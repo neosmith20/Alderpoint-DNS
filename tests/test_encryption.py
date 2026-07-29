@@ -88,6 +88,14 @@ class EncryptionTest(unittest.TestCase):
         with self.assertRaises(encryption.EncryptionError):
             encryption.validate_settings({**encryption.DEFAULTS, "doh_port": "70000"})
 
+    def test_validate_settings_rejects_bad_listen_address(self) -> None:
+        with self.assertRaises(encryption.EncryptionError):
+            encryption.validate_settings({**encryption.DEFAULTS, "listen_ipv4": "::1"})
+        with self.assertRaises(encryption.EncryptionError):
+            encryption.validate_settings({**encryption.DEFAULTS, "listen_ipv6": "127.0.0.1"})
+        with self.assertRaises(encryption.EncryptionError):
+            encryption.validate_settings({**encryption.DEFAULTS, "listen_ipv4": "", "listen_ipv6": ""})
+
     def test_validate_settings_rejects_unknown_cert_mode(self) -> None:
         with self.assertRaises(encryption.EncryptionError):
             encryption.validate_settings({**encryption.DEFAULTS, "cert_mode": "bogus"})
@@ -182,6 +190,7 @@ class EncryptionTest(unittest.TestCase):
         template = self.tmp / "template.conf"
         template.write_text(
             '-- Encryption Settings (managed by app/encryption.py)\n'
+            'local listenIPv4 = os.getenv("BINDGUARD_DNS_LISTEN_IPV4") or "0.0.0.0"\n'
             'setKey("BINDGUARD_CONSOLE_KEY_PLACEHOLDER")\n'
             'setWebserverConfig({password="BINDGUARD_WEBSERVER_PASSWORD_PLACEHOLDER", apiKey="BINDGUARD_WEBSERVER_API_KEY_PLACEHOLDER"})\n'
         )
@@ -195,9 +204,26 @@ class EncryptionTest(unittest.TestCase):
         self.assertIn('setKey("realconsolekey")', new_content)
         self.assertIn('password="realpassword"', new_content)
         self.assertIn('apiKey="realapikey"', new_content)
+        self.assertIn("BINDGUARD_DNS_LISTEN_IPV4", new_content)
         self.assertIn(encryption.MIGRATION_MARKER, new_content)
         # Idempotent: second call is a no-op.
         self.assertFalse(encryption.ensure_dnsdist_conf_parameterized(template))
+
+    def test_parameterized_conf_without_listen_vars_refreshes_from_template(self) -> None:
+        template = self.tmp / "template.conf"
+        template.write_text(
+            '-- Encryption Settings (managed by app/encryption.py)\n'
+            'local listenIPv4 = os.getenv("BINDGUARD_DNS_LISTEN_IPV4") or "0.0.0.0"\n'
+            'setKey("BINDGUARD_CONSOLE_KEY_PLACEHOLDER")\n'
+            'setWebserverConfig({password="BINDGUARD_WEBSERVER_PASSWORD_PLACEHOLDER", apiKey="BINDGUARD_WEBSERVER_API_KEY_PLACEHOLDER"})\n'
+        )
+        encryption.DNSDIST_CONF.write_text(
+            '-- Encryption Settings (managed by app/encryption.py)\n'
+            'setKey("realconsolekey")\n'
+            'setWebserverConfig({password="realpassword", apiKey="realapikey"})\n'
+        )
+        self.assertTrue(encryption.ensure_dnsdist_conf_parameterized(template))
+        self.assertIn("BINDGUARD_DNS_LISTEN_IPV4", encryption.DNSDIST_CONF.read_text())
 
     def test_ensure_dnsdist_conf_parameterized_requires_existing_secrets(self) -> None:
         template = self.tmp / "template.conf"
@@ -213,6 +239,8 @@ class EncryptionTest(unittest.TestCase):
         cfg.update(doh_enabled="1", dot_enabled="0", doq_enabled="1", doh3_enabled="0", dnscrypt_enabled="0")
         text = encryption.render_env_override(cfg)
         self.assertIn("Environment=BINDGUARD_DNS_PLAIN=1", text)
+        self.assertIn("Environment=BINDGUARD_DNS_LISTEN_IPV4=0.0.0.0", text)
+        self.assertIn("Environment=BINDGUARD_DNS_LISTEN_IPV6=::", text)
         self.assertIn("Environment=BINDGUARD_DNS_DOH=1", text)
         self.assertIn("Environment=BINDGUARD_DNS_DOT=0", text)
         self.assertIn(f"Environment=BINDGUARD_TLS_CERT={cfg['cert_path']}", text)
@@ -223,6 +251,7 @@ class EncryptionTest(unittest.TestCase):
         template = self.tmp / "template.conf"
         template.write_text(
             '-- Encryption Settings (managed by app/encryption.py)\n'
+            'local listenIPv4 = os.getenv("BINDGUARD_DNS_LISTEN_IPV4") or "0.0.0.0"\n'
             'setKey("BINDGUARD_CONSOLE_KEY_PLACEHOLDER")\n'
             'setWebserverConfig({password="BINDGUARD_WEBSERVER_PASSWORD_PLACEHOLDER", apiKey="BINDGUARD_WEBSERVER_API_KEY_PLACEHOLDER"})\n'
         )

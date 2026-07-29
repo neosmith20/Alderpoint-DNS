@@ -27,6 +27,10 @@
 - CSRF tokens are required for mutating forms.
 - dnsdist ACLs allow RFC1918 private networks by default, with an explicit
   environment switch for allow-all mode.
+- Encryption Settings can restrict client DNS listeners to a specific IPv4
+  and/or IPv6 address. The default wildcard addresses preserve the lab setup
+  but should be narrowed or protected by firewall rules before any public or
+  multi-tenant deployment.
 - BIND listens only on loopback backend ports.
 - Local DNS authoritative zones are generated separately from RPZ policy and
   are included only through the managed BIND local-zone include.

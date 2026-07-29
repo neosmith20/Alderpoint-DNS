@@ -25,5 +25,7 @@
 - Added per-upstream resolver analytics from dnsdist managed-backend counters,
   including dashboard ranking, success/failure/timeout counts, latency, and
   historical resolver snapshots.
+- Added configurable client DNS listener IPv4/IPv6 addresses for Encryption
+  Settings, with deployment validation and wildcard-listener warnings.
 - Made the top-right service status badge a global authenticated-shell
   component with a lightweight `/status/summary` refresh endpoint.

@@ -362,6 +362,7 @@ encryption_html = TEMPLATES.get_template("encryption.html").render(
     error=None,
     cfg={
         "server_hostname": "bindguard.local", "bootstrap_ip": "172.16.43.101",
+        "listen_ipv4": "0.0.0.0", "listen_ipv6": "::",
         "doh_enabled": "1", "doh3_enabled": "1", "dot_enabled": "1", "doq_enabled": "1", "dnscrypt_enabled": "0",
         "doh_path": "/dns-query", "doh_port": "443", "doh3_port": "443", "dot_port": "853", "doq_port": "853",
         "dnscrypt_port": "5443", "dnscrypt_provider": "2.dnscrypt-cert.bindguard.local",
@@ -377,7 +378,7 @@ encryption_html = TEMPLATES.get_template("encryption.html").render(
     connection_info={"DoH": "https://" + long_domain + "/dns-query", "DoT": "tls://bindguard.local:853"},
     dnscrypt_fingerprint=None,
 )
-for expected in ("Protocols", "Client Connection Information", "Self-signed certificate", "Upload certificate and key", long_domain, "data-async-form"):
+for expected in ("Protocols", "Listen IPv4", "Listen IPv6", "0.0.0.0", "Client Connection Information", "Self-signed certificate", "Upload certificate and key", long_domain, "data-async-form"):
     if expected not in encryption_html:
         raise SystemExit(f"encryption page missing {expected}")
 if 'data-nav-section="security"' not in encryption_html or 'aria-controls="nav-panel-security" aria-expanded="true" aria-current="true"' not in encryption_html or 'class="nav-subitem is-active" href="/encryption" aria-current="page"' not in encryption_html:

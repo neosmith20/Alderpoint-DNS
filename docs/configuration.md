@@ -63,3 +63,11 @@ resolvers by attempted queries, successful responses, failures, timeouts, and
 latency. BindGuard does not add per-query upstream labels unless dnsdist
 exposes that exact attribution; current client query rows remain client/domain
 analytics, not fabricated resolver traces.
+
+Encryption Settings manages client-facing encrypted DNS listeners separately
+from upstream resolver encryption. The listener IPv4/IPv6 addresses default to
+`0.0.0.0` and `::` to preserve existing lab behavior, but can be changed to
+loopback or a specific LAN address before deployment. At least one listen
+address is required so ordinary DNS remains reachable. Wildcard listener
+addresses still rely on dnsdist ACLs and the host/network firewall for actual
+client reachability.

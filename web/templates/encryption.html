@@ -33,7 +33,14 @@
       <label>Bootstrap / server IP
         <input name="bootstrap_ip" value="{{ cfg.bootstrap_ip }}" autocomplete="off">
       </label>
+      <label>Listen IPv4
+        <input name="listen_ipv4" value="{{ cfg.listen_ipv4 or '' }}" autocomplete="off" placeholder="0.0.0.0 or 127.0.0.1">
+      </label>
+      <label>Listen IPv6
+        <input name="listen_ipv6" value="{{ cfg.listen_ipv6 or '' }}" autocomplete="off" placeholder=":: or ::1">
+      </label>
     </div>
+    <p class="muted">Wildcard listen addresses such as <span class="mono">0.0.0.0</span> and <span class="mono">::</span> expose client DNS listeners on every host interface allowed by dnsdist ACLs and firewall policy. Use loopback or a specific LAN address for private testing.</p>
     <div class="grid compact">
       <label class="row"><input type="checkbox" name="doh_enabled" value="1" {% if cfg.doh_enabled == "1" %}checked{% endif %}> DoH (TCP 443)</label>
       <label>DoH port<input name="doh_port" type="number" min="1" max="65535" value="{{ cfg.doh_port }}"></label>

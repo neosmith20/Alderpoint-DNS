@@ -282,3 +282,85 @@ Remaining work:
 - Package 4: Installation, upgrades, packaging, and diagnostics.
 - Package 5: BIND Cache Management gap audit and any required corrections.
 - Package 6: external beta and v1.0 hardening.
+
+## Package 2: Encryption Settings listener controls
+
+Started from clean `main` at `1c8d669` (`Add per-upstream resolver analytics`).
+
+Gap audit:
+
+- Existing Encryption Settings already separated upstream resolver encryption
+  from client-facing encrypted DNS, and already supported DoH, DoT, DoQ,
+  DoH3, certificate metadata, self-signed/local-CA/uploaded/existing-path
+  certificate modes, certificate/key matching, dnsdist validation, service
+  restart, protocol tests, rollback, Apple DoH/DoT profiles, and private-key
+  redaction.
+- The main missing requested control was configurable listening interfaces:
+  live dnsdist config still bound client DNS listeners to hardcoded wildcard
+  IPv4/IPv6 addresses.
+
+Implementation:
+
+- Added `listen_ipv4` and `listen_ipv6` Encryption Settings with defaults
+  `0.0.0.0` and `::` to preserve existing lab behavior.
+- Validation accepts blanking one address family, rejects invalid/mismatched IP
+  families, and rejects blanking both families so DNS listeners remain present.
+- Updated the dnsdist packaging template so plain DNS, DoH, DoH3, DoT, DoQ,
+  and DNSCrypt listeners bind through `BINDGUARD_DNS_LISTEN_IPV4` and
+  `BINDGUARD_DNS_LISTEN_IPV6`.
+- Updated the dnsdist config migration to refresh older parameterized configs
+  that do not yet contain listener-address variables while preserving existing
+  console/web API secrets.
+- Added Encryption page controls and a wildcard-listener warning.
+- Hardened `detect_server_ip()` to return only valid IPv4 addresses and
+  hardened certificate ownership writes to tolerate unsupported temp-filesystem
+  `chown` behavior.
+- Updated `CHANGELOG.md`, `docs/configuration.md`, `docs/dnsdist.md`, and
+  `docs/security.md`.
+
+Live deployment and verification:
+
+- `/opt/bindguard/app/bindguard_compiler.py encryption-deploy`: succeeded with
+  deployment id `10`.
+- Live `/etc/dnsdist/dnsdist.conf` and packaging template now contain
+  `BINDGUARD_DNS_LISTEN_IPV4` / `BINDGUARD_DNS_LISTEN_IPV6` handling.
+- Live `/etc/systemd/system/dnsdist.service.d/bindguard.conf` contains
+  `Environment=BINDGUARD_DNS_LISTEN_IPV4=0.0.0.0` and
+  `Environment=BINDGUARD_DNS_LISTEN_IPV6=::`.
+- `dnsdist`, `bindguard`, `named`, and `bindguard-analytics` remained active.
+- Listener audit confirmed expected DNS, encrypted-DNS, BIND backend, web, and
+  analytics listeners.
+- DNS resolution succeeded through both BIND backend
+  (`dig @127.0.0.1 -p 5353 cloudflare.com A +short`) and dnsdist frontend
+  (`dig @127.0.0.1 -p 53 cloudflare.com A +short`).
+
+Tests:
+
+- `python3 -B /opt/bindguard/tests/test_encryption.py`: passed, 31 tests.
+- `dnsdist --check-config -C /opt/bindguard/packaging/dnsdist.conf`: passed.
+- `/opt/bindguard/tests/test_dnsdist_frontend.sh`: passed.
+- `/opt/bindguard/tests/test_web_smoke.sh`: passed.
+- `/opt/bindguard/tests/test_acceptance.sh`: passed. Expected invalid-RPZ and
+  forced-rollback tracebacks appeared, as did pre-existing backup ResourceWarnings;
+  final result was `BindGuard acceptance suite passed`.
+
+Files changed:
+
+- `app/encryption.py`
+- `app/webapp.py`
+- `packaging/dnsdist.conf`
+- `web/templates/encryption.html`
+- `tests/test_encryption.py`
+- `tests/test_web_smoke.sh`
+- `CHANGELOG.md`
+- `docs/configuration.md`
+- `docs/dnsdist.md`
+- `docs/security.md`
+- `AGENT_PROGRESS.md`
+
+Remaining work:
+
+- Package 3: Import and Migration gap audit and any required corrections.
+- Package 4: Installation, upgrades, packaging, and diagnostics.
+- Package 5: BIND Cache Management gap audit and any required corrections.
+- Package 6: external beta and v1.0 hardening.

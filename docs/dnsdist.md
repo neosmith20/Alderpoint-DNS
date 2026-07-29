@@ -19,6 +19,11 @@ Set `BINDGUARD_DNS_ALLOW_ALL=1` in the dnsdist service environment to allow
 queries from all IPv4 and IPv6 clients. BindGuard expects pfSense VLAN and
 firewall rules to be the network exposure boundary.
 
+Encryption Settings writes `BINDGUARD_DNS_LISTEN_IPV4` and
+`BINDGUARD_DNS_LISTEN_IPV6` into the dnsdist systemd override. The defaults
+are `0.0.0.0` and `::`; blanking either family disables listeners for that
+family, and at least one family must remain configured.
+
 The Debian dnsdist package is not sufficient because it lacks DNS-over-QUIC.
 Install dnsdist from the official PowerDNS `trixie-dnsdist-21` repository and
 verify `dnsdist --version` reports `dns-over-quic`.

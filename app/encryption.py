@@ -55,6 +55,8 @@ MIGRATION_MARKER = "-- Encryption Settings (managed by app/encryption.py)"
 DEFAULTS = {
     "server_hostname": "bindguard.local",
     "bootstrap_ip": "",
+    "listen_ipv4": "0.0.0.0",
+    "listen_ipv6": "::",
     "doh_enabled": "1",
     "doh3_enabled": "1",
     "dot_enabled": "1",
@@ -100,8 +102,12 @@ def detect_server_ip() -> str:
     try:
         proc = run(["hostname", "-I"], check=False)
         for token in proc.stdout.split():
-            if ":" not in token:
-                return token
+            try:
+                ip = ipaddress.ip_address(token)
+            except ValueError:
+                continue
+            if ip.version == 4:
+                return str(ip)
     except Exception:
         pass
     return "127.0.0.1"
@@ -181,6 +187,30 @@ def validate_settings(values: dict[str, Any]) -> dict[str, str]:
             raise EncryptionError("bootstrap_ip must be a valid IP address") from None
     else:
         out["bootstrap_ip"] = detect_server_ip()
+    listen_ipv4 = str(values.get("listen_ipv4", DEFAULTS["listen_ipv4"])).strip()
+    listen_ipv6 = str(values.get("listen_ipv6", DEFAULTS["listen_ipv6"])).strip()
+    if listen_ipv4:
+        try:
+            ip = ipaddress.ip_address(listen_ipv4)
+            if ip.version != 4:
+                raise ValueError
+            out["listen_ipv4"] = str(ip)
+        except ValueError:
+            raise EncryptionError("listen_ipv4 must be blank or a valid IPv4 address") from None
+    else:
+        out["listen_ipv4"] = ""
+    if listen_ipv6:
+        try:
+            ip = ipaddress.ip_address(listen_ipv6.strip("[]"))
+            if ip.version != 6:
+                raise ValueError
+            out["listen_ipv6"] = str(ip)
+        except ValueError:
+            raise EncryptionError("listen_ipv6 must be blank or a valid IPv6 address") from None
+    else:
+        out["listen_ipv6"] = ""
+    if not out["listen_ipv4"] and not out["listen_ipv6"]:
+        raise EncryptionError("at least one DNS listen address must be configured")
     for flag in ("doh_enabled", "doh3_enabled", "dot_enabled", "doq_enabled", "dnscrypt_enabled"):
         out[flag] = _bool(values.get(flag, "0"))
     doh_path = str(values.get("doh_path", "/dns-query")).strip() or "/dns-query"
@@ -234,7 +264,7 @@ def _write_owned(path: Path, content: bytes, mode: int) -> None:
     os.replace(tmp, path)
     try:
         shutil.chown(path, user="root", group="_dnsdist")
-    except (LookupError, PermissionError):
+    except (LookupError, PermissionError, OSError):
         pass
 
 
@@ -285,7 +315,7 @@ def ensure_local_ca() -> None:
         _write_owned(CA_KEY_PATH, key_out.read_bytes(), 0o600)
         try:
             shutil.chown(CA_KEY_PATH, user="root", group="root")
-        except (LookupError, PermissionError):
+        except (LookupError, PermissionError, OSError):
             pass
 
 
@@ -448,7 +478,7 @@ def ensure_dnscrypt_provider_keys() -> None:
         _write_owned(DNSCRYPT_PROVIDER_PRIVATE, priv.read_bytes(), 0o600)
         try:
             shutil.chown(DNSCRYPT_PROVIDER_PRIVATE, user="root", group="root")
-        except (LookupError, PermissionError):
+        except (LookupError, PermissionError, OSError):
             pass
 
 
@@ -495,7 +525,7 @@ def ensure_dnsdist_conf_parameterized(template_path: Path) -> bool:
     template, preserving the currently-installed console/webserver secrets.
     Returns True if a change was made."""
     current = DNSDIST_CONF.read_text() if DNSDIST_CONF.exists() else ""
-    if MIGRATION_MARKER in current:
+    if MIGRATION_MARKER in current and "BINDGUARD_DNS_LISTEN_IPV4" in current:
         return False
     key_match = re.search(r'setKey\("([^"]+)"\)', current)
     password_match = re.search(r'password="([^"]+)"', current)
@@ -525,6 +555,8 @@ def render_env_override(cfg: dict[str, str]) -> str:
     lines = [
         "[Service]",
         "Environment=BINDGUARD_DNS_PLAIN=1",
+        f"Environment=BINDGUARD_DNS_LISTEN_IPV4={cfg.get('listen_ipv4', DEFAULTS['listen_ipv4'])}",
+        f"Environment=BINDGUARD_DNS_LISTEN_IPV6={cfg.get('listen_ipv6', DEFAULTS['listen_ipv6'])}",
         f"Environment=BINDGUARD_DNS_DOH={cfg['doh_enabled']}",
         f"Environment=BINDGUARD_DNS_DOT={cfg['dot_enabled']}",
         f"Environment=BINDGUARD_DNS_DOQ={cfg['doq_enabled']}",
