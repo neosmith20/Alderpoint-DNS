@@ -259,6 +259,12 @@ def cache_flush_apply() -> tuple[int, str]:
     return run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "cache-flush"])
 
 
+def cache_flush_apply_or_raise() -> None:
+    code, out = cache_flush_apply()
+    if code != 0:
+        raise RuntimeError(out.strip() or "cache flush failed")
+
+
 def encryption_deploy_apply() -> tuple[int, str]:
     return run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "encryption-deploy"])
 
@@ -960,6 +966,7 @@ def dns_cache_settings_post(
     serve_stale_enabled: str = Form("0"),
     max_stale_ttl: int = Form(86400),
     stale_answer_client_timeout: str = Form("off"),
+    recursive_clients: int = Form(1000),
     _: sqlite3.Row = Depends(current_admin),
 ):
     check_csrf(request, csrf)
@@ -977,9 +984,10 @@ def dns_cache_settings_post(
                 "serve_stale_enabled": serve_stale_enabled,
                 "max_stale_ttl": max_stale_ttl,
                 "stale_answer_client_timeout": stale_answer_client_timeout,
+                "recursive_clients": recursive_clients,
             }
         )
-        deploy_no_download()
+        deploy_no_download_or_raise()
     except Exception as exc:
         return dns_cache_error(request, str(exc))
     return redirect("/dns-cache")
@@ -990,7 +998,7 @@ def dns_cache_flush_all(request: Request, csrf: str = Form(...), _: sqlite3.Row 
     check_csrf(request, csrf)
     try:
         dns_cache.request_flush("all")
-        cache_flush_apply()
+        cache_flush_apply_or_raise()
     except Exception as exc:
         return dns_cache_error(request, str(exc))
     return redirect("/dns-cache")
@@ -1001,7 +1009,7 @@ def dns_cache_flush_name(request: Request, csrf: str = Form(...), name: str = Fo
     check_csrf(request, csrf)
     try:
         dns_cache.request_flush("name", name)
-        cache_flush_apply()
+        cache_flush_apply_or_raise()
     except Exception as exc:
         return dns_cache_error(request, str(exc))
     return redirect("/dns-cache")
@@ -1012,7 +1020,7 @@ def dns_cache_flush_tree(request: Request, csrf: str = Form(...), name: str = Fo
     check_csrf(request, csrf)
     try:
         dns_cache.request_flush("tree", name)
-        cache_flush_apply()
+        cache_flush_apply_or_raise()
     except Exception as exc:
         return dns_cache_error(request, str(exc))
     return redirect("/dns-cache")

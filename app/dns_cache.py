@@ -89,6 +89,7 @@ DEFAULTS = {
     "serve_stale_enabled": "0",
     "max_stale_ttl": "86400",
     "stale_answer_client_timeout": "off",
+    "recursive_clients": "1000",
 }
 
 
@@ -185,6 +186,7 @@ def validate_settings(values: dict[str, Any]) -> dict[str, str]:
         out["stale_answer_client_timeout"] = "off"
     else:
         out["stale_answer_client_timeout"] = str(_validate_int("stale_answer_client_timeout", timeout_raw, 0, 60_000))
+    out["recursive_clients"] = str(_validate_int("recursive_clients", values.get("recursive_clients", 1000), 100, 100_000))
     return out
 
 
@@ -207,6 +209,7 @@ def render_cache_options(cfg: dict[str, str]) -> str:
         f"max-cache-ttl {int(cfg['max_cache_ttl'])};",
         f"min-ncache-ttl {int(cfg['min_ncache_ttl'])};",
         f"max-ncache-ttl {int(cfg['max_ncache_ttl'])};",
+        f"recursive-clients {int(cfg.get('recursive_clients', DEFAULTS['recursive_clients']))};",
     ]
     if cfg.get("prefetch_enabled") == "1":
         lines.append(f"prefetch {int(cfg['prefetch_trigger'])} {int(cfg['prefetch_eligible'])};")

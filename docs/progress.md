@@ -311,19 +311,24 @@ that existing cache rather than adding a second one, per `app/dns_cache.py`.
   rollback shape as RPZ and Local DNS deployment, and now runs automatically
   as part of every `bindguard_compiler.py deploy` (both download and
   no-download forms), so cache settings changes ride the same trusted
-  deployment path Local DNS mutations already use.
+  deployment path Local DNS mutations already use. The web route now treats a
+  non-zero privileged deploy result as an error instead of silently
+  redirecting after a failed helper.
 - Cache flush (entire cache / one name / one subtree) is requested
   unprivileged (writes a `dns_cache_flushes` row) and applied by a new,
   narrowly-scoped, argument-free sudo entry
   (`bindguard_compiler.py cache-flush`) that reads the pending request from
   SQLite and runs the corresponding `rndc flush[name|tree]` — avoiding any
   sudoers argument-injection surface, consistent with the existing
-  zero-argument-variability sudo design.
+  zero-argument-variability sudo design. Flush helper failures are reported
+  back to the page and the `dns_cache_flushes` row remains the audit trail for
+  completed, failed, and skipped cache actions.
 - Cache stats (hits, misses, hit percent, node count, tree+heap memory,
   LRU-eviction count, expired-TTL count) come from BIND's own
   `statistics-channels` JSON API (`views._default.resolver.cachestats`), not
   a second tracking mechanism. A new "Cache" page (`/dns-cache`,
-  `web/templates/dns_cache.html`) exposes tuning, flush controls, last
+  `web/templates/dns_cache.html`) exposes tuning including
+  `recursive-clients`, flush controls, explicit statistics refresh, last
   deployment status, and flush history; the dashboard's former placeholder
   "Top Upstream Resolvers"-adjacent panel was replaced with a real cache
   effectiveness panel.
@@ -337,9 +342,10 @@ that existing cache rather than adding a second one, per `app/dns_cache.py`.
   BIND's own `CacheMisses`/`CacheHits` counters increment correctly (92ms
   cold query, 0ms cached repeat) — see
   `tests/test_dns_cache_benchmark.sh`.
-- `tests/test_dns_cache.py` (20 tests) covers default sizing, validation
-  bounds (including the 75%-of-RAM ceiling and inverted min/max TTL
-  rejection), rendered BIND syntax for both prefetch/serve-stale states, the
+- `tests/test_dns_cache.py` (21 tests) covers default sizing, validation
+  bounds (including the 75%-of-RAM ceiling, inverted min/max TTL rejection,
+  and invalid recursive-client limits), rendered BIND syntax for
+  `recursive-clients` and both prefetch/serve-stale states, the
   idempotent named.conf.options migration, successful deploy, rollback on a
   failed post-deploy health check, invalid settings never touching the live
   file, all three flush scopes, newest-request-wins flush processing,

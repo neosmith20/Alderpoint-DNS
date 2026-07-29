@@ -113,12 +113,13 @@ restart/reload services, run a functional DNS query, record resolver health
 and latency, and roll back generated files if activation fails.
 
 The Cache page (`/dns-cache`) exposes BIND's existing recursive-cache tuning
-(max size, positive/negative min/max TTL, prefetch, serve-stale), flush
-controls (entire cache, one name, or one subtree), cache hit/miss/memory
-stats from BIND's own statistics API, and recent flush/deployment history.
-Settings save through the same staged/validated/atomic/rollback deployment
-path as Local DNS. The dashboard shows a cache-effectiveness panel (hit rate,
-hits/misses, memory) backed by the same live stats.
+(max size, positive/negative min/max TTL, recursive clients, prefetch,
+serve-stale), flush controls (entire cache, one name, or one subtree), an
+explicit statistics refresh action, cache hit/miss/memory stats from BIND's
+own statistics API, and recent flush/deployment history. Settings save
+through the same staged/validated/atomic/rollback deployment path as Local
+DNS. The dashboard shows a cache-effectiveness panel (hit rate, hits/misses,
+memory) backed by the same live stats.
 
 The Encryption page (`/encryption`) manages DoH/DoH3/DoT/DoQ (and
 best-effort DNSCrypt) listeners: per-protocol enable/port, hostname and

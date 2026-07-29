@@ -17,6 +17,10 @@
   {{ ui.metric_card("Evicted (size limit)", stats.evicted_lru if stats.available else "n/a", "", "Removed by max-cache-size LRU pressure", "warning") }}
 </section>
 
+<div class="form-actions">
+  <a class="button secondary" href="/dns-cache">Refresh statistics</a>
+</div>
+
 {% if not stats.available %}
   <section class="panel">
     {{ ui.empty_state("Cache statistics unavailable", stats.error or "BIND's statistics channel did not respond.") }}
@@ -43,8 +47,11 @@
       <label>Max negative TTL (s)
         <input name="max_ncache_ttl" type="number" min="0" max="604800" value="{{ cache.max_ncache_ttl }}">
       </label>
+      <label>Recursive clients
+        <input name="recursive_clients" type="number" min="100" max="100000" value="{{ cache.recursive_clients or '1000' }}">
+      </label>
     </div>
-    <p class="muted">This VM has {{ total_memory_mb }}MB of RAM; the default cache size is chosen conservatively so BIND never crowds out dnsdist, the web app, and analytics. Positive/negative TTL bounds default to BIND's own built-in defaults &mdash; they are not aggressively overridden.</p>
+    <p class="muted">This VM has {{ total_memory_mb }}MB of RAM; the default cache size is chosen conservatively so BIND never crowds out dnsdist, the web app, and analytics. Positive/negative TTL bounds default to BIND's own built-in defaults &mdash; they are not aggressively overridden. Recursive clients limits simultaneous recursive lookups accepted by BIND; lowering it too far can reject bursts of normal client traffic.</p>
     <details>
       <summary>Prefetch and serve-stale</summary>
       <div class="grid compact">

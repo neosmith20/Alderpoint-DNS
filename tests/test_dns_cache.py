@@ -77,6 +77,10 @@ class DNSCacheTest(unittest.TestCase):
         out = dns_cache.validate_settings({**dns_cache.DEFAULTS, "max_cache_size_mb": "256"})
         self.assertEqual(out["stale_answer_client_timeout"], "off")
 
+    def test_validate_settings_rejects_bad_recursive_client_limit(self) -> None:
+        with self.assertRaises(dns_cache.DNSCacheError):
+            dns_cache.validate_settings({**dns_cache.DEFAULTS, "max_cache_size_mb": "256", "recursive_clients": "50"})
+
     def test_update_settings_persists_validated_values(self) -> None:
         dns_cache.update_settings({**dns_cache.DEFAULTS, "max_cache_size_mb": "256", "prefetch_enabled": "1"})
         cfg = dns_cache.settings()
@@ -90,6 +94,7 @@ class DNSCacheTest(unittest.TestCase):
         cfg["max_cache_size_mb"] = "256"
         content = dns_cache.render_cache_options(cfg)
         self.assertIn("max-cache-size 256m;", content)
+        self.assertIn("recursive-clients 1000;", content)
         self.assertIn("prefetch 0;", content)
         self.assertIn("stale-answer-enable no;", content)
         self.assertNotIn("max-stale-ttl", content)

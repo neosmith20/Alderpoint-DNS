@@ -35,5 +35,8 @@
   support, a sanitized `bindguard-diagnostics` bundle command, version and
   dependency manifests, and Debian package scaffolding plus a local test
   `.deb` builder.
+- Expanded BIND cache management with a recursive client limit control, an
+  explicit statistics refresh action, and stricter web-route error handling
+  for cache deploy and flush helper failures.
 - Made the top-right service status badge a global authenticated-shell
   component with a lightweight `/status/summary` refresh endpoint.

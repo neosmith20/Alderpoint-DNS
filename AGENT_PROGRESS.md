@@ -281,7 +281,8 @@ Remaining work:
 - Package 3: Import and Migration gap audit and any required corrections.
 - Package 4: Installation, upgrades, packaging, and diagnostics complete
   (`Add installer upgrade diagnostics packaging`).
-- Package 5: BIND Cache Management gap audit and any required corrections.
+- Package 5: BIND Cache Management gap audit and corrections complete
+  (`Tighten BIND cache management controls`).
 - Package 6: external beta and v1.0 hardening.
 
 ## Package 2: Encryption Settings listener controls
@@ -506,3 +507,53 @@ Known limitations:
 - The diagnostics `--include-private-dns` flag is an explicit opt-in
   placeholder; diagnostics still does not export private DNS records. Use an
   encrypted backup for support cases that truly need private data.
+
+## Package 5 - BIND Cache Management Corrections
+
+Audit result:
+
+- BIND cache management was already substantially implemented in
+  `app/dns_cache.py`, `/dns-cache`, the privileged `cache-flush` compiler
+  command, tests, and docs.
+- Existing coverage already included max cache size, positive/negative TTLs,
+  serve-stale, prefetch, flush-all/name/tree, BIND cache stats, staged
+  deployment, validation, rollback, persistence through deploy/restart/
+  backup/restore paths, and acceptance/benchmark tests.
+
+Corrections implemented:
+
+- Added `recursive_clients` to `dns_cache_settings`, validation, generated
+  BIND config (`recursive-clients 1000;` by default), the Cache page, web
+  route handling, smoke fixtures, unit tests, and docs.
+- Added an explicit "Refresh statistics" action on `/dns-cache`.
+- Changed `/dns-cache/settings` to use `deploy_no_download_or_raise()` so
+  failed privileged deploys surface as page errors instead of redirecting as
+  if successful.
+- Added `cache_flush_apply_or_raise()` and switched all cache flush routes to
+  report privileged helper failure rather than silently redirecting.
+- Updated docs/changelog/progress to describe recursive-client support,
+  refresh behavior, and failure surfacing.
+
+Live deployment:
+
+- Ran `/opt/bindguard/app/bindguard_compiler.py deploy --no-download`;
+  deployment id `239`.
+- Verified `/var/lib/bindguard/compiled/bind/cache-options.conf` contains
+  `recursive-clients 1000;`.
+- Ran `named-checkconf -p /etc/bind/named.conf`; validation passed
+  (BIND's existing experimental `allow-proxy` warnings appeared).
+- Restarted `bindguard`; service returned active.
+
+Tests:
+
+- `python3 -B /opt/bindguard/tests/test_dns_cache.py`: passed, 21 tests.
+- `python3 -m py_compile /opt/bindguard/app/dns_cache.py /opt/bindguard/app/webapp.py`: passed.
+- `git diff --check`: passed.
+- `/opt/bindguard/tests/test_web_smoke.sh`: passed.
+- `/opt/bindguard/tests/test_acceptance.sh`: passed. Expected invalid-RPZ and
+  forced-rollback tracebacks appeared, as did pre-existing backup ResourceWarnings;
+  final result was `BindGuard acceptance suite passed`.
+
+Live service state after acceptance:
+
+- `bindguard`, `named`, `dnsdist`, and `bindguard-analytics` remained active.

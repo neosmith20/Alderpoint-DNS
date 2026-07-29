@@ -347,13 +347,14 @@ dns_cache_html = TEMPLATES.get_template("dns_cache.html").render(
         "min_ncache_ttl": "0", "max_ncache_ttl": "10800", "prefetch_enabled": "0",
         "prefetch_trigger": "2", "prefetch_eligible": "10", "serve_stale_enabled": "0",
         "max_stale_ttl": "86400", "stale_answer_client_timeout": "off",
+        "recursive_clients": "1000",
     },
     stats={"available": True, "hits": 1683, "misses": 669, "hit_percent": 71.5, "nodes": 162, "memory_bytes": 196419, "evicted_lru": 0, "expired_ttl": 39},
     deployment={"status": "deployed", "started_at": "2026-07-29T00:00:00Z", "finished_at": "2026-07-29T00:00:00Z", "message": "max-cache-size=490m prefetch=0 serve-stale=0"},
     flushes=[{"requested_at": "2026-07-29T00:00:00Z", "scope": "name", "target": long_domain, "status": "completed"}],
     total_memory_mb=3891,
 )
-for expected in ("Cache Tuning", "Flush Cache", "71.5", "max-cache-size=490m", long_domain, "data-async-form"):
+for expected in ("Cache Tuning", "Flush Cache", "Refresh statistics", "Recursive clients", "71.5", "max-cache-size=490m", long_domain, "data-async-form"):
     if expected not in dns_cache_html:
         raise SystemExit(f"cache page missing {expected}")
 

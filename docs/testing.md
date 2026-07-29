@@ -65,8 +65,9 @@ the auto-refresh state in browser session storage.
 
 The BIND cache management suite (`tests/test_dns_cache.py`) covers default
 cache-size sizing from VM memory, validation bounds (including rejecting a
-cache size above 75% of total RAM and inverted min/max TTL pairs), generated
-BIND syntax for both prefetch/serve-stale on and off, the idempotent
+cache size above 75% of total RAM, inverted min/max TTL pairs, and invalid
+recursive-client limits), generated BIND syntax for recursive clients and
+both prefetch/serve-stale on and off, the idempotent
 named.conf.options include migration, a successful staged deploy, rollback
 to the previous file on a failed post-deploy health check, invalid settings
 never touching the live file, all three flush scopes (all/name/subtree),
