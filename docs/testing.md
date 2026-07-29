@@ -21,16 +21,22 @@ long domain and IPv6-like values.
 The Local DNS suite covers A and AAAA record creation, automatic PTR records,
 forward and reverse zone rendering, editing, deletion, disabled records,
 duplicate hostname/PTR warnings, invalid host/IP rejection, CNAME conflicts,
-multiple reverse zones, serial increments, generated-zone rollback, BIND restart
-readiness, analytics client aliases, PTR fallback display, CSV import/export,
-and hosts-file preview. The web smoke test renders the Local DNS page with long
-domains, IPv6 clients, and upstream-like strings to guard against horizontal
-overflow.
+multiple reverse zones, advanced FQDN records outside the default internal
+domain, serial increments, generated-zone rollback, dnsdist packet-cache
+invalidation for managed local zones, BIND restart readiness, analytics client
+aliases, PTR fallback display, CSV import/export, and hosts-file preview. The
+web smoke test renders the Local DNS page with long domains, IPv6 clients, and
+upstream-like strings to guard against horizontal overflow, routine Local DNS
+confirmations, async form hooks, and toast feedback.
 
 The analytics unit suite covers aggregate collection, counter resets, bucketing,
 blocked-query detection, ordinary NXDOMAIN handling, protocol classification,
 retention cleanup, database-size protection, malformed protobuf input, queue
 overflow, privacy modes, and query-log filtering.
+
+The web smoke test also checks that Query Log auto-refresh has a partial
+`/query-log/partial` endpoint, updates only the result container, and persists
+the auto-refresh state in browser session storage.
 
 Run the combined suite:
 

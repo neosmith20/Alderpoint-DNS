@@ -577,6 +577,34 @@ th {
 
 .alert.error { border-color: rgba(248, 113, 113, 0.5); }
 
+.toast {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 40;
+  max-width: min(420px, calc(100vw - 36px));
+  border: 1px solid rgba(54, 211, 153, 0.5);
+  border-radius: var(--radius-sm);
+  background: #0f2b29;
+  color: var(--text);
+  padding: 11px 13px;
+  box-shadow: var(--shadow);
+  opacity: 0;
+  transform: translateY(10px);
+  pointer-events: none;
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+
+.toast[data-tone="error"] {
+  border-color: rgba(248, 113, 113, 0.55);
+  background: #3a1720;
+}
+
+.toast--visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
 pre {
   margin: 0;
   white-space: pre-wrap;

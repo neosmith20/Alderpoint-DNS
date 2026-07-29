@@ -58,6 +58,35 @@ webapp_text = Path("/opt/bindguard/app/webapp.py").read_text()
 for route in ("/local-dns", "local_dns_add_host", "local_dns_add_alias", "local_dns_import_preview"):
     if route not in webapp_text:
         raise SystemExit(f"local DNS route missing: {route}")
+if "/query-log/partial" not in webapp_text or "query_log_context" not in webapp_text:
+    raise SystemExit("query log partial refresh endpoint is missing")
+if "bindguardAutoRefresh" not in js or "sessionStorage" not in js or "target.innerHTML" not in js:
+    raise SystemExit("query log auto-refresh stateful partial update is missing")
+if "setInterval(() => window.location.reload()" in js:
+    raise SystemExit("query log auto-refresh still reloads the full page")
+if "data-async-form" not in template or "BindGuardAsyncForm" not in js or "showToast" not in js or ".toast" not in css:
+    raise SystemExit("Local DNS async form and toast behavior is missing")
+local_dns_template = Path("/opt/bindguard/web/templates/local_dns.html").read_text()
+for forbidden in (
+    'data-confirm="Add this host',
+    'data-confirm="Add this advanced record',
+    'data-confirm="Edit this local DNS record',
+    'data-confirm="Toggle this local DNS record',
+):
+    if forbidden in local_dns_template:
+        raise SystemExit(f"routine Local DNS confirmation still present: {forbidden}")
+if 'data-confirm="Delete this local DNS record' not in local_dns_template:
+    raise SystemExit("destructive Local DNS delete confirmation is missing")
+for expected in (
+    'action="/local-dns/hosts" data-async-form',
+    'action="/local-dns/records" data-async-form',
+    'data-success-message="Local DNS record saved and deployed."',
+):
+    if expected not in local_dns_template:
+        raise SystemExit(f"Local DNS async form hook missing: {expected}")
+query_template = Path("/opt/bindguard/web/templates/query_log.html").read_text()
+if "queryLogResults" not in query_template or 'data-refresh-url="/query-log/partial"' not in query_template:
+    raise SystemExit("query log results refresh target is missing")
 
 request = SimpleNamespace(url=SimpleNamespace(path="/"), query_params={})
 base = {

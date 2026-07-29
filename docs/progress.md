@@ -134,17 +134,27 @@
   links, client aliases, and Local DNS deployment results.
 - Generated authoritative forward and reverse BIND zones are separate from RPZ
   filtering policy and are included through
-  `/var/lib/bindguard/compiled/bind/local-zones.conf`.
+  `/var/lib/bindguard/compiled/bind/local-zones.conf`. Advanced FQDN records
+  outside the default internal domain create managed split-horizon forward
+  zones, so records such as `adguard.mylan.network` are emitted and served
+  locally instead of being forwarded upstream.
 - Add/edit/toggle/delete operations deploy through the normal staged,
   validated, atomic no-download deployment path.
+- Local DNS deployment clears dnsdist packet-cache entries for each managed
+  local zone after BIND activation, preventing stale frontend NODATA responses
+  after a local record is added.
 - The web UI includes a dedicated Local DNS page with simple host entry,
   advanced records, alias management, CSV import/export, hosts preview,
   validation warnings, and deployment status.
+- Routine Local DNS add/edit/toggle forms submit with targeted page-section
+  updates and toast feedback; destructive record deletion still requires
+  confirmation.
 - Analytics dashboard and Query Log display configured client aliases, or local
   PTR fallback names with the raw IP when no alias exists.
-- Unit and smoke tests cover record workflows, duplicate/conflict warnings,
-  serial increments, rollback, alias display, import/export, and responsive
-  layout rendering.
+- Unit and smoke tests cover record workflows, out-of-domain forward zones,
+  duplicate/conflict warnings, serial increments, rollback, dnsdist cache
+  invalidation, alias display, import/export, async Local DNS form behavior,
+  and responsive layout rendering.
 
 ## Verified policy-preparation milestone
 

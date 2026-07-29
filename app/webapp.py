@@ -924,8 +924,7 @@ def system_page(request: Request, _: sqlite3.Row = Depends(current_admin)):
     )
 
 
-@app.get("/query-log", response_class=HTMLResponse)
-def query_log(request: Request, _: sqlite3.Row = Depends(current_admin)):
+def query_log_context(request: Request) -> dict[str, Any]:
     limit = min(500, max(10, int(request.query_params.get("limit", "50"))))
     page = max(1, int(request.query_params.get("page", "1")))
     filters = {
@@ -937,7 +936,17 @@ def query_log(request: Request, _: sqlite3.Row = Depends(current_admin)):
         "blocked": request.query_params.get("blocked", ""),
         "rcode": request.query_params.get("rcode", ""),
     }
-    return render(request, "query_log.html", log=analytics.query_log(filters, page, limit))
+    return {"log": analytics.query_log(filters, page, limit)}
+
+
+@app.get("/query-log", response_class=HTMLResponse)
+def query_log(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    return render(request, "query_log.html", **query_log_context(request))
+
+
+@app.get("/query-log/partial", response_class=HTMLResponse)
+def query_log_partial(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    return render(request, "query_log_results.html", **query_log_context(request))
 
 
 @app.get("/statistics-settings", response_class=HTMLResponse)

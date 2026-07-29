@@ -24,19 +24,87 @@
     });
   }
 
-  document.querySelectorAll('[data-confirm]').forEach((node) => {
-    node.addEventListener('submit', (event) => {
-      if (!window.confirm(node.dataset.confirm)) event.preventDefault();
-    });
+  function showToast(message, tone) {
+    let toast = document.getElementById('appToast');
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.id = 'appToast';
+      toast.className = 'toast';
+      toast.setAttribute('role', 'status');
+      document.body.appendChild(toast);
+    }
+    toast.textContent = message;
+    toast.dataset.tone = tone || 'success';
+    toast.classList.add('toast--visible');
+    window.clearTimeout(showToast.timer);
+    showToast.timer = window.setTimeout(() => toast.classList.remove('toast--visible'), 3600);
+  }
+
+  document.addEventListener('submit', async (event) => {
+    const form = event.target.closest('form');
+    if (!form) return;
+    if (form.dataset.confirm && !window.confirm(form.dataset.confirm)) {
+      event.preventDefault();
+      return;
+    }
+    if (!form.matches('[data-async-form]')) return;
+    event.preventDefault();
+    const button = form.querySelector('button');
+    if (button) button.disabled = true;
+    try {
+      const response = await fetch(form.action, {
+        method: form.method || 'POST',
+        body: new FormData(form),
+        headers: { 'X-Requested-With': 'BindGuardAsyncForm' },
+      });
+      const text = await response.text();
+      const doc = new DOMParser().parseFromString(text, 'text/html');
+      const nextMain = doc.querySelector('main');
+      const main = document.querySelector('main');
+      if (nextMain && main) {
+        main.innerHTML = nextMain.innerHTML;
+        if (response.url) {
+          const url = new URL(response.url);
+          if (url.origin === window.location.origin) window.history.replaceState({}, '', url.pathname + url.search);
+        }
+      }
+      const error = doc.querySelector('.alert.error');
+      if (error) showToast(error.textContent.trim() || 'Local DNS change failed.', 'error');
+      else if (response.ok) showToast(form.dataset.successMessage || 'Saved.', 'success');
+      else showToast('Local DNS change failed.', 'error');
+    } catch (error) {
+      showToast('Local DNS change failed.', 'error');
+    } finally {
+      if (button) button.disabled = false;
+    }
   });
 
   const refreshToggle = document.getElementById('autoRefresh');
   let refreshTimer = null;
   if (refreshToggle) {
-    refreshToggle.addEventListener('change', () => {
+    const key = `bindguardAutoRefresh:${window.location.pathname}`;
+    const target = document.getElementById(refreshToggle.dataset.refreshTarget || '');
+    const refresh = async () => {
+      if (!target || !target.dataset.refreshUrl) {
+        window.location.reload();
+        return;
+      }
+      const url = new URL(target.dataset.refreshUrl, window.location.origin);
+      url.search = window.location.search;
+      const response = await fetch(url, { headers: { 'X-Requested-With': 'BindGuardAutoRefresh' } });
+      if (response.ok) target.innerHTML = await response.text();
+    };
+    const schedule = () => {
       if (refreshTimer) clearInterval(refreshTimer);
-      refreshTimer = refreshToggle.checked ? setInterval(() => window.location.reload(), 10000) : null;
+      refreshTimer = refreshToggle.checked ? setInterval(refresh, 10000) : null;
+    };
+    refreshToggle.checked = sessionStorage.getItem(key) === '1';
+    refreshToggle.addEventListener('change', () => {
+      sessionStorage.setItem(key, refreshToggle.checked ? '1' : '0');
+      schedule();
+      if (refreshToggle.checked) refresh();
     });
+    schedule();
   }
 
   function parseSeries(canvas) {

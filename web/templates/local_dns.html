@@ -45,7 +45,7 @@
 </section>
 
 <section class="grid">
-  <form class="panel stack" method="post" action="/local-dns/hosts" data-confirm="Add this host and deploy local DNS zones?">
+  <form class="panel stack" method="post" action="/local-dns/hosts" data-async-form data-success-message="Local DNS host saved and deployed.">
     <div class="panel__head"><h2>Add Host</h2></div>
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <div class="grid compact">
@@ -72,7 +72,7 @@
     </div>
   </form>
 
-  <form class="panel stack" method="post" action="/local-dns/records" data-confirm="Add this advanced record and deploy local DNS zones?">
+  <form class="panel stack" method="post" action="/local-dns/records" data-async-form data-success-message="Local DNS record saved and deployed.">
     <div class="panel__head"><h2>Advanced Record</h2></div>
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <div class="grid compact">
@@ -120,23 +120,23 @@
       <tbody>
         {% for record in records %}
           <tr>
-            <td class="mono" title="{{ record.fqdn }}">{{ record.fqdn }}</td>
+            <td class="mono wrap-anywhere" title="{{ record.fqdn }}">{{ record.fqdn }}</td>
             <td>{{ ui.status_badge(record.record_type, "neutral") }}</td>
-            <td class="mono" title="{{ record.value }}">{{ record.value }}</td>
+            <td class="mono wrap-anywhere" title="{{ record.value }}">{{ record.value }}</td>
             <td>{% if record.record_type == "PTR" %}{{ ui.status_badge("PTR", "healthy") }}{% elif record.ptr_record_id %}{{ ui.status_badge("Automatic", "healthy") }}{% else %}{{ ui.status_badge("None", "unavailable") }}{% endif %}</td>
             <td class="mono">{{ record.ttl }}</td>
-            <td>{{ record.comment }}</td>
+            <td class="wrap-anywhere">{{ record.comment }}</td>
             <td>{{ ui.status_badge("Enabled" if record.enabled else "Disabled", "healthy" if record.enabled else "unavailable") }}</td>
             <td>
               <div class="row">
-                <form method="post" action="/local-dns/records/{{ record.id }}/toggle" data-confirm="Toggle this local DNS record and deploy?"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">{{ "Disable" if record.enabled else "Enable" }}</button></form>
+                <form method="post" action="/local-dns/records/{{ record.id }}/toggle" data-async-form data-success-message="Local DNS record updated and deployed."><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">{{ "Disable" if record.enabled else "Enable" }}</button></form>
                 <form method="post" action="/local-dns/records/{{ record.id }}/delete" data-confirm="Delete this local DNS record and deploy?"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="danger">Delete</button></form>
               </div>
             </td>
           </tr>
           <tr>
             <td colspan="8">
-              <form method="post" action="/local-dns/records/{{ record.id }}/edit" class="grid compact" data-confirm="Edit this local DNS record and deploy?">
+              <form method="post" action="/local-dns/records/{{ record.id }}/edit" class="grid compact" data-async-form data-success-message="Local DNS record saved and deployed.">
                 <input type="hidden" name="csrf" value="{{ csrf }}">
                 <label>Type <select name="record_type"><option {{ "selected" if record.record_type == "A" else "" }}>A</option><option {{ "selected" if record.record_type == "AAAA" else "" }}>AAAA</option><option {{ "selected" if record.record_type == "CNAME" else "" }}>CNAME</option><option {{ "selected" if record.record_type == "PTR" else "" }}>PTR</option></select></label>
                 <label>Hostname <input name="fqdn" value="{{ record.fqdn }}"></label>
@@ -173,7 +173,7 @@
         {% for alias in aliases %}
           <div class="ranked-row">
             <div class="ranked-row__top"><span class="mono" title="{{ alias.cidr }}">{{ alias.cidr }}</span><strong>{{ alias.display_name }}</strong></div>
-            <div class="ranked-row__meta"><span>{{ alias.description }}</span><form method="post" action="/local-dns/aliases/{{ alias.id }}/delete" data-confirm="Delete this client alias?"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="danger">Delete</button></form></div>
+            <div class="ranked-row__meta"><span>{{ alias.description }}</span><form method="post" action="/local-dns/aliases/{{ alias.id }}/delete"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="danger">Delete</button></form></div>
           </div>
         {% endfor %}
       </div>

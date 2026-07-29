@@ -479,14 +479,27 @@ def render_zone(zone: str, records: list[sqlite3.Row], serial: int, default_ttl:
     return "\n".join(lines) + "\n"
 
 
+def forward_zone_for_fqdn(fqdn: str, internal_domain: str) -> str:
+    if fqdn == internal_domain or fqdn.endswith("." + internal_domain):
+        return internal_domain
+    labels = fqdn.split(".")
+    if len(labels) < 3:
+        return fqdn
+    return ".".join(labels[1:])
+
+
 def build_zone_files(conn: sqlite3.Connection, stage: Path, serial: int | None = None) -> list[ZoneFile]:
     cfg = settings(conn)
     domain = normalize_domain(cfg.get("internal_domain", DEFAULT_DOMAIN))
     default_ttl = validate_ttl(cfg.get("default_ttl", 300))
     zone_serial = serial or next_serial(conn)
     enabled = list(conn.execute("SELECT * FROM local_dns_records WHERE enabled=1 ORDER BY fqdn, record_type, value"))
-    forward_records = [row for row in enabled if row["record_type"] in {"A", "AAAA", "CNAME"} and row["fqdn"].endswith("." + domain)]
-    zones = [ZoneFile(domain, stage / "local" / f"{domain}.zone", render_zone(domain, forward_records, zone_serial, default_ttl))]
+    forward: dict[str, list[sqlite3.Row]] = {domain: []}
+    for row in enabled:
+        if row["record_type"] in {"A", "AAAA", "CNAME"}:
+            zone = forward_zone_for_fqdn(row["fqdn"], domain)
+            forward.setdefault(zone, []).append(row)
+    zones = [ZoneFile(zone, stage / "local" / f"{zone}.zone", render_zone(zone, rows, zone_serial, default_ttl)) for zone, rows in sorted(forward.items())]
     reverse: dict[str, list[sqlite3.Row]] = {}
     for row in enabled:
         if row["record_type"] == "PTR":
@@ -513,6 +526,20 @@ def render_include(zones: list[ZoneFile]) -> str:
             ]
         )
     return "\n".join(lines)
+
+
+def flush_dnsdist_packet_cache(zones: list[ZoneFile]) -> str:
+    output = ""
+    for zone in zones:
+        command = f'pc:expungeByName("{zone.zone}.", DNSQType.ANY, true)'
+        try:
+            proc = run(["dnsdist", "-C", "/etc/dnsdist/dnsdist.conf", "-c", "-e", command], check=False)
+            output += proc.stdout
+            if proc.returncode != 0:
+                output += f"dnsdist cache flush failed for {zone.zone}: {proc.stdout}\n"
+        except Exception as exc:
+            output += f"dnsdist cache flush unavailable for {zone.zone}: {exc}\n"
+    return output
 
 
 def ensure_named_include() -> None:
@@ -578,6 +605,7 @@ def deploy_zones(conn: sqlite3.Connection | None = None) -> int:
         run(["rndc", "reconfig"])
         for zone in zones:
             run(["rndc", "reload", zone.zone], check=False)
+        validation_output += flush_dnsdist_packet_cache(zones)
         validate_dns_results(db)
         status = "deployed"
         message = f"deployed {len(zones)} local DNS zones"
@@ -619,16 +647,26 @@ def deploy_zones(conn: sqlite3.Connection | None = None) -> int:
     return deployment_id
 
 
+def dig_contains(command: list[str], expected: str, attempts: int = 5) -> bool:
+    expected_lower = expected.rstrip(".").lower()
+    for attempt in range(attempts):
+        proc = run(command, check=False)
+        output = proc.stdout.rstrip(".\n").lower()
+        if proc.returncode == 0 and expected_lower in output:
+            return True
+        if attempt + 1 < attempts:
+            time.sleep(0.35)
+    return False
+
+
 def validate_dns_results(conn: sqlite3.Connection) -> None:
-    rows = list(conn.execute("SELECT * FROM local_dns_records WHERE enabled=1 AND record_type IN ('A','AAAA') ORDER BY id LIMIT 5"))
+    rows = list(conn.execute("SELECT * FROM local_dns_records WHERE enabled=1 AND record_type IN ('A','AAAA') ORDER BY id LIMIT 20"))
     for row in rows:
-        proc = run(["dig", "@127.0.0.1", "-p", "5353", row["fqdn"], row["record_type"], "+short", "+time=3", "+tries=1"], check=False)
-        if proc.returncode != 0 or row["value"].lower() not in proc.stdout.lower():
+        if not dig_contains(["dig", "@127.0.0.1", "-p", "5353", row["fqdn"], row["record_type"], "+short", "+time=2", "+tries=1"], row["value"]):
             raise RuntimeError(f"forward lookup failed for {row['fqdn']}")
         ptr = conn.execute("SELECT fqdn FROM local_dns_records WHERE id=?", (row["ptr_record_id"],)).fetchone() if row["ptr_record_id"] else None
         if ptr:
-            rev = run(["dig", "@127.0.0.1", "-p", "5353", "-x", row["value"], "+short", "+time=3", "+tries=1"], check=False)
-            if rev.returncode != 0 or row["fqdn"] not in rev.stdout.rstrip("."):
+            if not dig_contains(["dig", "@127.0.0.1", "-p", "5353", "-x", row["value"], "+short", "+time=2", "+tries=1"], row["fqdn"]):
                 raise RuntimeError(f"reverse lookup failed for {row['value']}")
 
 

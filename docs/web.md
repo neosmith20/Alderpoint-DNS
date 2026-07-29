@@ -55,9 +55,11 @@ empty-state, and confirmation styles. Long domains, IPv6 addresses, paths,
 command names, version strings, and URLs use wrapping or deliberate local table
 scrolling so they do not create page-level horizontal overflow.
 
-The Query Log page supports search, pagination, auto-refresh, client/domain
-filters, query type, protocol, allowed/blocked status, response code, and direct
-creation of allow/block rules with confirmation and normal staged deployment.
+The Query Log page supports search, pagination, client/domain filters, query
+type, protocol, allowed/blocked status, response code, and direct creation of
+allow/block rules with confirmation and normal staged deployment. Auto-refresh
+persists for the browser session and refreshes only the query-log result
+container through `/query-log/partial`; it does not reload the full page.
 
 Blocklist management supports add, inline edit, enable/disable, delete,
 single-source update, update-all, and compile/deploy. Single-source updates are
@@ -79,7 +81,15 @@ The Local DNS page supports:
 
 Every Local DNS mutation runs the normal no-download deployment path, which
 stages generated zones, validates them, installs atomically, reloads BIND, and
-records the result.
+records the result. Routine add/edit/toggle forms use targeted async page
+updates with toast feedback instead of browser confirmation prompts or full
+page reloads. Destructive record deletion still requires confirmation.
+
+Advanced Local DNS records can use fully qualified names outside the default
+internal domain. BindGuard generates an additional managed authoritative
+forward zone for the parent domain and clears dnsdist packet-cache entries for
+managed local zones after activation, so stale frontend NODATA responses do not
+hide newly added records.
 
 Useful commands:
 

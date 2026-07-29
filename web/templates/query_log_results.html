@@ -1,0 +1,45 @@
+{% import "components.html" as ui %}
+{% if log.rows %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Timestamp</th><th>Client</th><th>Domain</th><th>Type</th><th>Protocol</th><th>Status</th><th>Response time</th><th>Block source/category</th><th>Rule</th></tr></thead>
+      <tbody>
+        {% for row in log.rows %}
+          <tr title="{{ row.domain }}">
+            <td class="mono">{{ row.ts }}</td>
+            <td class="mono wrap-anywhere" title="{{ row.client }}">{{ row.client_display or row.client }}</td>
+            <td class="mono wrap-anywhere">{{ row.domain }}</td>
+            <td>{{ row.qtype }}</td>
+            <td>{{ row.protocol }}</td>
+            <td>{{ ui.status_badge("Blocked", "blocked") if row.blocked else ui.status_badge(row.rcode, "healthy") }}</td>
+            <td>{{ "%.1f ms"|format(row.latency_ms) if row.latency_ms is not none else "n/a" }}</td>
+            <td class="wrap-anywhere">{{ row.block_source or "unavailable" }}{% if row.block_category %}<span class="secondary muted">{{ row.block_category }}</span>{% endif %}</td>
+            <td>
+              <div class="row">
+                <form method="post" action="/custom-rules/add-from-query" data-confirm="Create and deploy an allow rule for this domain?">
+                  <input type="hidden" name="csrf" value="{{ csrf }}">
+                  <input type="hidden" name="domain" value="{{ row.domain }}">
+                  <input type="hidden" name="action" value="allow">
+                  <button class="secondary">Allow</button>
+                </form>
+                <form method="post" action="/custom-rules/add-from-query" data-confirm="Create and deploy a block rule for this domain?">
+                  <input type="hidden" name="csrf" value="{{ csrf }}">
+                  <input type="hidden" name="domain" value="{{ row.domain }}">
+                  <input type="hidden" name="action" value="block">
+                  <button class="danger">Block</button>
+                </form>
+              </div>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="row">
+    {% if log.page > 1 %}<a class="button secondary" href="/query-log?page={{ log.page - 1 }}&limit={{ log.limit }}">Previous</a>{% endif %}
+    <span class="muted">Page {{ log.page }} of {{ ((log.total + log.limit - 1) // log.limit) or 1 }}</span>
+    {% if log.page * log.limit < log.total %}<a class="button secondary" href="/query-log?page={{ log.page + 1 }}&limit={{ log.limit }}">Next</a>{% endif %}
+  </p>
+{% else %}
+  {{ ui.empty_state("No query events match", "Adjust the filters or wait for the analytics collector to record DNS traffic.") }}
+{% endif %}

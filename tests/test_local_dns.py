@@ -67,6 +67,8 @@ class LocalDNSTest(unittest.TestCase):
         if command[0] == "dig" and "+short" in command:
             if "-x" in command:
                 text = "alex-pc.home.arpa.\n"
+            elif "adguard.mylan.network" in command:
+                text = "172.16.43.10\n"
             elif "AAAA" in command:
                 text = "fd00::50\n"
             else:
@@ -131,6 +133,16 @@ class LocalDNSTest(unittest.TestCase):
         self.assertIn("43.16.172.in-addr.arpa", names)
         self.assertIn("9.10.10.in-addr.arpa", names)
 
+    def test_external_fqdn_records_create_managed_forward_zone(self) -> None:
+        local_dns.add_record("A", "adguard.mylan.network", "172.16.43.10")
+        with local_dns.connect() as conn:
+            zones = local_dns.build_zone_files(conn, self.tmp / "stage", 2026072901)
+        by_name = {zone.zone: zone.text for zone in zones}
+        self.assertIn("home.arpa", by_name)
+        self.assertIn("mylan.network", by_name)
+        self.assertIn("$ORIGIN mylan.network.", by_name["mylan.network"])
+        self.assertIn("adguard 300 IN A 172.16.43.10", by_name["mylan.network"])
+
     def test_zone_serial_increment(self) -> None:
         with local_dns.connect() as conn:
             first = local_dns.next_serial(conn)
@@ -154,6 +166,35 @@ class LocalDNSTest(unittest.TestCase):
         finally:
             os.environ.pop("BINDGUARD_TEST_INVALID_LOCAL_ZONE", None)
         self.assertEqual(local_dns.LOCAL_ZONES_CONF.read_text(), before)
+
+    def test_deploy_flushes_dnsdist_packet_cache_for_local_zones(self) -> None:
+        local_dns.add_record("A", "adguard.mylan.network", "172.16.43.10")
+        commands = []
+
+        def recording_run(command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+            commands.append(command)
+            return self.fake_run(command, check)
+
+        with mock.patch.object(local_dns, "run", recording_run):
+            local_dns.deploy_zones()
+        executed = [" ".join(command) for command in commands]
+        self.assertTrue(any('pc:expungeByName("mylan.network.", DNSQType.ANY, true)' in command for command in executed))
+        self.assertTrue(any('pc:expungeByName("home.arpa.", DNSQType.ANY, true)' in command for command in executed))
+
+    def test_dns_validation_retries_transient_forward_failure(self) -> None:
+        local_dns.add_record("A", "adguard.mylan.network", "172.16.43.10")
+        calls = []
+
+        def flaky_run(command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            if len(calls) == 1:
+                return subprocess.CompletedProcess(command, 0, "")
+            return subprocess.CompletedProcess(command, 0, "172.16.43.10\n")
+
+        with local_dns.connect() as conn:
+            with mock.patch.object(local_dns, "run", flaky_run), mock.patch.object(local_dns.time, "sleep"):
+                local_dns.validate_dns_results(conn)
+        self.assertGreaterEqual(len(calls), 2)
 
     def test_client_alias_and_ptr_fallback_display(self) -> None:
         local_dns.add_host("alex-pc", "home.arpa", "172.16.43.50", auto_ptr=True)
