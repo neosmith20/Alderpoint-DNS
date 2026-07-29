@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Dashboard</h1>
+<div class="grid">
+  <div class="card"><h3>BindGuard</h3><p class="ok">{{ bindguard }}</p></div>
+  <div class="card"><h3>BIND</h3><p>{{ bind }}</p></div>
+  <div class="card"><h3>dnsdist</h3><p>{{ dnsdist }}</p></div>
+  <div class="card"><h3>Active Rules</h3><p>{{ active_rules }}</p></div>
+  <div class="card"><h3>Enabled Lists</h3><p>{{ enabled_sources }}</p></div>
+  <div class="card"><h3>Last Deployment</h3><p>{{ deployment.status if deployment else "none" }}</p></div>
+</div>
+<form method="post" action="/deploy" class="panel" style="margin-top:12px">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button>Update, Compile, Deploy</button>
+</form>
+{% endblock %}

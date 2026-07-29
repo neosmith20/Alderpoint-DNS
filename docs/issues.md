@@ -13,6 +13,8 @@
 - Full VM reboot survival remains pending for the combined stack.
 - Only one public blocklist is seeded for lab validation. The UI and importer
   can add the user's remaining public URLs once the web interface exists.
+- Web cookies are not marked `Secure` in current lab HTTP mode. They must be
+  marked `Secure` when the admin interface is served over HTTPS.
 
 ## Resolved during BIND milestone
 

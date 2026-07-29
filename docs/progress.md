@@ -9,8 +9,8 @@
 - [x] Encrypted DNS where supported by installed package
 - [x] Blocklist compiler
 - [x] Safe RPZ deployment and rollback
-- [ ] Web interface
-- [ ] Authentication
+- [x] Web interface
+- [x] Authentication
 - [ ] v1 acceptance suite
 
 ## Verified BIND milestone
@@ -71,3 +71,20 @@
 - Forced post-deployment failure rolls back and records `rolled_back`.
 - With both BIND and dnsdist stopped, `update-sources` and direct HTTPS download
   still work through the host maintenance resolver; services restart afterward.
+
+## Verified web/auth milestone
+
+- FastAPI/Jinja application runs as dedicated non-root `bindguard` user.
+- Administration listener is loopback-only on `127.0.0.1:3000`.
+- Initial setup page is reachable and no default administrator exists.
+- Passwords are hashed with Argon2.
+- Sessions are signed, `HttpOnly`, and `SameSite=Strict`.
+- CSRF tokens protect mutating UI actions.
+- Login failures are rate-limited by source IP.
+- Web pages implemented: dashboard, blocklists, custom rules, DNS settings, and
+  system.
+- Privileged operations from the web service are limited to exact sudoers
+  commands for source update and compiler deployment; no unrestricted shell is
+  granted.
+- `bindguard.service` is enabled and active.
+- Web smoke test passes.

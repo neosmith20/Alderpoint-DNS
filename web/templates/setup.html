@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<form class="panel" method="post" action="/setup">
+  <h1>Initial administrator setup</h1>
+  <p class="muted">Create the first local administrator. No default password exists.</p>
+  <label>Username <input name="username" value="admin"></label>
+  <label>Password <input name="password" type="password" minlength="12" required></label>
+  <p><button>Create administrator</button></p>
+</form>
+{% endblock %}

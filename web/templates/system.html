@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>System</h1>
+<div class="grid">
+  <div class="card"><h3>BindGuard</h3><p>{{ bindguard }}</p></div>
+  <div class="card"><h3>BIND</h3><p>{{ named }}</p></div>
+  <div class="card"><h3>dnsdist</h3><p>{{ dnsdist }}</p></div>
+  <div class="card"><h3>Last Deployment</h3><p>{{ compiler.deployment.status if compiler.deployment else "none" }}</p></div>
+</div>
+<h2>Recent Logs</h2>
+<pre>{{ logs }}</pre>
+{% endblock %}

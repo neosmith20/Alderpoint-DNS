@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BindGuard</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; background: #f6f7f9; color: #18202a; }
+    header { background: #101820; color: white; padding: 12px 18px; display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
+    header a, header button { color: white; text-decoration: none; background: transparent; border: 0; font: inherit; cursor: pointer; }
+    main { max-width: 1180px; margin: 0 auto; padding: 18px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+    .card, table, form.panel { background: white; border: 1px solid #d9dde3; border-radius: 6px; padding: 14px; }
+    table { width: 100%; border-collapse: collapse; padding: 0; overflow: hidden; }
+    th, td { padding: 10px; border-bottom: 1px solid #e8ebef; text-align: left; vertical-align: top; }
+    input, select { width: 100%; box-sizing: border-box; padding: 9px; border: 1px solid #b7c0cc; border-radius: 4px; }
+    button, .button { background: #155e75; color: white; border: 0; padding: 9px 12px; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; }
+    .danger { background: #9f1239; }
+    .muted { color: #607080; }
+    .ok { color: #047857; }
+    .bad { color: #b91c1c; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    pre { white-space: pre-wrap; overflow: auto; background: #111827; color: #e5e7eb; padding: 12px; border-radius: 6px; }
+    @media (prefers-color-scheme: dark) {
+      body { background: #111827; color: #e5e7eb; }
+      .card, table, form.panel { background: #1f2937; border-color: #334155; }
+      th, td { border-color: #334155; }
+      input, select { background: #111827; color: #e5e7eb; border-color: #475569; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>BindGuard</strong>
+    {% if admin %}
+      <a href="/">Dashboard</a>
+      <a href="/blocklists">Blocklists</a>
+      <a href="/custom-rules">Custom Rules</a>
+      <a href="/dns-settings">DNS Settings</a>
+      <a href="/system">System</a>
+      <form method="post" action="/logout" style="margin-left:auto"><button>Logout</button></form>
+    {% endif %}
+  </header>
+  <main>{% block content %}{% endblock %}</main>
+</body>
+</html>

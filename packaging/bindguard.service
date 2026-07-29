@@ -1,0 +1,21 @@
+[Unit]
+Description=BindGuard Web Application
+After=network-online.target named.service dnsdist.service
+Wants=network-online.target
+
+[Service]
+User=bindguard
+Group=bindguard
+WorkingDirectory=/opt/bindguard
+Environment=PYTHONPATH=/opt/bindguard
+ExecStart=/usr/bin/uvicorn app.webapp:app --host 127.0.0.1 --port 3000
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/bindguard /var/log/bindguard /etc/bindguard
+
+[Install]
+WantedBy=multi-user.target

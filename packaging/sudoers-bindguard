@@ -1,0 +1,1 @@
+bindguard ALL=(root) NOPASSWD: /opt/bindguard/app/bindguard_compiler.py deploy, /opt/bindguard/app/bindguard_compiler.py deploy --no-download, /opt/bindguard/app/bindguard_compiler.py update-sources
