@@ -11,6 +11,9 @@
 - [x] Safe RPZ deployment and rollback
 - [x] Web interface
 - [x] Authentication
+- [x] Aggregate query statistics
+- [ ] Backup and restore
+- [ ] Full reboot acceptance
 - [ ] v1 acceptance suite
 
 ## Verified BIND milestone
@@ -88,3 +91,12 @@
   granted.
 - `bindguard.service` is enabled and active.
 - Web smoke test passes.
+
+## Verified query statistics milestone
+
+- Dashboard reads aggregate dnsdist statistics from the loopback-only dnsdist
+  API.
+- Total query count is displayed.
+- Blocked query count is displayed from dnsdist rule counters when available.
+- Full per-query ingestion is not enabled, avoiding unbounded SQLite growth for
+  v1.

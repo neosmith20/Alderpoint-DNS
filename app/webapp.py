@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import datetime as dt
+import base64
+import json
 import os
 import secrets
 import sqlite3
 import subprocess
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -151,6 +154,19 @@ def compiler_status() -> dict[str, Any]:
     return {"sources": sources, "rules": rules, "deployment": deployment}
 
 
+def dnsdist_stats() -> dict[str, Any]:
+    try:
+        creds = Path("/etc/bindguard/dnsdist-web.creds").read_text().strip()
+        api_key = Path("/etc/bindguard/dnsdist-api.key").read_text().strip()
+        request = urllib.request.Request("http://127.0.0.1:8083/jsonstat?command=stats")
+        request.add_header("Authorization", "Basic " + base64.b64encode(creds.encode()).decode())
+        request.add_header("x-api-key", api_key)
+        with urllib.request.urlopen(request, timeout=3) as response:
+            return json.loads(response.read().decode())
+    except Exception:
+        return {}
+
+
 def render(request: Request, template: str, **context: Any) -> HTMLResponse:
     session = signed_session(request)
     context.update(
@@ -170,6 +186,7 @@ def dashboard(request: Request, _: sqlite3.Row = Depends(current_admin)):
     enabled_sources = [s for s in status["sources"] if s["enabled"]]
     deployment = status["deployment"]
     active_rules = deployment["active_domains"] if deployment else 0
+    stats = dnsdist_stats()
     return render(
         request,
         "dashboard.html",
@@ -180,6 +197,8 @@ def dashboard(request: Request, _: sqlite3.Row = Depends(current_admin)):
         active_rules=active_rules,
         deployment=deployment,
         sources=status["sources"],
+        query_total=stats.get("queries", 0),
+        blocked_total=sum(int(stats.get(key, 0)) for key in ("rule-drop", "rule-nxdomain", "rule-refused")),
     )
 
 

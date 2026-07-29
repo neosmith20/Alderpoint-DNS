@@ -15,6 +15,8 @@
   can add the user's remaining public URLs once the web interface exists.
 - Web cookies are not marked `Secure` in current lab HTTP mode. They must be
   marked `Secure` when the admin interface is served over HTTPS.
+- Query statistics are aggregate-only for v1. Full recent-query ingestion,
+  top clients, top domains, and searchable history remain future work.
 
 ## Resolved during BIND milestone
 
