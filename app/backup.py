@@ -834,6 +834,34 @@ def resolves(domain: str, port: str = "53") -> bool:
     return result.returncode == 0 and "status: NOERROR" in result.stdout and "\tA\t" in result.stdout
 
 
+def _copy_with_ownership(src: str | Path, dest: str | Path) -> None:
+    """shutil.copy2 preserves content/mode/times but NOT owner/group, which
+    matters here: e.g. dnsdist.conf must stay root:_dnsdist or the dnsdist
+    process (running as _dnsdist) cannot read its own config after a
+    restore. Extraction from the tar archive (run as root) does preserve
+    original ownership on the staged copy, so mirror it onto the live path
+    explicitly rather than relying on copy2's defaults. Accepts str paths
+    too, since shutil.copytree's copy_function callback is invoked with
+    strings, not Path objects."""
+    shutil.copy2(src, dest)
+    src_stat = os.stat(src)
+    try:
+        os.chown(dest, src_stat.st_uid, src_stat.st_gid)
+    except (PermissionError, LookupError):
+        pass
+
+
+def _copytree_with_ownership(src: Path, dest: Path) -> None:
+    shutil.copytree(src, dest, copy_function=_copy_with_ownership)
+    for root, _dirs, _files in os.walk(dest):
+        rel = Path(root).relative_to(dest)
+        src_dir = src / rel
+        try:
+            os.chown(root, src_dir.stat().st_uid, src_dir.stat().st_gid)
+        except (PermissionError, LookupError, FileNotFoundError):
+            pass
+
+
 def _replace_path(live: Path, staged: Path, backups: list[tuple[Path, Path]]) -> None:
     """Back up the current live file/dir (if any) then atomically install
     the staged copy. Appends (live, backup_location) to `backups` for
@@ -848,9 +876,9 @@ def _replace_path(live: Path, staged: Path, backups: list[tuple[Path, Path]]) ->
     else:
         backups.append((live, Path("")))  # marks "did not exist before"
     if staged.is_dir():
-        shutil.copytree(staged, live)
+        _copytree_with_ownership(staged, live)
     else:
-        shutil.copy2(staged, live)
+        _copy_with_ownership(staged, live)
 
 
 def _rollback_paths(backups: list[tuple[Path, Path]]) -> None:

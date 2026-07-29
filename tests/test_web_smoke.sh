@@ -75,6 +75,11 @@ for route in ("/import", "import_upload", "/import/{job_id}", "/import/{job_id}/
         raise SystemExit(f"import route missing: {route}")
 if 'href="/import"' not in template:
     raise SystemExit("import nav link is missing")
+for route in ('"/backup"', '"/backup/create"', '"/backup/import"', '"/backup/preview"', '"/backup/restore"', '"/backup/{identifier}/download"', '"/backup/{identifier}/delete"', '"/backup/schedule"'):
+    if route not in webapp_text:
+        raise SystemExit(f"backup route missing: {route}")
+if 'href="/backup"' not in template:
+    raise SystemExit("backup nav link is missing")
 if "bindguardAutoRefresh" not in js or "sessionStorage" not in js or "target.innerHTML" not in js:
     raise SystemExit("query log auto-refresh stateful partial update is missing")
 if "setInterval(() => window.location.reload()" in js:
@@ -312,6 +317,27 @@ for expected in ("AdGuard Home Migration Preview", "Settings With No BindGuard E
     if expected not in import_adguard_html:
         raise SystemExit(f"import adguard preview page missing {expected}")
 
+backup_html = TEMPLATES.get_template("backup.html").render(
+    **base, error=None, imported=None, preview_source=None,
+    component_keys=["app_config", "sqlite_data", "custom_rules", "private_keys"],
+    component_defaults={"app_config": True, "sqlite_data": True, "custom_rules": True, "private_keys": False},
+    last_backup={"created_at": "2026-07-29T00:00:00Z", "size_bytes": 1048576, "status": "deployed"},
+    last_restore={"started_at": "2026-07-29T00:00:00Z", "finished_at": "2026-07-29T00:00:00Z", "status": "deployed"},
+    backup_settings={"schedule_enabled": "1", "schedule_interval_hours": "24", "retention_count": "7"},
+    backups=[{"id": 1, "created_at": "2026-07-29T00:00:00Z", "size_bytes": 2097152, "components_summary": long_upstream, "status": "deployed", "path": "bindguard-backup-x.tar.gz"}],
+    preview={
+        "compatible": True, "warnings": [],
+        "manifest": {"source_node_id": "bindguard-1", "created_at": "2026-07-29T00:00:00Z", "bindguard_app_version": "unreleased+git.abc", "database_schema_version": "abc123"},
+        "included_components": ["app_config", "sqlite_data"],
+        "table_diffs": [{"table": "custom_rules", "component": "custom_rules", "live_rows": 3, "backup_rows": 2}],
+        "file_diffs": [{"path": long_domain, "diff": "modified"}],
+        "unchanged_file_count": 5,
+    },
+)
+for expected in ("Create Backup", "Preview a Restore", "Restore Preview", "Scheduled Backups", "private_keys", long_upstream, long_domain, "data-async-form"):
+    if expected not in backup_html:
+        raise SystemExit(f"backup page missing {expected}")
+
 setup_html = TEMPLATES.get_template("setup.html").render(**{**base, "admin": None}, local_dns={"server_hostname": "bindguard", "server_ip": "172.16.43.101"})
 for expected in ("Create BindGuard local DNS records", "172.16.43.101", "bindguard.home.arpa"):
     if expected not in setup_html:
@@ -354,6 +380,7 @@ for name, rendered in {
     "import_base": import_base_html,
     "import_job": import_job_html,
     "import_adguard": import_adguard_html,
+    "backup": backup_html,
 }.items():
     if "app-topbar" not in rendered or "status-badge" not in rendered:
         raise SystemExit(f"{name} did not use the shared shell")

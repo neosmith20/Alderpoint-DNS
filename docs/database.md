@@ -57,3 +57,18 @@ Import table:
   parsed rows, the column mapping, preview counts, the list of inserted
   `local_dns_records` IDs (used by rollback), a downloadable JSON report, and
   status (`uploaded`/`previewed`/`applied`/`rolled_back`/`failed`).
+
+Backup tables:
+
+- `backup_settings`: key/value schedule settings (`schedule_enabled`,
+  `schedule_interval_hours`, `retention_count`) and the default component
+  selection used by scheduled/manual-CLI backups.
+- `backup_history`: one row per created archive — path, size, components,
+  manifest JSON, status, message.
+- `restore_history`: one row per restore attempt — source path, requested
+  components, staged/validated/applied outcome, the pre-restore safety
+  backup's path, validation output, and status
+  (`deployed`/`rolled_back`/`rollback_failed`/`failed`).
+- `backup_requests`: the unprivileged-web-process-writes /
+  privileged-compiler-process-reads handoff queue for
+  create/restore/preview requests (mirrors `dns_cache_flushes`).

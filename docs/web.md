@@ -50,8 +50,9 @@ The dashboard is organized around DNS-appliance information hierarchy:
   to `/system`.
 
 The Query Log, Blocklists, Filters, Local DNS, DNS Settings, Cache,
-Encryption, Import, Statistics, System, login, and setup pages all use the
-same card, table, badge, form, button, empty-state, and confirmation styles. Long domains, IPv6 addresses, paths,
+Encryption, Import, Backup, Statistics, System, login, and setup pages all
+use the same card, table, badge, form, button, empty-state, and confirmation
+styles. Long domains, IPv6 addresses, paths,
 command names, version strings, and URLs use wrapping or deliberate local table
 scrolling so they do not create page-level horizontal overflow.
 
@@ -113,6 +114,14 @@ DNS records from CSV/XLSX/hosts/BIND-zone/BindGuard-CSV sources, with
 column mapping, a normalized preview (valid/invalid/duplicate/conflict),
 per-conflict skip/merge/replace resolution, an automatic pre-apply backup,
 and rollback of exactly the rows an import added.
+
+The Backup page (`/backup`) creates versioned, checksummed, optionally
+password-encrypted archives with selectable components (private keys and
+credentials require an explicit confirmation), imports archives from
+elsewhere, and restores through a mandatory preview-first dry-run diff, an
+automatic pre-restore safety backup, and automatic rollback on any
+post-restore health-check failure. Scheduled backups run via a systemd
+timer with configurable interval and retention.
 
 Useful commands:
 

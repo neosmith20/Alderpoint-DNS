@@ -496,3 +496,103 @@ were needed for this milestone.
   policies against a real SQLite-backed `local_dns` fixture, apply+rollback
   round-tripping, and AdGuard YAML translation including the
   comment/cosmetic-rule exclusion and the untranslatable-settings list.
+
+## Verified Backup and Restore milestone
+
+`app/backup.py` adds a dedicated Backup and Restore page (`/backup`)
+producing versioned, checksummed archives and a preview-first, staged,
+automatically-rolled-back restore path, following the same shape as
+`app/dns_cache.py`/`app/encryption.py`. Built by a background agent working
+in an isolated git worktree; merged and then verified/fixed against the
+live VM in this session (see the two real bugs below — both were caught
+live, not assumed fixed from a clean test run).
+
+- Manifest (`manifest.json` at the archive root): `backup_format_version`,
+  `bindguard_app_version` (derived from the current git commit,
+  `unreleased+git.<short-sha>`, since there is no formal release versioning
+  yet), `created_at`, `source_node_id`, `included_components`, and a
+  `sha256_checksums` map for every archived file, verified on extraction
+  before any restore step touches live state.
+- The SQLite database is always captured through **SQLite's own online
+  backup API**, not a raw copy of the live `.db`/`.db-wal`/`.db-shm` files,
+  so a concurrently-writing web app or analytics collector can never produce
+  a torn/inconsistent archive — verified by
+  `test_sqlite_backup_copy_reflects_concurrent_writes_consistently`.
+- Component design (documented in the module's own docstring, since the
+  task asked for the reasoning behind this rather than a partial-SQLite-file
+  hack): the database is always captured as one consistent online-backup
+  copy; component selection controls two things instead — which *rows* get
+  stripped from that copy before archiving (`analytics_history`,
+  `user_auth_data`, off by default), and, at restore time, which *tables*
+  from the backup get merged into live SQLite, gated per-table so a narrow
+  restore (e.g. only `custom_rules`) never touches unrelated tables like
+  `dns_cache_settings` or `encryption_settings`.
+- Private key/credential material (TLS private keys, the DNSCrypt
+  provider/resolver private keys, the web session-signing secret, dnsdist
+  API/webserver credentials) is excluded from every backup by default and
+  requires both checking "include private keys" and a separate explicit
+  confirmation checkbox in the UI — not just a tooltip.
+- Password encryption uses `openssl enc -aes-256-cbc -pbkdf2 -iter 200000
+  -salt`, with the password piped via stdin (`-pass stdin`) rather than a
+  command-line argument, so it never appears in `ps`/process listings — no
+  hand-rolled crypto.
+- The unprivileged web process cannot write to `/etc/bindguard`, `/etc/bind`,
+  `/etc/dnsdist`, or arbitrary restore-target paths, so create/restore/
+  preview/schedule-deploy all follow the same "unprivileged process writes
+  an intent row (and, for passwords, a 0600 file consumed and deleted after
+  one read) to SQLite, then a new argument-free
+  `bindguard_compiler.py backup-{create,restore,preview,schedule-deploy}`
+  sudo entry reads and executes it" pattern already established by
+  `dns_cache.request_flush`/`process_pending_flush`.
+- `preview_restore` extracts to a temp dir, verifies checksums, and reports
+  a structured diff (per-table live-vs-backup row counts for tables mapped
+  to a specific component, plus a file-content diff summary) without ever
+  touching live state — verified live and by
+  `test_preview_restore_never_touches_live_state`.
+- `restore_backup` always takes a full safety backup of current state
+  *before* changing anything (not just before a risky step), stages then
+  atomically replaces each selected filesystem component, merges selected
+  SQLite tables, validates (`named-checkconf`, `dnsdist --check-config`,
+  `visudo -cf`), restarts only the services actually touched, runs a real
+  post-restore `dig` functional test, and on any failure restores every
+  replaced file/table from the safety backup and re-validates DNS before
+  reporting `rolled_back` (or `rollback_failed` if even that doesn't
+  recover, which never happened in live testing).
+- **Two real bugs were found and fixed via live testing on this VM, not
+  just unit tests** (both were caught safely by the rollback path itself —
+  DNS never went down during either failure, which is itself a live proof
+  the safety design works):
+  1. `_replace_path`'s file installation used `shutil.copy2`, which copies
+     content/mode/timestamps but — per Python's own documentation — *not*
+     owner/group. After a restore, `/etc/dnsdist/dnsdist.conf` silently
+     changed from `root:_dnsdist` (required for the `_dnsdist`-user dnsdist
+     process to read its own config) to whatever the restore process's
+     default group was, and `systemctl restart dnsdist` failed with
+     `Unable to read configuration file`. Fixed by explicitly `os.chown`-ing
+     every restored file/directory to match the staged copy's ownership
+     (which extraction — run as root — does preserve correctly from the
+     archive).
+  2. The first fix's `shutil.copytree(..., copy_function=_copy_with_ownership)`
+     then failed with `'str' object has no attribute 'stat'`, because
+     `shutil.copytree` invokes its `copy_function` callback with plain
+     string paths, not `Path` objects, contrary to the initial assumption.
+     Fixed by using `os.stat`/`os.chown` (which accept both) instead of the
+     `Path.stat()` method.
+  Both fixes were verified with a real end-to-end cycle: create a real
+  backup, mutate a real custom rule, restore, confirm the mutation reverted,
+  confirm `/etc/dnsdist/dnsdist.conf` and `/etc/bind/named.conf` kept
+  correct ownership, confirm DNS resolved throughout.
+- Scheduled backups use a systemd timer (`packaging/bindguard-backup.timer`
+  + `.service`), with the interval applied via a generated drop-in rather
+  than editing the packaged timer file directly. Retention pruning keeps
+  only the newest N archives (deleting both the file and its
+  `backup_history` row) after each scheduled run.
+- `tests/test_backup.py` (33 tests) covers settings validation, the real
+  SQLite online-backup mechanism (including that it reflects concurrent
+  writes consistently and correctly strips analytics/auth rows when those
+  components are off), manifest/checksum generation, preview never touching
+  live state, all three restore paths (component-scoped apply, full-database
+  merge of unmapped tables, rollback on both a forced failure and a failed
+  post-restore health check), retention pruning, and the
+  request/process-pending-request handoff pattern including that a stored
+  password file is consumed and deleted exactly once.

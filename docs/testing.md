@@ -13,9 +13,16 @@ Run individual suites:
 /opt/bindguard/tests/test_dns_cache_benchmark.sh
 /opt/bindguard/tests/test_encryption.py
 /opt/bindguard/tests/test_importer.py
+/opt/bindguard/tests/test_backup.py
 /opt/bindguard/tests/test_web_smoke.sh
 /opt/bindguard/tests/test_backup_restore.sh
 ```
+
+`tests/test_backup_restore.sh` (script-based, exercises `scripts/backup.sh`/
+`scripts/restore.sh`) and `tests/test_backup.py` (native `app/backup.py`)
+both remain in the suite; the scripts still work as a minimal, dependency-free
+fallback path, while the native page is the primary, versioned, richer
+workflow described below.
 
 The web smoke test also renders DNS Settings with long path/version-like
 content and asserts the responsive card/table wrapping rules that prevent
@@ -97,6 +104,19 @@ apply-then-rollback round-tripping, and AdGuard Home YAML translation
 the untranslatable/unsupported lists). Live verification imported real
 records through the actual privileged deploy path and confirmed they
 resolved from both BIND and dnsdist before rolling back.
+
+The Backup and Restore suite (`tests/test_backup.py`) covers the real SQLite
+online-backup mechanism (including under concurrent writes and correct
+stripping of analytics/auth rows when those components are disabled),
+manifest/checksum generation, dry-run restore preview never touching live
+state, all restore code paths (component-scoped, full-database merge,
+rollback-on-forced-failure, rollback-on-failed-health-check), retention
+pruning, and the unprivileged-request/privileged-apply handoff pattern
+including one-time password-file consumption. Live end-to-end verification
+on this VM (create a real backup, mutate a real custom rule, restore,
+confirm reversion, confirm file ownership, confirm DNS resolved throughout)
+caught and fixed two real bugs in file-ownership handling during restore —
+see `docs/progress.md`'s Backup and Restore milestone for detail.
 
 Manual protocol tests:
 

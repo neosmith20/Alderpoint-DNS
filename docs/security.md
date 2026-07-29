@@ -11,6 +11,16 @@
   unprivileged web process only ever stages bytes under
   `/var/lib/bindguard/staging`. Private key contents are never rendered back
   to the browser.
+- Backup archives exclude TLS/DNSCrypt private keys, the web session-signing
+  secret, and dnsdist API/webserver credentials by default; including them
+  requires both an explicit checkbox and a separate confirmation checkbox in
+  the UI. Password-encrypted archives use `openssl enc -aes-256-cbc -pbkdf2`
+  with the password passed via stdin, never a command-line argument (so it
+  never appears in process listings). Restore, like create, only runs
+  through the privileged, argument-free `backup-{create,restore,preview,
+  schedule-deploy}` sudo entries; the web process stages request intent and
+  a one-time-use, 0600, deleted-after-read password file, never a live path
+  or password as a sudo argument.
 - No default administrator exists.
 - Passwords are hashed with Argon2.
 - Session cookies are signed, `HttpOnly`, and `SameSite=Strict`.
