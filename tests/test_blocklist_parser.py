@@ -58,6 +58,37 @@ class ParserTests(unittest.TestCase):
         self.assertTrue(any("adguardteam.github.io" in url for url in urls))
         self.assertTrue(any("raw.githubusercontent.com" in url for url in urls))
 
+    def test_policy_schema_seed_supports_network_profiles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original_db = compiler.DB_PATH
+            compiler.DB_PATH = Path(tmp) / "bindguard.db"
+            try:
+                compiler.init_db()
+                with compiler.connect() as conn:
+                    categories = {row["key"] for row in conn.execute("SELECT key FROM categories")}
+                    profiles = {row["key"] for row in conn.execute("SELECT key FROM policy_profiles")}
+                    restricted = {
+                        row["category_key"]
+                        for row in conn.execute(
+                            "SELECT category_key FROM profile_categories WHERE profile_key='restricted' AND enabled=1"
+                        )
+                    }
+                    conn.execute(
+                        "INSERT INTO network_policies(cidr, profile_key, description) VALUES (?, ?, ?)",
+                        ("127.0.0.0/8", "trusted", "loopback lab policy"),
+                    )
+                    network = conn.execute("SELECT profile_key FROM network_policies WHERE cidr=?", ("127.0.0.0/8",)).fetchone()
+            finally:
+                compiler.DB_PATH = original_db
+
+        self.assertEqual(
+            {"malware", "ads_trackers", "adult_content", "iot_telemetry", "safesearch", "custom"},
+            categories,
+        )
+        self.assertEqual({"trusted", "standard", "iot", "restricted"}, profiles)
+        self.assertEqual({"malware", "ads_trackers", "adult_content", "iot_telemetry", "safesearch"}, restricted)
+        self.assertEqual("trusted", network["profile_key"])
+
 
 if __name__ == "__main__":
     unittest.main()

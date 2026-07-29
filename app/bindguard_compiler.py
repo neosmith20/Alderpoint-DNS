@@ -146,8 +146,78 @@ def init_db() -> None:
                 allowed_test_domain TEXT,
                 message TEXT NOT NULL DEFAULT ''
             );
+            CREATE TABLE IF NOT EXISTS categories (
+                key TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS policy_profiles (
+                key TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                is_custom INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS network_policies (
+                id INTEGER PRIMARY KEY,
+                cidr TEXT NOT NULL UNIQUE,
+                profile_key TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY(profile_key) REFERENCES policy_profiles(key)
+            );
+            CREATE TABLE IF NOT EXISTS profile_categories (
+                profile_key TEXT NOT NULL,
+                category_key TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY(profile_key, category_key),
+                FOREIGN KEY(profile_key) REFERENCES policy_profiles(key),
+                FOREIGN KEY(category_key) REFERENCES categories(key)
+            );
             CREATE INDEX IF NOT EXISTS idx_custom_rules_domain ON custom_rules(domain);
             """
+        )
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO categories(key, name, description)
+            VALUES (?, ?, ?)
+            """,
+            (
+                ("malware", "Malware", "Malware, phishing, scam, and threat-intelligence lists"),
+                ("ads_trackers", "Ads and trackers", "Advertising, affiliate, analytics, and tracking lists"),
+                ("adult_content", "Adult content", "Adult and explicit-content filtering lists"),
+                ("iot_telemetry", "IoT telemetry", "Device telemetry and vendor tracking lists"),
+                ("safesearch", "SafeSearch", "Search and video safety-enforcement policy"),
+                ("custom", "Custom categories", "Operator-defined categories and local rules"),
+            ),
+        )
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO policy_profiles(key, name, description, is_custom)
+            VALUES (?, ?, ?, 0)
+            """,
+            (
+                ("trusted", "Trusted", "Minimal policy for trusted administrator devices"),
+                ("standard", "Standard", "Default balanced malware, ads, and tracker protection"),
+                ("iot", "IoT", "Stricter telemetry-aware policy for appliance networks"),
+                ("restricted", "Restricted", "Most restrictive built-in profile for sensitive networks"),
+            ),
+        )
+        profile_defaults = {
+            "trusted": ("malware",),
+            "standard": ("malware", "ads_trackers"),
+            "iot": ("malware", "ads_trackers", "iot_telemetry"),
+            "restricted": ("malware", "ads_trackers", "adult_content", "iot_telemetry", "safesearch"),
+        }
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO profile_categories(profile_key, category_key, enabled)
+            VALUES (?, ?, 1)
+            """,
+            [
+                (profile, category)
+                for profile, categories in profile_defaults.items()
+                for category in categories
+            ],
         )
 
 
@@ -525,6 +595,20 @@ def list_status(_: argparse.Namespace) -> None:
             print(dict(row))
         print("Deployments:")
         for row in conn.execute("SELECT id, status, active_domains, finished_at, message FROM deployments ORDER BY id DESC LIMIT 5"):
+            print(dict(row))
+        print("Policy profiles:")
+        for row in conn.execute(
+            """
+            SELECT p.key, p.name, group_concat(pc.category_key, ',') AS categories
+            FROM policy_profiles p
+            LEFT JOIN profile_categories pc ON pc.profile_key=p.key AND pc.enabled=1
+            GROUP BY p.key, p.name
+            ORDER BY p.key
+            """
+        ):
+            print(dict(row))
+        print("Network policies:")
+        for row in conn.execute("SELECT cidr, profile_key, enabled, description FROM network_policies ORDER BY cidr"):
             print(dict(row))
 
 

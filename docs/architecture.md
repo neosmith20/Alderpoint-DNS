@@ -19,3 +19,9 @@ the explicit maintenance resolvers `1.1.1.2` and `1.0.0.2`. It never uses
 Until the management CIDR and allowed DNS client networks are explicitly known,
 all BindGuard listeners remain limited to loopback.
 
+Policy preparation is represented in SQLite even though v1 runtime enforcement
+currently uses the single generated RPZ. The schema includes built-in profiles
+for trusted, standard, IoT, and restricted networks; category keys for malware,
+ads and trackers, adult content, IoT telemetry, SafeSearch, and custom policy;
+and a `network_policies` table that can bind CIDRs to profiles once actual
+client networks are supplied.

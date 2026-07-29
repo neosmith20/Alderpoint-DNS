@@ -14,6 +14,9 @@
   marked `Secure` when the admin interface is served over HTTPS.
 - Query statistics are aggregate-only for v1. Full recent-query ingestion,
   top clients, top domains, and searchable history remain future work.
+- Per-network policy runtime enforcement is not enabled yet; v1 now has the
+  database and compiler-visible profile/category model needed to add it without
+  a schema rewrite.
 
 ## Resolved during post-reboot recovery
 
@@ -28,6 +31,12 @@
   `/opt/bindguard/app/bindguard_compiler.py seed-public`. The catalog assigns
   categories and includes both `adguardteam.github.io` and GitHub raw URLs while
   preserving the faster one-source lab seed for routine acceptance runs.
+
+## Resolved during policy preparation
+
+- Policy categories, built-in trusted/standard/IoT/restricted profiles,
+  profile-category mappings, and CIDR-to-profile network policy storage are
+  initialized in SQLite and covered by unit tests.
 
 ## Resolved during BIND milestone
 

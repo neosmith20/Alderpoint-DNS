@@ -14,6 +14,7 @@
 - [x] Aggregate query statistics
 - [x] Backup and restore
 - [x] Full reboot acceptance
+- [x] Per-network policy preparation
 - [x] v1 acceptance suite
 
 ## Verified BIND milestone
@@ -105,6 +106,20 @@
 - Blocked query count is displayed from dnsdist rule counters when available.
 - Full per-query ingestion is not enabled, avoiding unbounded SQLite growth for
   v1.
+
+## Verified policy-preparation milestone
+
+- SQLite schema includes policy categories for malware, ads and trackers, adult
+  content, IoT telemetry, SafeSearch, and custom categories.
+- Built-in policy profiles exist for trusted, standard, IoT, and restricted
+  networks.
+- `profile_categories` stores profile-to-category mappings, with restricted
+  enabling all built-in filtering categories.
+- `network_policies` can bind CIDRs to policy profiles once real client
+  networks are supplied.
+- Compiler status output includes policy profiles and network policy rows.
+- Unit tests verify the seeded categories, profiles, restricted mapping, and a
+  sample CIDR-to-profile binding.
 
 ## Verified backup/restore milestone
 
