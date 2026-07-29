@@ -9,8 +9,27 @@
 </head>
 <body>
   {% if admin %}
+    {% set path = request.url.path %}
+    {% set dns_active = path in ["/query-log", "/local-dns", "/dns-settings", "/dns-cache"] %}
+    {% set security_active = path in ["/custom-rules", "/blocklists"] or path.startswith("/encryption") %}
+    {% set operations_active = path.startswith("/import") or path.startswith("/backup") or path == "/replication" %}
+    {% set system_active = path.startswith("/statistics-settings") or path == "/system" %}
+    {% macro nav_icon(name) -%}
+      {% if name == "dashboard" %}
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h6V4H4v9Zm10 7h6V4h-6v16ZM4 20h6v-3H4v3Z"/></svg>
+      {% elif name == "dns" %}
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a8 8 0 0 0-8 8v2a5 5 0 0 0 5 5h1v-6H7v-1a5 5 0 0 1 10 0v1h-3v6h1a5 5 0 0 0 5-5v-2a8 8 0 0 0-8-8Z"/></svg>
+      {% elif name == "security" %}
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 5.4v5.5c0 4.3 2.7 8 7 9.6 4.3-1.6 7-5.3 7-9.6V5.4L12 3Zm3.8 7.2-4.4 4.8-2.5-2.5 1.4-1.4 1 1 3-3.3 1.5 1.4Z"/></svg>
+      {% elif name == "operations" %}
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4h10v3h3v10h-3v3H7v-3H4V7h3V4Zm2 3v10h6V7H9Z"/></svg>
+      {% elif name == "system" %}
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v10H4V5Zm2 2v6h12V7H6Zm2 10h8v2H8v-2Z"/></svg>
+      {% endif %}
+    {%- endmacro %}
     <div class="app-shell">
-      <header class="app-topbar" id="appTopbar">
+      <div class="mobile-nav-backdrop" data-nav-dismiss hidden></div>
+      <header class="app-mobilebar" id="appTopbar">
         <a class="brand" href="/">
           <span class="brand-mark" aria-hidden="true">
             <svg width="19" height="21" viewBox="0 0 19 21" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -20,16 +39,33 @@
           </span>
           <span>BindGuard</span>
         </a>
-        <button class="mobile-nav-toggle secondary" type="button" data-nav-toggle aria-controls="appNav" aria-expanded="false">Menu</button>
-        {% set path = request.url.path %}
-        {% set dns_active = path in ["/query-log", "/local-dns", "/dns-settings", "/dns-cache"] %}
-        {% set security_active = path in ["/custom-rules", "/blocklists"] or path.startswith("/encryption") %}
-        {% set operations_active = path.startswith("/import") or path.startswith("/backup") or path == "/replication" %}
-        {% set system_active = path.startswith("/statistics-settings") or path == "/system" %}
-        <nav class="app-nav" id="appNav" aria-label="Primary navigation">
-          <a class="nav-link nav-link--primary" href="/" {% if path == "/" %}aria-current="page"{% endif %}>Dashboard</a>
+        <button class="mobile-nav-toggle secondary" type="button" data-nav-toggle aria-controls="appNav" aria-expanded="false">
+          <span class="mobile-nav-toggle__icon" aria-hidden="true"></span>
+          <span>Menu</span>
+        </button>
+      </header>
+      <aside class="app-sidebar" id="appNav">
+        <div class="app-sidebar__brand">
+          <a class="brand" href="/">
+            <span class="brand-mark" aria-hidden="true">
+              <svg width="19" height="21" viewBox="0 0 19 21" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M9.5 1.6 16.6 4v5.7c0 4.5-2.8 8.3-7.1 9.8-4.3-1.5-7.1-5.3-7.1-9.8V4l7.1-2.4Z" stroke="currentColor" stroke-width="1.7"/>
+                <path d="M6 10.2 8.5 13l4.8-5.7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </span>
+            <span>BindGuard</span>
+          </a>
+        </div>
+        <nav class="app-nav" aria-label="Primary navigation">
+          <a class="nav-link nav-link--primary" href="/" {% if path == "/" %}aria-current="page"{% endif %}>
+            <span class="nav-icon">{{ nav_icon("dashboard") }}</span>
+            <span>Dashboard</span>
+          </a>
           <details class="nav-group" data-nav-section="dns" {{ "open" if dns_active else "" }}>
-            <summary class="nav-group__summary" {% if dns_active %}aria-current="true"{% endif %}>DNS</summary>
+            <summary class="nav-group__summary" {% if dns_active %}aria-current="true"{% endif %}>
+              <span class="nav-icon">{{ nav_icon("dns") }}</span>
+              <span>DNS</span>
+            </summary>
             <div class="nav-group__menu">
               <a href="/query-log" {% if path == "/query-log" %}aria-current="page"{% endif %}>Query Log</a>
               <a href="/local-dns" {% if path == "/local-dns" %}aria-current="page"{% endif %}>Local DNS</a>
@@ -38,7 +74,10 @@
             </div>
           </details>
           <details class="nav-group" data-nav-section="security" {{ "open" if security_active else "" }}>
-            <summary class="nav-group__summary" {% if security_active %}aria-current="true"{% endif %}>Security</summary>
+            <summary class="nav-group__summary" {% if security_active %}aria-current="true"{% endif %}>
+              <span class="nav-icon">{{ nav_icon("security") }}</span>
+              <span>Security</span>
+            </summary>
             <div class="nav-group__menu">
               <a href="/custom-rules" {% if path == "/custom-rules" %}aria-current="page"{% endif %}>Filters</a>
               <a href="/blocklists" {% if path == "/blocklists" %}aria-current="page"{% endif %}>Blocklists</a>
@@ -46,7 +85,10 @@
             </div>
           </details>
           <details class="nav-group" data-nav-section="operations" {{ "open" if operations_active else "" }}>
-            <summary class="nav-group__summary" {% if operations_active %}aria-current="true"{% endif %}>Operations</summary>
+            <summary class="nav-group__summary" {% if operations_active %}aria-current="true"{% endif %}>
+              <span class="nav-icon">{{ nav_icon("operations") }}</span>
+              <span>Operations</span>
+            </summary>
             <div class="nav-group__menu">
               <a href="/import" {% if path.startswith("/import") %}aria-current="page"{% endif %}>Import</a>
               <a href="/backup" {% if path.startswith("/backup") %}aria-current="page"{% endif %}>Backup</a>
@@ -54,7 +96,10 @@
             </div>
           </details>
           <details class="nav-group" data-nav-section="system" {{ "open" if system_active else "" }}>
-            <summary class="nav-group__summary" {% if system_active %}aria-current="true"{% endif %}>System</summary>
+            <summary class="nav-group__summary" {% if system_active %}aria-current="true"{% endif %}>
+              <span class="nav-icon">{{ nav_icon("system") }}</span>
+              <span>System</span>
+            </summary>
             <div class="nav-group__menu">
               <a href="/statistics-settings" {% if path.startswith("/statistics-settings") %}aria-current="page"{% endif %}>Statistics</a>
               <a href="/system" {% if path == "/system" %}aria-current="page"{% endif %}>System Status</a>
@@ -68,8 +113,8 @@
           </span>
           <form method="post" action="/logout"><button class="secondary">Logout</button></form>
         </div>
-      </header>
-      <main>{% block content %}{% endblock %}</main>
+      </aside>
+      <main class="app-main">{% block content %}{% endblock %}</main>
     </div>
   {% else %}
     <main class="auth-shell">{{ self.content() }}</main>

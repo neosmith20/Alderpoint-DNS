@@ -1,30 +1,30 @@
 (function () {
-  const topbar = document.getElementById('appTopbar');
+  const appShell = document.querySelector('.app-shell');
+  const appNav = document.getElementById('appNav');
   const navToggle = document.querySelector('[data-nav-toggle]');
-  if (topbar && navToggle) {
+  const navDismiss = document.querySelector('[data-nav-dismiss]');
+  const setNavOpen = (open) => {
+    if (!appShell || !navToggle) return;
+    appShell.classList.toggle('nav-open', open);
+    navToggle.setAttribute('aria-expanded', String(open));
+    if (navDismiss) navDismiss.hidden = !open;
+  };
+  if (appShell && navToggle) {
     navToggle.addEventListener('click', () => {
-      const open = topbar.classList.toggle('nav-open');
-      navToggle.setAttribute('aria-expanded', String(open));
+      setNavOpen(!appShell.classList.contains('nav-open'));
     });
-  }
-
-  const navGroups = document.querySelectorAll('.nav-group');
-  if (navGroups.length) {
-    const closeOtherGroups = (activeGroup) => {
-      navGroups.forEach((group) => {
-        if (group !== activeGroup && window.matchMedia('(min-width: 701px)').matches) group.open = false;
+    if (navDismiss) navDismiss.addEventListener('click', () => setNavOpen(false));
+    if (appNav) {
+      appNav.addEventListener('click', (event) => {
+        if (event.target.closest('a') && window.matchMedia('(max-width: 840px)').matches) setNavOpen(false);
       });
-    };
-    navGroups.forEach((group) => {
-      group.addEventListener('toggle', () => {
-        if (group.open) closeOtherGroups(group);
-      });
-    });
+    }
     document.addEventListener('click', (event) => {
-      if (!event.target.closest('.app-nav')) navGroups.forEach((group) => { group.open = false; });
+      if (!appShell.classList.contains('nav-open')) return;
+      if (!event.target.closest('#appNav') && !event.target.closest('[data-nav-toggle]')) setNavOpen(false);
     });
     document.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') navGroups.forEach((group) => { group.open = false; });
+      if (event.key === 'Escape') setNavOpen(false);
     });
   }
 

@@ -42,8 +42,11 @@ required_css = [
     "--panel:",
     "--accent:",
     "--blocked:",
-    "@media (max-width: 700px)",
+    "@media (max-width: 840px)",
+    ".app-sidebar",
+    ".app-mobilebar",
     ".mobile-nav-toggle",
+    ".mobile-nav-backdrop",
     ".nav-group",
     ".nav-group__summary",
     ".nav-group__menu",
@@ -61,7 +64,7 @@ if "data-nav-toggle" not in template or "appNav" not in template:
 for nav_hook in ("data-nav-section=\"dns\"", "data-nav-section=\"security\"", "data-nav-section=\"operations\"", "data-nav-section=\"system\""):
     if nav_hook not in template:
         raise SystemExit(f"grouped navigation hook missing: {nav_hook}")
-for js_hook in ("document.addEventListener('keydown'", "event.key === 'Escape'", "closest('.app-nav')", "matchMedia('(min-width: 701px)'"):
+for js_hook in ("document.addEventListener('keydown'", "event.key === 'Escape'", "closest('#appNav')", "matchMedia('(max-width: 840px)'", "setNavOpen"):
     if js_hook not in js:
         raise SystemExit(f"keyboard/click navigation behavior missing: {js_hook}")
 if "queryChart" not in template or 'data-chart="traffic"' not in template:
@@ -238,11 +241,11 @@ for expected in (
     'data-nav-section="security"',
     'data-nav-section="operations"',
     'data-nav-section="system"',
-    '>Dashboard</a>',
-    '>DNS</summary>',
-    '>Security</summary>',
-    '>Operations</summary>',
-    '>System</summary>',
+    '>Dashboard</span>',
+    '>DNS</span>',
+    '>Security</span>',
+    '>Operations</span>',
+    '>System</span>',
 ):
     if expected not in dashboard:
         raise SystemExit(f"grouped dashboard navigation missing {expected}")
@@ -276,7 +279,7 @@ query_log = TEMPLATES.get_template("query_log.html").render(
 )
 if "No query events match" not in query_log or "Auto-refresh" not in query_log or "Reset" not in query_log:
     raise SystemExit("query log empty state did not render")
-if 'data-nav-section="dns" open' not in query_log or '>DNS</summary>' not in query_log or 'href="/query-log" aria-current="page"' not in query_log:
+if 'data-nav-section="dns" open' not in query_log or '>DNS</span>' not in query_log or 'href="/query-log" aria-current="page"' not in query_log:
     raise SystemExit("query log navigation does not mark the active DNS section and page")
 
 local_dns = TEMPLATES.get_template("local_dns.html").render(
@@ -466,7 +469,7 @@ for name, rendered in {
     "import_adguard": import_adguard_html,
     "backup": backup_html,
 }.items():
-    if "app-topbar" not in rendered or "globalServiceStatus" not in rendered or "data-status-label" not in rendered:
+    if "app-shell" not in rendered or "app-sidebar" not in rendered or "globalServiceStatus" not in rendered or "data-status-label" not in rendered:
         raise SystemExit(f"{name} did not use the shared shell")
 
 with mock.patch.object(webapp, "service_state", side_effect=lambda name: "active"):
