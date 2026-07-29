@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -158,6 +159,83 @@ class AnalyticsTests(unittest.TestCase):
         self.assertEqual(decoded["protocol"], "UDP")
         self.assertEqual(decoded["rcode"], "NOERROR")
         self.assertEqual(decoded["latency_ms"], 500.0)
+
+    def _response_msg(self, *, ts: int, usec: int, query_sec: int, query_usec: int = 0, proto: int = 1, http_version: int = 0) -> bytes:
+        question = field_bytes(1, b"example.com.") + field_varint(2, 1)
+        response = field_varint(1, 0) + field_varint(5, query_sec) + field_varint(6, query_usec)
+        msg = (
+            field_varint(1, 2)
+            + field_varint(5, proto)
+            + field_bytes(6, b"\x7f\x00\x00\x01")
+            + field_varint(9, ts)
+            + field_varint(10, usec)
+            + field_bytes(12, question)
+            + field_bytes(13, response)
+            + field_varint(24, http_version)
+        )
+        return field_bytes(1, msg)
+
+    def test_one_second_response_displays_as_1000ms(self) -> None:
+        decoded = analytics.decode_dnsdist_message(self._response_msg(ts=101, usec=0, query_sec=100, query_usec=0))[0]
+        self.assertEqual(decoded["latency_ms"], 1000.0)
+
+    def test_no_multiplication_error_between_microseconds_and_milliseconds(self) -> None:
+        # A 4058.9 microsecond dnsdist average must display as ~4.1ms, never
+        # ~4058.9ms (missing conversion) or ~0.0041ms (double conversion).
+        with compiler.connect() as conn:
+            delta = analytics.collect_dnsdist_aggregate(conn, {"latency-avg100": 4058.9}, ts=120)
+        self.assertAlmostEqual(round(delta["latency_sum_ms"], 1), 4.1, places=1)
+
+    def test_negative_latency_from_clock_skew_clamped_to_zero(self) -> None:
+        # Response timestamp earlier than the recorded query time (clock skew
+        # between dnsdist's internal clock reads) must never surface as a
+        # negative latency.
+        decoded = analytics.decode_dnsdist_message(self._response_msg(ts=100, usec=0, query_sec=100, query_usec=500000))[0]
+        self.assertEqual(decoded["latency_ms"], 0.0)
+        self.assertGreaterEqual(decoded["latency_ms"], 0.0)
+
+    def test_implausible_latency_is_discarded_not_recorded(self) -> None:
+        # A corrupted/misparsed timestamp field (e.g. query time far in the
+        # past) must not be recorded as a real multi-day latency and corrupt
+        # aggregate averages; it is dropped instead.
+        decoded = analytics.decode_dnsdist_message(self._response_msg(ts=1_000_000, usec=0, query_sec=0, query_usec=0))[0]
+        self.assertIsNone(decoded["latency_ms"])
+
+    def test_telemetry_delivery_delay_not_counted_as_dns_latency(self) -> None:
+        # Latency must derive solely from timestamps embedded in the protobuf
+        # payload by dnsdist, never from when the collector happens to decode
+        # the frame, so a delayed/backlogged analytics queue cannot inflate
+        # reported DNS latency.
+        frame = self._response_msg(ts=100, usec=0, query_sec=99, query_usec=500000)
+        immediate = analytics.decode_dnsdist_message(frame)[0]["latency_ms"]
+        time.sleep(0.05)
+        delayed = analytics.decode_dnsdist_message(frame)[0]["latency_ms"]
+        self.assertEqual(immediate, delayed)
+        self.assertEqual(immediate, 500.0)
+
+    def test_polled_latency_missing_stat_does_not_crash_or_count(self) -> None:
+        # dnsdist may not yet report latency-avg100 (e.g. immediately after
+        # (re)start before 100 queries have been served); the poll must not
+        # crash and must not fabricate a latency sample.
+        with compiler.connect() as conn:
+            delta = analytics.collect_dnsdist_aggregate(conn, {"responses": 5}, ts=120)
+        self.assertNotIn("latency_sum_ms", delta)
+        self.assertNotIn("latency_count", delta)
+
+    def test_protocol_classification_across_transports(self) -> None:
+        cases = [
+            (1, 0, "UDP"),
+            (2, 0, "TCP"),
+            (3, 0, "DoT"),
+            (4, 0, "DoH"),
+            (4, 3, "DoH3"),
+            (7, 0, "DoQ"),
+        ]
+        for proto, http_version, expected in cases:
+            decoded = analytics.decode_dnsdist_message(
+                self._response_msg(ts=101, usec=0, query_sec=100, query_usec=0, proto=proto, http_version=http_version)
+            )[0]
+            self.assertEqual(decoded["protocol"], expected, f"proto={proto} http_version={http_version}")
 
 
 if __name__ == "__main__":

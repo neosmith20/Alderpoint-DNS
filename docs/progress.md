@@ -223,3 +223,58 @@
   strengthened dnsdist checks. The expected invalid-RPZ and forced-rollback
   stack traces still occurred only inside the negative-path tests, and the suite
   completed successfully.
+
+## Verified latency accuracy audit
+
+A prior session fixed the primary bug (`latency-avg100` is reported by dnsdist
+in microseconds and was being stored unconverted as milliseconds, a ~1000x
+inflation). This audit covered every remaining latency field end to end before
+any cache-tuning work:
+
+- Canonical unit: BindGuard stores latency as milliseconds (float) everywhere
+  — `query_events.latency_ms`, `analytics_aggregate_buckets.latency_sum_ms` —
+  and only ever converts once, at the single point microseconds enter the
+  system (`stats["latency-avg100"] / 1000.0` in `collect_dnsdist_aggregate`).
+  Templates render the stored millisecond value directly
+  (`"%.1f ms"|format(...)`); there is no second API-layer unit conversion that
+  could double-convert or omit a conversion.
+- Per-query latency (`app/analytics.py:decode_dnsdist_message`) is computed
+  entirely from timestamps dnsdist embeds in the protobuf payload itself
+  (response message time vs. the original query time), never from when the
+  collector happens to receive or process the frame. Analytics-queue backlog
+  or delayed protobuf delivery therefore cannot inflate reported DNS latency;
+  `test_telemetry_delivery_delay_not_counted_as_dns_latency` proves decoding
+  the same frame later yields an identical latency.
+- Negative latency from clock skew between dnsdist's internal timestamp reads
+  is clamped to zero. Implausible values (a corrupted/misparsed timestamp
+  producing a delta above `MAX_PLAUSIBLE_LATENCY_MS` = 30s, generous headroom
+  above dnsdist's configured 5s TCP / 2s UDP upstream timeouts) are discarded
+  rather than recorded, so a single bad frame cannot corrupt the aggregate
+  average. The same plausibility bound applies to the polled
+  `latency-avg100` value.
+- `latency-avg100` is a live rolling average, not a monotonic counter, so a
+  dnsdist restart naturally produces a fresh average with no delta/reset logic
+  needed (unlike the monotonic counters in `COUNTER_MAP`, which are
+  reset-safe via `test_counter_reset_never_negative`).
+- Protocol classification (UDP/TCP/DoH/DoT/DoQ/DoH3, including the
+  `DoH`+`http_version==3` → `DoH3` special case) is exercised for all six
+  transports in `test_protocol_classification_across_transports`. dnsdist also
+  exposes separate `latency-doh-avg100`/`latency-dot-avg100`/etc. stats;
+  BindGuard does not blend these into the generic aggregate because real
+  per-query events already carry accurate per-protocol latency in
+  `query_events.protocol`, avoiding double-counting.
+- Live controlled comparison on this VM: `dig @127.0.0.1 -p 5353` (direct BIND
+  backend) showed 88ms for a cold query and 0ms for a cached repeat; dnsdist's
+  own `jsonstat` reported `latency-avg100: 10330.87` (raw microseconds,
+  i.e. ~10.3ms); the dashboard aggregate (`analytics.dashboard_data`) showed
+  `avg_latency_ms: 52.08` over the trailing hour of mixed traffic; and
+  individual query-log rows showed per-query values from 0.2ms to 111ms — all
+  consistently millisecond-scale with no 1000x-style discrepancy between any
+  of the four vantage points.
+- `app/analytics.py` never reads dnsdist's `latency-sum` counter (documented
+  in milliseconds, unlike the microsecond rolling averages), so the two
+  differently-unit'd dnsdist fields are never mixed.
+- New regression tests in `tests/test_analytics.py`: one-second response
+  displays as 1000ms, no microsecond/millisecond multiplication error,
+  negative latency clamp, implausible-latency discard, telemetry-delay
+  independence, missing-stat poll safety, and per-protocol classification.

@@ -45,6 +45,10 @@ DEFAULT_DB_LIMIT_BYTES = 256 * 1024 * 1024
 DEFAULT_RECENT_LIMIT = 100
 QUEUE_SIZE = 10000
 MAX_FRAME_BYTES = 1024 * 1024
+# Well above dnsdist's configured 5s TCP / 2s UDP upstream timeouts (with
+# margin for retries), so real slow queries are never dropped, but a
+# corrupted/misparsed protobuf timestamp cannot silently inflate aggregates.
+MAX_PLAUSIBLE_LATENCY_MS = 30_000
 SECRET_FILE = Path("/etc/bindguard/analytics.secret")
 
 QTYPE_NAMES = {
@@ -353,7 +357,17 @@ def decode_dnsdist_message(data: bytes) -> list[dict[str, Any]]:
         usec = int(first(msg, 10, 0) or 0)
         latency_ms = None
         if query_sec is not None:
-            latency_ms = max(0.0, ((ts - int(query_sec)) * 1000.0) + ((usec - int(query_usec or 0)) / 1000.0))
+            # Latency comes entirely from timestamps embedded by dnsdist in the
+            # protobuf payload (query time vs. this response's own time), never
+            # from when the collector happens to receive/process the frame, so
+            # analytics-queue or network delivery delay to the collector cannot
+            # inflate DNS latency. Clamp negative deltas (clock skew) to zero and
+            # discard implausible values (corrupted/misparsed timestamp fields)
+            # above the highest configured dnsdist upstream timeout instead of
+            # letting a single bad frame corrupt aggregate averages.
+            raw_latency_ms = ((ts - int(query_sec)) * 1000.0) + ((usec - int(query_usec or 0)) / 1000.0)
+            if raw_latency_ms <= MAX_PLAUSIBLE_LATENCY_MS:
+                latency_ms = max(0.0, raw_latency_ms)
         protocol = PROTO_NAMES.get(int(first(msg, 5, 0) or 0), "UNKNOWN")
         http_version = int(first(msg, 24, 0) or 0)
         if protocol == "DoH" and http_version == 3:
@@ -590,8 +604,12 @@ def collect_dnsdist_aggregate(conn: sqlite3.Connection, stats: dict[str, Any] | 
     latency = stats.get("latency-avg100")
     if latency is not None:
         # dnsdist reports latency-avg100 in microseconds; buckets store milliseconds.
-        deltas["latency_sum_ms"] = float(latency) / 1000.0
-        deltas["latency_count"] = 1
+        # latency-avg100 is a live rolling average, not a monotonic counter, so a
+        # dnsdist restart naturally resets it without needing delta logic here.
+        latency_ms = float(latency) / 1000.0
+        if 0 <= latency_ms <= MAX_PLAUSIBLE_LATENCY_MS:
+            deltas["latency_sum_ms"] = latency_ms
+            deltas["latency_count"] = 1
     upsert_bucket(conn, ts, deltas)
     return deltas
 

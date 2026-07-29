@@ -35,6 +35,16 @@ retention cleanup, database-size protection, malformed protobuf input, queue
 overflow, privacy modes, query-log filtering, and microsecond-to-millisecond
 conversion of dnsdist's polled `latency-avg100` stat.
 
+The latency-accuracy audit (see `docs/progress.md`) added regression tests
+proving: a one-second response displays as 1000ms; no microsecond/millisecond
+multiplication error against the 4058.9us regression case; negative latency
+from clock skew clamps to zero; an implausible (corrupted-timestamp) latency
+is discarded rather than recorded; a delayed/backlogged analytics queue does
+not inflate reported DNS latency, since latency is computed only from
+timestamps dnsdist embeds in the protobuf payload; a poll where dnsdist has
+not yet published `latency-avg100` does not crash or fabricate a sample; and
+protocol classification is correct across UDP, TCP, DoH, DoH3, DoT, and DoQ.
+
 The web smoke test also checks that Query Log auto-refresh has a partial
 `/query-log/partial` endpoint, updates only the result container, and persists
 the auto-refresh state in browser session storage.
