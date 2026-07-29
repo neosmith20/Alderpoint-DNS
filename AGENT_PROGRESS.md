@@ -197,3 +197,88 @@ Final validation before commit:
 - `/opt/bindguard/tests/test_acceptance.sh`: passed. Expected rollback-test
   tracebacks and pre-existing backup ResourceWarnings appeared, but the suite
   completed with `BindGuard acceptance suite passed`.
+
+## Package 1: Per-Upstream Resolver Analytics
+
+Started from clean `main` at `6720b6f` (`Modernize admin sidebar navigation`).
+
+Initial inspection:
+
+- `git status --short`: clean.
+- `git log --oneline -20`: latest commit was `6720b6f`; prior checkpoint
+  `fced3f2` and upstream resolver commit `20d6bc4` were present.
+- `git diff`: empty.
+- Reviewed `AGENT_PROGRESS.md`, existing route/template/tests/docs inventory,
+  live service state, generated dnsdist upstream config, live upstream resolver
+  DB records, analytics collector code, dnsdist web/API status, and the
+  existing encryption/import/backup/restore/replication/cache implementations.
+- `bindguard`, `named`, `dnsdist`, and `bindguard-analytics` were active before
+  changes.
+- Live upstream resolver configuration contained four enabled healthy imported
+  plain resolvers: `1.1.1.2`, `1.0.0.2`, `4.2.2.1`, and `4.2.2.2`.
+
+Implementation:
+
+- Added `upstream_resolver_aggregate_buckets` and
+  `upstream_resolver_counter_state` schema creation in `app/analytics.py`.
+- Added authenticated polling of dnsdist's local
+  `/api/v1/servers/localhost` endpoint and mapped managed upstream backends
+  back to `upstream_resolvers.id` through generated names such as
+  `upstream-1-Imported-upstream-1`.
+- Stored resolver name, protocol, endpoint, enabled state, health state,
+  attempted queries, successful responses, failures, timeouts, average/recent
+  latency, last success, and last failure as aggregate snapshots.
+- First poll seeds counter state without backfilling old dnsdist counters as
+  new traffic. Counter resets are treated as zero deltas.
+- Historical rows snapshot resolver metadata so deleting a resolver does not
+  corrupt dashboard history.
+- The collector records resolver aggregates only. It does not label individual
+  client query rows with an upstream because the current dnsdist+BIND
+  architecture does not expose that per-query relationship.
+- Dashboard Top Upstream Resolvers now renders real ranked resolver data, links
+  to DNS Settings, and provides a clear empty state when no resolver counters
+  are available yet.
+- Updated `CHANGELOG.md`, `docs/configuration.md`, `docs/database.md`,
+  `docs/progress.md`, and `docs/testing.md`.
+
+Live verification:
+
+- Ran `/opt/bindguard/app/analytics.py init-db` against the live DB.
+- Ran `/opt/bindguard/app/analytics.py collect-once`; first resolver poll
+  correctly seeded counters with zero attempted-query deltas.
+- Restarted `bindguard-analytics` and `bindguard`.
+- Generated controlled DNS traffic through both BIND backend and dnsdist
+  frontend, then ran another `collect-once`.
+- Live resolver analytics rows showed nonzero activity for resolver 1 with
+  successes capped to attempted queries and no failures/timeouts.
+- All core services remained active after restarts.
+
+Tests:
+
+- `python3 -B /opt/bindguard/tests/test_analytics.py`: passed, 24 tests.
+- `python3 -B /opt/bindguard/tests/test_upstream_dns.py`: passed, 7 tests.
+- `/opt/bindguard/tests/test_web_smoke.sh`: passed.
+- `/opt/bindguard/tests/test_acceptance.sh`: passed. Expected invalid-RPZ and
+  forced-rollback tracebacks appeared, as did pre-existing backup ResourceWarnings;
+  final result was `BindGuard acceptance suite passed`.
+
+Files changed:
+
+- `app/analytics.py`
+- `web/templates/dashboard.html`
+- `tests/test_analytics.py`
+- `tests/test_web_smoke.sh`
+- `CHANGELOG.md`
+- `docs/configuration.md`
+- `docs/database.md`
+- `docs/progress.md`
+- `docs/testing.md`
+- `AGENT_PROGRESS.md`
+
+Remaining work:
+
+- Package 2: Encryption Settings gap audit and any required corrections.
+- Package 3: Import and Migration gap audit and any required corrections.
+- Package 4: Installation, upgrades, packaging, and diagnostics.
+- Package 5: BIND Cache Management gap audit and any required corrections.
+- Package 6: external beta and v1.0 hardening.

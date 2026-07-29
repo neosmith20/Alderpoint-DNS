@@ -114,8 +114,37 @@
     {% endif %}
   </article>
   <article class="panel">
-    <div class="panel__head"><h2>Top Upstream Resolvers</h2></div>
-    {{ ui.empty_state("Unavailable", "BindGuard does not yet store per-upstream resolver identity.") }}
+    <div class="panel__head"><h2>Top Upstream Resolvers</h2><a href="/dns-settings">Manage</a></div>
+    {% if analytics.top_upstreams %}
+      <div class="ranked-list">
+        {% set upstream_total = analytics.top_upstreams|sum(attribute="value") %}
+        {% for row in analytics.top_upstreams %}
+          {% set success_percent = (row.successful_responses / row.value * 100) if row.value else 0 %}
+          {% set tone = "healthy" if row.health_state == "up" and row.failures == 0 else "degraded" if row.health_state == "up" else "down" %}
+          <div class="ranked-row">
+            <div class="ranked-row__top">
+              <span class="ranked-row__label mono" title="{{ row.endpoint }}">{{ row.label }}</span>
+              <span class="ranked-row__value">{{ row.value }}</span>
+            </div>
+            <div class="ranked-row__meta">
+              <span>{{ row.protocol }}</span>
+              {{ ui.status_badge(row.health_state|title, tone) }}
+              <span>{{ row.successful_responses }} ok</span>
+              {% if row.failures %}<span>{{ row.failures }} failed</span>{% endif %}
+              {% if row.timeouts %}<span>{{ row.timeouts }} timed out</span>{% endif %}
+              <span>{{ "%.1f ms"|format(row.avg_latency_ms) if row.avg_latency_ms is not none else "latency n/a" }}</span>
+            </div>
+            <div class="ranked-row__meta">
+              <span class="meter"><span style="width: {{ "%.1f"|format(success_percent if success_percent <= 100 else 100) }}%"></span></span>
+              <span>{{ "%.1f"|format((row.value / upstream_total * 100) if upstream_total else 0) }}% of upstream attempts</span>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+      <p class="muted">Resolver attribution is based on dnsdist backend counters for BIND's managed upstream pool. Individual client query rows are not labeled with an upstream unless dnsdist exposes that relationship.</p>
+    {% else %}
+      {{ ui.empty_state("No upstream resolver data yet", "Resolver identities are configured; this panel fills after dnsdist reports managed upstream backend counters.") }}
+    {% endif %}
   </article>
 </section>
 

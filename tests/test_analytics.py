@@ -237,6 +237,108 @@ class AnalyticsTests(unittest.TestCase):
             )[0]
             self.assertEqual(decoded["protocol"], expected, f"proto={proto} http_version={http_version}")
 
+    def _create_upstream_resolver(self, conn, resolver_id: int = 7) -> None:
+        conn.execute(
+            """
+            CREATE TABLE upstream_resolvers (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                protocol TEXT NOT NULL,
+                address TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                doh_path TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                last_status TEXT NOT NULL DEFAULT 'unknown'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO upstream_resolvers(id, name, protocol, address, port, doh_path, enabled, last_status)
+            VALUES (?, 'Quad9 DoT', 'dot', '9.9.9.9', 853, '', 1, 'healthy')
+            """,
+            (resolver_id,),
+        )
+
+    def _server_state(self, *, queries: int, responses: int, failures: int = 0, timeouts: int = 0) -> dict:
+        return {
+            "servers": [
+                {"name": "bind-proxy", "pools": ["bindguard_bind"], "queries": 10, "responses": 10},
+                {
+                    "name": "upstream-7-Quad9-DoT",
+                    "pools": ["bindguard_upstreams"],
+                    "address": "9.9.9.9:853",
+                    "protocol": "Do53 UDP",
+                    "state": "up",
+                    "queries": queries,
+                    "responses": responses,
+                    "sendErrors": failures,
+                    "healthCheckFailures": failures,
+                    "healthCheckFailuresTimeout": timeouts,
+                    "tcpConnectTimeouts": 0,
+                    "tcpReadTimeouts": 0,
+                    "tcpWriteTimeouts": 0,
+                    "tcpGaveUp": 0,
+                    "latency": 12.5,
+                },
+            ]
+        }
+
+    def test_upstream_resolver_first_poll_seeds_without_fabricated_delta(self) -> None:
+        with compiler.connect() as conn:
+            self._create_upstream_resolver(conn)
+            collected = analytics.collect_upstream_resolver_aggregate(conn, self._server_state(queries=100, responses=99), ts=120)
+            self.assertEqual(collected[0]["queries_attempted"], 0)
+            row = conn.execute("SELECT * FROM upstream_resolver_aggregate_buckets").fetchone()
+            self.assertEqual(row["resolver_id"], 7)
+            self.assertEqual(row["resolver_name"], "Quad9 DoT")
+            self.assertEqual(row["protocol"], "DoT")
+            self.assertEqual(row["queries_attempted"], 0)
+
+    def test_upstream_resolver_deltas_and_latency_are_stored(self) -> None:
+        with compiler.connect() as conn:
+            self._create_upstream_resolver(conn)
+            analytics.collect_upstream_resolver_aggregate(conn, self._server_state(queries=100, responses=99), ts=120)
+            analytics.collect_upstream_resolver_aggregate(conn, self._server_state(queries=105, responses=103, failures=1, timeouts=1), ts=180)
+            row = conn.execute(
+                """
+                SELECT resolver_name, endpoint, queries_attempted, successful_responses, failures,
+                       timeouts, latency_sum_ms, latency_count, recent_latency_ms, last_success_at, last_failure_at
+                FROM upstream_resolver_aggregate_buckets
+                WHERE bucket_start=180
+                """
+            ).fetchone()
+            self.assertEqual(row["resolver_name"], "Quad9 DoT")
+            self.assertEqual(row["endpoint"], "tls://9.9.9.9:853")
+            self.assertEqual(row["queries_attempted"], 5)
+            self.assertEqual(row["successful_responses"], 4)
+            self.assertEqual(row["failures"], 3)
+            self.assertEqual(row["timeouts"], 1)
+            self.assertEqual(row["latency_count"], 4)
+            self.assertAlmostEqual(row["latency_sum_ms"], 50.0)
+            self.assertEqual(row["recent_latency_ms"], 12.5)
+            self.assertIsNotNone(row["last_success_at"])
+            self.assertIsNotNone(row["last_failure_at"])
+
+    def test_deleted_resolver_history_remains_in_dashboard_data(self) -> None:
+        with compiler.connect() as conn:
+            self._create_upstream_resolver(conn)
+            analytics.collect_upstream_resolver_aggregate(conn, self._server_state(queries=100, responses=99), ts=analytics.utc_now())
+            analytics.collect_upstream_resolver_aggregate(conn, self._server_state(queries=103, responses=102), ts=analytics.utc_now())
+            conn.execute("DROP TABLE upstream_resolvers")
+        data = analytics.dashboard_data("1h")
+        self.assertEqual(data["top_upstreams"][0]["label"], "Quad9 DoT")
+        self.assertEqual(data["top_upstreams"][0]["value"], 3)
+
+    def test_upstream_successes_do_not_exceed_attempts(self) -> None:
+        with compiler.connect() as conn:
+            self._create_upstream_resolver(conn)
+            analytics.collect_upstream_resolver_aggregate(conn, self._server_state(queries=100, responses=100), ts=120)
+            analytics.collect_upstream_resolver_aggregate(conn, self._server_state(queries=102, responses=103), ts=180)
+            row = conn.execute("SELECT queries_attempted, successful_responses FROM upstream_resolver_aggregate_buckets WHERE bucket_start=180").fetchone()
+            self.assertEqual(row["queries_attempted"], 2)
+            self.assertEqual(row["successful_responses"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

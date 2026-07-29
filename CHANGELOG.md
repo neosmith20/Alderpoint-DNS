@@ -22,5 +22,8 @@
 - Added DNS Settings upstream resolver management for plain DNS, DoT, and DoH,
   using BIND plus a managed dnsdist loopback upstream pool with validation,
   health, latency, and rollback.
+- Added per-upstream resolver analytics from dnsdist managed-backend counters,
+  including dashboard ranking, success/failure/timeout counts, latency, and
+  historical resolver snapshots.
 - Made the top-right service status badge a global authenticated-shell
   component with a lightweight `/status/summary` refresh endpoint.

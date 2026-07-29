@@ -127,6 +127,13 @@
   2 allowed, and 1 blocked stored events.
 - Dashboard now includes range selection, metric cards, a local canvas
   time-series chart, top lists, protocol/rcode tables, and recent activity.
+- Dashboard Top Upstream Resolvers now uses dnsdist's managed-upstream server
+  counters. Resolver identities are stable because generated dnsdist backend
+  names include the `upstream_resolvers.id` value. BindGuard stores resolver
+  aggregate buckets with name/protocol/endpoint snapshots so deleting a
+  resolver does not corrupt historical reporting. Per-client query rows are
+  not labeled with an upstream resolver because this dnsdist+BIND architecture
+  does not expose that relationship in the response protobuf stream.
 - Query Log supports search, filters, pagination, auto-refresh, and creating
   custom allow/block rules from rows.
 - Statistics Settings supports analytics toggles, privacy mode, retention,

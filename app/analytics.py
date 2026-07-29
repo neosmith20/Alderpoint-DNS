@@ -11,6 +11,7 @@ import ipaddress
 import json
 import os
 import queue
+import re
 import socket
 import sqlite3
 import struct
@@ -50,6 +51,8 @@ MAX_FRAME_BYTES = 1024 * 1024
 # corrupted/misparsed protobuf timestamp cannot silently inflate aggregates.
 MAX_PLAUSIBLE_LATENCY_MS = 30_000
 SECRET_FILE = Path("/etc/bindguard/analytics.secret")
+DNSDIST_SERVER_API_URL = "http://127.0.0.1:8083/api/v1/servers/localhost"
+UPSTREAM_SERVER_RE = re.compile(r"^upstream-(?P<id>\d+)-")
 
 QTYPE_NAMES = {
     1: "A",
@@ -169,10 +172,37 @@ def init_analytics_db() -> None:
                 level TEXT NOT NULL,
                 message TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS upstream_resolver_aggregate_buckets (
+                bucket_start INTEGER NOT NULL,
+                resolver_id INTEGER,
+                resolver_name TEXT NOT NULL,
+                protocol TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                health_state TEXT NOT NULL DEFAULT 'unknown',
+                queries_attempted INTEGER NOT NULL DEFAULT 0,
+                successful_responses INTEGER NOT NULL DEFAULT 0,
+                failures INTEGER NOT NULL DEFAULT 0,
+                timeouts INTEGER NOT NULL DEFAULT 0,
+                latency_sum_ms REAL NOT NULL DEFAULT 0,
+                latency_count INTEGER NOT NULL DEFAULT 0,
+                recent_latency_ms REAL,
+                last_success_at TEXT,
+                last_failure_at TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(bucket_start, resolver_id, resolver_name)
+            );
+            CREATE TABLE IF NOT EXISTS upstream_resolver_counter_state (
+                server_name TEXT PRIMARY KEY,
+                resolver_id INTEGER,
+                counters_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS idx_query_events_ts ON query_events(ts DESC);
             CREATE INDEX IF NOT EXISTS idx_query_events_domain ON query_events(domain);
             CREATE INDEX IF NOT EXISTS idx_query_events_client ON query_events(client);
             CREATE INDEX IF NOT EXISTS idx_query_events_blocked ON query_events(blocked, ts DESC);
+            CREATE INDEX IF NOT EXISTS idx_upstream_resolver_buckets_resolver ON upstream_resolver_aggregate_buckets(resolver_id, bucket_start DESC);
             """
         )
         defaults = {
@@ -566,6 +596,16 @@ def dnsdist_stats() -> dict[str, Any]:
         return json.loads(response.read().decode())
 
 
+def dnsdist_server_state() -> dict[str, Any]:
+    creds = Path("/etc/bindguard/dnsdist-web.creds").read_text().strip()
+    api_key = Path("/etc/bindguard/dnsdist-api.key").read_text().strip()
+    request = urllib.request.Request(DNSDIST_SERVER_API_URL)
+    request.add_header("Authorization", "Basic " + base64.b64encode(creds.encode()).decode())
+    request.add_header("x-api-key", api_key)
+    with urllib.request.urlopen(request, timeout=3) as response:
+        return json.loads(response.read().decode())
+
+
 COUNTER_MAP = {
     "responses": "responses",
     "cache-hits": "cache_hits",
@@ -614,12 +654,199 @@ def collect_dnsdist_aggregate(conn: sqlite3.Connection, stats: dict[str, Any] | 
     return deltas
 
 
+SERVER_COUNTER_FIELDS = (
+    "queries",
+    "responses",
+    "sendErrors",
+    "healthCheckFailures",
+    "healthCheckFailuresTimeout",
+    "tcpConnectTimeouts",
+    "tcpReadTimeouts",
+    "tcpWriteTimeouts",
+    "tcpGaveUp",
+)
+
+
+def _resolver_id_from_server_name(name: str) -> int | None:
+    match = UPSTREAM_SERVER_RE.match(name or "")
+    if not match:
+        return None
+    try:
+        return int(match.group("id"))
+    except ValueError:
+        return None
+
+
+def _endpoint_for_resolver(row: sqlite3.Row | None, server: dict[str, Any]) -> str:
+    if row is None:
+        return str(server.get("address") or "unknown")
+    address = str(row["address"])
+    port = int(row["port"])
+    if row["protocol"] == "doh":
+        return f"https://{address}:{port}{row['doh_path'] or '/dns-query'}"
+    if row["protocol"] == "dot":
+        return f"tls://{address}:{port}"
+    return f"{address}:{port}"
+
+
+def _protocol_for_server(row: sqlite3.Row | None, server: dict[str, Any]) -> str:
+    if row is not None:
+        return {"plain": "UDP/TCP", "dot": "DoT", "doh": "DoH"}.get(str(row["protocol"]), str(row["protocol"]))
+    protocol = str(server.get("protocol") or "")
+    if "DoH" in protocol:
+        return "DoH"
+    if "DoT" in protocol or "TLS" in protocol:
+        return "DoT"
+    if "TCP" in protocol:
+        return "TCP"
+    if "UDP" in protocol or "Do53" in protocol:
+        return "UDP"
+    return protocol or "unknown"
+
+
+def _server_counter_values(server: dict[str, Any]) -> dict[str, int]:
+    return {field: int(server.get(field, 0) or 0) for field in SERVER_COUNTER_FIELDS}
+
+
+def _server_deltas(current: dict[str, int], previous: dict[str, int] | None) -> dict[str, int]:
+    if not previous:
+        return {key: 0 for key in current}
+    out: dict[str, int] = {}
+    for key, value in current.items():
+        old = int(previous.get(key, 0) or 0)
+        out[key] = 0 if value < old else value - old
+    return out
+
+
+def collect_upstream_resolver_aggregate(conn: sqlite3.Connection, state: dict[str, Any] | None = None, ts: int | None = None) -> list[dict[str, Any]]:
+    """Collect resolver-scoped dnsdist server counters.
+
+    dnsdist identifies the upstream backend selected for BIND's forwarded
+    lookup through per-server counters. It does not expose the original client
+    query alongside that backend selection in this architecture, so BindGuard
+    records resolver activity aggregates only and does not annotate individual
+    query log rows with fabricated upstream identity.
+    """
+
+    state = state or dnsdist_server_state()
+    ts = ts or utc_now()
+    ts_iso = iso_from_ts(ts)
+    try:
+        resolver_rows = {
+            row["id"]: row
+            for row in conn.execute(
+                "SELECT id, name, protocol, address, port, doh_path, enabled, last_status FROM upstream_resolvers"
+            )
+        }
+    except sqlite3.OperationalError:
+        resolver_rows = {}
+    previous = {
+        row["server_name"]: json.loads(row["counters_json"])
+        for row in conn.execute("SELECT server_name, counters_json FROM upstream_resolver_counter_state")
+    }
+    collected: list[dict[str, Any]] = []
+    for server in state.get("servers", []) or []:
+        pools = set(server.get("pools") or [])
+        name = str(server.get("name") or "")
+        resolver_id = _resolver_id_from_server_name(name)
+        if "bindguard_upstreams" not in pools or resolver_id is None:
+            continue
+        row = resolver_rows.get(resolver_id)
+        current = _server_counter_values(server)
+        deltas = _server_deltas(current, previous.get(name))
+        queries = deltas["queries"]
+        responses = min(deltas["responses"], queries) if queries > 0 else 0
+        timeout_delta = sum(deltas[key] for key in ("healthCheckFailuresTimeout", "tcpConnectTimeouts", "tcpReadTimeouts", "tcpWriteTimeouts", "tcpGaveUp"))
+        failure_delta = max(0, queries - responses) + deltas["sendErrors"] + deltas["healthCheckFailures"]
+        try:
+            recent_latency_ms = float(server["latency"]) if server.get("latency") is not None else None
+        except (TypeError, ValueError):
+            recent_latency_ms = None
+        latency_count = responses if responses > 0 and recent_latency_ms is not None else (1 if recent_latency_ms is not None else 0)
+        latency_sum = (recent_latency_ms or 0.0) * latency_count
+        resolver_name = str(row["name"] if row is not None else name)
+        protocol = _protocol_for_server(row, server)
+        endpoint = _endpoint_for_resolver(row, server)
+        enabled = int(row["enabled"]) if row is not None else 0
+        health_state = str(server.get("state") or (row["last_status"] if row is not None else "unknown"))
+        conn.execute(
+            """
+            INSERT INTO upstream_resolver_aggregate_buckets(
+                bucket_start, resolver_id, resolver_name, protocol, endpoint,
+                enabled, health_state, queries_attempted, successful_responses,
+                failures, timeouts, latency_sum_ms, latency_count,
+                recent_latency_ms, last_success_at, last_failure_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(bucket_start, resolver_id, resolver_name) DO UPDATE SET
+                protocol=excluded.protocol,
+                endpoint=excluded.endpoint,
+                enabled=excluded.enabled,
+                health_state=excluded.health_state,
+                queries_attempted=queries_attempted+excluded.queries_attempted,
+                successful_responses=successful_responses+excluded.successful_responses,
+                failures=failures+excluded.failures,
+                timeouts=timeouts+excluded.timeouts,
+                latency_sum_ms=latency_sum_ms+excluded.latency_sum_ms,
+                latency_count=latency_count+excluded.latency_count,
+                recent_latency_ms=excluded.recent_latency_ms,
+                last_success_at=coalesce(excluded.last_success_at, last_success_at),
+                last_failure_at=coalesce(excluded.last_failure_at, last_failure_at),
+                updated_at=excluded.updated_at
+            """,
+            (
+                bucket_start(ts),
+                resolver_id,
+                resolver_name,
+                protocol,
+                endpoint,
+                enabled,
+                health_state,
+                queries,
+                responses,
+                failure_delta,
+                timeout_delta,
+                latency_sum,
+                latency_count,
+                recent_latency_ms,
+                ts_iso if responses > 0 else None,
+                ts_iso if failure_delta > 0 or timeout_delta > 0 else None,
+                ts_iso,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO upstream_resolver_counter_state(server_name, resolver_id, counters_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(server_name) DO UPDATE SET
+                resolver_id=excluded.resolver_id,
+                counters_json=excluded.counters_json,
+                updated_at=excluded.updated_at
+            """,
+            (name, resolver_id, json.dumps(current, sort_keys=True), ts_iso),
+        )
+        collected.append(
+            {
+                "resolver_id": resolver_id,
+                "resolver_name": resolver_name,
+                "queries_attempted": queries,
+                "successful_responses": responses,
+                "failures": failure_delta,
+                "timeouts": timeout_delta,
+                "recent_latency_ms": recent_latency_ms,
+                "health_state": health_state,
+            }
+        )
+    return collected
+
+
 def cleanup(conn: sqlite3.Connection, cfg: dict[str, str]) -> None:
     now_ts = utc_now()
     detailed_days = max(0, int(cfg.get("detailed_retention_days", DEFAULT_DETAILED_RETENTION_DAYS)))
     aggregate_days = max(1, int(cfg.get("aggregate_retention_days", DEFAULT_AGGREGATE_RETENTION_DAYS)))
     conn.execute("DELETE FROM query_events WHERE ts < ?", (now_ts - detailed_days * 86400,))
     conn.execute("DELETE FROM analytics_aggregate_buckets WHERE bucket_start < ?", (now_ts - aggregate_days * 86400,))
+    conn.execute("DELETE FROM upstream_resolver_aggregate_buckets WHERE bucket_start < ?", (now_ts - aggregate_days * 86400,))
     limit = int(cfg.get("db_size_limit_bytes", DEFAULT_DB_LIMIT_BYTES))
     size = db_size()
     if size > limit:
@@ -738,6 +965,7 @@ class Collector:
                 try:
                     with connect() as conn:
                         collect_dnsdist_aggregate(conn)
+                        collect_upstream_resolver_aggregate(conn)
                 except Exception:
                     pass
             self.stop_event.wait(interval)
@@ -792,6 +1020,32 @@ def dashboard_data(range_key: str = "24h") -> dict[str, Any]:
         qtypes = conn.execute("SELECT qtype AS label, count(*) AS value FROM query_events WHERE ts >= ? GROUP BY qtype ORDER BY value DESC", (since,)).fetchall()
         rcodes = conn.execute("SELECT rcode AS label, count(*) AS value FROM query_events WHERE ts >= ? GROUP BY rcode ORDER BY value DESC", (since,)).fetchall()
         protocols = conn.execute("SELECT protocol AS label, count(*) AS value FROM query_events WHERE ts >= ? GROUP BY protocol ORDER BY value DESC", (since,)).fetchall()
+        top_upstreams_raw = conn.execute(
+            """
+            SELECT
+                resolver_id,
+                resolver_name AS label,
+                protocol,
+                endpoint,
+                enabled,
+                health_state,
+                sum(queries_attempted) AS value,
+                sum(successful_responses) AS successful_responses,
+                sum(failures) AS failures,
+                sum(timeouts) AS timeouts,
+                sum(latency_sum_ms) AS latency_sum_ms,
+                sum(latency_count) AS latency_count,
+                max(recent_latency_ms) AS recent_latency_ms,
+                max(last_success_at) AS last_success_at,
+                max(last_failure_at) AS last_failure_at
+            FROM upstream_resolver_aggregate_buckets
+            WHERE bucket_start >= ?
+            GROUP BY resolver_id, resolver_name, protocol, endpoint, enabled, health_state
+            ORDER BY value DESC, successful_responses DESC, label
+            LIMIT 10
+            """,
+            (since,),
+        ).fetchall()
         recent_raw = conn.execute("SELECT * FROM query_events ORDER BY ts DESC LIMIT 20").fetchall()
     top_clients = []
     for row in top_clients_raw:
@@ -814,6 +1068,13 @@ def dashboard_data(range_key: str = "24h") -> dict[str, Any]:
         "qtypes": qtypes,
         "rcodes": rcodes,
         "protocols": protocols,
+        "top_upstreams": [
+            {
+                **dict(row),
+                "avg_latency_ms": (row["latency_sum_ms"] / row["latency_count"]) if row["latency_count"] else None,
+            }
+            for row in top_upstreams_raw
+        ],
         "recent": recent,
         "has_data": bool(buckets),
     }
@@ -858,6 +1119,8 @@ def clear_statistics() -> None:
         conn.execute("DELETE FROM query_events")
         conn.execute("DELETE FROM analytics_aggregate_buckets")
         conn.execute("DELETE FROM analytics_counter_state")
+        conn.execute("DELETE FROM upstream_resolver_aggregate_buckets")
+        conn.execute("DELETE FROM upstream_resolver_counter_state")
         conn.execute("INSERT INTO analytics_events(ts, level, message) VALUES (?, 'info', 'statistics cleared')", (utc_now(),))
 
 
@@ -867,6 +1130,7 @@ def export_statistics() -> str:
         payload = {
             "settings": settings(conn),
             "buckets": [dict(row) for row in conn.execute("SELECT * FROM analytics_aggregate_buckets ORDER BY bucket_start")],
+            "upstream_resolvers": [dict(row) for row in conn.execute("SELECT * FROM upstream_resolver_aggregate_buckets ORDER BY bucket_start DESC LIMIT 10000")],
             "queries": [dict(row) for row in conn.execute("SELECT * FROM query_events ORDER BY ts DESC LIMIT 10000")],
         }
     return json.dumps(payload, indent=2)
@@ -888,6 +1152,7 @@ def collect_once() -> None:
     init_analytics_db()
     with connect() as conn:
         collect_dnsdist_aggregate(conn)
+        collect_upstream_resolver_aggregate(conn)
         cleanup(conn, settings(conn))
 
 

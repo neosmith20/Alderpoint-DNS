@@ -55,3 +55,11 @@ Subsequent deployments render dnsdist upstream backends for enabled plain DNS,
 DoT, and DoH resolvers and point BIND at the local dnsdist upstream listener.
 DoH URLs with query strings or fragments are rejected so credentials or tokens
 are not stored or exposed in diagnostics.
+
+The analytics collector also polls dnsdist's authenticated local server API and
+maps managed upstream backend counters back to `upstream_resolvers.id` through
+BindGuard's generated backend names. The Dashboard can therefore rank upstream
+resolvers by attempted queries, successful responses, failures, timeouts, and
+latency. BindGuard does not add per-query upstream labels unless dnsdist
+exposes that exact attribution; current client query rows remain client/domain
+analytics, not fabricated resolver traces.

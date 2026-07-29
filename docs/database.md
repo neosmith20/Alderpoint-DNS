@@ -49,6 +49,15 @@ Upstream resolver tables:
 - `upstream_deployments`: staged/validated/health-checked/rolled-back
   deployment history for the generated BIND forwarder include and dnsdist
   upstream-forwarder include.
+- `upstream_resolver_aggregate_buckets`: one-minute per-resolver analytics
+  snapshots from dnsdist's `bindguard_upstreams` backend counters, including
+  resolver name/protocol/endpoint snapshots, enabled and health state, queries
+  attempted, successful responses, failures, timeouts, latency aggregates, and
+  last success/failure timestamps. Historical rows intentionally do not depend
+  on a live `upstream_resolvers` row.
+- `upstream_resolver_counter_state`: last-seen dnsdist per-server counters,
+  keyed by generated backend name, used to calculate monotonic deltas after
+  polling and after dnsdist restarts.
 
 Encryption tables:
 

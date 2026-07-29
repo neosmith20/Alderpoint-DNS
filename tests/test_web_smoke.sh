@@ -227,12 +227,30 @@ dashboard = TEMPLATES.get_template("dashboard.html").render(
         "qtypes": [{"label": "AAAA", "value": 1}],
         "rcodes": [{"label": "NOERROR", "value": 1}],
         "protocols": [{"label": "DoH3", "value": 1}],
+        "top_upstreams": [{
+            "resolver_id": 1,
+            "label": "Cloudflare DoH",
+            "protocol": "DoH",
+            "endpoint": "https://" + long_domain + ":443/dns-query",
+            "enabled": 1,
+            "health_state": "up",
+            "value": 12,
+            "successful_responses": 11,
+            "failures": 1,
+            "timeouts": 0,
+            "latency_sum_ms": 55.0,
+            "latency_count": 11,
+            "recent_latency_ms": 4.7,
+            "last_success_at": "2026-07-29T00:00:00Z",
+            "last_failure_at": "2026-07-29T00:00:00Z",
+            "avg_latency_ms": 5.0,
+        }],
         "recent": [{"ts": "2026-07-29T00:00:00Z", "client": long_client, "domain": long_domain, "qtype": "AAAA", "protocol": "DoH3", "blocked": 1, "rcode": "NOERROR", "latency_ms": 1.2}],
     },
 )
 if "DNS Query Volume" not in dashboard or "queryChart" not in dashboard:
     raise SystemExit("dashboard analytics chart did not render")
-for expected in ("Protection Active", "Disable protection", "Top Upstream Resolvers", "BIND Cache Effectiveness", "80.0", long_domain, long_client):
+for expected in ("Protection Active", "Disable protection", "Top Upstream Resolvers", "Cloudflare DoH", "11 ok", "1 failed", "Resolver attribution is based on dnsdist backend counters", "BIND Cache Effectiveness", "80.0", long_domain, long_client):
     if expected not in dashboard:
         raise SystemExit(f"dashboard missing {expected}")
 for expected in (

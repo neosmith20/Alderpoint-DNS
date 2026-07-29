@@ -44,7 +44,10 @@ The analytics unit suite covers aggregate collection, counter resets, bucketing,
 blocked-query detection, ordinary NXDOMAIN handling, protocol classification,
 retention cleanup, database-size protection, malformed protobuf input, queue
 overflow, privacy modes, query-log filtering, and microsecond-to-millisecond
-conversion of dnsdist's polled `latency-avg100` stat.
+conversion of dnsdist's polled `latency-avg100` stat. It also covers
+per-upstream resolver analytics: first-poll counter seeding without fabricated
+deltas, subsequent dnsdist backend-counter deltas, latency storage, success and
+failure timestamps, and dashboard history after a resolver row is deleted.
 
 The latency-accuracy audit (see `docs/progress.md`) added regression tests
 proving: a one-second response displays as 1000ms; no microsecond/millisecond
