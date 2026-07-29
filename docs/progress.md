@@ -12,7 +12,7 @@
 - [x] Web interface
 - [x] Authentication
 - [x] Aggregate query statistics
-- [ ] Backup and restore
+- [x] Backup and restore
 - [ ] Full reboot acceptance
 - [ ] v1 acceptance suite
 
@@ -100,3 +100,13 @@
 - Blocked query count is displayed from dnsdist rule counters when available.
 - Full per-query ingestion is not enabled, avoiding unbounded SQLite growth for
   v1.
+
+## Verified backup/restore milestone
+
+- Local backup script creates archives under `/var/lib/bindguard/backups`.
+- Backup includes `/etc` BindGuard/BIND/dnsdist service configuration, SQLite
+  state, downloads, compiled RPZ, and local source tree.
+- Restore validates BIND, RPZ, dnsdist, and sudoers before extracting.
+- Restore restarts named, dnsdist, and bindguard.
+- Backup/restore acceptance test passes and confirms DNS and web services work
+  afterward.
