@@ -45,3 +45,11 @@
   configuration.
 - Made the top-right service status badge a global authenticated-shell
   component with a lightweight `/status/summary` refresh endpoint.
+- Verified full reboot survival: services, listeners, DNS functionality,
+  feature persistence, and the acceptance/smoke/hardening-doc suites all
+  passed post-reboot; validated a production-flow backup/restore round trip.
+- Fixed a diagnostics bundle defect where `bindguard-diagnostics` leaked the
+  live BIND RNDC/TSIG control-channel secret in plaintext; added a redaction
+  pattern and a bundle-level regression test.
+- Fixed unclosed SQLite connections in `tests/test_backup.py` that caused
+  the pre-existing `ResourceWarning` noise during backup test runs.

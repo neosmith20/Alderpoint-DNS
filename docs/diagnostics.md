@@ -30,6 +30,8 @@ The bundle automatically redacts:
 - Authorization headers
 - Private-key PEM blocks
 - Sensitive resolver URL query strings
+- BIND `key { secret "..."; }` blocks (RNDC/TSIG shared secrets), which
+  `named-checkconf -p` would otherwise echo verbatim into the bundle
 
 Private DNS records and detailed query contents are not included by default.
 `--include-private-dns` is currently an explicit placeholder that records the

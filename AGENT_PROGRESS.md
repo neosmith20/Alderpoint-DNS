@@ -606,3 +606,168 @@ Known limitations before external beta:
   proxy and set `BINDGUARD_COOKIE_SECURE=1`.
 - Signed apt repository publishing is not implemented; only local test `.deb`
   creation is currently validated.
+
+## Post-Reboot Verification (after Package 6 checkpoint `da0ab25`)
+
+The controlled full reboot referenced above was performed. This section
+records the post-reboot verification pass.
+
+Services:
+
+- `bindguard`, `named`, `dnsdist`, and `bindguard-analytics` all came back
+  `enabled` and `active` on boot with no restarts or manual intervention.
+- `journalctl -b` for all four units showed no errors, crash loops, migration
+  failures, permission problems, or certificate/listener failures at any
+  priority.
+
+Listeners (matched the intended topology, no unintended exposure):
+
+- dnsdist frontend: plain DNS `0.0.0.0:53`/`[::]:53`, DoH `443/tcp`, DoH3
+  `443/udp`, DoT `853/tcp`, DoQ `853/udp` (all enabled via the
+  `dnsdist.service.d/bindguard.conf` drop-in); DNSCrypt correctly absent
+  (disabled). Console (`127.0.0.1:5199`) and webserver (`127.0.0.1:8083`)
+  stayed loopback-only.
+- BIND backend: `127.0.0.1:5353` (plain) and `127.0.0.1:5354` (proxy-protocol
+  from dnsdist), rndc on `127.0.0.1:953`, stats on `127.0.0.1:8053` — all
+  loopback-only.
+- BindGuard web: `0.0.0.0:3000` (HTTP) and `0.0.0.0:8843` (replication
+  listener/HTTPS admin), `bindguard-analytics` remote-logger receiver on
+  `127.0.0.1:5301`.
+- `dnsdist.conf`'s `setACL` confirmed restricted to RFC1918 + loopback +
+  ULA ranges (`BINDGUARD_DNS_ALLOW_ALL` unset) — no open-resolver exposure.
+
+DNS functionality (all verified live against the running stack):
+
+- Recursive resolution through dnsdist `:53` and BIND backend `:5353` both
+  returned correct answers.
+- Local A record (`adguard.mylan.network`) and PTR record
+  (`9.43.16.172.in-addr.arpa` -> `adguard.mylan.network.`) resolved correctly
+  from the persisted local zone files.
+- RPZ filtering confirmed live: a known blocklist entry
+  (`0.avmarket.rs`) returned `NXDOMAIN` with the `bindguard.rpz` SOA in the
+  additional section.
+- Upstream forwarder pool (`bindguard_upstreams`, `firstAvailable` policy)
+  showed all 4 configured upstreams `up` via dnsdist's `showServers()`,
+  confirming persisted upstream configuration and health checking survived
+  reboot.
+- DoT (`kdig +tls` on `853/tcp`) and DoH (raw wire-format query over
+  `https://127.0.0.1/dns-query`) both resolved correctly against the
+  self-signed lab certificate (valid until 2028-10-31, as expected for the
+  documented lab TLS mode).
+- Unauthenticated requests to `/`, `/dashboard`, and `/status/summary` all
+  redirected to `/login` (auth enforcement intact).
+
+Feature persistence (verified directly in `bindguard.db` and on disk):
+
+- `upstream_resolvers` (4 rows, `last_status=healthy`), `replication_settings`
+  (role `primary`, node id, listen port 8843), `encryption_settings` (DoH/
+  DoH3/DoT/DoQ enabled, DNSCrypt off, cert/key paths), `dns_cache_settings`
+  (including the `recursive_clients=1000` value added in Package 5),
+  `local_dns_settings`, `analytics_settings`, `admins` (argon2 hash intact)
+  all matched their expected values and matched the actually-deployed
+  dnsdist/BIND config on disk.
+- Analytics data persisted (17k+ `query_events`, populated aggregate
+  buckets); replication enrollments/replicas rows persisted; certificates
+  present with correct ownership/permissions.
+
+Tests:
+
+- `tests/test_web_smoke.sh`: passed.
+- `tests/test_acceptance.sh`: passed (run twice after fixes below, both
+  clean). Expected invalid-RPZ and forced-rollback tracebacks appeared as
+  documented; final line `BindGuard acceptance suite passed`.
+- `tests/test_beta_hardening_docs.sh`: passed standalone.
+- All package-specific suites bundled in `test_acceptance.sh`
+  (`test_bind_backend.sh`, `test_dnsdist_frontend.sh`,
+  `test_blocklist_deploy.sh`, `test_blocklist_failure_paths.sh`,
+  `test_analytics.py`, `test_local_dns.py`, `test_dns_cache.py`,
+  `test_upstream_dns.py`, `test_dns_cache_benchmark.sh`, `test_encryption.py`,
+  `test_importer.py`, `test_backup.py`, `test_replication.py`,
+  `test_install_upgrade_diagnostics.sh`, `test_service_restart_analytics.sh`,
+  `test_backup_restore.sh`) all passed.
+
+Two real defects were found and fixed during this verification pass (each
+committed separately, with a regression test, before this closeout commit):
+
+1. **Unclosed SQLite connections in `tests/test_backup.py`**
+   (`06cab14`). `sqlite3.Connection.__exit__` only commits/rolls back a
+   transaction — it does not close the connection. `BackupTestBase.setUp()`
+   and several test methods used `with backup.connect() as conn:` directly,
+   leaking one connection per test and producing the pre-existing
+   `ResourceWarning: unclosed database` noise seen during backup test runs
+   (already known/accepted per the pre-reboot checkpoint). Fixed by wrapping
+   with `contextlib.closing()` — the same effect `local_dns.py` and
+   `bindguard_compiler.py` already get from their `BindGuardConnection`
+   factory (`__exit__` override that also calls `close()`). Full acceptance
+   suite now runs with zero `ResourceWarning`s. **Tech debt** (not fixed, out
+   of scope for this pass): `app/dns_cache.py`, `app/importer.py`,
+   `app/upstream_dns.py`, `app/encryption.py`, and `app/backup.py` still
+   define a plain `connect()` (no `BindGuardConnection` factory) and use the
+   same `with connect() as conn:` pattern internally. In practice CPython's
+   refcounting closes these promptly when `conn` goes out of scope, so no
+   FD/lock exhaustion has been observed in production, but adopting the
+   `BindGuardConnection` factory there too would be a low-risk future
+   cleanup for consistency and defense against reference-cycle edge cases.
+2. **RNDC/TSIG secret leak in the diagnostics bundle** (`3892dc2`) — a real,
+   production-impacting finding, not just documented. `bind_validation.txt`
+   in every `bindguard-diagnostics` bundle is generated from
+   `named-checkconf -p`, which echoes the live BIND control-channel key
+   verbatim (`key "rndc-key" { secret "<real key>"; };`). None of the
+   existing `REDACTION_PATTERNS` matched BIND's `secret "value";` config
+   syntax (they covered `key=value`/`key: value` forms, private-key PEM
+   blocks, and HTTP auth headers, but not this one), so every diagnostics
+   bundle generated before this fix leaked the live RNDC/TSIG shared secret
+   in plaintext by default. Fixed by adding a `secret "..."` redaction
+   pattern, extending `bindguard-diagnostics --self-test-redaction` to cover
+   an rndc-key sample, and adding a bundle-level regression check in
+   `tests/test_install_upgrade_diagnostics.sh` that fails if any unredacted
+   `secret "..."` value survives in a real generated bundle. Verified with a
+   fresh diagnostics run post-fix: no known secret values (session secret,
+   dnsdist console/webserver key, RNDC key) appear anywhere in the bundle.
+
+Backup/restore final check (production flow, not just unit tests):
+
+- Created a real backup via the same `backup_requests` intent-row +
+  `bindguard_compiler.py backup-create` path the web UI uses, with default
+  components (`private_keys`/`user_auth_data`/`analytics_history` all off).
+- Validated the resulting archive: all 25 manifest SHA-256 checksums matched
+  the extracted files exactly; no `.key` files or `secrets.env` present;
+  the bundled `bindguard.db` had `admins`, `login_attempts`, `query_events`,
+  and `analytics_aggregate_buckets` correctly stripped (0 rows) while
+  `upstream_resolvers`/`custom_rules` were retained — matching the documented
+  secret/private-data policy exactly.
+- Reversible restore test: inserted a temporary `custom_rules` row, then
+  requested a `custom_rules`-only scoped restore from the fresh backup (same
+  intent-row + `backup-restore` production path). The restore automatically
+  took its own pre-restore safety backup, reverted the temporary row, left
+  every other table (`upstream_resolvers`, `admins`, `query_events`, etc.)
+  untouched, and passed its own post-restore validation
+  (`named-checkconf`/`visudo` OK).
+- Confirmed `bindguard`/`named`/`dnsdist`/`bindguard-analytics` stayed active
+  and DNS (`example.com`, `adguard.mylan.network`) resolved correctly
+  throughout and after.
+- Cleaned up the temporary extraction directories used for checksum
+  verification; the two backup archives created during this test (the
+  manual verification backup and its auto-generated pre-restore safety
+  backup) were left in `/var/lib/bindguard/backups/` as legitimate recovery
+  points, tracked in `backup_history` like any other backup.
+
+Installer/packaging/diagnostics consistency:
+
+- `VERSION` (`0.4.0-beta.1`) is consistent with `docs/release-notes.md`,
+  `docs/versioning.md`, and `packaging/debian/changelog`
+  (`0.4.0~beta1-1`, correct Debian tilde-versioning for a pre-release).
+- All required docs present: install, upgrade, backup-recovery, migration,
+  security, troubleshooting, supported-systems, hardware-requirements,
+  beta-readiness, beta-feedback/bug-report/feature-request templates.
+- Ran `bindguard-diagnostics` (no arguments beyond `--output-dir`) once
+  end-to-end and manually inspected every extracted file; after the RNDC
+  fix above, no secrets, credentials, private keys, resolver secrets,
+  Authorization headers, or private DNS/query data were present.
+
+Remaining known issues / external-beta blockers: none found that block a
+first external tester, beyond the pre-existing documented ones (self-signed
+lab TLS cert, admin UI HTTP-by-default requiring `BINDGUARD_COOKIE_SECURE=1`
+behind a reverse proxy for real HTTPS, signed apt repo not yet implemented,
+per-network policy runtime enforcement not yet wired up). BindGuard is ready
+to hand to a first external tester on this checkpoint.

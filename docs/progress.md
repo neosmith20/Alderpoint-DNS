@@ -752,3 +752,58 @@ place:
   packaging purge guidance, BIND recursion/cache ACLs, dnsdist private ACL
   defaults with environment-gated allow-all, diagnostics redaction, and the
   secure-cookie environment toggle.
+
+## Post-reboot verification milestone
+
+A controlled full reboot was performed after the External Beta and v1.0
+Hardening milestone (checkpoint `da0ab25`), followed by a full post-reboot
+verification pass:
+
+- All four services (`bindguard`, `named`, `dnsdist`, `bindguard-analytics`)
+  came back enabled/active with a clean journal; listeners matched the
+  intended topology (dnsdist plain/DoH/DoH3/DoT/DoQ frontends, loopback-only
+  BIND backend and control ports, loopback analytics receiver) with the
+  dnsdist ACL still restricted to private ranges by default.
+- DNS functionality (recursive resolution, local A/PTR records, RPZ
+  filtering, upstream pool health/persistence, DoH/DoT) was verified live
+  against the running stack, not just via unit tests.
+- Feature persistence (upstream resolvers, replication settings, encryption
+  settings, cache settings including the Package 5 `recursive_clients`
+  value, analytics data, admin auth) was confirmed directly against
+  `bindguard.db` and the deployed BIND/dnsdist config on disk.
+- The full acceptance suite, web smoke test, and beta-hardening doc test all
+  passed after reboot.
+- A production-flow backup/restore round-trip was exercised (not just
+  `test_backup.py`'s isolated unit tests): a real backup was created through
+  the same intent-row + `bindguard_compiler.py backup-create` path the web
+  UI uses, its manifest checksums were verified against the extracted
+  archive, the documented secret-stripping policy was confirmed
+  (`admins`/`login_attempts`/`query_events`/`analytics_aggregate_buckets`
+  correctly stripped by default), and a scoped `custom_rules` restore was
+  used to prove a real, reversible restore correctly reverts data while
+  leaving unrelated tables untouched.
+- Two real defects were found and fixed, each with its own regression test:
+  1. `tests/test_backup.py` leaked unclosed SQLite connections via
+     `with backup.connect() as conn:` (which only commits/rolls back, never
+     closes) — this was the source of the pre-existing `ResourceWarning`
+     noise during backup tests. Fixed with `contextlib.closing()`; the
+     acceptance suite now runs with zero `ResourceWarning`s. The same
+     `connect()`-without-a-closing-`__exit__` pattern still exists in several
+     production modules (`dns_cache.py`, `importer.py`, `upstream_dns.py`,
+     `encryption.py`, `backup.py`) that don't use the `BindGuardConnection`
+     factory `local_dns.py`/`bindguard_compiler.py` already use; this is
+     recorded as tech debt rather than fixed here, since CPython's
+     refcounting closes these promptly in practice and a wider refactor was
+     out of scope for a reboot-verification pass.
+  2. The `bindguard-diagnostics` bundle leaked the live BIND RNDC/TSIG
+     control-channel secret in plaintext inside `bind_validation.txt`
+     (sourced from `named-checkconf -p`, which echoes `key { secret "..."; }`
+     blocks verbatim). None of the existing redaction patterns matched
+     BIND's `secret "value";` syntax. Fixed by adding a redaction pattern,
+     extending the script's `--self-test-redaction` self-check, and adding a
+     bundle-level regression assertion in
+     `tests/test_install_upgrade_diagnostics.sh`. Verified with a fresh
+     diagnostics run that no known secret value appears anywhere in the
+     bundle.
+- See `AGENT_PROGRESS.md` for full command-level detail on this
+  verification pass.
