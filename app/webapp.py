@@ -167,6 +167,116 @@ def dnsdist_stats() -> dict[str, Any]:
         return {}
 
 
+def dnsdist_version_info() -> dict[str, Any]:
+    code, out = run(["dnsdist", "--version"])
+    lines = out.splitlines()
+    features = ""
+    for line in lines:
+        if line.startswith("Enabled features:"):
+            features = line.split(":", 1)[1].strip()
+    return {
+        "ok": code == 0,
+        "version": lines[0] if lines else "unknown",
+        "features": features,
+        "feature_set": set(features.split()),
+    }
+
+
+def listener_addresses() -> set[str]:
+    code, out = run(["ss", "-H", "-ltnup"])
+    if code != 0:
+        return set()
+    addresses: set[str] = set()
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 5:
+            addresses.add(parts[4])
+    return addresses
+
+
+def file_contains(path: Path, needle: str) -> bool:
+    try:
+        return needle in path.read_text()
+    except Exception:
+        return False
+
+
+def cert_status() -> dict[str, str]:
+    cert = Path("/etc/bindguard/certs/bindguard-lab.crt")
+    key = Path("/etc/bindguard/certs/bindguard-lab.key")
+    if not cert.exists() or not key.exists():
+        return {"state": "missing", "detail": "certificate and key must both be present"}
+    code, out = run(["openssl", "x509", "-noout", "-subject", "-dates", "-in", str(cert)])
+    if code != 0:
+        return {"state": "invalid", "detail": out.strip() or "certificate could not be parsed"}
+    return {
+        "state": "present",
+        "detail": "certificate parses successfully; private key match is verified by the acceptance suite",
+    }
+
+
+def protocol_statuses() -> list[dict[str, str]]:
+    version = dnsdist_version_info()
+    features = version["feature_set"]
+    listeners = listener_addresses()
+    config = Path("/etc/dnsdist/dnsdist.conf")
+    has_doh3 = "dns-over-http3" in features
+    protocols = [
+        {
+            "name": "Plain DNS",
+            "available": True,
+            "enabled": file_contains(config, "plainEnabled"),
+            "listening": "0.0.0.0:53" in listeners or "[::]:53" in listeners,
+            "tested": "acceptance-covered",
+            "port": "53/udp,tcp",
+        },
+        {
+            "name": "DoH",
+            "available": "dns-over-https(nghttp2)" in features,
+            "enabled": file_contains(config, "dohEnabled"),
+            "listening": "0.0.0.0:443" in listeners or "[::]:443" in listeners,
+            "tested": "acceptance-covered",
+            "port": "443/tcp /dns-query",
+        },
+        {
+            "name": "DoT",
+            "available": any(feature.startswith("dns-over-tls") for feature in features),
+            "enabled": file_contains(config, "dotEnabled"),
+            "listening": "0.0.0.0:853" in listeners or "[::]:853" in listeners,
+            "tested": "acceptance-covered",
+            "port": "853/tcp",
+        },
+        {
+            "name": "DoQ",
+            "available": "dns-over-quic" in features,
+            "enabled": file_contains(config, "doqEnabled"),
+            "listening": "0.0.0.0:853" in listeners or "[::]:853" in listeners,
+            "tested": "acceptance-covered",
+            "port": "853/udp",
+        },
+    ]
+    protocols.append(
+        {
+            "name": "DoH3",
+            "available": has_doh3,
+            "enabled": file_contains(config, "doh3Enabled") if has_doh3 else False,
+            "listening": ("0.0.0.0:443" in listeners or "[::]:443" in listeners) if has_doh3 else False,
+            "tested": "config-validated" if has_doh3 else "unavailable in build",
+            "port": "443/udp",
+        }
+    )
+    for protocol in protocols:
+        if not protocol["available"]:
+            protocol["state"] = "unavailable in build"
+        elif protocol["enabled"] and protocol["listening"]:
+            protocol["state"] = "listening"
+        elif protocol["enabled"]:
+            protocol["state"] = "enabled"
+        else:
+            protocol["state"] = "available"
+    return protocols
+
+
 def render(request: Request, template: str, **context: Any) -> HTMLResponse:
     session = signed_session(request)
     context.update(
@@ -391,14 +501,24 @@ def custom_delete(request: Request, rule_id: int, csrf: str = Form(...), _: sqli
 
 @app.get("/dns-settings", response_class=HTMLResponse)
 def dns_settings(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    version = dnsdist_version_info()
+    proxy_backend = file_contains(Path("/etc/dnsdist/dnsdist.conf"), 'address="127.0.0.1:5354"') and file_contains(
+        Path("/etc/dnsdist/dnsdist.conf"), "useProxyProtocol=true"
+    )
     return render(
         request,
         "dns_settings.html",
-        backend="127.0.0.1:5353",
-        allowed_clients="127.0.0.0/8, ::1/128",
+        backend="127.0.0.1:5353 plain health/recovery, 127.0.0.1:5354 PROXYv2",
+        allowed_clients="RFC1918 private networks, loopback, fc00::/7; set BINDGUARD_DNS_ALLOW_ALL=1 to allow all",
         maintenance="1.1.1.2, 1.0.0.2, 4.2.2.1, 4.2.2.2",
         hostname="bindguard.local",
         doh_path="/dns-query",
+        dnsdist_version=version["version"],
+        dnsdist_features=version["features"],
+        protocols=protocol_statuses(),
+        cert=cert_status(),
+        proxy_backend="enabled" if proxy_backend else "not enabled",
+        client_address_test="covered by /opt/bindguard/tests/test_dnsdist_frontend.sh",
     )
 
 

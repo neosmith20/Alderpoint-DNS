@@ -5,9 +5,9 @@ BindGuard's web interface is a FastAPI/Jinja application served by
 
 Current lab mode:
 
-- URL: `http://127.0.0.1:3000`
+- URL: `http://<vm-lan-ip>:3000`
 - Service user: `bindguard`
-- Listener: loopback only
+- Listener: `0.0.0.0:3000`
 - Initial admin: none. The first administrator must be created through
   `/setup`.
 - Password hashing: Argon2
@@ -37,4 +37,6 @@ systemctl restart bindguard
 /opt/bindguard/tests/test_web_smoke.sh
 ```
 
-The admin listener remains loopback-only until a management CIDR is supplied.
+The admin listener binds to `0.0.0.0:3000` and requires a BindGuard admin
+session. pfSense VLAN/firewall rules are responsible for restricting network
+reachability to the management UI.

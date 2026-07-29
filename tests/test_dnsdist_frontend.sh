@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-trap 'systemctl start named >/dev/null 2>&1 || true' EXIT
+trap 'rndc querylog off >/dev/null 2>&1 || true; systemctl start named >/dev/null 2>&1 || true' EXIT
 
 fail() {
   echo "FAIL: $*" >&2
@@ -19,6 +19,9 @@ need openssl
 need systemctl
 need ss
 need dnsdist
+need rndc
+
+dnsdist --version | grep -q 'dns-over-quic' || fail "official dnsdist build with dns-over-quic support is required"
 
 dig @127.0.0.1 -p 5353 cloudflare.com A +time=3 +tries=1 >/dev/null || fail "BIND backend UDP resolution failed"
 dig @127.0.0.1 -p 53 cloudflare.com A +time=3 +tries=1 >/dev/null || fail "dnsdist UDP resolution failed"
@@ -48,20 +51,26 @@ if curl --silent --show-error --fail --max-time 5 http://127.0.0.1:8083/jsonstat
   fail "dnsdist stats API allowed unauthenticated access"
 fi
 
-ss -lunp | grep -q '127.0.0.1:53' || fail "dnsdist is not listening on UDP 53"
-ss -ltnp | grep -q '127.0.0.1:53' || fail "dnsdist is not listening on TCP 53"
-ss -ltnp | grep -q '127.0.0.1:443' || fail "dnsdist is not listening on TCP 443"
-ss -ltnp | grep -q '127.0.0.1:853' || fail "dnsdist is not listening on TCP 853"
+ss -lunp | grep -Eq '(^|[[:space:]])(0[.]0[.]0[.]0|\*):53' || fail "dnsdist is not listening on UDP 0.0.0.0:53"
+ss -lunp | grep -Eq '(^|[[:space:]])(\[::\]|\*):53' || fail "dnsdist is not listening on UDP [::]:53"
+ss -ltnp | grep -Eq '(^|[[:space:]])(0[.]0[.]0[.]0|\*):53' || fail "dnsdist is not listening on TCP 0.0.0.0:53"
+ss -ltnp | grep -Eq '(^|[[:space:]])(\[::\]|\*):53' || fail "dnsdist is not listening on TCP [::]:53"
+ss -ltnp | grep -Eq '(^|[[:space:]])(0[.]0[.]0[.]0|\*):443' || fail "dnsdist is not listening on TCP 0.0.0.0:443"
+ss -ltnp | grep -Eq '(^|[[:space:]])(0[.]0[.]0[.]0|\*):853' || fail "dnsdist is not listening on TCP 0.0.0.0:853"
 ss -ltnp | grep -q '127.0.0.1:8083' || fail "dnsdist web statistics interface is not loopback-only"
 ss -ltnp | grep -q '127.0.0.1:5199' || fail "dnsdist control console is not loopback-only"
 
-if ss -H -lntup '( sport = :53 or sport = :443 or sport = :853 or sport = :8083 or sport = :5199 )' |
+if ss -H -lntup '( sport = :8083 or sport = :5199 )' |
   awk '{ print $5 }' |
-  grep -Ev '^(127[.]0[.]0[.]1:(53|443|853|8083|5199))$'; then
-  fail "dnsdist is listening on a non-loopback client or management address"
+  grep -Ev '^(127[.]0[.]0[.]1:(8083|5199))$'; then
+  fail "dnsdist is listening on a non-loopback management address"
 fi
 
 dnsdist --check-config -C /etc/dnsdist/dnsdist.conf >/dev/null || fail "installed dnsdist configuration does not validate"
+grep -q 'BINDGUARD_DNS_ALLOW_ALL' /etc/dnsdist/dnsdist.conf || fail "dnsdist allow-all switch is missing"
+grep -q '10.0.0.0/8' /etc/dnsdist/dnsdist.conf || fail "dnsdist RFC1918 10/8 ACL is missing"
+grep -q '172.16.0.0/12' /etc/dnsdist/dnsdist.conf || fail "dnsdist RFC1918 172.16/12 ACL is missing"
+grep -q '192.168.0.0/16' /etc/dnsdist/dnsdist.conf || fail "dnsdist RFC1918 192.168/16 ACL is missing"
 grep -q 'setQueryRate(120, 10' /etc/dnsdist/dnsdist.conf || fail "dnsdist query rate limit is missing"
 grep -q 'setRCodeRate(DNSRCode.NXDOMAIN, 80, 10' /etc/dnsdist/dnsdist.conf || fail "dnsdist NXDOMAIN rate limit is missing"
 grep -q 'setQTypeRate(DNSQType.ANY, 10, 10' /etc/dnsdist/dnsdist.conf || fail "dnsdist ANY query rate limit is missing"
@@ -77,16 +86,27 @@ fi
 systemctl start named
 dig @127.0.0.1 -p 53 cloudflare.com A +time=5 +tries=1 >/dev/null || fail "dnsdist did not recover after BIND backend restart"
 
-if dnsdist --check-config -C /opt/bindguard/tests/dnsdist-doq-capability.conf >/tmp/bindguard-dnsdist-doq-check.out 2>&1; then
-  kdig +quic @127.0.0.1 -p 853 cloudflare.com A +time=3 >/dev/null || fail "DoQ advertised by config but query failed"
-else
-  grep -qi 'DNS over QUIC support is not present' /tmp/bindguard-dnsdist-doq-check.out || fail "DoQ unavailable for an unexpected reason"
+dnsdist --check-config -C /opt/bindguard/tests/dnsdist-doq-capability.conf >/dev/null || fail "DoQ capability config did not validate"
+kdig +quic @127.0.0.1 -p 853 \
+  +tls-ca=/etc/bindguard/certs/bindguard-lab.crt \
+  +tls-hostname=bindguard.local \
+  cloudflare.com A +time=3 | grep -q 'status: NOERROR' || fail "DoQ query failed"
+if kdig +quic @127.0.0.1 -p 853 \
+  +tls-ca=/etc/bindguard/certs/bindguard-lab.crt \
+  +tls-hostname=wrong.local \
+  cloudflare.com A +time=3 >/tmp/bindguard-doq-wrong-host.out 2>&1; then
+  fail "DoQ accepted a certificate with the wrong hostname"
 fi
+dnsdist --check-config -C /opt/bindguard/tests/dnsdist-doh3-capability.conf >/dev/null || fail "DoH3 capability config did not validate"
+grep -q 'address="127.0.0.1:5354"' /etc/dnsdist/dnsdist.conf || fail "dnsdist backend is not using the PROXYv2 BIND listener"
+grep -q 'useProxyProtocol=true' /etc/dnsdist/dnsdist.conf || fail "dnsdist backend PROXYv2 forwarding is not enabled"
 
-if dnsdist --check-config -C /opt/bindguard/tests/dnsdist-doh3-capability.conf >/tmp/bindguard-dnsdist-doh3-check.out 2>&1; then
-  echo "DoH3 config validated; runtime client test still pending because installed curl lacks HTTP/3 support detection in this script."
-else
-  grep -qi 'DNS over HTTP/3 support is not present' /tmp/bindguard-dnsdist-doh3-check.out || fail "DoH3 unavailable for an unexpected reason"
-fi
+preserve_name="bindguard-preserve-$(date +%s).example"
+rndc querylog on
+dig -b 127.0.0.2 @127.0.0.1 -p 53 "$preserve_name" A +time=3 +tries=1 >/dev/null || true
+sleep 1
+rndc querylog off
+tail -n 120 /var/log/bindguard/bind/named.log |
+  grep -q "127[.]0[.]0[.]2#.*($preserve_name)" || fail "BIND did not log the original client address preserved by PROXYv2"
 
 echo "dnsdist frontend tests passed"

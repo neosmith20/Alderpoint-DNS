@@ -4,23 +4,24 @@ BindGuard uses dnsdist as the only client-facing DNS frontend.
 
 Current lab configuration:
 
-- Plain UDP/TCP DNS: `127.0.0.1:53`
-- DoH: `https://127.0.0.1/dns-query`
-- DoT: `127.0.0.1:853`
-- BIND backend: `127.0.0.1:5353`
-- ACL: loopback only until allowed client networks are supplied
+- Plain UDP/TCP DNS: `0.0.0.0:53`, `[::]:53`
+- DoH: `https://<vm-lan-ip>/dns-query`
+- DoH3: UDP `0.0.0.0:443`, `[::]:443`
+- DoT: `0.0.0.0:853`, `[::]:853`
+- DoQ: UDP `0.0.0.0:853`, `[::]:853`
+- BIND backend: `127.0.0.1:5354` with PROXYv2 client address forwarding
+- BIND recovery/health listener: `127.0.0.1:5353`
+- ACL: RFC1918 private networks, loopback, and `fc00::/7` by default
 - dnsdist web/API: `127.0.0.1:8083`, random local credentials
 - dnsdist console: `127.0.0.1:5199`, random local key
 
-The Debian 13 dnsdist `1.9.15-0+deb13u1` package reports these enabled
-features:
+Set `BINDGUARD_DNS_ALLOW_ALL=1` in the dnsdist service environment to allow
+queries from all IPv4 and IPv6 clients. BindGuard expects pfSense VLAN and
+firewall rules to be the network exposure boundary.
 
-`AF_XDP cdb dns-over-tls(openssl) dns-over-https(nghttp2) dnscrypt ebpf fstrm ipcipher libedit libsodium lmdb protobuf re2 recvmmsg/sendmmsg snmp systemd`
-
-DoQ and DoH3 entry points exist in the binary, but runtime validation reports
-that DNS-over-QUIC and DNS-over-HTTP/3 support is not present in this build.
-BindGuard must display those transports as unavailable until a compatible
-dnsdist build is installed.
+The Debian dnsdist package is not sufficient because it lacks DNS-over-QUIC.
+Install dnsdist from the official PowerDNS `trixie-dnsdist-21` repository and
+verify `dnsdist --version` reports `dns-over-quic`.
 
 Validation commands:
 

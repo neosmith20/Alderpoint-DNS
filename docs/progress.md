@@ -6,7 +6,7 @@
 - [x] Baseline and architecture commit (`aaefc75`)
 - [x] BIND backend installed, validated, and tested on `127.0.0.1:5353`
 - [x] dnsdist plain DNS
-- [x] Encrypted DNS where supported by installed package
+- [x] Encrypted DNS with official PowerDNS dnsdist package
 - [x] Blocklist compiler
 - [x] Safe RPZ deployment and rollback
 - [x] Web interface
@@ -35,21 +35,23 @@
 
 ## Verified dnsdist milestone
 
-- dnsdist 1.9.15 installed from Debian security packages and enabled.
-- Client-facing listeners are lab-safe loopback only until allowed client
-  networks are supplied:
-  - UDP/TCP DNS on `127.0.0.1:53`
-  - DoH on `127.0.0.1:443` path `/dns-query`
-  - DoT on `127.0.0.1:853`
-- BIND backend health check marks `127.0.0.1:5353` up.
-- Access ACL is loopback only.
+- dnsdist is installed from the official PowerDNS repository and enabled.
+- Client-facing listeners bind to the VM interfaces:
+  - UDP/TCP DNS on `0.0.0.0:53` and `[::]:53`
+  - DoH/DoH3 on `0.0.0.0:443` and `[::]:443` path `/dns-query`
+  - DoT/DoQ on `0.0.0.0:853` and `[::]:853`
+- dnsdist forwards to BIND on `127.0.0.1:5354` with PROXYv2 client address
+  preservation; `127.0.0.1:5353` remains available for direct loopback health
+  and recovery checks.
+- Access ACL defaults to RFC1918 private networks, loopback, and `fc00::/7`,
+  with `BINDGUARD_DNS_ALLOW_ALL=1` available for pfSense-enforced allow-all
+  deployments.
 - Private-resolver dynamic rate limits are configured.
 - Packet cache and local dnsdist stats API are configured.
 - Temporary self-signed lab certificate validates against its private key.
 - DoH and DoT pass with the lab CA explicitly trusted by the test client.
-- DoQ and DoH3 are not present in the Debian package build; capability tests
-  confirm dnsdist rejects those listeners with explicit unsupported-feature
-  errors.
+- DoQ and DoH3 listener configs validate with the official PowerDNS build; DoQ
+  is exercised by the acceptance suite.
 - Backend outage behavior is tested: stopping BIND prevents frontend
   resolution, restarting BIND restores dnsdist service.
 - dnsdist restart test passes.
@@ -86,7 +88,7 @@
 ## Verified web/auth milestone
 
 - FastAPI/Jinja application runs as dedicated non-root `bindguard` user.
-- Administration listener is loopback-only on `127.0.0.1:3000`.
+- Administration listener binds to `0.0.0.0:3000` and requires authentication.
 - Initial setup page is reachable and no default administrator exists.
 - Passwords are hashed with Argon2.
 - Sessions are signed, `HttpOnly`, and `SameSite=Strict`.
@@ -147,24 +149,26 @@
 - After the VM reboot, the repository was recovered on `main` at commit
   `f2065b8`; `git status` was clean and `git diff` was empty.
 - Live services were verified active and enabled after boot:
-  - `bindguard.service` on `127.0.0.1:3000`
-  - `dnsdist.service` on loopback DNS, DoH, DoT, stats, and control sockets
+  - `bindguard.service` on `0.0.0.0:3000`
+  - `dnsdist.service` on wildcard DNS, encrypted DNS, loopback stats, and
+    loopback control sockets
   - `named.service` on loopback backend recursion and RNDC
-- Listener audit confirmed the DNS and management services remain loopback-only:
-  - BIND on `127.0.0.1:5353` and `::1:5353`
-  - dnsdist UDP/TCP DNS on `127.0.0.1:53`
-  - dnsdist DoH on `127.0.0.1:443`
-  - dnsdist DoT on `127.0.0.1:853`
+- Listener audit confirms only internal backend and management sockets remain
+  loopback-only:
+  - BIND on `127.0.0.1:5353`, `127.0.0.1:5354` PROXYv2, and `::1:5353`
+  - dnsdist UDP/TCP DNS on `0.0.0.0:53` and `[::]:53`
+  - dnsdist DoH/DoH3 on `0.0.0.0:443` and `[::]:443`
+  - dnsdist DoT/DoQ on `0.0.0.0:853` and `[::]:853`
   - dnsdist web stats on `127.0.0.1:8083`
   - dnsdist control console on `127.0.0.1:5199`
-  - BindGuard web on `127.0.0.1:3000`
+  - BindGuard web on `0.0.0.0:3000`
 - BIND `rndc status` confirmed the server is up and query logging remains off.
-- Installed dnsdist `1.9.15` reports features for DoT and DoH only; DoQ and
-  DoH3 remain unsupported by this Debian build.
+- Installed official PowerDNS dnsdist reports `dns-over-quic`.
 - `/opt/bindguard/tests/test_dnsdist_frontend.sh` now asserts successful DoH and
   DoT DNS responses, certificate/key match, authenticated-only stats access,
-  loopback-only dnsdist DNS/management listeners, dnsdist config validation, and
-  configured private-resolver rate limits.
+  wildcard dnsdist DNS listeners, loopback-only management listeners, dnsdist
+  config validation, DoQ capability, and configured private-resolver rate
+  limits.
 - `/opt/bindguard/tests/test_acceptance.sh` passed after the reboot with the
   strengthened dnsdist checks. The expected invalid-RPZ and forced-rollback
   stack traces still occurred only inside the negative-path tests, and the suite

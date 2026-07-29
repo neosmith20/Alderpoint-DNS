@@ -1,11 +1,23 @@
 // Managed by BindGuard. Validate with named-checkconf before deployment.
+acl "bindguard_clients" {
+	10.0.0.0/8;
+	172.16.0.0/12;
+	192.168.0.0/16;
+	127.0.0.0/8;
+	::1/128;
+	fc00::/7;
+};
+
 options {
 	directory "/var/cache/bind";
 	listen-on port 5353 { 127.0.0.1; };
+	listen-on port 5354 proxy plain { 127.0.0.1; };
 	listen-on-v6 port 5353 { ::1; };
-	allow-query { localhost; };
-	allow-query-cache { localhost; };
-	allow-recursion { localhost; };
+	allow-proxy { 127.0.0.1; };
+	allow-proxy-on { 127.0.0.1; };
+	allow-query { "bindguard_clients"; };
+	allow-query-cache { "bindguard_clients"; };
+	allow-recursion { "bindguard_clients"; };
 	recursion yes;
 	forward only;
 	forwarders { 1.1.1.2; 1.0.0.2; 4.2.2.1; 4.2.2.2; };

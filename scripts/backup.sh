@@ -12,6 +12,7 @@ tar -C / -czf "$tmp" \
   etc/bind/named.conf.local \
   etc/dnsdist/dnsdist.conf \
   etc/systemd/system/bindguard.service \
+  etc/systemd/system/dnsdist.service.d \
   etc/sudoers.d/bindguard \
   var/lib/bindguard/bindguard.db \
   var/lib/bindguard/downloads \

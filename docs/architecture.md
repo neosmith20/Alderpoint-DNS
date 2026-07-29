@@ -2,7 +2,9 @@
 
 dnsdist is the sole client-facing DNS frontend. It will terminate plain DNS and
 supported encrypted DNS transports, enforce client ACLs and rate limits, and
-forward to BIND on `127.0.0.1:5353`.
+forward to BIND on `127.0.0.1:5354` with PROXYv2 client address preservation.
+The plain `127.0.0.1:5353` BIND listener remains loopback-only for health and
+recovery checks.
 
 BIND is a localhost-only validating cache/forwarder. Filtering is compiled into
 an RPZ zone. Generated files live under `/var/lib/bindguard/compiled` and are

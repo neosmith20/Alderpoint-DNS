@@ -5,10 +5,10 @@ Python management application.
 
 Current lab endpoints:
 
-- Web setup: `http://127.0.0.1:3000/setup`
-- DNS: `127.0.0.1:53`
-- DoH: `https://127.0.0.1/dns-query`
-- DoT: `127.0.0.1:853`
+- Web setup: `http://<vm-lan-ip>:3000/setup`
+- DNS: `<vm-lan-ip>:53`
+- DoH: `https://<vm-lan-ip>/dns-query`
+- DoT/DoQ: `<vm-lan-ip>:853`
 
 No default administrator exists. Create the first admin through `/setup`.
 

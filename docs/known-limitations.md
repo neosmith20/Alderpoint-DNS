@@ -1,10 +1,11 @@
 # Known limitations
 
-- Debian dnsdist `1.9.15-0+deb13u1` lacks DNS-over-QUIC and DNS-over-HTTP/3
-  support. DoQ and DoH3 are reported as unavailable.
-- Admin UI is loopback-only until management CIDR is supplied.
-- DNS client ACL is loopback-only until allowed client networks are supplied.
-- Temporary self-signed lab certificate is not production trusted.
+- The management UI and DNS listeners intentionally bind to VM interfaces.
+  pfSense VLAN/firewall rules must restrict who can reach them.
+- The automatically generated self-signed certificate is not publicly trusted.
+  Replace `/etc/bindguard/certs/bindguard-lab.crt` and
+  `/etc/bindguard/certs/bindguard-lab.key` together when production TLS
+  material is available.
 - Query statistics are aggregate-only; full query history and top-client/domain
   views are future work.
 - Per-network policy profiles and SafeSearch enforcement are modeled as future

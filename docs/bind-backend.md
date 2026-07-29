@@ -4,7 +4,9 @@ The installed backend is BIND 9.20.26 and is enabled as `named.service`.
 
 ## Network boundary
 
-BIND listens only on `127.0.0.1:5353` and `[::1]:5353`, over UDP and TCP.
+BIND listens only on loopback. `127.0.0.1:5353` and `[::1]:5353` provide
+plain loopback recursion for health and recovery checks; `127.0.0.1:5354`
+requires PROXYv2 from dnsdist so BIND can evaluate the original client address.
 It does not listen on port 53 or on the VM interface. Queries and recursion are
 restricted to localhost. dnsdist will be its only production client.
 
@@ -38,11 +40,10 @@ Inspect:
 ```sh
 systemctl status named
 rndc status
-ss -lntup 'sport = :5353'
+ss -lntup '( sport = :5353 or sport = :5354 )'
 curl http://127.0.0.1:8053/json/v1/status
 ```
 
 The package-default configurations are preserved under
 `/var/lib/bindguard/backups`. AppArmor additions are isolated in
 `/etc/apparmor.d/local/usr.sbin.named`.
-
