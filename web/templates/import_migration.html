@@ -2,7 +2,7 @@
 {% import "components.html" as ui %}
 {% block title %}Import - BindGuard{% endblock %}
 {% block content %}
-{{ ui.page_header("Import and Migration", "Migrate from AdGuard Home, or import Local DNS records from CSV, XLSX, hosts files, or zone data.") }}
+{{ ui.page_header("Import and Migration", "Migrate from AdGuard Home, Pi-hole, hosts files, BIND zones, CSV/XLSX, or a BindGuard-native JSON export.") }}
 
 {% if error %}
   <div class="alert error" role="alert">{{ error }}</div>
@@ -10,7 +10,7 @@
 
 {% if applied_counts %}
   <section class="panel stack">
-    <div class="panel__head"><h2>AdGuard Import Applied</h2></div>
+    <div class="panel__head"><h2>Migration Applied</h2></div>
     <p class="mono wrap-anywhere">{{ applied_counts }}</p>
   </section>
 {% endif %}
@@ -27,6 +27,8 @@
         <option value="xlsx">XLSX</option>
         <option value="hosts">Hosts file</option>
         <option value="zone">BIND-style zone data</option>
+        <option value="pihole">Pi-hole export/list text</option>
+        <option value="bindguard_json">BindGuard-native JSON</option>
       </select>
     </label>
     <label>Default domain (for hosts/zone files, and bare hostnames)
@@ -34,7 +36,10 @@
     </label>
     <label>File<input type="file" name="upload" required></label>
     <p class="muted">Parsing never modifies BindGuard's live configuration. You will review a preview and choose how to resolve conflicts before anything is applied.</p>
-    <div class="form-actions"><button>Upload and preview</button></div>
+    <div class="form-actions">
+      <button>Upload and preview</button>
+      <a class="button secondary" href="/import/export/bindguard.json">Export BindGuard JSON</a>
+    </div>
   </form>
 
   <div class="panel stack">
@@ -175,11 +180,14 @@
 
 {% if adguard %}
 <section class="panel stack">
-  <div class="panel__head"><h2>AdGuard Home Migration Preview</h2></div>
+  <div class="panel__head"><h2>{{ migration_title or "Migration Preview" }}</h2></div>
   {% if adguard.fetch_errors %}
     <div class="alert error" role="alert">Some AdGuard API endpoints could not be reached: {{ adguard.fetch_errors }}</div>
   {% endif %}
-  <form method="post" action="/import/adguard/apply" data-confirm="Apply the selected groups to BindGuard? This deploys through the normal validated path.">
+  {% if source_path %}
+    <p class="muted">Original source staged for troubleshooting: <span class="mono wrap-anywhere">{{ source_path }}</span>. Staged uploads are retained under BindGuard's import staging directory and can be pruned after troubleshooting.</p>
+  {% endif %}
+  <form method="post" action="/import/migration/apply" data-confirm="Apply the selected groups to BindGuard? This deploys through the normal validated path.">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <input type="hidden" name="translation_json" value='{{ adguard_json }}'>
     <div class="grid compact">
@@ -187,9 +195,35 @@
       <label class="row"><input type="checkbox" name="group_custom_rules" value="1" checked> Custom allow/block rules ({{ adguard.custom_allow|length }} allow, {{ adguard.custom_block|length }} block)</label>
       <label class="row"><input type="checkbox" name="group_rewrites" value="1" checked> DNS rewrites &rarr; Local DNS ({{ adguard.rewrites_as_local_dns|length }})</label>
       <label class="row"><input type="checkbox" name="group_clients" value="1" checked> Persistent clients &rarr; client aliases ({{ adguard.clients_as_aliases|length }})</label>
+      <label class="row"><input type="checkbox" name="group_upstream_resolvers" value="1" checked> Upstream resolvers ({{ adguard.upstream_resolvers|length }})</label>
     </div>
     <div class="form-actions"><button>Apply selected groups</button></div>
   </form>
+
+  {% if migration_summary %}
+    <div class="grid">
+      {{ ui.metric_card("Add", migration_summary.items_to_add|length, "", "New items in selected data", "success") }}
+      {{ ui.metric_card("Update", migration_summary.items_to_update|length, "", "Existing items that would be updated", "warning") }}
+      {{ ui.metric_card("Conflicts", migration_summary.conflicts|length, "", "Requires review before apply", "blocked") }}
+      {{ ui.metric_card("Skipped", migration_summary.skipped|length, "", "Invalid or duplicate source items", "neutral") }}
+    </div>
+    {% for title, items in [
+      ("Items to add", migration_summary.items_to_add),
+      ("Items to update", migration_summary.items_to_update),
+      ("Conflicts", migration_summary.conflicts),
+      ("Skipped", migration_summary.skipped),
+      ("Unsupported", migration_summary.unsupported)
+    ] %}
+      {% if items %}
+        <div class="panel stack">
+          <div class="panel__head"><h2>{{ title }}</h2></div>
+          <ul>
+            {% for item in items[:80] %}<li class="wrap-anywhere">{{ item }}</li>{% endfor %}
+          </ul>
+        </div>
+      {% endif %}
+    {% endfor %}
+  {% endif %}
 
   {% if adguard.allowlist_unsupported %}
     <div class="alert error" role="alert">Allowlist subscriptions cannot be automatically translated (BindGuard has no allowlist-subscription object): {% for a in adguard.allowlist_unsupported %}{{ a.name }} ({{ a.url }}){% if not loop.last %}, {% endif %}{% endfor %}</div>

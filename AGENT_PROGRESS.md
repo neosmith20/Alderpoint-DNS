@@ -360,7 +360,79 @@ Files changed:
 
 Remaining work:
 
-- Package 3: Import and Migration gap audit and any required corrections.
+- Package 3: Import and Migration gap audit and corrections complete
+  (`Expand import migration sources`).
 - Package 4: Installation, upgrades, packaging, and diagnostics.
 - Package 5: BIND Cache Management gap audit and any required corrections.
 - Package 6: external beta and v1.0 hardening.
+
+## Package 3 - Import and Migration Expansion
+
+Started from clean `main` at `1d9c55a` (`Add encrypted DNS listener controls`)
+and preserved existing import, backup, restore, replication, encryption,
+upstream resolver, cache, route, service, certificate, and credential behavior.
+
+Implemented:
+
+- Added staged source retention for imports under
+  `/var/lib/bindguard/imports`, with sanitized filenames, empty-upload
+  rejection, and a 10 MiB upload size limit.
+- Added `import_jobs.source_path` as an idempotent schema migration for
+  row-oriented imports.
+- Added Pi-hole text/list parsing for adlist URLs, allow/block domain lines,
+  plain domain block entries, and hosts-style local DNS rewrites. Unsupported
+  syntax is reported for preview instead of executed.
+- Added BindGuard-native JSON export/import for local DNS records, client
+  aliases, custom allow/block rules, blocklist sources, and managed upstream
+  resolvers.
+- Expanded AdGuard Home migration to translate safe `dns.upstream_dns`
+  entries into managed upstream resolver candidates where BindGuard can model
+  them. Domain-specific upstream routing and unsupported resolver schemes are
+  listed as untranslatable.
+- Added a structured migration summary for add/update/conflict/skipped/
+  unsupported states before apply.
+- Added upstream resolver application for migration imports, including
+  validation and duplicate protocol/address/port/path suppression.
+- Updated the Import page to expose Pi-hole, BindGuard-native JSON import,
+  native JSON export, staged source metadata, upstream resolver group
+  selection, and generalized migration preview text while preserving the
+  existing AdGuard routes.
+
+Files changed:
+
+- `app/importer.py`
+- `app/webapp.py`
+- `web/templates/import_migration.html`
+- `tests/test_importer.py`
+- `tests/test_web_smoke.sh`
+- `CHANGELOG.md`
+- `docs/adguard-parity.md`
+- `docs/database.md`
+- `docs/known-limitations.md`
+- `docs/progress.md`
+- `docs/testing.md`
+- `docs/web.md`
+- `AGENT_PROGRESS.md`
+
+Tests and verification:
+
+- `python3 -m py_compile /opt/bindguard/app/importer.py /opt/bindguard/app/webapp.py`: passed.
+- `python3 -B /opt/bindguard/tests/test_importer.py`: passed, 23 tests.
+- `python3 -B /opt/bindguard/tests/test_upstream_dns.py`: passed, 7 tests.
+- `git diff --check`: passed.
+- Restarted `bindguard`; service returned active.
+- `/opt/bindguard/tests/test_web_smoke.sh`: passed.
+- `/opt/bindguard/tests/test_acceptance.sh`: passed. Expected invalid-RPZ and
+  forced-rollback tracebacks appeared, as did pre-existing backup ResourceWarnings;
+  final result was `BindGuard acceptance suite passed`.
+
+Known limitations:
+
+- Pi-hole import intentionally targets practical text/list exports rather than
+  reading Pi-hole's live gravity database internals.
+- AdGuard domain-specific upstream routing is not imported because BindGuard
+  currently has one shared managed upstream set for non-local queries.
+- Migration-style applies still use the existing deployment path after
+  database writes; source data is backed up before apply and unsupported items
+  are previewed, but a future hardening pass can make the structured migration
+  report persist as its own import job type.

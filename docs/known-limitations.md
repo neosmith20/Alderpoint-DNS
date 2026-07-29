@@ -8,5 +8,9 @@
   material is available.
 - Per-network policy profiles and SafeSearch enforcement are modeled but not
   fully enforced at runtime yet.
-- Local DNS hosts import currently provides preview support for hosts-style
-  input. CSV import is the deployment-capable bulk import path.
+- Import compatibility is intentionally conservative. Pi-hole text/list import
+  covers adlist URLs, plain allow/block domains, and hosts-style local rewrites;
+  unsupported regex/gravity database internals are previewed as skipped or
+  unsupported, not executed. AdGuard domain-specific upstream routing and
+  encrypted upstream schemes that cannot be mapped directly are also reported
+  rather than fabricated.

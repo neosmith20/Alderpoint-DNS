@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 warnings.simplefilter("ignore", ResourceWarning)
 
-from app import importer, local_dns  # noqa: E402
+from app import bindguard_compiler, importer, local_dns, upstream_dns  # noqa: E402
 
 
 class ImporterTest(unittest.TestCase):
@@ -20,10 +20,16 @@ class ImporterTest(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="bindguard-importer-test-"))
         self.old_importer_db_path = importer.DB_PATH
         self.old_local_dns_db_path = local_dns.DB_PATH
+        self.old_upstream_dns_db_path = upstream_dns.DB_PATH
+        self.old_compiler_db_path = bindguard_compiler.DB_PATH
         self.old_backup_script = importer.BACKUP_SCRIPT
+        self.old_upload_dir = importer.IMPORT_UPLOAD_DIR
         importer.DB_PATH = self.tmp / "bindguard.db"
         local_dns.DB_PATH = importer.DB_PATH
+        upstream_dns.DB_PATH = importer.DB_PATH
+        bindguard_compiler.DB_PATH = importer.DB_PATH
         importer.BACKUP_SCRIPT = self.tmp / "no-such-backup-script.sh"
+        importer.IMPORT_UPLOAD_DIR = self.tmp / "imports"
         local_dns.STAGING_DIR = self.tmp / "staging"
         local_dns.BACKUP_DIR = self.tmp / "backups"
         local_dns.COMPILED_DIR = self.tmp / "compiled" / "bind"
@@ -35,12 +41,17 @@ class ImporterTest(unittest.TestCase):
             'acl "bindguard_clients" { localhost; };\nzone "bindguard.rpz" { type primary; file "bindguard.rpz"; };\n'
         )
         local_dns.init_db()
+        upstream_dns.init_db()
+        bindguard_compiler.init_db()
         importer.init_db()
 
     def tearDown(self) -> None:
         importer.DB_PATH = self.old_importer_db_path
         local_dns.DB_PATH = self.old_local_dns_db_path
+        upstream_dns.DB_PATH = self.old_upstream_dns_db_path
+        bindguard_compiler.DB_PATH = self.old_compiler_db_path
         importer.BACKUP_SCRIPT = self.old_backup_script
+        importer.IMPORT_UPLOAD_DIR = self.old_upload_dir
         import shutil
 
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -73,6 +84,30 @@ class ImporterTest(unittest.TestCase):
         rows = importer.parse_bindguard_csv(text)
         self.assertEqual(rows[0]["fqdn"], "x.home.arpa")
         self.assertEqual(rows[0]["target"], "172.16.43.40")
+
+    def test_parse_pihole_text_practical_exports(self) -> None:
+        result = importer.parse_pihole_text(
+            "https://example.invalid/adlist.txt\n"
+            "whitelist safe.example\n"
+            "blacklist bad.example\n"
+            "172.16.43.90 printer\n"
+            "plainblock.example\n"
+            "/regex/[0-9]+/\n",
+            "home.arpa",
+        )
+        self.assertEqual(result["blocklist_sources"][0]["url"], "https://example.invalid/adlist.txt")
+        self.assertIn("safe.example", result["custom_allow"])
+        self.assertIn("bad.example", result["custom_block"])
+        self.assertIn("plainblock.example", result["custom_block"])
+        self.assertEqual(result["rewrites_as_local_dns"][0]["fqdn"], "printer.home.arpa")
+        self.assertEqual(result["unsupported_rules"], ["/regex/[0-9]+/"])
+
+    def test_stage_uploaded_source_sanitizes_name_and_limits_size(self) -> None:
+        path = importer.stage_uploaded_source("../../bad name.txt", b"content")
+        self.assertEqual(path.parent, importer.IMPORT_UPLOAD_DIR)
+        self.assertTrue(path.name.endswith("bad-name.txt"))
+        with self.assertRaises(importer.ImportError_):
+            importer.stage_uploaded_source("too-big.txt", b"x" * (importer.MAX_UPLOAD_BYTES + 1))
 
     # -- column mapping ----------------------------------------------------
 
@@ -198,6 +233,20 @@ class ImporterTest(unittest.TestCase):
         self.assertEqual(result["clients_as_aliases"][0]["cidr_or_ip"], "172.16.43.77")
         self.assertTrue(any("filtering_enabled" in note for note in result["untranslatable"]))
 
+    def test_translate_adguard_upstream_resolvers(self) -> None:
+        text = (
+            "dns:\n"
+            "  bootstrap_dns: ['1.1.1.1']\n"
+            "  upstream_dns:\n"
+            "    - 'https://dns.example/dns-query'\n"
+            "    - '9.9.9.9:53'\n"
+            "    - '[/corp.example/]10.0.0.53'\n"
+        )
+        result = importer.parse_adguard_yaml(text)
+        protocols = {row["protocol"] for row in result["upstream_resolvers"]}
+        self.assertEqual(protocols, {"doh", "plain"})
+        self.assertTrue(any("domain-specific upstream routing" in note for note in result["untranslatable"]))
+
     def test_translate_adguard_ignores_comments_and_cosmetic_rules(self) -> None:
         text = "user_rules:\n  - '! this is a comment'\n  - 'example.com##.ad-banner'\n"
         result = importer.parse_adguard_yaml(text)
@@ -213,7 +262,7 @@ class ImporterTest(unittest.TestCase):
             "clients_as_aliases": [{"display_name": "TestClient", "cidr_or_ip": "172.16.43.61", "all_ids": []}],
         }
         counts = importer.apply_adguard_translation(translation, {"blocklist_sources", "custom_rules", "rewrites", "clients"})
-        self.assertEqual(counts, {"sources": 1, "custom_allow": 1, "custom_block": 1, "local_dns": 1, "aliases": 1})
+        self.assertEqual(counts, {"sources": 1, "custom_allow": 1, "custom_block": 1, "local_dns": 1, "aliases": 1, "upstream_resolvers": 0})
         self.assertEqual(local_dns.alias_for_client("172.16.43.61"), "TestClient")
 
     def test_apply_adguard_translation_respects_group_selection(self) -> None:
@@ -223,6 +272,56 @@ class ImporterTest(unittest.TestCase):
         }
         counts = importer.apply_adguard_translation(translation, set())
         self.assertEqual(counts["sources"], 0)
+
+    def test_apply_adguard_translation_imports_upstream_resolvers(self) -> None:
+        translation = {
+            "blocklist_sources": [],
+            "custom_allow": [],
+            "custom_block": [],
+            "rewrites_as_local_dns": [],
+            "clients_as_aliases": [],
+            "upstream_resolvers": [
+                {"name": "Imported Quad9", "protocol": "plain", "address": "9.9.9.9", "port": 53, "enabled": "1"},
+            ],
+        }
+        counts = importer.apply_adguard_translation(translation, {"upstream_resolvers"})
+        self.assertEqual(counts["upstream_resolvers"], 1)
+        with upstream_dns.connect() as conn:
+            row = conn.execute("SELECT name, protocol, address FROM upstream_resolvers WHERE address='9.9.9.9'").fetchone()
+        self.assertEqual(dict(row), {"name": "Imported Quad9", "protocol": "plain", "address": "9.9.9.9"})
+
+    def test_native_export_parse_round_trip(self) -> None:
+        local_dns.add_record("A", "native.home.arpa", "172.16.43.101", 300, "native", True)
+        with bindguard_compiler.connect() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO custom_rules(domain, action, enabled, comment, created_at) VALUES (?, 'block', 1, 'native', ?)",
+                ("native-block.example", importer.now()),
+            )
+            conn.commit()
+        exported = importer.export_bindguard_native()
+        parsed = importer.parse_bindguard_native_json(exported)
+        self.assertTrue(any(row["fqdn"] == "native.home.arpa" for row in parsed["rewrites_as_local_dns"]))
+        self.assertIn("native-block.example", parsed["custom_block"])
+
+    def test_migration_summary_reports_conflicts_and_existing_items(self) -> None:
+        local_dns.add_record("A", "conflict.home.arpa", "172.16.43.10", 300, "", True)
+        translation = {
+            "blocklist_sources": [{"name": "Existing", "url": "https://example.invalid/list.txt"}],
+            "custom_allow": [],
+            "custom_block": [],
+            "rewrites_as_local_dns": [{"fqdn": "conflict.home.arpa", "record_type": "A", "value": "172.16.43.11"}],
+            "clients_as_aliases": [],
+            "upstream_resolvers": [],
+            "unsupported_rules": ["unsupported syntax"],
+            "untranslatable": [],
+        }
+        with bindguard_compiler.connect() as conn:
+            conn.execute("INSERT INTO sources(name, url) VALUES ('Existing', 'https://old.invalid/list.txt')")
+            conn.commit()
+        summary = importer.summarize_migration(translation, "home.arpa")
+        self.assertTrue(any("blocklist source Existing" in item for item in summary["items_to_update"]))
+        self.assertTrue(any("conflict.home.arpa" in item for item in summary["conflicts"]))
+        self.assertEqual(summary["unsupported"], ["unsupported syntax"])
 
 
 if __name__ == "__main__":

@@ -71,10 +71,14 @@ Encryption tables:
 
 Import table:
 
-- `import_jobs`: one row per upload (spreadsheet/text/AdGuard), storing raw
-  parsed rows, the column mapping, preview counts, the list of inserted
-  `local_dns_records` IDs (used by rollback), a downloadable JSON report, and
-  status (`uploaded`/`previewed`/`applied`/`rolled_back`/`failed`).
+- `import_jobs`: one row per row-oriented upload (CSV/XLSX/hosts/BIND-zone/
+  BindGuard CSV), storing raw parsed rows, the sanitized staged source path,
+  the column mapping, preview counts, the list of inserted `local_dns_records`
+  IDs (used by rollback), a downloadable JSON report, and status
+  (`uploaded`/`previewed`/`applied`/`rolled_back`/`failed`). Migration-style
+  imports such as AdGuard Home, Pi-hole, and BindGuard-native JSON are
+  previewed as structured translations before apply; their original upload is
+  staged under `/var/lib/bindguard/imports` for troubleshooting.
 
 Backup tables:
 

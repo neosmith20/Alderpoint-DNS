@@ -29,11 +29,13 @@ from typing import Any
 
 import yaml
 
-from app import local_dns
+from app import local_dns, upstream_dns
 
 
 DB_PATH = Path("/var/lib/bindguard/bindguard.db")
 BACKUP_SCRIPT = Path("/opt/bindguard/scripts/backup.sh")
+IMPORT_UPLOAD_DIR = Path("/var/lib/bindguard/imports")
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 CANONICAL_FIELDS = [
     "hostname",
@@ -99,6 +101,7 @@ def init_db(conn: sqlite3.Connection | None = None) -> None:
             );
             """
         )
+        _ensure_column(db, "import_jobs", "source_path", "TEXT NOT NULL DEFAULT ''")
         if close:
             db.commit()
     finally:
@@ -109,6 +112,64 @@ def init_db(conn: sqlite3.Connection | None = None) -> None:
 # ---------------------------------------------------------------------------
 # Parsing: CSV / XLSX / hosts / zone
 # ---------------------------------------------------------------------------
+
+def _ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def sanitize_filename(name: str) -> str:
+    candidate = Path(name or "upload").name
+    candidate = re.sub(r"[^A-Za-z0-9._-]+", "-", candidate).strip(".-")
+    return candidate[:160] or "upload"
+
+
+def stage_uploaded_source(filename: str, data: bytes) -> Path:
+    if not data:
+        raise ImportError_("uploaded file is empty")
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise ImportError_(f"uploaded file exceeds {MAX_UPLOAD_BYTES // (1024 * 1024)} MiB limit")
+    IMPORT_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    target = IMPORT_UPLOAD_DIR / f"{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{sanitize_filename(filename)}"
+    target.write_bytes(data)
+    target.chmod(0o640)
+    return target
+
+
+def _init_filter_tables(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS sources (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            url TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            category TEXT NOT NULL DEFAULT 'ads_trackers',
+            last_attempt TEXT,
+            last_success TEXT,
+            http_status INTEGER,
+            downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+            parsed_rules INTEGER NOT NULL DEFAULT 0,
+            accepted_domains INTEGER NOT NULL DEFAULT 0,
+            duplicate_domains INTEGER NOT NULL DEFAULT 0,
+            invalid_rules INTEGER NOT NULL DEFAULT 0,
+            unsupported_rules INTEGER NOT NULL DEFAULT 0,
+            final_active_domains INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT
+        );
+        CREATE TABLE IF NOT EXISTS custom_rules (
+            id INTEGER PRIMARY KEY,
+            domain TEXT NOT NULL,
+            action TEXT NOT NULL CHECK(action IN ('allow', 'block')),
+            enabled INTEGER NOT NULL DEFAULT 1,
+            comment TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            UNIQUE(domain, action)
+        );
+        """
+    )
+
 
 def parse_csv_text(text: str) -> tuple[list[str], list[dict[str, str]]]:
     reader = csv.DictReader(StringIO(text))
@@ -215,6 +276,193 @@ def parse_bindguard_csv(text: str) -> list[dict[str, str]]:
     return out
 
 
+def parse_pihole_text(text: str, default_domain: str) -> dict[str, Any]:
+    """Parse practical Pi-hole exports: adlists.list URLs, whitelist/blacklist
+    domain lists, and custom.list hosts-style local DNS records."""
+    blocklist_sources: list[dict[str, Any]] = []
+    custom_allow: list[str] = []
+    custom_block: list[str] = []
+    rewrites_as_local_dns: list[dict[str, str]] = []
+    unsupported: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        lower = line.lower()
+        if lower.startswith(("http://", "https://")):
+            blocklist_sources.append({"name": sanitize_filename(line.rsplit("/", 1)[-1] or "Pi-hole list"), "url": line, "enabled": True})
+            continue
+        if lower.startswith(("whitelist ", "allow ")):
+            custom_allow.append(line.split(None, 1)[1].strip().strip("."))
+            continue
+        if lower.startswith(("blacklist ", "block ")):
+            custom_block.append(line.split(None, 1)[1].strip().strip("."))
+            continue
+        parts = line.split()
+        if len(parts) >= 2:
+            try:
+                ip = ipaddress.ip_address(parts[0])
+            except ValueError:
+                pass
+            else:
+                for host in parts[1:]:
+                    rewrites_as_local_dns.append({
+                        "fqdn": local_dns.normalize_fqdn(host, default_domain),
+                        "record_type": "A" if isinstance(ip, ipaddress.IPv4Address) else "AAAA",
+                        "value": str(ip),
+                    })
+                continue
+        if re.match(r"^[A-Za-z0-9.-]+$", line):
+            custom_block.append(line.strip("."))
+        else:
+            unsupported.append(line)
+    return {
+        "blocklist_sources": blocklist_sources,
+        "allowlist_unsupported": [],
+        "custom_allow": sorted(set(custom_allow)),
+        "custom_block": sorted(set(custom_block)),
+        "unsupported_rules": unsupported,
+        "rewrites_as_local_dns": rewrites_as_local_dns,
+        "clients_as_aliases": [],
+        "upstream_resolvers": [],
+        "untranslatable": [],
+    }
+
+
+def export_bindguard_native(conn: sqlite3.Connection | None = None) -> str:
+    close = conn is None
+    db = conn or connect()
+    try:
+        local_dns.init_db(db)
+        upstream_dns.init_db(db)
+        _init_filter_tables(db)
+        payload = {
+            "format": "bindguard-native",
+            "version": 1,
+            "created_at": now(),
+            "local_dns_records": [dict(row) for row in db.execute("SELECT fqdn, record_type, value, ttl, comment, enabled FROM local_dns_records ORDER BY fqdn, record_type, value")],
+            "client_aliases": [dict(row) for row in db.execute("SELECT cidr, display_name, description FROM client_aliases ORDER BY cidr")],
+            "custom_rules": [dict(row) for row in db.execute("SELECT domain, action, enabled, comment FROM custom_rules ORDER BY domain, action")],
+            "blocklist_sources": [dict(row) for row in db.execute("SELECT name, url, enabled, category FROM sources ORDER BY name")],
+            "upstream_resolvers": [
+                {
+                    key: row[key]
+                    for key in ("name", "protocol", "address", "port", "doh_path", "tls_hostname", "bootstrap_ips", "enabled", "position")
+                    if key in row.keys()
+                }
+                for row in db.execute("SELECT name, protocol, address, port, doh_path, tls_hostname, bootstrap_ips, enabled, position FROM upstream_resolvers ORDER BY position, id")
+            ],
+        }
+        return json.dumps(payload, indent=2)
+    finally:
+        if close:
+            db.close()
+
+
+def parse_bindguard_native_json(text: str) -> dict[str, Any]:
+    data = json.loads(text)
+    if not isinstance(data, dict) or data.get("format") != "bindguard-native":
+        raise ImportError_("not a BindGuard native JSON export")
+    local_records = []
+    for row in data.get("local_dns_records", []):
+        if isinstance(row, dict):
+            local_records.append({"fqdn": row.get("fqdn", ""), "record_type": row.get("record_type", ""), "value": row.get("value", ""), "ttl": row.get("ttl", 300)})
+    return {
+        "blocklist_sources": [row for row in data.get("blocklist_sources", []) if isinstance(row, dict)],
+        "allowlist_unsupported": [],
+        "custom_allow": sorted({row.get("domain", "") for row in data.get("custom_rules", []) if isinstance(row, dict) and row.get("action") == "allow"}),
+        "custom_block": sorted({row.get("domain", "") for row in data.get("custom_rules", []) if isinstance(row, dict) and row.get("action") == "block"}),
+        "unsupported_rules": [],
+        "rewrites_as_local_dns": local_records,
+        "clients_as_aliases": [
+            {"display_name": row.get("display_name", ""), "cidr_or_ip": row.get("cidr", ""), "all_ids": []}
+            for row in data.get("client_aliases", [])
+            if isinstance(row, dict)
+        ],
+        "upstream_resolvers": [row for row in data.get("upstream_resolvers", []) if isinstance(row, dict)],
+        "untranslatable": [],
+    }
+
+
+def summarize_migration(translation: dict[str, Any], default_domain: str | None = None) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "items_to_add": [],
+        "items_to_update": [],
+        "conflicts": [],
+        "unsupported": list(translation.get("unsupported_rules", [])) + list(translation.get("untranslatable", [])),
+        "skipped": [],
+        "warnings": [],
+    }
+    with connect() as conn:
+        local_dns.init_db(conn)
+        upstream_dns.init_db(conn)
+        _init_filter_tables(conn)
+        cfg = local_dns.settings(conn)
+        domain = default_domain or cfg.get("internal_domain", local_dns.DEFAULT_DOMAIN)
+        existing_sources = {
+            row["name"]: row
+            for row in conn.execute("SELECT name, url FROM sources")
+        }
+        for source in translation.get("blocklist_sources", []):
+            name = str(source.get("name", "")).strip()
+            url = str(source.get("url", "")).strip()
+            if not name or not url:
+                summary["skipped"].append(f"blocklist source missing name or URL: {source}")
+            elif name in existing_sources:
+                summary["items_to_update"].append(f"blocklist source {name}")
+            else:
+                summary["items_to_add"].append(f"blocklist source {name}")
+        for action, domains in (("allow", translation.get("custom_allow", [])), ("block", translation.get("custom_block", []))):
+            for value in domains:
+                name = str(value).strip().strip(".")
+                if not name:
+                    continue
+                exists = conn.execute("SELECT 1 FROM custom_rules WHERE domain=? AND action=?", (name, action)).fetchone()
+                summary["items_to_update" if exists else "items_to_add"].append(f"{action} rule {name}")
+        seen_records: set[tuple[str, str, str]] = set()
+        for rewrite in translation.get("rewrites_as_local_dns", []):
+            try:
+                fqdn = local_dns.normalize_fqdn(str(rewrite.get("fqdn", "")), domain)
+                rtype, fqdn, value, _ttl = local_dns.validate_record(
+                    str(rewrite.get("record_type", "")),
+                    fqdn,
+                    str(rewrite.get("value", "")),
+                    str(rewrite.get("ttl", "300")),
+                )
+                key = (fqdn, rtype, value)
+                if key in seen_records:
+                    summary["skipped"].append(f"duplicate local DNS record in import: {fqdn} {rtype} {value}")
+                    continue
+                seen_records.add(key)
+                warnings = local_dns.record_warnings(conn, fqdn, rtype, value)
+                if warnings:
+                    summary["conflicts"].append(f"{fqdn} {rtype}: {'; '.join(warnings)}")
+                else:
+                    summary["items_to_add"].append(f"local DNS {fqdn} {rtype}")
+            except Exception as exc:
+                summary["skipped"].append(f"invalid local DNS rewrite {rewrite}: {exc}")
+        existing_resolvers = {
+            (row["protocol"], row["address"], int(row["port"]), row["doh_path"] or "")
+            for row in conn.execute("SELECT protocol, address, port, doh_path FROM upstream_resolvers")
+        }
+        seen_resolvers: set[tuple[str, str, int, str]] = set()
+        for resolver in translation.get("upstream_resolvers", []):
+            try:
+                data = upstream_dns.validate_resolver({**resolver, "enabled": resolver.get("enabled", "1")}, require_enabled_set=True)
+                key = (data["protocol"], data["address"], int(data["port"]), data["doh_path"] or "")
+                label = f"upstream {data['name']} ({data['protocol']} {data['address']}:{data['port']})"
+                if key in seen_resolvers:
+                    summary["skipped"].append(f"duplicate upstream resolver in import: {label}")
+                elif key in existing_resolvers:
+                    summary["conflicts"].append(f"upstream resolver already exists: {label}")
+                else:
+                    summary["items_to_add"].append(label)
+                seen_resolvers.add(key)
+            except Exception as exc:
+                summary["skipped"].append(f"invalid upstream resolver {resolver}: {exc}")
+    return summary
+
+
 # ---------------------------------------------------------------------------
 # Column mapping
 # ---------------------------------------------------------------------------
@@ -267,15 +515,15 @@ def apply_column_map(raw_rows: list[dict[str, str]], column_map: dict[str, str])
 # Jobs
 # ---------------------------------------------------------------------------
 
-def create_job(source_type: str, source_name: str, headers: list[str], raw_rows: list[dict[str, str]]) -> int:
+def create_job(source_type: str, source_name: str, headers: list[str], raw_rows: list[dict[str, str]], source_path: str = "") -> int:
     with connect() as conn:
         init_db(conn)
         cursor = conn.execute(
             """
-            INSERT INTO import_jobs(created_at, source_type, source_name, headers_json, raw_rows_json, status, total_rows)
-            VALUES (?, ?, ?, ?, ?, 'uploaded', ?)
+            INSERT INTO import_jobs(created_at, source_type, source_name, headers_json, raw_rows_json, source_path, status, total_rows)
+            VALUES (?, ?, ?, ?, ?, ?, 'uploaded', ?)
             """,
-            (now(), source_type, source_name, json.dumps(headers), json.dumps(raw_rows), len(raw_rows)),
+            (now(), source_type, source_name, json.dumps(headers), json.dumps(raw_rows), source_path, len(raw_rows)),
         )
         conn.commit()
         return cursor.lastrowid
@@ -530,6 +778,12 @@ def _translate_adguard_config(data: dict[str, Any]) -> dict[str, Any]:
     clients_block = data.get("clients") if isinstance(data.get("clients"), dict) else {}
     persistent_clients = clients_block.get("persistent") or []
     dns_block = data.get("dns") if isinstance(data.get("dns"), dict) else {}
+    bootstrap_ips = []
+    for raw in dns_block.get("bootstrap_dns", []) or []:
+        try:
+            bootstrap_ips.append(str(ipaddress.ip_address(str(raw).strip())))
+        except ValueError:
+            continue
 
     blocklist_sources = []
     for entry in filters:
@@ -597,8 +851,13 @@ def _translate_adguard_config(data: dict[str, Any]) -> dict[str, Any]:
                 untranslatable_client_settings.append(f"{name or cidr_or_ip}: {feature} has no BindGuard per-client equivalent yet (schema exists, not enforced at runtime)")
 
     untranslatable = list(untranslatable_client_settings)
-    if dns_block.get("upstream_dns"):
-        untranslatable.append("dns.upstream_dns: BIND's forwarders list is a static packaging setting, not yet admin-editable")
+    upstream_resolvers = []
+    for index, raw_upstream in enumerate(dns_block.get("upstream_dns", []) or [], start=1):
+        parsed = _translate_upstream_resolver(str(raw_upstream), index, bootstrap_ips)
+        if parsed.get("unsupported"):
+            untranslatable.append(parsed["unsupported"])
+        else:
+            upstream_resolvers.append(parsed)
     if filtering.get("safe_search", {}).get("enabled") if isinstance(filtering.get("safe_search"), dict) else False:
         untranslatable.append("filtering.safe_search: SafeSearch enforcement is not implemented in BindGuard")
     if filtering.get("blocked_services", {}).get("ids") if isinstance(filtering.get("blocked_services"), dict) else False:
@@ -612,8 +871,34 @@ def _translate_adguard_config(data: dict[str, Any]) -> dict[str, Any]:
         "unsupported_rules": unsupported_rules,
         "rewrites_as_local_dns": rewrites_as_local_dns,
         "clients_as_aliases": clients_as_aliases,
+        "upstream_resolvers": upstream_resolvers,
         "untranslatable": untranslatable,
     }
+
+
+def _translate_upstream_resolver(value: str, index: int, bootstrap_ips: list[str]) -> dict[str, Any]:
+    raw = value.strip()
+    if not raw:
+        return {"unsupported": "empty upstream resolver entry"}
+    if raw.startswith("[/"):
+        return {"unsupported": f"{raw}: domain-specific upstream routing is not implemented"}
+    try:
+        data = upstream_dns.validate_resolver({"name": f"Imported upstream {index}", "protocol": "doh", "address": raw, "bootstrap_ips": ", ".join(bootstrap_ips), "enabled": "1"})
+        return data
+    except Exception:
+        pass
+    lowered = raw.lower()
+    if lowered.startswith(("tls://", "sdns://", "quic://", "h3://")):
+        return {"unsupported": f"{raw}: upstream scheme is not directly importable yet"}
+    host = raw
+    port = ""
+    if ":" in raw and raw.count(":") == 1:
+        host, port = raw.rsplit(":", 1)
+    try:
+        data = upstream_dns.validate_resolver({"name": f"Imported upstream {index}", "protocol": "plain", "address": host.strip("[]"), "port": port or "53", "enabled": "1"})
+        return data
+    except Exception as exc:
+        return {"unsupported": f"{raw}: {exc}"}
 
 
 def _looks_like_ip_or_cidr(value: str) -> bool:
@@ -627,9 +912,11 @@ def _looks_like_ip_or_cidr(value: str) -> bool:
 def apply_adguard_translation(translation: dict[str, Any], groups: set[str]) -> dict[str, int]:
     from app import bindguard_compiler
 
-    counts = {"sources": 0, "custom_allow": 0, "custom_block": 0, "local_dns": 0, "aliases": 0}
+    create_pre_import_backup()
+    counts = {"sources": 0, "custom_allow": 0, "custom_block": 0, "local_dns": 0, "aliases": 0, "upstream_resolvers": 0}
     with bindguard_compiler.connect() as conn:
-        bindguard_compiler.init_db()
+        _init_filter_tables(conn)
+        upstream_dns.init_db(conn)
         if "blocklist_sources" in groups:
             for source in translation.get("blocklist_sources", []):
                 if not source.get("url"):
@@ -655,6 +942,8 @@ def apply_adguard_translation(translation: dict[str, Any], groups: set[str]) -> 
                     (domain, now()),
                 )
                 counts["custom_block"] += 1
+        if "upstream_resolvers" in groups:
+            counts["upstream_resolvers"] += _insert_upstream_resolvers(conn, translation.get("upstream_resolvers", []))
         conn.commit()
     if "rewrites" in groups:
         for rewrite in translation.get("rewrites_as_local_dns", []):
@@ -671,3 +960,35 @@ def apply_adguard_translation(translation: dict[str, Any], groups: set[str]) -> 
             except Exception:
                 continue
     return counts
+
+
+def _insert_upstream_resolvers(conn: sqlite3.Connection, resolvers: list[dict[str, Any]]) -> int:
+    count = 0
+    existing = {
+        (row["protocol"], row["address"], int(row["port"]), row["doh_path"] or "")
+        for row in conn.execute("SELECT protocol, address, port, doh_path FROM upstream_resolvers")
+    }
+    for resolver in resolvers:
+        try:
+            data = upstream_dns.validate_resolver({**resolver, "enabled": resolver.get("enabled", "1")}, require_enabled_set=True)
+        except Exception:
+            continue
+        key = (data["protocol"], data["address"], int(data["port"]), data["doh_path"] or "")
+        if key in existing:
+            continue
+        pos = conn.execute("SELECT coalesce(max(position), 0) + 1 AS pos FROM upstream_resolvers").fetchone()["pos"]
+        ts = now()
+        conn.execute(
+            """
+            INSERT INTO upstream_resolvers(name, protocol, address, port, doh_path, tls_hostname, bootstrap_ips, enabled, position, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (data["name"], data["protocol"], data["address"], data["port"], data["doh_path"], data["tls_hostname"], data["bootstrap_ips"], int(data["enabled"]), pos, ts, ts),
+        )
+        count += 1
+        existing.add(key)
+    return count
+
+
+def apply_native_translation(translation: dict[str, Any], groups: set[str]) -> dict[str, int]:
+    return apply_adguard_translation(translation, groups)

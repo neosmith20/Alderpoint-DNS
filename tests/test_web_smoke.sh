@@ -416,11 +416,15 @@ import_adguard_html = TEMPLATES.get_template("import_migration.html").render(
         "unsupported_rules": ["example.com##.ad"],
         "rewrites_as_local_dns": [{"fqdn": long_domain, "record_type": "A", "value": "172.16.43.12"}],
         "clients_as_aliases": [{"display_name": "Phone", "cidr_or_ip": "172.16.43.77", "all_ids": []}],
+        "upstream_resolvers": [{"name": "Imported upstream", "protocol": "plain", "address": "9.9.9.9", "port": 53}],
         "untranslatable": ["safe_search: not implemented"],
     },
     adguard_json="{}",
+    migration_summary={"items_to_add": ["upstream Imported upstream"], "items_to_update": [], "conflicts": [], "skipped": [], "unsupported": ["safe_search: not implemented"]},
+    migration_title="AdGuard Home Migration Preview",
+    source_path="/var/lib/bindguard/imports/AdGuardHome.yaml",
 )
-for expected in ("AdGuard Home Migration Preview", "Settings With No BindGuard Equivalent", long_upstream):
+for expected in ("AdGuard Home Migration Preview", "Settings With No BindGuard Equivalent", "Upstream resolvers", "Items to add", long_upstream):
     if expected not in import_adguard_html:
         raise SystemExit(f"import adguard preview page missing {expected}")
 

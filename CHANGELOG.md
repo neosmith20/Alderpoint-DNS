@@ -27,5 +27,9 @@
   historical resolver snapshots.
 - Added configurable client DNS listener IPv4/IPv6 addresses for Encryption
   Settings, with deployment validation and wildcard-listener warnings.
+- Expanded Import and Migration with Pi-hole text/list parsing, AdGuard
+  upstream resolver translation, BindGuard-native JSON export/import, staged
+  upload retention metadata, and migration summaries that surface adds,
+  updates, conflicts, skipped items, and unsupported source features.
 - Made the top-right service status badge a global authenticated-shell
   component with a lightweight `/status/summary` refresh endpoint.

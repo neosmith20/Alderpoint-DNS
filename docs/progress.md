@@ -552,6 +552,30 @@ were needed for this milestone.
   round-tripping, and AdGuard YAML translation including the
   comment/cosmetic-rule exclusion and the untranslatable-settings list.
 
+Follow-up migration expansion completed the broader import package:
+
+- Uploads are staged under `/var/lib/bindguard/imports` with sanitized
+  filenames and a 10 MiB limit so original sources are available for
+  troubleshooting without executing imported content.
+- Pi-hole text/list import now handles adlist URLs, `whitelist`/`allow` and
+  `blacklist`/`block` domain lines, plain domain block entries, and hosts-style
+  local DNS rewrites. Unsupported syntax is shown as skipped/unsupported.
+- AdGuard Home `dns.upstream_dns` entries are translated where BindGuard can
+  represent them safely: plain UDP/TCP-style upstreams and DoH URLs with
+  bootstrap IPs become managed upstream resolver candidates. Domain-specific
+  routing and unsupported encrypted upstream schemes are reported instead of
+  fabricated.
+- BindGuard-native JSON export/import provides a practical round-trip format
+  for local DNS, client aliases, custom rules, blocklist sources, and managed
+  upstream resolvers.
+- The migration preview now summarizes items to add, items to update,
+  conflicts, skipped entries, and unsupported source features before apply.
+  Upstream resolver application avoids inserting duplicate protocol/address/
+  port/path entries.
+- `tests/test_importer.py` now has 23 tests covering Pi-hole parsing, staged
+  upload safety, AdGuard upstream translation, upstream resolver import,
+  BindGuard-native export/import round-trip, and migration summaries.
+
 ## Verified Backup and Restore milestone
 
 `app/backup.py` adds a dedicated Backup and Restore page (`/backup`)

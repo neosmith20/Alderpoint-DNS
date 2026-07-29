@@ -110,15 +110,19 @@ real per-protocol queries (`dig` for plain, `dnspython`'s
 through the actual deploy path, not just mocked unit tests.
 
 The Import and Migration suite (`tests/test_importer.py`) covers CSV/hosts/
-zone/BindGuard-CSV parsing, column-mapping auto-detection, preview
-classification (valid/invalid/duplicate/conflict) against a real Local DNS
-database, all three conflict policies (skip/merge/replace, each verified to
-do exactly what it claims and never silently overwrite an existing record),
-apply-then-rollback round-tripping, and AdGuard Home YAML translation
-(blocklist sources, custom allow/block rules, rewrites, client aliases, and
-the untranslatable/unsupported lists). Live verification imported real
-records through the actual privileged deploy path and confirmed they
-resolved from both BIND and dnsdist before rolling back.
+zone/BindGuard-CSV parsing, Pi-hole text/list parsing, BindGuard-native JSON
+export/import round-tripping, upload filename sanitization and size limits,
+column-mapping auto-detection, preview classification
+(valid/invalid/duplicate/conflict) against a real Local DNS database, all
+three conflict policies (skip/merge/replace, each verified to do exactly what
+it claims and never silently overwrite an existing record), apply-then-
+rollback round-tripping, AdGuard Home YAML translation (blocklist sources,
+custom allow/block rules, rewrites, client aliases, upstream resolvers, and
+the untranslatable/unsupported lists), and structured migration summaries for
+adds, updates, conflicts, skipped entries, and unsupported source features.
+Live verification imported real records through the actual privileged deploy
+path and confirmed they resolved from both BIND and dnsdist before rolling
+back.
 
 The Backup and Restore suite (`tests/test_backup.py`) covers the real SQLite
 online-backup mechanism (including under concurrent writes and correct
