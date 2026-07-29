@@ -94,6 +94,7 @@ a:hover { text-decoration: underline; }
 }
 
 .app-nav a,
+.nav-group__summary,
 .app-nav button,
 .button,
 button {
@@ -114,8 +115,64 @@ button {
   white-space: nowrap;
 }
 
+.nav-link--primary { font-weight: 700; }
+
+.nav-group {
+  position: relative;
+  min-width: 0;
+}
+
+.nav-group__summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  list-style: none;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.nav-group__summary::-webkit-details-marker { display: none; }
+
+.nav-group__summary::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-right: 1.8px solid currentColor;
+  border-bottom: 1.8px solid currentColor;
+  transform: translateY(-2px) rotate(45deg);
+  transition: transform 0.14s ease;
+}
+
+.nav-group[open] .nav-group__summary::after {
+  transform: translateY(2px) rotate(225deg);
+}
+
+.nav-group__menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 30;
+  display: grid;
+  gap: 2px;
+  min-width: 210px;
+  max-width: min(280px, calc(100vw - 28px));
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-elevated);
+  box-shadow: var(--shadow);
+}
+
+.nav-group__menu a {
+  width: 100%;
+  min-width: 0;
+}
+
 .app-nav a:hover,
-.app-nav a[aria-current="page"] {
+.app-nav a[aria-current="page"],
+.nav-group__summary:hover,
+.nav-group__summary[aria-current="true"] {
   color: var(--text);
   background: rgba(255, 255, 255, 0.06);
   text-decoration: none;
@@ -638,7 +695,8 @@ pre {
 @media (max-width: 1024px) {
   .dashboard-grid { grid-template-columns: 1fr; }
   .app-topbar { align-items: flex-start; }
-  .app-nav { order: 3; width: 100%; overflow-x: auto; padding-bottom: 2px; }
+  .app-nav { order: 3; width: 100%; overflow: visible; padding-bottom: 2px; }
+  .nav-group__menu { right: 0; left: auto; }
 }
 
 @media (max-width: 700px) {
@@ -652,7 +710,16 @@ pre {
     overflow: visible;
   }
   .app-topbar.nav-open .app-nav { display: flex; }
-  .app-nav a { width: 100%; }
+  .app-nav a,
+  .nav-group__summary { width: 100%; }
+  .nav-group__menu {
+    position: static;
+    max-width: none;
+    width: 100%;
+    margin: 4px 0 6px;
+    box-shadow: none;
+    background: #0b1828;
+  }
   .account-menu { order: 2; flex: 1 0 100%; width: 100%; justify-content: space-between; margin-left: 0; }
   .panel__head { align-items: flex-start; flex-direction: column; }
   .panel__head .actions,

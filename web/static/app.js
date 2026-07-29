@@ -8,6 +8,26 @@
     });
   }
 
+  const navGroups = document.querySelectorAll('.nav-group');
+  if (navGroups.length) {
+    const closeOtherGroups = (activeGroup) => {
+      navGroups.forEach((group) => {
+        if (group !== activeGroup && window.matchMedia('(min-width: 701px)').matches) group.open = false;
+      });
+    };
+    navGroups.forEach((group) => {
+      group.addEventListener('toggle', () => {
+        if (group.open) closeOtherGroups(group);
+      });
+    });
+    document.addEventListener('click', (event) => {
+      if (!event.target.closest('.app-nav')) navGroups.forEach((group) => { group.open = false; });
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') navGroups.forEach((group) => { group.open = false; });
+    });
+  }
+
   const rangeLinks = document.querySelectorAll('[data-range-link]');
   if (rangeLinks.length) {
     const params = new URLSearchParams(window.location.search);

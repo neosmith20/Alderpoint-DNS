@@ -12,6 +12,10 @@ ss -ltnup | grep -Eq '(^|[[:space:]])(0[.]0[.]0[.]0|\*):3000' || fail "bindguard
 setup_response="$(curl --silent --show-error --include --max-time 5 http://127.0.0.1:3000/setup)"
 printf '%s' "$setup_response" | grep -Eq 'Initial administrator setup|303 See Other' || fail "setup page missing or setup redirect invalid"
 curl --silent --show-error --include --max-time 5 http://127.0.0.1:3000/ | grep -q '303 See Other' || fail "unauthenticated dashboard did not redirect"
+for protected_path in /query-log /custom-rules /blocklists /local-dns /dns-settings /dns-cache /encryption /import /backup /replication /statistics-settings /system
+do
+  curl --silent --show-error --include --max-time 5 "http://127.0.0.1:3000${protected_path}" | grep -q '303 See Other' || fail "unauthenticated ${protected_path} did not redirect"
+done
 runuser -u bindguard -- sudo -n /opt/bindguard/app/bindguard_compiler.py update-sources | grep -q 'active_domains=' || fail "bindguard sudo helper failed"
 python3 -B - <<'PY' || fail "web interface layout and analytics checks failed"
 import sys
@@ -39,6 +43,9 @@ required_css = [
     "--blocked:",
     "@media (max-width: 700px)",
     ".mobile-nav-toggle",
+    ".nav-group",
+    ".nav-group__summary",
+    ".nav-group__menu",
     ".status-badge",
 ]
 missing = [rule for rule in required_css if rule not in template + css]
@@ -50,6 +57,12 @@ if "/static/app.css" not in template or "/static/app.js" not in template:
     raise SystemExit("local static assets are not referenced")
 if "data-nav-toggle" not in template or "appNav" not in template:
     raise SystemExit("mobile navigation hooks are missing")
+for nav_hook in ("data-nav-section=\"dns\"", "data-nav-section=\"security\"", "data-nav-section=\"operations\"", "data-nav-section=\"system\""):
+    if nav_hook not in template:
+        raise SystemExit(f"grouped navigation hook missing: {nav_hook}")
+for js_hook in ("document.addEventListener('keydown'", "event.key === 'Escape'", "closest('.app-nav')", "matchMedia('(min-width: 701px)'"):
+    if js_hook not in js:
+        raise SystemExit(f"keyboard/click navigation behavior missing: {js_hook}")
 if "queryChart" not in template or 'data-chart="traffic"' not in template:
     raise SystemExit("dashboard chart hooks are missing")
 if "analytics/chart-data" not in Path("/opt/bindguard/app/webapp.py").read_text():
@@ -121,6 +134,9 @@ base = {
     "csrf": "smoke",
     "protection": {"label": "Active", "tone": "healthy"},
 }
+def page_base(path):
+    return {**base, "request": SimpleNamespace(url=SimpleNamespace(path=path), query_params={})}
+
 context = {
     **base,
     "allowed_clients": [
@@ -194,9 +210,40 @@ if "DNS Query Volume" not in dashboard or "queryChart" not in dashboard:
 for expected in ("Protection Active", "Disable protection", "Top Upstream Resolvers", "BIND Cache Effectiveness", "80.0", long_domain, long_client):
     if expected not in dashboard:
         raise SystemExit(f"dashboard missing {expected}")
+for expected in (
+    'class="nav-link nav-link--primary" href="/" aria-current="page"',
+    'data-nav-section="dns"',
+    'data-nav-section="security"',
+    'data-nav-section="operations"',
+    'data-nav-section="system"',
+    '>Dashboard</a>',
+    '>DNS</summary>',
+    '>Security</summary>',
+    '>Operations</summary>',
+    '>System</summary>',
+):
+    if expected not in dashboard:
+        raise SystemExit(f"grouped dashboard navigation missing {expected}")
+for href in (
+    'href="/"',
+    'href="/query-log"',
+    'href="/custom-rules"',
+    'href="/blocklists"',
+    'href="/local-dns"',
+    'href="/dns-settings"',
+    'href="/dns-cache"',
+    'href="/encryption"',
+    'href="/import"',
+    'href="/backup"',
+    'href="/replication"',
+    'href="/statistics-settings"',
+    'href="/system"',
+):
+    if href not in dashboard:
+        raise SystemExit(f"navigation href missing: {href}")
 
 query_log = TEMPLATES.get_template("query_log.html").render(
-    **base,
+    **page_base("/query-log"),
     log={
         "rows": [],
         "total": 0,
@@ -207,9 +254,11 @@ query_log = TEMPLATES.get_template("query_log.html").render(
 )
 if "No query events match" not in query_log or "Auto-refresh" not in query_log or "Reset" not in query_log:
     raise SystemExit("query log empty state did not render")
+if 'data-nav-section="dns" open' not in query_log or '>DNS</summary>' not in query_log or 'href="/query-log" aria-current="page"' not in query_log:
+    raise SystemExit("query log navigation does not mark the active DNS section and page")
 
 local_dns = TEMPLATES.get_template("local_dns.html").render(
-    **base,
+    **page_base("/local-dns"),
     settings={"internal_domain": "home.arpa", "default_ttl": "300", "server_hostname": "bindguard", "server_ip": "172.16.43.101"},
     records=[{
         "id": 1,
@@ -243,7 +292,7 @@ for expected in ("Local DNS", "home.arpa", "Add Host", "Advanced Record", "Autom
         raise SystemExit(f"local DNS page missing {expected}")
 
 dns_cache_html = TEMPLATES.get_template("dns_cache.html").render(
-    **base,
+    **page_base("/dns-cache"),
     error=None,
     cache={
         "max_cache_size_mb": "490", "min_cache_ttl": "0", "max_cache_ttl": "604800",
@@ -261,7 +310,7 @@ for expected in ("Cache Tuning", "Flush Cache", "71.5", "max-cache-size=490m", l
         raise SystemExit(f"cache page missing {expected}")
 
 encryption_html = TEMPLATES.get_template("encryption.html").render(
-    **base,
+    **page_base("/encryption"),
     error=None,
     cfg={
         "server_hostname": "bindguard.local", "bootstrap_ip": "172.16.43.101",
@@ -283,11 +332,15 @@ encryption_html = TEMPLATES.get_template("encryption.html").render(
 for expected in ("Protocols", "Client Connection Information", "Self-signed certificate", "Upload certificate and key", long_domain, "data-async-form"):
     if expected not in encryption_html:
         raise SystemExit(f"encryption page missing {expected}")
+if 'data-nav-section="security" open' not in encryption_html or 'href="/encryption" aria-current="page"' not in encryption_html:
+    raise SystemExit("encryption navigation does not mark the active Security section and page")
 
-import_base_html = TEMPLATES.get_template("import_migration.html").render(**base, error=None, jobs=[{"id": 1, "created_at": "2026-07-29T00:00:00Z", "source_type": "csv", "source_name": long_domain, "status": "applied", "valid_rows": 3, "applied_rows": 3}], job=None, preview=None, adguard=None)
+import_base_html = TEMPLATES.get_template("import_migration.html").render(**page_base("/import"), error=None, jobs=[{"id": 1, "created_at": "2026-07-29T00:00:00Z", "source_type": "csv", "source_name": long_domain, "status": "applied", "valid_rows": 3, "applied_rows": 3}], job=None, preview=None, adguard=None)
 for expected in ("Spreadsheet / Text Import", "AdGuard Home Migration", "Column Mapping Reference", long_domain):
     if expected not in import_base_html:
         raise SystemExit(f"import page missing {expected}")
+if 'data-nav-section="operations" open' not in import_base_html or 'href="/import" aria-current="page"' not in import_base_html:
+    raise SystemExit("import navigation does not mark the active Operations section and page")
 
 import_job_html = TEMPLATES.get_template("import_migration.html").render(
     **base, error=None, jobs=[],
@@ -347,6 +400,10 @@ setup_html = TEMPLATES.get_template("setup.html").render(**{**base, "admin": Non
 for expected in ("Create BindGuard local DNS records", "172.16.43.101", "bindguard.home.arpa"):
     if expected not in setup_html:
         raise SystemExit(f"setup local DNS option missing {expected}")
+login_html = TEMPLATES.get_template("login.html").render(**{**base, "admin": None}, error=None)
+for public_html, name in ((setup_html, "setup"), (login_html, "login")):
+    if "app-nav" in public_html or "data-nav-section" in public_html:
+        raise SystemExit(f"{name} page renders protected navigation while logged out")
 
 for name, rendered in {
     "blocklists": TEMPLATES.get_template("blocklists.html").render(**base, sources=[{

@@ -21,20 +21,45 @@
           <span>BindGuard</span>
         </a>
         <button class="mobile-nav-toggle secondary" type="button" data-nav-toggle aria-controls="appNav" aria-expanded="false">Menu</button>
+        {% set path = request.url.path %}
+        {% set dns_active = path in ["/query-log", "/local-dns", "/dns-settings", "/dns-cache"] %}
+        {% set security_active = path in ["/custom-rules", "/blocklists"] or path.startswith("/encryption") %}
+        {% set operations_active = path.startswith("/import") or path.startswith("/backup") or path == "/replication" %}
+        {% set system_active = path.startswith("/statistics-settings") or path == "/system" %}
         <nav class="app-nav" id="appNav" aria-label="Primary navigation">
-          <a href="/" {{ 'aria-current="page"' if request.url.path == "/" else "" }}>Dashboard</a>
-          <a href="/query-log" {{ 'aria-current="page"' if request.url.path == "/query-log" else "" }}>Query Log</a>
-          <a href="/custom-rules" {{ 'aria-current="page"' if request.url.path == "/custom-rules" else "" }}>Filters</a>
-          <a href="/blocklists" {{ 'aria-current="page"' if request.url.path == "/blocklists" else "" }}>Blocklists</a>
-          <a href="/local-dns" {{ 'aria-current="page"' if request.url.path == "/local-dns" else "" }}>Local DNS</a>
-          <a href="/dns-settings" {{ 'aria-current="page"' if request.url.path == "/dns-settings" else "" }}>DNS Settings</a>
-          <a href="/dns-cache" {{ 'aria-current="page"' if request.url.path == "/dns-cache" else "" }}>Cache</a>
-          <a href="/encryption" {{ 'aria-current="page"' if request.url.path == "/encryption" else "" }}>Encryption</a>
-          <a href="/import" {{ 'aria-current="page"' if request.url.path.startswith("/import") else "" }}>Import</a>
-          <a href="/backup" {{ 'aria-current="page"' if request.url.path == "/backup" else "" }}>Backup</a>
-          <a href="/replication" {{ 'aria-current="page"' if request.url.path == "/replication" else "" }}>Replication</a>
-          <a href="/statistics-settings" {{ 'aria-current="page"' if request.url.path == "/statistics-settings" else "" }}>Statistics</a>
-          <a href="/system" {{ 'aria-current="page"' if request.url.path == "/system" else "" }}>System</a>
+          <a class="nav-link nav-link--primary" href="/" {% if path == "/" %}aria-current="page"{% endif %}>Dashboard</a>
+          <details class="nav-group" data-nav-section="dns" {{ "open" if dns_active else "" }}>
+            <summary class="nav-group__summary" {% if dns_active %}aria-current="true"{% endif %}>DNS</summary>
+            <div class="nav-group__menu">
+              <a href="/query-log" {% if path == "/query-log" %}aria-current="page"{% endif %}>Query Log</a>
+              <a href="/local-dns" {% if path == "/local-dns" %}aria-current="page"{% endif %}>Local DNS</a>
+              <a href="/dns-settings" {% if path == "/dns-settings" %}aria-current="page"{% endif %}>DNS Settings</a>
+              <a href="/dns-cache" {% if path == "/dns-cache" %}aria-current="page"{% endif %}>Cache</a>
+            </div>
+          </details>
+          <details class="nav-group" data-nav-section="security" {{ "open" if security_active else "" }}>
+            <summary class="nav-group__summary" {% if security_active %}aria-current="true"{% endif %}>Security</summary>
+            <div class="nav-group__menu">
+              <a href="/custom-rules" {% if path == "/custom-rules" %}aria-current="page"{% endif %}>Filters</a>
+              <a href="/blocklists" {% if path == "/blocklists" %}aria-current="page"{% endif %}>Blocklists</a>
+              <a href="/encryption" {% if path.startswith("/encryption") %}aria-current="page"{% endif %}>Encryption</a>
+            </div>
+          </details>
+          <details class="nav-group" data-nav-section="operations" {{ "open" if operations_active else "" }}>
+            <summary class="nav-group__summary" {% if operations_active %}aria-current="true"{% endif %}>Operations</summary>
+            <div class="nav-group__menu">
+              <a href="/import" {% if path.startswith("/import") %}aria-current="page"{% endif %}>Import</a>
+              <a href="/backup" {% if path.startswith("/backup") %}aria-current="page"{% endif %}>Backup</a>
+              <a href="/replication" {% if path == "/replication" %}aria-current="page"{% endif %}>Replication</a>
+            </div>
+          </details>
+          <details class="nav-group" data-nav-section="system" {{ "open" if system_active else "" }}>
+            <summary class="nav-group__summary" {% if system_active %}aria-current="true"{% endif %}>System</summary>
+            <div class="nav-group__menu">
+              <a href="/statistics-settings" {% if path.startswith("/statistics-settings") %}aria-current="page"{% endif %}>Statistics</a>
+              <a href="/system" {% if path == "/system" %}aria-current="page"{% endif %}>System Status</a>
+            </div>
+          </details>
         </nav>
         <div class="account-menu">
           <span class="status-badge status-badge--{{ protection.tone if protection is defined else 'neutral' }}">{{ protection.label if protection is defined else 'Active' }}</span>

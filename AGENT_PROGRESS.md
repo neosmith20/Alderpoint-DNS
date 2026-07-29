@@ -50,3 +50,33 @@ Current state:
 - The controlled reboot has completed and core services are active.
 - `/opt/bindguard/tests/test_acceptance.sh` passed again on 2026-07-29 after
   the current-state check.
+
+## Navigation and IA cleanup
+
+Started from clean `main` at `2afc948`.
+
+Inventory of authenticated primary navigation links and preserved URLs:
+
+- Dashboard: `/`
+- DNS: `/query-log`, `/local-dns`, `/dns-settings`, `/dns-cache`
+- Security: `/custom-rules`, `/blocklists`, `/encryption`
+- Operations: `/import`, `/backup`, `/replication`
+- System: `/statistics-settings`, `/system`
+
+Implemented a grouped responsive primary navigation in `web/templates/base.html`
+using native `<details>` sections so the groups work by click, touch, and
+keyboard rather than hover-only behavior. Dashboard remains the first direct
+link. Active child pages use `aria-current="page"` and active parent sections
+use `aria-current="true"` plus an open group.
+
+Updated `web/static/app.css` for desktop dropdowns and mobile stacked groups,
+and updated `web/static/app.js` so Escape/outside-click closes open desktop
+groups without affecting route behavior.
+
+Updated `tests/test_web_smoke.sh` to inventory every primary navigation href,
+assert grouped section hooks, verify active parent/child rendering, and confirm
+unauthenticated primary pages redirect instead of exposing the admin navigation.
+
+Validation:
+
+- `/opt/bindguard/tests/test_web_smoke.sh`: passed.
