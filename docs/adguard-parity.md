@@ -1,0 +1,214 @@
+# AdGuard Home functional parity matrix
+
+This document maps AdGuard Home's feature set to BindGuard's actual, current
+implementation. It is a functional and usability reference only — no AdGuard
+source, CSS, assets, or branded strings were copied. AdGuard Home behavior
+below reflects its `master`-branch OpenAPI spec (`openapi/openapi.yaml`) and
+wiki configuration docs at the time of research; BindGuard behavior below was
+verified against this repository's actual source and docs, not assumed.
+
+Status values:
+
+- `complete` — implemented, deployed, and exercised by a real test.
+- `partial` — some of the mechanism exists (schema, config, or a subset of
+  the UI) but the full AdGuard-equivalent behavior is not there yet.
+- `planned` — acknowledged direction, no working code yet.
+- `intentionally not applicable` — out of scope for BindGuard's architecture
+  by design, not a gap.
+
+Architecturally, AdGuard Home is a single Go binary that is simultaneously
+the DNS resolver, the filtering engine, and the admin API. BindGuard splits
+those roles across three processes — dnsdist (client-facing transports and
+rate limiting), BIND (recursion, DNSSEC, RPZ enforcement, authoritative local
+zones), and a FastAPI/Jinja web app plus SQLite (configuration, analytics,
+deployment control) — coordinated by a compiler/deployment layer instead of
+in-process config reload. This shows up repeatedly below as "the same
+outcome is reached in a different file/process" rather than a gap.
+
+## Dashboard and protection control
+
+| AdGuard feature | Where in AdGuard | BindGuard equivalent | Implementation location | Status | Missing tests | Notes |
+|---|---|---|---|---|---|---|
+| Protection on/off toggle | Dashboard header; `POST /protection` | Protection state card with confirmation | `app/webapp.py::protection_toggle`, `web/templates/dashboard.html` | complete | none — covered by `tests/test_web_smoke.sh` dashboard render checks | BindGuard's toggle flips a stored flag consulted at query time; it does not stop dnsdist/BIND. |
+| Protection pause with duration (5 min/24h/until re-enabled) | Dashboard protection dropdown; `pause_duration` field on `POST /protection` | Not implemented | — | planned | test for timed re-enable would be needed | BindGuard's toggle is only manual on/off; no scheduled auto-resume. |
+| Dashboard stat cards (queries, blocked, %, avg latency, clients) | Dashboard | Primary metric cards for queries, blocked, % blocked, active clients, avg response time, active rules | `app/analytics.py::dashboard_data`, `web/templates/dashboard.html` | complete | none — `tests/test_analytics.py`, `tests/test_web_smoke.sh` | Backed by real dnsdist protobuf events + polled stats, not estimates. |
+| Time-series charts | Dashboard | Sparklines + local canvas time-series chart over stored buckets | `app/webapp.py` `/analytics/chart-data`, `web/static/app.js` | complete | none — `tests/test_web_smoke.sh` asserts the chart data endpoint | Chart rendering is local JS/canvas; no external charting library. |
+| Top clients/domains/blocked-domains/query-types/response-codes | Dashboard ranked lists | Ranked panels for clients, domains, blocked domains, query types, response codes, protocol usage | `app/analytics.py`, `web/templates/dashboard.html` | complete | none — `tests/test_analytics.py::test_query_log_filtering` and dashboard aggregation tests | |
+
+## Statistics and retention
+
+| AdGuard feature | Where in AdGuard | BindGuard equivalent | Implementation location | Status | Missing tests | Notes |
+|---|---|---|---|---|---|---|
+| Statistics enable/disable, rotation interval (6h–90d) | `GET/PUT /stats/config` | Statistics Settings page: privacy mode, detailed retention days, aggregate retention days | `app/webapp.py::statistics_settings`, `web/templates/statistics_settings.html`, `app/analytics.py::update_settings` | complete | none — `tests/test_analytics.py::test_retention_cleanup` | Defaults: 7-day detailed retention, 90-day aggregate retention (`docs/configuration.md`). |
+| Statistics reset | `POST /stats_reset` | Clear statistics action | `app/webapp.py` `/statistics-settings/clear`, `app/analytics.py::clear_statistics` | complete | none — covered by `test_analytics.py` DB fixtures exercising the same delete path | |
+| Statistics export | Not in AdGuard's API (config lives in `AdGuardHome.yaml` only) | JSON export of aggregate buckets | `app/webapp.py` `/statistics-settings/export`, `app/analytics.py::export_statistics` | complete | none — direct function, low risk; no dedicated unit test | BindGuard exposes an export AdGuard does not have as a discrete API. |
+| Ignored hostnames list for stats/query log | `stats.ignored`, `querylog.ignored` | Not implemented | — | planned | n/a | No per-domain exclusion from BindGuard analytics. |
+| Database size protection | Not present in AdGuard (file-based JSON/BoltDB with its own rotation) | Configurable DB size limit; oldest detailed rows pruned when exceeded | `app/analytics.py::cleanup`, `db_size` | complete | none — `tests/test_analytics.py::test_db_size_protection_prunes_old_rows` | Default 256 MiB (`docs/configuration.md`). |
+
+## Query log and filtering reasons
+
+| AdGuard feature | Where in AdGuard | BindGuard equivalent | Implementation location | Status | Missing tests | Notes |
+|---|---|---|---|---|---|---|
+| Query log list with domain/client/status/type filters | `GET /querylog`, Query Log page | Query Log page: search, client/domain filters, query type, protocol, allowed/blocked, response code, pagination | `app/webapp.py::query_log`, `app/analytics.py::query_log`, `web/templates/query_log.html` | complete | none — `tests/test_analytics.py::test_query_log_filtering`, `tests/test_web_smoke.sh` | |
+| Auto-refreshing log without full reload | React SPA re-fetch | `/query-log/partial` endpoint refreshes only the result container; state persists in session storage | `app/webapp.py::query_log_partial`, `web/static/app.js` | complete | none — `tests/test_web_smoke.sh` asserts the partial endpoint and session-storage hook | |
+| Per-row "block/unblock this domain" action | Query log row action | "Create rule from row" with confirmation, staged deploy | `app/webapp.py` `/custom-rules/add-from-query` | complete | none — exercised indirectly via `tests/test_blocklist_deploy.sh` custom-rule path | |
+| Filtering reason per response (FilteredBlackList, NotFilteredWhiteList, Rewrite, SafeSearch, etc.) | `querylog` response `reason` field | Blocked/allowed status correlated against active RPZ policy set (category + rule) | `app/analytics.py::policy_match`, `load_policy_index` | partial | none dedicated; covered indirectly by `test_analytics.py::test_rpz_policy_match_marks_blocked`, `test_nxdomain_is_not_automatically_blocked` | BindGuard distinguishes allowed vs. blocked-by-policy correctly but does not yet break blocked reasons into AdGuard's full reason taxonomy (safe search / parental / safe browsing reasons do not exist because those features don't exist yet). |
+| Client name/anonymization display in log | Query log | Client alias / PTR fallback display; anonymization at storage time (truncate/hash) | `app/local_dns.py::alias_for_client`, `app/analytics.py::normalize_client` | complete | none — `tests/test_analytics.py::test_privacy_modes`, `tests/test_local_dns.py::test_client_alias_and_ptr_fallback_display` | |
+
+## Filter subscriptions and allowlists
+
+| AdGuard feature | Where in AdGuard | BindGuard equivalent | Implementation location | Status | Missing tests | Notes |
+|---|---|---|---|---|---|---|
+| Add/remove/enable/disable filter subscription URL | `POST /filtering/add_url`, `/remove_url`, `/set_url` | Blocklists page: add, inline edit, enable/disable, delete | `app/webapp.py::blocklist_add/toggle/edit/delete`, `web/templates/blocklists.html` | complete | none — `tests/test_blocklist_deploy.sh`, `tests/test_blocklist_failure_paths.sh` | |
+| Refresh one or all filter lists | `POST /filtering/refresh` | Single-source update (unprivileged, DB+cache only) and update-all | `app/webapp.py::blocklist_update_one/update`, `app/bindguard_compiler.py::update_source`/`update-sources` | complete | none — `tests/test_blocklist_deploy.sh` | Deployment (compiling into RPZ) stays privileged/enumerated per `docs/web.md`. |
+| Curated built-in filter catalog | AdGuard-maintained default lists shipped in binary | 19-source curated public catalog | `app/bindguard_compiler.py seed-public`, `docs/filtering.md` | complete | none — catalog seeding is exercised by acceptance flow, not a dedicated unit test | |
+| Separate allowlist ("whitelist") filter subscriptions | AdGuard supports filter lists marked as allowlist type | Not implemented as a subscription type | — | planned | n/a | BindGuard only has custom per-domain allow rules (below), not allow-type subscription URLs. |
+| Filter list rule counts / last-updated / parse errors | Filter list metadata in UI | Per-source parse statistics and last errors | `app/bindguard_compiler.py::record_source_result`, `docs/filtering.md` | complete | none — `tests/test_blocklist_failure_paths.sh` | |
+| `check_host` — test whether a domain is filtered and why | `GET /filtering/check_host` | Not implemented as a discrete lookup tool | — | planned | n/a | Query Log gives blocked/allowed status per observed query, but there's no ad hoc "test this domain" utility. |
+
+## Custom filtering rules
+
+| AdGuard feature | Where in AdGuard | BindGuard equivalent | Implementation location | Status | Missing tests | Notes |
+|---|---|---|---|---|---|---|
+| Custom user rules (AdBlock syntax incl. regex, modifiers, cosmetic) | `POST /filtering/set_rules`, Filters → Custom filtering rules | Custom allow/block domain rules; plain domain, hosts-file, basic `||domain^` and `@@||domain^` syntax | `app/bindguard_compiler.py::parse_rules/parse_line`, `web/templates/custom_rules.html` | partial | none dedicated; covered indirectly by `tests/test_blocklist_parser.py` | Regex, cosmetic, and modifier rules are counted as unsupported and reported, never interpreted as DNS policy (`docs/filtering.md`) — a deliberate scope limit, not a bug. |
+| Allow rule precedence over block rules | Rule evaluation order | Custom allow always overrides all block rules | `app/bindguard_compiler.py::collect_rules` | complete | none — `tests/test_blocklist_parser.py` | |
+
+## DNS rewrites and Local DNS
+
+| AdGuard feature | Where in AdGuard | BindGuard equivalent | Implementation location | Status | Missing tests | Notes |
+|---|---|---|---|---|---|---|
+| DNS rewrite rules (domain/wildcard → A/AAAA/CNAME) | `rewrite` endpoints, Filters → DNS rewrites | Local DNS: A/AAAA/PTR/CNAME records with TTL, comments, enabled state | `app/local_dns.py::add_record/update_record`, `web/templates/local_dns.html` | complete | none — `tests/test_local_dns.py` (record creation, edit, delete, CNAME conflict) | BindGuard implements this as real authoritative BIND zone data, not an in-memory rewrite table — see `docs/architecture.md`. No wildcard-domain rewrite pattern (`*.example.com`) support. |
+| Automatic PTR generation from A/AAAA rewrite | Implicit in some AdGuard rewrite flows | Simple host entries auto-create A/AAAA + PTR together | `app/local_dns.py::add_host` | complete | none — `tests/test_local_dns.py::test_a_record_creation_and_automatic_ptr` | |
+| Rewrites outside the primary domain | Any domain can be rewritten | Advanced records with fully-qualified names outside the internal domain, auto-creating a managed parent authoritative zone | `app/local_dns.py::forward_zone_for_fqdn`, `build_zone_files` | complete | none — `tests/test_local_dns.py::test_external_fqdn_records_create_managed_forward_zone` | |
+| Bulk import/export of rewrites | Not a first-class AdGuard feature (config file only) | CSV import/export, hosts-style preview | `app/local_dns.py::csv_import/csv_export/hosts_preview`, `web/templates/local_dns.html` | partial | none dedicated beyond `tests/test_local_dns.py::test_csv_preview_import_export`, `test_hosts_preview` | Hosts-style input is preview-only; CSV is the deployment-capable bulk path (`docs/known-limitations.md`). |
+| Atomic zone deploy with validation/rollback | AdGuard reloads its in-process rewrite table; no external validation step | Staged zone generation, `named-checkzone`, atomic install, rollback on failure | `app/local_dns.py::deploy_zones` | complete | none — `tests/test_local_dns.py::test_invalid_generated_zone_rolls_back`, `test_zone_serial_increment` | BindGuard's split-process architecture requires this step; AdGuard's single binary does not. |
+
+## Client discovery and persistent clients
+
+| AdGuard feature | Where in AdGuard | BindGuard equivalent | Implementation location | Status | Missing tests | Notes |
+|---|---|---|---|---|---|---|
+| Auto-discovery via hosts file / rDNS / ARP / WHOIS / DHCP leases | Clients page, background runtime sources | PTR-based display fallback only (no ARP/WHOIS/hosts-file probing) | `app/local_dns.py::ptr_hostname_for_ip` | partial | none dedicated | BindGuard shows a client's own PTR record if one exists; it does not actively probe ARP tables or WHOIS. |
+| Persistent (manually named) clients | Clients page "Add client" | Client aliases: CIDR/IP → display label | `app/local_dns.py::upsert_alias/alias_for_client`, `web/templates/local_dns.html` | complete | none — `tests/test_local_dns.py::test_analytics_client_aliases` | Aliases are presentation-only labels for dashboard/query-log; they carry no policy (`docs/architecture.md`). This is narrower than AdGuard's "client object," which is also a policy attachment point. |
+| Client identification by MAC address | Clients page, requires AdGuard as DHCP server | Not applicable | — | intentionally not applicable | n/a | BindGuard has no DHCP server (see DHCP row below), so MAC-based identification has no lease table to draw from. |
+| ClientID for encrypted-DNS client identification (DoH/DoT/DoQ path-based ID) | Clients page, DoH/DoT/DoQ URL scheme | Not implemented | — | planned | n/a | dnsdist can support this in principle, but BindGuard's dnsdist config does not currently parse or route on a ClientID segment. |
+
+## Per-client filtering, upstream, SafeSearch, blocked services
+
+| AdGuard feature | Where in AdGuard | BindGuard equivalent | Implementation location | Status | Missing tests | Notes |
+|---|---|---|---|---|---|---|
+| Per-client filtering enable/disable (`use_global_settings`) | Client edit dialog | Not enforced at runtime | `app/bindguard_compiler.py` `network_policies`, `policy_profiles`, `profile_categories` tables exist | partial | policy-enforcement test would be new work | Schema exists (built-in trusted/standard/iot/restricted profiles, category keys, CIDR-to-profile table) but v1 runtime applies one global RPZ to every client (`docs/architecture.md`, `docs/issues.md`). Explicitly called out as the next milestone. |
+| Per-client upstream DNS servers | Client edit dialog `upstreams` field | Not implemented | — | planned | n/a | All clients share BIND's single `forwarders` list in `named.conf.options`; no per-client resolver routing. |
+| Per-client SafeSearch | Client edit dialog, per-engine toggles | Not implemented | `bindguard.db` has a `safesearch` category key but no enforcement | planned | n/a | SafeSearch has no rewrite/redirect logic anywhere in `app/bindguard_compiler.py` or BIND config yet. |
+| Per-client blocked services + schedule | Client edit dialog, `blocked_services`/`blocked_services_schedule` | Not implemented | — | planned | n/a | No "blocked services" catalog (streaming/social apps by name) exists in BindGuard at all, per-client or global. |
+| `ignore_querylog` / `ignore_statistics` per client | Client edit dialog | Not implemented | — | planned | n/a | Analytics privacy modes (full/anonymized/aggregate-only) are global settings, not per-client opt-outs. |
+| Allowed/disallowed clients (access control lists) | Settings → Client settings → Access Settings; `access/list`, `access/set` | Not implemented in the web UI | — | planned | n/a | dnsdist's `setACL()` in `packaging/dnsdist.conf` is a static, deploy-time network ACL (RFC1918 + loopback + `fc00::/7` by default, `BINDGUARD_DNS_ALLOW_ALL=1` to open it), not an admin-editable per-client allow/deny list. Network exposure is explicitly delegated to external pfSense VLAN/firewall rules (`docs/security.md`, `docs/issues.md`). |
+| Blocked hosts (raw IP blocking regardless of domain) | Access Settings "Blocked hosts" | Not implemented | — | planned | n/a | |
+| Trusted HTTP proxies (`trusted_proxies`, X-Forwarded-For/X-Real-IP trust for DoH) | `AdGuardHome.yaml` `trusted_proxies` | Not implemented | `app/webapp.py` uses `request.client.host` directly | planned | n/a | Neither dnsdist's DoH frontend nor the BindGuard web app currently trusts/parses forwarded-for headers from an upstream proxy; both see the direct peer address. |
+
+## Protection categories (malware, adult, SafeSearch)
+
+| AdGuard feature | Where in AdGuard | BindGuard equivalent | Implementation location | Status | Missing tests | Notes |
+|---|---|---|---|---|---|---|
+| Safe Browsing (malware/phishing) toggle | `POST /safebrowsing/enable`/`disable` | Category key `malware` exists in schema; enforced only via whatever public blocklist sources are subscribed under that category | `app/bindguard_compiler.py` categories table, `seed-public` catalog | partial | none — no dedicated malware-category enforcement test | There is no dedicated, separately-toggleable malware feed the way AdGuard has a built-in safe-browsing service; it's whatever blocklists an admin enables tagged `malware`. |
+| Parental / adult content filtering with sensitivity level | `POST /parental/enable`/`disable` | Category key `adult` exists in schema; same catalog-subscription model as above, no sensitivity levels | `app/bindguard_compiler.py` categories table | partial | none | No graduated sensitivity — a list is either subscribed or not. |
+| SafeSearch enforcement per search engine (Google, Bing, DuckDuckGo, YouTube, etc.) | `PUT /safesearch/settings` | Category key `safesearch` exists in schema; no rewrite logic | `app/bindguard_compiler.py` categories table | planned | n/a | AdGuard enforces SafeSearch by rewriting answers to each engine's safe-mode IP/CNAME; BindGuard has no equivalent rewrite mechanism implemented. |
+| Blocked-service catalog with time-based schedule (per-day windows) | `blocked_services/*` | Not implemented | — | planned | n/a | No concept of a named "service" (e.g. TikTok, Steam) mapped to a rule bundle exists in BindGuard. |
+
+## Recursive/forwarding DNS behavior
+
+| AdGuard feature | Where in AdGuard | BindGuard equivalent | Implementation location | Status | Missing tests | Notes |
+|---|---|---|---|---|---|---|
+| Recursive vs. forwarding mode | AdGuard can resolve recursively itself or forward to `upstream_dns` | BIND is a forwarding-only validating resolver: `forward only; forwarders { 1.1.1.2; 1.0.0.2; 4.2.2.1; 4.2.2.2; };` | `packaging/named.conf.options` | complete (as forwarder) / intentionally not applicable (as full recursive-from-root) | none — implicitly covered by `tests/test_bind_backend.sh` | BIND is capable of full root-based recursion but BindGuard deliberately configures it as `forward only` in this deployment; there is no UI toggle to switch modes. |
+| Primary upstream DNS servers, editable in UI | Settings → DNS settings → Upstream DNS servers | Not editable in UI; static in `named.conf.options` | `packaging/named.conf.options` | planned | n/a | Changing forwarders currently requires editing the packaging template and redeploying, not a web form. |
+| Bootstrap DNS servers (resolve upstream hostnames) | Settings → DNS settings → Bootstrap DNS servers | Intentionally not applicable | — | intentionally not applicable | n/a | BindGuard's forwarders are hardcoded IP literals (`1.1.1.2`, `1.0.0.2`, `4.2.2.1`, `4.2.2.2`), never hostnames, so there is nothing to bootstrap-resolve. |
+| Fallback DNS servers (used when primary upstreams fail) | Settings → DNS settings → Fallback DNS servers | Not implemented as a distinct tier | `packaging/named.conf.options` `forwarders` list | partial | n/a | BIND's forwarders list already has 4 entries queried per its own internal failover logic, but BindGuard does not model a separate "fallback" tier the way AdGuard's UI does. |
+| Upstream mode (parallel/fastest/load-balance) | Settings → DNS settings → Upstream mode | Not exposed; BIND's internal forwarder selection applies | — | intentionally not applicable | n/a | This is BIND's internal resolver behavior, not something BindGuard currently surfaces or needs to reimplement. |
+| Private reverse-DNS resolvers for RFC1918 PTR queries | Settings → DNS settings → Private reverse DNS servers | Not applicable in the AdGuard sense; BindGuard answers private-range PTR queries authoritatively from its own Local DNS reverse zones instead of forwarding them | `app/local_dns.py::ip_network_zone`, generated reverse zones | intentionally not applicable | none — reverse-zone rendering covered by `tests/test_local_dns.py::test_multiple_local_subnets_and_zone_rendering` | Where an admin has added Local DNS records, PTR is authoritative and local; where they haven't, PTR queries fall through to BIND's normal forwarders like any other query — there's no separate private-PTR-resolver setting because BindGuard doesn't special-case that traffic class. |
+| Forwarding by domain (route specific domains to specific upstreams) | `upstream_dns` entries like `[/example.local/]192.168.0.1` | Not implemented | — | planned | n/a | All non-local queries share the single forwarders list; only Local DNS zones (an entirely separate authoritative mechanism) get per-domain routing. |
+| Upstream timeout | Settings → DNS settings → Upstream timeout | Not exposed in UI | BIND default resolver timeout | planned | n/a | No BindGuard-specific timeout setting for the BIND→internet forwarders (distinct from dnsdist's own `setTCPRecvTimeout`/`setUDPTimeout`, which govern the client-facing side only). |
+| "Test upstream" button | `POST /test_upstream_dns` | Not implemented | — | planned | n/a | |
+
+## DNSSEC, EDNS, IPv6, rate limiting, blocking response
+
+| AdGuard feature | Where in AdGuard | BindGuard equivalent | Implementation location | Status | Missing tests | Notes |
+|---|---|---|---|---|---|---|
+| DNSSEC validation toggle | Settings → DNS settings → Enable DNSSEC | Always-on, not user-toggleable: `dnssec-validation auto;` | `packaging/named.conf.options` | partial | none — `tests/test_bind_backend.sh` asserts the `ad` flag on a signed name and SERVFAIL on `dnssec-failed.org` | BindGuard validates DNSSEC unconditionally at the BIND layer; there's no admin control to turn it off (arguably safer default, but it means BindGuard cannot match AdGuard's "off" state). |
+| EDNS Client Subnet control | Settings → DNS settings → EDNS client subnet | Not implemented | — | planned | n/a | Neither dnsdist nor BIND config sets or strips ECS options today. |
+| IPv6 answer controls (e.g. "Disable IPv6") | Settings → DNS settings | Not implemented | — | planned | n/a | Both dnsdist and BIND listen and answer over IPv4 and IPv6 with no toggle to suppress AAAA answers. |
+| Rate limiting (queries/sec, subnet mask, allowlist exceptions) | Settings → DNS settings → Rate limiting | dnsdist `dynBlockRulesGroup`: query rate 120/10s, NXDOMAIN rate 80/10s, SERVFAIL rate 40/10s, ANY-type rate 10/10s | `packaging/dnsdist.conf` | partial | none dedicated; `tests/test_dnsdist_frontend.sh` asserts the configured thresholds are present in the deployed config | Rate limiting exists and is deployed, but is a fixed set of dynamic block rules with no per-client allowlist/exception UI and no admin-editable thresholds — it's a packaging-time constant, not a runtime setting. |
+| Blocking response mode (default/NXDOMAIN/null IP/custom IP/REFUSED) | Settings → DNS settings → Blocking mode | Fixed: RPZ NXDOMAIN-style policy via `response-policy { zone "bindguard.rpz"; } break-dnssec yes;` | `packaging/named.conf.options`, `app/bindguard_compiler.py::render_rpz` | partial | none dedicated — implicitly exercised by every blocklist deploy test | RPZ zones can in principle answer with CNAME-to-null, a walled-garden IP, or NXDOMAIN per rule, but BindGuard's compiler only emits one rule shape today; there's no UI choice of blocking mode. |
+| Blocked response TTL | Settings → DNS settings → Blocked response TTL | Not exposed; RPZ TTL is whatever the compiler emits | `app/bindguard_compiler.py::render_rpz` | planned | n/a | |
+| ANY-query refusal (anti-reflection) | `refuse_any` | Implemented via `OpcodeRule`/`QTypeRule` REFUSED action plus ANY-type dynamic rate limit | `packaging/dnsdist.conf` | complete | none — `tests/test_dnsdist_frontend.sh` checks the ANY rate rule; the static REFUSED action isn't separately asserted | |
+| Zone transfer / NOTIFY / dynamic update refusal | Not an AdGuard concept (AdGuard isn't an authoritative server) | AXFR/IXFR/NOTIFY/UPDATE explicitly REFUSED at the dnsdist edge | `packaging/dnsdist.conf` | complete | none — not separately asserted in test scripts | BindGuard needs this because BIND is authoritative for RPZ and Local DNS zones; AdGuard has no authoritative-zone attack surface to guard. |
+
+## Cache controls
+
+| AdGuard feature | Where in AdGuard | BindGuard equivalent | Implementation location | Status | Missing tests | Notes |
+|---|---|---|---|---|---|---|
+| Cache size / TTL min / TTL max | Settings → DNS settings → Cache configuration | dnsdist packet cache: `newPacketCache(100000, {maxTTL=86400, minTTL=0, temporaryFailureTTL=60, staleTTL=60})`; BIND also caches recursively underneath | `packaging/dnsdist.conf` | partial | none dedicated | Cache exists and is tuned at packaging time, but there is no admin-facing UI to view or change it. |
+| Cache optimistic serving (serve-stale) | `cache_optimistic` | `staleTTL=60` on the dnsdist packet cache provides a bounded stale-serving window | `packaging/dnsdist.conf` | partial | none | Fixed constant, not an admin toggle. |
+| Clear cache button | `POST /cache_clear` | Only a narrow, code-path-specific cache flush: dnsdist packet-cache entries for managed Local DNS zones are cleared after a Local DNS deploy | `app/local_dns.py::flush_dnsdist_packet_cache` | partial | none — `tests/test_local_dns.py::test_deploy_flushes_dnsdist_packet_cache_for_local_zones` | No general "clear all cache" admin action exists; this only exists to prevent stale NODATA answers immediately after adding a Local DNS record. |
+| Dedicated cache-management UI page | Settings → DNS settings | Not implemented | — | planned | n/a | Per current task scope, this is being worked on in a parallel, not-yet-merged change; this document reflects the repository state before that work lands. |
+
+## Encrypted DNS transports and TLS
+
+| AdGuard feature | Where in AdGuard | BindGuard equivalent | Implementation location | Status | Missing tests | Notes |
+|---|---|---|---|---|---|---|
+| DNS-over-HTTPS | Encryption settings; `addDOHLocal`-equivalent | DoH enabled: `addDOHLocal("0.0.0.0:443"/"[::]:443", ..., "/dns-query", {minTLSVersion="tls1.2", ciphers="HIGH:!aNULL:!MD5:!RC4"})` | `packaging/dnsdist.conf` | complete | none dedicated; `docs/testing.md` documents a manual `kdig +https` check, not an automated assertion | |
+| DNS-over-TLS | Encryption settings | DoT enabled on `0.0.0.0:853`/`[::]:853` | `packaging/dnsdist.conf` | complete | none dedicated; manual `kdig +tls` check documented | |
+| DNS-over-QUIC | Encryption settings (newer AdGuard versions) | DoQ enabled on `0.0.0.0:853`/`[::]:853` UDP, gated on `BINDGUARD_DNS_DOQ=1` and on the installed dnsdist build actually reporting `dns-over-quic` | `packaging/dnsdist.conf`, `docs/issues.md` | complete | none — `tests/test_dnsdist_frontend.sh` asserts DoQ capability post-reboot | Requires the official PowerDNS dnsdist package; the Debian-packaged dnsdist lacks DoQ support (`docs/issues.md`). |
+| DNS-over-HTTP/3 (DoH3) | Not in classic AdGuard Home; present as an experimental option in some builds | DoH3 enabled, gated on `BINDGUARD_DNS_DOH3=1` | `packaging/dnsdist.conf` | complete | none dedicated | |
+| DNSCrypt | Encryption settings, `dnscrypt_config_file` | Not implemented | — | intentionally not applicable | n/a | dnsdist does not support DNSCrypt server-side termination the way AdGuard's Go stack does; not on the roadmap. |
+| TLS certificate upload / replace via UI | Encryption settings — paste or upload cert/key, `POST /tls/configure` | No UI; manual file replacement | `scripts/ensure_tls_cert.sh`, `/etc/bindguard/certs/bindguard-lab.crt`/`.key` | planned | n/a | One bootstrap self-signed cert pair is shared across DoH/DoT; replacing it means overwriting both files directly and reloading dnsdist, not a web form (`docs/known-limitations.md`). |
+| Certificate validation (chain, SAN match, expiry) surfaced in UI | `tls/status` returns `valid_cert`, `valid_chain`, `valid_key`, DNS names, expiry | Not implemented | — | planned | n/a | No Encryption Settings page exists yet to display any of this. |
+| `POST /tls/validate` — dry-run cert check before applying | Encryption settings | Not implemented | — | planned | n/a | |
+| Admin UI over HTTPS | Settings → General → serve web UI on HTTPS | Not implemented; UI is plain HTTP in current lab mode | `app/webapp.py`, `docs/web.md` | planned | n/a | Session cookies are not marked `Secure` yet because there's no HTTPS listener for the admin UI (`docs/issues.md`, `docs/security.md`). Must be added together, not independently. |
+| Apple mobile config profile generation (DoH/DoT `.mobileconfig`) | `GET /apple/doh.mobileconfig`, `/apple/dot.mobileconfig` | Not implemented | — | planned | n/a | |
+
+## DHCP
+
+| AdGuard feature | Where in AdGuard | BindGuard equivalent | Implementation location | Status | Missing tests | Notes |
+|---|---|---|---|---|---|---|
+| Built-in DHCP server (IPv4/IPv6 pools, gateway, lease time) | Settings → DHCP settings | Not implemented | — | intentionally not applicable | n/a | BindGuard is a DNS-filtering appliance sitting behind pfSense, which already provides DHCP on this network (`docs/baseline.md` notes `dhcpcd`-managed addressing). Building a competing DHCP server is out of scope by design, not a gap. |
+| Static DHCP leases | DHCP settings | Not implemented | — | intentionally not applicable | n/a | Same reasoning — Local DNS host records serve BindGuard's equivalent need (stable name→IP mapping) without owning IP address assignment. |
+| Active DHCP server detection | `POST /dhcp/find_active_dhcp` | Not implemented | — | intentionally not applicable | n/a | |
+
+## Authentication, users, and localization
+
+| AdGuard feature | Where in AdGuard | BindGuard equivalent | Implementation location | Status | Missing tests | Notes |
+|---|---|---|---|---|---|---|
+| Admin login | `POST /login` | Login with Argon2-hashed password, signed HttpOnly SameSite=Strict session cookie | `app/webapp.py::login`, `web/templates/login.html` | complete | none dedicated to login flow itself; exercised implicitly by every other authenticated test | |
+| First-run setup wizard | `POST /install/configure` | `/setup` route, only reachable when no administrator exists yet | `app/webapp.py::setup`, `web/templates/setup.html` | complete | none dedicated | No default admin credentials ship, unlike some AdGuard install paths that prompt during first boot but can be skipped. |
+| Login rate limiting / lockout | Not a documented AdGuard feature | Per-source-IP failed-login rate limiting | `app/webapp.py` `login_attempts` table, login handler | complete | none dedicated; would benefit from a direct unit test of the lockout threshold | BindGuard has a control here that AdGuard's public docs don't describe having. |
+| Multiple admin users | Single admin account model (AdGuard Home has no multi-user support either) | Single admin account | `app/webapp.py` `admins` table | complete (matches AdGuard) | n/a | Both products are single-tenant admin; not a gap in either direction. |
+| Password reset flow | Safe-mode/YAML edit only; no in-UI "forgot password" | Not implemented | — | intentionally not applicable | n/a | Neither product has a self-service reset; recovery in both cases means direct server/DB access. |
+| Language selection | `GET/PUT /profile`, i18n endpoints | Not implemented | — | planned | n/a | UI is English-only. |
+| Theme selection (light/dark/auto) | Profile settings | Fixed dark theme only | `web/static/app.css` | intentionally not applicable | n/a | `docs/web.md` describes "a shared dark-theme application shell"; no light-theme variant exists, and there's no signal this is planned. |
+| CSRF protection on mutating requests | Not documented as a distinct AdGuard feature (session-cookie auth only) | Required CSRF token on every mutating form | `app/webapp.py::check_csrf`, used across all `POST` routes | complete | none dedicated; every form-post code path enforces it, so functional tests exercise it implicitly | |
+| Trusted-proxy-aware admin UI | Reverse-proxy guidance + `trusted_proxies` | Not implemented | `app/webapp.py` reads `request.client.host` directly | planned | n/a | Same gap as the DoH-side trusted-proxies row above; BindGuard's web app has no concept of a trusted reverse proxy either. |
+
+## System info, logs, updates, backup/restore, import/export, replication
+
+| AdGuard feature | Where in AdGuard | BindGuard equivalent | Implementation location | Status | Missing tests | Notes |
+|---|---|---|---|---|---|---|
+| System status / version info | `GET /status`, dashboard footer | System page: service health chips, dnsdist version/feature set, last deployment status | `app/webapp.py::system`, `web/templates/system.html` | complete | none dedicated beyond `tests/test_web_smoke.sh` rendering checks | |
+| Recent logs viewer | Not a first-class AdGuard UI feature (log file only) | Recent Logs panel on System page | `app/webapp.py::system`, `web/templates/system.html` | complete | none dedicated | |
+| Check for updates / self-update | `POST /version.json`, `POST /update` | Not implemented | — | intentionally not applicable | n/a | BindGuard is a Debian-packaged appliance; updates are expected via OS package management (`apt`), not an in-app updater. No evidence this is planned. |
+| Configuration backup | Manual copy of `AdGuardHome.yaml` — AdGuard Home has no built-in backup/export API (open feature requests, unresolved as of research) | `scripts/backup.sh` — tars `/etc` BindGuard/BIND/dnsdist config, SQLite state, downloads, compiled RPZ | `scripts/backup.sh`, `docs/recovery.md` | partial | none dedicated as a standalone unit test; `tests/test_backup_restore.sh` covers the combined backup+restore round trip | BindGuard's scripted backup is already more complete than AdGuard's "copy the YAML yourself" story, but it has no versioned manifest, no scheduling, no dedicated UI page, no dry-run/diff preview, and no backup-file encryption yet. |
+| Configuration restore | Manual copy of `AdGuardHome.yaml` back into place | `scripts/restore.sh` — validates BIND/RPZ/dnsdist/sudoers before extracting, restarts `named`/`dnsdist`/`bindguard-analytics`/`bindguard` | `scripts/restore.sh`, `docs/recovery.md` | partial | none dedicated as a standalone unit test; `tests/test_backup_restore.sh` | Same caveats as backup: no dry-run, no UI. |
+| Scheduled/automatic backups | Not present in AdGuard either | Not implemented | — | planned | n/a | |
+| Configuration import/export via UI or API | Not present in AdGuard's API either (config-file-only) | Not implemented | — | planned | n/a | Neither product has this; BindGuard's CSV import/export is scoped to Local DNS records only, not full appliance config. |
+| Replication / multi-node sync | Not an AdGuard feature | Not implemented | — | planned | n/a | Named explicitly in current project direction as future work, no code yet. |
+| Disaster recovery runbook | Not documented centrally in AdGuard | `docs/recovery.md` — explicit recovery steps for web, DNS, Local DNS, and analytics failure modes | `docs/recovery.md` | complete | n/a — this is documentation, not code | |
+
+## Summary of the largest gaps
+
+The areas furthest from AdGuard parity are, in order of how much runtime
+logic (not just schema) is missing: per-client policy enforcement (filtering,
+upstream, SafeSearch, blocked services, log/stat opt-outs — schema exists,
+nothing runs yet); a dedicated Encryption Settings page (cert
+upload/validation/Apple profiles); scheduled/versioned backup with a UI; and
+DNS-server-level tunables that AdGuard exposes as user settings but BindGuard
+currently bakes into packaging templates (upstream servers, blocking mode,
+blocked-response TTL, rate-limit thresholds, cache size/TTL). DHCP is the one
+large AdGuard surface area BindGuard deliberately does not intend to build.
