@@ -52,6 +52,10 @@ if tar -xOzf "$BUNDLE" | grep -Eq 'BEGIN PRIVATE KEY|BINDGUARD_SESSION_SECRET|dn
   echo "diagnostics bundle leaked secret-like content" >&2
   exit 1
 fi
+if tar -xOzf "$BUNDLE" | grep -Ei 'secret "[^"]{8,}"' | grep -qv '\[REDACTED\]'; then
+  echo "diagnostics bundle leaked an unredacted BIND key secret (e.g. rndc-key)" >&2
+  exit 1
+fi
 
 test -f /opt/bindguard/packaging/debian/control || {
   echo "debian control file missing" >&2

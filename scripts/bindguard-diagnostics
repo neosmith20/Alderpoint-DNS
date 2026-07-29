@@ -36,6 +36,10 @@ REDACTION_PATTERNS = [
     (re.compile(r"(?i)(private[_-]?key\s*[=:]\s*)['\"]?[^'\"\s,;]+"), r"\1[REDACTED]"),
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S), "[REDACTED PRIVATE KEY]"),
     (re.compile(r"(https://[^?\s]+)\?[^ \n\r\t]+"), r"\1?[REDACTED_QUERY]"),
+    # BIND config `key "name" { ...; secret "..."; };` blocks (rndc-key, TSIG
+    # keys). named-checkconf -p echoes these verbatim, so bind_validation.txt
+    # would otherwise leak the live RNDC/TSIG shared secret in plaintext.
+    (re.compile(r'(?i)(secret\s+)"[^"]*"'), r'\1"[REDACTED]"'),
 ]
 
 
@@ -161,9 +165,13 @@ https://resolver.example/dns-query?token=secret&client=private
 -----BEGIN PRIVATE KEY-----
 abc
 -----END PRIVATE KEY-----
+key "rndc-key" {
+	algorithm "hmac-sha256";
+	secret "5O1I/TE1qQor6HqTnazGaL8sAPVtCM2TsdkZX6FnGbU=";
+};
 """
     cleaned = redact(sample)
-    forbidden = ("hunter2", "abcdef", "secret&client", "BEGIN PRIVATE KEY", "x-api-key: secret")
+    forbidden = ("hunter2", "abcdef", "secret&client", "BEGIN PRIVATE KEY", "x-api-key: secret", "5O1I/TE1qQor6HqTnazGaL8sAPVtCM2TsdkZX6FnGbU=")
     if any(token in cleaned for token in forbidden):
         print(cleaned)
         return 1
