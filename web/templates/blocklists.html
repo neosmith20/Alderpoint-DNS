@@ -1,43 +1,52 @@
 {% extends "base.html" %}
+{% import "components.html" as ui %}
 {% block content %}
-<h1>Blocklists</h1>
-<form class="panel" method="post" action="/blocklists/add">
+{{ ui.page_header("Blocklists", "Manage external policy sources and categories.", '<form method="post" action="/blocklists/update" data-confirm="Update all blocklist sources?"><input type="hidden" name="csrf" value="' ~ csrf ~ '"><button>Update All Sources</button></form>') }}
+
+<form class="panel stack" method="post" action="/blocklists/add">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <div class="grid">
     <label>Name <input name="name" required></label>
     <label>URL <input name="url" required></label>
     <label>Category <input name="category" value="ads_trackers"></label>
   </div>
-  <p><button>Add Source</button></p>
+  <div class="form-actions"><button>Add Source</button></div>
 </form>
-<form method="post" action="/blocklists/update" class="panel">
-  <input type="hidden" name="csrf" value="{{ csrf }}">
-  <button>Update All Sources</button>
-</form>
-<table>
-  <tr><th>Source</th><th>State</th><th>Accepted</th><th>Invalid</th><th>Unsupported</th><th>Error</th><th>Actions</th></tr>
-  {% for s in sources %}
-  <tr>
-    <td>
-      <form method="post" action="/blocklists/{{ s.id }}/edit">
-        <input type="hidden" name="csrf" value="{{ csrf }}">
-        <label>Name <input name="name" value="{{ s.name }}" required></label>
-        <label>URL <input name="url" value="{{ s.url }}" required></label>
-        <label>Category <input name="category" value="{{ s.category }}"></label>
-        <p><button>Save</button></p>
-      </form>
-    </td>
-    <td>{{ "enabled" if s.enabled else "disabled" }}</td>
-    <td>{{ s.accepted_domains }}</td>
-    <td>{{ s.invalid_rules }}</td>
-    <td>{{ s.unsupported_rules }}</td>
-    <td>{{ s.last_error or "" }}</td>
-    <td class="row">
-      <form method="post" action="/blocklists/{{ s.id }}/update"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Update</button></form>
-      <form method="post" action="/blocklists/{{ s.id }}/toggle"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Toggle</button></form>
-      <form method="post" action="/blocklists/{{ s.id }}/delete"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="danger">Delete</button></form>
-    </td>
-  </tr>
-  {% endfor %}
-</table>
+
+{% if sources %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Source</th><th>State</th><th>Accepted</th><th>Invalid</th><th>Unsupported</th><th>Error</th><th>Actions</th></tr></thead>
+      <tbody>
+        {% for s in sources %}
+        <tr>
+          <td>
+            <form class="stack" method="post" action="/blocklists/{{ s.id }}/edit">
+              <input type="hidden" name="csrf" value="{{ csrf }}">
+              <label>Name <input name="name" value="{{ s.name }}" required></label>
+              <label>URL <input name="url" value="{{ s.url }}" required></label>
+              <label>Category <input name="category" value="{{ s.category }}"></label>
+              <button>Save</button>
+            </form>
+          </td>
+          <td>{{ ui.status_badge("Enabled", "healthy") if s.enabled else ui.status_badge("Disabled", "unavailable") }}</td>
+          <td>{{ s.accepted_domains }}</td>
+          <td>{{ s.invalid_rules }}</td>
+          <td>{{ s.unsupported_rules }}</td>
+          <td>{{ s.last_error or "" }}</td>
+          <td>
+            <div class="row">
+              <form method="post" action="/blocklists/{{ s.id }}/update"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">Update</button></form>
+              <form method="post" action="/blocklists/{{ s.id }}/toggle"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">Toggle</button></form>
+              <form method="post" action="/blocklists/{{ s.id }}/delete" data-confirm="Delete this blocklist source?"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="danger">Delete</button></form>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% else %}
+  {{ ui.empty_state("No blocklists configured", "Add a source to begin compiling filtering policy.") }}
+{% endif %}
 {% endblock %}

@@ -24,10 +24,36 @@ commands through sudo:
 /opt/bindguard/app/bindguard_compiler.py update-sources
 ```
 
-The dashboard shows stored DNS query totals, blocked totals, block percentage,
-average processing time, active clients, active block rules, a local canvas
-time-series chart, top lists, and recent activity. Empty states are displayed
-until the analytics collector has gathered data.
+The interface uses a shared dark-theme application shell across all admin
+pages. The shell is defined in `web/templates/base.html`, reusable components
+live in `web/templates/components.html`, and the visual system is maintained in
+`web/static/app.css` with CSS custom properties for page background, panels,
+borders, text, accent, success, warning, danger, blocked, malware, adult
+category, spacing, radius, and shadows. Runtime JavaScript is local-only in
+`web/static/app.js`; public CDNs are not used.
+
+The dashboard is organized around DNS-appliance information hierarchy:
+
+- Protection state and protection enable/disable action with confirmation.
+- Manual refresh, auto-refresh control, last refresh timestamp, and a
+  session-persisted time-range selector for last hour, last 24 hours, last
+  seven days, and last 30 days.
+- Primary metric cards for DNS queries, blocked queries, percentage blocked,
+  active clients, average response time, and active filtering rules.
+- Real sparklines and a responsive local canvas time-series chart using stored
+  BindGuard analytics buckets only.
+- Query outcome bars for allowed, blocked, and recorded policy categories.
+- Ranked panels for clients, queried domains, blocked domains, query types,
+  response codes, protocol usage, and clear unavailable states for upstream
+  resolver data that is not yet stored.
+- Recent activity and compact system-health chips with low-level details moved
+  to `/system`.
+
+The Query Log, Blocklists, Filters, DNS Settings, Statistics, System, login, and
+setup pages all use the same card, table, badge, form, button, empty-state, and
+confirmation styles. Long domains, IPv6 addresses, paths, command names,
+version strings, and URLs use wrapping or deliberate local table scrolling so
+they do not create page-level horizontal overflow.
 
 The Query Log page supports search, pagination, auto-refresh, client/domain
 filters, query type, protocol, allowed/blocked status, response code, and direct
@@ -47,6 +73,19 @@ systemctl restart bindguard
 systemctl restart bindguard-analytics
 /opt/bindguard/tests/test_web_smoke.sh
 ```
+
+Responsive review targets are 1920, 1440, 1024, 768, 430, and 360 pixels wide.
+The smoke test renders long domains, IPv6 clients, and long upstream URLs and
+checks the shared no-overflow CSS contract, mobile navigation hooks, chart data
+endpoint, local-only static assets, and dashboard/query-log/settings page
+rendering.
+
+Sanitized before-and-after screenshots are stored under `docs/screenshots/`:
+
+- `dashboard-before-desktop.png`
+- `dashboard-after-desktop.png`
+- `dashboard-before-mobile.png`
+- `dashboard-after-mobile.png`
 
 The admin listener binds to `0.0.0.0:3000` and requires a BindGuard admin
 session. pfSense VLAN/firewall rules are responsible for restricting network

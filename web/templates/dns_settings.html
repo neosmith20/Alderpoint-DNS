@@ -1,45 +1,52 @@
 {% extends "base.html" %}
+{% import "components.html" as ui %}
 {% block content %}
-<h1>DNS Settings</h1>
-<div class="grid">
-  <div class="card">
-    <h3>Allowed Clients</h3>
-    <div class="card-list">
+{{ ui.page_header("DNS Settings", "Listener, protocol, certificate, and client-address validation status.") }}
+
+<section class="grid">
+  <article class="card">
+    <div class="card__head"><h2>Allowed Clients</h2></div>
+    <div class="stack">
       {% for client in allowed_clients %}
         <div>{{ client }}</div>
       {% endfor %}
     </div>
+  </article>
+  <article class="card"><div class="card__head"><h2>BIND Backend</h2></div><p>{{ backend }}</p></article>
+  <article class="card"><div class="card__head"><h2>Maintenance DNS</h2></div><p>{{ maintenance }}</p></article>
+  <article class="card"><div class="card__head"><h2>Hostname</h2></div><p>{{ hostname }}</p></article>
+  <article class="card"><div class="card__head"><h2>DoH Path</h2></div><p><span class="mono">{{ doh_path }}</span></p></article>
+  <article class="card"><div class="card__head"><h2>dnsdist Version</h2></div><p><span class="mono">{{ dnsdist_version }}</span></p></article>
+  <article class="card"><div class="card__head"><h2>Certificate</h2>{{ ui.status_badge(cert.state|title, "healthy" if cert.state == "present" else "down") }}</div><p class="muted">{{ cert.detail }}</p></article>
+  <article class="card"><div class="card__head"><h2>PROXYv2 Backend</h2>{{ ui.status_badge(proxy_backend|title, "healthy" if proxy_backend == "enabled" else "degraded") }}</div></article>
+  <article class="card">
+    <div class="card__head"><h2>Client Address Test</h2>{{ ui.status_badge(client_address_test.state, "healthy" if client_address_test.state == "Passed" else "down" if client_address_test.state == "Failed" else "unavailable") }}</div>
+    <p class="muted mono">{{ client_address_test.filename }}</p>
+  </article>
+</section>
+
+<section class="panel">
+  <div class="panel__head"><h2>Protocol Status</h2></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Protocol</th><th>Port</th><th>Status</th><th>Test</th></tr></thead>
+      <tbody>
+        {% for protocol in protocols %}
+          <tr>
+            <td>{{ protocol.name }}</td>
+            <td class="mono">{{ protocol.port }}</td>
+            <td>{{ ui.status_badge(protocol.state|title, "healthy" if protocol.state == "listening" else "unavailable" if "unavailable" in protocol.state else "degraded") }}</td>
+            <td class="mono">{{ protocol.tested }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
   </div>
-  <div class="card"><h3>BIND Backend</h3><p>{{ backend }}</p></div>
-  <div class="card"><h3>Maintenance DNS</h3><p>{{ maintenance }}</p></div>
-  <div class="card"><h3>Hostname</h3><p>{{ hostname }}</p></div>
-  <div class="card"><h3>DoH Path</h3><p><span class="mono">{{ doh_path }}</span></p></div>
-  <div class="card"><h3>dnsdist Version</h3><p><span class="mono">{{ dnsdist_version }}</span></p></div>
-  <div class="card"><h3>Certificate</h3><p>{{ cert.state }}<br><span class="muted">{{ cert.detail }}</span></p></div>
-  <div class="card"><h3>PROXYv2 Backend</h3><p>{{ proxy_backend }}</p></div>
-  <div class="card">
-    <h3>Client Address Test</h3>
-    <p>
-      {{ client_address_test.state }}
-      <span class="muted secondary mono">{{ client_address_test.filename }}</span>
-    </p>
-  </div>
-</div>
-<h2>Protocol Status</h2>
-<table>
-  <thead><tr><th>Protocol</th><th>Port</th><th>Status</th><th>Test</th></tr></thead>
-  <tbody>
-    {% for protocol in protocols %}
-      <tr>
-        <td>{{ protocol.name }}</td>
-        <td>{{ protocol.port }}</td>
-        <td>{{ protocol.state }}</td>
-        <td>{{ protocol.tested }}</td>
-      </tr>
-    {% endfor %}
-  </tbody>
-</table>
-<h2>Build Features</h2>
-<p class="muted">{{ dnsdist_features }}</p>
-<p class="muted">Replace certificate material by staging both <span class="mono">/etc/bindguard/certs/bindguard-lab.crt</span> and <span class="mono">/etc/bindguard/certs/bindguard-lab.key</span>, validating the pair, then restarting dnsdist. The bootstrap helper refuses partial replacement.</p>
+</section>
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Build Features</h2></div>
+  <p class="muted mono">{{ dnsdist_features }}</p>
+  <p class="muted">Replace certificate material by staging both <span class="mono">/etc/bindguard/certs/bindguard-lab.crt</span> and <span class="mono">/etc/bindguard/certs/bindguard-lab.key</span>, validating the pair, then restarting dnsdist. The bootstrap helper refuses partial replacement.</p>
+</section>
 {% endblock %}

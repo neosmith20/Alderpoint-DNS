@@ -1,0 +1,207 @@
+(function () {
+  const topbar = document.getElementById('appTopbar');
+  const navToggle = document.querySelector('[data-nav-toggle]');
+  if (topbar && navToggle) {
+    navToggle.addEventListener('click', () => {
+      const open = topbar.classList.toggle('nav-open');
+      navToggle.setAttribute('aria-expanded', String(open));
+    });
+  }
+
+  const rangeLinks = document.querySelectorAll('[data-range-link]');
+  if (rangeLinks.length) {
+    const params = new URLSearchParams(window.location.search);
+    if (!params.has('range')) {
+      const stored = sessionStorage.getItem('bindguardRange');
+      const current = document.querySelector('[data-current-range]');
+      if (stored && current && current.dataset.currentRange !== stored) {
+        params.set('range', stored);
+        window.location.search = params.toString();
+      }
+    }
+    rangeLinks.forEach((link) => {
+      link.addEventListener('click', () => sessionStorage.setItem('bindguardRange', link.dataset.rangeLink));
+    });
+  }
+
+  document.querySelectorAll('[data-confirm]').forEach((node) => {
+    node.addEventListener('submit', (event) => {
+      if (!window.confirm(node.dataset.confirm)) event.preventDefault();
+    });
+  });
+
+  const refreshToggle = document.getElementById('autoRefresh');
+  let refreshTimer = null;
+  if (refreshToggle) {
+    refreshToggle.addEventListener('change', () => {
+      if (refreshTimer) clearInterval(refreshTimer);
+      refreshTimer = refreshToggle.checked ? setInterval(() => window.location.reload(), 10000) : null;
+    });
+  }
+
+  function parseSeries(canvas) {
+    try {
+      return JSON.parse(canvas.dataset.series || '[]');
+    } catch (_) {
+      return [];
+    }
+  }
+
+  function resizeCanvas(canvas) {
+    const ratio = window.devicePixelRatio || 1;
+    const width = Math.max(280, canvas.clientWidth || 600);
+    const height = Math.max(180, canvas.clientHeight || 300);
+    canvas.width = Math.floor(width * ratio);
+    canvas.height = Math.floor(height * ratio);
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    return { ctx, width, height };
+  }
+
+  function niceTime(epoch) {
+    const d = new Date(epoch * 1000);
+    return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+
+  function drawSparkline(canvas) {
+    const data = parseSeries(canvas);
+    const { ctx, width, height } = resizeCanvas(canvas);
+    ctx.clearRect(0, 0, width, height);
+    if (!data.length) return;
+    const max = Math.max(1, ...data);
+    ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#20d6b5';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    data.forEach((value, index) => {
+      const x = data.length === 1 ? width : index * (width / (data.length - 1));
+      const y = height - 3 - ((height - 6) * value / max);
+      if (index === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+
+  function drawChart(canvas, hoverIndex) {
+    const data = parseSeries(canvas);
+    const { ctx, width, height } = resizeCanvas(canvas);
+    const styles = getComputedStyle(document.documentElement);
+    const colors = {
+      total: styles.getPropertyValue('--accent-strong').trim() || '#67e8f9',
+      blocked: styles.getPropertyValue('--blocked').trim() || '#fb7185',
+      allowed: styles.getPropertyValue('--success').trim() || '#36d399',
+      grid: styles.getPropertyValue('--border').trim() || '#26384e',
+      text: styles.getPropertyValue('--muted').trim() || '#9cafc1',
+      panel: styles.getPropertyValue('--panel-elevated').trim() || '#15283e',
+    };
+    ctx.clearRect(0, 0, width, height);
+    const padding = { top: 20, right: 18, bottom: 38, left: 52 };
+    const plotW = Math.max(20, width - padding.left - padding.right);
+    const plotH = Math.max(20, height - padding.top - padding.bottom);
+    ctx.font = '12px system-ui, sans-serif';
+    ctx.textBaseline = 'middle';
+
+    if (!data.length) {
+      ctx.fillStyle = colors.text;
+      ctx.fillText('No analytics data collected yet', padding.left, height / 2);
+      return;
+    }
+
+    const enabled = (canvas.dataset.enabledSeries || 'total,blocked').split(',');
+    const max = Math.max(1, ...data.map((d) => Math.max(...enabled.map((key) => Number(d[key] || 0)))));
+    for (let i = 0; i <= 4; i += 1) {
+      const y = padding.top + (plotH * i / 4);
+      const value = Math.round(max - (max * i / 4));
+      ctx.strokeStyle = colors.grid;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(padding.left, y);
+      ctx.lineTo(width - padding.right, y);
+      ctx.stroke();
+      ctx.fillStyle = colors.text;
+      ctx.textAlign = 'right';
+      ctx.fillText(String(value), padding.left - 9, y);
+    }
+
+    function point(index, key) {
+      const x = padding.left + (data.length === 1 ? plotW : plotW * index / (data.length - 1));
+      const y = padding.top + plotH - (plotH * Number(data[index][key] || 0) / max);
+      return { x, y };
+    }
+
+    enabled.forEach((key) => {
+      ctx.strokeStyle = colors[key] || colors.total;
+      ctx.lineWidth = key === 'blocked' ? 2.4 : 2;
+      ctx.beginPath();
+      data.forEach((_, index) => {
+        const p = point(index, key);
+        if (index === 0) ctx.moveTo(p.x, p.y);
+        else ctx.lineTo(p.x, p.y);
+      });
+      ctx.stroke();
+    });
+
+    ctx.fillStyle = colors.text;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    const labels = [0, Math.floor((data.length - 1) / 2), data.length - 1].filter((v, i, a) => a.indexOf(v) === i);
+    labels.forEach((index) => {
+      const p = point(index, enabled[0]);
+      ctx.fillText(niceTime(data[index].t), Math.min(width - 130, Math.max(6, p.x - 48)), height - 28);
+    });
+
+    if (hoverIndex !== undefined && data[hoverIndex]) {
+      const x = point(hoverIndex, enabled[0]).x;
+      ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+      ctx.beginPath();
+      ctx.moveTo(x, padding.top);
+      ctx.lineTo(x, padding.top + plotH);
+      ctx.stroke();
+      const boxW = 188;
+      const boxH = 76;
+      const boxX = Math.min(width - boxW - 8, Math.max(8, x + 12));
+      const boxY = padding.top + 8;
+      ctx.fillStyle = colors.panel;
+      ctx.strokeStyle = colors.grid;
+      ctx.beginPath();
+      ctx.roundRect(boxX, boxY, boxW, boxH, 10);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = '#ecf4fb';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText(niceTime(data[hoverIndex].t), boxX + 10, boxY + 10);
+      ctx.fillStyle = colors.total;
+      ctx.fillText(`Total: ${data[hoverIndex].total || 0}`, boxX + 10, boxY + 31);
+      ctx.fillStyle = colors.blocked;
+      ctx.fillText(`Blocked: ${data[hoverIndex].blocked || 0}`, boxX + 10, boxY + 52);
+    }
+  }
+
+  function setupChart(canvas) {
+    let hoverIndex;
+    const render = () => drawChart(canvas, hoverIndex);
+    canvas.addEventListener('mousemove', (event) => {
+      const data = parseSeries(canvas);
+      if (!data.length) return;
+      const rect = canvas.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const plotStart = 52;
+      const plotEnd = rect.width - 18;
+      const ratio = Math.min(1, Math.max(0, (x - plotStart) / Math.max(1, plotEnd - plotStart)));
+      hoverIndex = Math.round(ratio * (data.length - 1));
+      render();
+    });
+    canvas.addEventListener('mouseleave', () => {
+      hoverIndex = undefined;
+      render();
+    });
+    render();
+    window.addEventListener('resize', render);
+  }
+
+  document.querySelectorAll('canvas.sparkline').forEach((canvas) => {
+    drawSparkline(canvas);
+    window.addEventListener('resize', () => drawSparkline(canvas));
+  });
+  document.querySelectorAll('canvas[data-chart="traffic"]').forEach(setupChart);
+}());

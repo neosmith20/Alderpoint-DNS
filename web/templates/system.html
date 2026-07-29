@@ -1,12 +1,22 @@
 {% extends "base.html" %}
+{% import "components.html" as ui %}
 {% block content %}
-<h1>System</h1>
-<div class="grid">
-  <div class="card"><h3>BindGuard</h3><p>{{ bindguard }}</p></div>
-  <div class="card"><h3>BIND</h3><p>{{ named }}</p></div>
-  <div class="card"><h3>dnsdist</h3><p>{{ dnsdist }}</p></div>
-  <div class="card"><h3>Last Deployment</h3><p>{{ compiler.deployment.status if compiler.deployment else "none" }}</p></div>
-</div>
-<h2>Recent Logs</h2>
-<pre>{{ logs }}</pre>
+{{ ui.page_header("System", "Service state, deployment state, and recent BindGuard logs.") }}
+
+<section class="grid">
+  {% for item in health %}
+    <article class="card">
+      <div class="card__head"><h2>{{ item.name }}</h2>{{ ui.status_badge(item.state, item.tone) }}</div>
+    </article>
+  {% endfor %}
+  <article class="card">
+    <div class="card__head"><h2>Last Deployment</h2>{{ ui.status_badge(compiler.deployment.status if compiler.deployment else "None", "healthy" if compiler.deployment and compiler.deployment.status == "deployed" else "unavailable") }}</div>
+    {% if compiler.deployment %}<p class="muted">Active domains: {{ compiler.deployment.active_domains }}</p>{% endif %}
+  </article>
+</section>
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Recent Logs</h2></div>
+  <pre>{{ logs }}</pre>
+</section>
 {% endblock %}

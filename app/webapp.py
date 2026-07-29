@@ -15,7 +15,7 @@ from typing import Any
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
@@ -148,6 +148,65 @@ def run(command: list[str]) -> tuple[int, str]:
 def service_state(name: str) -> str:
     code, out = run(["systemctl", "is-active", name])
     return out.strip() if code == 0 else "inactive"
+
+
+def status_tone(state: str) -> str:
+    normalized = (state or "").lower()
+    if normalized in {"active", "listening", "enabled", "present", "healthy", "passed"}:
+        return "healthy"
+    if normalized in {"inactive", "failed", "missing", "invalid", "down"}:
+        return "down"
+    if "unavailable" in normalized:
+        return "unavailable"
+    return "degraded"
+
+
+def protection_state(active_rules: int, bind_state: str, dnsdist_state: str, collector_state: str) -> dict[str, str]:
+    if bind_state != "active" or dnsdist_state != "active":
+        return {"label": "Degraded", "tone": "degraded"}
+    if active_rules <= 0:
+        return {"label": "Disabled", "tone": "down"}
+    if collector_state != "active":
+        return {"label": "Degraded", "tone": "degraded"}
+    return {"label": "Active", "tone": "healthy"}
+
+
+def analytics_category_breakdown(range_key: str) -> list[dict[str, Any]]:
+    analytics.init_analytics_db()
+    since = analytics.utc_now() - analytics.range_seconds(range_key)
+    with analytics.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT coalesce(nullif(block_category, ''), 'Unavailable') AS label, count(*) AS value
+            FROM query_events
+            WHERE blocked=1 AND ts >= ?
+            GROUP BY label
+            ORDER BY value DESC
+            LIMIT 8
+            """,
+            (since,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def system_health(bind_state: str | None = None, dnsdist_state: str | None = None, bindguard_state: str | None = None) -> list[dict[str, str]]:
+    named = bind_state or service_state("named")
+    dnsdist_current = dnsdist_state or service_state("dnsdist")
+    bindguard_current = bindguard_state or service_state("bindguard")
+    collector = service_state("bindguard-analytics")
+    backend = "healthy" if named == "active" and dnsdist_current == "active" else "degraded"
+    cert = cert_status()["state"]
+    db_state = "healthy" if analytics.db_size() > 0 else "unavailable"
+    return [
+        {"name": "BIND", "state": "Healthy" if named == "active" else "Down", "tone": status_tone(named)},
+        {"name": "dnsdist", "state": "Healthy" if dnsdist_current == "active" else "Down", "tone": status_tone(dnsdist_current)},
+        {"name": "BindGuard", "state": "Healthy" if bindguard_current == "active" else "Down", "tone": status_tone(bindguard_current)},
+        {"name": "Analytics collector", "state": "Healthy" if collector == "active" else "Down", "tone": status_tone(collector)},
+        {"name": "Backend health", "state": "Healthy" if backend == "healthy" else "Degraded", "tone": backend},
+        {"name": "DNSSEC", "state": "Unavailable", "tone": "unavailable"},
+        {"name": "Certificate", "state": "Healthy" if cert == "present" else cert.title(), "tone": status_tone(cert)},
+        {"name": "Database", "state": "Healthy" if db_state == "healthy" else "Unavailable", "tone": db_state},
+    ]
 
 
 def compiler_status() -> dict[str, Any]:
@@ -324,28 +383,75 @@ def dashboard(request: Request, _: sqlite3.Row = Depends(current_admin)):
     active_rules = deployment["active_domains"] if deployment else 0
     range_key = request.query_params.get("range", "24h")
     data = analytics.dashboard_data(range_key)
+    bind_state = service_state("named")
+    dnsdist_state = service_state("dnsdist")
+    bindguard_state = service_state("bindguard")
+    collector_state = service_state("bindguard-analytics")
+    protection = protection_state(active_rules, bind_state, dnsdist_state, collector_state)
+    chart_points = [
+        {
+            "t": row["bucket_start"],
+            "total": row["total_queries"],
+            "blocked": row["blocked_queries"],
+            "allowed": row["allowed_queries"],
+            "errors": row["nxdomain"] + row["servfail"] + row["refused"],
+            "rate_limited": row["dropped_requests"] + row["rate_limited_requests"],
+        }
+        for row in data["buckets"]
+    ]
     return render(
         request,
         "dashboard.html",
-        bindguard="active",
-        bind=service_state("named"),
-        dnsdist=service_state("dnsdist"),
+        bindguard=bindguard_state,
+        bind=bind_state,
+        dnsdist=dnsdist_state,
+        collector=collector_state,
         enabled_sources=len(enabled_sources),
         active_rules=active_rules,
         deployment=deployment,
         sources=status["sources"],
         analytics=data,
-        chart_json=json.dumps(
-            [
+        chart_json=json.dumps(chart_points),
+        category_breakdown=analytics_category_breakdown(range_key),
+        protection=protection,
+        system_health=system_health(bind_state, dnsdist_state, bindguard_state),
+        last_refresh=utc_now(),
+    )
+
+
+@app.get("/analytics/chart-data")
+def analytics_chart_data(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    data = analytics.dashboard_data(request.query_params.get("range", "24h"))
+    return JSONResponse(
+        {
+            "range": data["range"],
+            "series": [
                 {
                     "t": row["bucket_start"],
                     "total": row["total_queries"],
                     "blocked": row["blocked_queries"],
+                    "allowed": row["allowed_queries"],
+                    "errors": row["nxdomain"] + row["servfail"] + row["refused"],
+                    "rate_limited": row["dropped_requests"] + row["rate_limited_requests"],
                 }
                 for row in data["buckets"]
-            ]
-        ),
+            ],
+        }
     )
+
+
+@app.post("/protection/toggle")
+def protection_toggle(request: Request, csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    status = compiler_status()
+    deployment = status["deployment"]
+    active_rules = deployment["active_domains"] if deployment else 0
+    enable = active_rules <= 0
+    with db() as conn:
+        conn.execute("UPDATE sources SET enabled=?", (1 if enable else 0,))
+        conn.execute("UPDATE custom_rules SET enabled=?", (1 if enable else 0,))
+    run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "deploy", "--no-download"])
+    return redirect("/")
 
 
 @app.get("/setup", response_class=HTMLResponse)
@@ -595,12 +701,16 @@ def dns_settings(request: Request, _: sqlite3.Row = Depends(current_admin)):
 @app.get("/system", response_class=HTMLResponse)
 def system_page(request: Request, _: sqlite3.Row = Depends(current_admin)):
     code, logs = run(["journalctl", "-u", "bindguard", "-n", "80", "--no-pager"])
+    named = service_state("named")
+    dnsdist = service_state("dnsdist")
+    bindguard = service_state("bindguard")
     return render(
         request,
         "system.html",
-        named=service_state("named"),
-        dnsdist=service_state("dnsdist"),
-        bindguard=service_state("bindguard"),
+        named=named,
+        dnsdist=dnsdist,
+        bindguard=bindguard,
+        health=system_health(named, dnsdist, bindguard),
         logs=logs,
         compiler=compiler_status(),
     )
