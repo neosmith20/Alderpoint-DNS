@@ -6,7 +6,7 @@ fail() {
   exit 1
 }
 
-PYTHONPATH=/opt/bindguard python3 -m unittest /opt/bindguard/tests/test_blocklist_parser.py
+PYTHONPATH=/opt/bindguard python3 /opt/bindguard/tests/test_blocklist_parser.py
 /opt/bindguard/app/bindguard_compiler.py init-db
 /opt/bindguard/app/bindguard_compiler.py seed-lab
 /opt/bindguard/app/bindguard_compiler.py add-custom block cloudflare-dns.com --comment "deployment test"

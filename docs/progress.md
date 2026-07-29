@@ -14,7 +14,7 @@
 - [x] Aggregate query statistics
 - [x] Backup and restore
 - [ ] Full reboot acceptance
-- [ ] v1 acceptance suite
+- [x] v1 acceptance suite
 
 ## Verified BIND milestone
 
@@ -110,3 +110,12 @@
 - Restore restarts named, dnsdist, and bindguard.
 - Backup/restore acceptance test passes and confirms DNS and web services work
   afterward.
+
+## Verified pre-reboot acceptance milestone
+
+- `/opt/bindguard/tests/test_acceptance.sh` runs the BIND backend, dnsdist
+  frontend, blocklist deployment, failure-path rollback, web smoke, and
+  backup/restore tests.
+- The pre-reboot acceptance suite passed on this VM.
+- Negative-path stack traces during the suite are expected for invalid RPZ and
+  forced rollback tests; both paths were verified as rejected/rolled back.
