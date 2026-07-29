@@ -9,6 +9,8 @@ Run individual suites:
 /opt/bindguard/tests/test_blocklist_failure_paths.sh
 /opt/bindguard/tests/test_analytics.py
 /opt/bindguard/tests/test_local_dns.py
+/opt/bindguard/tests/test_dns_cache.py
+/opt/bindguard/tests/test_dns_cache_benchmark.sh
 /opt/bindguard/tests/test_web_smoke.sh
 /opt/bindguard/tests/test_backup_restore.sh
 ```
@@ -48,6 +50,21 @@ protocol classification is correct across UDP, TCP, DoH, DoH3, DoT, and DoQ.
 The web smoke test also checks that Query Log auto-refresh has a partial
 `/query-log/partial` endpoint, updates only the result container, and persists
 the auto-refresh state in browser session storage.
+
+The BIND cache management suite (`tests/test_dns_cache.py`) covers default
+cache-size sizing from VM memory, validation bounds (including rejecting a
+cache size above 75% of total RAM and inverted min/max TTL pairs), generated
+BIND syntax for both prefetch/serve-stale on and off, the idempotent
+named.conf.options include migration, a successful staged deploy, rollback
+to the previous file on a failed post-deploy health check, invalid settings
+never touching the live file, all three flush scopes (all/name/subtree),
+newest-request-wins flush processing, flush-failure recording, and cache
+hit-percent computation from BIND's statistics-channels JSON API.
+`tests/test_dns_cache_benchmark.sh` proves cache effectiveness on live BIND
+using its own `CacheHits`/`CacheMisses` counters across a cold query followed
+by a repeated (cached) query, rather than asserting on noisy wall-clock
+timing. The web smoke test also renders the Cache page with a long flush
+target to guard against horizontal overflow.
 
 Run the combined suite:
 

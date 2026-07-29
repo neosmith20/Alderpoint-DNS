@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
-from app import analytics, local_dns
+from app import analytics, dns_cache, local_dns
 from app.bindguard_compiler import DB_PATH, add_source, init_db, normalize_domain
 
 
@@ -221,6 +221,10 @@ def deploy_no_download() -> tuple[int, str]:
     return run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "deploy", "--no-download"])
 
 
+def cache_flush_apply() -> tuple[int, str]:
+    return run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "cache-flush"])
+
+
 def dnsdist_stats() -> dict[str, Any]:
     try:
         creds = Path("/etc/bindguard/dnsdist-web.creds").read_text().strip()
@@ -419,6 +423,7 @@ def dashboard(request: Request, _: sqlite3.Row = Depends(current_admin)):
         category_breakdown=analytics_category_breakdown(range_key),
         protection=protection,
         system_health=system_health(bind_state, dnsdist_state, bindguard_state),
+        cache_stats=dns_cache.cache_stats(),
         last_refresh=utc_now(),
     )
 
@@ -871,6 +876,102 @@ def local_dns_import_apply(request: Request, csrf: str = Form(...), csv_text: st
 @app.get("/local-dns/export")
 def local_dns_export(_: sqlite3.Row = Depends(current_admin)):
     return PlainTextResponse(local_dns.csv_export(), media_type="text/csv")
+
+
+def dns_cache_context() -> dict[str, Any]:
+    return {
+        "cache": dns_cache.settings(),
+        "stats": dns_cache.cache_stats(),
+        "deployment": dns_cache.last_deployment(),
+        "flushes": dns_cache.recent_flushes(),
+        "total_memory_mb": dns_cache.detect_total_memory_mb(),
+    }
+
+
+def dns_cache_error(request: Request, message: str, status_code: int = 400) -> HTMLResponse:
+    context = dns_cache_context()
+    context.update({"error": message})
+    return render(request, "dns_cache.html", **context, status_code=status_code)
+
+
+@app.get("/dns-cache", response_class=HTMLResponse)
+def dns_cache_page(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    context = dns_cache_context()
+    context.update({"error": None})
+    return render(request, "dns_cache.html", **context)
+
+
+@app.post("/dns-cache/settings")
+def dns_cache_settings_post(
+    request: Request,
+    csrf: str = Form(...),
+    max_cache_size_mb: int = Form(...),
+    min_cache_ttl: int = Form(...),
+    max_cache_ttl: int = Form(...),
+    min_ncache_ttl: int = Form(...),
+    max_ncache_ttl: int = Form(...),
+    prefetch_enabled: str = Form("0"),
+    prefetch_trigger: int = Form(2),
+    prefetch_eligible: int = Form(10),
+    serve_stale_enabled: str = Form("0"),
+    max_stale_ttl: int = Form(86400),
+    stale_answer_client_timeout: str = Form("off"),
+    _: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    try:
+        dns_cache.update_settings(
+            {
+                "max_cache_size_mb": max_cache_size_mb,
+                "min_cache_ttl": min_cache_ttl,
+                "max_cache_ttl": max_cache_ttl,
+                "min_ncache_ttl": min_ncache_ttl,
+                "max_ncache_ttl": max_ncache_ttl,
+                "prefetch_enabled": prefetch_enabled,
+                "prefetch_trigger": prefetch_trigger,
+                "prefetch_eligible": prefetch_eligible,
+                "serve_stale_enabled": serve_stale_enabled,
+                "max_stale_ttl": max_stale_ttl,
+                "stale_answer_client_timeout": stale_answer_client_timeout,
+            }
+        )
+        deploy_no_download()
+    except Exception as exc:
+        return dns_cache_error(request, str(exc))
+    return redirect("/dns-cache")
+
+
+@app.post("/dns-cache/flush")
+def dns_cache_flush_all(request: Request, csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    try:
+        dns_cache.request_flush("all")
+        cache_flush_apply()
+    except Exception as exc:
+        return dns_cache_error(request, str(exc))
+    return redirect("/dns-cache")
+
+
+@app.post("/dns-cache/flush-name")
+def dns_cache_flush_name(request: Request, csrf: str = Form(...), name: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    try:
+        dns_cache.request_flush("name", name)
+        cache_flush_apply()
+    except Exception as exc:
+        return dns_cache_error(request, str(exc))
+    return redirect("/dns-cache")
+
+
+@app.post("/dns-cache/flush-tree")
+def dns_cache_flush_tree(request: Request, csrf: str = Form(...), name: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    try:
+        dns_cache.request_flush("tree", name)
+        cache_flush_apply()
+    except Exception as exc:
+        return dns_cache_error(request, str(exc))
+    return redirect("/dns-cache")
 
 
 @app.get("/dns-settings", response_class=HTMLResponse)

@@ -60,6 +60,11 @@ for route in ("/local-dns", "local_dns_add_host", "local_dns_add_alias", "local_
         raise SystemExit(f"local DNS route missing: {route}")
 if "/query-log/partial" not in webapp_text or "query_log_context" not in webapp_text:
     raise SystemExit("query log partial refresh endpoint is missing")
+for route in ("/dns-cache", "dns_cache_settings_post", "/dns-cache/flush", "/dns-cache/flush-name", "/dns-cache/flush-tree"):
+    if route not in webapp_text:
+        raise SystemExit(f"cache route missing: {route}")
+if 'href="/dns-cache"' not in template:
+    raise SystemExit("cache nav link is missing")
 if "bindguardAutoRefresh" not in js or "sessionStorage" not in js or "target.innerHTML" not in js:
     raise SystemExit("query log auto-refresh stateful partial update is missing")
 if "setInterval(() => window.location.reload()" in js:
@@ -148,6 +153,7 @@ dashboard = TEMPLATES.get_template("dashboard.html").render(
     category_breakdown=[{"label": "ads_trackers", "value": 1}, {"label": "adult_content", "value": 0}],
     system_health=[{"name": "BIND", "state": "Healthy", "tone": "healthy"}],
     last_refresh="2026-07-29T00:00:00Z",
+    cache_stats={"available": True, "hits": 100, "misses": 25, "hit_percent": 80.0, "nodes": 42, "memory_bytes": 1048576, "evicted_lru": 0, "expired_ttl": 3},
     analytics={
         "range": "24h",
         "has_data": True,
@@ -165,7 +171,7 @@ dashboard = TEMPLATES.get_template("dashboard.html").render(
 )
 if "DNS Query Volume" not in dashboard or "queryChart" not in dashboard:
     raise SystemExit("dashboard analytics chart did not render")
-for expected in ("Protection Active", "Disable protection", "Top Upstream Resolvers", "Average Upstream Latency", long_domain, long_client):
+for expected in ("Protection Active", "Disable protection", "Top Upstream Resolvers", "BIND Cache Effectiveness", "80.0", long_domain, long_client):
     if expected not in dashboard:
         raise SystemExit(f"dashboard missing {expected}")
 
@@ -216,6 +222,24 @@ for expected in ("Local DNS", "home.arpa", "Add Host", "Advanced Record", "Autom
     if expected not in local_dns:
         raise SystemExit(f"local DNS page missing {expected}")
 
+dns_cache_html = TEMPLATES.get_template("dns_cache.html").render(
+    **base,
+    error=None,
+    cache={
+        "max_cache_size_mb": "490", "min_cache_ttl": "0", "max_cache_ttl": "604800",
+        "min_ncache_ttl": "0", "max_ncache_ttl": "10800", "prefetch_enabled": "0",
+        "prefetch_trigger": "2", "prefetch_eligible": "10", "serve_stale_enabled": "0",
+        "max_stale_ttl": "86400", "stale_answer_client_timeout": "off",
+    },
+    stats={"available": True, "hits": 1683, "misses": 669, "hit_percent": 71.5, "nodes": 162, "memory_bytes": 196419, "evicted_lru": 0, "expired_ttl": 39},
+    deployment={"status": "deployed", "started_at": "2026-07-29T00:00:00Z", "finished_at": "2026-07-29T00:00:00Z", "message": "max-cache-size=490m prefetch=0 serve-stale=0"},
+    flushes=[{"requested_at": "2026-07-29T00:00:00Z", "scope": "name", "target": long_domain, "status": "completed"}],
+    total_memory_mb=3891,
+)
+for expected in ("Cache Tuning", "Flush Cache", "71.5", "max-cache-size=490m", long_domain, "data-async-form"):
+    if expected not in dns_cache_html:
+        raise SystemExit(f"cache page missing {expected}")
+
 setup_html = TEMPLATES.get_template("setup.html").render(**{**base, "admin": None}, local_dns={"server_hostname": "bindguard", "server_ip": "172.16.43.101"})
 for expected in ("Create BindGuard local DNS records", "172.16.43.101", "bindguard.home.arpa"):
     if expected not in setup_html:
@@ -253,6 +277,7 @@ for name, rendered in {
     }, db_size=1234),
     "system": TEMPLATES.get_template("system.html").render(**base, health=[{"name": "Analytics collector", "state": "Healthy", "tone": "healthy"}], logs=long_upstream, compiler={"deployment": None}),
     "local_dns": local_dns,
+    "dns_cache": dns_cache_html,
 }.items():
     if "app-topbar" not in rendered or "status-badge" not in rendered:
         raise SystemExit(f"{name} did not use the shared shell")

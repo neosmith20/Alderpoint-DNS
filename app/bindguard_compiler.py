@@ -22,10 +22,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 try:
-    from app import local_dns
+    from app import dns_cache, local_dns
 except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from app import local_dns
+    from app import dns_cache, local_dns
 
 
 DB_PATH = Path("/var/lib/bindguard/bindguard.db")
@@ -523,6 +523,7 @@ def deploy(download: bool = True) -> int:
                 os.replace(staged_rpz, COMPILED_RPZ)
                 reload_bind()
                 local_dns.deploy_zones(conn)
+                dns_cache.deploy_cache_options(conn)
                 if os.environ.get("BINDGUARD_TEST_FORCE_POSTCHECK_FAIL") == "1":
                     raise RuntimeError("forced post-deploy failure for rollback test")
                 if not resolves("cloudflare.com"):
@@ -741,6 +742,10 @@ def main(argv: list[str] | None = None) -> int:
     dep.set_defaults(func=lambda args: print(deploy(download=not args.no_download)))
     local_dep = sub.add_parser("local-dns-deploy")
     local_dep.set_defaults(func=lambda args: print(local_dns.deploy_zones()))
+    cache_dep = sub.add_parser("cache-deploy")
+    cache_dep.set_defaults(func=lambda args: print(dns_cache.deploy_cache_options()))
+    cache_flush = sub.add_parser("cache-flush")
+    cache_flush.set_defaults(func=lambda args: print(dns_cache.process_pending_flush()))
     local_host = sub.add_parser("local-dns-add-host")
     local_host.add_argument("hostname")
     local_host.add_argument("domain")

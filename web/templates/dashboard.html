@@ -99,12 +99,23 @@
   {{ ui.ranked_list("Response Codes", analytics.rcodes, total, "/query-log") }}
   {{ ui.ranked_list("Protocol Usage", analytics.protocols, total, "/query-log") }}
   <article class="panel">
-    <div class="panel__head"><h2>Top Upstream Resolvers</h2></div>
-    {{ ui.empty_state("Unavailable", "BindGuard does not yet store per-upstream resolver identity.") }}
+    <div class="panel__head"><h2>BIND Cache Effectiveness</h2><a href="/dns-cache">Manage</a></div>
+    {% if cache_stats.available %}
+      <div class="ranked-list">
+        <div class="ranked-row">
+          <div class="ranked-row__top"><span class="ranked-row__label">Hit rate</span><span class="ranked-row__value">{{ "%.1f"|format(cache_stats.hit_percent) }}%</span></div>
+          <div class="ranked-row__meta"><span class="meter"><span style="width: {{ '%.1f'|format(cache_stats.hit_percent if cache_stats.hit_percent <= 100 else 100) }}%"></span></span></div>
+        </div>
+        <div class="ranked-row"><div class="ranked-row__top"><span class="ranked-row__label">Hits / misses</span><span class="ranked-row__value">{{ cache_stats.hits }} / {{ cache_stats.misses }}</span></div></div>
+        <div class="ranked-row"><div class="ranked-row__top"><span class="ranked-row__label">Cache memory</span><span class="ranked-row__value">{{ "%.1f"|format(cache_stats.memory_bytes / 1048576) }} MB</span></div></div>
+      </div>
+    {% else %}
+      {{ ui.empty_state("Unavailable", cache_stats.error or "BIND's statistics channel did not respond.") }}
+    {% endif %}
   </article>
   <article class="panel">
-    <div class="panel__head"><h2>Average Upstream Latency</h2></div>
-    {{ ui.empty_state("Unavailable", "dnsdist aggregate latency is shown in the primary metrics.") }}
+    <div class="panel__head"><h2>Top Upstream Resolvers</h2></div>
+    {{ ui.empty_state("Unavailable", "BindGuard does not yet store per-upstream resolver identity.") }}
   </article>
 </section>
 

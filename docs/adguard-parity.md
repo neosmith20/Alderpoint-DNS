@@ -145,10 +145,12 @@ outcome is reached in a different file/process" rather than a gap.
 
 | AdGuard feature | Where in AdGuard | BindGuard equivalent | Implementation location | Status | Missing tests | Notes |
 |---|---|---|---|---|---|---|
-| Cache size / TTL min / TTL max | Settings → DNS settings → Cache configuration | dnsdist packet cache: `newPacketCache(100000, {maxTTL=86400, minTTL=0, temporaryFailureTTL=60, staleTTL=60})`; BIND also caches recursively underneath | `packaging/dnsdist.conf` | partial | none dedicated | Cache exists and is tuned at packaging time, but there is no admin-facing UI to view or change it. |
-| Cache optimistic serving (serve-stale) | `cache_optimistic` | `staleTTL=60` on the dnsdist packet cache provides a bounded stale-serving window | `packaging/dnsdist.conf` | partial | none | Fixed constant, not an admin toggle. |
-| Clear cache button | `POST /cache_clear` | Only a narrow, code-path-specific cache flush: dnsdist packet-cache entries for managed Local DNS zones are cleared after a Local DNS deploy | `app/local_dns.py::flush_dnsdist_packet_cache` | partial | none — `tests/test_local_dns.py::test_deploy_flushes_dnsdist_packet_cache_for_local_zones` | No general "clear all cache" admin action exists; this only exists to prevent stale NODATA answers immediately after adding a Local DNS record. |
-| Dedicated cache-management UI page | Settings → DNS settings | Not implemented | — | planned | n/a | Per current task scope, this is being worked on in a parallel, not-yet-merged change; this document reflects the repository state before that work lands. |
+| Cache size / TTL min / TTL max | Settings → DNS settings → Cache configuration | BIND recursive-cache tuning: explicit `max-cache-size` (defaulted from VM memory), `min-cache-ttl`/`max-cache-ttl`, `min-ncache-ttl`/`max-ncache-ttl`, all admin-editable | `app/dns_cache.py`, `web/templates/dns_cache.html` (`/dns-cache`) | complete | none — `tests/test_dns_cache.py` (validation, rendering, deploy/rollback) | BindGuard tunes BIND's own recursive cache rather than adding a second cache; the separate dnsdist packet cache (`packaging/dnsdist.conf`, `newPacketCache(100000, {maxTTL=86400, minTTL=0, temporaryFailureTTL=60, staleTTL=60})`) remains a fixed packaging-time constant and is a known limitation once per-client policy is enforced (see `docs/progress.md`). |
+| Prefetch | Not an AdGuard-exposed setting (AdGuard's internal cache has no admin prefetch toggle) | BIND `prefetch trigger eligible`, admin enable + tunable trigger/eligibility | `app/dns_cache.py::render_cache_options` | complete | none — `tests/test_dns_cache.py::test_render_cache_options_prefetch_and_serve_stale_enabled` | A BindGuard capability AdGuard's UI doesn't expose. |
+| Cache optimistic serving (serve-stale) | `cache_optimistic` | BIND `stale-answer-enable`, `max-stale-ttl`, `stale-answer-client-timeout`, admin enable + tunable | `app/dns_cache.py`, `web/templates/dns_cache.html` | complete | none — `tests/test_dns_cache.py::test_render_cache_options_prefetch_and_serve_stale_enabled` | Disabled by default, matching prior behavior; not silently turned on. |
+| Clear cache button | `POST /cache_clear` | Flush entire BIND cache, one name, or one subtree, each via `rndc flush[name\|tree]` | `app/dns_cache.py::request_flush`/`process_pending_flush`, `/dns-cache/flush*` | complete | none — `tests/test_dns_cache.py` (`test_process_pending_flush_all`, `_name_and_tree`, `_only_applies_newest_request`, `_records_failure`) | Supersedes the narrower Local DNS-only packet-cache flush, which still runs separately for its own purpose. |
+| Cache hit/miss/memory stats in UI | Not exposed in AdGuard's UI (internal only) | Cache page metric cards + dashboard panel: hit rate, hits/misses, memory, node count, LRU evictions | `app/dns_cache.py::cache_stats`, `web/templates/dns_cache.html`, `web/templates/dashboard.html` | complete | none — `tests/test_dns_cache.py::test_cache_stats_computes_hit_percent` | Sourced from BIND's own `statistics-channels` JSON API, not a second tracking mechanism; benchmark-verified with `tests/test_dns_cache_benchmark.sh`. |
+| Dedicated cache-management UI page | Settings → DNS settings | Cache page | `web/templates/dns_cache.html` (`/dns-cache`) | complete | none — `tests/test_web_smoke.sh` cache page render checks | |
 
 ## Encrypted DNS transports and TLS
 
@@ -210,5 +212,8 @@ nothing runs yet); a dedicated Encryption Settings page (cert
 upload/validation/Apple profiles); scheduled/versioned backup with a UI; and
 DNS-server-level tunables that AdGuard exposes as user settings but BindGuard
 currently bakes into packaging templates (upstream servers, blocking mode,
-blocked-response TTL, rate-limit thresholds, cache size/TTL). DHCP is the one
-large AdGuard surface area BindGuard deliberately does not intend to build.
+blocked-response TTL, rate-limit thresholds). Cache size/TTL/prefetch/
+serve-stale moved from "baked into packaging" to `complete` in a follow-up
+change (`app/dns_cache.py`, `/dns-cache`) after this document's initial
+research pass. DHCP is the one large AdGuard surface area BindGuard
+deliberately does not intend to build.

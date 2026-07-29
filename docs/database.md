@@ -30,3 +30,13 @@ Local DNS tables:
 
 Local DNS records are stored separately from RPZ filtering data. Host records
 are never written into the RPZ zone.
+
+BIND cache tables:
+
+- `dns_cache_settings`: key/value cache tuning (max size, positive/negative
+  min/max TTL, prefetch, serve-stale), same shape as `local_dns_settings`.
+- `dns_cache_deployments`: staged/validated/backed-up/atomically-activated/
+  health-checked/rolled-back deployment history for generated cache options.
+- `dns_cache_flushes`: pending and completed cache flush requests (entire
+  cache, one name, or one subtree), applied by the privileged
+  `cache-flush` compiler command.

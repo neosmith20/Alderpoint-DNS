@@ -49,9 +49,9 @@ The dashboard is organized around DNS-appliance information hierarchy:
 - Recent activity and compact system-health chips with low-level details moved
   to `/system`.
 
-The Query Log, Blocklists, Filters, Local DNS, DNS Settings, Statistics, System,
-login, and setup pages all use the same card, table, badge, form, button,
-empty-state, and confirmation styles. Long domains, IPv6 addresses, paths,
+The Query Log, Blocklists, Filters, Local DNS, DNS Settings, Cache, Statistics,
+System, login, and setup pages all use the same card, table, badge, form,
+button, empty-state, and confirmation styles. Long domains, IPv6 addresses, paths,
 command names, version strings, and URLs use wrapping or deliberate local table
 scrolling so they do not create page-level horizontal overflow.
 
@@ -90,6 +90,14 @@ internal domain. BindGuard generates an additional managed authoritative
 forward zone for the parent domain and clears dnsdist packet-cache entries for
 managed local zones after activation, so stale frontend NODATA responses do not
 hide newly added records.
+
+The Cache page (`/dns-cache`) exposes BIND's existing recursive-cache tuning
+(max size, positive/negative min/max TTL, prefetch, serve-stale), flush
+controls (entire cache, one name, or one subtree), cache hit/miss/memory
+stats from BIND's own statistics API, and recent flush/deployment history.
+Settings save through the same staged/validated/atomic/rollback deployment
+path as Local DNS. The dashboard shows a cache-effectiveness panel (hit rate,
+hits/misses, memory) backed by the same live stats.
 
 Useful commands:
 

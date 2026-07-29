@@ -11,6 +11,9 @@ Current configuration:
 - BIND RPZ: `/var/lib/bindguard/compiled/bind/bindguard.rpz`
 - Local DNS include: `/var/lib/bindguard/compiled/bind/local-zones.conf`
 - Local DNS default domain: `home.arpa`
+- BIND cache tuning include: `/var/lib/bindguard/compiled/bind/cache-options.conf`
+- BIND cache size default: computed from VM memory (an eighth of total RAM,
+  bounded to 64-512MB), not BIND's much larger implicit default
 - Analytics collector: `127.0.0.1:5301`
 - Maintenance DNS: `1.1.1.2`, `1.0.0.2`, `4.2.2.1`, `4.2.2.2`
 

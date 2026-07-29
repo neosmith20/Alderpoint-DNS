@@ -278,3 +278,69 @@ any cache-tuning work:
   displays as 1000ms, no microsecond/millisecond multiplication error,
   negative latency clamp, implausible-latency discard, telemetry-delay
   independence, missing-stat poll safety, and per-protocol classification.
+
+## Verified BIND cache management milestone
+
+BIND already performs recursive caching; this milestone exposes and manages
+that existing cache rather than adding a second one, per `app/dns_cache.py`.
+
+- Settings (`dns_cache_settings` table, key/value like `local_dns_settings`):
+  explicit max cache size, positive/negative min/max TTL, prefetch
+  enable+trigger+eligibility, serve-stale enable+max-stale-ttl+client-timeout.
+  Defaults for TTL/prefetch/serve-stale match BIND's own built-in defaults
+  (not aggressively overridden); the one deliberately-chosen default is
+  cache size, computed from `/proc/meminfo` as roughly an eighth of total RAM
+  bounded to [64, 512]MB (490MB on this VM's 3.8GiB) instead of leaving
+  BIND's much larger implicit ceiling in place. Validation rejects a
+  configured size above 75% of total RAM and rejects inverted min/max TTL
+  pairs.
+- Generated cache tuning lives in its own include file
+  (`/var/lib/bindguard/compiled/bind/cache-options.conf`), included from
+  inside the `options {}` block of `/etc/bind/named.conf.options` by a
+  one-time idempotent migration (`ensure_named_options_include`) that backs
+  up the file before editing it, matching the "small package-independent
+  include files" pattern already used for RPZ and Local DNS.
+- `deploy_cache_options` follows the same staged/backup/atomic/health-check/
+  rollback shape as RPZ and Local DNS deployment, and now runs automatically
+  as part of every `bindguard_compiler.py deploy` (both download and
+  no-download forms), so cache settings changes ride the same trusted
+  deployment path Local DNS mutations already use.
+- Cache flush (entire cache / one name / one subtree) is requested
+  unprivileged (writes a `dns_cache_flushes` row) and applied by a new,
+  narrowly-scoped, argument-free sudo entry
+  (`bindguard_compiler.py cache-flush`) that reads the pending request from
+  SQLite and runs the corresponding `rndc flush[name|tree]` — avoiding any
+  sudoers argument-injection surface, consistent with the existing
+  zero-argument-variability sudo design.
+- Cache stats (hits, misses, hit percent, node count, tree+heap memory,
+  LRU-eviction count, expired-TTL count) come from BIND's own
+  `statistics-channels` JSON API (`views._default.resolver.cachestats`), not
+  a second tracking mechanism. A new "Cache" page (`/dns-cache`,
+  `web/templates/dns_cache.html`) exposes tuning, flush controls, last
+  deployment status, and flush history; the dashboard's former placeholder
+  "Top Upstream Resolvers"-adjacent panel was replaced with a real cache
+  effectiveness panel.
+- Live verification on this VM: deployed cache settings, confirmed
+  `named-checkconf` accepted the merged config with `max-cache-size
+  513802240` (490m) present, ran all three flush scopes successfully,
+  deliberately corrupted a setting to prove the invalid-config path never
+  touches the live `cache-options.conf` (fails before any file write) and
+  that a failed post-deploy health check restores the prior good file and
+  reconfigures BIND back to it, and ran a live cold/warm benchmark showing
+  BIND's own `CacheMisses`/`CacheHits` counters increment correctly (92ms
+  cold query, 0ms cached repeat) — see
+  `tests/test_dns_cache_benchmark.sh`.
+- `tests/test_dns_cache.py` (20 tests) covers default sizing, validation
+  bounds (including the 75%-of-RAM ceiling and inverted min/max TTL
+  rejection), rendered BIND syntax for both prefetch/serve-stale states, the
+  idempotent named.conf.options migration, successful deploy, rollback on a
+  failed post-deploy health check, invalid settings never touching the live
+  file, all three flush scopes, newest-request-wins flush processing,
+  flush-failure recording, and cache-stats hit-percent computation.
+- Known limitation carried forward from `docs/adguard-parity.md`: dnsdist's
+  separate packet cache (`packaging/dnsdist.conf`) is untouched by this
+  milestone. It is safe today only because BindGuard v1 applies one global
+  RPZ policy to every client — its cache key does not vary by client, so it
+  must be disabled or re-keyed before any per-client/per-network policy
+  (schema already exists, not yet enforced) is ever turned on at runtime, or
+  one client's filtered/personalized answer could leak to another.
