@@ -27,12 +27,16 @@ dig @127.0.0.1 -p 53 cloudflare.com A +tcp +time=3 +tries=1 >/dev/null || fail "
 kdig +https @127.0.0.1 -p 443 \
   +tls-ca=/etc/bindguard/certs/bindguard-lab.crt \
   +tls-hostname=bindguard.local \
-  cloudflare.com A +time=3 >/dev/null || fail "DoH query failed"
+  cloudflare.com A +time=3 | grep -q 'status: NOERROR' || fail "DoH query failed"
 
 kdig +tls @127.0.0.1 -p 853 \
   +tls-ca=/etc/bindguard/certs/bindguard-lab.crt \
   +tls-hostname=bindguard.local \
-  cloudflare.com A +time=3 >/dev/null || fail "DoT query failed"
+  cloudflare.com A +time=3 | grep -q 'status: NOERROR' || fail "DoT query failed"
+
+cert_modulus="$(openssl x509 -noout -modulus -in /etc/bindguard/certs/bindguard-lab.crt | sha256sum | awk '{print $1}')"
+key_modulus="$(openssl rsa -noout -modulus -in /etc/bindguard/certs/bindguard-lab.key 2>/dev/null | sha256sum | awk '{print $1}')"
+[ "$cert_modulus" = "$key_modulus" ] || fail "DoH/DoT certificate and private key do not match"
 
 curl --silent --show-error --fail --max-time 5 \
   --user "$(cat /etc/bindguard/dnsdist-web.creds)" \
@@ -40,9 +44,27 @@ curl --silent --show-error --fail --max-time 5 \
   http://127.0.0.1:8083/jsonstat?command=stats |
   jq -e 'has("queries") and (.queries >= 1) and has("responses")' >/dev/null || fail "dnsdist stats API failed"
 
-ss -ltnup | grep -q '127.0.0.1:53' || fail "dnsdist is not listening on TCP/UDP 53"
-ss -ltnup | grep -q '127.0.0.1:443' || fail "dnsdist is not listening on TCP 443"
-ss -ltnup | grep -q '127.0.0.1:853' || fail "dnsdist is not listening on TCP 853"
+if curl --silent --show-error --fail --max-time 5 http://127.0.0.1:8083/jsonstat?command=stats >/tmp/bindguard-unauth-stats.out 2>&1; then
+  fail "dnsdist stats API allowed unauthenticated access"
+fi
+
+ss -lunp | grep -q '127.0.0.1:53' || fail "dnsdist is not listening on UDP 53"
+ss -ltnp | grep -q '127.0.0.1:53' || fail "dnsdist is not listening on TCP 53"
+ss -ltnp | grep -q '127.0.0.1:443' || fail "dnsdist is not listening on TCP 443"
+ss -ltnp | grep -q '127.0.0.1:853' || fail "dnsdist is not listening on TCP 853"
+ss -ltnp | grep -q '127.0.0.1:8083' || fail "dnsdist web statistics interface is not loopback-only"
+ss -ltnp | grep -q '127.0.0.1:5199' || fail "dnsdist control console is not loopback-only"
+
+if ss -H -lntup '( sport = :53 or sport = :443 or sport = :853 or sport = :8083 or sport = :5199 )' |
+  awk '{ print $5 }' |
+  grep -Ev '^(127[.]0[.]0[.]1:(53|443|853|8083|5199))$'; then
+  fail "dnsdist is listening on a non-loopback client or management address"
+fi
+
+dnsdist --check-config -C /etc/dnsdist/dnsdist.conf >/dev/null || fail "installed dnsdist configuration does not validate"
+grep -q 'setQueryRate(120, 10' /etc/dnsdist/dnsdist.conf || fail "dnsdist query rate limit is missing"
+grep -q 'setRCodeRate(DNSRCode.NXDOMAIN, 80, 10' /etc/dnsdist/dnsdist.conf || fail "dnsdist NXDOMAIN rate limit is missing"
+grep -q 'setQTypeRate(DNSQType.ANY, 10, 10' /etc/dnsdist/dnsdist.conf || fail "dnsdist ANY query rate limit is missing"
 
 systemctl restart dnsdist
 dig @127.0.0.1 -p 53 cloudflare.com A +time=5 +tries=1 >/dev/null || fail "dnsdist failed after restart"

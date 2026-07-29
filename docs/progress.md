@@ -13,7 +13,7 @@
 - [x] Authentication
 - [x] Aggregate query statistics
 - [x] Backup and restore
-- [ ] Full reboot acceptance
+- [x] Full reboot acceptance
 - [x] v1 acceptance suite
 
 ## Verified BIND milestone
@@ -119,3 +119,31 @@
 - The pre-reboot acceptance suite passed on this VM.
 - Negative-path stack traces during the suite are expected for invalid RPZ and
   forced rollback tests; both paths were verified as rejected/rolled back.
+
+## Verified post-reboot recovery acceptance milestone
+
+- After the VM reboot, the repository was recovered on `main` at commit
+  `f2065b8`; `git status` was clean and `git diff` was empty.
+- Live services were verified active and enabled after boot:
+  - `bindguard.service` on `127.0.0.1:3000`
+  - `dnsdist.service` on loopback DNS, DoH, DoT, stats, and control sockets
+  - `named.service` on loopback backend recursion and RNDC
+- Listener audit confirmed the DNS and management services remain loopback-only:
+  - BIND on `127.0.0.1:5353` and `::1:5353`
+  - dnsdist UDP/TCP DNS on `127.0.0.1:53`
+  - dnsdist DoH on `127.0.0.1:443`
+  - dnsdist DoT on `127.0.0.1:853`
+  - dnsdist web stats on `127.0.0.1:8083`
+  - dnsdist control console on `127.0.0.1:5199`
+  - BindGuard web on `127.0.0.1:3000`
+- BIND `rndc status` confirmed the server is up and query logging remains off.
+- Installed dnsdist `1.9.15` reports features for DoT and DoH only; DoQ and
+  DoH3 remain unsupported by this Debian build.
+- `/opt/bindguard/tests/test_dnsdist_frontend.sh` now asserts successful DoH and
+  DoT DNS responses, certificate/key match, authenticated-only stats access,
+  loopback-only dnsdist DNS/management listeners, dnsdist config validation, and
+  configured private-resolver rate limits.
+- `/opt/bindguard/tests/test_acceptance.sh` passed after the reboot with the
+  strengthened dnsdist checks. The expected invalid-RPZ and forced-rollback
+  stack traces still occurred only inside the negative-path tests, and the suite
+  completed successfully.
