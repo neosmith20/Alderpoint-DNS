@@ -411,34 +411,117 @@ def consume_enrollment(raw_token: str, cert_days: int = 825, conn: sqlite3.Conne
         ).fetchone()
         if row is None:
             raise ReplicationError("enrollment token is invalid, expired, or already used")
-        issued = issue_client_cert(row["node_id"], days=cert_days)
-        ts = now()
-        db.execute(
-            """
-            INSERT INTO replication_replicas(node_id, display_name, cert_fingerprint, cert_serial, enrolled_at, status)
-            VALUES (?, ?, ?, ?, ?, 'active')
-            ON CONFLICT(node_id) DO UPDATE SET
-              cert_fingerprint=excluded.cert_fingerprint, cert_serial=excluded.cert_serial,
-              enrolled_at=excluded.enrolled_at, status='active'
-            """,
-            (row["node_id"], row["node_name"], issued["fingerprint"], issued["serial"], ts),
-        )
-        db.execute("UPDATE replication_enrollments SET status='consumed', consumed_at=? WHERE id=?", (ts, row["id"]))
-        db.commit()
-        ensure_server_cert()
-        return {
-            "node_id": row["node_id"],
-            "node_name": row["node_name"],
-            "ca_cert_pem": encryption.CA_CERT_PATH.read_text(),
-            "client_cert_pem": issued["cert_pem"],
-            "client_key_pem": issued["key_pem"],
-        }
+        return _finish_enrollment(db, row, cert_days)
     except Exception:
         db.rollback()
         raise
     finally:
         if close:
             db.close()
+
+
+# /etc/bindguard/certs is root:_dnsdist 0750 -- the unprivileged bindguard
+# web process (which is what runs the primary's HTTP replication listener,
+# see start_primary_listener/ensure_primary_listener_running) cannot write
+# the CA material consume_enrollment() needs. So, exactly like every other
+# BindGuard feature that needs a privileged filesystem write, the listener
+# only validates the token itself (a plain SQLite read, no privilege
+# required) and stages the *hash* for the privileged
+# bindguard_compiler.py replication-consume-enrollment sudo entry to
+# actually read and process -- mirroring dns_cache's
+# request_flush/process_pending_flush and backup's
+# request_backup/process_pending_request handoff pattern.
+PENDING_ENROLLMENT_TOKEN_HASH = STAGING_DIR / "pending-enrollment-token-hash"
+
+
+def request_enrollment_consumption(raw_token: str, conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+    """Unprivileged-safe: validates the token and, only if valid, stages it
+    for the privileged step. Never touches certificate material."""
+    close = conn is None
+    db = conn or connect()
+    try:
+        init_db(db)
+        _expire_stale_enrollments(db)
+        token_hash = _hash_token(raw_token)
+        row = db.execute(
+            "SELECT node_id, node_name FROM replication_enrollments WHERE token_hash=? AND status='pending' AND expires_at >= ?",
+            (token_hash, now()),
+        ).fetchone()
+        if row is None:
+            raise ReplicationError("enrollment token is invalid, expired, or already used")
+        STAGING_DIR.mkdir(parents=True, exist_ok=True)
+        PENDING_ENROLLMENT_TOKEN_HASH.write_text(token_hash)
+        PENDING_ENROLLMENT_TOKEN_HASH.chmod(0o600)
+        # Commit explicitly (rather than leaving it to the caller) so any
+        # implicit write transaction from _expire_stale_enrollments() above
+        # releases SQLite's write lock now, not whenever the caller
+        # eventually closes/commits -- this connection is about to be held
+        # open across a blocking sudo subprocess call in the HTTP handler,
+        # and the privileged process needs to write to the same database
+        # while that call is in flight.
+        db.commit()
+        return {"node_id": row["node_id"], "node_name": row["node_name"]}
+    finally:
+        if close:
+            db.close()
+
+
+def process_pending_enrollment_consumption(cert_days: int = 825, conn: sqlite3.Connection | None = None) -> dict[str, Any] | None:
+    """Executed by the privileged compiler process: consumes the token
+    staged by request_enrollment_consumption(), if any, and does the real
+    CA-signing work. Re-validates the token from scratch (does not trust
+    that staging happened recently) since the file may be stale."""
+    if not PENDING_ENROLLMENT_TOKEN_HASH.exists():
+        return None
+    try:
+        token_hash = PENDING_ENROLLMENT_TOKEN_HASH.read_text().strip()
+    finally:
+        PENDING_ENROLLMENT_TOKEN_HASH.unlink(missing_ok=True)
+    if not token_hash:
+        return None
+    close = conn is None
+    db = conn or connect()
+    try:
+        init_db(db)
+        _expire_stale_enrollments(db)
+        row = db.execute(
+            "SELECT * FROM replication_enrollments WHERE token_hash=? AND status='pending' AND expires_at >= ?",
+            (token_hash, now()),
+        ).fetchone()
+        if row is None:
+            raise ReplicationError("enrollment token is invalid, expired, or already used")
+        return _finish_enrollment(db, row, cert_days)
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        if close:
+            db.close()
+
+
+def _finish_enrollment(db: sqlite3.Connection, row: sqlite3.Row, cert_days: int) -> dict[str, Any]:
+    issued = issue_client_cert(row["node_id"], days=cert_days)
+    ts = now()
+    db.execute(
+        """
+        INSERT INTO replication_replicas(node_id, display_name, cert_fingerprint, cert_serial, enrolled_at, status)
+        VALUES (?, ?, ?, ?, ?, 'active')
+        ON CONFLICT(node_id) DO UPDATE SET
+          cert_fingerprint=excluded.cert_fingerprint, cert_serial=excluded.cert_serial,
+          enrolled_at=excluded.enrolled_at, status='active'
+        """,
+        (row["node_id"], row["node_name"], issued["fingerprint"], issued["serial"], ts),
+    )
+    db.execute("UPDATE replication_enrollments SET status='consumed', consumed_at=? WHERE id=?", (ts, row["id"]))
+    db.commit()
+    ensure_server_cert()
+    return {
+        "node_id": row["node_id"],
+        "node_name": row["node_name"],
+        "ca_cert_pem": encryption.CA_CERT_PATH.read_text(),
+        "client_cert_pem": issued["cert_pem"],
+        "client_key_pem": issued["key_pem"],
+    }
 
 
 def list_replicas(conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
@@ -777,7 +860,16 @@ def _make_handler(ctx: ServerContext) -> type[http.server.BaseHTTPRequestHandler
             token = str(body.get("token", ""))
             if not token:
                 raise ReplicationError("token is required")
-            result = consume_enrollment(token, conn=db)
+            # This listener runs as the unprivileged bindguard user and
+            # cannot write /etc/bindguard/certs itself. request_enrollment_
+            # consumption() validates the token (read-only) and stages it;
+            # the privileged sudo call does the actual CA-signing work and
+            # returns the cert material to relay back to the replica.
+            request_enrollment_consumption(token, conn=db)
+            proc = run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "replication-consume-enrollment"], check=False)
+            if proc.returncode != 0:
+                raise ReplicationError(f"enrollment could not be completed: {proc.stdout[-500:]}")
+            result = json.loads(proc.stdout)
             self._reply(200, result)
 
         def _handle_latest(self, db: sqlite3.Connection) -> None:
@@ -956,7 +1048,23 @@ def _snapshot_replicable_tables(db: sqlite3.Connection) -> dict[str, Any]:
         snapshot["dns_cache_settings"] = {
             r["key"]: r["value"] for r in db.execute(f"SELECT key, value FROM dns_cache_settings WHERE key IN ({placeholders})", REPLICABLE_CACHE_SETTING_KEYS)
         }
+    if _table_exists(db, "encryption_settings"):
+        placeholders = ",".join("?" * len(REPLICABLE_ENCRYPTION_SETTING_KEYS))
+        snapshot["encryption_settings"] = {
+            r["key"]: r["value"] for r in db.execute(f"SELECT key, value FROM encryption_settings WHERE key IN ({placeholders})", REPLICABLE_ENCRYPTION_SETTING_KEYS)
+        }
     return snapshot
+
+
+def _replace_settings_subset(db: sqlite3.Connection, table: str, allowed_keys: tuple[str, ...], values: dict[str, Any]) -> None:
+    if not _table_exists(db, table):
+        return
+    placeholders = ",".join("?" * len(allowed_keys))
+    db.execute(f"DELETE FROM {table} WHERE key IN ({placeholders})", allowed_keys)
+    db.executemany(
+        f"INSERT INTO {table}(key, value) VALUES (?, ?)",
+        [(key, str(value)) for key, value in values.items() if key in allowed_keys],
+    )
 
 
 def _restore_snapshot(db: sqlite3.Connection, snapshot: dict[str, Any]) -> None:
@@ -972,10 +1080,9 @@ def _restore_snapshot(db: sqlite3.Connection, snapshot: dict[str, Any]) -> None:
                 f"INSERT INTO {table}({', '.join(cols)}) VALUES ({placeholders})",
                 [tuple(row[c] for c in cols) for row in rows],
             )
-    for key, value in snapshot.get("local_dns_settings", {}).items():
-        db.execute("INSERT INTO local_dns_settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
-    for key, value in snapshot.get("dns_cache_settings", {}).items():
-        db.execute("INSERT INTO dns_cache_settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+    _replace_settings_subset(db, "local_dns_settings", REPLICABLE_LOCAL_DNS_SETTING_KEYS, snapshot.get("local_dns_settings", {}))
+    _replace_settings_subset(db, "dns_cache_settings", REPLICABLE_CACHE_SETTING_KEYS, snapshot.get("dns_cache_settings", {}))
+    _replace_settings_subset(db, "encryption_settings", REPLICABLE_ENCRYPTION_SETTING_KEYS, snapshot.get("encryption_settings", {}))
     db.commit()
 
 
@@ -999,10 +1106,9 @@ def _apply_sections(db: sqlite3.Connection, sections: dict[str, Any]) -> None:
                 f"INSERT INTO {table}({', '.join(cols)}) VALUES ({placeholders})",
                 [tuple(row[c] for c in cols) for row in rows],
             )
-    for key, value in sections.get("local_dns_settings", {}).items():
-        db.execute("INSERT INTO local_dns_settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
-    for key, value in sections.get("dns_cache_settings", {}).items():
-        db.execute("INSERT INTO dns_cache_settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+    _replace_settings_subset(db, "local_dns_settings", REPLICABLE_LOCAL_DNS_SETTING_KEYS, sections.get("local_dns_settings", {}))
+    _replace_settings_subset(db, "dns_cache_settings", REPLICABLE_CACHE_SETTING_KEYS, sections.get("dns_cache_settings", {}))
+    _replace_settings_subset(db, "encryption_settings", REPLICABLE_ENCRYPTION_SETTING_KEYS, sections.get("encryption_settings", {}))
     db.commit()
 
 
@@ -1216,6 +1322,39 @@ def ensure_replica_poller_running() -> bool:
             _REPLICA_POLLER = ReplicaPoller(rc, int(cfg.get("poll_interval_seconds", DEFAULT_POLL_INTERVAL_SECONDS)))
             _REPLICA_POLLER.start()
         return True
+
+
+def _build_replica_context() -> ReplicaContext | None:
+    cfg = settings()
+    if cfg.get("role") != "replica":
+        return None
+    client_cert, client_key, ca_cert = REPL_DIR / "client.crt", REPL_DIR / "client.key", REPL_DIR / "ca.crt"
+    if not (client_cert.exists() and client_key.exists() and ca_cert.exists()):
+        return None
+    primary_address = cfg.get("primary_address", "")
+    if not primary_address:
+        return None
+    host, _, port_str = primary_address.partition(":")
+    port = int(port_str) if port_str else DEFAULT_LISTEN_PORT
+    return ReplicaContext(DB_PATH, host, port, ca_cert, client_cert, client_key)
+
+
+def trigger_sync_now() -> dict[str, Any]:
+    """Web-triggered manual "Sync Now", independent of the background
+    poller's own schedule."""
+    rc = _build_replica_context()
+    if rc is None:
+        raise ReplicationError("this node is not an enrolled replica")
+    if _REPLICA_POLLER is not None:
+        return _REPLICA_POLLER.sync_now()
+    return replica_sync_once(rc, force=True)
+
+
+def trigger_drift_check() -> dict[str, Any]:
+    rc = _build_replica_context()
+    if rc is None:
+        raise ReplicationError("this node is not an enrolled replica")
+    return check_drift(rc)
 
 
 def stop_replica_poller() -> None:

@@ -11,7 +11,14 @@ Environment=PYTHONPATH=/opt/bindguard
 ExecStart=/usr/bin/uvicorn app.webapp:app --host 0.0.0.0 --port 3000
 Restart=on-failure
 RestartSec=3
-NoNewPrivileges=true
+# NoNewPrivileges is deliberately NOT set: bindguard legitimately escalates
+# via sudo to the exact, argument-free, sudoers-enumerated
+# bindguard_compiler.py subcommands every privileged feature (cache,
+# encryption, backup, import deploy, replication enrollment) relies on.
+# NoNewPrivileges=true silently breaks sudo (which needs to gain
+# privileges via its setuid-root binary) with no working alternative here;
+# the real access-control boundary is the narrow sudoers allowlist itself,
+# not this flag.
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=full

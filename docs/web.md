@@ -50,7 +50,7 @@ The dashboard is organized around DNS-appliance information hierarchy:
   to `/system`.
 
 The Query Log, Blocklists, Filters, Local DNS, DNS Settings, Cache,
-Encryption, Import, Backup, Statistics, System, login, and setup pages all
+Encryption, Import, Backup, Replication, Statistics, System, login, and setup pages all
 use the same card, table, badge, form, button, empty-state, and confirmation
 styles. Long domains, IPv6 addresses, paths,
 command names, version strings, and URLs use wrapping or deliberate local table
@@ -122,6 +122,18 @@ elsewhere, and restores through a mandatory preview-first dry-run diff, an
 automatic pre-restore safety backup, and automatic rollback on any
 post-restore health-check failure. Scheduled backups run via a systemd
 timer with configurable interval and retention.
+
+The Replication page (`/replication`) configures a node as standalone,
+primary, or replica. A primary issues short-lived, single-use enrollment
+tokens, runs an in-process HTTPS listener on the configured replication port,
+and serves numbered, content-hashed generations over mutual TLS. A replica
+enrolls with the primary, stores the returned CA/client certificate material,
+polls for the latest generation, verifies its hash, applies only the
+replication allowlist into local tables, and then reuses the normal
+`bindguard_compiler.py deploy --no-download` pipeline. Failed replica deploys
+roll back the replica SQLite changes as well as relying on the compiler's
+configuration rollback; revoked replicas are denied by certificate
+fingerprint before generation fetch or ACK.
 
 Useful commands:
 

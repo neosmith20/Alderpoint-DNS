@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
-from app import analytics, backup, dns_cache, encryption, importer, local_dns
+from app import analytics, backup, dns_cache, encryption, importer, local_dns, replication
 from app.bindguard_compiler import DB_PATH, add_source, init_db, normalize_domain
 
 
@@ -32,6 +32,15 @@ SECRET_FILE = Path("/etc/bindguard/secrets.env")
 ph = PasswordHasher()
 app = FastAPI(title="BindGuard")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+@app.on_event("startup")
+def _replication_autostart() -> None:
+    # Re-establishes the primary listener or replica poller thread after a
+    # service restart, matching whichever role was previously configured.
+    # Deliberately best-effort (replication.autostart() never raises): a
+    # replication bug must never prevent bindguard.service from starting.
+    replication.autostart()
 
 
 def utc_now() -> str:
@@ -1474,6 +1483,167 @@ def backup_schedule_route(
     except Exception as exc:
         return backup_error(request, str(exc))
     return redirect("/backup")
+
+
+def replication_primary_init_apply() -> tuple[int, str]:
+    return run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "replication-primary-init"])
+
+
+def replication_context() -> dict[str, Any]:
+    cfg = replication.settings()
+    context: dict[str, Any] = {"cfg": cfg}
+    if cfg.get("role") == "primary":
+        context["enrollments"] = replication.list_enrollments()
+        context["replicas"] = replication.list_replicas()
+        context["latest_generation"] = replication.latest_generation()
+        context["listener_running"] = replication.ensure_primary_listener_running()
+    elif cfg.get("role") == "replica":
+        context["sync_history"] = replication.sync_history()
+    return context
+
+
+def replication_error(request: Request, message: str, status_code: int = 400) -> HTMLResponse:
+    context = replication_context()
+    context.update({"error": message})
+    return render(request, "replication.html", **context, status_code=status_code)
+
+
+@app.get("/replication", response_class=HTMLResponse)
+def replication_page(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    context = replication_context()
+    context.update({"error": None})
+    return render(request, "replication.html", **context)
+
+
+@app.post("/replication/role")
+def replication_role_post(request: Request, csrf: str = Form(...), role: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    try:
+        previous = replication.settings().get("role")
+        replication.set_role(role)
+        if role == "primary" and previous != "primary":
+            replication.stop_replica_poller()
+            replication_primary_init_apply()
+            replication.ensure_primary_listener_running()
+        elif role == "replica" and previous != "replica":
+            replication.stop_primary_listener()
+            replication.ensure_replica_poller_running()
+        elif role == "standalone":
+            replication.stop_primary_listener()
+            replication.stop_replica_poller()
+    except Exception as exc:
+        return replication_error(request, str(exc))
+    return redirect("/replication")
+
+
+@app.post("/replication/token")
+def replication_token_post(request: Request, csrf: str = Form(...), node_name: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    try:
+        replication.ensure_primary_listener_running()
+        token = replication.generate_enrollment_token(node_name)
+    except Exception as exc:
+        return replication_error(request, str(exc))
+    context = replication_context()
+    context.update({"error": None, "issued_token": token})
+    return render(request, "replication.html", **context)
+
+
+@app.post("/replication/enrollment/{enrollment_id}/revoke")
+def replication_enrollment_revoke(request: Request, enrollment_id: int, csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    try:
+        replication.revoke_enrollment(enrollment_id)
+    except Exception as exc:
+        return replication_error(request, str(exc))
+    return redirect("/replication")
+
+
+@app.post("/replication/replica/{replica_id}/status")
+def replication_replica_status(request: Request, replica_id: int, csrf: str = Form(...), status: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    try:
+        replication.set_replica_status(replica_id, status)
+    except Exception as exc:
+        return replication_error(request, str(exc))
+    return redirect("/replication")
+
+
+@app.post("/replication/connect")
+def replication_connect_post(
+    request: Request,
+    csrf: str = Form(...),
+    primary_host: str = Form(...),
+    primary_port: int = Form(...),
+    token: str = Form(...),
+    _: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    try:
+        enrolled = replication.enroll_with_primary(primary_host, primary_port, token)
+        replication.store_enrollment_material(f"{primary_host}:{primary_port}", enrolled)
+        replication.stop_primary_listener()
+        replication.ensure_replica_poller_running()
+    except Exception as exc:
+        return replication_error(request, str(exc))
+    return redirect("/replication")
+
+
+@app.post("/replication/sync-now")
+def replication_sync_now_post(request: Request, csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    try:
+        replication.trigger_sync_now()
+    except Exception as exc:
+        return replication_error(request, str(exc))
+    return redirect("/replication")
+
+
+@app.post("/replication/drift-check")
+def replication_drift_check_post(request: Request, csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    try:
+        replication.trigger_drift_check()
+    except Exception as exc:
+        return replication_error(request, str(exc))
+    return redirect("/replication")
+
+
+@app.post("/replication/pause")
+def replication_pause_post(request: Request, csrf: str = Form(...), paused: str = Form("0"), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    try:
+        replication.update_settings({"paused": "1" if paused == "1" else "0"})
+    except Exception as exc:
+        return replication_error(request, str(exc))
+    return redirect("/replication")
+
+
+@app.post("/replication/settings")
+def replication_settings_post(
+    request: Request,
+    csrf: str = Form(...),
+    poll_interval_seconds: int = Form(60),
+    listen_host: str = Form("0.0.0.0"),
+    listen_port: int = Form(8843),
+    include_encryption_settings: str = Form("0"),
+    include_certificates: str = Form("0"),
+    _: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    try:
+        replication.update_settings(
+            {
+                "poll_interval_seconds": poll_interval_seconds,
+                "listen_host": listen_host,
+                "listen_port": listen_port,
+                "include_encryption_settings": include_encryption_settings,
+                "include_certificates": include_certificates,
+            }
+        )
+    except Exception as exc:
+        return replication_error(request, str(exc))
+    return redirect("/replication")
 
 
 @app.get("/system", response_class=HTMLResponse)

@@ -9,6 +9,7 @@ Current lab endpoints:
 - DNS: `<vm-lan-ip>:53`
 - DoH: `https://<vm-lan-ip>/dns-query`
 - DoT/DoQ: `<vm-lan-ip>:853`
+- Replication listener, when this node is primary: `<vm-lan-ip>:8843`
 
 No default administrator exists. Create the first admin through `/setup`.
 

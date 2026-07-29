@@ -80,6 +80,11 @@ for route in ('"/backup"', '"/backup/create"', '"/backup/import"', '"/backup/pre
         raise SystemExit(f"backup route missing: {route}")
 if 'href="/backup"' not in template:
     raise SystemExit("backup nav link is missing")
+for route in ('"/replication"', '"/replication/role"', '"/replication/token"', '"/replication/connect"', '"/replication/sync-now"', '"/replication/drift-check"'):
+    if route not in webapp_text:
+        raise SystemExit(f"replication route missing: {route}")
+if 'href="/replication"' not in template:
+    raise SystemExit("replication nav link is missing")
 if "bindguardAutoRefresh" not in js or "sessionStorage" not in js or "target.innerHTML" not in js:
     raise SystemExit("query log auto-refresh stateful partial update is missing")
 if "setInterval(() => window.location.reload()" in js:

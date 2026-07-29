@@ -32,6 +32,7 @@
           <a href="/encryption" {{ 'aria-current="page"' if request.url.path == "/encryption" else "" }}>Encryption</a>
           <a href="/import" {{ 'aria-current="page"' if request.url.path.startswith("/import") else "" }}>Import</a>
           <a href="/backup" {{ 'aria-current="page"' if request.url.path == "/backup" else "" }}>Backup</a>
+          <a href="/replication" {{ 'aria-current="page"' if request.url.path == "/replication" else "" }}>Replication</a>
           <a href="/statistics-settings" {{ 'aria-current="page"' if request.url.path == "/statistics-settings" else "" }}>Statistics</a>
           <a href="/system" {{ 'aria-current="page"' if request.url.path == "/system" else "" }}>System</a>
         </nav>

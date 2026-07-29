@@ -23,10 +23,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 try:
-    from app import backup, dns_cache, encryption, local_dns
+    from app import backup, dns_cache, encryption, local_dns, replication
 except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from app import backup, dns_cache, encryption, local_dns
+    from app import backup, dns_cache, encryption, local_dns, replication
 
 
 DB_PATH = Path("/var/lib/bindguard/bindguard.db")
@@ -539,6 +539,7 @@ def deploy(download: bool = True) -> int:
                         raise RuntimeError(f"post-deploy allowed-domain test failed for {allowed_test}")
                 status = "deployed"
                 message = "; ".join(errors)
+                replication.on_deploy_success(conn)
             except Exception as exc:
                 failure = exc
                 message = str(exc)
@@ -745,6 +746,22 @@ def backup_schedule_deploy(_: argparse.Namespace) -> None:
     print(backup.deploy_backup_schedule())
 
 
+def replication_primary_init(_: argparse.Namespace) -> None:
+    # Ensures /etc/bindguard/certs (root:_dnsdist, not writable by the
+    # unprivileged bindguard web process) has the CA + replication server
+    # cert the primary's in-process listener needs before it can start.
+    replication.ensure_server_cert()
+    print(json.dumps({"ok": True}))
+
+
+def replication_consume_enrollment(_: argparse.Namespace) -> None:
+    result = replication.process_pending_enrollment_consumption()
+    if result is None:
+        print(json.dumps({"error": "no pending enrollment request found"}))
+        raise SystemExit(1)
+    print(json.dumps(result))
+
+
 def local_dns_add_host(args: argparse.Namespace) -> None:
     local_dns.add_host(args.hostname, args.domain, args.address, args.ttl, args.comment or "", args.auto_ptr, args.override)
     print(f"local_dns_host={args.hostname}.{args.domain}")
@@ -794,6 +811,10 @@ def main(argv: list[str] | None = None) -> int:
     backup_preview_parser.set_defaults(func=backup_preview)
     backup_schedule_parser = sub.add_parser("backup-schedule-deploy")
     backup_schedule_parser.set_defaults(func=backup_schedule_deploy)
+    repl_primary_init_parser = sub.add_parser("replication-primary-init")
+    repl_primary_init_parser.set_defaults(func=replication_primary_init)
+    repl_consume_parser = sub.add_parser("replication-consume-enrollment")
+    repl_consume_parser.set_defaults(func=replication_consume_enrollment)
     local_host = sub.add_parser("local-dns-add-host")
     local_host.add_argument("hostname")
     local_host.add_argument("domain")

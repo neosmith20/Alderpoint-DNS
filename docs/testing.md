@@ -118,6 +118,15 @@ confirm reversion, confirm file ownership, confirm DNS resolved throughout)
 caught and fixed two real bugs in file-ownership handling during restore —
 see `docs/progress.md`'s Backup and Restore milestone for detail.
 
+The Replication suite (`tests/test_replication.py`) covers payload allowlist
+exclusion, replica rollback when deploy fails, successful replacement of
+replicated settings while preserving node-local identity keys, enrollment
+staging, and revoked-client-certificate rejection. Live verification in
+`/tmp/replica-test` enrolled a real temp replica against the local primary,
+applied generation 1, confirmed drift detection before/after a manual edit,
+confirmed failed-sync rollback left the temp replica state restored, and
+confirmed a temporarily revoked peer was denied by the primary listener.
+
 Manual protocol tests:
 
 ```sh

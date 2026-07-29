@@ -12,3 +12,8 @@
 - Added authenticated FastAPI web interface.
 - Added aggregate dnsdist dashboard statistics.
 - Added local backup and restore workflow.
+- Added native Backup and Restore page with preview-first restore,
+  checksummed archives, scheduled backups, and rollback.
+- Added one-way primary-to-replica replication with token enrollment, mTLS,
+  generation hashes, drift checks, failed-sync rollback, and revoked-peer
+  enforcement.

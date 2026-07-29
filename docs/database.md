@@ -72,3 +72,18 @@ Backup tables:
 - `backup_requests`: the unprivileged-web-process-writes /
   privileged-compiler-process-reads handoff queue for
   create/restore/preview requests (mirrors `dns_cache_flushes`).
+
+Replication tables:
+
+- `replication_settings`: node role, stable node ID, listener/poll settings,
+  primary address, pause flag, last applied generation/hash, and drift state.
+- `replication_enrollments`: one-time enrollment token hashes, intended node
+  identity/name, expiry, status, and consumption timestamp.
+- `replication_replicas`: enrolled replica identities, certificate
+  fingerprints/serials, active/paused/revoked status, last seen time, last
+  ACKed generation/hash, and last result.
+- `replication_generations`: primary-produced generation number, source node,
+  schema version, replicated section list, content hash, and canonical JSON
+  payload.
+- `replication_sync_history`: replica-side sync attempt history including
+  generation, result, timestamp, and message.
