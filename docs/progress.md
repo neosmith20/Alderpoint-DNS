@@ -7,8 +7,8 @@
 - [x] BIND backend installed, validated, and tested on `127.0.0.1:5353`
 - [x] dnsdist plain DNS
 - [x] Encrypted DNS where supported by installed package
-- [ ] Blocklist compiler
-- [ ] Safe deployment and rollback
+- [x] Blocklist compiler
+- [x] Safe RPZ deployment and rollback
 - [ ] Web interface
 - [ ] Authentication
 - [ ] v1 acceptance suite
@@ -50,3 +50,24 @@
   resolution, restarting BIND restores dnsdist service.
 - dnsdist restart test passes.
 - Integrated BIND and dnsdist automated tests pass.
+
+## Verified filtering milestone
+
+- SQLite state database is initialized at `/var/lib/bindguard/bindguard.db`.
+- Seeded public AdGuard DNS filter downloads through the host resolver.
+- Download and parse test currently accepts about 160k active domains from one
+  realistic public source.
+- Plain domains, hosts rules, basic Adblock rules, exceptions, duplicates, IDN
+  normalization, invalid rules, and unsupported rules are covered by unit tests.
+- Custom block and custom allow rules deploy successfully.
+- Custom allow rules take precedence over downloaded and custom block rules.
+- RPZ output validates with `named-checkzone`.
+- Complete BIND configuration validates with `named-checkconf`.
+- Deployment uses a lock, staging, backup, atomic replacement, `rndc reload`,
+  post-deploy ordinary/blocked/allowed DNS tests, and rollback on runtime
+  failure.
+- Failed source update preserves the previous successful downloaded copy.
+- Invalid generated RPZ is rejected before active configuration replacement.
+- Forced post-deployment failure rolls back and records `rolled_back`.
+- With both BIND and dnsdist stopped, `update-sources` and direct HTTPS download
+  still work through the host maintenance resolver; services restart afterward.

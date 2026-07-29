@@ -11,6 +11,8 @@
   binary contains the functions but reports DNS-over-QUIC and DNS-over-HTTP/3
   support is not present. DoH and DoT are operational.
 - Full VM reboot survival remains pending for the combined stack.
+- Only one public blocklist is seeded for lab validation. The UI and importer
+  can add the user's remaining public URLs once the web interface exists.
 
 ## Resolved during BIND milestone
 
