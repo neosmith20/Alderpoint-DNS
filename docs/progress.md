@@ -110,7 +110,12 @@
 - dnsdist 2.1 protobuf response logging is enabled with delayed delivery,
   bounded dnsdist-side queuing, and no SQLite writes in the DNS path.
 - The collector polls the loopback-only dnsdist stats API for aggregate
-  counters, latency, cache, drop, and health data.
+  counters, latency, cache, drop, and health data. Polled `latency-avg100` is
+  reported by dnsdist in microseconds and is converted to milliseconds before
+  it is blended with per-query protobuf latency in aggregate buckets; this
+  fixed a bug where dashboard/query-log average response time displayed
+  roughly 1000x too high (observed ~4197 ms instead of the true ~4-9 ms on
+  this VM's loopback backend).
 - SQLite stores one-minute aggregate buckets plus recent detailed query events
   when detailed logging is enabled.
 - Privacy modes support full, anonymized-client, and aggregate-only collection.

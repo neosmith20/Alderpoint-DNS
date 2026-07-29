@@ -32,7 +32,8 @@ confirmations, async form hooks, and toast feedback.
 The analytics unit suite covers aggregate collection, counter resets, bucketing,
 blocked-query detection, ordinary NXDOMAIN handling, protocol classification,
 retention cleanup, database-size protection, malformed protobuf input, queue
-overflow, privacy modes, and query-log filtering.
+overflow, privacy modes, query-log filtering, and microsecond-to-millisecond
+conversion of dnsdist's polled `latency-avg100` stat.
 
 The web smoke test also checks that Query Log auto-refresh has a partial
 `/query-log/partial` endpoint, updates only the result container, and persists

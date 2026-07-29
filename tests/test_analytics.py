@@ -58,6 +58,15 @@ class AnalyticsTests(unittest.TestCase):
             self.assertEqual(delta["responses"], 0)
             self.assertEqual(delta["cache_hits"], 0)
 
+    def test_polled_latency_converts_microseconds_to_milliseconds(self) -> None:
+        # dnsdist's latency-avg100 stat is documented in microseconds; a prior
+        # bug stored it unconverted, inflating dashboard latency ~1000x
+        # (e.g. a real 4.1ms average displayed as 4100ms).
+        with compiler.connect() as conn:
+            delta = analytics.collect_dnsdist_aggregate(conn, {"latency-avg100": 4058.9}, ts=120)
+        self.assertAlmostEqual(delta["latency_sum_ms"], 4.0589)
+        self.assertEqual(delta["latency_count"], 1)
+
     def test_allowed_and_blocked_query_counting(self) -> None:
         with compiler.connect() as conn:
             blocked = analytics.QueryEvent(120, "127.0.0.1", "bad.example", "A", "UDP", "NXDOMAIN", 2.0, True)

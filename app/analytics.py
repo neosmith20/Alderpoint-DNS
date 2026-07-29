@@ -589,7 +589,8 @@ def collect_dnsdist_aggregate(conn: sqlite3.Connection, stats: dict[str, Any] | 
         )
     latency = stats.get("latency-avg100")
     if latency is not None:
-        deltas["latency_sum_ms"] = float(latency)
+        # dnsdist reports latency-avg100 in microseconds; buckets store milliseconds.
+        deltas["latency_sum_ms"] = float(latency) / 1000.0
         deltas["latency_count"] = 1
     upsert_bucket(conn, ts, deltas)
     return deltas
