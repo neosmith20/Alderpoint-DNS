@@ -39,11 +39,14 @@ Files changed:
 - Updated `README.md`, `CHANGELOG.md`, `docs/web.md`, `docs/database.md`, `docs/testing.md`, `docs/adguard-parity.md`, and added `docs/replication-promotion.md`.
 - Marked `bindguard-handoff.md` as superseded by `AGENT_PROGRESS.md`.
 
-Commits created:
+Commits now present on `main`:
 
-- None yet in this session.
+- `c12a09c Complete primary-to-replica replication`
+- `3c80bc8 Record BindGuard backlog handoff progress`
 
-Remaining work:
+Current state:
 
-- Commit logical checkpoints.
-- Perform controlled reboot test after work is saved and committed.
+- The repository is clean at the close-out commit.
+- The controlled reboot has completed and core services are active.
+- `/opt/bindguard/tests/test_acceptance.sh` passed again on 2026-07-29 after
+  the current-state check.

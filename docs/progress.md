@@ -197,7 +197,7 @@
 ## Verified post-reboot recovery acceptance milestone
 
 - After the VM reboot, the repository was recovered on `main` at commit
-  `f2065b8`; `git status` was clean and `git diff` was empty.
+  `3c80bc8`; `git status` was clean and `git diff` was empty.
 - Live services were verified active and enabled after boot:
   - `bindguard.service` on `0.0.0.0:3000`
   - `dnsdist.service` on wildcard DNS, encrypted DNS, loopback stats, and
