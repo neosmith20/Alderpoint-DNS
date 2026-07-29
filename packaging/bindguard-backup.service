@@ -1,0 +1,7 @@
+[Unit]
+Description=BindGuard Scheduled Backup
+After=bindguard.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/bindguard/app/bindguard_compiler.py backup-create

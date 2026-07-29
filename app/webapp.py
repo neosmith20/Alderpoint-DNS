@@ -15,12 +15,12 @@ from typing import Any
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
-from app import analytics, dns_cache, encryption, importer, local_dns
+from app import analytics, backup, dns_cache, encryption, importer, local_dns
 from app.bindguard_compiler import DB_PATH, add_source, init_db, normalize_domain
 
 
@@ -1309,6 +1309,171 @@ async def import_adguard_apply(request: Request, _: sqlite3.Row = Depends(curren
         return import_error(request, str(exc))
     context = {"error": None, "jobs": importer.list_jobs(), "job": None, "preview": None, "adguard": None, "applied_counts": counts}
     return render(request, "import_migration.html", **context)
+
+
+# ---------------------------------------------------------------------------
+# Backup and Restore
+# ---------------------------------------------------------------------------
+
+def backup_component_flags(form: Any) -> dict[str, bool]:
+    return {key: str(form.get(key, "")).strip().lower() in {"1", "true", "on", "yes"} for key in backup.COMPONENT_KEYS}
+
+
+def backup_create_apply() -> tuple[int, str]:
+    return run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "backup-create"])
+
+
+def backup_restore_apply() -> tuple[int, str]:
+    return run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "backup-restore"])
+
+
+def backup_preview_apply() -> tuple[int, str]:
+    return run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "backup-preview"])
+
+
+def backup_schedule_apply() -> tuple[int, str]:
+    return run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "backup-schedule-deploy"])
+
+
+def backup_context() -> dict[str, Any]:
+    return {
+        "backups": backup.list_backups(),
+        "backup_settings": backup.settings(),
+        "last_backup": backup.last_backup(),
+        "last_restore": backup.last_restore(),
+        "component_keys": backup.COMPONENT_KEYS,
+        "component_defaults": backup.COMPONENT_DEFAULTS,
+    }
+
+
+def backup_error(request: Request, message: str, status_code: int = 400, **extra: Any) -> HTMLResponse:
+    context = backup_context()
+    context.update({"error": message, "preview": None, "preview_source": None, "imported": None})
+    context.update(extra)
+    return render(request, "backup.html", **context, status_code=status_code)
+
+
+@app.get("/backup", response_class=HTMLResponse)
+def backup_page(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    context = backup_context()
+    context.update({"error": None, "preview": None, "preview_source": None, "imported": request.query_params.get("imported")})
+    return render(request, "backup.html", **context)
+
+
+@app.post("/backup/create")
+async def backup_create_route(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    form = await request.form()
+    check_csrf(request, str(form.get("csrf", "")))
+    try:
+        components = backup_component_flags(form)
+        if components.get("private_keys") and str(form.get("confirm_private_keys", "")).strip().lower() not in {"1", "true", "on", "yes"}:
+            raise backup.BackupError("including private keys requires checking the explicit confirmation box")
+        password = str(form.get("password", "")).strip() or None
+        backup.request_backup("create", {"components": components}, password)
+        backup_create_apply()
+    except Exception as exc:
+        return backup_error(request, str(exc))
+    return redirect("/backup")
+
+
+@app.post("/backup/import")
+async def backup_import_route(request: Request, csrf: str = Form(...), upload: UploadFile = File(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    try:
+        data = await upload.read()
+        if not data:
+            raise backup.BackupError("uploaded file is empty")
+        path = backup.stage_import(upload.filename or "uploaded-backup.tar.gz", data)
+    except Exception as exc:
+        return backup_error(request, str(exc))
+    return redirect(f"/backup?imported={path.name}")
+
+
+@app.post("/backup/preview")
+async def backup_preview_route(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    form = await request.form()
+    check_csrf(request, str(form.get("csrf", "")))
+    source = str(form.get("source", "")).strip()
+    password = str(form.get("password", "")).strip() or None
+    try:
+        if not source:
+            raise backup.BackupError("choose a backup to preview")
+        backup.request_backup("preview", {"path": source}, password)
+        backup_preview_apply()
+        result = backup.latest_request_result("preview")
+        if not result or result.get("status") != "done":
+            raise backup.BackupError("preview did not complete; check /system logs")
+        payload = json.loads(result["result_json"] or "{}")
+        if "error" in payload:
+            raise backup.BackupError(payload["error"])
+    except Exception as exc:
+        return backup_error(request, str(exc))
+    context = backup_context()
+    context.update({"error": None, "preview": payload, "preview_source": source, "imported": None})
+    return render(request, "backup.html", **context)
+
+
+@app.post("/backup/restore")
+async def backup_restore_route(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    form = await request.form()
+    check_csrf(request, str(form.get("csrf", "")))
+    try:
+        source = str(form.get("source", "")).strip()
+        if not source:
+            raise backup.BackupError("choose a backup to restore")
+        components = backup_component_flags(form)
+        password = str(form.get("password", "")).strip() or None
+        backup.request_backup("restore", {"path": source, "components": components}, password)
+        backup_restore_apply()
+        result = backup.latest_request_result("restore")
+        if result and result.get("status") != "done":
+            raise backup.BackupError("restore did not complete; check the restore history table below")
+    except Exception as exc:
+        return backup_error(request, str(exc))
+    return redirect("/backup")
+
+
+@app.get("/backup/{identifier}/download")
+def backup_download_route(identifier: str, _: sqlite3.Row = Depends(current_admin)):
+    try:
+        path = backup.find_backup_path(identifier)
+    except backup.BackupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(str(path), filename=path.name, media_type="application/octet-stream")
+
+
+@app.post("/backup/{identifier}/delete")
+def backup_delete_route(request: Request, identifier: str, csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    try:
+        backup.delete_backup(identifier)
+    except Exception as exc:
+        return backup_error(request, str(exc))
+    return redirect("/backup")
+
+
+@app.post("/backup/schedule")
+def backup_schedule_route(
+    request: Request,
+    csrf: str = Form(...),
+    schedule_enabled: str = Form("0"),
+    schedule_interval_hours: int = Form(24),
+    retention_count: int = Form(7),
+    _: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    try:
+        backup.update_settings(
+            {
+                "schedule_enabled": schedule_enabled,
+                "schedule_interval_hours": schedule_interval_hours,
+                "retention_count": retention_count,
+            }
+        )
+        backup_schedule_apply()
+    except Exception as exc:
+        return backup_error(request, str(exc))
+    return redirect("/backup")
 
 
 @app.get("/system", response_class=HTMLResponse)
