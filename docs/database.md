@@ -50,3 +50,10 @@ Encryption tables:
 - `encryption_deployments`: staged/validated/backed-up/atomically-activated/
   health-checked/rolled-back deployment history, including the per-protocol
   functional test results for the most recent deployment.
+
+Import table:
+
+- `import_jobs`: one row per upload (spreadsheet/text/AdGuard), storing raw
+  parsed rows, the column mapping, preview counts, the list of inserted
+  `local_dns_records` IDs (used by rollback), a downloadable JSON report, and
+  status (`uploaded`/`previewed`/`applied`/`rolled_back`/`failed`).

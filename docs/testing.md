@@ -12,6 +12,7 @@ Run individual suites:
 /opt/bindguard/tests/test_dns_cache.py
 /opt/bindguard/tests/test_dns_cache_benchmark.sh
 /opt/bindguard/tests/test_encryption.py
+/opt/bindguard/tests/test_importer.py
 /opt/bindguard/tests/test_web_smoke.sh
 /opt/bindguard/tests/test_backup_restore.sh
 ```
@@ -85,6 +86,17 @@ without blocking other protocols, client connection info, and Apple
 real per-protocol queries (`dig` for plain, `dnspython`'s
 `dns.query.https`/`dns.query.quic` for DoH/DoH3/DoQ, `kdig +tls` for DoT)
 through the actual deploy path, not just mocked unit tests.
+
+The Import and Migration suite (`tests/test_importer.py`) covers CSV/hosts/
+zone/BindGuard-CSV parsing, column-mapping auto-detection, preview
+classification (valid/invalid/duplicate/conflict) against a real Local DNS
+database, all three conflict policies (skip/merge/replace, each verified to
+do exactly what it claims and never silently overwrite an existing record),
+apply-then-rollback round-tripping, and AdGuard Home YAML translation
+(blocklist sources, custom allow/block rules, rewrites, client aliases, and
+the untranslatable/unsupported lists). Live verification imported real
+records through the actual privileged deploy path and confirmed they
+resolved from both BIND and dnsdist before rolling back.
 
 Manual protocol tests:
 

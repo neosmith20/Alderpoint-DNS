@@ -427,3 +427,72 @@ cannot be turned off from the UI.
   (including secret preservation and idempotency), env-override rendering,
   full deploy success/rollback/unchanged/cert-forces-redeploy paths, DNSCrypt
   graceful degradation, connection info, and Apple profile content.
+
+## Verified Import and Migration milestone
+
+`app/importer.py` adds a dedicated Import and Migration page (`/import`),
+built to write only through the same unprivileged SQLite operations ordinary
+Local DNS/blocklist edits already use, then trigger the existing
+`sudo bindguard_compiler.py deploy --no-download` path — no new sudo entries
+were needed for this milestone.
+
+- Spreadsheet/text sources: CSV (arbitrary columns, with auto-detected +
+  admin-editable column mapping to the required canonical field set —
+  `hostname`, `fqdn`, `domain`, `ipv4`, `ipv6`, `record_type`, `target`,
+  `create_ptr`, `ttl`, `comment`, `enabled`, `client_alias`,
+  `client_id_or_cidr`), XLSX (via newly-installed `python3-openpyxl`), hosts
+  files, a practical subset of BIND zone-file syntax (`name [ttl] [IN] TYPE
+  data` lines for A/AAAA/CNAME/PTR, `$ORIGIN` support; SOA/NS/MX and
+  multi-line records are explicitly out of scope, documented as such rather
+  than silently mishandled), and BindGuard's own exported CSV format.
+- Workflow matches the requested shape exactly: upload parses into an
+  `import_jobs` row without touching live state → normalized preview
+  classifies every row as valid / invalid (with a reason) / duplicate
+  (within the file) / conflict (against existing Local DNS records, reusing
+  `local_dns.record_warnings` rather than a second conflict-detection
+  mechanism) → the admin picks skip / merge / replace, verified live against
+  the real database: skip leaves the existing record untouched, merge adds a
+  second record alongside it (round-robin), replace deletes the prior
+  record(s) for that name+type first — proven by
+  `test_apply_job_never_overwrites_existing_record_silently` and the
+  merge/replace tests, not just asserted.
+- Apply stages nothing new to disk (the "staging" is the in-memory/DB-row
+  preview computed before any `local_dns_records` write) but does take an
+  automatic pre-apply backup (`scripts/backup.sh`) before writing, tracks
+  every inserted row's ID on the job record, and on
+  `deploy --no-download` failure a caller can invoke `rollback_job()`, which
+  deletes exactly those tracked rows and leaves an audit trail
+  (`status='rolled_back'`) — verified live end-to-end on this VM: imported
+  two real A records via CSV, ran the privileged deploy, confirmed both
+  resolved from both BIND (`:5353`) and dnsdist (`:53`), rolled back, redeployed,
+  and confirmed the records stopped resolving.
+- AdGuard Home migration accepts either an uploaded `AdGuardHome.yaml` or a
+  direct read-only API connection (`/control/filtering/status`,
+  `/control/rewrite/list`, `/control/clients`, `/control/dns_info`, Basic
+  Auth, credentials used for one request and never stored) — verified
+  against AdGuard Home's actual documented top-level YAML schema (`filters`,
+  `whitelist_filters`, `user_rules`, `filtering.rewrites`,
+  `clients.persistent`) rather than assumed. Both paths funnel into the same
+  translator: `filters` → blocklist `sources` rows; `user_rules` split into
+  `@@||domain^` → custom allow, `||domain^`/plain-domain → custom block,
+  anything else (regex, cosmetic `##`, modifiers) → `unsupported_rules`,
+  shown but not imported; `filtering.rewrites` → Local DNS A/AAAA/CNAME
+  records; `clients.persistent` → client aliases (display-only, matching
+  BindGuard's current alias semantics; per-client filtering/SafeSearch/
+  upstream/blocked-services settings have no runtime BindGuard equivalent
+  yet and are listed under `untranslatable` rather than silently dropped).
+  `whitelist_filters` (AdGuard allowlist-subscription URLs) are explicitly
+  **not** auto-imported as anything, since BindGuard has no allowlist-
+  subscription object (confirmed in `docs/adguard-parity.md`) and treating
+  their URLs as ordinary block sources would be actively wrong — they are
+  listed for manual review instead, per "display anything that cannot be
+  translated."
+- Never imports passwords, private keys, sessions, or AdGuard's own admin
+  credentials — the translator only reads filtering/rewrite/client/dns_info
+  data, nothing from AdGuard's user/auth configuration.
+- `tests/test_importer.py` (17 tests) covers every parser (CSV, hosts, zone,
+  BindGuard CSV), column-mapping auto-detection and pass-through, preview
+  classification (valid/invalid/duplicate/conflict), all three conflict
+  policies against a real SQLite-backed `local_dns` fixture, apply+rollback
+  round-tripping, and AdGuard YAML translation including the
+  comment/cosmetic-rule exclusion and the untranslatable-settings list.

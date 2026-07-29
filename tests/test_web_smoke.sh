@@ -19,7 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, "/opt/bindguard")
-from app import webapp  # noqa: E402
+from app import importer, webapp  # noqa: E402
 from app.webapp import TEMPLATES  # noqa: E402
 
 template = "\n".join(path.read_text() for path in Path("/opt/bindguard/web/templates").glob("*.html"))
@@ -70,6 +70,11 @@ for route in ("/encryption", "encryption_settings_post", "/encryption/certificat
         raise SystemExit(f"encryption route missing: {route}")
 if 'href="/encryption"' not in template:
     raise SystemExit("encryption nav link is missing")
+for route in ("/import", "import_upload", "/import/{job_id}", "/import/{job_id}/remap", "/import/{job_id}/apply", "/import/{job_id}/rollback", "/import/adguard/yaml", "/import/adguard/api", "/import/adguard/apply"):
+    if route not in webapp_text:
+        raise SystemExit(f"import route missing: {route}")
+if 'href="/import"' not in template:
+    raise SystemExit("import nav link is missing")
 if "bindguardAutoRefresh" not in js or "sessionStorage" not in js or "target.innerHTML" not in js:
     raise SystemExit("query log auto-refresh stateful partial update is missing")
 if "setInterval(() => window.location.reload()" in js:
@@ -269,6 +274,44 @@ for expected in ("Protocols", "Client Connection Information", "Self-signed cert
     if expected not in encryption_html:
         raise SystemExit(f"encryption page missing {expected}")
 
+import_base_html = TEMPLATES.get_template("import_migration.html").render(**base, error=None, jobs=[{"id": 1, "created_at": "2026-07-29T00:00:00Z", "source_type": "csv", "source_name": long_domain, "status": "applied", "valid_rows": 3, "applied_rows": 3}], job=None, preview=None, adguard=None)
+for expected in ("Spreadsheet / Text Import", "AdGuard Home Migration", "Column Mapping Reference", long_domain):
+    if expected not in import_base_html:
+        raise SystemExit(f"import page missing {expected}")
+
+import_job_html = TEMPLATES.get_template("import_migration.html").render(
+    **base, error=None, jobs=[],
+    job={"id": 1, "source_type": "csv", "source_name": long_domain, "status": "previewed", "message": "", "report_json": "{}"},
+    headers=["Hostname", "IP"], column_map={"hostname": "Hostname", "ipv4": "IP"}, canonical_fields=importer.CANONICAL_FIELDS,
+    preview={
+        "valid": [{"index": 0, "fqdn": "a." + long_domain, "record_type": "A", "value": "172.16.43.10"}],
+        "invalid": [{"index": 1, "error": "bad row"}],
+        "duplicates": [],
+        "conflicts": [{"index": 2, "fqdn": "b." + long_domain, "record_type": "A", "value": "172.16.43.11", "warnings": ["A hostname already exists."]}],
+    },
+    adguard=None,
+)
+for expected in ("Import Job #", "Conflicts", "data-async-form", long_domain):
+    if expected not in import_job_html:
+        raise SystemExit(f"import job page missing {expected}")
+
+import_adguard_html = TEMPLATES.get_template("import_migration.html").render(
+    **base, error=None, jobs=[], job=None, preview=None,
+    adguard={
+        "blocklist_sources": [{"name": "EasyList", "url": long_upstream, "enabled": True}],
+        "allowlist_unsupported": [{"name": "Allow", "url": long_upstream, "note": "n/a"}],
+        "custom_allow": ["a.example"], "custom_block": ["b.example"],
+        "unsupported_rules": ["example.com##.ad"],
+        "rewrites_as_local_dns": [{"fqdn": long_domain, "record_type": "A", "value": "172.16.43.12"}],
+        "clients_as_aliases": [{"display_name": "Phone", "cidr_or_ip": "172.16.43.77", "all_ids": []}],
+        "untranslatable": ["safe_search: not implemented"],
+    },
+    adguard_json="{}",
+)
+for expected in ("AdGuard Home Migration Preview", "Settings With No BindGuard Equivalent", long_upstream):
+    if expected not in import_adguard_html:
+        raise SystemExit(f"import adguard preview page missing {expected}")
+
 setup_html = TEMPLATES.get_template("setup.html").render(**{**base, "admin": None}, local_dns={"server_hostname": "bindguard", "server_ip": "172.16.43.101"})
 for expected in ("Create BindGuard local DNS records", "172.16.43.101", "bindguard.home.arpa"):
     if expected not in setup_html:
@@ -308,6 +351,9 @@ for name, rendered in {
     "local_dns": local_dns,
     "dns_cache": dns_cache_html,
     "encryption": encryption_html,
+    "import_base": import_base_html,
+    "import_job": import_job_html,
+    "import_adguard": import_adguard_html,
 }.items():
     if "app-topbar" not in rendered or "status-badge" not in rendered:
         raise SystemExit(f"{name} did not use the shared shell")

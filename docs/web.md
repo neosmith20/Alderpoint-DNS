@@ -50,8 +50,8 @@ The dashboard is organized around DNS-appliance information hierarchy:
   to `/system`.
 
 The Query Log, Blocklists, Filters, Local DNS, DNS Settings, Cache,
-Encryption, Statistics, System, login, and setup pages all use the same
-card, table, badge, form, button, empty-state, and confirmation styles. Long domains, IPv6 addresses, paths,
+Encryption, Import, Statistics, System, login, and setup pages all use the
+same card, table, badge, form, button, empty-state, and confirmation styles. Long domains, IPv6 addresses, paths,
 command names, version strings, and URLs use wrapping or deliberate local table
 scrolling so they do not create page-level horizontal overflow.
 
@@ -106,6 +106,13 @@ with match/SAN/expiry validation, a downloadable public certificate, real
 per-protocol connectivity tests on every deploy, ready-to-copy client
 connection info, and Apple `.mobileconfig` downloads for DoH/DoT. Plain
 UDP/TCP 53 has no control on this page and cannot be disabled from the UI.
+
+The Import page (`/import`) migrates from AdGuard Home (uploaded
+`AdGuardHome.yaml` or a direct read-only API connection) and imports Local
+DNS records from CSV/XLSX/hosts/BIND-zone/BindGuard-CSV sources, with
+column mapping, a normalized preview (valid/invalid/duplicate/conflict),
+per-conflict skip/merge/replace resolution, an automatic pre-apply backup,
+and rollback of exactly the rows an import added.
 
 Useful commands:
 
