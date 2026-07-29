@@ -8,6 +8,7 @@ import datetime as dt
 import fcntl
 import hashlib
 import ipaddress
+import json
 import os
 import re
 import shutil
@@ -22,10 +23,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 try:
-    from app import dns_cache, encryption, local_dns
+    from app import backup, dns_cache, encryption, local_dns
 except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from app import dns_cache, encryption, local_dns
+    from app import backup, dns_cache, encryption, local_dns
 
 
 DB_PATH = Path("/var/lib/bindguard/bindguard.db")
@@ -707,6 +708,43 @@ def update_source(args: argparse.Namespace) -> None:
             print(f"error={result.error}")
 
 
+def backup_create(_: argparse.Namespace) -> None:
+    processed = backup.process_pending_request("create")
+    if processed is not None:
+        print(processed)
+        return
+    # No pending web-originated request: this is a scheduled or manual
+    # invocation, so fall back to the stored default component selection.
+    cfg = backup.settings()
+    try:
+        components = json.loads(cfg.get("default_components", "{}"))
+    except json.JSONDecodeError:
+        components = {}
+    path = backup.create_backup(backup.validate_components(components))
+    pruned = backup.prune_backups()
+    print(f"backup_path={path}")
+    if pruned:
+        print(f"pruned={len(pruned)}")
+
+
+def backup_restore(_: argparse.Namespace) -> None:
+    processed = backup.process_pending_request("restore")
+    if processed is None:
+        raise SystemExit("no pending restore request found")
+    print(processed)
+
+
+def backup_preview(_: argparse.Namespace) -> None:
+    processed = backup.process_pending_request("preview")
+    if processed is None:
+        raise SystemExit("no pending preview request found")
+    print(processed)
+
+
+def backup_schedule_deploy(_: argparse.Namespace) -> None:
+    print(backup.deploy_backup_schedule())
+
+
 def local_dns_add_host(args: argparse.Namespace) -> None:
     local_dns.add_host(args.hostname, args.domain, args.address, args.ttl, args.comment or "", args.auto_ptr, args.override)
     print(f"local_dns_host={args.hostname}.{args.domain}")
@@ -748,6 +786,14 @@ def main(argv: list[str] | None = None) -> int:
     cache_flush.set_defaults(func=lambda args: print(dns_cache.process_pending_flush()))
     encryption_dep = sub.add_parser("encryption-deploy")
     encryption_dep.set_defaults(func=lambda args: print(encryption.deploy_encryption()))
+    backup_create_parser = sub.add_parser("backup-create")
+    backup_create_parser.set_defaults(func=backup_create)
+    backup_restore_parser = sub.add_parser("backup-restore")
+    backup_restore_parser.set_defaults(func=backup_restore)
+    backup_preview_parser = sub.add_parser("backup-preview")
+    backup_preview_parser.set_defaults(func=backup_preview)
+    backup_schedule_parser = sub.add_parser("backup-schedule-deploy")
+    backup_schedule_parser.set_defaults(func=backup_schedule_deploy)
     local_host = sub.add_parser("local-dns-add-host")
     local_host.add_argument("hostname")
     local_host.add_argument("domain")
