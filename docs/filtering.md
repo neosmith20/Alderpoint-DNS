@@ -6,6 +6,8 @@ Current capabilities:
 
 - SQLite state at `/var/lib/bindguard/bindguard.db`
 - Public source tracking with per-source parse statistics and last errors
+- A curated 19-source public blocklist catalog seeded with `seed-public`,
+  spanning AdGuard-hosted assets and GitHub raw URLs
 - Downloads through the host resolver with connection and total timeouts
 - Maximum source size limit of 25 MiB per list
 - Preservation of the last successful downloaded copy when an update fails
@@ -30,6 +32,17 @@ Seed the lab source and deploy:
 /opt/bindguard/app/bindguard_compiler.py deploy
 /opt/bindguard/app/bindguard_compiler.py update-sources
 ```
+
+Seed the larger public catalog when operationally ready:
+
+```sh
+/opt/bindguard/app/bindguard_compiler.py seed-public
+/opt/bindguard/app/bindguard_compiler.py update-sources
+/opt/bindguard/app/bindguard_compiler.py deploy
+```
+
+Use `seed-public --disabled` to load the catalog metadata without enabling the
+sources immediately.
 
 Run tests:
 

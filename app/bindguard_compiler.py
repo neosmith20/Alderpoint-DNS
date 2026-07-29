@@ -58,6 +58,36 @@ class SourceResult:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class PublicSource:
+    name: str
+    url: str
+    category: str
+
+
+PUBLIC_SOURCES = (
+    PublicSource("AdGuard DNS filter", "https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt", "ads_trackers"),
+    PublicSource("OISD Blocklist Big", "https://adguardteam.github.io/HostlistsRegistry/assets/filter_27.txt", "ads_trackers"),
+    PublicSource("1Hosts Lite", "https://adguardteam.github.io/HostlistsRegistry/assets/filter_24.txt", "ads_trackers"),
+    PublicSource("StevenBlack Unified Hosts", "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts", "ads_trackers"),
+    PublicSource("HaGeZi Multi Normal", "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/multi.txt", "ads_trackers"),
+    PublicSource("HaGeZi Multi Pro", "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.txt", "ads_trackers"),
+    PublicSource("Peter Lowe Blocklist", "https://adguardteam.github.io/HostlistsRegistry/assets/filter_3.txt", "ads_trackers"),
+    PublicSource("Dan Pollock Hosts", "https://adguardteam.github.io/HostlistsRegistry/assets/filter_4.txt", "ads_trackers"),
+    PublicSource("AWAvenue Ads Rule", "https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/AWAvenue-Ads-Rule.txt", "ads_trackers"),
+    PublicSource("AdGuard Popup Hosts", "https://adguardteam.github.io/HostlistsRegistry/assets/filter_59.txt", "ads_trackers"),
+    PublicSource("OISD Blocklist Small", "https://adguardteam.github.io/HostlistsRegistry/assets/filter_5.txt", "ads_trackers"),
+    PublicSource("ShadowWhisperer Tracking", "https://raw.githubusercontent.com/ShadowWhisperer/BlockLists/master/Lists/Tracking", "ads_trackers"),
+    PublicSource("URLHaus Malicious URL Blocklist", "https://adguardteam.github.io/HostlistsRegistry/assets/filter_11.txt", "malware"),
+    PublicSource("Dandelion Sprout Anti-Malware", "https://adguardteam.github.io/HostlistsRegistry/assets/filter_12.txt", "malware"),
+    PublicSource("Phishing Army", "https://adguardteam.github.io/HostlistsRegistry/assets/filter_18.txt", "malware"),
+    PublicSource("Stalkerware Indicators", "https://raw.githubusercontent.com/AssoEchap/stalkerware-indicators/master/generated/hosts", "malware"),
+    PublicSource("ShadowWhisperer Malware", "https://raw.githubusercontent.com/ShadowWhisperer/BlockLists/master/Lists/Malware", "malware"),
+    PublicSource("HaGeZi Threat Intelligence Feeds", "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/tif.txt", "malware"),
+    PublicSource("uBlock Badware Risks", "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/badware.txt", "malware"),
+)
+
+
 def now() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
 
@@ -513,6 +543,32 @@ def seed_lab(_: argparse.Namespace) -> None:
         )
 
 
+def seed_public(args: argparse.Namespace) -> None:
+    init_db()
+    enabled = 1 if args.enabled else 0
+    with connect() as conn:
+        conn.executemany(
+            """
+            INSERT INTO sources(name, url, enabled, category)
+            VALUES (:name, :url, :enabled, :category)
+            ON CONFLICT(name) DO UPDATE SET
+              url=excluded.url,
+              enabled=excluded.enabled,
+              category=excluded.category
+            """,
+            [
+                {
+                    "name": source.name,
+                    "url": source.url,
+                    "category": source.category,
+                    "enabled": enabled,
+                }
+                for source in PUBLIC_SOURCES
+            ],
+        )
+    print(f"seeded_public_sources={len(PUBLIC_SOURCES)} enabled={enabled}")
+
+
 def update_sources(_: argparse.Namespace) -> None:
     init_db()
     with connect() as conn:
@@ -528,6 +584,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("init-db").set_defaults(func=lambda args: init_db())
     seed = sub.add_parser("seed-lab")
     seed.set_defaults(func=seed_lab)
+    seed_public_parser = sub.add_parser("seed-public")
+    seed_public_parser.add_argument("--disabled", dest="enabled", action="store_false")
+    seed_public_parser.set_defaults(enabled=True, func=seed_public)
     add = sub.add_parser("add-source")
     add.add_argument("name")
     add.add_argument("url")

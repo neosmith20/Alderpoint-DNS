@@ -58,10 +58,15 @@
 
 - SQLite state database is initialized at `/var/lib/bindguard/bindguard.db`.
 - Seeded public AdGuard DNS filter downloads through the host resolver.
+- A 19-source public catalog can be loaded with `seed-public`; sources include
+  category assignments and both `adguardteam.github.io` and GitHub raw URLs.
 - Download and parse test currently accepts about 160k active domains from one
   realistic public source.
 - Plain domains, hosts rules, basic Adblock rules, exceptions, duplicates, IDN
   normalization, invalid rules, and unsupported rules are covered by unit tests.
+- Unit tests verify the public catalog size, enabled state, categories, and URL
+  host coverage without requiring every large public list to download on every
+  routine test run.
 - Custom block and custom allow rules deploy successfully.
 - Custom allow rules take precedence over downloaded and custom block rules.
 - RPZ output validates with `named-checkzone`.

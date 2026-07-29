@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
+import argparse
+import contextlib
+import io
+import tempfile
 import unittest
+from pathlib import Path
 
+import app.bindguard_compiler as compiler
 from app.bindguard_compiler import normalize_domain, parse_rules
 
 
@@ -29,6 +35,28 @@ class ParserTests(unittest.TestCase):
 
     def test_idn_normalization(self):
         self.assertEqual(normalize_domain("bücher.example"), "xn--bcher-kva.example")
+
+    def test_public_source_catalog_seeds_large_list_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original_db = compiler.DB_PATH
+            compiler.DB_PATH = Path(tmp) / "bindguard.db"
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    compiler.seed_public(argparse.Namespace(enabled=True))
+                    compiler.seed_public(argparse.Namespace(enabled=False))
+                with compiler.connect() as conn:
+                    rows = conn.execute("SELECT name, url, enabled, category FROM sources ORDER BY name").fetchall()
+            finally:
+                compiler.DB_PATH = original_db
+
+        urls = [row["url"] for row in rows]
+        categories = {row["category"] for row in rows}
+        self.assertEqual(len(rows), 19)
+        self.assertTrue(all(row["enabled"] == 0 for row in rows))
+        self.assertIn("ads_trackers", categories)
+        self.assertIn("malware", categories)
+        self.assertTrue(any("adguardteam.github.io" in url for url in urls))
+        self.assertTrue(any("raw.githubusercontent.com" in url for url in urls))
 
 
 if __name__ == "__main__":
