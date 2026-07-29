@@ -35,6 +35,12 @@ RPZ_ZONE = "bindguard.rpz"
 DOMAIN_RE = re.compile(r"^(?=.{1,253}\.?$)([a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?\.)+[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?\.?$")
 
 
+class BindGuardConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        super().__exit__(exc_type, exc_value, traceback)
+        self.close()
+
+
 @dataclass
 class ParseStats:
     parsed_rules: int = 0
@@ -99,7 +105,7 @@ def slug(text: str) -> str:
 
 def connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, factory=BindGuardConnection)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -653,6 +659,19 @@ def seed_public(args: argparse.Namespace) -> None:
     print(f"seeded_public_sources={len(PUBLIC_SOURCES)} enabled={enabled}")
 
 
+def update_one_source(conn: sqlite3.Connection, source: sqlite3.Row) -> tuple[SourceResult, ParseStats]:
+    result = download_source(source)
+    stats = ParseStats()
+    if result.path and result.path.exists():
+        blocks, _, stats = parse_rules(result.path.read_text(errors="replace"))
+        conn.execute(
+            "UPDATE sources SET final_active_domains=? WHERE id=?",
+            (len(blocks), source["id"]),
+        )
+    record_source_result(conn, result, stats)
+    return result, stats
+
+
 def update_sources(_: argparse.Namespace) -> None:
     init_db()
     with connect() as conn:
@@ -660,6 +679,20 @@ def update_sources(_: argparse.Namespace) -> None:
         print(f"active_domains={len(active_blocks)}")
         for error in errors:
             print(f"error={error}")
+
+
+def update_source(args: argparse.Namespace) -> None:
+    init_db()
+    with connect() as conn:
+        source = conn.execute("SELECT * FROM sources WHERE id=?", (args.source_id,)).fetchone()
+        if not source:
+            raise SystemExit(f"source not found: {args.source_id}")
+        result, stats = update_one_source(conn, source)
+        print(f"source_id={source['id']}")
+        print(f"success={1 if result.success else 0}")
+        print(f"accepted_domains={stats.accepted_domains}")
+        if result.error:
+            print(f"error={result.error}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -687,6 +720,9 @@ def main(argv: list[str] | None = None) -> int:
     dep.set_defaults(func=lambda args: print(deploy(download=not args.no_download)))
     update = sub.add_parser("update-sources")
     update.set_defaults(func=update_sources)
+    update_one = sub.add_parser("update-source")
+    update_one.add_argument("source_id", type=int)
+    update_one.set_defaults(func=update_source)
     status = sub.add_parser("status")
     status.set_defaults(func=list_status)
     args = parser.parse_args(argv)

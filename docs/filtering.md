@@ -8,6 +8,8 @@ Current capabilities:
 - Public source tracking with per-source parse statistics and last errors
 - A curated 19-source public blocklist catalog seeded with `seed-public`,
   spanning AdGuard-hosted assets and GitHub raw URLs
+- Bulk source updates with `update-sources` and single-source refreshes with
+  `update-source <id>`
 - Downloads through the host resolver with connection and total timeouts
 - Maximum source size limit of 25 MiB per list
 - Preservation of the last successful downloaded copy when an update fails
@@ -31,6 +33,12 @@ Seed the lab source and deploy:
 /opt/bindguard/app/bindguard_compiler.py seed-lab
 /opt/bindguard/app/bindguard_compiler.py deploy
 /opt/bindguard/app/bindguard_compiler.py update-sources
+```
+
+Refresh one source without touching the other configured sources:
+
+```sh
+/opt/bindguard/app/bindguard_compiler.py update-source 1
 ```
 
 Seed the larger public catalog when operationally ready:

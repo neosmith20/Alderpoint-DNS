@@ -292,6 +292,40 @@ def blocklist_toggle(request: Request, source_id: int, csrf: str = Form(...), _:
     return redirect("/blocklists")
 
 
+@app.post("/blocklists/{source_id}/edit")
+def blocklist_edit(
+    request: Request,
+    source_id: int,
+    name: str = Form(...),
+    url: str = Form(...),
+    category: str = Form("ads_trackers"),
+    csrf: str = Form(...),
+    _: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    clean_name = name.strip()
+    clean_url = url.strip()
+    clean_category = category.strip() or "ads_trackers"
+    if not clean_name or not clean_url:
+        raise HTTPException(status_code=400, detail="source name and url are required")
+    try:
+        with db() as conn:
+            conn.execute(
+                "UPDATE sources SET name=?, url=?, category=? WHERE id=?",
+                (clean_name, clean_url, clean_category, source_id),
+            )
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=400, detail="source name already exists") from exc
+    return redirect("/blocklists")
+
+
+@app.post("/blocklists/{source_id}/update")
+def blocklist_update_one(request: Request, source_id: int, csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    run(["/opt/bindguard/app/bindguard_compiler.py", "update-source", str(source_id)])
+    return redirect("/blocklists")
+
+
 @app.post("/blocklists/{source_id}/delete")
 def blocklist_delete(request: Request, source_id: int, csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
     check_csrf(request, csrf)

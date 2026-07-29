@@ -89,6 +89,34 @@ class ParserTests(unittest.TestCase):
         self.assertEqual({"malware", "ads_trackers", "adult_content", "iot_telemetry", "safesearch"}, restricted)
         self.assertEqual("trusted", network["profile_key"])
 
+    def test_update_single_source_records_stats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source_file = tmp_path / "source.txt"
+            source_file.write_text("example.test\n||ads.example^\n@@||allowed.example^\n")
+            original_db = compiler.DB_PATH
+            original_download_dir = compiler.DOWNLOAD_DIR
+            compiler.DB_PATH = tmp_path / "bindguard.db"
+            compiler.DOWNLOAD_DIR = tmp_path / "downloads"
+            try:
+                compiler.init_db()
+                with compiler.connect() as conn:
+                    conn.execute(
+                        "INSERT INTO sources(name, url, enabled, category) VALUES (?, ?, 1, ?)",
+                        ("local fixture", source_file.as_uri(), "ads_trackers"),
+                    )
+                    source = conn.execute("SELECT * FROM sources WHERE name='local fixture'").fetchone()
+                    result, stats = compiler.update_one_source(conn, source)
+                    row = conn.execute("SELECT accepted_domains, last_error FROM sources WHERE id=?", (source["id"],)).fetchone()
+            finally:
+                compiler.DB_PATH = original_db
+                compiler.DOWNLOAD_DIR = original_download_dir
+
+        self.assertTrue(result.success)
+        self.assertEqual(3, stats.accepted_domains)
+        self.assertEqual(3, row["accepted_domains"])
+        self.assertIsNone(row["last_error"])
+
 
 if __name__ == "__main__":
     unittest.main()

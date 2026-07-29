@@ -24,6 +24,11 @@ commands through sudo:
 /opt/bindguard/app/bindguard_compiler.py update-sources
 ```
 
+Blocklist management supports add, inline edit, enable/disable, delete,
+single-source update, update-all, and compile/deploy. Single-source updates are
+unprivileged because they only write BindGuard's database and download cache;
+deployment remains privileged and enumerated.
+
 Useful commands:
 
 ```sh

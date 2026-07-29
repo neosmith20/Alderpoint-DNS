@@ -76,6 +76,8 @@
   post-deploy ordinary/blocked/allowed DNS tests, and rollback on runtime
   failure.
 - Failed source update preserves the previous successful downloaded copy.
+- Blocklist management now supports source add, edit, enable/disable, delete,
+  update-all, and single-source update.
 - Invalid generated RPZ is rejected before active configuration replacement.
 - Forced post-deployment failure rolls back and records `rolled_back`.
 - With both BIND and dnsdist stopped, `update-sources` and direct HTTPS download
