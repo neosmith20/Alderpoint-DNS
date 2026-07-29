@@ -1,0 +1,5 @@
+bindguard (0.4.0~beta1-1) unstable; urgency=medium
+
+  * Beta packaging scaffold for fresh installation and upgrade testing.
+
+ -- BindGuard Maintainers <maintainers@example.invalid>  Wed, 29 Jul 2026 16:00:00 -0600

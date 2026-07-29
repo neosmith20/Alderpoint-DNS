@@ -31,5 +31,9 @@
   upstream resolver translation, BindGuard-native JSON export/import, staged
   upload retention metadata, and migration summaries that surface adds,
   updates, conflicts, skipped items, and unsupported source features.
+- Added reviewed-install and safe-upgrade scripts with dry-run/test-root
+  support, a sanitized `bindguard-diagnostics` bundle command, version and
+  dependency manifests, and Debian package scaffolding plus a local test
+  `.deb` builder.
 - Made the top-right service status badge a global authenticated-shell
   component with a lightweight `/status/summary` refresh endpoint.

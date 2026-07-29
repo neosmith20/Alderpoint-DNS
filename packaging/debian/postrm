@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  purge)
+    rm -rf /etc/bindguard /var/lib/bindguard /var/log/bindguard
+    ;;
+  remove)
+    echo "BindGuard persistent data remains in /etc/bindguard, /var/lib/bindguard, and /var/log/bindguard." >&2
+    echo "Use apt purge bindguard only when permanent data removal is intended." >&2
+    ;;
+esac
+
+#DEBHELPER#
+exit 0

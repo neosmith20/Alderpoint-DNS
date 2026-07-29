@@ -279,7 +279,8 @@ Remaining work:
 
 - Package 2: Encryption Settings gap audit and any required corrections.
 - Package 3: Import and Migration gap audit and any required corrections.
-- Package 4: Installation, upgrades, packaging, and diagnostics.
+- Package 4: Installation, upgrades, packaging, and diagnostics complete
+  (`Add installer upgrade diagnostics packaging`).
 - Package 5: BIND Cache Management gap audit and any required corrections.
 - Package 6: external beta and v1.0 hardening.
 
@@ -436,3 +437,72 @@ Known limitations:
   database writes; source data is backed up before apply and unsupported items
   are previewed, but a future hardening pass can make the structured migration
   report persist as its own import job type.
+
+## Package 4 - Installation, Upgrade, Packaging, and Diagnostics
+
+Implemented:
+
+- Added `VERSION` (`0.4.0-beta.1`), `requirements.txt`, and
+  `requirements-debian.txt`.
+- Added `scripts/install.sh` for reviewed fresh Debian-based installs. It
+  checks OS/version, architecture, memory, and disk; installs packages;
+  creates the `bindguard` user/group; creates application/config/data/log/
+  backup/import-staging directories; creates a Python virtual environment;
+  installs systemd units and sudoers policy; generates local secrets;
+  initializes databases and generated DNS; enables services; and runs service
+  health checks. It supports `--dry-run`, `--skip-apt`, `--source`, and
+  `BINDGUARD_INSTALL_ROOT`.
+- Added `scripts/upgrade.sh` for safe local upgrades. It detects current and
+  target versions, creates a pre-upgrade backup, creates a rollback snapshot,
+  replaces application files without deleting persistent data, validates
+  Python/BIND/dnsdist/sudoers state, runs migrations/deploy, restarts services
+  in controlled order, and restores the snapshot on failure. It supports
+  dry-run/test-root mode.
+- Added `scripts/bindguard-diagnostics`, which generates a sanitized support
+  bundle with version, OS/kernel/Python, service status, listeners, BIND and
+  dnsdist validation, schema object names, recent warnings, network/resource
+  summaries, DNS health checks, and configuration metadata. It redacts
+  passwords, API keys, session secrets, tokens, Authorization headers, private
+  keys, and sensitive resolver URL query strings. Private DNS records and
+  query contents are excluded by default.
+- Added Debian packaging scaffold under `packaging/debian`, including
+  `control`, `rules`, `install`, `changelog`, `postinst`, `prerm`, and
+  `postrm`. Normal remove preserves `/etc/bindguard`, `/var/lib/bindguard`,
+  and `/var/log/bindguard`; purge removes them only when explicitly requested.
+- Added `scripts/build-deb.sh` to build a local test `.deb` with `dpkg-deb`
+  without requiring `debhelper` on the active VM.
+- Added `tests/test_install_upgrade_diagnostics.sh` and included it in
+  `tests/test_acceptance.sh`.
+- Added documentation: `docs/install.md`, `docs/upgrade.md`,
+  `docs/diagnostics.md`, and `docs/packaging.md`; updated changelog, testing,
+  and progress docs.
+
+Tests:
+
+- `python3 -m py_compile /opt/bindguard/scripts/bindguard-diagnostics`: passed.
+- `sh -n /opt/bindguard/scripts/install.sh`: passed.
+- `sh -n /opt/bindguard/scripts/upgrade.sh`: passed.
+- `sh -n /opt/bindguard/scripts/build-deb.sh`: passed.
+- `/opt/bindguard/tests/test_install_upgrade_diagnostics.sh`: passed; it ran
+  installer and upgrader dry-runs in an isolated test root, verified
+  diagnostics redaction and bundle structure, and built/inspected a test
+  `.deb`.
+- `git diff --check`: passed.
+- `/opt/bindguard/tests/test_web_smoke.sh`: passed.
+- `/opt/bindguard/tests/test_acceptance.sh`: passed. Expected invalid-RPZ and
+  forced-rollback tracebacks appeared, as did pre-existing backup ResourceWarnings;
+  final result was `BindGuard acceptance suite passed`.
+
+Live service state after acceptance:
+
+- `bindguard`, `named`, `dnsdist`, and `bindguard-analytics` remained active
+  during package 4 verification.
+
+Known limitations:
+
+- The full `dpkg-buildpackage`/debhelper release pipeline is scaffolded but
+  not exercised on this VM because `debhelper` is not installed. The local
+  `dpkg-deb` test package path is present and tested.
+- The diagnostics `--include-private-dns` flag is an explicit opt-in
+  placeholder; diagnostics still does not export private DNS records. Use an
+  encrypted backup for support cases that truly need private data.

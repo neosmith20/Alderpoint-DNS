@@ -1,0 +1,15 @@
+app opt/bindguard/
+docs opt/bindguard/
+packaging opt/bindguard/
+scripts opt/bindguard/
+tests opt/bindguard/
+web opt/bindguard/
+VERSION opt/bindguard/
+requirements.txt opt/bindguard/
+requirements-debian.txt opt/bindguard/
+packaging/bindguard.service lib/systemd/system/
+packaging/bindguard-analytics.service lib/systemd/system/
+packaging/bindguard-backup.service lib/systemd/system/
+packaging/bindguard-backup.timer lib/systemd/system/
+packaging/sudoers-bindguard etc/sudoers.d/bindguard
+scripts/bindguard-diagnostics usr/sbin/bindguard-diagnostics

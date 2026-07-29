@@ -137,6 +137,15 @@ confirm reversion, confirm file ownership, confirm DNS resolved throughout)
 caught and fixed two real bugs in file-ownership handling during restore —
 see `docs/progress.md`'s Backup and Restore milestone for detail.
 
+The installation, upgrade, diagnostics, and packaging suite
+(`tests/test_install_upgrade_diagnostics.sh`) runs the installer in dry-run
+mode against an isolated `BINDGUARD_INSTALL_ROOT`, runs the upgrader in dry-run
+mode against a staged fake installation, verifies diagnostics redaction with a
+self-test sample, creates a sanitized diagnostics tarball without journal
+excerpts, checks that the bundle contains schema/summary metadata without
+secret-like content, and builds/inspects a local test `.deb` with
+`scripts/build-deb.sh`.
+
 The Replication suite (`tests/test_replication.py`) covers payload allowlist
 exclusion, replica rollback when deploy fails, successful replacement of
 replicated settings while preserving node-local identity keys, enrollment

@@ -14,6 +14,7 @@ set -eu
 /opt/bindguard/tests/test_importer.py
 /opt/bindguard/tests/test_backup.py
 /opt/bindguard/tests/test_replication.py
+/opt/bindguard/tests/test_install_upgrade_diagnostics.sh
 /opt/bindguard/tests/test_web_smoke.sh
 /opt/bindguard/tests/test_service_restart_analytics.sh
 /opt/bindguard/tests/test_backup_restore.sh

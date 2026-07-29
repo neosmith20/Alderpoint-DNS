@@ -582,6 +582,7 @@ Follow-up migration expansion completed the broader import package:
 producing versioned, checksummed archives and a preview-first, staged,
 automatically-rolled-back restore path, following the same shape as
 `app/dns_cache.py`/`app/encryption.py`. Built by a background agent working
+
 in an isolated git worktree; merged and then verified/fixed against the
 live VM in this session (see the two real bugs below — both were caught
 live, not assumed fixed from a clean test run).
@@ -675,3 +676,43 @@ live, not assumed fixed from a clean test run).
   post-restore health check), retention pruning, and the
   request/process-pending-request handoff pattern including that a stored
   password file is consumed and deleted exactly once.
+
+## Verified Installation, Upgrade, Diagnostics, and Packaging milestone
+
+BindGuard now has a reviewed local installation and upgrade path plus a
+sanitized diagnostics command:
+
+- `scripts/install.sh` supports fresh Debian-based server installs from a
+  reviewed local source tree. It checks OS/version, architecture, memory, and
+  disk space; installs required Debian packages; creates the `bindguard`
+  system user/group; lays out `/opt/bindguard`, `/etc/bindguard`,
+  `/var/lib/bindguard`, `/var/log/bindguard`; creates a system-site Python
+  virtual environment; installs systemd units and sudoers policy; generates
+  local secrets; initializes databases; deploys generated DNS configuration;
+  enables services; and runs health checks. `--dry-run` plus
+  `BINDGUARD_INSTALL_ROOT` enables isolated validation without touching the
+  active VM.
+- `scripts/upgrade.sh` detects current/target versions, checks disk space,
+  creates a pre-upgrade backup and rollback snapshot, replaces application
+  files while preserving persistent data, validates Python/BIND/dnsdist/
+  sudoers state, runs migrations/deploy, restarts services in controlled
+  order, and restores the snapshot on failure. It also supports dry-run
+  testing against a fake root.
+- `scripts/bindguard-diagnostics` creates a sanitized tarball with version,
+  OS/kernel/Python, service status, listeners, BIND/dnsdist validation, schema
+  object names, recent warnings, network/resource summaries, health-check
+  results, and configuration metadata. It redacts passwords, API keys, session
+  secrets, tokens, Authorization headers, private-key PEM blocks, and resolver
+  URL query strings. Private DNS records and query contents are excluded by
+  default.
+- `VERSION`, `requirements.txt`, and `requirements-debian.txt` define the
+  beta version and dependency manifests.
+- `packaging/debian` contains Debian packaging metadata and maintainer
+  scripts. Normal remove preserves persistent data; purge removes it only when
+  explicitly requested.
+- `scripts/build-deb.sh` builds a local test `.deb` with `dpkg-deb` for
+  package-content validation while the future debhelper/repository pipeline is
+  still being prepared.
+- `tests/test_install_upgrade_diagnostics.sh` validates install/upgrade
+  dry-runs, diagnostics redaction and bundle contents, package docs, and test
+  `.deb` creation/metadata.
