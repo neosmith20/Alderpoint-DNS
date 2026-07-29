@@ -283,7 +283,8 @@ Remaining work:
   (`Add installer upgrade diagnostics packaging`).
 - Package 5: BIND Cache Management gap audit and corrections complete
   (`Tighten BIND cache management controls`).
-- Package 6: external beta and v1.0 hardening.
+- Package 6: external beta and v1.0 hardening complete
+  (`Prepare external beta hardening docs`).
 
 ## Package 2: Encryption Settings listener controls
 
@@ -557,3 +558,51 @@ Tests:
 Live service state after acceptance:
 
 - `bindguard`, `named`, `dnsdist`, and `bindguard-analytics` remained active.
+
+## Package 6 - External Beta and v1.0 Hardening
+
+Implemented:
+
+- Added beta and release documentation:
+  - `docs/beta-readiness.md`
+  - `docs/versioning.md`
+  - `docs/release-notes.md`
+  - `docs/supported-systems.md`
+  - `docs/hardware-requirements.md`
+- Added operator guides:
+  - `docs/backup-recovery.md`
+  - `docs/migration.md`
+  - `docs/troubleshooting.md`
+- Added tester and issue templates:
+  - `docs/beta-feedback-template.md`
+  - `docs/bug-report-template.md`
+  - `docs/feature-request-template.md`
+- Added `docs/hardening-review.md` covering authentication/authorization,
+  CSRF, session cookies, input validation, upload handling, command execution,
+  permissions/ownership, secret storage, logging/redaction, DNS recursion ACLs,
+  public exposure, backup encryption, and replication auth/revocation.
+- Added `BINDGUARD_COOKIE_SECURE=1` support in `app/webapp.py` so HTTPS admin
+  deployments can mark session cookies Secure while current HTTP lab mode
+  remains usable.
+- Updated `docs/security.md`, `docs/issues.md`, `CHANGELOG.md`, and
+  `docs/progress.md`.
+- Added `tests/test_beta_hardening_docs.sh` and included it in acceptance.
+
+Tests:
+
+- `python3 -m py_compile /opt/bindguard/app/webapp.py`: passed.
+- `git diff --check`: passed.
+- `/opt/bindguard/tests/test_beta_hardening_docs.sh`: passed.
+- `/opt/bindguard/tests/test_web_smoke.sh`: passed.
+- `/opt/bindguard/tests/test_acceptance.sh`: passed. Expected invalid-RPZ and
+  forced-rollback tracebacks appeared, as did pre-existing backup ResourceWarnings;
+  final result was `BindGuard acceptance suite passed`.
+
+Known limitations before external beta:
+
+- A controlled full reboot still needs to be performed after the final beta
+  commit, then post-reboot DNS/listener/service verification repeated.
+- Admin UI HTTPS remains a beta risk; use private access or a trusted reverse
+  proxy and set `BINDGUARD_COOKIE_SECURE=1`.
+- Signed apt repository publishing is not implemented; only local test `.deb`
+  creation is currently validated.

@@ -38,5 +38,10 @@
 - Expanded BIND cache management with a recursive client limit control, an
   explicit statistics refresh action, and stricter web-route error handling
   for cache deploy and flush helper failures.
+- Added beta-readiness, versioning, release-note, supported-system, hardware,
+  migration, recovery, troubleshooting, feedback, bug-report, feature-request,
+  and hardening-review documentation, plus a hardening test for docs,
+  resolver ACL defaults, diagnostics redaction, and secure-cookie deployment
+  configuration.
 - Made the top-right service status badge a global authenticated-shell
   component with a lightweight `/status/summary` refresh endpoint.

@@ -9,8 +9,8 @@
   Independence has been verified with BIND stopped.
 - The Debian dnsdist package must be replaced by the official PowerDNS package;
   acceptance requires `dnsdist --version` to report `dns-over-quic`.
-- Web cookies are not marked `Secure` in current lab HTTP mode. They must be
-  marked `Secure` when the admin interface is served over HTTPS.
+- Web cookies are not marked `Secure` in current lab HTTP mode. Set
+  `BINDGUARD_COOKIE_SECURE=1` when the admin interface is served over HTTPS.
 - Per-network policy runtime enforcement is not enabled yet; v1 now has the
   database and compiler-visible profile/category model needed to add it without
   a schema rewrite.

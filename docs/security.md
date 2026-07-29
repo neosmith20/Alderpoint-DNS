@@ -23,7 +23,9 @@
   or password as a sudo argument.
 - No default administrator exists.
 - Passwords are hashed with Argon2.
-- Session cookies are signed, `HttpOnly`, and `SameSite=Strict`.
+- Session cookies are signed, `HttpOnly`, and `SameSite=Strict`. Set
+  `BINDGUARD_COOKIE_SECURE=1` in the web service environment when the admin UI
+  is served over HTTPS.
 - CSRF tokens are required for mutating forms.
 - dnsdist ACLs allow RFC1918 private networks by default, with an explicit
   environment switch for allow-all mode.
@@ -46,5 +48,5 @@
 - Telemetry queues are bounded. If the collector is unavailable or overloaded,
   DNS service continues and telemetry drops are counted separately.
 
-Lab HTTP mode does not mark cookies `Secure`; enable that when admin HTTPS is
-configured.
+Lab HTTP mode does not mark cookies `Secure`; the environment toggle above is
+for HTTPS admin deployments.

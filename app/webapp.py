@@ -34,6 +34,10 @@ app = FastAPI(title="BindGuard")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
+def secure_session_cookie_enabled() -> bool:
+    return os.getenv("BINDGUARD_COOKIE_SECURE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 @app.on_event("startup")
 def _replication_autostart() -> None:
     # Re-establishes the primary listener or replica poller thread after a
@@ -106,7 +110,7 @@ def set_session(response: Response, data: dict[str, Any]) -> None:
         serializer.dumps(data),
         httponly=True,
         samesite="strict",
-        secure=False,
+        secure=secure_session_cookie_enabled(),
         max_age=SESSION_MAX_AGE,
     )
 

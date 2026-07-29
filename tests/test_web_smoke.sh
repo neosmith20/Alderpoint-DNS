@@ -517,6 +517,12 @@ with mock.patch.object(webapp, "service_state", side_effect=RuntimeError("boom")
     unknown = webapp.global_service_status()
 if unknown["label"] != "Unknown" or unknown["tone"] != "unavailable":
     raise SystemExit("global status unknown state is wrong")
+with mock.patch.dict(webapp.os.environ, {"BINDGUARD_COOKIE_SECURE": "1"}):
+    if not webapp.secure_session_cookie_enabled():
+        raise SystemExit("secure session cookie env toggle did not enable")
+with mock.patch.dict(webapp.os.environ, {"BINDGUARD_COOKIE_SECURE": "0"}):
+    if webapp.secure_session_cookie_enabled():
+        raise SystemExit("secure session cookie env toggle did not disable")
 
 response = webapp.analytics_chart_data(SimpleNamespace(query_params={"range": "24h"}), None)
 if response.status_code != 200 or b'"series"' not in response.body:

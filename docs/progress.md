@@ -722,3 +722,33 @@ sanitized diagnostics command:
 - `tests/test_install_upgrade_diagnostics.sh` validates install/upgrade
   dry-runs, diagnostics redaction and bundle contents, package docs, and test
   `.deb` creation/metadata.
+
+## External Beta and v1.0 Hardening milestone
+
+Beta-preparation documentation and a focused hardening correction are in
+place:
+
+- Added `docs/beta-readiness.md` with the external beta checklist covering
+  install, setup, upgrade, backup/restore, import/migration, replication,
+  restart, reboot, DNS resolution, local DNS/PTR, filtering, upstream changes,
+  encrypted DNS, failover, dashboard analytics, responsive UI, permissions,
+  diagnostics, uninstall, and failed-deployment recovery.
+- Added release/version/support docs: `docs/versioning.md`,
+  `docs/release-notes.md`, `docs/supported-systems.md`, and
+  `docs/hardware-requirements.md`.
+- Added operator guides: `docs/backup-recovery.md`, `docs/migration.md`, and
+  `docs/troubleshooting.md`.
+- Added feedback intake templates: `docs/beta-feedback-template.md`,
+  `docs/bug-report-template.md`, and `docs/feature-request-template.md`.
+- Added `docs/hardening-review.md`, documenting authentication,
+  authorization, CSRF, session cookies, input validation, upload handling,
+  command execution, permissions, secret storage, logging/redaction, DNS
+  recursion ACLs, public exposure, backup encryption, and replication auth/
+  revocation.
+- Added `BINDGUARD_COOKIE_SECURE=1` support for HTTPS-admin deployments while
+  preserving current HTTP lab behavior.
+- Added `tests/test_beta_hardening_docs.sh` and wired it into acceptance. It
+  verifies required docs, beta checklist content, secure-cookie guidance,
+  packaging purge guidance, BIND recursion/cache ACLs, dnsdist private ACL
+  defaults with environment-gated allow-all, diagnostics redaction, and the
+  secure-cookie environment toggle.
