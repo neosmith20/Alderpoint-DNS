@@ -11,11 +11,18 @@
   acceptance requires `dnsdist --version` to report `dns-over-quic`.
 - Web cookies are not marked `Secure` in current lab HTTP mode. They must be
   marked `Secure` when the admin interface is served over HTTPS.
-- Query statistics are aggregate-only for v1. Full recent-query ingestion,
-  top clients, top domains, and searchable history remain future work.
 - Per-network policy runtime enforcement is not enabled yet; v1 now has the
   database and compiler-visible profile/category model needed to add it without
   a schema rewrite.
+
+## Resolved during analytics implementation
+
+- The dashboard now uses native SQLite-backed analytics with real dnsdist
+  protobuf response events and aggregate dnsdist stats. Query log, top clients,
+  top domains, top blocked domains, protocol usage, response-code tables,
+  privacy modes, retention cleanup, database-size protection, and statistics
+  settings are implemented without Prometheus, Grafana, Elasticsearch, or
+  unbounded text logs.
 
 ## Resolved during post-reboot recovery
 

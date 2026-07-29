@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Query Log</h1>
+<form class="panel" method="get" action="/query-log">
+  <div class="grid compact">
+    <label>Search <input name="search" value="{{ log.filters.search }}"></label>
+    <label>Client <input name="client" value="{{ log.filters.client }}"></label>
+    <label>Domain <input name="domain" value="{{ log.filters.domain }}"></label>
+    <label>Type <input name="qtype" value="{{ log.filters.qtype }}"></label>
+    <label>Protocol <input name="protocol" value="{{ log.filters.protocol }}"></label>
+    <label>Status
+      <select name="blocked">
+        <option value="" {{ "selected" if log.filters.blocked == "" else "" }}>Any</option>
+        <option value="0" {{ "selected" if log.filters.blocked == "0" else "" }}>Allowed</option>
+        <option value="1" {{ "selected" if log.filters.blocked == "1" else "" }}>Blocked</option>
+      </select>
+    </label>
+    <label>Response code <input name="rcode" value="{{ log.filters.rcode }}"></label>
+    <label>Limit <input name="limit" type="number" min="10" max="500" value="{{ log.limit }}"></label>
+  </div>
+  <p class="row"><button>Filter</button><label class="row"><input type="checkbox" id="autoRefresh" style="width:auto"> Auto-refresh</label></p>
+</form>
+{% if log.rows %}
+  <table>
+    <tr><th>Timestamp</th><th>Client</th><th>Domain</th><th>Type</th><th>Protocol</th><th>Status</th><th>Response time</th><th>Block source/category</th><th>Rule</th></tr>
+    {% for row in log.rows %}
+      <tr>
+        <td class="mono">{{ row.ts }}</td>
+        <td class="mono">{{ row.client }}</td>
+        <td class="mono">{{ row.domain }}</td>
+        <td>{{ row.qtype }}</td>
+        <td>{{ row.protocol }}</td>
+        <td>{{ "Blocked" if row.blocked else row.rcode }}</td>
+        <td>{{ "%.1f ms"|format(row.latency_ms) if row.latency_ms is not none else "n/a" }}</td>
+        <td>{{ row.block_source or "unavailable" }}{% if row.block_category %}<span class="secondary muted">{{ row.block_category }}</span>{% endif %}</td>
+        <td class="row">
+          <form method="post" action="/custom-rules/add-from-query" onsubmit="return confirm('Create and deploy this rule?')">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="domain" value="{{ row.domain }}">
+            <input type="hidden" name="action" value="allow">
+            <button>Allow</button>
+          </form>
+          <form method="post" action="/custom-rules/add-from-query" onsubmit="return confirm('Create and deploy this rule?')">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="domain" value="{{ row.domain }}">
+            <input type="hidden" name="action" value="block">
+            <button class="danger">Block</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+  </table>
+  <p class="row">
+    {% if log.page > 1 %}<a class="button" href="/query-log?page={{ log.page - 1 }}&limit={{ log.limit }}">Previous</a>{% endif %}
+    <span class="muted">Page {{ log.page }} of {{ ((log.total + log.limit - 1) // log.limit) or 1 }}</span>
+    {% if log.page * log.limit < log.total %}<a class="button" href="/query-log?page={{ log.page + 1 }}&limit={{ log.limit }}">Next</a>{% endif %}
+  </p>
+{% else %}
+  <div class="empty">No query events match the current filters.</div>
+{% endif %}
+<script>
+  const toggle = document.getElementById('autoRefresh');
+  let refreshTimer = null;
+  if (toggle) {
+    toggle.addEventListener('change', () => {
+      if (refreshTimer) clearInterval(refreshTimer);
+      if (toggle.checked) refreshTimer = setInterval(() => location.reload(), 10000);
+    });
+  }
+</script>
+{% endblock %}

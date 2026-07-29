@@ -15,19 +15,23 @@ from typing import Any
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
+from app import analytics
 from app.bindguard_compiler import DB_PATH, add_source, init_db, normalize_domain
 
 
 ROOT = Path("/opt/bindguard")
 TEMPLATES = Jinja2Templates(directory=str(ROOT / "web" / "templates"))
+STATIC_DIR = ROOT / "web" / "static"
 SESSION_MAX_AGE = 8 * 60 * 60
 SECRET_FILE = Path("/etc/bindguard/secrets.env")
 ph = PasswordHasher()
 app = FastAPI(title="BindGuard")
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 def utc_now() -> str:
@@ -318,7 +322,8 @@ def dashboard(request: Request, _: sqlite3.Row = Depends(current_admin)):
     enabled_sources = [s for s in status["sources"] if s["enabled"]]
     deployment = status["deployment"]
     active_rules = deployment["active_domains"] if deployment else 0
-    stats = dnsdist_stats()
+    range_key = request.query_params.get("range", "24h")
+    data = analytics.dashboard_data(range_key)
     return render(
         request,
         "dashboard.html",
@@ -329,8 +334,17 @@ def dashboard(request: Request, _: sqlite3.Row = Depends(current_admin)):
         active_rules=active_rules,
         deployment=deployment,
         sources=status["sources"],
-        query_total=stats.get("queries", 0),
-        blocked_total=sum(int(stats.get(key, 0)) for key in ("rule-drop", "rule-nxdomain", "rule-refused")),
+        analytics=data,
+        chart_json=json.dumps(
+            [
+                {
+                    "t": row["bucket_start"],
+                    "total": row["total_queries"],
+                    "blocked": row["blocked_queries"],
+                }
+                for row in data["buckets"]
+            ]
+        ),
     )
 
 
@@ -503,6 +517,30 @@ def custom_add(request: Request, action: str = Form(...), domain: str = Form(...
     return redirect("/custom-rules")
 
 
+@app.post("/custom-rules/add-from-query")
+def custom_add_from_query(
+    request: Request,
+    action: str = Form(...),
+    domain: str = Form(...),
+    csrf: str = Form(...),
+    _: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    normalized = normalize_domain(domain)
+    if not normalized or action not in {"allow", "block"}:
+        raise HTTPException(status_code=400, detail="invalid custom rule")
+    with db() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO custom_rules(domain, action, enabled, comment, created_at)
+            VALUES (?, ?, 1, ?, ?)
+            """,
+            (normalized, action, "created from query log", utc_now()),
+        )
+    run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "deploy", "--no-download"])
+    return redirect("/query-log")
+
+
 @app.post("/custom-rules/{rule_id}/toggle")
 def custom_toggle(request: Request, rule_id: int, csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
     check_csrf(request, csrf)
@@ -566,3 +604,70 @@ def system_page(request: Request, _: sqlite3.Row = Depends(current_admin)):
         logs=logs,
         compiler=compiler_status(),
     )
+
+
+@app.get("/query-log", response_class=HTMLResponse)
+def query_log(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    limit = min(500, max(10, int(request.query_params.get("limit", "50"))))
+    page = max(1, int(request.query_params.get("page", "1")))
+    filters = {
+        "search": request.query_params.get("search", ""),
+        "client": request.query_params.get("client", ""),
+        "domain": request.query_params.get("domain", ""),
+        "qtype": request.query_params.get("qtype", ""),
+        "protocol": request.query_params.get("protocol", ""),
+        "blocked": request.query_params.get("blocked", ""),
+        "rcode": request.query_params.get("rcode", ""),
+    }
+    return render(request, "query_log.html", log=analytics.query_log(filters, page, limit))
+
+
+@app.get("/statistics-settings", response_class=HTMLResponse)
+def statistics_settings(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    return render(request, "statistics_settings.html", settings=analytics.settings(), db_size=analytics.db_size())
+
+
+@app.post("/statistics-settings")
+def statistics_settings_post(
+    request: Request,
+    csrf: str = Form(...),
+    analytics_enabled: str = Form("0"),
+    detailed_query_logging_enabled: str = Form("0"),
+    privacy_mode: str = Form("full"),
+    detailed_retention_days: int = Form(7),
+    aggregate_retention_days: int = Form(90),
+    db_size_limit_bytes: int = Form(268435456),
+    client_anonymization: str = Form("truncate"),
+    collection_interval: int = Form(15),
+    recent_query_limit: int = Form(100),
+    _: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    analytics.update_settings(
+        {
+            "analytics_enabled": "1" if analytics_enabled == "1" else "0",
+            "detailed_query_logging_enabled": "1" if detailed_query_logging_enabled == "1" else "0",
+            "privacy_mode": privacy_mode,
+            "detailed_retention_days": max(0, detailed_retention_days),
+            "aggregate_retention_days": max(1, aggregate_retention_days),
+            "db_size_limit_bytes": max(1048576, db_size_limit_bytes),
+            "client_anonymization": client_anonymization,
+            "collection_interval": max(5, collection_interval),
+            "recent_query_limit": max(10, recent_query_limit),
+        }
+    )
+    return redirect("/statistics-settings")
+
+
+@app.post("/statistics-settings/clear")
+def statistics_clear(request: Request, confirm: str = Form(""), csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    if confirm != "CLEAR":
+        raise HTTPException(status_code=400, detail="confirmation must be CLEAR")
+    analytics.clear_statistics()
+    return redirect("/statistics-settings")
+
+
+@app.get("/statistics-settings/export")
+def statistics_export(_: sqlite3.Row = Depends(current_admin)):
+    return PlainTextResponse(analytics.export_statistics(), media_type="application/json")

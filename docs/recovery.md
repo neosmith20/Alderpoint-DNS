@@ -13,15 +13,17 @@ Restore a backup:
 ```
 
 The restore script validates BIND, the RPZ zone, dnsdist, and sudoers before
-extracting. It then reloads systemd and restarts `named`, `dnsdist`, and
-`bindguard`.
+extracting. It then reloads systemd and restarts `named`, `dnsdist`,
+`bindguard-analytics`, and `bindguard`.
 
 When the web interface is unavailable:
 
 ```sh
 systemctl status bindguard --no-pager
+systemctl status bindguard-analytics --no-pager
 journalctl -u bindguard -n 100 --no-pager
 systemctl restart bindguard
+systemctl restart bindguard-analytics
 ```
 
 When DNS is unavailable:
@@ -33,3 +35,7 @@ dnsdist --check-config -C /etc/dnsdist/dnsdist.conf
 systemctl restart named
 systemctl restart dnsdist
 ```
+
+When analytics is unavailable, DNS service should continue. Check that
+`bindguard-analytics` is active and that `ss -ltnup` shows the collector only on
+`127.0.0.1:5301`.

@@ -1,18 +1,78 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>Dashboard</h1>
-<div class="grid">
-  <div class="card"><h3>BindGuard</h3><p class="ok">{{ bindguard }}</p></div>
-  <div class="card"><h3>BIND</h3><p>{{ bind }}</p></div>
-  <div class="card"><h3>dnsdist</h3><p>{{ dnsdist }}</p></div>
-  <div class="card"><h3>Active Rules</h3><p>{{ active_rules }}</p></div>
-  <div class="card"><h3>Enabled Lists</h3><p>{{ enabled_sources }}</p></div>
-  <div class="card"><h3>Last Deployment</h3><p>{{ deployment.status if deployment else "none" }}</p></div>
-  <div class="card"><h3>Total Queries</h3><p>{{ query_total }}</p></div>
-  <div class="card"><h3>Blocked Queries</h3><p>{{ blocked_total }}</p></div>
+<form class="toolbar" method="get" action="/">
+  <label>Time range
+    <select name="range">
+      <option value="1h" {{ "selected" if analytics.range == "1h" else "" }}>Last hour</option>
+      <option value="24h" {{ "selected" if analytics.range == "24h" else "" }}>Last 24 hours</option>
+      <option value="7d" {{ "selected" if analytics.range == "7d" else "" }}>Last 7 days</option>
+      <option value="30d" {{ "selected" if analytics.range == "30d" else "" }}>Last 30 days</option>
+    </select>
+  </label>
+  <button>Apply</button>
+</form>
+<div class="grid compact">
+  <div class="card"><h3>DNS queries</h3><p class="metric">{{ analytics.totals.total_queries }}</p></div>
+  <div class="card"><h3>Blocked queries</h3><p class="metric">{{ analytics.totals.blocked_queries }}</p></div>
+  <div class="card"><h3>Percentage blocked</h3><p class="metric">{{ "%.1f"|format(analytics.totals.blocked_percent) }}%</p></div>
+  <div class="card"><h3>Average processing time</h3><p class="metric">{{ "%.1f"|format(analytics.totals.avg_latency_ms) }} ms</p></div>
+  <div class="card"><h3>Active clients</h3><p class="metric">{{ analytics.active_clients }}</p></div>
+  <div class="card"><h3>Active block rules</h3><p class="metric">{{ active_rules }}</p></div>
 </div>
+<div class="card chart-wrap" style="margin-top:12px">
+  <h3>DNS query volume</h3>
+  {% if analytics.has_data %}
+    <canvas id="queryChart" data-series='{{ chart_json }}'></canvas>
+  {% else %}
+    <div class="empty">No analytics data has been collected yet.</div>
+  {% endif %}
+</div>
+<div class="grid" style="margin-top:12px">
+  {% for title, rows in [
+    ("Top clients", analytics.top_clients),
+    ("Top queried domains", analytics.top_domains),
+    ("Top blocked domains", analytics.top_blocked),
+    ("Query types", analytics.qtypes),
+    ("Response codes", analytics.rcodes),
+    ("Protocol usage", analytics.protocols)
+  ] %}
+    <div class="card">
+      <h3>{{ title }}</h3>
+      {% if rows %}
+        <div class="card-list">
+          {% for row in rows %}
+            <div class="row"><span class="mono">{{ row.label }}</span><strong style="margin-left:auto">{{ row.value }}</strong></div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="muted">No data yet.</p>
+      {% endif %}
+    </div>
+  {% endfor %}
+</div>
+<h2>Recent activity</h2>
+{% if analytics.recent %}
+  <table>
+    <tr><th>Time</th><th>Client</th><th>Domain</th><th>Type</th><th>Protocol</th><th>Status</th><th>Response time</th></tr>
+    {% for row in analytics.recent %}
+      <tr>
+        <td class="mono">{{ row.ts }}</td>
+        <td class="mono">{{ row.client }}</td>
+        <td class="mono">{{ row.domain }}</td>
+        <td>{{ row.qtype }}</td>
+        <td>{{ row.protocol }}</td>
+        <td>{{ "Blocked" if row.blocked else row.rcode }}</td>
+        <td>{{ "%.1f ms"|format(row.latency_ms) if row.latency_ms is not none else "n/a" }}</td>
+      </tr>
+    {% endfor %}
+  </table>
+{% else %}
+  <div class="empty">No recent query activity has been collected yet.</div>
+{% endif %}
 <form method="post" action="/deploy" class="panel" style="margin-top:12px">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <button>Update, Compile, Deploy</button>
 </form>
+<script src="/static/dashboard.js"></script>
 {% endblock %}

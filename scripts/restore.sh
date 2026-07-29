@@ -24,6 +24,7 @@ tar -C / -xzf "$backup"
 systemctl daemon-reload
 systemctl restart named
 systemctl restart dnsdist
+systemctl restart bindguard-analytics
 systemctl restart bindguard
 
 echo "restored $backup"

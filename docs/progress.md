@@ -12,6 +12,7 @@
 - [x] Web interface
 - [x] Authentication
 - [x] Aggregate query statistics
+- [x] Native analytics dashboard and query log
 - [x] Backup and restore
 - [x] Full reboot acceptance
 - [x] Per-network policy preparation
@@ -102,14 +103,29 @@
 - `bindguard.service` is enabled and active.
 - Web smoke test passes.
 
-## Verified query statistics milestone
+## Verified analytics milestone
 
-- Dashboard reads aggregate dnsdist statistics from the loopback-only dnsdist
-  API.
-- Total query count is displayed.
-- Blocked query count is displayed from dnsdist rule counters when available.
-- Full per-query ingestion is not enabled, avoiding unbounded SQLite growth for
-  v1.
+- `bindguard-analytics.service` runs as the restricted `bindguard` account and
+  listens only on `127.0.0.1:5301`.
+- dnsdist 2.1 protobuf response logging is enabled with delayed delivery,
+  bounded dnsdist-side queuing, and no SQLite writes in the DNS path.
+- The collector polls the loopback-only dnsdist stats API for aggregate
+  counters, latency, cache, drop, and health data.
+- SQLite stores one-minute aggregate buckets plus recent detailed query events
+  when detailed logging is enabled.
+- Privacy modes support full, anonymized-client, and aggregate-only collection.
+- Retention cleanup and database-size pruning are implemented.
+- Blocked status is correlated with the active BindGuard RPZ policy set;
+  ordinary NXDOMAIN responses are not counted as blocked.
+- Controlled DNS traffic verified the dashboard/query log path: one allowed
+  query, one RPZ-blocked query, and one ordinary NXDOMAIN produced 3 total,
+  2 allowed, and 1 blocked stored events.
+- Dashboard now includes range selection, metric cards, a local canvas
+  time-series chart, top lists, protocol/rcode tables, and recent activity.
+- Query Log supports search, filters, pagination, auto-refresh, and creating
+  custom allow/block rules from rows.
+- Statistics Settings supports analytics toggles, privacy mode, retention,
+  database limit, collection interval, clear, and export.
 
 ## Verified policy-preparation milestone
 

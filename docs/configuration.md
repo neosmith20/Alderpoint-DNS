@@ -9,6 +9,7 @@ Current configuration:
 - BIND dnsdist backend: `127.0.0.1:5354` with PROXYv2
 - BIND recovery/health listener: `127.0.0.1:5353`
 - BIND RPZ: `/var/lib/bindguard/compiled/bind/bindguard.rpz`
+- Analytics collector: `127.0.0.1:5301`
 - Maintenance DNS: `1.1.1.2`, `1.0.0.2`, `4.2.2.1`, `4.2.2.2`
 
 dnsdist accepts RFC1918 private clients by default. Set
@@ -16,3 +17,10 @@ dnsdist accepts RFC1918 private clients by default. Set
 intended boundary. The generated self-signed certificate lives at
 `/etc/bindguard/certs/bindguard-lab.crt`; replace both cert and key together to
 install production TLS material.
+
+Analytics settings are managed from the Statistics page. Detailed query rows
+default to seven days of retention; aggregate buckets default to 90 days.
+Privacy modes are full, anonymized clients, and aggregate-only. The default
+database size limit is 256 MiB; when the database exceeds the configured limit,
+BindGuard prunes the oldest detailed query rows and records a local analytics
+warning.

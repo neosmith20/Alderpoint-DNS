@@ -71,6 +71,53 @@ if "/opt/bindguard/tests/test_dnsdist_frontend.sh" in html:
     raise SystemExit("client address test renders a raw path")
 if 'class="mono">/dns-query<' not in html or 'class="mono">dnsdist 2.0.0-alpha' not in html:
     raise SystemExit("monospace styling missing from path/version values")
+
+dashboard = TEMPLATES.get_template("dashboard.html").render(
+    request={},
+    admin="smoke",
+    setup_required=False,
+    csrf="smoke",
+    bindguard="active",
+    bind="active",
+    dnsdist="active",
+    enabled_sources=1,
+    active_rules=42,
+    deployment=None,
+    sources=[],
+    chart_json='[{"t":1,"total":1,"blocked":1}]',
+    analytics={
+        "range": "24h",
+        "has_data": True,
+        "buckets": [{"bucket_start": 1, "total_queries": 1, "blocked_queries": 1}],
+        "totals": {"total_queries": 1, "blocked_queries": 1, "blocked_percent": 100.0, "avg_latency_ms": 1.2},
+        "active_clients": 1,
+        "top_clients": [{"label": "2001:db8:ffffffff:ffffffff:ffffffff:ffffffff:ffffffff:ffff", "value": 1}],
+        "top_domains": [{"label": "extremely-long-subdomain-name-that-must-wrap.example.invalid", "value": 1}],
+        "top_blocked": [],
+        "qtypes": [{"label": "AAAA", "value": 1}],
+        "rcodes": [{"label": "NOERROR", "value": 1}],
+        "protocols": [{"label": "DoH3", "value": 1}],
+        "recent": [],
+    },
+)
+if "DNS query volume" not in dashboard or "queryChart" not in dashboard:
+    raise SystemExit("dashboard analytics chart did not render")
+
+query_log = TEMPLATES.get_template("query_log.html").render(
+    request={},
+    admin="smoke",
+    setup_required=False,
+    csrf="smoke",
+    log={
+        "rows": [],
+        "total": 0,
+        "page": 1,
+        "limit": 50,
+        "filters": {"search": "", "client": "", "domain": "", "qtype": "", "protocol": "", "blocked": "", "rcode": ""},
+    },
+)
+if "No query events match" not in query_log or "Auto-refresh" not in query_log:
+    raise SystemExit("query log empty state did not render")
 PY
 
 echo "web smoke tests passed"

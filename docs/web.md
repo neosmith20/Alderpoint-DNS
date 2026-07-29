@@ -24,6 +24,15 @@ commands through sudo:
 /opt/bindguard/app/bindguard_compiler.py update-sources
 ```
 
+The dashboard shows stored DNS query totals, blocked totals, block percentage,
+average processing time, active clients, active block rules, a local canvas
+time-series chart, top lists, and recent activity. Empty states are displayed
+until the analytics collector has gathered data.
+
+The Query Log page supports search, pagination, auto-refresh, client/domain
+filters, query type, protocol, allowed/blocked status, response code, and direct
+creation of allow/block rules with confirmation and normal staged deployment.
+
 Blocklist management supports add, inline edit, enable/disable, delete,
 single-source update, update-all, and compile/deploy. Single-source updates are
 unprivileged because they only write BindGuard's database and download cache;
@@ -33,7 +42,9 @@ Useful commands:
 
 ```sh
 systemctl status bindguard --no-pager
+systemctl status bindguard-analytics --no-pager
 systemctl restart bindguard
+systemctl restart bindguard-analytics
 /opt/bindguard/tests/test_web_smoke.sh
 ```
 

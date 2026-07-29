@@ -14,6 +14,19 @@ The Python web application and deployment controller run as a dedicated
 unprivileged account. A narrow root-owned helper performs only enumerated
 validation, atomic deployment, reload, health-test, and rollback operations.
 
+BindGuard analytics are native to the appliance. dnsdist emits delayed
+protobuf response events to `127.0.0.1:5301`, where
+`bindguard-analytics.service` receives them with a bounded queue and writes
+batched rows to the existing SQLite database. The collector also polls the
+loopback-only dnsdist stats API every configured interval for aggregate
+latency, cache, drop, and health counters. DNS continues to answer if the
+collector is stopped; dnsdist queues only a bounded number of telemetry events
+and then drops telemetry rather than blocking query handling.
+
+Blocked-query status is derived by correlating response events with the active
+BindGuard RPZ policy set. Ordinary NXDOMAIN responses are not treated as
+blocked unless the queried name also matches the compiled block policy.
+
 Management HTTP traffic uses the host resolver from `/etc/resolv.conf`, currently
 the explicit maintenance resolvers `1.1.1.2` and `1.0.0.2`. It never uses
 `127.0.0.1`, the appliance address, BIND, or dnsdist.

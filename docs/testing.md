@@ -7,13 +7,20 @@ Run individual suites:
 /opt/bindguard/tests/test_dnsdist_frontend.sh
 /opt/bindguard/tests/test_blocklist_deploy.sh
 /opt/bindguard/tests/test_blocklist_failure_paths.sh
+/opt/bindguard/tests/test_analytics.py
 /opt/bindguard/tests/test_web_smoke.sh
 /opt/bindguard/tests/test_backup_restore.sh
 ```
 
 The web smoke test also renders DNS Settings with long path/version-like
 content and asserts the responsive card/table wrapping rules that prevent
-horizontal overflow.
+horizontal overflow. It also renders the analytics dashboard and query log with
+long domain and IPv6-like values.
+
+The analytics unit suite covers aggregate collection, counter resets, bucketing,
+blocked-query detection, ordinary NXDOMAIN handling, protocol classification,
+retention cleanup, database-size protection, malformed protobuf input, queue
+overflow, privacy modes, and query-log filtering.
 
 Run the combined suite:
 

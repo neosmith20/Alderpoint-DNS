@@ -13,6 +13,14 @@
   environment switch for allow-all mode.
 - BIND listens only on loopback backend ports.
 - AppArmor remains enabled for BIND.
+- The analytics collector runs as the restricted `bindguard` account and
+  listens only on `127.0.0.1:5301`.
+- dnsdist's web/API and control sockets remain loopback-only; analytics never
+  exposes dnsdist credentials or private TLS keys.
+- Detailed query logging can be disabled, client addresses can be anonymized,
+  and aggregate-only mode avoids retaining individual query rows.
+- Telemetry queues are bounded. If the collector is unavailable or overloaded,
+  DNS service continues and telemetry drops are counted separately.
 
 Lab HTTP mode does not mark cookies `Secure`; enable that when admin HTTPS is
 configured.
