@@ -1,0 +1,6 @@
+# BindGuard generated RPZ and statistics/logging paths.
+/var/lib/bindguard/compiled/bind/ r,
+/var/lib/bindguard/compiled/bind/** r,
+/var/log/bindguard/bind/ rw,
+/var/log/bindguard/bind/** rw,
+

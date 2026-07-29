@@ -1,0 +1,14 @@
+// Managed by BindGuard.
+include "/etc/bind/rndc.key";
+controls {
+	inet 127.0.0.1 port 953
+		allow { 127.0.0.1; }
+		keys { "rndc-key"; };
+};
+zone "bindguard.rpz" {
+	type primary;
+	file "/var/lib/bindguard/compiled/bind/bindguard.rpz";
+	allow-query { localhost; };
+	allow-transfer { none; };
+};
+

@@ -1,0 +1,36 @@
+// Managed by BindGuard. Validate with named-checkconf before deployment.
+options {
+	directory "/var/cache/bind";
+	listen-on port 5353 { 127.0.0.1; };
+	listen-on-v6 port 5353 { ::1; };
+	allow-query { localhost; };
+	allow-query-cache { localhost; };
+	allow-recursion { localhost; };
+	recursion yes;
+	forward only;
+	forwarders { 1.1.1.2; 1.0.0.2; 4.2.2.1; 4.2.2.2; };
+	dnssec-validation auto;
+	auth-nxdomain no;
+	minimal-responses yes;
+	empty-zones-enable yes;
+	version "not disclosed";
+	querylog no;
+	response-policy { zone "bindguard.rpz"; } break-dnssec yes;
+	statistics-file "/var/log/bindguard/bind/named.stats";
+	memstatistics-file "/var/log/bindguard/bind/named.memstats";
+};
+statistics-channels {
+	inet 127.0.0.1 port 8053 allow { 127.0.0.1; };
+};
+logging {
+	channel bindguard_default {
+		file "/var/log/bindguard/bind/named.log" versions 5 size 10m;
+		severity info;
+		print-time yes;
+		print-severity yes;
+		print-category yes;
+	};
+	category default { bindguard_default; };
+	category general { bindguard_default; };
+	category security { bindguard_default; };
+};
