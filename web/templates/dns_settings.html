@@ -2,15 +2,28 @@
 {% block content %}
 <h1>DNS Settings</h1>
 <div class="grid">
-  <div class="card"><h3>Allowed Clients</h3><p>{{ allowed_clients }}</p></div>
+  <div class="card">
+    <h3>Allowed Clients</h3>
+    <div class="card-list">
+      {% for client in allowed_clients %}
+        <div>{{ client }}</div>
+      {% endfor %}
+    </div>
+  </div>
   <div class="card"><h3>BIND Backend</h3><p>{{ backend }}</p></div>
   <div class="card"><h3>Maintenance DNS</h3><p>{{ maintenance }}</p></div>
   <div class="card"><h3>Hostname</h3><p>{{ hostname }}</p></div>
-  <div class="card"><h3>DoH Path</h3><p>{{ doh_path }}</p></div>
-  <div class="card"><h3>dnsdist Version</h3><p>{{ dnsdist_version }}</p></div>
+  <div class="card"><h3>DoH Path</h3><p><span class="mono">{{ doh_path }}</span></p></div>
+  <div class="card"><h3>dnsdist Version</h3><p><span class="mono">{{ dnsdist_version }}</span></p></div>
   <div class="card"><h3>Certificate</h3><p>{{ cert.state }}<br><span class="muted">{{ cert.detail }}</span></p></div>
   <div class="card"><h3>PROXYv2 Backend</h3><p>{{ proxy_backend }}</p></div>
-  <div class="card"><h3>Client Address Test</h3><p>{{ client_address_test }}</p></div>
+  <div class="card">
+    <h3>Client Address Test</h3>
+    <p>
+      {{ client_address_test.state }}
+      <span class="muted secondary mono">{{ client_address_test.filename }}</span>
+    </p>
+  </div>
 </div>
 <h2>Protocol Status</h2>
 <table>
@@ -28,5 +41,5 @@
 </table>
 <h2>Build Features</h2>
 <p class="muted">{{ dnsdist_features }}</p>
-<p class="muted">Replace certificate material by staging both `/etc/bindguard/certs/bindguard-lab.crt` and `/etc/bindguard/certs/bindguard-lab.key`, validating the pair, then restarting dnsdist. The bootstrap helper refuses partial replacement.</p>
+<p class="muted">Replace certificate material by staging both <span class="mono">/etc/bindguard/certs/bindguard-lab.crt</span> and <span class="mono">/etc/bindguard/certs/bindguard-lab.key</span>, validating the pair, then restarting dnsdist. The bootstrap helper refuses partial replacement.</p>
 {% endblock %}

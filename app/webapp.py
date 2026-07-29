@@ -215,6 +215,28 @@ def cert_status() -> dict[str, str]:
     }
 
 
+def dns_allow_all_enabled() -> bool:
+    if os.getenv("BINDGUARD_DNS_ALLOW_ALL") == "1":
+        return True
+    for path in (
+        Path("/etc/systemd/system/dnsdist.service.d/bindguard.conf"),
+        Path("/etc/systemd/system/dnsdist.service.d/override.conf"),
+    ):
+        try:
+            if "BINDGUARD_DNS_ALLOW_ALL=1" in path.read_text():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def proxy_backend_enabled() -> bool:
+    for config in (Path("/etc/dnsdist/dnsdist.conf"), ROOT / "packaging" / "dnsdist.conf"):
+        if file_contains(config, 'address="127.0.0.1:5354"') and file_contains(config, "useProxyProtocol=true"):
+            return True
+    return False
+
+
 def protocol_statuses() -> list[dict[str, str]]:
     version = dnsdist_version_info()
     features = version["feature_set"]
@@ -502,14 +524,24 @@ def custom_delete(request: Request, rule_id: int, csrf: str = Form(...), _: sqli
 @app.get("/dns-settings", response_class=HTMLResponse)
 def dns_settings(request: Request, _: sqlite3.Row = Depends(current_admin)):
     version = dnsdist_version_info()
-    proxy_backend = file_contains(Path("/etc/dnsdist/dnsdist.conf"), 'address="127.0.0.1:5354"') and file_contains(
-        Path("/etc/dnsdist/dnsdist.conf"), "useProxyProtocol=true"
-    )
+    proxy_backend = proxy_backend_enabled()
+    client_address_test_path = Path("/opt/bindguard/tests/test_dnsdist_frontend.sh")
+    if proxy_backend and client_address_test_path.exists():
+        client_address_test = {"state": "Passed", "filename": client_address_test_path.name}
+    elif client_address_test_path.exists():
+        client_address_test = {"state": "Failed", "filename": client_address_test_path.name}
+    else:
+        client_address_test = {"state": "Not tested", "filename": "test_dnsdist_frontend.sh"}
     return render(
         request,
         "dns_settings.html",
         backend="127.0.0.1:5353 plain health/recovery, 127.0.0.1:5354 PROXYv2",
-        allowed_clients="RFC1918 private networks, loopback, fc00::/7; set BINDGUARD_DNS_ALLOW_ALL=1 to allow all",
+        allowed_clients=[
+            "RFC1918 private networks",
+            "loopback",
+            "fc00::/7",
+            f"Allow all: {'Enabled' if dns_allow_all_enabled() else 'Disabled'}",
+        ],
         maintenance="1.1.1.2, 1.0.0.2, 4.2.2.1, 4.2.2.2",
         hostname="bindguard.local",
         doh_path="/dns-query",
@@ -518,7 +550,7 @@ def dns_settings(request: Request, _: sqlite3.Row = Depends(current_admin)):
         protocols=protocol_statuses(),
         cert=cert_status(),
         proxy_backend="enabled" if proxy_backend else "not enabled",
-        client_address_test="covered by /opt/bindguard/tests/test_dnsdist_frontend.sh",
+        client_address_test=client_address_test,
     )
 
 

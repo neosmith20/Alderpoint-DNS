@@ -11,6 +11,10 @@ Run individual suites:
 /opt/bindguard/tests/test_backup_restore.sh
 ```
 
+The web smoke test also renders DNS Settings with long path/version-like
+content and asserts the responsive card/table wrapping rules that prevent
+horizontal overflow.
+
 Run the combined suite:
 
 ```sh
