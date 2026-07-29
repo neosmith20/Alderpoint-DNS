@@ -23,10 +23,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 try:
-    from app import backup, dns_cache, encryption, local_dns, replication
+    from app import backup, dns_cache, encryption, local_dns, replication, upstream_dns
 except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from app import backup, dns_cache, encryption, local_dns, replication
+    from app import backup, dns_cache, encryption, local_dns, replication, upstream_dns
 
 
 DB_PATH = Path("/var/lib/bindguard/bindguard.db")
@@ -525,6 +525,7 @@ def deploy(download: bool = True) -> int:
                 reload_bind()
                 local_dns.deploy_zones(conn)
                 dns_cache.deploy_cache_options(conn)
+                upstream_dns.deploy_upstreams(conn)
                 if os.environ.get("BINDGUARD_TEST_FORCE_POSTCHECK_FAIL") == "1":
                     raise RuntimeError("forced post-deploy failure for rollback test")
                 if not resolves("cloudflare.com"):
@@ -801,6 +802,8 @@ def main(argv: list[str] | None = None) -> int:
     cache_dep.set_defaults(func=lambda args: print(dns_cache.deploy_cache_options()))
     cache_flush = sub.add_parser("cache-flush")
     cache_flush.set_defaults(func=lambda args: print(dns_cache.process_pending_flush()))
+    upstream_dep = sub.add_parser("upstream-deploy")
+    upstream_dep.set_defaults(func=lambda args: print(upstream_dns.deploy_upstreams()))
     encryption_dep = sub.add_parser("encryption-deploy")
     encryption_dep.set_defaults(func=lambda args: print(encryption.deploy_encryption()))
     backup_create_parser = sub.add_parser("backup-create")

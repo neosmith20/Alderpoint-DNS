@@ -62,7 +62,10 @@
           </details>
         </nav>
         <div class="account-menu">
-          <span class="status-badge status-badge--{{ protection.tone if protection is defined else 'neutral' }}">{{ protection.label if protection is defined else 'Active' }}</span>
+          {% set service_status = global_status if global_status is defined else {"label": "Unknown", "tone": "unavailable", "detail": "service status unavailable"} %}
+          <span id="globalServiceStatus" class="status-badge status-badge--{{ service_status.tone }}" data-status-url="/status/summary" title="{{ service_status.detail }}">
+            <span data-status-label>{{ service_status.label }}</span>
+          </span>
           <form method="post" action="/logout"><button class="secondary">Logout</button></form>
         </div>
       </header>

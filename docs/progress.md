@@ -345,6 +345,54 @@ that existing cache rather than adding a second one, per `app/dns_cache.py`.
   (schema already exists, not yet enforced) is ever turned on at runtime, or
   one client's filtered/personalized answer could leak to another.
 
+## Verified Upstream Resolvers milestone
+
+The DNS Settings page now manages recursive upstream resolvers without manual
+edits to BIND or dnsdist configuration.
+
+- Current architecture confirmed: dnsdist is the client-facing listener and
+  forwards to BIND; BIND performs recursion, DNSSEC validation, RPZ policy, and
+  Local DNS authoritative answers. Managed upstreams preserve that split by
+  adding a loopback dnsdist upstream pool (`127.0.0.1:5355`) that BIND uses as
+  its forwarder target after validation.
+- `app/upstream_dns.py` stores friendly name, protocol, address/DoH URL
+  fields, port, DoH path, TLS hostname, bootstrap IPs, enabled state, order,
+  and last health/latency. It imports the existing BIND `forwarders` block on
+  first use so opening DNS Settings preserves the active configuration.
+- Supported protocols are plain UDP/TCP DNS, DNS-over-TLS, and
+  DNS-over-HTTPS. DoH hostnames require bootstrap IPs, DoH query strings and
+  fragments are rejected, and deployment messages sanitize URL-shaped values.
+- Deployment renders generated includes for both BIND and dnsdist, validates
+  `dnsdist --check-config` and `named-checkconf`, restarts dnsdist, reloads
+  BIND, performs a real post-deploy lookup through BIND, records resolver
+  health/latency, and restores the prior generated files on failure.
+- The DNS Settings UI supports add, inline edit, enable/disable, reordering,
+  and delete through async forms with success/error feedback, without a manual
+  browser refresh.
+- Live verification on this VM migrated the four existing BIND forwarders
+  (`1.1.1.2`, `1.0.0.2`, `4.2.2.1`, `4.2.2.2`) into managed resolver rows,
+  deployed the dnsdist loopback upstream pool, and confirmed resolution through
+  both BIND (`127.0.0.1:5353`) and dnsdist (`127.0.0.1:53`).
+- Tests: `tests/test_upstream_dns.py` covers standard-DNS changes, DoH
+  validation/rendering, failed connectivity rollback, multiple enabled
+  resolvers, and persistence; `tests/test_web_smoke.sh` covers the UI and
+  route presence.
+
+## Verified navigation and global status milestone
+
+- Primary navigation is grouped into Dashboard, DNS, Security, Operations, and
+  System, preserving all existing primary URLs. Dashboard remains the first
+  direct link; section parents and child pages expose active state.
+- The grouped navigation uses native disclosure controls plus shared CSS/JS for
+  desktop dropdowns, mobile stacked groups, Escape/outside-click closing, and
+  non-hover keyboard/touch access.
+- The upper-right service status is now a global shell component backed by
+  `global_service_status()` and `/status/summary`; it renders accessible text
+  and refreshed state consistently on every authenticated page.
+- `tests/test_web_smoke.sh` inventories every primary nav href, checks active
+  parent/child rendering, confirms protected route visibility, and exercises
+  healthy/degraded/inactive/unknown global-status states.
+
 ## Verified Encryption Settings milestone
 
 `app/encryption.py` adds a full Encryption Settings workflow on top of

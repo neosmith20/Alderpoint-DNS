@@ -50,11 +50,21 @@ The dashboard is organized around DNS-appliance information hierarchy:
   to `/system`.
 
 The Query Log, Blocklists, Filters, Local DNS, DNS Settings, Cache,
-Encryption, Import, Backup, Replication, Statistics, System, login, and setup pages all
-use the same card, table, badge, form, button, empty-state, and confirmation
-styles. Long domains, IPv6 addresses, paths,
-command names, version strings, and URLs use wrapping or deliberate local table
-scrolling so they do not create page-level horizontal overflow.
+Encryption, Import, Backup, Replication, Statistics, System, login, and setup
+pages all use the same card, table, badge, form, button, empty-state, and
+confirmation styles. Authenticated pages share a grouped primary navigation:
+Dashboard remains a direct link, while DNS, Security, Operations, and System
+sections contain the rest of the primary pages. Active pages and parent
+sections are marked with `aria-current`, and native disclosure controls keep
+the navigation usable by keyboard, touch, and mobile layouts. Long domains,
+IPv6 addresses, paths, command names, version strings, and URLs use wrapping
+or deliberate local table scrolling so they do not create page-level
+horizontal overflow.
+
+The upper-right service-status badge is a global shell component. It uses the
+same service-state logic on every authenticated page, exposes accessible text
+(`Active`, `Degraded`, `Inactive`, or `Unknown`) in addition to color, and
+refreshes through `/status/summary` without a page reload.
 
 The Query Log page supports search, pagination, client/domain filters, query
 type, protocol, allowed/blocked status, response code, and direct creation of
@@ -91,6 +101,16 @@ internal domain. BindGuard generates an additional managed authoritative
 forward zone for the parent domain and clears dnsdist packet-cache entries for
 managed local zones after activation, so stale frontend NODATA responses do not
 hide newly added records.
+
+The DNS Settings page includes an Upstream Resolvers section. It displays the
+current managed resolver set and supports add, edit, enable/disable, reorder,
+and delete operations for UDP/TCP DNS, DNS-over-TLS, and DNS-over-HTTPS
+upstreams. Changes save through targeted async forms and the normal privileged
+deployment path. BIND remains the recursive resolver; for managed upstreams it
+forwards to a loopback dnsdist upstream pool that can speak plain DNS, DoT, or
+DoH to the selected resolvers. Deployments validate dnsdist and BIND config,
+restart/reload services, run a functional DNS query, record resolver health
+and latency, and roll back generated files if activation fails.
 
 The Cache page (`/dns-cache`) exposes BIND's existing recursive-cache tuning
 (max size, positive/negative min/max TTL, prefetch, serve-stale), flush

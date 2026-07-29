@@ -75,6 +75,18 @@ by a repeated (cached) query, rather than asserting on noisy wall-clock
 timing. The web smoke test also renders the Cache page with a long flush
 target to guard against horizontal overflow.
 
+The Upstream Resolvers suite (`tests/test_upstream_dns.py`) covers importing
+existing BIND forwarders, changing a standard DNS upstream, DoH URL/bootstrap
+validation (including rejecting query parameters), generated dnsdist DoH/DoT
+backend syntax, multiple enabled resolvers, rollback after a failed functional
+resolution check, and SQLite persistence across a new connection. The web
+smoke test checks the DNS Settings upstream UI, async form hooks, protected
+routes, and the grouped navigation/global status shell. Live deployment on
+this VM migrated the existing four BIND forwarders into managed plain-DNS
+upstream rows, generated the dnsdist loopback upstream listener, and verified
+resolution through both BIND (`127.0.0.1:5353`) and client-facing dnsdist
+(`127.0.0.1:53`).
+
 Run the combined suite:
 
 ```sh

@@ -28,6 +28,27 @@
     });
   }
 
+  const globalStatus = document.getElementById('globalServiceStatus');
+  if (globalStatus && globalStatus.dataset.statusUrl) {
+    const label = globalStatus.querySelector('[data-status-label]');
+    const refreshStatus = async () => {
+      try {
+        const response = await fetch(globalStatus.dataset.statusUrl, { headers: { 'X-Requested-With': 'BindGuardStatus' } });
+        if (!response.ok) return;
+        const data = await response.json();
+        const tone = data.tone || 'unavailable';
+        globalStatus.className = `status-badge status-badge--${tone}`;
+        globalStatus.title = data.detail || data.label || 'service status';
+        if (label) label.textContent = data.label || 'Unknown';
+      } catch (_) {
+        globalStatus.className = 'status-badge status-badge--unavailable';
+        globalStatus.title = 'service status unavailable';
+        if (label) label.textContent = 'Unknown';
+      }
+    };
+    window.setInterval(refreshStatus, 15000);
+  }
+
   const rangeLinks = document.querySelectorAll('[data-range-link]');
   if (rangeLinks.length) {
     const params = new URLSearchParams(window.location.search);

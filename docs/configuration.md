@@ -12,6 +12,12 @@ Current configuration:
 - Local DNS include: `/var/lib/bindguard/compiled/bind/local-zones.conf`
 - Local DNS default domain: `home.arpa`
 - BIND cache tuning include: `/var/lib/bindguard/compiled/bind/cache-options.conf`
+- Managed upstream BIND include:
+  `/var/lib/bindguard/compiled/bind/upstream-forwarders.conf`
+- Managed upstream dnsdist include:
+  `/var/lib/bindguard/compiled/dnsdist/upstream-forwarder.conf`
+- Managed upstream loopback listener: `127.0.0.1:5355` (dnsdist upstream pool
+  used by BIND when Upstream Resolvers are deployed)
 - BIND cache size default: computed from VM memory (an eighth of total RAM,
   bounded to 64-512MB), not BIND's much larger implicit default
 - Analytics collector: `127.0.0.1:5301`
@@ -42,3 +48,10 @@ Local DNS settings are managed from the Local DNS page. Administrators can
 change the internal domain, default TTL, and BindGuard server identity there.
 The setup workflow offers to create `bindguard.home.arpa` and the matching PTR
 record using the detected server IP, which can be edited later.
+
+Upstream DNS resolvers are managed from DNS Settings. On first use, BindGuard
+imports the existing BIND `forwarders` values into `upstream_resolvers`.
+Subsequent deployments render dnsdist upstream backends for enabled plain DNS,
+DoT, and DoH resolvers and point BIND at the local dnsdist upstream listener.
+DoH URLs with query strings or fragments are rejected so credentials or tokens
+are not stored or exposed in diagnostics.

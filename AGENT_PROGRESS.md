@@ -80,3 +80,64 @@ unauthenticated primary pages redirect instead of exposing the admin navigation.
 Validation:
 
 - `/opt/bindguard/tests/test_web_smoke.sh`: passed.
+
+## Upstream Resolvers and Global Status
+
+Inspected current forwarding architecture:
+
+- dnsdist is the client-facing DNS proxy.
+- BIND is the recursive resolver, DNSSEC validator, RPZ policy point, and Local
+  DNS authoritative backend.
+- Before this work, BIND used a static `forwarders` block in
+  `/etc/bind/named.conf.options`.
+
+Implemented managed upstream resolvers:
+
+- Added `app/upstream_dns.py`.
+- Added `upstream_resolvers` and `upstream_deployments` tables.
+- DNS Settings now has an Upstream Resolvers section with add/edit,
+  enable/disable, reorder, delete, health, latency, and deployment result.
+- Supports plain UDP/TCP DNS, DNS-over-TLS, and DNS-over-HTTPS.
+- Existing BIND forwarders are imported on first use.
+- Generated config:
+  - `/var/lib/bindguard/compiled/bind/upstream-forwarders.conf`
+  - `/var/lib/bindguard/compiled/dnsdist/upstream-forwarder.conf`
+- BIND forwards to a managed dnsdist loopback upstream pool at
+  `127.0.0.1:5355`.
+- Deployment validates dnsdist and BIND config, restarts dnsdist, reloads BIND,
+  performs a functional lookup, records health/latency, and rolls back
+  generated files on failure.
+- DoH URLs with query strings/fragments are rejected to avoid storing or
+  logging credentials/tokens.
+
+Implemented global service status:
+
+- Added `global_service_status()` and `/status/summary`.
+- The top-right badge is now rendered by the shared shell on every
+  authenticated page.
+- Shared JS refreshes the badge through `/status/summary` without a full page
+  reload.
+- Smoke tests cover healthy, degraded, inactive, and unknown status logic.
+
+Backlog audit:
+
+- BIND cache-management settings UI: complete (`0ed4bf5`, `/dns-cache`).
+- Configurable Encryption Settings page: complete (`4acb870`, `/encryption`).
+- Import and migration beyond Local DNS CSV: complete (`5d172fc`, `/import`).
+- Native Backup and Restore: complete (`cfea522`, `40721ec`, `/backup`).
+- Replication: complete (`c12a09c`, `/replication`).
+- AdGuard parity documentation: complete and updated (`docs/adguard-parity.md`).
+- Local DNS fixes, Query Log refresh behavior, latency correction, acceptance
+  testing, and reboot validation: represented in current commits and
+  `docs/progress.md`.
+
+Validation during this checkpoint:
+
+- `python3 -B /opt/bindguard/tests/test_upstream_dns.py`: passed.
+- `/opt/bindguard/tests/test_web_smoke.sh`: passed.
+- `/opt/bindguard/app/bindguard_compiler.py deploy --no-download`: passed with
+  deployment id `198`.
+- Live DNS after deploy:
+  - `dig @127.0.0.1 -p 5353 cloudflare.com A +short`: returned A records.
+  - `dig @127.0.0.1 -p 53 cloudflare.com A +short`: returned A records.
+- Live upstream DB state: four imported plain resolvers are enabled and healthy.

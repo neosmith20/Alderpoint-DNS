@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
-from app import analytics, backup, dns_cache, encryption, importer, local_dns, replication
+from app import analytics, backup, dns_cache, encryption, importer, local_dns, replication, upstream_dns
 from app.bindguard_compiler import DB_PATH, add_source, init_db, normalize_domain
 
 
@@ -180,6 +180,25 @@ def protection_state(active_rules: int, bind_state: str, dnsdist_state: str, col
     return {"label": "Active", "tone": "healthy"}
 
 
+def global_service_status() -> dict[str, str]:
+    try:
+        bindguard_state = service_state("bindguard")
+        bind_state = service_state("named")
+        dnsdist_state = service_state("dnsdist")
+        collector_state = service_state("bindguard-analytics")
+    except Exception:
+        return {"label": "Unknown", "tone": "unavailable", "detail": "service status unavailable"}
+    core = {"BindGuard": bindguard_state, "BIND": bind_state, "dnsdist": dnsdist_state}
+    if all(state == "active" for state in core.values()) and collector_state == "active":
+        return {"label": "Active", "tone": "healthy", "detail": "all core services active"}
+    if any(state in {"failed", "inactive"} for state in core.values()):
+        down = ", ".join(name for name, state in core.items() if state != "active")
+        return {"label": "Inactive", "tone": "down", "detail": f"core service down: {down}"}
+    if collector_state != "active":
+        return {"label": "Degraded", "tone": "degraded", "detail": "analytics collector is not active"}
+    return {"label": "Degraded", "tone": "degraded", "detail": "one or more services are not fully healthy"}
+
+
 def analytics_category_breakdown(range_key: str) -> list[dict[str, Any]]:
     analytics.init_analytics_db()
     since = analytics.utc_now() - analytics.range_seconds(range_key)
@@ -228,6 +247,12 @@ def compiler_status() -> dict[str, Any]:
 
 def deploy_no_download() -> tuple[int, str]:
     return run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "deploy", "--no-download"])
+
+
+def deploy_no_download_or_raise() -> None:
+    code, out = deploy_no_download()
+    if code != 0:
+        raise RuntimeError(out.strip() or "deployment failed")
 
 
 def cache_flush_apply() -> tuple[int, str]:
@@ -391,9 +416,15 @@ def render(request: Request, template: str, status_code: int = 200, **context: A
             "admin": session.get("admin"),
             "csrf": session.get("csrf") or csrf_token(request),
             "setup_required": admin_count() == 0,
+            "global_status": global_service_status() if session.get("admin") else {"label": "Unknown", "tone": "unavailable", "detail": "not authenticated"},
         }
     )
     return TEMPLATES.TemplateResponse(template, context, status_code=status_code)
+
+
+@app.get("/status/summary")
+def status_summary(_: sqlite3.Row = Depends(current_admin)):
+    return JSONResponse(global_service_status())
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1173,7 +1204,98 @@ def dns_settings(request: Request, _: sqlite3.Row = Depends(current_admin)):
         cert=cert_status(),
         proxy_backend="enabled" if proxy_backend else "not enabled",
         client_address_test=client_address_test,
+        upstream_resolvers=upstream_dns.resolvers(),
+        upstream_deployment=upstream_dns.last_deployment(),
+        upstream_error=None,
     )
+
+
+def dns_settings_error(request: Request, message: str, status_code: int = 400) -> HTMLResponse:
+    response = dns_settings(request, current_admin(request))
+    response.status_code = status_code
+    body = response.body.decode()
+    body = body.replace('<section class="grid">', f'<div class="alert error">{message}</div>\n<section class="grid">', 1)
+    return HTMLResponse(body, status_code=status_code)
+
+
+@app.post("/dns-settings/upstreams/add")
+def upstream_add(
+    request: Request,
+    csrf: str = Form(...),
+    name: str = Form(...),
+    protocol: str = Form(...),
+    address: str = Form(...),
+    port: str = Form(""),
+    doh_path: str = Form(""),
+    tls_hostname: str = Form(""),
+    bootstrap_ips: str = Form(""),
+    enabled: str = Form("0"),
+    _: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    try:
+        upstream_dns.add_resolver({"name": name, "protocol": protocol, "address": address, "port": port, "doh_path": doh_path, "tls_hostname": tls_hostname, "bootstrap_ips": bootstrap_ips, "enabled": enabled})
+        deploy_no_download_or_raise()
+    except Exception as exc:
+        return dns_settings_error(request, str(exc))
+    return redirect("/dns-settings")
+
+
+@app.post("/dns-settings/upstreams/{resolver_id}/edit")
+def upstream_edit(
+    request: Request,
+    resolver_id: int,
+    csrf: str = Form(...),
+    name: str = Form(...),
+    protocol: str = Form(...),
+    address: str = Form(...),
+    port: str = Form(""),
+    doh_path: str = Form(""),
+    tls_hostname: str = Form(""),
+    bootstrap_ips: str = Form(""),
+    enabled: str = Form("0"),
+    _: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    try:
+        upstream_dns.update_resolver(resolver_id, {"name": name, "protocol": protocol, "address": address, "port": port, "doh_path": doh_path, "tls_hostname": tls_hostname, "bootstrap_ips": bootstrap_ips, "enabled": enabled})
+        deploy_no_download_or_raise()
+    except Exception as exc:
+        return dns_settings_error(request, str(exc))
+    return redirect("/dns-settings")
+
+
+@app.post("/dns-settings/upstreams/{resolver_id}/toggle")
+def upstream_toggle(request: Request, resolver_id: int, csrf: str = Form(...), enabled: str = Form("0"), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    try:
+        upstream_dns.set_enabled(resolver_id, enabled == "1")
+        deploy_no_download_or_raise()
+    except Exception as exc:
+        return dns_settings_error(request, str(exc))
+    return redirect("/dns-settings")
+
+
+@app.post("/dns-settings/upstreams/{resolver_id}/move")
+def upstream_move(request: Request, resolver_id: int, csrf: str = Form(...), direction: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    try:
+        upstream_dns.move_resolver(resolver_id, direction)
+        deploy_no_download_or_raise()
+    except Exception as exc:
+        return dns_settings_error(request, str(exc))
+    return redirect("/dns-settings")
+
+
+@app.post("/dns-settings/upstreams/{resolver_id}/delete")
+def upstream_delete(request: Request, resolver_id: int, csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    try:
+        upstream_dns.delete_resolver(resolver_id)
+        deploy_no_download_or_raise()
+    except Exception as exc:
+        return dns_settings_error(request, str(exc))
+    return redirect("/dns-settings")
 
 
 def import_error(request: Request, message: str, status_code: int = 400) -> HTMLResponse:

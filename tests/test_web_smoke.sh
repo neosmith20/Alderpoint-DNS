@@ -12,7 +12,7 @@ ss -ltnup | grep -Eq '(^|[[:space:]])(0[.]0[.]0[.]0|\*):3000' || fail "bindguard
 setup_response="$(curl --silent --show-error --include --max-time 5 http://127.0.0.1:3000/setup)"
 printf '%s' "$setup_response" | grep -Eq 'Initial administrator setup|303 See Other' || fail "setup page missing or setup redirect invalid"
 curl --silent --show-error --include --max-time 5 http://127.0.0.1:3000/ | grep -q '303 See Other' || fail "unauthenticated dashboard did not redirect"
-for protected_path in /query-log /custom-rules /blocklists /local-dns /dns-settings /dns-cache /encryption /import /backup /replication /statistics-settings /system
+for protected_path in /query-log /custom-rules /blocklists /local-dns /dns-settings /dns-cache /encryption /import /backup /replication /statistics-settings /system /status/summary
 do
   curl --silent --show-error --include --max-time 5 "http://127.0.0.1:3000${protected_path}" | grep -q '303 See Other' || fail "unauthenticated ${protected_path} did not redirect"
 done
@@ -21,6 +21,7 @@ python3 -B - <<'PY' || fail "web interface layout and analytics checks failed"
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, "/opt/bindguard")
 from app import importer, webapp  # noqa: E402
@@ -68,6 +69,9 @@ if "queryChart" not in template or 'data-chart="traffic"' not in template:
 if "analytics/chart-data" not in Path("/opt/bindguard/app/webapp.py").read_text():
     raise SystemExit("chart data endpoint is missing")
 webapp_text = Path("/opt/bindguard/app/webapp.py").read_text()
+for status_hook in ("globalServiceStatus", "BindGuardStatus", "data-status-label", "/status/summary"):
+    if status_hook not in template + js + webapp_text:
+        raise SystemExit(f"global service status hook missing: {status_hook}")
 for route in ("/local-dns", "local_dns_add_host", "local_dns_add_alias", "local_dns_import_preview"):
     if route not in webapp_text:
         raise SystemExit(f"local DNS route missing: {route}")
@@ -78,6 +82,9 @@ for route in ("/dns-cache", "dns_cache_settings_post", "/dns-cache/flush", "/dns
         raise SystemExit(f"cache route missing: {route}")
 if 'href="/dns-cache"' not in template:
     raise SystemExit("cache nav link is missing")
+for route in ("/dns-settings/upstreams/add", "/dns-settings/upstreams/{resolver_id}/edit", "/dns-settings/upstreams/{resolver_id}/toggle", "/dns-settings/upstreams/{resolver_id}/move", "/dns-settings/upstreams/{resolver_id}/delete"):
+    if route not in webapp_text:
+        raise SystemExit(f"upstream resolver route missing: {route}")
 for route in ("/encryption", "encryption_settings_post", "/encryption/certificate/self-signed", "/encryption/certificate/local-ca", "/encryption/certificate/upload", "/encryption/certificate/existing-path", "/encryption/certificate/download", "/encryption/apple/"):
     if route not in webapp_text:
         raise SystemExit(f"encryption route missing: {route}")
@@ -133,9 +140,14 @@ base = {
     "setup_required": False,
     "csrf": "smoke",
     "protection": {"label": "Active", "tone": "healthy"},
+    "global_status": {"label": "Active", "tone": "healthy", "detail": "all core services active"},
 }
 def page_base(path):
     return {**base, "request": SimpleNamespace(url=SimpleNamespace(path=path), query_params={})}
+
+long_domain = "extremely-long-subdomain-name-that-must-wrap-without-horizontal-overflow.example.invalid"
+long_client = "2001:db8:ffff:ffff:ffff:ffff:ffff:ffff"
+long_upstream = "https://resolver.example.invalid/dns-query?very-long-upstream-url-for-layout-testing=1"
 
 context = {
     **base,
@@ -155,6 +167,9 @@ context = {
     "cert": {"state": "present", "detail": "/etc/bindguard/certs/bindguard-lab.crt"},
     "proxy_backend": "enabled",
     "client_address_test": {"state": "Passed", "filename": "test_dnsdist_frontend.sh"},
+    "upstream_resolvers": [{"id": 1, "name": "Cloudflare DoH", "protocol": "doh", "address": long_domain, "port": 443, "doh_path": "/dns-query", "tls_hostname": long_domain, "bootstrap_ips": "1.1.1.1, 1.0.0.1", "enabled": 1, "last_status": "healthy", "last_latency_ms": 4.2, "last_message": "resolved through active upstream set"}],
+    "upstream_deployment": {"status": "deployed", "message": "deployed 1 enabled upstream resolver(s)"},
+    "upstream_error": None,
 }
 html = TEMPLATES.get_template("dns_settings.html").render(**context)
 for expected in (
@@ -164,6 +179,14 @@ for expected in (
     "Allow all: Disabled",
     "Passed",
     "test_dnsdist_frontend.sh",
+    "Upstream Resolvers",
+    "Cloudflare DoH",
+    "DNS-over-HTTPS",
+    "1.1.1.1, 1.0.0.1",
+    "Add Upstream Resolver",
+    'action="/dns-settings/upstreams/1/edit"',
+    'action="/dns-settings/upstreams/add"',
+    "data-async-form",
 ):
     if expected not in html:
         raise SystemExit(f"missing rendered content: {expected}")
@@ -172,9 +195,6 @@ if "/opt/bindguard/tests/test_dnsdist_frontend.sh" in html:
 if 'class="mono">/dns-query<' not in html or 'class="mono">dnsdist 2.0.0-alpha' not in html:
     raise SystemExit("monospace styling missing from path/version values")
 
-long_domain = "extremely-long-subdomain-name-that-must-wrap-without-horizontal-overflow.example.invalid"
-long_client = "2001:db8:ffff:ffff:ffff:ffff:ffff:ffff"
-long_upstream = "https://resolver.example.invalid/dns-query?very-long-upstream-url-for-layout-testing=1"
 dashboard = TEMPLATES.get_template("dashboard.html").render(
     **base,
     bindguard="active",
@@ -212,6 +232,8 @@ for expected in ("Protection Active", "Disable protection", "Top Upstream Resolv
         raise SystemExit(f"dashboard missing {expected}")
 for expected in (
     'class="nav-link nav-link--primary" href="/" aria-current="page"',
+    'id="globalServiceStatus"',
+    'data-status-url="/status/summary"',
     'data-nav-section="dns"',
     'data-nav-section="security"',
     'data-nav-section="operations"',
@@ -444,8 +466,25 @@ for name, rendered in {
     "import_adguard": import_adguard_html,
     "backup": backup_html,
 }.items():
-    if "app-topbar" not in rendered or "status-badge" not in rendered:
+    if "app-topbar" not in rendered or "globalServiceStatus" not in rendered or "data-status-label" not in rendered:
         raise SystemExit(f"{name} did not use the shared shell")
+
+with mock.patch.object(webapp, "service_state", side_effect=lambda name: "active"):
+    healthy = webapp.global_service_status()
+if healthy["label"] != "Active" or healthy["tone"] != "healthy":
+    raise SystemExit("global status healthy state is wrong")
+with mock.patch.object(webapp, "service_state", side_effect=lambda name: "inactive" if name == "named" else "active"):
+    inactive = webapp.global_service_status()
+if inactive["label"] != "Inactive" or inactive["tone"] != "down":
+    raise SystemExit("global status inactive state is wrong")
+with mock.patch.object(webapp, "service_state", side_effect=lambda name: "inactive" if name == "bindguard-analytics" else "active"):
+    degraded = webapp.global_service_status()
+if degraded["label"] != "Degraded" or degraded["tone"] != "degraded":
+    raise SystemExit("global status degraded state is wrong")
+with mock.patch.object(webapp, "service_state", side_effect=RuntimeError("boom")):
+    unknown = webapp.global_service_status()
+if unknown["label"] != "Unknown" or unknown["tone"] != "unavailable":
+    raise SystemExit("global status unknown state is wrong")
 
 response = webapp.analytics_chart_data(SimpleNamespace(query_params={"range": "24h"}), None)
 if response.status_code != 200 or b'"series"' not in response.body:

@@ -41,6 +41,15 @@ BIND cache tables:
   cache, one name, or one subtree), applied by the privileged
   `cache-flush` compiler command.
 
+Upstream resolver tables:
+
+- `upstream_resolvers`: friendly name, protocol (`plain`/`dot`/`doh`),
+  resolver address or DoH host, port, DoH path, TLS hostname, bootstrap IPs,
+  enabled state, ordering, and last health/latency result.
+- `upstream_deployments`: staged/validated/health-checked/rolled-back
+  deployment history for the generated BIND forwarder include and dnsdist
+  upstream-forwarder include.
+
 Encryption tables:
 
 - `encryption_settings`: key/value protocol toggles/ports, hostname,
