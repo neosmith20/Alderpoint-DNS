@@ -28,22 +28,50 @@
     });
   }
 
-  const globalStatus = document.getElementById('globalServiceStatus');
-  if (globalStatus && globalStatus.dataset.statusUrl) {
-    const label = globalStatus.querySelector('[data-status-label]');
+  document.querySelectorAll('[data-nav-section-toggle]').forEach((button) => {
+    const panel = document.getElementById(button.getAttribute('aria-controls') || '');
+    if (!panel) return;
+    const section = button.closest('[data-nav-section]');
+    const setSectionOpen = (open) => {
+      button.setAttribute('aria-expanded', String(open));
+      panel.hidden = !open;
+      if (section) section.classList.toggle('is-expanded', open);
+    };
+    setSectionOpen(button.getAttribute('aria-expanded') === 'true');
+    button.addEventListener('click', () => {
+      const isActive = button.getAttribute('aria-current') === 'true';
+      const nextOpen = !(button.getAttribute('aria-expanded') === 'true');
+      if (isActive && !nextOpen) {
+        setSectionOpen(true);
+        return;
+      }
+      setSectionOpen(nextOpen);
+    });
+  });
+
+  const globalStatuses = document.querySelectorAll('.js-global-service-status[data-status-url]');
+  if (globalStatuses.length) {
     const refreshStatus = async () => {
       try {
-        const response = await fetch(globalStatus.dataset.statusUrl, { headers: { 'X-Requested-With': 'BindGuardStatus' } });
+        const response = await fetch(globalStatuses[0].dataset.statusUrl, { headers: { 'X-Requested-With': 'BindGuardStatus' } });
         if (!response.ok) return;
         const data = await response.json();
         const tone = data.tone || 'unavailable';
-        globalStatus.className = `status-badge status-badge--${tone}`;
-        globalStatus.title = data.detail || data.label || 'service status';
-        if (label) label.textContent = data.label || 'Unknown';
+        globalStatuses.forEach((globalStatus) => {
+          const label = globalStatus.querySelector('[data-status-label]');
+          const extraClasses = Array.from(globalStatus.classList).filter((name) => !name.startsWith('status-badge--') && name !== 'status-badge');
+          globalStatus.className = ['status-badge', `status-badge--${tone}`, ...extraClasses].join(' ');
+          globalStatus.title = data.detail || data.label || 'service status';
+          if (label) label.textContent = data.label || 'Unknown';
+        });
       } catch (_) {
-        globalStatus.className = 'status-badge status-badge--unavailable';
-        globalStatus.title = 'service status unavailable';
-        if (label) label.textContent = 'Unknown';
+        globalStatuses.forEach((globalStatus) => {
+          const label = globalStatus.querySelector('[data-status-label]');
+          const extraClasses = Array.from(globalStatus.classList).filter((name) => !name.startsWith('status-badge--') && name !== 'status-badge');
+          globalStatus.className = ['status-badge', 'status-badge--unavailable', ...extraClasses].join(' ');
+          globalStatus.title = 'service status unavailable';
+          if (label) label.textContent = 'Unknown';
+        });
       }
     };
     window.setInterval(refreshStatus, 15000);

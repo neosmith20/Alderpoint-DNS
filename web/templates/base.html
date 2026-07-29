@@ -14,6 +14,9 @@
     {% set security_active = path in ["/custom-rules", "/blocklists"] or path.startswith("/encryption") %}
     {% set operations_active = path.startswith("/import") or path.startswith("/backup") or path == "/replication" %}
     {% set system_active = path.startswith("/statistics-settings") or path == "/system" %}
+    {% macro nav_chevron() -%}
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.7 5.3 15.4 12l-6.7 6.7 1.9 1.8 8.5-8.5-8.5-8.5-1.9 1.8Z"/></svg>
+    {%- endmacro %}
     {% macro nav_icon(name) -%}
       {% if name == "dashboard" %}
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h6V4H4v9Zm10 7h6V4h-6v16ZM4 20h6v-3H4v3Z"/></svg>
@@ -27,6 +30,19 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v10H4V5Zm2 2v6h12V7H6Zm2 10h8v2H8v-2Z"/></svg>
       {% endif %}
     {%- endmacro %}
+    {% macro nav_section(id, label, active, icon_name) -%}
+      <section class="nav-section{% if active %} is-active{% endif %}" data-nav-section="{{ id }}">
+        <button class="nav-section__button" type="button" data-nav-section-toggle aria-controls="nav-panel-{{ id }}" aria-expanded="{{ 'true' if active else 'false' }}" {% if active %}aria-current="true"{% endif %}>
+          <span class="nav-icon">{{ nav_icon(icon_name) }}</span>
+          <span class="nav-section__label">{{ label }}</span>
+          <span class="nav-section__chevron">{{ nav_chevron() }}</span>
+        </button>
+        <div class="nav-section__panel" id="nav-panel-{{ id }}" {% if not active %}hidden{% endif %}>
+          {{ caller() }}
+        </div>
+      </section>
+    {%- endmacro %}
+    {% set service_status = global_status if global_status is defined else {"label": "Unknown", "tone": "unavailable", "detail": "service status unavailable"} %}
     <div class="app-shell">
       <div class="mobile-nav-backdrop" data-nav-dismiss hidden></div>
       <header class="app-mobilebar" id="appTopbar">
@@ -39,6 +55,9 @@
           </span>
           <span>BindGuard</span>
         </a>
+        <span class="status-badge status-badge--{{ service_status.tone }} app-mobilebar__status js-global-service-status" data-status-url="/status/summary" title="{{ service_status.detail }}">
+          <span data-status-label>{{ service_status.label }}</span>
+        </span>
         <button class="mobile-nav-toggle secondary" type="button" data-nav-toggle aria-controls="appNav" aria-expanded="false">
           <span class="mobile-nav-toggle__icon" aria-hidden="true"></span>
           <span>Menu</span>
@@ -56,59 +75,34 @@
             <span>BindGuard</span>
           </a>
         </div>
-        <nav class="app-nav" aria-label="Primary navigation">
-          <a class="nav-link nav-link--primary" href="/" {% if path == "/" %}aria-current="page"{% endif %}>
+        <nav class="app-nav" aria-label="Primary navigation" data-primary-nav>
+          <a class="nav-link nav-link--primary{% if path == '/' %} is-active{% endif %}" href="/" {% if path == "/" %}aria-current="page"{% endif %}>
             <span class="nav-icon">{{ nav_icon("dashboard") }}</span>
-            <span>Dashboard</span>
+            <span class="nav-link__label">Dashboard</span>
           </a>
-          <details class="nav-group" data-nav-section="dns" {{ "open" if dns_active else "" }}>
-            <summary class="nav-group__summary" {% if dns_active %}aria-current="true"{% endif %}>
-              <span class="nav-icon">{{ nav_icon("dns") }}</span>
-              <span>DNS</span>
-            </summary>
-            <div class="nav-group__menu">
-              <a href="/query-log" {% if path == "/query-log" %}aria-current="page"{% endif %}>Query Log</a>
-              <a href="/local-dns" {% if path == "/local-dns" %}aria-current="page"{% endif %}>Local DNS</a>
-              <a href="/dns-settings" {% if path == "/dns-settings" %}aria-current="page"{% endif %}>DNS Settings</a>
-              <a href="/dns-cache" {% if path == "/dns-cache" %}aria-current="page"{% endif %}>Cache</a>
-            </div>
-          </details>
-          <details class="nav-group" data-nav-section="security" {{ "open" if security_active else "" }}>
-            <summary class="nav-group__summary" {% if security_active %}aria-current="true"{% endif %}>
-              <span class="nav-icon">{{ nav_icon("security") }}</span>
-              <span>Security</span>
-            </summary>
-            <div class="nav-group__menu">
-              <a href="/custom-rules" {% if path == "/custom-rules" %}aria-current="page"{% endif %}>Filters</a>
-              <a href="/blocklists" {% if path == "/blocklists" %}aria-current="page"{% endif %}>Blocklists</a>
-              <a href="/encryption" {% if path.startswith("/encryption") %}aria-current="page"{% endif %}>Encryption</a>
-            </div>
-          </details>
-          <details class="nav-group" data-nav-section="operations" {{ "open" if operations_active else "" }}>
-            <summary class="nav-group__summary" {% if operations_active %}aria-current="true"{% endif %}>
-              <span class="nav-icon">{{ nav_icon("operations") }}</span>
-              <span>Operations</span>
-            </summary>
-            <div class="nav-group__menu">
-              <a href="/import" {% if path.startswith("/import") %}aria-current="page"{% endif %}>Import</a>
-              <a href="/backup" {% if path.startswith("/backup") %}aria-current="page"{% endif %}>Backup</a>
-              <a href="/replication" {% if path == "/replication" %}aria-current="page"{% endif %}>Replication</a>
-            </div>
-          </details>
-          <details class="nav-group" data-nav-section="system" {{ "open" if system_active else "" }}>
-            <summary class="nav-group__summary" {% if system_active %}aria-current="true"{% endif %}>
-              <span class="nav-icon">{{ nav_icon("system") }}</span>
-              <span>System</span>
-            </summary>
-            <div class="nav-group__menu">
-              <a href="/statistics-settings" {% if path.startswith("/statistics-settings") %}aria-current="page"{% endif %}>Statistics</a>
-              <a href="/system" {% if path == "/system" %}aria-current="page"{% endif %}>System Status</a>
-            </div>
-          </details>
+          {% call nav_section("dns", "DNS", dns_active, "dns") %}
+            <a class="nav-subitem{% if path == '/query-log' %} is-active{% endif %}" href="/query-log" {% if path == "/query-log" %}aria-current="page"{% endif %}>Query Log</a>
+            <a class="nav-subitem{% if path == '/local-dns' %} is-active{% endif %}" href="/local-dns" {% if path == "/local-dns" %}aria-current="page"{% endif %}>Local DNS</a>
+            <a class="nav-subitem{% if path == '/dns-settings' %} is-active{% endif %}" href="/dns-settings" {% if path == "/dns-settings" %}aria-current="page"{% endif %}>DNS Settings</a>
+            <a class="nav-subitem{% if path == '/dns-cache' %} is-active{% endif %}" href="/dns-cache" {% if path == "/dns-cache" %}aria-current="page"{% endif %}>Cache</a>
+          {% endcall %}
+          {% call nav_section("security", "Security", security_active, "security") %}
+            <a class="nav-subitem{% if path == '/custom-rules' %} is-active{% endif %}" href="/custom-rules" {% if path == "/custom-rules" %}aria-current="page"{% endif %}>Filters</a>
+            <a class="nav-subitem{% if path == '/blocklists' %} is-active{% endif %}" href="/blocklists" {% if path == "/blocklists" %}aria-current="page"{% endif %}>Blocklists</a>
+            <a class="nav-subitem{% if path.startswith('/encryption') %} is-active{% endif %}" href="/encryption" {% if path.startswith("/encryption") %}aria-current="page"{% endif %}>Encryption</a>
+          {% endcall %}
+          {% call nav_section("operations", "Operations", operations_active, "operations") %}
+            <a class="nav-subitem{% if path.startswith('/import') %} is-active{% endif %}" href="/import" {% if path.startswith("/import") %}aria-current="page"{% endif %}>Import</a>
+            <a class="nav-subitem{% if path.startswith('/backup') %} is-active{% endif %}" href="/backup" {% if path.startswith("/backup") %}aria-current="page"{% endif %}>Backup</a>
+            <a class="nav-subitem{% if path == '/replication' %} is-active{% endif %}" href="/replication" {% if path == "/replication" %}aria-current="page"{% endif %}>Replication</a>
+          {% endcall %}
+          {% call nav_section("system", "System", system_active, "system") %}
+            <a class="nav-subitem{% if path.startswith('/statistics-settings') %} is-active{% endif %}" href="/statistics-settings" {% if path.startswith("/statistics-settings") %}aria-current="page"{% endif %}>Statistics</a>
+            <a class="nav-subitem{% if path == '/system' %} is-active{% endif %}" href="/system" {% if path == "/system" %}aria-current="page"{% endif %}>System Status</a>
+          {% endcall %}
         </nav>
         <div class="account-menu">
-          {% set service_status = global_status if global_status is defined else {"label": "Unknown", "tone": "unavailable", "detail": "service status unavailable"} %}
-          <span id="globalServiceStatus" class="status-badge status-badge--{{ service_status.tone }}" data-status-url="/status/summary" title="{{ service_status.detail }}">
+          <span id="globalServiceStatus" class="status-badge status-badge--{{ service_status.tone }} js-global-service-status" data-status-url="/status/summary" title="{{ service_status.detail }}">
             <span data-status-label>{{ service_status.label }}</span>
           </span>
           <form method="post" action="/logout"><button class="secondary">Logout</button></form>

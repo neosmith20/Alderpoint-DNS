@@ -4,6 +4,8 @@
   --bg-soft: #0b1828;
   --panel: #101f32;
   --panel-elevated: #15283e;
+  --sidebar: #08101c;
+  --sidebar-raised: #0d1928;
   --border: #26384e;
   --border-strong: #36516d;
   --text: #ecf4fb;
@@ -48,23 +50,26 @@ a:hover { text-decoration: underline; }
 .app-shell {
   min-height: 100vh;
   display: grid;
-  grid-template-columns: 276px minmax(0, 1fr);
+  grid-template-columns: 292px minmax(0, 1fr);
+  isolation: isolate;
 }
 
-.app-mobilebar { display: none; }
+.app-mobilebar,
+.app-mobilebar__status { display: none; }
 
 .app-sidebar {
-  position: sticky;
+  position: fixed;
   top: 0;
+  left: 0;
   z-index: 20;
   display: flex;
   flex-direction: column;
-  width: 276px;
+  width: 292px;
   height: 100vh;
   min-height: 0;
   border-right: 1px solid var(--border);
-  background: #081322;
-  box-shadow: 12px 0 32px rgba(0, 0, 0, 0.16);
+  background: var(--sidebar);
+  box-shadow: 16px 0 38px rgba(0, 0, 0, 0.18);
   overflow: hidden;
 }
 
@@ -100,17 +105,16 @@ a:hover { text-decoration: underline; }
 .app-nav {
   display: grid;
   align-content: start;
-  gap: 6px;
+  gap: 7px;
   min-width: 0;
   flex: 1 1 auto;
-  padding: 8px 12px 14px;
+  padding: 6px 14px 16px;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
 
 .app-nav a,
-.nav-group__summary,
-.app-nav button,
+.nav-section__button,
 .button,
 button {
   min-height: 40px;
@@ -133,14 +137,19 @@ button {
 }
 
 .nav-link,
-.nav-group__summary {
+.nav-section__button {
   gap: 10px;
   font-weight: 650;
 }
 
 .nav-link--primary {
-  margin-bottom: 6px;
+  min-height: 44px;
+  margin-bottom: 8px;
   font-weight: 760;
+}
+
+.nav-link.is-active {
+  box-shadow: inset 3px 0 0 var(--accent);
 }
 
 .nav-icon {
@@ -159,81 +168,110 @@ button {
   fill: currentColor;
 }
 
-.nav-group {
+.nav-link__label,
+.nav-section__label {
   min-width: 0;
-  border-radius: var(--radius-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.nav-group[open] {
-  background: rgba(255, 255, 255, 0.035);
+.nav-section {
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  overflow: hidden;
 }
 
-.nav-group__summary {
+.nav-section.is-active {
+  border-color: rgba(32, 214, 181, 0.22);
+  background: rgba(32, 214, 181, 0.045);
+}
+
+.nav-section__button {
   display: flex;
   align-items: center;
   width: 100%;
+  min-height: 44px;
   color: var(--muted);
-  list-style: none;
   user-select: none;
+  text-align: left;
 }
 
-.nav-group__summary::-webkit-details-marker { display: none; }
-
-.nav-group__summary::after {
-  content: "";
-  width: 7px;
-  height: 7px;
+.nav-section__chevron {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
   margin-left: auto;
-  border-right: 1.8px solid currentColor;
-  border-bottom: 1.8px solid currentColor;
-  transform: translateY(-2px) rotate(45deg);
-  transition: transform 0.14s ease;
+  color: var(--faint);
+  transform: rotate(0deg);
+  transition: transform 0.16s ease, color 0.16s ease;
+  flex: 0 0 18px;
 }
 
-.nav-group[open] .nav-group__summary::after {
-  transform: translateY(2px) rotate(225deg);
+.nav-section__chevron svg {
+  display: block;
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
 }
 
-.nav-group__menu {
+.nav-section__button[aria-expanded="true"] .nav-section__chevron {
+  transform: rotate(90deg);
+  color: var(--accent);
+}
+
+.nav-section__panel {
   display: grid;
-  gap: 3px;
+  gap: 4px;
   min-width: 0;
-  padding: 2px 6px 8px 42px;
+  padding: 1px 8px 9px 42px;
 }
 
-.nav-group__menu a {
+.nav-section__panel[hidden] {
+  display: none;
+}
+
+.nav-subitem {
   width: 100%;
   min-width: 0;
-  min-height: 36px;
-  padding: 7px 10px;
+  min-height: 38px;
+  padding: 8px 11px;
   font-size: 0.93rem;
   font-weight: 600;
+  border-radius: 8px;
 }
 
 .app-nav a:hover,
 .app-nav a[aria-current="page"],
-.nav-group__summary:hover,
-.nav-group__summary[aria-current="true"] {
+.nav-section__button:hover,
+.nav-section__button[aria-current="true"] {
   color: var(--text);
-  background: rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.075);
   text-decoration: none;
 }
 
 .app-nav a:hover .nav-icon,
 .app-nav a[aria-current="page"] .nav-icon,
-.nav-group__summary:hover .nav-icon,
-.nav-group__summary[aria-current="true"] .nav-icon {
+.nav-section__button:hover .nav-icon,
+.nav-section__button[aria-current="true"] .nav-icon {
   color: var(--accent);
 }
 
 .app-nav a[aria-current="page"] {
-  border-color: rgba(32, 214, 181, 0.3);
-  background: rgba(32, 214, 181, 0.12);
+  border-color: rgba(32, 214, 181, 0.38);
+  background: rgba(32, 214, 181, 0.15);
   color: var(--text);
 }
 
-.nav-group__summary[aria-current="true"] {
-  border-color: rgba(103, 232, 249, 0.18);
+.nav-subitem[aria-current="page"] {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.nav-section__button[aria-current="true"] {
+  border-color: rgba(103, 232, 249, 0.2);
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .button,
@@ -290,6 +328,7 @@ button.mobile-nav-toggle { display: none; }
 
 .app-main,
 main {
+  grid-column: 2;
   width: min(1500px, 100%);
   margin: 0 auto;
   padding: 24px;
@@ -456,6 +495,10 @@ form.panel {
   font-size: 0.8rem;
   font-weight: 650;
   white-space: nowrap;
+}
+
+.status-badge.app-mobilebar__status {
+  display: none;
 }
 
 .status-badge::before {
@@ -765,7 +808,7 @@ pre {
 @media (max-width: 840px) {
   .app-shell {
     display: block;
-    padding-top: 61px;
+    padding-top: 69px;
   }
 
   .app-mobilebar {
@@ -781,6 +824,15 @@ pre {
     border-bottom: 1px solid var(--border);
     background: rgba(7, 17, 31, 0.96);
     backdrop-filter: blur(12px);
+  }
+
+  .app-mobilebar .brand {
+    flex: 1 1 auto;
+  }
+
+  .status-badge.app-mobilebar__status {
+    display: inline-flex;
+    flex: 0 0 auto;
   }
 
   .app-sidebar {
@@ -807,7 +859,9 @@ pre {
 
   button.mobile-nav-toggle {
     display: inline-flex;
+    flex: 0 0 auto;
     margin-left: auto;
+    margin-top: 0;
   }
 
   .mobile-nav-toggle__icon {
@@ -830,6 +884,7 @@ pre {
 
   .app-main,
   main {
+    grid-column: auto;
     padding: 16px;
   }
 
@@ -848,6 +903,14 @@ pre {
 }
 
 @media (max-width: 430px) {
+  .app-mobilebar {
+    gap: 8px;
+  }
+
+  .app-mobilebar .brand span:last-child {
+    display: none;
+  }
+
   .app-main,
   main { padding: 12px; }
   .metric-grid,

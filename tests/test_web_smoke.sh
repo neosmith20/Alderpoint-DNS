@@ -45,11 +45,13 @@ required_css = [
     "@media (max-width: 840px)",
     ".app-sidebar",
     ".app-mobilebar",
+    ".app-mobilebar__status",
     ".mobile-nav-toggle",
     ".mobile-nav-backdrop",
-    ".nav-group",
-    ".nav-group__summary",
-    ".nav-group__menu",
+    ".nav-section",
+    ".nav-section__button",
+    ".nav-section__panel",
+    ".nav-subitem",
     ".status-badge",
 ]
 missing = [rule for rule in required_css if rule not in template + css]
@@ -59,12 +61,12 @@ if "https://" in template + css + js or "http://" in css + js:
     raise SystemExit("runtime CDN or public asset reference found")
 if "/static/app.css" not in template or "/static/app.js" not in template:
     raise SystemExit("local static assets are not referenced")
-if "data-nav-toggle" not in template or "appNav" not in template:
+if "data-nav-toggle" not in template or "appNav" not in template or "data-primary-nav" not in template:
     raise SystemExit("mobile navigation hooks are missing")
-for nav_hook in ("data-nav-section=\"dns\"", "data-nav-section=\"security\"", "data-nav-section=\"operations\"", "data-nav-section=\"system\""):
+for nav_hook in ('nav_section("dns"', 'nav_section("security"', 'nav_section("operations"', 'nav_section("system"'):
     if nav_hook not in template:
         raise SystemExit(f"grouped navigation hook missing: {nav_hook}")
-for js_hook in ("document.addEventListener('keydown'", "event.key === 'Escape'", "closest('#appNav')", "matchMedia('(max-width: 840px)'", "setNavOpen"):
+for js_hook in ("document.addEventListener('keydown'", "event.key === 'Escape'", "closest('#appNav')", "matchMedia('(max-width: 840px)'", "setNavOpen", "data-nav-section-toggle", "aria-expanded", "panel.hidden", "js-global-service-status"):
     if js_hook not in js:
         raise SystemExit(f"keyboard/click navigation behavior missing: {js_hook}")
 if "queryChart" not in template or 'data-chart="traffic"' not in template:
@@ -234,13 +236,16 @@ for expected in ("Protection Active", "Disable protection", "Top Upstream Resolv
     if expected not in dashboard:
         raise SystemExit(f"dashboard missing {expected}")
 for expected in (
-    'class="nav-link nav-link--primary" href="/" aria-current="page"',
+    'class="nav-link nav-link--primary is-active" href="/" aria-current="page"',
     'id="globalServiceStatus"',
+    'class="status-badge status-badge--healthy app-mobilebar__status js-global-service-status"',
     'data-status-url="/status/summary"',
     'data-nav-section="dns"',
     'data-nav-section="security"',
     'data-nav-section="operations"',
     'data-nav-section="system"',
+    'data-nav-section-toggle',
+    'aria-controls="nav-panel-dns"',
     '>Dashboard</span>',
     '>DNS</span>',
     '>Security</span>',
@@ -279,7 +284,7 @@ query_log = TEMPLATES.get_template("query_log.html").render(
 )
 if "No query events match" not in query_log or "Auto-refresh" not in query_log or "Reset" not in query_log:
     raise SystemExit("query log empty state did not render")
-if 'data-nav-section="dns" open' not in query_log or '>DNS</span>' not in query_log or 'href="/query-log" aria-current="page"' not in query_log:
+if 'data-nav-section="dns"' not in query_log or 'aria-controls="nav-panel-dns" aria-expanded="true" aria-current="true"' not in query_log or 'class="nav-subitem is-active" href="/query-log" aria-current="page"' not in query_log:
     raise SystemExit("query log navigation does not mark the active DNS section and page")
 
 local_dns = TEMPLATES.get_template("local_dns.html").render(
@@ -357,14 +362,14 @@ encryption_html = TEMPLATES.get_template("encryption.html").render(
 for expected in ("Protocols", "Client Connection Information", "Self-signed certificate", "Upload certificate and key", long_domain, "data-async-form"):
     if expected not in encryption_html:
         raise SystemExit(f"encryption page missing {expected}")
-if 'data-nav-section="security" open' not in encryption_html or 'href="/encryption" aria-current="page"' not in encryption_html:
+if 'data-nav-section="security"' not in encryption_html or 'aria-controls="nav-panel-security" aria-expanded="true" aria-current="true"' not in encryption_html or 'class="nav-subitem is-active" href="/encryption" aria-current="page"' not in encryption_html:
     raise SystemExit("encryption navigation does not mark the active Security section and page")
 
 import_base_html = TEMPLATES.get_template("import_migration.html").render(**page_base("/import"), error=None, jobs=[{"id": 1, "created_at": "2026-07-29T00:00:00Z", "source_type": "csv", "source_name": long_domain, "status": "applied", "valid_rows": 3, "applied_rows": 3}], job=None, preview=None, adguard=None)
 for expected in ("Spreadsheet / Text Import", "AdGuard Home Migration", "Column Mapping Reference", long_domain):
     if expected not in import_base_html:
         raise SystemExit(f"import page missing {expected}")
-if 'data-nav-section="operations" open' not in import_base_html or 'href="/import" aria-current="page"' not in import_base_html:
+if 'data-nav-section="operations"' not in import_base_html or 'aria-controls="nav-panel-operations" aria-expanded="true" aria-current="true"' not in import_base_html or 'class="nav-subitem is-active" href="/import" aria-current="page"' not in import_base_html:
     raise SystemExit("import navigation does not mark the active Operations section and page")
 
 import_job_html = TEMPLATES.get_template("import_migration.html").render(

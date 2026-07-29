@@ -141,3 +141,59 @@ Validation during this checkpoint:
   - `dig @127.0.0.1 -p 5353 cloudflare.com A +short`: returned A records.
   - `dig @127.0.0.1 -p 53 cloudflare.com A +short`: returned A records.
 - Live upstream DB state: four imported plain resolvers are enabled and healthy.
+
+## Post-reboot navigation correction
+
+Started from clean `main` at `fced3f2` (`Redesign admin navigation shell`).
+
+Post-reboot verification completed on 2026-07-29:
+
+- `bindguard`, `named`, `dnsdist`, and `bindguard-analytics` were active.
+- Required listeners were present:
+  - dnsdist: `0.0.0.0:53`, `[::]:53`, `0.0.0.0:443`, `[::]:443`,
+    `0.0.0.0:853`, `[::]:853`, and managed upstream listener
+    `127.0.0.1:5355`.
+  - BIND backend: `127.0.0.1:5353`, `127.0.0.1:5354`, and `::1:5353`.
+  - Web/admin: `0.0.0.0:3000`, `0.0.0.0:8843`.
+  - Analytics sink: `127.0.0.1:5301`.
+- DNS resolution succeeded through both BIND backend
+  (`dig @127.0.0.1 -p 5353 cloudflare.com A +short`) and dnsdist frontend
+  (`dig @127.0.0.1 -p 53 cloudflare.com A +short`).
+- Upstream resolver settings persisted after reboot: four imported plain
+  resolvers remained enabled and healthy, with recent deployed records.
+- `/opt/bindguard/tests/test_web_smoke.sh`: passed.
+- `/opt/bindguard/tests/test_acceptance.sh`: passed.
+
+Navigation correction:
+
+- Replaced the `<details>` navigation groups with explicit app-style sidebar
+  sections using button-controlled panels.
+- Desktop now reserves a fixed left navigation column and pins the sidebar while
+  the main content resizes in the adjacent column.
+- Mobile now uses a slide-out drawer with backdrop dismissal, Escape handling,
+  full-row section toggles, and automatic close after route selection.
+- Active sections remain expanded; active pages use `aria-current="page"`,
+  stronger background/border styling, and an inset accent marker.
+- Added a mobile top-bar service-status badge so global service state remains
+  visible when the drawer is closed, and updated status refresh logic to update
+  all visible badges.
+- Updated web smoke coverage for the new nav structure, active-state rendering,
+  mobile hooks, and shared status refresh hooks.
+
+Rendered inspection:
+
+- Used live Chromium inspection against the authenticated web app at desktop
+  (`1440x1000`), tablet (`900x900`), and mobile (`390x844`, `430x932`)
+  viewport widths.
+- Verified no visible menu item escaped the nav/drawer container, visible rows
+  remained clickable, active section/page state was obvious, drawer open/close
+  worked, Escape closed the drawer, and content did not render beneath the
+  sidebar or mobile top bar.
+- Screenshots were captured under `/tmp/bindguard-nav-*.png` for local review.
+
+Final validation before commit:
+
+- `/opt/bindguard/tests/test_web_smoke.sh`: passed.
+- `/opt/bindguard/tests/test_acceptance.sh`: passed. Expected rollback-test
+  tracebacks and pre-existing backup ResourceWarnings appeared, but the suite
+  completed with `BindGuard acceptance suite passed`.
