@@ -188,6 +188,14 @@ def run(command: list[str], check: bool = True, input_text: str | None = None, e
     return subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=check, input=input_text, env=env)
 
 
+def harden_backup_file_permissions(path: Path) -> None:
+    try:
+        shutil.chown(path, user="root", group="bindguard")
+    except (LookupError, PermissionError, OSError):
+        pass
+    os.chmod(path, 0o640)
+
+
 def init_db(conn: sqlite3.Connection | None = None) -> None:
     close = conn is None
     db = conn or connect()
@@ -522,11 +530,7 @@ def create_backup(components: dict[str, bool] | None = None, password: str | Non
             final_name = encrypt_archive_inplace(tmp_archive, password)
         final_path = BACKUP_DIR / final_name
         os.replace(tmp_archive if not password else stage / final_name, final_path)
-        try:
-            shutil.chown(final_path, user="root", group="bindguard")
-        except (LookupError, PermissionError):
-            pass
-        os.chmod(final_path, 0o640)
+        harden_backup_file_permissions(final_path)
 
         size_bytes = final_path.stat().st_size
         status = "deployed"
@@ -553,11 +557,7 @@ def _fix_backup_dir_permissions() -> None:
         return
     for path in BACKUP_DIR.iterdir():
         if path.is_file() and path.name.startswith(FILENAME_PREFIX):
-            try:
-                shutil.chown(path, user="root", group="bindguard")
-                os.chmod(path, 0o640)
-            except (LookupError, PermissionError):
-                continue
+            harden_backup_file_permissions(path)
 
 
 # ---------------------------------------------------------------------------
