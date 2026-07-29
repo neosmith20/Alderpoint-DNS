@@ -22,6 +22,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+try:
+    from app import local_dns
+except ModuleNotFoundError:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from app import local_dns
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.bindguard_compiler import DB_PATH, connect, enabled_sources, init_db, normalize_domain, parse_rules, source_paths
@@ -759,13 +767,23 @@ def dashboard_data(range_key: str = "24h") -> dict[str, Any]:
         totals["blocked_percent"] = (totals["blocked_queries"] / totals["total_queries"] * 100) if totals["total_queries"] else 0
         totals["avg_latency_ms"] = (totals["latency_sum_ms"] / totals["latency_count"]) if totals["latency_count"] else 0
         active_clients = conn.execute("SELECT count(DISTINCT client) FROM query_events WHERE ts >= ?", (since,)).fetchone()[0]
-        top_clients = conn.execute("SELECT client AS label, count(*) AS value FROM query_events WHERE ts >= ? GROUP BY client ORDER BY value DESC LIMIT 10", (since,)).fetchall()
+        top_clients_raw = conn.execute("SELECT client AS raw_client, client AS label, count(*) AS value FROM query_events WHERE ts >= ? GROUP BY client ORDER BY value DESC LIMIT 10", (since,)).fetchall()
         top_domains = conn.execute("SELECT domain AS label, count(*) AS value FROM query_events WHERE ts >= ? GROUP BY domain ORDER BY value DESC LIMIT 10", (since,)).fetchall()
         top_blocked = conn.execute("SELECT coalesce(blocked_domain, domain) AS label, count(*) AS value FROM query_events WHERE ts >= ? AND blocked=1 GROUP BY label ORDER BY value DESC LIMIT 10", (since,)).fetchall()
         qtypes = conn.execute("SELECT qtype AS label, count(*) AS value FROM query_events WHERE ts >= ? GROUP BY qtype ORDER BY value DESC", (since,)).fetchall()
         rcodes = conn.execute("SELECT rcode AS label, count(*) AS value FROM query_events WHERE ts >= ? GROUP BY rcode ORDER BY value DESC", (since,)).fetchall()
         protocols = conn.execute("SELECT protocol AS label, count(*) AS value FROM query_events WHERE ts >= ? GROUP BY protocol ORDER BY value DESC", (since,)).fetchall()
-        recent = conn.execute("SELECT * FROM query_events ORDER BY ts DESC LIMIT 20").fetchall()
+        recent_raw = conn.execute("SELECT * FROM query_events ORDER BY ts DESC LIMIT 20").fetchall()
+    top_clients = []
+    for row in top_clients_raw:
+        item = dict(row)
+        item["label"] = local_dns.alias_for_client(item["raw_client"]) or item["raw_client"]
+        top_clients.append(item)
+    recent = []
+    for row in recent_raw:
+        item = dict(row)
+        item["client_display"] = local_dns.alias_for_client(item["client"]) or item["client"]
+        recent.append(item)
     return {
         "range": range_key,
         "buckets": [dict(row) for row in buckets],
@@ -803,10 +821,15 @@ def query_log(filters: dict[str, str], page: int = 1, limit: int = 50) -> dict[s
     offset = max(0, page - 1) * limit
     with connect() as conn:
         total = conn.execute(f"SELECT count(*) FROM query_events {where}", params).fetchone()[0]
-        rows = conn.execute(
+        rows_raw = conn.execute(
             f"SELECT * FROM query_events {where} ORDER BY ts DESC LIMIT ? OFFSET ?",
             (*params, limit, offset),
         ).fetchall()
+    rows = []
+    for row in rows_raw:
+        item = dict(row)
+        item["client_display"] = local_dns.alias_for_client(item["client"]) or item["client"]
+        rows.append(item)
     return {"rows": rows, "total": total, "page": page, "limit": limit, "filters": filters}
 
 

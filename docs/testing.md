@@ -8,6 +8,7 @@ Run individual suites:
 /opt/bindguard/tests/test_blocklist_deploy.sh
 /opt/bindguard/tests/test_blocklist_failure_paths.sh
 /opt/bindguard/tests/test_analytics.py
+/opt/bindguard/tests/test_local_dns.py
 /opt/bindguard/tests/test_web_smoke.sh
 /opt/bindguard/tests/test_backup_restore.sh
 ```
@@ -16,6 +17,15 @@ The web smoke test also renders DNS Settings with long path/version-like
 content and asserts the responsive card/table wrapping rules that prevent
 horizontal overflow. It also renders the analytics dashboard and query log with
 long domain and IPv6-like values.
+
+The Local DNS suite covers A and AAAA record creation, automatic PTR records,
+forward and reverse zone rendering, editing, deletion, disabled records,
+duplicate hostname/PTR warnings, invalid host/IP rejection, CNAME conflicts,
+multiple reverse zones, serial increments, generated-zone rollback, BIND restart
+readiness, analytics client aliases, PTR fallback display, CSV import/export,
+and hosts-file preview. The web smoke test renders the Local DNS page with long
+domains, IPv6 clients, and upstream-like strings to guard against horizontal
+overflow.
 
 The analytics unit suite covers aggregate collection, counter resets, bucketing,
 blocked-query detection, ordinary NXDOMAIN handling, protocol classification,

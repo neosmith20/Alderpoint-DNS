@@ -14,6 +14,16 @@
   <p class="muted">Create the first local administrator. No default password exists.</p>
   <label>Username <input name="username" value="admin"></label>
   <label>Password <input name="password" type="password" minlength="12" required></label>
+  <div class="stack">
+    <label class="row"><input type="checkbox" name="create_local_dns" value="1" checked> Create BindGuard local DNS records</label>
+    <label>BindGuard hostname
+      <input name="server_hostname" value="{{ (local_dns.server_hostname if local_dns is defined else 'bindguard') or 'bindguard' }}">
+    </label>
+    <label>BindGuard IP address
+      <input name="server_ip" value="{{ (local_dns.server_ip if local_dns is defined else '172.16.43.101') or '172.16.43.101' }}">
+    </label>
+    <p class="muted">Creates <span class="mono">bindguard.home.arpa</span>, a reverse PTR record, and the BindGuard client alias. The IP is detected when available and can be changed later.</p>
+  </div>
   <div class="form-actions"><button>Create administrator</button></div>
 </form>
 {% endblock %}

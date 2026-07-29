@@ -21,6 +21,12 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
+try:
+    from app import local_dns
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from app import local_dns
+
 
 DB_PATH = Path("/var/lib/bindguard/bindguard.db")
 DOWNLOAD_DIR = Path("/var/lib/bindguard/downloads")
@@ -225,6 +231,7 @@ def init_db() -> None:
                 for category in categories
             ],
         )
+        local_dns.init_db(conn)
 
 
 def normalize_domain(raw: str) -> str | None:
@@ -515,6 +522,7 @@ def deploy(download: bool = True) -> int:
                 COMPILED_RPZ.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(staged_rpz, COMPILED_RPZ)
                 reload_bind()
+                local_dns.deploy_zones(conn)
                 if os.environ.get("BINDGUARD_TEST_FORCE_POSTCHECK_FAIL") == "1":
                     raise RuntimeError("forced post-deploy failure for rollback test")
                 if not resolves("cloudflare.com"):
@@ -601,6 +609,9 @@ def list_status(_: argparse.Namespace) -> None:
             print(dict(row))
         print("Deployments:")
         for row in conn.execute("SELECT id, status, active_domains, finished_at, message FROM deployments ORDER BY id DESC LIMIT 5"):
+            print(dict(row))
+        print("Local DNS deployments:")
+        for row in conn.execute("SELECT id, status, forward_zone, reverse_zones, serial, finished_at, message FROM local_dns_deployments ORDER BY id DESC LIMIT 5"):
             print(dict(row))
         print("Policy profiles:")
         for row in conn.execute(
@@ -695,6 +706,16 @@ def update_source(args: argparse.Namespace) -> None:
             print(f"error={result.error}")
 
 
+def local_dns_add_host(args: argparse.Namespace) -> None:
+    local_dns.add_host(args.hostname, args.domain, args.address, args.ttl, args.comment or "", args.auto_ptr, args.override)
+    print(f"local_dns_host={args.hostname}.{args.domain}")
+
+
+def local_dns_add_alias(args: argparse.Namespace) -> None:
+    local_dns.upsert_alias(args.cidr, args.name, args.description or "")
+    print(f"client_alias={args.cidr}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="BindGuard blocklist compiler")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -718,6 +739,22 @@ def main(argv: list[str] | None = None) -> int:
     dep = sub.add_parser("deploy")
     dep.add_argument("--no-download", action="store_true")
     dep.set_defaults(func=lambda args: print(deploy(download=not args.no_download)))
+    local_dep = sub.add_parser("local-dns-deploy")
+    local_dep.set_defaults(func=lambda args: print(local_dns.deploy_zones()))
+    local_host = sub.add_parser("local-dns-add-host")
+    local_host.add_argument("hostname")
+    local_host.add_argument("domain")
+    local_host.add_argument("address")
+    local_host.add_argument("--ttl", type=int, default=300)
+    local_host.add_argument("--comment", default="")
+    local_host.add_argument("--no-ptr", dest="auto_ptr", action="store_false")
+    local_host.add_argument("--override", action="store_true")
+    local_host.set_defaults(auto_ptr=True, func=local_dns_add_host)
+    local_alias = sub.add_parser("local-dns-add-alias")
+    local_alias.add_argument("cidr")
+    local_alias.add_argument("name")
+    local_alias.add_argument("--description", default="")
+    local_alias.set_defaults(func=local_dns_add_alias)
     update = sub.add_parser("update-sources")
     update.set_defaults(func=update_sources)
     update_one = sub.add_parser("update-source")

@@ -12,6 +12,10 @@
 - dnsdist ACLs allow RFC1918 private networks by default, with an explicit
   environment switch for allow-all mode.
 - BIND listens only on loopback backend ports.
+- Local DNS authoritative zones are generated separately from RPZ policy and
+  are included only through the managed BIND local-zone include.
+- The default Local DNS domain is `home.arpa`; `.local` is rejected because it
+  conflicts with multicast DNS.
 - AppArmor remains enabled for BIND.
 - The analytics collector runs as the restricted `bindguard` account and
   listens only on `127.0.0.1:5301`.

@@ -10,6 +10,14 @@ BIND is a localhost-only validating cache/forwarder. Filtering is compiled into
 an RPZ zone. Generated files live under `/var/lib/bindguard/compiled` and are
 referenced by small package-independent include files.
 
+Local DNS records are authoritative data, not filtering policy. BindGuard stores
+host records and client aliases in SQLite, then generates a dedicated
+authoritative forward zone for the configured internal domain, default
+`home.arpa`, plus any required IPv4 or IPv6 reverse zones. The generated BIND
+include is `/var/lib/bindguard/compiled/bind/local-zones.conf`, and zone files
+live under `/var/lib/bindguard/compiled/bind/local/`. Queries for the internal
+zone are answered by BIND locally and are not forwarded to public resolvers.
+
 The Python web application and deployment controller run as a dedicated
 unprivileged account. A narrow root-owned helper performs only enumerated
 validation, atomic deployment, reload, health-test, and rollback operations.
@@ -26,6 +34,10 @@ and then drops telemetry rather than blocking query handling.
 Blocked-query status is derived by correlating response events with the active
 BindGuard RPZ policy set. Ordinary NXDOMAIN responses are not treated as
 blocked unless the queried name also matches the compiled block policy.
+
+Client aliases are presentation-only. They map an IP or CIDR to a friendly
+dashboard/query-log label and do not alter DNS answers. When no alias exists,
+BindGuard may use an enabled local PTR record as a cached display fallback.
 
 Management HTTP traffic uses the host resolver from `/etc/resolv.conf`, currently
 the explicit maintenance resolvers `1.1.1.2` and `1.0.0.2`. It never uses

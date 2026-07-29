@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
-from app import analytics
+from app import analytics, local_dns
 from app.bindguard_compiler import DB_PATH, add_source, init_db, normalize_domain
 
 
@@ -217,6 +217,10 @@ def compiler_status() -> dict[str, Any]:
     return {"sources": sources, "rules": rules, "deployment": deployment}
 
 
+def deploy_no_download() -> tuple[int, str]:
+    return run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "deploy", "--no-download"])
+
+
 def dnsdist_stats() -> dict[str, Any]:
     try:
         creds = Path("/etc/bindguard/dnsdist-web.creds").read_text().strip()
@@ -362,7 +366,7 @@ def protocol_statuses() -> list[dict[str, str]]:
     return protocols
 
 
-def render(request: Request, template: str, **context: Any) -> HTMLResponse:
+def render(request: Request, template: str, status_code: int = 200, **context: Any) -> HTMLResponse:
     session = signed_session(request)
     context.update(
         {
@@ -372,7 +376,7 @@ def render(request: Request, template: str, **context: Any) -> HTMLResponse:
             "setup_required": admin_count() == 0,
         }
     )
-    return TEMPLATES.TemplateResponse(template, context)
+    return TEMPLATES.TemplateResponse(template, context, status_code=status_code)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -450,7 +454,7 @@ def protection_toggle(request: Request, csrf: str = Form(...), _: sqlite3.Row = 
     with db() as conn:
         conn.execute("UPDATE sources SET enabled=?", (1 if enable else 0,))
         conn.execute("UPDATE custom_rules SET enabled=?", (1 if enable else 0,))
-    run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "deploy", "--no-download"])
+    deploy_no_download()
     return redirect("/")
 
 
@@ -458,11 +462,18 @@ def protection_toggle(request: Request, csrf: str = Form(...), _: sqlite3.Row = 
 def setup_get(request: Request):
     if admin_count() > 0:
         return redirect("/login")
-    return render(request, "setup.html", error=None)
+    local_dns.init_db()
+    return render(request, "setup.html", error=None, local_dns=local_dns.settings())
 
 
 @app.post("/setup")
-def setup_post(username: str = Form("admin"), password: str = Form(...)):
+def setup_post(
+    username: str = Form("admin"),
+    password: str = Form(...),
+    create_local_dns: str = Form("0"),
+    server_hostname: str = Form("bindguard"),
+    server_ip: str = Form(""),
+):
     if admin_count() > 0:
         return redirect("/login")
     if len(password) < 12:
@@ -472,6 +483,13 @@ def setup_post(username: str = Form("admin"), password: str = Form(...)):
             "INSERT INTO admins(username, password_hash, created_at) VALUES (?, ?, ?)",
             (username.strip() or "admin", ph.hash(password), utc_now()),
         )
+    if create_local_dns == "1":
+        cfg = local_dns.settings()
+        ip = server_ip.strip() or cfg.get("server_ip") or local_dns.detect_server_ip()
+        host = server_hostname.strip() or "bindguard"
+        local_dns.update_settings({"server_hostname": host, "server_ip": ip})
+        local_dns.add_host(host, cfg.get("internal_domain", "home.arpa"), ip, cfg.get("default_ttl", 300), "BindGuard server", True, True)
+        local_dns.upsert_alias(ip, "BindGuard", "BindGuard DNS appliance")
     return redirect("/login")
 
 
@@ -619,7 +637,7 @@ def custom_add(request: Request, action: str = Form(...), domain: str = Form(...
             """,
             (normalized, action, comment, utc_now()),
         )
-    run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "deploy", "--no-download"])
+    deploy_no_download()
     return redirect("/custom-rules")
 
 
@@ -643,7 +661,7 @@ def custom_add_from_query(
             """,
             (normalized, action, "created from query log", utc_now()),
         )
-    run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "deploy", "--no-download"])
+    deploy_no_download()
     return redirect("/query-log")
 
 
@@ -652,7 +670,7 @@ def custom_toggle(request: Request, rule_id: int, csrf: str = Form(...), _: sqli
     check_csrf(request, csrf)
     with db() as conn:
         conn.execute("UPDATE custom_rules SET enabled=CASE enabled WHEN 1 THEN 0 ELSE 1 END WHERE id=?", (rule_id,))
-    run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "deploy", "--no-download"])
+    deploy_no_download()
     return redirect("/custom-rules")
 
 
@@ -661,8 +679,198 @@ def custom_delete(request: Request, rule_id: int, csrf: str = Form(...), _: sqli
     check_csrf(request, csrf)
     with db() as conn:
         conn.execute("DELETE FROM custom_rules WHERE id=?", (rule_id,))
-    run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "deploy", "--no-download"])
+    deploy_no_download()
     return redirect("/custom-rules")
+
+
+def local_dns_error(request: Request, message: str, status_code: int = 400) -> HTMLResponse:
+    context = local_dns.list_records(request.query_params.get("search", ""))
+    context.update({"error": message, "preview": None, "hosts_preview": None})
+    return render(request, "local_dns.html", **context, status_code=status_code)
+
+
+@app.get("/local-dns", response_class=HTMLResponse)
+def local_dns_page(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    context = local_dns.list_records(request.query_params.get("search", ""))
+    context.update({"error": None, "preview": None, "hosts_preview": None})
+    return render(request, "local_dns.html", **context)
+
+
+@app.post("/local-dns/settings")
+def local_dns_settings_post(
+    request: Request,
+    csrf: str = Form(...),
+    internal_domain: str = Form("home.arpa"),
+    default_ttl: int = Form(300),
+    server_hostname: str = Form("bindguard"),
+    server_ip: str = Form(""),
+    _: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    try:
+        local_dns.update_settings(
+            {
+                "internal_domain": internal_domain,
+                "default_ttl": default_ttl,
+                "server_hostname": server_hostname.strip() or "bindguard",
+                "server_ip": server_ip.strip() or local_dns.detect_server_ip(),
+            }
+        )
+        deploy_no_download()
+    except Exception as exc:
+        return local_dns_error(request, str(exc))
+    return redirect("/local-dns")
+
+
+@app.post("/local-dns/server-record")
+def local_dns_server_record(request: Request, csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    try:
+        cfg = local_dns.settings()
+        host = cfg.get("server_hostname", "bindguard")
+        ip = cfg.get("server_ip") or local_dns.detect_server_ip()
+        local_dns.add_host(host, cfg.get("internal_domain", "home.arpa"), ip, cfg.get("default_ttl", 300), "BindGuard server", True, True)
+        local_dns.upsert_alias(ip, "BindGuard", "BindGuard DNS appliance")
+        deploy_no_download()
+    except Exception as exc:
+        return local_dns_error(request, str(exc))
+    return redirect("/local-dns")
+
+
+@app.post("/local-dns/hosts")
+def local_dns_add_host(
+    request: Request,
+    csrf: str = Form(...),
+    hostname: str = Form(...),
+    domain: str = Form("home.arpa"),
+    address: str = Form(...),
+    ttl: int = Form(300),
+    comment: str = Form(""),
+    auto_ptr: str = Form("0"),
+    override: str = Form("0"),
+    _: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    try:
+        local_dns.add_host(hostname, domain, address, ttl, comment, auto_ptr == "1", override == "1")
+        deploy_no_download()
+    except Exception as exc:
+        return local_dns_error(request, str(exc))
+    return redirect("/local-dns")
+
+
+@app.post("/local-dns/records")
+def local_dns_add_record(
+    request: Request,
+    csrf: str = Form(...),
+    record_type: str = Form(...),
+    fqdn: str = Form(...),
+    value: str = Form(...),
+    ttl: int = Form(300),
+    comment: str = Form(""),
+    enabled: str = Form("0"),
+    override: str = Form("0"),
+    _: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    try:
+        local_dns.add_record(record_type, fqdn, value, ttl, comment, enabled == "1", override == "1")
+        deploy_no_download()
+    except Exception as exc:
+        return local_dns_error(request, str(exc))
+    return redirect("/local-dns")
+
+
+@app.post("/local-dns/records/{record_id}/edit")
+def local_dns_edit_record(
+    request: Request,
+    record_id: int,
+    csrf: str = Form(...),
+    record_type: str = Form(...),
+    fqdn: str = Form(...),
+    value: str = Form(...),
+    ttl: int = Form(300),
+    comment: str = Form(""),
+    enabled: str = Form("0"),
+    override: str = Form("0"),
+    _: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    try:
+        local_dns.update_record(record_id, record_type, fqdn, value, ttl, comment, enabled == "1", override == "1")
+        deploy_no_download()
+    except Exception as exc:
+        return local_dns_error(request, str(exc))
+    return redirect("/local-dns")
+
+
+@app.post("/local-dns/records/{record_id}/toggle")
+def local_dns_toggle_record(request: Request, record_id: int, csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    local_dns.toggle_record(record_id)
+    deploy_no_download()
+    return redirect("/local-dns")
+
+
+@app.post("/local-dns/records/{record_id}/delete")
+def local_dns_delete_record(request: Request, record_id: int, csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    local_dns.delete_record(record_id)
+    deploy_no_download()
+    return redirect("/local-dns")
+
+
+@app.post("/local-dns/aliases")
+def local_dns_add_alias(
+    request: Request,
+    csrf: str = Form(...),
+    cidr: str = Form(...),
+    display_name: str = Form(...),
+    description: str = Form(""),
+    _: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    try:
+        local_dns.upsert_alias(cidr, display_name, description)
+    except Exception as exc:
+        return local_dns_error(request, str(exc))
+    return redirect("/local-dns")
+
+
+@app.post("/local-dns/aliases/{alias_id}/delete")
+def local_dns_delete_alias(request: Request, alias_id: int, csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    local_dns.delete_alias(alias_id)
+    return redirect("/local-dns")
+
+
+@app.post("/local-dns/import/preview")
+def local_dns_import_preview(request: Request, csrf: str = Form(...), csv_text: str = Form(""), hosts_text: str = Form(""), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    context = local_dns.list_records("")
+    try:
+        preview = local_dns.csv_preview(csv_text) if csv_text.strip() else None
+        hosts = local_dns.hosts_preview(hosts_text, context["settings"].get("internal_domain", "home.arpa")) if hosts_text.strip() else None
+    except Exception as exc:
+        return local_dns_error(request, str(exc))
+    context.update({"error": None, "preview": preview, "hosts_preview": hosts, "csv_text": csv_text, "hosts_text": hosts_text})
+    return render(request, "local_dns.html", **context)
+
+
+@app.post("/local-dns/import")
+def local_dns_import_apply(request: Request, csrf: str = Form(...), csv_text: str = Form(""), override: str = Form("0"), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    try:
+        local_dns.csv_import(csv_text, override == "1")
+        deploy_no_download()
+    except Exception as exc:
+        return local_dns_error(request, str(exc))
+    return redirect("/local-dns")
+
+
+@app.get("/local-dns/export")
+def local_dns_export(_: sqlite3.Row = Depends(current_admin)):
+    return PlainTextResponse(local_dns.csv_export(), media_type="text/csv")
 
 
 @app.get("/dns-settings", response_class=HTMLResponse)

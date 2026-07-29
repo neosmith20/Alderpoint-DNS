@@ -54,8 +54,12 @@ if "queryChart" not in template or 'data-chart="traffic"' not in template:
     raise SystemExit("dashboard chart hooks are missing")
 if "analytics/chart-data" not in Path("/opt/bindguard/app/webapp.py").read_text():
     raise SystemExit("chart data endpoint is missing")
+webapp_text = Path("/opt/bindguard/app/webapp.py").read_text()
+for route in ("/local-dns", "local_dns_add_host", "local_dns_add_alias", "local_dns_import_preview"):
+    if route not in webapp_text:
+        raise SystemExit(f"local DNS route missing: {route}")
 
-request = SimpleNamespace(url=SimpleNamespace(path="/"))
+request = SimpleNamespace(url=SimpleNamespace(path="/"), query_params={})
 base = {
     "request": request,
     "admin": "smoke",
@@ -149,6 +153,45 @@ query_log = TEMPLATES.get_template("query_log.html").render(
 if "No query events match" not in query_log or "Auto-refresh" not in query_log or "Reset" not in query_log:
     raise SystemExit("query log empty state did not render")
 
+local_dns = TEMPLATES.get_template("local_dns.html").render(
+    **base,
+    settings={"internal_domain": "home.arpa", "default_ttl": "300", "server_hostname": "bindguard", "server_ip": "172.16.43.101"},
+    records=[{
+        "id": 1,
+        "fqdn": "alex-pc." + long_domain,
+        "record_type": "A",
+        "value": "172.16.43.50",
+        "ttl": 300,
+        "comment": long_upstream,
+        "enabled": 1,
+        "ptr_record_id": 2,
+    }, {
+        "id": 2,
+        "fqdn": "50.43.16.172.in-addr.arpa",
+        "record_type": "PTR",
+        "value": "alex-pc.home.arpa",
+        "ttl": 300,
+        "comment": "reverse",
+        "enabled": 1,
+        "ptr_record_id": None,
+    }],
+    aliases=[{"id": 1, "cidr": long_client + "/128", "display_name": "Alex-PC", "description": long_upstream}],
+    deployment={"status": "deployed", "forward_zone": "home.arpa", "reverse_zones": 1, "serial": 2026072901, "message": "deployed", "validation_output": "zone home.arpa/IN: loaded serial 2026072901"},
+    error=None,
+    preview=[{"line": 2, "record": {"fqdn": "csv.home.arpa", "record_type": "A", "value": "172.16.43.70"}, "valid": True, "warnings": []}],
+    hosts_preview=[{"line": 1, "valid": True, "records": [{"fqdn": "printer.home.arpa"}]}],
+    csv_text="fqdn,record_type,value,ttl,enabled,comment\ncsv.home.arpa,A,172.16.43.70,300,1,imported\n",
+    hosts_text="172.16.43.80 printer",
+)
+for expected in ("Local DNS", "home.arpa", "Add Host", "Advanced Record", "Automatically create reverse PTR record", "Client Aliases", "Import CSV and deploy", long_domain, long_client):
+    if expected not in local_dns:
+        raise SystemExit(f"local DNS page missing {expected}")
+
+setup_html = TEMPLATES.get_template("setup.html").render(**{**base, "admin": None}, local_dns={"server_hostname": "bindguard", "server_ip": "172.16.43.101"})
+for expected in ("Create BindGuard local DNS records", "172.16.43.101", "bindguard.home.arpa"):
+    if expected not in setup_html:
+        raise SystemExit(f"setup local DNS option missing {expected}")
+
 for name, rendered in {
     "blocklists": TEMPLATES.get_template("blocklists.html").render(**base, sources=[{
         "id": 1,
@@ -180,6 +223,7 @@ for name, rendered in {
         "recent_query_limit": "100",
     }, db_size=1234),
     "system": TEMPLATES.get_template("system.html").render(**base, health=[{"name": "Analytics collector", "state": "Healthy", "tone": "healthy"}], logs=long_upstream, compiler={"deployment": None}),
+    "local_dns": local_dns,
 }.items():
     if "app-topbar" not in rendered or "status-badge" not in rendered:
         raise SystemExit(f"{name} did not use the shared shell")

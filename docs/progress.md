@@ -127,6 +127,25 @@
 - Statistics Settings supports analytics toggles, privacy mode, retention,
   database limit, collection interval, clear, and export.
 
+## Verified Local DNS milestone
+
+- Local DNS uses `home.arpa` by default and rejects `.local`.
+- SQLite stores A, AAAA, PTR, CNAME, TTL, comments, enabled state, automatic PTR
+  links, client aliases, and Local DNS deployment results.
+- Generated authoritative forward and reverse BIND zones are separate from RPZ
+  filtering policy and are included through
+  `/var/lib/bindguard/compiled/bind/local-zones.conf`.
+- Add/edit/toggle/delete operations deploy through the normal staged,
+  validated, atomic no-download deployment path.
+- The web UI includes a dedicated Local DNS page with simple host entry,
+  advanced records, alias management, CSV import/export, hosts preview,
+  validation warnings, and deployment status.
+- Analytics dashboard and Query Log display configured client aliases, or local
+  PTR fallback names with the raw IP when no alias exists.
+- Unit and smoke tests cover record workflows, duplicate/conflict warnings,
+  serial increments, rollback, alias display, import/export, and responsive
+  layout rendering.
+
 ## Verified policy-preparation milestone
 
 - SQLite schema includes policy categories for malware, ads and trackers, adult

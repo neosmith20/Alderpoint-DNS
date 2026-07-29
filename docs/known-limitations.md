@@ -6,7 +6,7 @@
   Replace `/etc/bindguard/certs/bindguard-lab.crt` and
   `/etc/bindguard/certs/bindguard-lab.key` together when production TLS
   material is available.
-- Query statistics are aggregate-only; full query history and top-client/domain
-  views are future work.
-- Per-network policy profiles and SafeSearch enforcement are modeled as future
-  work but not fully implemented.
+- Per-network policy profiles and SafeSearch enforcement are modeled but not
+  fully enforced at runtime yet.
+- Local DNS hosts import currently provides preview support for hosts-style
+  input. CSV import is the deployment-capable bulk import path.

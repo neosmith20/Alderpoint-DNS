@@ -12,3 +12,4 @@ zone "bindguard.rpz" {
 	allow-transfer { none; };
 };
 
+include "/var/lib/bindguard/compiled/bind/local-zones.conf";

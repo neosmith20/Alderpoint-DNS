@@ -34,7 +34,7 @@
         {% for row in log.rows %}
           <tr title="{{ row.domain }}">
             <td class="mono">{{ row.ts }}</td>
-            <td class="mono">{{ row.client }}</td>
+            <td class="mono" title="{{ row.client }}">{{ row.client_display or row.client }}</td>
             <td class="mono">{{ row.domain }}</td>
             <td>{{ row.qtype }}</td>
             <td>{{ row.protocol }}</td>

@@ -49,11 +49,11 @@ The dashboard is organized around DNS-appliance information hierarchy:
 - Recent activity and compact system-health chips with low-level details moved
   to `/system`.
 
-The Query Log, Blocklists, Filters, DNS Settings, Statistics, System, login, and
-setup pages all use the same card, table, badge, form, button, empty-state, and
-confirmation styles. Long domains, IPv6 addresses, paths, command names,
-version strings, and URLs use wrapping or deliberate local table scrolling so
-they do not create page-level horizontal overflow.
+The Query Log, Blocklists, Filters, Local DNS, DNS Settings, Statistics, System,
+login, and setup pages all use the same card, table, badge, form, button,
+empty-state, and confirmation styles. Long domains, IPv6 addresses, paths,
+command names, version strings, and URLs use wrapping or deliberate local table
+scrolling so they do not create page-level horizontal overflow.
 
 The Query Log page supports search, pagination, auto-refresh, client/domain
 filters, query type, protocol, allowed/blocked status, response code, and direct
@@ -63,6 +63,23 @@ Blocklist management supports add, inline edit, enable/disable, delete,
 single-source update, update-all, and compile/deploy. Single-source updates are
 unprivileged because they only write BindGuard's database and download cache;
 deployment remains privileged and enumerated.
+
+The Local DNS page supports:
+
+- Internal domain settings, defaulting to `home.arpa`.
+- Setup and page actions to create BindGuard's own forward and reverse records.
+- Simple host entries that create A/AAAA records and optional automatic PTR
+  records together.
+- Advanced A, AAAA, PTR, and CNAME records with TTL, comments, and enabled
+  state.
+- Client aliases for dashboard/query-log display without changing DNS behavior.
+- CSV preview/import/export and hosts-style preview.
+- Last Local DNS deployment status, serial, validation output, and rollback
+  result.
+
+Every Local DNS mutation runs the normal no-download deployment path, which
+stages generated zones, validates them, installs atomically, reloads BIND, and
+records the result.
 
 Useful commands:
 

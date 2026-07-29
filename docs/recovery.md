@@ -36,6 +36,17 @@ systemctl restart named
 systemctl restart dnsdist
 ```
 
+For Local DNS failures, inspect the last deployment on the Local DNS page or in
+`local_dns_deployments`. Generated zones are staged first, checked with
+`named-checkzone`, installed atomically, and backed up under
+`/var/lib/bindguard/backups`. Re-run a no-download deploy after correcting bad
+records:
+
+```sh
+/opt/bindguard/app/bindguard_compiler.py deploy --no-download
+named-checkconf -p /etc/bind/named.conf
+```
+
 When analytics is unavailable, DNS service should continue. Check that
 `bindguard-analytics` is active and that `ss -ltnup` shows the collector only on
 `127.0.0.1:5301`.
