@@ -65,6 +65,11 @@ for route in ("/dns-cache", "dns_cache_settings_post", "/dns-cache/flush", "/dns
         raise SystemExit(f"cache route missing: {route}")
 if 'href="/dns-cache"' not in template:
     raise SystemExit("cache nav link is missing")
+for route in ("/encryption", "encryption_settings_post", "/encryption/certificate/self-signed", "/encryption/certificate/local-ca", "/encryption/certificate/upload", "/encryption/certificate/existing-path", "/encryption/certificate/download", "/encryption/apple/"):
+    if route not in webapp_text:
+        raise SystemExit(f"encryption route missing: {route}")
+if 'href="/encryption"' not in template:
+    raise SystemExit("encryption nav link is missing")
 if "bindguardAutoRefresh" not in js or "sessionStorage" not in js or "target.innerHTML" not in js:
     raise SystemExit("query log auto-refresh stateful partial update is missing")
 if "setInterval(() => window.location.reload()" in js:
@@ -240,6 +245,30 @@ for expected in ("Cache Tuning", "Flush Cache", "71.5", "max-cache-size=490m", l
     if expected not in dns_cache_html:
         raise SystemExit(f"cache page missing {expected}")
 
+encryption_html = TEMPLATES.get_template("encryption.html").render(
+    **base,
+    error=None,
+    cfg={
+        "server_hostname": "bindguard.local", "bootstrap_ip": "172.16.43.101",
+        "doh_enabled": "1", "doh3_enabled": "1", "dot_enabled": "1", "doq_enabled": "1", "dnscrypt_enabled": "0",
+        "doh_path": "/dns-query", "doh_port": "443", "doh3_port": "443", "dot_port": "853", "doq_port": "853",
+        "dnscrypt_port": "5443", "dnscrypt_provider": "2.dnscrypt-cert.bindguard.local",
+        "cert_mode": "self_signed", "cert_path": "/etc/bindguard/certs/bindguard-lab.crt", "key_path": "/etc/bindguard/certs/bindguard-lab.key",
+    },
+    cert={
+        "available": True, "subject": "CN=" + long_domain, "issuer": "CN=" + long_domain,
+        "not_before": "Jul 29 00:00:00 2026 GMT", "not_after": "Oct 31 00:00:00 2028 GMT",
+        "days_remaining": 824, "expiring_soon": False, "expired": False,
+        "fingerprint_sha256": "AA:BB:CC:DD", "sans": ["DNS:" + long_domain, "IP Address:172.16.43.101"], "self_signed": True,
+    },
+    deployment={"status": "deployed", "started_at": "2026-07-29T00:00:00Z", "finished_at": "2026-07-29T00:00:00Z", "message": "deployed with protocols: {'plain': 'ok'}", "protocol_tests": "{'plain': 'ok'}"},
+    connection_info={"DoH": "https://" + long_domain + "/dns-query", "DoT": "tls://bindguard.local:853"},
+    dnscrypt_fingerprint=None,
+)
+for expected in ("Protocols", "Client Connection Information", "Self-signed certificate", "Upload certificate and key", long_domain, "data-async-form"):
+    if expected not in encryption_html:
+        raise SystemExit(f"encryption page missing {expected}")
+
 setup_html = TEMPLATES.get_template("setup.html").render(**{**base, "admin": None}, local_dns={"server_hostname": "bindguard", "server_ip": "172.16.43.101"})
 for expected in ("Create BindGuard local DNS records", "172.16.43.101", "bindguard.home.arpa"):
     if expected not in setup_html:
@@ -278,6 +307,7 @@ for name, rendered in {
     "system": TEMPLATES.get_template("system.html").render(**base, health=[{"name": "Analytics collector", "state": "Healthy", "tone": "healthy"}], logs=long_upstream, compiler={"deployment": None}),
     "local_dns": local_dns,
     "dns_cache": dns_cache_html,
+    "encryption": encryption_html,
 }.items():
     if "app-topbar" not in rendered or "status-badge" not in rendered:
         raise SystemExit(f"{name} did not use the shared shell")

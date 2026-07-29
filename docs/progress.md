@@ -344,3 +344,86 @@ that existing cache rather than adding a second one, per `app/dns_cache.py`.
   must be disabled or re-keyed before any per-client/per-network policy
   (schema already exists, not yet enforced) is ever turned on at runtime, or
   one client's filtered/personalized answer could leak to another.
+
+## Verified Encryption Settings milestone
+
+`app/encryption.py` adds a full Encryption Settings workflow on top of
+dnsdist's existing DoH/DoH3/DoT/DoQ listeners. Plain UDP/TCP 53 is never
+controlled from this page — it has no enable/disable control at all, so it
+cannot be turned off from the UI.
+
+- `packaging/dnsdist.conf` (and, via a one-time idempotent migration,
+  `/etc/dnsdist/dnsdist.conf`) now reads certificate paths, the DoH path, and
+  every protocol's port from environment variables instead of hardcoding
+  them, defaulting to the original lab values so an unmigrated install
+  behaves identically. The migration (`ensure_dnsdist_conf_parameterized`)
+  extracts and preserves the currently-installed console key and webserver
+  password/API key by regex rather than regenerating them, backs up the
+  prior file first, and is marked idempotent by a comment so it only runs
+  once.
+- Settings (`encryption_settings` table) cover per-protocol enable + port,
+  DoH path, server hostname, bootstrap IP, DNSCrypt port/provider name, and
+  certificate mode (`self_signed`, `local_ca`, `uploaded`, `existing_path`).
+- Deployment (`deploy_encryption`) regenerates
+  `/etc/systemd/system/dnsdist.service.d/bindguard.conf` (the same drop-in
+  that already controlled protocol enable flags), `daemon-reload`s,
+  validates with `dnsdist --check-config` using the *pending* environment
+  values (not the live ones), restarts dnsdist, waits for it to become
+  active, then runs a real functional query per newly-enabled protocol
+  before declaring success; any failure restores the previous drop-in,
+  reconfigures, and restarts back to the last-good state. A deploy where
+  nothing actually changed (env text identical, dnsdist.conf already
+  migrated, no certificate regenerated) is a fast no-op recorded as
+  `unchanged` rather than an unnecessary dnsdist restart; certificate
+  regeneration at the same configured path is explicitly tracked so it still
+  forces a redeploy even though the env var *value* didn't change.
+- Real per-protocol tests: plain (`dig`), DoH and DoH3 and DoQ (`dnspython`'s
+  `dns.query.https`/`dns.query.quic`, the latter requiring `python3-aioquic`
+  which this milestone installed), and DoT (`kdig +tls`, note kdig's timeout
+  flags are `+timeout=`/`+retry=`, not dig's `+time=`/`+tries=` — an early
+  bug caught by live testing before it reached tests/). All four were
+  verified against the live VM with real answers, not mocked.
+- DNSCrypt is a known, disclosed limitation, not a fake completion.
+  `generateDNSCryptProviderKeys`/`generateDNSCryptCertificate` are real
+  dnsdist console Lua functions (confirmed via `help()` against the live
+  console) that print a correct-looking provider fingerprint when invoked
+  from this VM, in both live-console (`dnsdist -c`) and standalone one-shot
+  (`dnsdist -l ... -e`) modes, but reliably fail to persist the requested
+  key/cert files to disk in either mode — the live-console path is
+  additionally blocked by `dnsdist.service`'s systemd sandboxing
+  (`PrivateTmp=yes`, `ProtectSystem=full`, no `ReadWritePaths` covering
+  `/etc/bindguard/certs`). Rather than fabricate DNSCrypt support,
+  `deploy_encryption` catches generation failure, disables DNSCrypt for that
+  deployment only (the stored setting is untouched so the admin's intent is
+  preserved and retried next deploy), and records a clear message — proven
+  by `test_deploy_encryption_dnscrypt_failure_does_not_block_other_protocols`
+  not to affect DoH/DoH3/DoT/DoQ/plain.
+- Certificates: self-signed generation and a local CA (issuing leaf certs
+  signed by a persistent BindGuard CA) both use `openssl` directly.
+  Cert/key match validation compares RSA moduli; SAN, validity window, days
+  remaining, expiry/expiring-soon flags, and SHA-256 fingerprint are parsed
+  from `openssl x509`. Upload and cert-generation actions run through the
+  same privileged `bindguard_compiler.py encryption-deploy` sudo entry as
+  settings changes (the web process cannot write to root:_dnsdist-owned
+  `/etc/bindguard/certs` directly); uploads are staged to
+  `/var/lib/bindguard/staging` (bindguard-writable) by the unprivileged web
+  process and validated/installed by the privileged step. Private key
+  contents are never rendered back to the browser; only the public
+  certificate is downloadable.
+- New enumerated sudo entry `bindguard_compiler.py encryption-deploy`
+  (argument-free, like `cache-flush`) — kept as its own command rather than
+  folded into the shared `deploy`/`deploy --no-download` path used by
+  Local DNS and cache changes, since a dnsdist restart is a heavier,
+  categorically different operation that should only happen when an admin
+  actually changes Encryption Settings, not as a side effect of an
+  unrelated Local DNS or blocklist change.
+- Client connection info (ready-to-copy DoH/DoH3/DoT/DoQ/DNSCrypt strings)
+  and Apple `.mobileconfig` generation for DoH/DoT (`com.apple.dnsSettings.managed`
+  payload, verified against Apple's public configuration profile reference)
+  are both implemented and tested.
+- `tests/test_encryption.py` (29 tests) covers settings validation, real
+  self-signed/local-CA certificate generation and matching, mismatched
+  cert/key rejection, upload staging/consumption, the dnsdist.conf migration
+  (including secret preservation and idempotency), env-override rendering,
+  full deploy success/rollback/unchanged/cert-forces-redeploy paths, DNSCrypt
+  graceful degradation, connection info, and Apple profile content.

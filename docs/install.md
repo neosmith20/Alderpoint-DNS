@@ -8,7 +8,12 @@ Core packages:
 ```sh
 apt-get install -y bind9 bind9-dnsutils knot-dnsutils curl openssl jq sudo
 apt-get install -y python3-fastapi uvicorn python3-uvicorn python3-jinja2 python3-argon2 python3-itsdangerous python3-multipart python3-yaml
+apt-get install -y python3-dnspython python3-httpx python3-aioquic
 ```
+
+`python3-dnspython`/`python3-httpx`/`python3-aioquic` provide real DoH/DoH3/DoQ
+functional query testing for Encryption Settings deployments
+(`app/encryption.py`); `knot-dnsutils` (`kdig`) provides the DoT test.
 
 PowerDNS dnsdist package on Debian 13:
 

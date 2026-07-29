@@ -5,6 +5,12 @@
   exact compiler commands.
 - The admin UI requires authentication and relies on pfSense VLAN/firewall
   policy for network reachability.
+- Encryption Settings certificate uploads and generation write to
+  root:_dnsdist-owned `/etc/bindguard/certs` only through the privileged,
+  argument-free `bindguard_compiler.py encryption-deploy` sudo entry; the
+  unprivileged web process only ever stages bytes under
+  `/var/lib/bindguard/staging`. Private key contents are never rendered back
+  to the browser.
 - No default administrator exists.
 - Passwords are hashed with Argon2.
 - Session cookies are signed, `HttpOnly`, and `SameSite=Strict`.

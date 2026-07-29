@@ -14,13 +14,13 @@ from typing import Any
 
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
-from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
-from app import analytics, dns_cache, local_dns
+from app import analytics, dns_cache, encryption, local_dns
 from app.bindguard_compiler import DB_PATH, add_source, init_db, normalize_domain
 
 
@@ -223,6 +223,10 @@ def deploy_no_download() -> tuple[int, str]:
 
 def cache_flush_apply() -> tuple[int, str]:
     return run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "cache-flush"])
+
+
+def encryption_deploy_apply() -> tuple[int, str]:
+    return run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "encryption-deploy"])
 
 
 def dnsdist_stats() -> dict[str, Any]:
@@ -972,6 +976,162 @@ def dns_cache_flush_tree(request: Request, csrf: str = Form(...), name: str = Fo
     except Exception as exc:
         return dns_cache_error(request, str(exc))
     return redirect("/dns-cache")
+
+
+def encryption_context() -> dict[str, Any]:
+    cfg = encryption.settings()
+    cert_path, _key_path = encryption.resolve_active_cert_paths(cfg)
+    return {
+        "cfg": cfg,
+        "cert": encryption.cert_info(cert_path),
+        "deployment": encryption.last_deployment(),
+        "connection_info": encryption.connection_info(cfg),
+        "dnscrypt_fingerprint": encryption.dnscrypt_provider_fingerprint(),
+    }
+
+
+def encryption_error(request: Request, message: str, status_code: int = 400) -> HTMLResponse:
+    context = encryption_context()
+    context.update({"error": message})
+    return render(request, "encryption.html", **context, status_code=status_code)
+
+
+@app.get("/encryption", response_class=HTMLResponse)
+def encryption_page(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    context = encryption_context()
+    context.update({"error": None})
+    return render(request, "encryption.html", **context)
+
+
+@app.post("/encryption/settings")
+def encryption_settings_post(
+    request: Request,
+    csrf: str = Form(...),
+    server_hostname: str = Form(...),
+    bootstrap_ip: str = Form(""),
+    doh_enabled: str = Form("0"),
+    doh3_enabled: str = Form("0"),
+    dot_enabled: str = Form("0"),
+    doq_enabled: str = Form("0"),
+    dnscrypt_enabled: str = Form("0"),
+    doh_path: str = Form("/dns-query"),
+    doh_port: int = Form(443),
+    doh3_port: int = Form(443),
+    dot_port: int = Form(853),
+    doq_port: int = Form(853),
+    dnscrypt_port: int = Form(5443),
+    dnscrypt_provider: str = Form("2.dnscrypt-cert.bindguard.local"),
+    _: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    try:
+        cfg = encryption.settings()
+        encryption.update_settings(
+            {
+                **cfg,
+                "server_hostname": server_hostname,
+                "bootstrap_ip": bootstrap_ip,
+                "doh_enabled": doh_enabled,
+                "doh3_enabled": doh3_enabled,
+                "dot_enabled": dot_enabled,
+                "doq_enabled": doq_enabled,
+                "dnscrypt_enabled": dnscrypt_enabled,
+                "doh_path": doh_path,
+                "doh_port": doh_port,
+                "doh3_port": doh3_port,
+                "dot_port": dot_port,
+                "doq_port": doq_port,
+                "dnscrypt_port": dnscrypt_port,
+                "dnscrypt_provider": dnscrypt_provider,
+            }
+        )
+        encryption_deploy_apply()
+    except Exception as exc:
+        return encryption_error(request, str(exc))
+    return redirect("/encryption")
+
+
+@app.post("/encryption/certificate/self-signed")
+def encryption_cert_self_signed(request: Request, csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    try:
+        encryption.update_settings({**encryption.settings(), "cert_mode": "self_signed"})
+        encryption.request_cert_action("generate_self_signed")
+        encryption_deploy_apply()
+    except Exception as exc:
+        return encryption_error(request, str(exc))
+    return redirect("/encryption")
+
+
+@app.post("/encryption/certificate/local-ca")
+def encryption_cert_local_ca(request: Request, csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    try:
+        encryption.update_settings({**encryption.settings(), "cert_mode": "local_ca"})
+        encryption.request_cert_action("generate_local_ca")
+        encryption_deploy_apply()
+    except Exception as exc:
+        return encryption_error(request, str(exc))
+    return redirect("/encryption")
+
+
+@app.post("/encryption/certificate/upload")
+async def encryption_cert_upload(
+    request: Request,
+    csrf: str = Form(...),
+    cert_file: UploadFile = File(...),
+    key_file: UploadFile = File(...),
+    _: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    try:
+        cert_bytes = await cert_file.read()
+        key_bytes = await key_file.read()
+        if not cert_bytes or not key_bytes:
+            raise encryption.EncryptionError("both a certificate file and a key file are required")
+        encryption.request_cert_upload(cert_bytes, key_bytes)
+        encryption.update_settings({**encryption.settings(), "cert_mode": "uploaded"})
+        encryption_deploy_apply()
+    except Exception as exc:
+        return encryption_error(request, str(exc))
+    return redirect("/encryption")
+
+
+@app.post("/encryption/certificate/existing-path")
+def encryption_cert_existing_path(
+    request: Request,
+    csrf: str = Form(...),
+    cert_path: str = Form(...),
+    key_path: str = Form(...),
+    _: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    try:
+        encryption.update_settings({**encryption.settings(), "cert_mode": "existing_path", "cert_path": cert_path, "key_path": key_path})
+        encryption_deploy_apply()
+    except Exception as exc:
+        return encryption_error(request, str(exc))
+    return redirect("/encryption")
+
+
+@app.get("/encryption/certificate/download")
+def encryption_cert_download(_: sqlite3.Row = Depends(current_admin)):
+    cfg = encryption.settings()
+    cert_path, _key_path = encryption.resolve_active_cert_paths(cfg)
+    if not cert_path.exists():
+        raise HTTPException(status_code=404, detail="no certificate deployed")
+    return PlainTextResponse(cert_path.read_text(), media_type="application/x-pem-file")
+
+
+@app.get("/encryption/apple/{protocol}.mobileconfig")
+def encryption_apple_profile(protocol: str, _: sqlite3.Row = Depends(current_admin)):
+    if protocol not in {"doh", "dot"}:
+        raise HTTPException(status_code=404, detail="unknown profile")
+    cfg = encryption.settings()
+    if cfg.get(f"{protocol}_enabled") != "1":
+        raise HTTPException(status_code=400, detail=f"{protocol} is not enabled")
+    content = encryption.apple_mobileconfig(cfg, protocol)
+    return Response(content=content, media_type="application/x-apple-aspen-config")
 
 
 @app.get("/dns-settings", response_class=HTMLResponse)

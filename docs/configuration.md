@@ -21,7 +21,15 @@ dnsdist accepts RFC1918 private clients by default. Set
 `BINDGUARD_DNS_ALLOW_ALL=1` only when pfSense rules are ready to enforce the
 intended boundary. The generated self-signed certificate lives at
 `/etc/bindguard/certs/bindguard-lab.crt`; replace both cert and key together to
-install production TLS material.
+install production TLS material, or manage this from the Encryption page
+(`/encryption`), which also supports a local CA, cert upload, and existing
+server-side paths. `dnsdist.conf` reads its certificate paths, DoH path, and
+per-protocol ports from `BINDGUARD_TLS_CERT`/`BINDGUARD_TLS_KEY`/
+`BINDGUARD_DOH_PATH`/`BINDGUARD_DOH_PORT`/`BINDGUARD_DOH3_PORT`/
+`BINDGUARD_DOT_PORT`/`BINDGUARD_DOQ_PORT` environment variables (defaulting
+to the original hardcoded lab values), set via the systemd drop-in
+`/etc/systemd/system/dnsdist.service.d/bindguard.conf`, which Encryption
+Settings deployments regenerate.
 
 Analytics settings are managed from the Statistics page. Detailed query rows
 default to seven days of retention; aggregate buckets default to 90 days.

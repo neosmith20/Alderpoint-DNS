@@ -11,6 +11,7 @@ Run individual suites:
 /opt/bindguard/tests/test_local_dns.py
 /opt/bindguard/tests/test_dns_cache.py
 /opt/bindguard/tests/test_dns_cache_benchmark.sh
+/opt/bindguard/tests/test_encryption.py
 /opt/bindguard/tests/test_web_smoke.sh
 /opt/bindguard/tests/test_backup_restore.sh
 ```
@@ -71,6 +72,19 @@ Run the combined suite:
 ```sh
 /opt/bindguard/tests/test_acceptance.sh
 ```
+
+The Encryption Settings suite (`tests/test_encryption.py`) covers settings
+validation, real self-signed and local-CA certificate generation with
+cert/key match checking, mismatched-pair rejection, upload staging and
+consumption, the one-time `dnsdist.conf` parameterization migration
+(including preserving the existing console/webserver secrets and being
+idempotent), env-override rendering, full deploy success/rollback/
+unchanged/forced-redeploy-on-cert-regen paths, DNSCrypt failing gracefully
+without blocking other protocols, client connection info, and Apple
+`.mobileconfig` content for DoH and DoT. Live verification on this VM ran
+real per-protocol queries (`dig` for plain, `dnspython`'s
+`dns.query.https`/`dns.query.quic` for DoH/DoH3/DoQ, `kdig +tls` for DoT)
+through the actual deploy path, not just mocked unit tests.
 
 Manual protocol tests:
 

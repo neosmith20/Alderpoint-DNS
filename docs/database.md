@@ -40,3 +40,13 @@ BIND cache tables:
 - `dns_cache_flushes`: pending and completed cache flush requests (entire
   cache, one name, or one subtree), applied by the privileged
   `cache-flush` compiler command.
+
+Encryption tables:
+
+- `encryption_settings`: key/value protocol toggles/ports, hostname,
+  bootstrap IP, certificate mode/paths, and a `pending_cert_action` flag used
+  to hand a certificate-generation request from the unprivileged web process
+  to the privileged deploy step.
+- `encryption_deployments`: staged/validated/backed-up/atomically-activated/
+  health-checked/rolled-back deployment history, including the per-protocol
+  functional test results for the most recent deployment.

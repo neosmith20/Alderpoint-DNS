@@ -49,9 +49,9 @@ The dashboard is organized around DNS-appliance information hierarchy:
 - Recent activity and compact system-health chips with low-level details moved
   to `/system`.
 
-The Query Log, Blocklists, Filters, Local DNS, DNS Settings, Cache, Statistics,
-System, login, and setup pages all use the same card, table, badge, form,
-button, empty-state, and confirmation styles. Long domains, IPv6 addresses, paths,
+The Query Log, Blocklists, Filters, Local DNS, DNS Settings, Cache,
+Encryption, Statistics, System, login, and setup pages all use the same
+card, table, badge, form, button, empty-state, and confirmation styles. Long domains, IPv6 addresses, paths,
 command names, version strings, and URLs use wrapping or deliberate local table
 scrolling so they do not create page-level horizontal overflow.
 
@@ -98,6 +98,14 @@ stats from BIND's own statistics API, and recent flush/deployment history.
 Settings save through the same staged/validated/atomic/rollback deployment
 path as Local DNS. The dashboard shows a cache-effectiveness panel (hit rate,
 hits/misses, memory) backed by the same live stats.
+
+The Encryption page (`/encryption`) manages DoH/DoH3/DoT/DoQ (and
+best-effort DNSCrypt) listeners: per-protocol enable/port, hostname and
+bootstrap IP, self-signed/local-CA/uploaded/existing-path certificate modes
+with match/SAN/expiry validation, a downloadable public certificate, real
+per-protocol connectivity tests on every deploy, ready-to-copy client
+connection info, and Apple `.mobileconfig` downloads for DoH/DoT. Plain
+UDP/TCP 53 has no control on this page and cannot be disabled from the UI.
 
 Useful commands:
 

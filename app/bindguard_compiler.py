@@ -22,10 +22,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 try:
-    from app import dns_cache, local_dns
+    from app import dns_cache, encryption, local_dns
 except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from app import dns_cache, local_dns
+    from app import dns_cache, encryption, local_dns
 
 
 DB_PATH = Path("/var/lib/bindguard/bindguard.db")
@@ -746,6 +746,8 @@ def main(argv: list[str] | None = None) -> int:
     cache_dep.set_defaults(func=lambda args: print(dns_cache.deploy_cache_options()))
     cache_flush = sub.add_parser("cache-flush")
     cache_flush.set_defaults(func=lambda args: print(dns_cache.process_pending_flush()))
+    encryption_dep = sub.add_parser("encryption-deploy")
+    encryption_dep.set_defaults(func=lambda args: print(encryption.deploy_encryption()))
     local_host = sub.add_parser("local-dns-add-host")
     local_host.add_argument("hostname")
     local_host.add_argument("domain")
