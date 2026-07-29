@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 import warnings
+from contextlib import closing
 from pathlib import Path
 from unittest import mock
 
@@ -73,7 +74,7 @@ class BackupTestBase(unittest.TestCase):
         backup.SUDOERS_FILE.write_text("bindguard ALL=(root) NOPASSWD: /opt/bindguard/app/bindguard_compiler.py deploy\n")
 
         backup.init_db()
-        with backup.connect() as conn:
+        with closing(backup.connect()) as conn:
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS sources (id INTEGER PRIMARY KEY, name TEXT);
@@ -154,11 +155,11 @@ class ManifestAndComponentsTest(BackupTestBase):
         self.assertTrue(version.startswith("unreleased+git.") or version.startswith("released+git."))
 
     def test_database_schema_version_stable_and_changes_with_schema(self) -> None:
-        with backup.connect() as conn:
+        with closing(backup.connect()) as conn:
             v1 = backup.database_schema_version(conn)
             v1_again = backup.database_schema_version(conn)
         self.assertEqual(v1, v1_again)
-        with backup.connect() as conn:
+        with closing(backup.connect()) as conn:
             conn.execute("CREATE TABLE extra_test_table (id INTEGER PRIMARY KEY)")
             conn.commit()
             v2 = backup.database_schema_version(conn)
@@ -288,7 +289,7 @@ class PreviewTest(BackupTestBase):
     def test_preview_restore_reports_table_and_file_diffs(self) -> None:
         with mock.patch.object(backup, "run", self.fake_run):
             path = backup.create_backup(backup.validate_components(None))
-        with backup.connect() as conn:
+        with closing(backup.connect()) as conn:
             conn.execute("INSERT INTO custom_rules(domain) VALUES ('new-since-backup.example')")
             conn.commit()
         backup.DNSDIST_CONF.write_text("setLocal('127.0.0.1:53') -- changed\n")
@@ -305,11 +306,11 @@ class PreviewTest(BackupTestBase):
         with mock.patch.object(backup, "run", self.fake_run):
             path = backup.create_backup(backup.validate_components(None))
         original = backup.DNSDIST_CONF.read_text()
-        with backup.connect() as conn:
+        with closing(backup.connect()) as conn:
             before = conn.execute("SELECT count(*) FROM custom_rules").fetchone()[0]
         backup.preview_restore(path, None)
         self.assertEqual(backup.DNSDIST_CONF.read_text(), original)
-        with backup.connect() as conn:
+        with closing(backup.connect()) as conn:
             after = conn.execute("SELECT count(*) FROM custom_rules").fetchone()[0]
         self.assertEqual(before, after)
 
@@ -354,14 +355,14 @@ class RestoreTest(BackupTestBase):
 
     def test_restore_backup_applies_selected_table_only(self) -> None:
         path = self._make_backup()
-        with backup.connect() as conn:
+        with closing(backup.connect()) as conn:
             conn.execute("INSERT INTO custom_rules(domain) VALUES ('added-after-backup.example')")
             conn.execute("INSERT INTO dns_cache_settings(key, value) VALUES ('unrelated_key', 'unrelated_value')")
             conn.commit()
         with mock.patch.object(backup, "run", self.fake_run), mock.patch.object(backup, "resolves", return_value=True), \
                 mock.patch.object(backup, "_wait_active", return_value=True):
             backup.restore_backup(path, None, {key: False for key in backup.COMPONENT_KEYS} | {"sqlite_data": False, "custom_rules": True})
-        with backup.connect() as conn:
+        with closing(backup.connect()) as conn:
             rules = conn.execute("SELECT count(*) FROM custom_rules").fetchone()[0]
             # custom_rules restored to the 1-row state captured at backup time
             self.assertEqual(rules, 1)
@@ -371,13 +372,13 @@ class RestoreTest(BackupTestBase):
 
     def test_restore_backup_full_sqlite_data_merges_unmapped_tables(self) -> None:
         path = self._make_backup()
-        with backup.connect() as conn:
+        with closing(backup.connect()) as conn:
             conn.execute("INSERT INTO dns_cache_settings(key, value) VALUES ('unrelated_key', 'unrelated_value')")
             conn.commit()
         with mock.patch.object(backup, "run", self.fake_run), mock.patch.object(backup, "resolves", return_value=True), \
                 mock.patch.object(backup, "_wait_active", return_value=True):
             backup.restore_backup(path, None, dict.fromkeys(backup.COMPONENT_KEYS, True))
-        with backup.connect() as conn:
+        with closing(backup.connect()) as conn:
             unrelated = conn.execute("SELECT count(*) FROM dns_cache_settings WHERE key='unrelated_key'").fetchone()[0]
             self.assertEqual(unrelated, 0)
 
@@ -445,7 +446,7 @@ class RequestResponseTest(BackupTestBase):
         with mock.patch.object(backup, "run", self.fake_run):
             result = backup.process_pending_request("create")
         self.assertEqual(result["status"], "done")
-        with backup.connect() as conn:
+        with closing(backup.connect()) as conn:
             statuses = [row["status"] for row in conn.execute("SELECT status FROM backup_requests ORDER BY id")]
         self.assertEqual(statuses, ["skipped", "done"])
 
