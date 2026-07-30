@@ -3,19 +3,19 @@ set -e
 
 case "$1" in
   configure)
-    if ! getent group bindguard >/dev/null; then
-      addgroup --system bindguard
+    if ! getent group alderpointdns >/dev/null; then
+      addgroup --system alderpointdns
     fi
-    if ! id bindguard >/dev/null 2>&1; then
-      adduser --system --home /var/lib/alderpointdns --no-create-home --ingroup bindguard --disabled-login bindguard
+    if ! id alderpointdns >/dev/null 2>&1; then
+      adduser --system --home /var/lib/alderpointdns --no-create-home --ingroup alderpointdns --disabled-login alderpointdns
     fi
-    install -d -o bindguard -g bindguard -m 0750 /var/lib/alderpointdns /var/lib/alderpointdns/backups /var/lib/alderpointdns/compiled /var/lib/alderpointdns/imports /var/lib/alderpointdns/staging
-    install -d -o bindguard -g bindguard -m 0755 /var/log/alderpointdns
-    install -d -o root -g bindguard -m 0750 /etc/alderpointdns /etc/alderpointdns/certs
+    install -d -o alderpointdns -g alderpointdns -m 0750 /var/lib/alderpointdns /var/lib/alderpointdns/backups /var/lib/alderpointdns/compiled /var/lib/alderpointdns/imports /var/lib/alderpointdns/staging
+    install -d -o alderpointdns -g alderpointdns -m 0755 /var/log/alderpointdns
+    install -d -o root -g alderpointdns -m 0750 /etc/alderpointdns /etc/alderpointdns/certs
     if [ ! -e /etc/alderpointdns/secrets.env ]; then
       umask 077
       printf 'ALDERPOINTDNS_SESSION_SECRET=%s\n' "$(openssl rand -base64 48)" > /etc/alderpointdns/secrets.env
-      chown root:bindguard /etc/alderpointdns/secrets.env
+      chown root:alderpointdns /etc/alderpointdns/secrets.env
     fi
     PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/analytics.py init-db || true
     systemctl daemon-reload >/dev/null 2>&1 || true
