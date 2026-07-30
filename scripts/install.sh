@@ -164,18 +164,24 @@ generate_secrets() {
   dnsdist_api="$(root_path /etc/alderpointdns/dnsdist-api.key)"
   dnsdist_web="$(root_path /etc/alderpointdns/dnsdist-web.creds)"
   if [ "$DRY_RUN" -eq 0 ]; then
-    [ -e "$secrets_env" ] || {
+    # Each block runs in a subshell: `umask` has no block scope in POSIX
+    # sh (a bare `{ ...; }` group does not fork one), and initialize()
+    # runs right after this function in the same shell -- its deploy step
+    # creates compiled zone/config files that named/dnsdist must be able
+    # to read, which must not inherit a leftover 077 meant only for these
+    # three secrets.
+    [ -e "$secrets_env" ] || (
       umask 077
       printf 'ALDERPOINTDNS_SESSION_SECRET=%s\n' "$(openssl rand -base64 48)" > "$secrets_env"
-    }
-    [ -e "$dnsdist_api" ] || {
+    )
+    [ -e "$dnsdist_api" ] || (
       umask 077
       openssl rand -base64 32 > "$dnsdist_api"
-    }
-    [ -e "$dnsdist_web" ] || {
+    )
+    [ -e "$dnsdist_web" ] || (
       umask 077
       printf 'alderpointdns:%s\n' "$(openssl rand -base64 24)" > "$dnsdist_web"
-    }
+    )
   else
     echo "+ generate session, dnsdist API, and dnsdist web credentials"
   fi

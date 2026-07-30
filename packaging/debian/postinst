@@ -31,8 +31,14 @@ case "$1" in
     # by default in packaging/dnsdist.service.d/alderpointdns.conf) starts.
     /opt/alderpointdns/scripts/ensure_tls_cert.sh
     if [ ! -e /etc/alderpointdns/secrets.env ]; then
-      umask 077
-      printf 'ALDERPOINTDNS_SESSION_SECRET=%s\n' "$(openssl rand -base64 48)" > /etc/alderpointdns/secrets.env
+      # Subshell: `umask` is a whole-process setting with no block scope in
+      # POSIX sh, and everything alderpointdns_compiler.py's deploy step
+      # creates below (compiled zone/config files named needs to read) must
+      # not inherit this restrictive 077 meant only for the secret itself.
+      (
+        umask 077
+        printf 'ALDERPOINTDNS_SESSION_SECRET=%s\n' "$(openssl rand -base64 48)" > /etc/alderpointdns/secrets.env
+      )
       chown root:alderpointdns /etc/alderpointdns/secrets.env
     fi
     # Base BIND/dnsdist configuration that `include`s the generated files
