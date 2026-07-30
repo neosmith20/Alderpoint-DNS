@@ -127,4 +127,4 @@ follows the `CODE_OF_CONDUCT.md`.
 
 ## License
 
-Alderpoint DNS is released under the MIT License — see `LICENSE`.
+A license has not yet been finalized for Alderpoint DNS.
