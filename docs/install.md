@@ -1,9 +1,12 @@
 # Install
 
-Alderpoint DNS supports installation from a reviewed local source tree on a fresh
-Debian-based server. Do not pipe an unreviewed remote script directly into a
-root shell; download a release artifact, verify its checksum/signature when
-published, inspect `scripts/install.sh`, then run it locally.
+Alderpoint DNS is currently beta software (v0.4.0-beta.2); see
+`docs/known-limitations.md` and `docs/beta-readiness.md` before deploying it
+anywhere you rely on. Alderpoint DNS supports installation from a reviewed
+local source tree on a fresh Debian-based server. Do not pipe an unreviewed
+remote script directly into a root shell; download a release artifact,
+verify its checksum/signature when published, inspect `scripts/install.sh`,
+then run it locally.
 
 Supported operating systems for this installer:
 
