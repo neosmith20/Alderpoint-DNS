@@ -593,5 +593,126 @@ class DeployTests(CustomRulesTestBase):
         self.assertEqual(row["active_domains"], 1)
 
 
+class WebRouteTests(CustomRulesTestBase):
+    def setUp(self) -> None:
+        super().setUp()
+        from fastapi.testclient import TestClient  # noqa: PLC0415
+
+        from app import replication, webapp  # noqa: PLC0415
+
+        self.webapp = webapp
+        self.old["w_DB_PATH"] = webapp.DB_PATH
+        webapp.DB_PATH = custom_rules.DB_PATH
+        compiler.init_db()
+        with self.connect() as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS admins (id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at TEXT NOT NULL)"
+            )
+            conn.execute("INSERT INTO admins(username, password_hash, created_at) VALUES ('admin', 'x', 'now')")
+            conn.commit()
+        from fastapi.templating import Jinja2Templates  # noqa: PLC0415
+
+        self.patches = [
+            mock.patch.object(webapp, "deploy_no_download", lambda: (0, "ok")),
+            mock.patch.object(webapp, "deploy_no_download_or_raise", lambda: None),
+            mock.patch.object(webapp, "global_service_status", lambda: {"label": "Active", "tone": "healthy", "detail": "test"}),
+            mock.patch.object(replication, "autostart", lambda: None),
+            # Render the templates checked out with this code, not the ones
+            # installed at the live /opt/alderpointdns path.
+            mock.patch.object(webapp, "TEMPLATES", Jinja2Templates(directory=str(ROOT / "web" / "templates"))),
+        ]
+        for patcher in self.patches:
+            patcher.start()
+        self.client = TestClient(webapp.app)
+        self.csrf = "test-csrf-token"
+        self.client.cookies.set(
+            "alderpointdns_session",
+            webapp.serializer.dumps({"admin_id": 1, "admin": "admin", "csrf": self.csrf}),
+        )
+
+    def tearDown(self) -> None:
+        for patcher in reversed(self.patches):
+            patcher.stop()
+        self.webapp.DB_PATH = self.old.pop("w_DB_PATH")
+        super().tearDown()
+
+    def test_page_renders_with_counts_filters_and_rules(self) -> None:
+        custom_rules.add_rule("||page.example^", comment="page test")
+        custom_rules.add_rule("||narrowed.example^$client=10.0.0.4")
+        response = self.client.get("/custom-rules")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("||page.example^", response.text)
+        self.assertIn("Unsupported", response.text)
+        self.assertIn("Test a Domain", response.text)
+        filtered = self.client.get("/custom-rules?status=unsupported")
+        self.assertNotIn("||page.example^", filtered.text)
+        self.assertIn("narrowed.example", filtered.text)
+
+    def test_add_bulk_test_and_selected_routes(self) -> None:
+        response = self.client.post(
+            "/custom-rules/add",
+            data={"rule_text": "||web-add.example^", "comment": "", "csrf": self.csrf},
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 303)
+        response = self.client.post(
+            "/custom-rules/bulk",
+            data={"rules_text": "||web-bulk.example^\nnot ~~ valid", "csrf": self.csrf},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Added 1 active rule(s)", response.text)
+        response = self.client.post(
+            "/custom-rules/test",
+            data={"domain": "sub.web-add.example", "csrf": self.csrf},
+        )
+        self.assertIn("Blocked", response.text)
+        ids = [str(row["id"]) for row in custom_rules.list_rules(status="enabled")]
+        response = self.client.post(
+            "/custom-rules/selected",
+            data={"op": "disable", "ids": ids, "csrf": self.csrf},
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(custom_rules.rule_counts()["active"], 0)
+        response = self.client.post(
+            "/custom-rules/selected",
+            data={"op": "delete", "ids": ids, "csrf": self.csrf},
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 303)
+
+    def test_edit_toggle_delete_and_query_log_add(self) -> None:
+        rule_id = custom_rules.add_rule("||web-edit.example^")[0]["id"]
+        response = self.client.post(
+            f"/custom-rules/{rule_id}/edit",
+            data={"rule_text": "@@||web-edited.example^", "comment": "c", "enabled": "1", "csrf": self.csrf},
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(custom_rules.get_rule(rule_id)["rule_type"], "allow")
+        self.client.post(f"/custom-rules/{rule_id}/toggle", data={"csrf": self.csrf}, follow_redirects=False)
+        self.assertEqual(custom_rules.get_rule(rule_id)["enabled"], 0)
+        self.client.post(f"/custom-rules/{rule_id}/delete", data={"csrf": self.csrf}, follow_redirects=False)
+        self.assertIsNone(custom_rules.get_rule(rule_id))
+        response = self.client.post(
+            "/custom-rules/add-from-query",
+            data={"action": "block", "domain": "querylog.example", "csrf": self.csrf},
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["location"], "/query-log")
+        rows = custom_rules.list_rules(search="querylog.example")
+        self.assertEqual(rows[0]["rule_text"], "||querylog.example^")
+        self.assertEqual(rows[0]["comment"], "created from query log")
+
+    def test_csrf_required(self) -> None:
+        response = self.client.post(
+            "/custom-rules/add",
+            data={"rule_text": "||nocsrf.example^", "csrf": "wrong"},
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 403)
+
+
 if __name__ == "__main__":
     unittest.main()

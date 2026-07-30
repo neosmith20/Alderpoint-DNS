@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
-from app import analytics, backup, dns_cache, encryption, importer, local_dns, replication, upstream_dns
+from app import analytics, backup, custom_rules as custom_rules_model, dns_cache, encryption, importer, local_dns, replication, upstream_dns
 from app import blocklist_categories
 from app import service_logs
 from app.alderpointdns_compiler import DB_PATH, add_source, init_db, normalize_domain
@@ -247,7 +247,7 @@ def system_health(bind_state: str | None = None, dnsdist_state: str | None = Non
 def compiler_status() -> dict[str, Any]:
     with db() as conn:
         sources = conn.execute("SELECT * FROM sources ORDER BY id").fetchall()
-        rules = conn.execute("SELECT * FROM custom_rules ORDER BY id DESC").fetchall()
+        rules = conn.execute("SELECT * FROM custom_filter_rules ORDER BY id DESC").fetchall()
         deployment = conn.execute("SELECT * FROM deployments ORDER BY id DESC LIMIT 1").fetchone()
     return {"sources": sources, "rules": rules, "deployment": deployment}
 
@@ -530,6 +530,10 @@ def protection_toggle(request: Request, csrf: str = Form(...), _: sqlite3.Row = 
     with db() as conn:
         conn.execute("UPDATE sources SET enabled=?", (1 if enable else 0,))
         conn.execute("UPDATE custom_rules SET enabled=?", (1 if enable else 0,))
+        if enable:
+            conn.execute("UPDATE custom_filter_rules SET enabled=1 WHERE validation_state='valid'")
+        else:
+            conn.execute("UPDATE custom_filter_rules SET enabled=0")
     deploy_no_download()
     return redirect("/")
 
@@ -789,26 +793,100 @@ def deploy(request: Request, csrf: str = Form(...), _: sqlite3.Row = Depends(cur
     return redirect("/")
 
 
+def custom_rules_context(request: Request, **extra: Any) -> dict[str, Any]:
+    search = request.query_params.get("search", "").strip()
+    type_filter = request.query_params.get("type", "")
+    status_filter = request.query_params.get("status", "")
+    context: dict[str, Any] = {
+        "rules": custom_rules_model.list_rules(search=search, rule_type=type_filter, status=status_filter),
+        "counts": custom_rules_model.rule_counts(),
+        "search": search,
+        "type_filter": type_filter,
+        "status_filter": status_filter,
+        "error": None,
+        "notice": None,
+        "bulk_results": None,
+        "test_result": None,
+        "test_domain": "",
+    }
+    context.update(extra)
+    return context
+
+
+def custom_rules_error(request: Request, message: str, status_code: int = 400) -> HTMLResponse:
+    return render(request, "custom_rules.html", **custom_rules_context(request, error=message), status_code=status_code)
+
+
 @app.get("/custom-rules", response_class=HTMLResponse)
 def custom_rules(request: Request, _: sqlite3.Row = Depends(current_admin)):
-    return render(request, "custom_rules.html", rules=compiler_status()["rules"])
+    return render(request, "custom_rules.html", **custom_rules_context(request))
 
 
 @app.post("/custom-rules/add")
-def custom_add(request: Request, action: str = Form(...), domain: str = Form(...), comment: str = Form(""), csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+def custom_add(request: Request, rule_text: str = Form(...), comment: str = Form(""), csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
     check_csrf(request, csrf)
-    normalized = normalize_domain(domain)
-    if not normalized or action not in {"allow", "block"}:
-        raise HTTPException(status_code=400, detail="invalid custom rule")
+    try:
+        results = custom_rules_model.add_rule(rule_text, source_system="manual", comment=comment)
+        if not results:
+            return custom_rules_error(request, "Enter a rule to add.")
+        stored_inactive = [r for r in results if r["validation_state"] != "valid"]
+        active_added = [r for r in results if r["status"] == "added" and r["validation_state"] == "valid" and r["rule_type"] != "comment"]
+        if active_added:
+            deploy_no_download_or_raise()
+        if stored_inactive:
+            reasons = "; ".join(f"{r['rule_text']}: {r['reason']}" for r in stored_inactive)
+            return render(
+                request,
+                "custom_rules.html",
+                **custom_rules_context(request, notice=f"Rule saved but kept inactive ({stored_inactive[0]['validation_state']}): {reasons}"),
+            )
+        if all(r["status"] == "duplicate" for r in results):
+            return custom_rules_error(request, "An identical rule already exists.")
+    except Exception as exc:
+        return custom_rules_error(request, str(exc))
+    return redirect("/custom-rules")
+
+
+@app.post("/custom-rules/bulk")
+def custom_bulk_add(request: Request, rules_text: str = Form(...), csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    try:
+        summary = custom_rules_model.add_rules_bulk(rules_text, source_system="manual")
+        if summary["added_active"]:
+            deploy_no_download_or_raise()
+    except Exception as exc:
+        return custom_rules_error(request, str(exc))
+    return render(request, "custom_rules.html", **custom_rules_context(request, bulk_results=summary))
+
+
+@app.post("/custom-rules/test")
+def custom_test(request: Request, domain: str = Form(...), csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
     with db() as conn:
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO custom_rules(domain, action, enabled, comment, created_at)
-            VALUES (?, ?, 1, ?, ?)
-            """,
-            (normalized, action, comment, utc_now()),
-        )
-    deploy_no_download()
+        result = custom_rules_model.evaluate_domain(conn, domain)
+        conn.commit()
+    return render(request, "custom_rules.html", **custom_rules_context(request, test_result=result, test_domain=domain))
+
+
+@app.post("/custom-rules/selected")
+def custom_selected(request: Request, op: str = Form(...), ids: list[int] = Form([]), csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    if not ids:
+        return custom_rules_error(request, "Select at least one rule first.")
+    try:
+        if op == "enable":
+            custom_rules_model.bulk_set_enabled(ids, True)
+        elif op == "disable":
+            custom_rules_model.bulk_set_enabled(ids, False)
+        elif op == "delete":
+            custom_rules_model.bulk_delete(ids)
+        else:
+            raise HTTPException(status_code=400, detail="unknown bulk operation")
+        deploy_no_download_or_raise()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        return custom_rules_error(request, str(exc))
     return redirect("/custom-rules")
 
 
@@ -824,33 +902,50 @@ def custom_add_from_query(
     normalized = normalize_domain(domain)
     if not normalized or action not in {"allow", "block"}:
         raise HTTPException(status_code=400, detail="invalid custom rule")
-    with db() as conn:
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO custom_rules(domain, action, enabled, comment, created_at)
-            VALUES (?, ?, 1, ?, ?)
-            """,
-            (normalized, action, "created from query log", utc_now()),
-        )
+    text = ("@@||" if action == "allow" else "||") + normalized + "^"
+    custom_rules_model.add_rule(text, source_system="manual", comment="created from query log")
     deploy_no_download()
     return redirect("/query-log")
+
+
+@app.post("/custom-rules/{rule_id}/edit")
+def custom_edit(
+    request: Request,
+    rule_id: int,
+    rule_text: str = Form(...),
+    comment: str = Form(""),
+    enabled: str = Form("0"),
+    csrf: str = Form(...),
+    _: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    try:
+        custom_rules_model.update_rule(rule_id, rule_text, comment, enabled == "1")
+        deploy_no_download_or_raise()
+    except Exception as exc:
+        return custom_rules_error(request, str(exc))
+    return redirect("/custom-rules")
 
 
 @app.post("/custom-rules/{rule_id}/toggle")
 def custom_toggle(request: Request, rule_id: int, csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
     check_csrf(request, csrf)
-    with db() as conn:
-        conn.execute("UPDATE custom_rules SET enabled=CASE enabled WHEN 1 THEN 0 ELSE 1 END WHERE id=?", (rule_id,))
-    deploy_no_download()
+    try:
+        custom_rules_model.toggle_rule(rule_id)
+        deploy_no_download_or_raise()
+    except Exception as exc:
+        return custom_rules_error(request, str(exc))
     return redirect("/custom-rules")
 
 
 @app.post("/custom-rules/{rule_id}/delete")
 def custom_delete(request: Request, rule_id: int, csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
     check_csrf(request, csrf)
-    with db() as conn:
-        conn.execute("DELETE FROM custom_rules WHERE id=?", (rule_id,))
-    deploy_no_download()
+    try:
+        custom_rules_model.delete_rule(rule_id)
+        deploy_no_download_or_raise()
+    except Exception as exc:
+        return custom_rules_error(request, str(exc))
     return redirect("/custom-rules")
 
 

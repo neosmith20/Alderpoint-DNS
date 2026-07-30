@@ -198,6 +198,23 @@
     toggle.textContent = open ? 'Close' : 'Edit';
   });
 
+  // Button-level confirmation for forms with several submit actions where
+  // only one is destructive (Filters bulk actions, etc).
+  document.addEventListener('click', (event) => {
+    const button = event.target.closest('button[data-confirm]');
+    if (!button) return;
+    if (!window.confirm(button.dataset.confirm)) event.preventDefault();
+  });
+
+  // Header select-all checkbox for bulk-selection tables (Filters, etc).
+  document.addEventListener('change', (event) => {
+    const master = event.target.closest('input[type="checkbox"][data-check-all]');
+    if (!master) return;
+    document
+      .querySelectorAll(`input[type="checkbox"][data-check-group="${master.dataset.checkAll}"]`)
+      .forEach((box) => { box.checked = master.checked; });
+  });
+
   // Compact overflow action menus (DNS Settings, Blocklists, etc).
   function closeOverflowMenus(except) {
     document.querySelectorAll('[data-overflow-menu]').forEach((menu) => {
