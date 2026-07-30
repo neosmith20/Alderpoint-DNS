@@ -12,6 +12,7 @@ echo "== checking for stale BindGuard-era references outside historical files ==
 STALE="$(grep -rlI "bindguard\|BindGuard\|BINDGUARD" "$ROOT_DIR" \
   --exclude-dir=.git --exclude-dir=__pycache__ --exclude-dir=audit \
   --exclude=AGENT_PROGRESS.md --exclude=CHANGELOG.md --exclude=bindguard-handoff.md \
+  --exclude=POST_REBOOT_HANDOFF.md \
   --exclude-dir=progress.md 2>/dev/null | grep -v '/docs/progress\.md$' || true)"
 # Files that intentionally still say "bindguard": the preserved Linux
 # system user/group, deprecated compatibility wrappers/docs, and this
