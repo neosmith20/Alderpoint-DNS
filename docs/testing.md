@@ -18,6 +18,7 @@ Run individual suites:
 /opt/alderpointdns/tests/test_web_smoke.sh
 /opt/alderpointdns/tests/test_encryption_layout.sh
 /opt/alderpointdns/tests/test_backup_restore.sh
+/opt/alderpointdns/tests/test_release_hygiene.sh
 ```
 
 `tests/test_backup_restore.sh` (script-based, exercises `scripts/backup.sh`/
@@ -144,11 +145,11 @@ manifest/checksum generation, dry-run restore preview never touching live
 state, all restore code paths (component-scoped, full-database merge,
 rollback-on-forced-failure, rollback-on-failed-health-check), retention
 pruning, and the unprivileged-request/privileged-apply handoff pattern
-including one-time password-file consumption. Live end-to-end verification
-on this VM (create a real backup, mutate a real custom rule, restore,
-confirm reversion, confirm file ownership, confirm DNS resolved throughout)
-caught and fixed two real bugs in file-ownership handling during restore —
-see `docs/progress.md`'s Backup and Restore milestone for detail.
+including one-time password-file consumption. End-to-end verification
+(create a real backup, mutate a real custom rule, restore, confirm
+reversion, confirm file ownership, confirm DNS resolved throughout) caught
+and fixed two real bugs in file-ownership handling during restore — see
+`docs/progress.md`'s "Backup and restore" section for detail.
 
 The installation, upgrade, diagnostics, and packaging suite
 (`tests/test_install_upgrade_diagnostics.sh`) runs the installer in dry-run
@@ -159,19 +160,13 @@ excerpts, checks that the bundle contains schema/summary metadata without
 secret-like content, and builds/inspects a local test `.deb` with
 `scripts/build-deb.sh`.
 
-The rename/migration suite (`tests/test_rename_migration.sh`) guards the
-BindGuard -> Alderpoint DNS rename: it greps the tree for stale product-name
-references outside the historical/compatibility allowlist, then runs
-`scripts/upgrade.sh` against a synthetic legacy BindGuard installation layout
-(`/opt/bindguard`, `/etc/bindguard`, `/var/lib/bindguard/bindguard.db`,
-`/var/lib/bindguard/compiled/bind/bindguard.rpz`, `/var/log/bindguard`) inside
-an isolated `ALDERPOINTDNS_INSTALL_ROOT` and asserts the legacy layout is
-detected, migrated (not treated as a fresh install), and ends up fully
-Alderpoint DNS-branded. `tests/test_backup.py`'s
-`test_preview_restore_reads_legacy_bindguard_archive` and
-`test_restore_backup_merges_legacy_bindguard_archive` cover the complementary
-case: restoring a backup archive that was created before the rename. See
-`docs/compatibility.md` and `docs/migrating-from-bindguard.md`.
+The release hygiene suite (`tests/test_release_hygiene.sh`) is a permanent
+gate run as part of release verification. It scans tracked files and
+filenames for stale references matching a prohibited-name pattern, supplied
+via the `PROHIBITED_NAME_PATTERN` environment variable, and fails if any
+tracked file's contents or filename matches. This guards against
+accidentally reintroducing deprecated naming, internal identifiers, or other
+prohibited strings into a release.
 
 The Replication suite (`tests/test_replication.py`) covers payload allowlist
 exclusion, replica rollback when deploy fails, successful replacement of
