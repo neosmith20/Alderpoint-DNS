@@ -1,0 +1,198 @@
+{% extends "base.html" %}
+{% import "components.html" as ui %}
+{% block content %}
+{% set total = analytics.totals.total_queries %}
+{% set blocked = analytics.totals.blocked_queries %}
+{% set allowed = analytics.totals.allowed_queries %}
+{% set range_labels = {"1h": "Last hour", "24h": "Last 24 hours", "7d": "Last 7 days", "30d": "Last 30 days"} %}
+{{ ui.page_header(
+  "Dashboard",
+  "Live DNS filtering analytics from local Alderpoint DNS telemetry.",
+  '<span class="status-badge status-badge--' ~ protection.tone ~ '">Protection ' ~ protection.label ~ '</span>'
+) }}
+
+<section class="panel stack" data-current-range="{{ analytics.range }}">
+  <div class="panel__head">
+    <div>
+      <h2>Protection Control</h2>
+      <p class="muted">Last refresh {{ last_refresh }}. Auto-refresh follows the browser session.</p>
+    </div>
+    <div class="actions">
+      <form method="post" action="/protection/toggle" data-confirm="Change protection state and deploy the policy?">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="{{ 'danger' if protection.label == 'Active' else '' }}">{{ "Disable protection" if protection.label == "Active" else "Enable protection" }}</button>
+      </form>
+      <a class="button secondary" href="/?range={{ analytics.range }}">Refresh</a>
+    </div>
+  </div>
+  <div class="toolbar">
+    <nav class="segment-control" aria-label="Dashboard time range">
+      {% for key, label in range_labels.items() %}
+        <a data-range-link="{{ key }}" href="/?range={{ key }}" aria-current="{{ 'true' if analytics.range == key else 'false' }}">{{ label }}</a>
+      {% endfor %}
+    </nav>
+    <label class="row"><input type="checkbox" id="autoRefresh"> Auto-refresh</label>
+  </div>
+</section>
+
+<section class="metric-grid" aria-label="Primary DNS metrics">
+  {{ ui.metric_card("DNS queries", total, "", "Total queries in " ~ range_labels.get(analytics.range, "selected range"), "accent", analytics.buckets|map(attribute="total_queries")|list|tojson) }}
+  {{ ui.metric_card("Blocked queries", blocked, "", "Requests blocked or rewritten by active policy", "blocked", analytics.buckets|map(attribute="blocked_queries")|list|tojson) }}
+  {{ ui.metric_card("Percentage blocked", "%.1f"|format(analytics.totals.blocked_percent), "%", "Share of total queries blocked by policy", "blocked", analytics.buckets|map(attribute="blocked_queries")|list|tojson) }}
+  {{ ui.metric_card("Active clients", analytics.active_clients, "", "Unique clients seen in retained detailed telemetry", "success", analytics.buckets|map(attribute="total_queries")|list|tojson) }}
+  {{ ui.metric_card("Average response time", "%.1f"|format(analytics.totals.avg_latency_ms), "ms", "Average processing time when dnsdist latency is available", "accent", analytics.buckets|map(attribute="latency_count")|list|tojson) }}
+  {{ ui.metric_card("Active filtering rules", active_rules, "", "Currently deployed active filtering domains", "warning", "[" ~ active_rules ~ "]") }}
+</section>
+
+<section class="dashboard-grid">
+  <article class="panel chart-panel">
+    <div class="panel__head">
+      <div>
+        <h2>DNS Query Volume</h2>
+        <p class="muted">Total and blocked DNS queries from stored analytics buckets.</p>
+      </div>
+      <div class="legend" aria-hidden="true"><span>Total</span><span class="blocked">Blocked</span><span class="allowed">Allowed</span></div>
+    </div>
+    <div class="chart-wrap">
+      {% if analytics.has_data %}
+        <p class="chart-summary">Traffic chart for {{ range_labels.get(analytics.range, "selected range") }}: {{ total }} total queries and {{ blocked }} blocked queries.</p>
+        <canvas id="queryChart" data-chart="traffic" data-enabled-series="total,blocked,allowed" data-series='{{ chart_json }}' aria-label="DNS query volume chart" role="img"></canvas>
+      {% else %}
+        {{ ui.empty_state("No analytics data yet", "The collector will populate this chart after DNS traffic is observed.") }}
+      {% endif %}
+    </div>
+  </article>
+
+  <article class="panel">
+    <div class="panel__head"><h2>Query Outcomes</h2></div>
+    <div class="breakdown">
+      {% set allowed_percent = (allowed / total * 100) if total else 0 %}
+      {% set blocked_percent = (blocked / total * 100) if total else 0 %}
+      <div class="bar-row">
+        <div class="bar-row__head"><span class="bar-row__label">Allowed</span><span class="bar-row__value">{{ allowed }}{% if total %} / {{ "%.1f"|format(allowed_percent) }}%{% endif %}</span></div>
+        <span class="meter"><span style="width: {{ "%.1f"|format(allowed_percent if allowed_percent <= 100 else 100) }}%"></span></span>
+      </div>
+      <div class="bar-row">
+        <div class="bar-row__head"><span class="bar-row__label">Blocked</span><span class="bar-row__value">{{ blocked }}{% if total %} / {{ "%.1f"|format(blocked_percent) }}%{% endif %}</span></div>
+        <span class="meter blocked"><span style="width: {{ "%.1f"|format(blocked_percent if blocked_percent <= 100 else 100) }}%"></span></span>
+      </div>
+      {% if category_breakdown %}
+        {% for row in category_breakdown %}
+          {% set category_percent = (row.value / blocked * 100) if blocked else 0 %}
+          <div class="bar-row">
+            <div class="bar-row__head"><span class="bar-row__label" title="{{ row.label }}">{{ row.label }}</span><span class="bar-row__value">{{ row.value }}{% if blocked %} / {{ "%.1f"|format(category_percent) }}%{% endif %}</span></div>
+            <span class="meter {{ 'warning' if 'malware' in row.label|lower else 'adult' if 'adult' in row.label|lower else 'blocked' }}"><span style="width: {{ "%.1f"|format(category_percent if category_percent <= 100 else 100) }}%"></span></span>
+          </div>
+        {% endfor %}
+      {% else %}
+        {{ ui.empty_state("Policy categories unavailable", "Blocked category values appear here when recorded by source metadata.") }}
+      {% endif %}
+    </div>
+  </article>
+</section>
+
+<section class="grid wide" aria-label="Ranked analytics panels">
+  {{ ui.ranked_list("Top Clients", analytics.top_clients, total, "/query-log") }}
+  {{ ui.ranked_list("Top Queried Domains", analytics.top_domains, total, "/query-log") }}
+  {{ ui.ranked_list("Top Blocked Domains", analytics.top_blocked, blocked, "/query-log?blocked=1") }}
+  {{ ui.ranked_list("Query Types", analytics.qtypes, total, "/query-log") }}
+  {{ ui.ranked_list("Response Codes", analytics.rcodes, total, "/query-log") }}
+  {{ ui.ranked_list("Protocol Usage", analytics.protocols, total, "/query-log") }}
+  <article class="panel">
+    <div class="panel__head"><h2>BIND Cache Effectiveness</h2><a href="/dns-cache">Manage</a></div>
+    {% if cache_stats.available %}
+      <div class="ranked-list">
+        <div class="ranked-row">
+          <div class="ranked-row__top"><span class="ranked-row__label">Hit rate</span><span class="ranked-row__value">{{ "%.1f"|format(cache_stats.hit_percent) }}%</span></div>
+          <div class="ranked-row__meta"><span class="meter"><span style="width: {{ '%.1f'|format(cache_stats.hit_percent if cache_stats.hit_percent <= 100 else 100) }}%"></span></span></div>
+        </div>
+        <div class="ranked-row"><div class="ranked-row__top"><span class="ranked-row__label">Hits / misses</span><span class="ranked-row__value">{{ cache_stats.hits }} / {{ cache_stats.misses }}</span></div></div>
+        <div class="ranked-row"><div class="ranked-row__top"><span class="ranked-row__label">Cache memory</span><span class="ranked-row__value">{{ "%.1f"|format(cache_stats.memory_bytes / 1048576) }} MB</span></div></div>
+      </div>
+    {% else %}
+      {{ ui.empty_state("Unavailable", cache_stats.error or "BIND's statistics channel did not respond.") }}
+    {% endif %}
+  </article>
+  <article class="panel">
+    <div class="panel__head"><h2>Top Upstream Resolvers</h2><a href="/dns-settings">Manage</a></div>
+    {% if analytics.top_upstreams %}
+      <div class="ranked-list">
+        {% set upstream_total = analytics.top_upstreams|sum(attribute="value") %}
+        {% for row in analytics.top_upstreams %}
+          {% set success_percent = (row.successful_responses / row.value * 100) if row.value else 0 %}
+          {% set tone = "healthy" if row.health_state == "up" and row.failures == 0 else "degraded" if row.health_state == "up" else "down" %}
+          <div class="ranked-row">
+            <div class="ranked-row__top">
+              <span class="ranked-row__label mono" title="{{ row.endpoint }}">{{ row.label }}</span>
+              <span class="ranked-row__value">{{ row.value }}</span>
+            </div>
+            <div class="ranked-row__meta">
+              <span>{{ row.protocol }}</span>
+              {{ ui.status_badge(row.health_state|title, tone) }}
+              <span>{{ row.successful_responses }} ok</span>
+              {% if row.failures %}<span>{{ row.failures }} failed</span>{% endif %}
+              {% if row.timeouts %}<span>{{ row.timeouts }} timed out</span>{% endif %}
+              <span>{{ "%.1f ms"|format(row.avg_latency_ms) if row.avg_latency_ms is not none else "latency n/a" }}</span>
+            </div>
+            <div class="ranked-row__meta">
+              <span class="meter"><span style="width: {{ "%.1f"|format(success_percent if success_percent <= 100 else 100) }}%"></span></span>
+              <span>{{ "%.1f"|format((row.value / upstream_total * 100) if upstream_total else 0) }}% of upstream attempts</span>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+      <p class="muted">Resolver attribution is based on dnsdist backend counters for BIND's managed upstream pool. Individual client query rows are not labeled with an upstream unless dnsdist exposes that relationship.</p>
+    {% else %}
+      {{ ui.empty_state("No upstream resolver data yet", "Resolver identities are configured; this panel fills after dnsdist reports managed upstream backend counters.") }}
+    {% endif %}
+  </article>
+</section>
+
+<section class="panel">
+  <div class="panel__head">
+    <h2>Recent Activity</h2>
+    <a href="/query-log">View all</a>
+  </div>
+  {% if analytics.recent %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Timestamp</th><th>Client</th><th>Domain</th><th>Type</th><th>Protocol</th><th>Status</th><th>Response time</th></tr></thead>
+        <tbody>
+          {% for row in analytics.recent %}
+            <tr title="{{ row.domain }}">
+              <td class="mono">{{ row.ts }}</td>
+              <td class="mono" title="{{ row.client }}">{{ row.client_display or row.client }}</td>
+              <td class="mono">{{ row.domain }}</td>
+              <td>{{ row.qtype }}</td>
+              <td>{{ row.protocol }}</td>
+              <td>{{ ui.status_badge("Blocked", "blocked") if row.blocked else ui.status_badge(row.rcode, "healthy") }}</td>
+              <td>{{ "%.1f ms"|format(row.latency_ms) if row.latency_ms is not none else "n/a" }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    {{ ui.empty_state("No recent activity", "Detailed query rows will appear here when logging is enabled.") }}
+  {% endif %}
+</section>
+
+<section class="panel">
+  <div class="panel__head">
+    <h2>System Health</h2>
+    <a href="/system">Details</a>
+  </div>
+  <div class="grid health">
+    {% for item in system_health %}
+      <div class="card">
+        <div class="card__head"><h3>{{ item.name }}</h3>{{ ui.status_badge(item.state, item.tone) }}</div>
+      </div>
+    {% endfor %}
+  </div>
+</section>
+
+<form method="post" action="/deploy" class="panel" data-confirm="Update sources, compile policy, and deploy?">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button>Update, Compile, Deploy</button>
+</form>
+{% endblock %}

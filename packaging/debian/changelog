@@ -1,0 +1,39 @@
+alderpointdns (0.4.0~beta2-1) unstable; urgency=medium
+
+  * Established the alderpointdns system account, paths, and environment
+    variables used by the package: package, service, path, and
+    environment-variable names all use alderpointdns/ALDERPOINTDNS_
+    consistently, including the system user/group that the daemons run
+    as and own their data, log, and config directories under.
+  * Fixed a live-database backup race: scripts/backup.sh now takes a
+    SQLite online-backup-API snapshot instead of tarring the live WAL-mode
+    database file directly.
+  * Added a collapsible desktop sidebar with an icon-only rail, flyout
+    submenus, keyboard/focus support, and a localStorage-persisted,
+    flash-free collapsed state; the mobile drawer is unaffected.
+  * Reworked Local DNS records into compact, single-line, truncated rows
+    with a collapsed-by-default row editor, fixing hostnames/comments that
+    previously wrapped mid-word.
+  * Reworked DNS Settings upstream resolver actions into a Save/Enable
+    primary row plus a reorder/delete overflow menu.
+  * Replaced Blocklists' free-text category field with managed categories
+    (create/rename/merge/delete-with-reassignment) and a compact,
+    filterable/sortable source table.
+  * Replaced System Status Recent Logs' raw, permission-denied journalctl
+    output with a narrowly-scoped, sudoers-allowlisted log helper
+    (alderpointdns, alderpointdns-analytics, named, dnsdist only) that
+    returns sanitized, structured log entries with service/severity/line
+    filters.
+  * Fixed Dashboard System Health cards splitting words like "Healthy" and
+    "DNSSEC" mid-character on narrow layouts.
+  * build-deb.sh now derives the Debian package version from VERSION
+    (0.4.0-beta.2 -> 0.4.0~beta2-1) instead of embedding the semver-style
+    string verbatim.
+
+ -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Wed, 29 Jul 2026 21:02:00 -0600
+
+alderpointdns (0.4.0~beta1-1) unstable; urgency=medium
+
+  * Beta packaging scaffold for fresh installation and upgrade testing.
+
+ -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Wed, 29 Jul 2026 16:00:00 -0600

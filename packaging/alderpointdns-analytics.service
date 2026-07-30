@@ -1,0 +1,21 @@
+[Unit]
+Description=Alderpoint DNS Analytics Collector
+After=network-online.target dnsdist.service named.service
+Wants=network-online.target
+
+[Service]
+User=alderpointdns
+Group=alderpointdns
+WorkingDirectory=/opt/alderpointdns
+Environment=PYTHONPATH=/opt/alderpointdns
+ExecStart=/opt/alderpointdns/app/analytics.py run
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/alderpointdns /etc/alderpointdns
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,239 @@
+{% extends "base.html" %}
+{% import "components.html" as ui %}
+{% block title %}Local DNS - Alderpoint DNS{% endblock %}
+{% block content %}
+{% set cfg = settings %}
+{{ ui.page_header("Local DNS", "Authoritative internal hostnames, reverse DNS, rewrites, and client display aliases.", '<a class="button secondary" href="/local-dns/export">Export CSV</a>') }}
+
+{% if error %}
+  <div class="alert error" role="alert">{{ error }}</div>
+{% endif %}
+
+<section class="grid">
+  <form class="panel stack" method="post" action="/local-dns/settings" data-confirm="Changing the internal domain redeploys local authoritative zones. Continue?">
+    <div class="panel__head"><h2>Local Domain</h2>{{ ui.status_badge(cfg.internal_domain or "home.arpa", "healthy") }}</div>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Internal domain
+      <input name="internal_domain" value="{{ cfg.internal_domain or 'home.arpa' }}" autocomplete="off">
+    </label>
+    <p class="muted">Use <span class="mono">home.arpa</span> by default. Queries for this zone are answered locally and are not forwarded upstream.</p>
+    <div class="grid compact">
+      <label>Default TTL
+        <input name="default_ttl" type="number" min="30" max="86400" value="{{ cfg.default_ttl or 300 }}">
+      </label>
+      <label>Server hostname
+        <input name="server_hostname" value="{{ cfg.server_hostname or 'alderpointdns' }}" autocomplete="off">
+      </label>
+      <label>Server IP
+        <input name="server_ip" value="{{ cfg.server_ip or '' }}" autocomplete="off">
+      </label>
+    </div>
+    <div class="form-actions">
+      <button>Save and deploy</button>
+    </div>
+  </form>
+
+  <form class="panel stack" method="post" action="/local-dns/server-record" data-confirm="Create or update Alderpoint DNS's own local DNS and reverse records?">
+    <div class="panel__head"><h2>Alderpoint DNS Identity</h2></div>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <p>Suggested record: <span class="mono">{{ cfg.server_hostname or 'alderpointdns' }}.{{ cfg.internal_domain or 'home.arpa' }}</span> to <span class="mono">{{ cfg.server_ip or '192.168.1.101' }}</span>.</p>
+    <p class="muted">Creates the forward record, reverse PTR, and a client alias for analytics display.</p>
+    <div class="form-actions">
+      <button class="secondary">Create server records</button>
+    </div>
+  </form>
+</section>
+
+<section class="grid">
+  <form class="panel stack" method="post" action="/local-dns/hosts" data-async-form data-success-message="Local DNS host saved and deployed.">
+    <div class="panel__head"><h2>Add Host</h2></div>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="grid compact">
+      <label>Hostname
+        <input name="hostname" placeholder="alex-pc" autocomplete="off" required>
+      </label>
+      <label>Domain
+        <input name="domain" value="{{ cfg.internal_domain or 'home.arpa' }}" autocomplete="off">
+      </label>
+      <label>IPv4 or IPv6 address
+        <input name="address" placeholder="192.168.1.50" autocomplete="off" required>
+      </label>
+      <label>TTL
+        <input name="ttl" type="number" min="30" max="86400" value="{{ cfg.default_ttl or 300 }}">
+      </label>
+    </div>
+    <label>Comment
+      <input name="comment" autocomplete="off">
+    </label>
+    <label class="row"><input type="checkbox" name="auto_ptr" value="1" checked> Automatically create reverse PTR record</label>
+    <label class="row"><input type="checkbox" name="override" value="1"> Override warnings when the generated DNS remains valid</label>
+    <div class="form-actions">
+      <button>Add host and deploy</button>
+    </div>
+  </form>
+
+  <form class="panel stack" method="post" action="/local-dns/records" data-async-form data-success-message="Local DNS record saved and deployed.">
+    <div class="panel__head"><h2>Advanced Record</h2></div>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="grid compact">
+      <label>Type
+        <select name="record_type">
+          <option>A</option>
+          <option>AAAA</option>
+          <option>CNAME</option>
+          <option>PTR</option>
+        </select>
+      </label>
+      <label>Forward hostname / PTR owner
+        <input name="fqdn" placeholder="alias.home.arpa" autocomplete="off" required>
+      </label>
+      <label>IP address or target
+        <input name="value" placeholder="target.home.arpa" autocomplete="off" required>
+      </label>
+      <label>TTL
+        <input name="ttl" type="number" min="30" max="86400" value="{{ cfg.default_ttl or 300 }}">
+      </label>
+    </div>
+    <label>Comment
+      <input name="comment" autocomplete="off">
+    </label>
+    <label class="row"><input type="checkbox" name="enabled" value="1" checked> Enabled</label>
+    <label class="row"><input type="checkbox" name="override" value="1"> Override warnings</label>
+    <div class="form-actions">
+      <button>Add record and deploy</button>
+    </div>
+  </form>
+</section>
+
+<section class="panel stack">
+  <div class="panel__head">
+    <h2>Records</h2>
+    <form method="get" action="/local-dns" class="row">
+      <input name="search" value="{{ request.query_params.get('search', '') }}" placeholder="Search hostnames, IPs, comments">
+      <button class="secondary">Search</button>
+    </form>
+  </div>
+  {% if records %}
+    {% call ui.table_wrap("table-compact") %}
+    <table>
+      <colgroup>
+        <col style="width: 21%"><col style="width: 7%"><col style="width: 20%"><col style="width: 8%">
+        <col style="width: 5%"><col style="width: 14%"><col style="width: 8%"><col style="width: 17%">
+      </colgroup>
+      <thead><tr><th>Hostname</th><th>Type</th><th>Value / target</th><th>PTR</th><th>TTL</th><th>Comment</th><th>Status</th><th>Actions</th></tr></thead>
+      <tbody>
+        {% for record in records %}
+          {% set reverse_target = record.comment[12:] if record.comment and record.comment.startswith("reverse for ") else None %}
+          <tr>
+            <td class="mono truncate" title="{{ record.fqdn }}">{{ record.fqdn }}</td>
+            <td>{{ ui.status_badge(record.record_type, "neutral") }}</td>
+            <td class="mono truncate" title="{{ record.value }}">{{ record.value }}</td>
+            <td>{% if record.record_type == "PTR" %}{{ ui.status_badge("PTR", "healthy") }}{% elif record.ptr_record_id %}{{ ui.status_badge("Automatic", "healthy") }}{% else %}{{ ui.status_badge("None", "unavailable") }}{% endif %}</td>
+            <td class="mono">{{ record.ttl }}</td>
+            <td class="truncate" title="{{ record.comment }}">
+              {% if reverse_target %}<span class="category-badge" title="Automatically generated reverse record for {{ reverse_target }}">&#8617; reverse of <span class="mono">{{ reverse_target }}</span></span>{% else %}{{ record.comment }}{% endif %}
+            </td>
+            <td>{{ ui.status_badge("Enabled" if record.enabled else "Disabled", "healthy" if record.enabled else "unavailable") }}</td>
+            <td>
+              <div class="row">
+                <button type="button" class="secondary" data-row-edit-toggle aria-controls="editRow{{ record.id }}" aria-expanded="false">Edit</button>
+                {% call ui.overflow_menu("recordMenu" ~ record.id) %}
+                  <form method="post" action="/local-dns/records/{{ record.id }}/toggle" data-async-form data-success-message="Local DNS record updated and deployed."><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="secondary" role="menuitem">{{ "Disable" if record.enabled else "Enable" }}</button></form>
+                  <div class="overflow-menu__divider" role="separator"></div>
+                  <form method="post" action="/local-dns/records/{{ record.id }}/delete" data-confirm="Delete this local DNS record and deploy?"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="danger" role="menuitem">Delete</button></form>
+                {% endcall %}
+              </div>
+            </td>
+          </tr>
+          <tr class="row-edit" id="editRow{{ record.id }}" hidden>
+            <td colspan="8">
+              <form method="post" action="/local-dns/records/{{ record.id }}/edit" class="grid compact" data-async-form data-success-message="Local DNS record saved and deployed.">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <label>Type <select name="record_type"><option {{ "selected" if record.record_type == "A" else "" }}>A</option><option {{ "selected" if record.record_type == "AAAA" else "" }}>AAAA</option><option {{ "selected" if record.record_type == "CNAME" else "" }}>CNAME</option><option {{ "selected" if record.record_type == "PTR" else "" }}>PTR</option></select></label>
+                <label>Hostname <input name="fqdn" value="{{ record.fqdn }}"></label>
+                <label>Value <input name="value" value="{{ record.value }}"></label>
+                <label>TTL <input name="ttl" type="number" min="30" max="86400" value="{{ record.ttl }}"></label>
+                <label>Comment <input name="comment" value="{{ record.comment }}"></label>
+                <label class="row"><input type="checkbox" name="enabled" value="1" {{ "checked" if record.enabled else "" }}> Enabled</label>
+                <label class="row"><input type="checkbox" name="override" value="1"> Override warnings</label>
+                <button class="secondary">Save</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endcall %}
+  {% else %}
+    {{ ui.empty_state("No local DNS records", "Add a host record or import CSV data to create authoritative local zones.") }}
+  {% endif %}
+</section>
+
+<section class="grid">
+  <form class="panel stack" method="post" action="/local-dns/aliases">
+    <div class="panel__head"><h2>Client Aliases</h2></div>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="grid compact">
+      <label>Client IP or CIDR <input name="cidr" placeholder="192.168.1.50" autocomplete="off" required></label>
+      <label>Friendly name <input name="display_name" placeholder="Alex-PC" autocomplete="off" required></label>
+    </div>
+    <label>Description <input name="description" autocomplete="off"></label>
+    <div class="form-actions"><button>Add alias</button></div>
+    {% if aliases %}
+      <div class="ranked-list">
+        {% for alias in aliases %}
+          <div class="ranked-row">
+            <div class="ranked-row__top"><span class="mono" title="{{ alias.cidr }}">{{ alias.cidr }}</span><strong>{{ alias.display_name }}</strong></div>
+            <div class="ranked-row__meta"><span>{{ alias.description }}</span><form method="post" action="/local-dns/aliases/{{ alias.id }}/delete"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="danger">Delete</button></form></div>
+          </div>
+        {% endfor %}
+      </div>
+    {% endif %}
+  </form>
+
+  <article class="panel stack">
+    <div class="panel__head"><h2>Deployment Status</h2>{% if deployment %}{{ ui.status_badge(deployment.status, "healthy" if deployment.status == "deployed" else "down" if "failed" in deployment.status else "degraded") }}{% endif %}</div>
+    {% if deployment %}
+      <p>Forward zone: <span class="mono">{{ deployment.forward_zone }}</span></p>
+      <p>Reverse zones: <span class="mono">{{ deployment.reverse_zones }}</span></p>
+      <p>Serial: <span class="mono">{{ deployment.serial }}</span></p>
+      <p class="muted">{{ deployment.message }}</p>
+      {% if deployment.validation_output %}<pre>{{ deployment.validation_output }}</pre>{% endif %}
+    {% else %}
+      {{ ui.empty_state("Not deployed yet", "Local DNS zones will deploy after the first record or settings change.") }}
+    {% endif %}
+  </article>
+</section>
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Import</h2></div>
+  <form method="post" action="/local-dns/import/preview" class="stack">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>CSV records
+      <textarea name="csv_text" rows="6" placeholder="fqdn,record_type,value,ttl,enabled,comment">{{ csv_text or "" }}</textarea>
+    </label>
+    <label>Bind-style hosts data
+      <textarea name="hosts_text" rows="4" placeholder="192.168.1.50 alex-pc alex-pc.home.arpa">{{ hosts_text or "" }}</textarea>
+    </label>
+    <div class="form-actions"><button class="secondary">Preview import</button></div>
+  </form>
+  {% if preview %}
+    {% call ui.table_wrap() %}
+    <table><thead><tr><th>Line</th><th>Record</th><th>Status</th><th>Warnings</th></tr></thead><tbody>
+      {% for item in preview %}
+        <tr><td>{{ item.line }}</td><td class="mono">{{ item.record }}</td><td>{{ "Valid" if item.valid else item.error }}</td><td>{{ item.warnings|join(" ") }}</td></tr>
+      {% endfor %}
+    </tbody></table>
+    {% endcall %}
+    <form method="post" action="/local-dns/import" data-confirm="Import these CSV records and deploy?">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="csv_text" value="{{ csv_text|e }}">
+      <label class="row"><input type="checkbox" name="override" value="1"> Override warnings</label>
+      <button>Import CSV and deploy</button>
+    </form>
+  {% endif %}
+  {% if hosts_preview %}
+    <pre>{{ hosts_preview }}</pre>
+  {% endif %}
+</section>
+{% endblock %}

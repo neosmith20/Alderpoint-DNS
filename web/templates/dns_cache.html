@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% import "components.html" as ui %}
+{% block title %}Cache - Alderpoint DNS{% endblock %}
+{% block content %}
+{{ ui.page_header("Cache", "BIND recursive-cache tuning, flush controls, and effectiveness.") }}
+
+{% if error %}
+  <div class="alert error" role="alert">{{ error }}</div>
+{% endif %}
+
+<section class="grid">
+  {{ ui.metric_card("Cache hit rate", "%.1f"|format(stats.hit_percent) if stats.available else "n/a", "%" if stats.available else "", "Since the last BIND restart", "accent") }}
+  {{ ui.metric_card("Cache hits", stats.hits if stats.available else "n/a", "", "Answered directly from cache", "success") }}
+  {{ ui.metric_card("Cache misses", stats.misses if stats.available else "n/a", "", "Required an upstream lookup", "neutral") }}
+  {{ ui.metric_card("Cache memory", "%.1f"|format(stats.memory_bytes / 1048576) if stats.available else "n/a", "MB" if stats.available else "", "Tree + heap memory in use", "neutral") }}
+  {{ ui.metric_card("Cache nodes", stats.nodes if stats.available else "n/a", "", "Distinct cached name/type entries", "neutral") }}
+  {{ ui.metric_card("Evicted (size limit)", stats.evicted_lru if stats.available else "n/a", "", "Removed by max-cache-size LRU pressure", "warning") }}
+</section>
+
+<div class="form-actions">
+  <a class="button secondary" href="/dns-cache">Refresh statistics</a>
+</div>
+
+{% if not stats.available %}
+  <section class="panel">
+    {{ ui.empty_state("Cache statistics unavailable", stats.error or "BIND's statistics channel did not respond.") }}
+  </section>
+{% endif %}
+
+<section class="grid align-start">
+  <form class="panel stack" method="post" action="/dns-cache/settings" data-async-form data-success-message="Cache settings saved and deployed.">
+    <div class="panel__head"><h2>Cache Tuning</h2></div>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="grid compact">
+      <label>Max cache size (MB)
+        <input name="max_cache_size_mb" type="number" min="16" max="{{ (total_memory_mb * 3) // 4 }}" value="{{ cache.max_cache_size_mb }}">
+      </label>
+      <label>Min positive TTL (s)
+        <input name="min_cache_ttl" type="number" min="0" max="86400" value="{{ cache.min_cache_ttl }}">
+      </label>
+      <label>Max positive TTL (s)
+        <input name="max_cache_ttl" type="number" min="0" max="2592000" value="{{ cache.max_cache_ttl }}">
+      </label>
+      <label>Min negative TTL (s)
+        <input name="min_ncache_ttl" type="number" min="0" max="86400" value="{{ cache.min_ncache_ttl }}">
+      </label>
+      <label>Max negative TTL (s)
+        <input name="max_ncache_ttl" type="number" min="0" max="604800" value="{{ cache.max_ncache_ttl }}">
+      </label>
+      <label>Recursive clients
+        <input name="recursive_clients" type="number" min="100" max="100000" value="{{ cache.recursive_clients or '1000' }}">
+      </label>
+    </div>
+    <p class="muted">This VM has {{ total_memory_mb }}MB of RAM; the default cache size is chosen conservatively so BIND never crowds out dnsdist, the web app, and analytics. Positive/negative TTL bounds default to BIND's own built-in defaults &mdash; they are not aggressively overridden. Recursive clients limits simultaneous recursive lookups accepted by BIND; lowering it too far can reject bursts of normal client traffic.</p>
+    <details>
+      <summary>Prefetch and serve-stale</summary>
+      <div class="grid compact">
+        <label class="row"><input type="checkbox" name="prefetch_enabled" value="1" {% if cache.prefetch_enabled == "1" %}checked{% endif %}> Enable prefetch</label>
+        <label>Prefetch trigger (s remaining)
+          <input name="prefetch_trigger" type="number" min="1" max="3600" value="{{ cache.prefetch_trigger }}">
+        </label>
+        <label>Prefetch eligible (original TTL &ge;)
+          <input name="prefetch_eligible" type="number" min="1" max="86400" value="{{ cache.prefetch_eligible }}">
+        </label>
+      </div>
+      <div class="grid compact">
+        <label class="row"><input type="checkbox" name="serve_stale_enabled" value="1" {% if cache.serve_stale_enabled == "1" %}checked{% endif %}> Enable serve-stale</label>
+        <label>Max stale TTL (s)
+          <input name="max_stale_ttl" type="number" min="60" max="604800" value="{{ cache.max_stale_ttl }}">
+        </label>
+        <label>Stale answer client timeout
+          <input name="stale_answer_client_timeout" value="{{ cache.stale_answer_client_timeout }}" placeholder="off">
+        </label>
+      </div>
+      <p class="muted">Serve-stale answers an expired cached record immediately (bounded by max stale TTL) while BIND refreshes it in the background, if the authoritative source is unreachable. Disabled by default.</p>
+    </details>
+    <div class="form-actions">
+      <button>Save and deploy</button>
+    </div>
+  </form>
+
+  <div class="panel stack">
+    <div class="panel__head"><h2>Flush Cache</h2></div>
+    <form method="post" action="/dns-cache/flush" data-confirm="Flush the entire BIND cache? Upcoming queries will be uncached until repopulated.">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <div class="form-actions"><button class="secondary">Flush entire cache</button></div>
+    </form>
+    <form method="post" action="/dns-cache/flush-name" data-async-form data-success-message="Cached name flushed.">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label>Flush one name
+        <input name="name" placeholder="example.com" autocomplete="off" required>
+      </label>
+      <div class="form-actions"><button class="secondary">Flush name</button></div>
+    </form>
+    <form method="post" action="/dns-cache/flush-tree" data-async-form data-success-message="Cached subtree flushed.">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label>Flush a subtree
+        <input name="name" placeholder="example.com" autocomplete="off" required>
+      </label>
+      <div class="form-actions"><button class="secondary">Flush subtree</button></div>
+    </form>
+    {% if flushes %}
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Requested</th><th>Scope</th><th>Target</th><th>Status</th></tr></thead>
+          <tbody>
+            {% for flush in flushes %}
+              <tr>
+                <td class="mono">{{ flush.requested_at }}</td>
+                <td>{{ flush.scope }}</td>
+                <td class="mono wrap-anywhere">{{ flush.target or "-" }}</td>
+                <td>{{ ui.status_badge(flush.status|title, "healthy" if flush.status == "completed" else "down" if flush.status == "failed" else "neutral") }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      {{ ui.empty_state("No flush requests yet") }}
+    {% endif %}
+  </div>
+</section>
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Last Cache Deployment</h2>{% if deployment %}{{ ui.status_badge(deployment.status|title, "healthy" if deployment.status == "deployed" else "down" if deployment.status in ("failed", "rollback_failed") else "neutral") }}{% endif %}</div>
+  {% if deployment %}
+    <p class="muted mono">{{ deployment.finished_at or deployment.started_at }}</p>
+    <p>{{ deployment.message }}</p>
+  {% else %}
+    {{ ui.empty_state("No cache deployment recorded yet", "Cache settings deploy automatically the next time Alderpoint DNS applies a configuration change.") }}
+  {% endif %}
+</section>
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Notes</h2></div>
+  <p class="muted">BIND already performs recursive caching for every query; this page tunes that existing cache. It is separate from dnsdist's packet cache (see DNS Settings / System), which caches the final client-facing answer for a shorter, fixed window.</p>
+</section>
+{% endblock %}

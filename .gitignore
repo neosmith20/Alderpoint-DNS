@@ -1,0 +1,63 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+
+# Databases and SQLite sidecars
+*.db
+*.db-wal
+*.db-shm
+
+# Secrets
+*.env
+
+# Certificates and private keys
+*.key
+*.pem
+*.crt
+*.srl
+
+# Backups and restore artifacts
+*-backup-*.tar.gz
+backups/
+
+# Internal engineering artifacts (not for public distribution)
+AGENT_PROGRESS.md
+*-handoff.md
+*HANDOFF*.md
+
+# Audit captures
+audit/
+
+# Generated BIND/dnsdist configuration output and staging directories
+staging/
+compiled/
+generated/
+
+# Installer/package build output
+build/
+dist/
+*.deb
+
+# Enrollment/replication material
+*.enrollment
+*-enrollment.json
+enrollment/
+
+# Ad-hoc screenshot/browser output (tracked screenshots under docs/screenshots/ are exempt)
+*.screenshot.png
+screenshots-tmp/
+
+# Test output
+test-results/
+test-output/
+
+# Temp files
+*.tmp
+*.temp
+*~
+.DS_Store
+
+.claude/

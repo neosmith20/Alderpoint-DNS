@@ -1,0 +1,19 @@
+Source: alderpointdns
+Section: net
+Priority: optional
+Maintainer: Alderpoint DNS Maintainers <maintainers@example.invalid>
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+Build-Depends: debhelper-compat (= 13), dh-python, python3
+
+Package: alderpointdns
+Architecture: all
+Depends: bind9, bind9-dnsutils, curl, dnsdist, jq, knot-dnsutils, openssl,
+ python3-aioquic, python3-argon2, python3-dnspython, python3-fastapi,
+ python3-httpx, python3-itsdangerous, python3-jinja2, python3-multipart,
+ python3-openpyxl, python3-yaml, sudo, uvicorn, ${misc:Depends},
+ ${python3:Depends}
+Description: Private DNS filtering and administration appliance
+ Alderpoint DNS combines BIND, dnsdist, local DNS records, filtering policy,
+ analytics, backup/restore, replication, and encrypted DNS listener controls
+ behind a local administration interface.

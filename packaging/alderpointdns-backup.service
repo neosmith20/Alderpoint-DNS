@@ -1,0 +1,7 @@
+[Unit]
+Description=Alderpoint DNS Scheduled Backup
+After=alderpointdns.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/alderpointdns/app/alderpointdns_compiler.py backup-create

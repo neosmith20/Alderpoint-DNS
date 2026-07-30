@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% import "components.html" as ui %}
+{% block content %}
+{{ ui.page_header("Statistics", "Configure analytics collection, retention, privacy, and exports.", '<a class="button secondary" href="/statistics-settings/export">Export JSON</a>') }}
+
+<form class="panel stack" method="post" action="/statistics-settings">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <div class="grid">
+    <label class="row"><input type="checkbox" name="analytics_enabled" value="1" {{ "checked" if settings.analytics_enabled == "1" else "" }}> Analytics enabled</label>
+    <label class="row"><input type="checkbox" name="detailed_query_logging_enabled" value="1" {{ "checked" if settings.detailed_query_logging_enabled == "1" else "" }}> Detailed query logging enabled</label>
+    <label>Privacy mode
+      <select name="privacy_mode">
+        <option value="full" {{ "selected" if settings.privacy_mode == "full" else "" }}>Full</option>
+        <option value="anonymized_clients" {{ "selected" if settings.privacy_mode == "anonymized_clients" else "" }}>Anonymized clients</option>
+        <option value="aggregate_only" {{ "selected" if settings.privacy_mode == "aggregate_only" else "" }}>Aggregate only</option>
+      </select>
+    </label>
+    <label>Client anonymization
+      <select name="client_anonymization">
+        <option value="truncate" {{ "selected" if settings.client_anonymization == "truncate" else "" }}>Truncate</option>
+        <option value="hash" {{ "selected" if settings.client_anonymization == "hash" else "" }}>Hash</option>
+      </select>
+    </label>
+    <label>Detailed retention days <input type="number" min="0" name="detailed_retention_days" value="{{ settings.detailed_retention_days }}"></label>
+    <label>Aggregate retention days <input type="number" min="1" name="aggregate_retention_days" value="{{ settings.aggregate_retention_days }}"></label>
+    <label>Database size limit bytes <input type="number" min="1048576" name="db_size_limit_bytes" value="{{ settings.db_size_limit_bytes }}"></label>
+    <label>Collection interval seconds <input type="number" min="5" name="collection_interval" value="{{ settings.collection_interval }}"></label>
+    <label>Recent query limit <input type="number" min="10" name="recent_query_limit" value="{{ settings.recent_query_limit }}"></label>
+  </div>
+  <div class="form-actions"><button>Save settings</button></div>
+</form>
+
+<section class="grid">
+  <article class="metric-card">
+    <div class="metric-card__head"><span>Database size</span><span class="metric-card__dot" aria-hidden="true"></span></div>
+    <div class="metric-card__value"><strong>{{ db_size }}</strong><span>bytes</span></div>
+    <div class="metric-card__foot"><span>Includes SQLite WAL files.</span></div>
+  </article>
+  <form class="panel stack" method="post" action="/statistics-settings/clear" data-confirm="Delete all stored analytics and query events?">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Type CLEAR to delete statistics <input name="confirm"></label>
+    <div class="form-actions"><button class="danger">Clear statistics</button></div>
+  </form>
+</section>
+{% endblock %}

@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% import "components.html" as ui %}
+{% block content %}
+{{ ui.page_header("System", "Service state, deployment state, and recent Alderpoint DNS logs.") }}
+
+<section class="grid">
+  {% for item in health %}
+    <article class="card">
+      <div class="card__head"><h2>{{ item.name }}</h2>{{ ui.status_badge(item.state, item.tone) }}</div>
+    </article>
+  {% endfor %}
+  <article class="card">
+    <div class="card__head"><h2>Last Deployment</h2>{{ ui.status_badge(compiler.deployment.status if compiler.deployment else "None", "healthy" if compiler.deployment and compiler.deployment.status == "deployed" else "unavailable") }}</div>
+    {% if compiler.deployment %}<p class="muted">Active domains: {{ compiler.deployment.active_domains }}</p>{% endif %}
+  </article>
+</section>
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Recent Logs</h2></div>
+  <form method="get" action="/system" class="toolbar">
+    <label class="row">Service
+      <select name="service">
+        <option value="alderpointdns" {{ "selected" if logs.service == "alderpointdns" else "" }}>Alderpoint DNS</option>
+        <option value="alderpointdns-analytics" {{ "selected" if logs.service == "alderpointdns-analytics" else "" }}>Analytics collector</option>
+        <option value="named" {{ "selected" if logs.service == "named" else "" }}>BIND (named)</option>
+        <option value="dnsdist" {{ "selected" if logs.service == "dnsdist" else "" }}>dnsdist</option>
+      </select>
+    </label>
+    <label class="row">Severity
+      <select name="severity">
+        <option value="all" {{ "selected" if logs.severity == "all" else "" }}>All</option>
+        <option value="error" {{ "selected" if logs.severity == "error" else "" }}>Error and above</option>
+        <option value="warning" {{ "selected" if logs.severity == "warning" else "" }}>Warning</option>
+        <option value="info" {{ "selected" if logs.severity == "info" else "" }}>Info</option>
+        <option value="debug" {{ "selected" if logs.severity == "debug" else "" }}>Debug</option>
+      </select>
+    </label>
+    <label class="row">Lines
+      <select name="lines">
+        <option value="50" {{ "selected" if logs.lines == 50 else "" }}>50</option>
+        <option value="100" {{ "selected" if logs.lines == 100 else "" }}>100</option>
+        <option value="200" {{ "selected" if logs.lines == 200 else "" }}>200</option>
+        <option value="500" {{ "selected" if logs.lines == 500 else "" }}>500</option>
+      </select>
+    </label>
+    <button class="secondary">Refresh</button>
+    <label class="row"><input type="checkbox" id="autoRefresh" data-refresh-target="systemLogsResults"> Auto-refresh</label>
+  </form>
+  <div id="systemLogsResults" data-refresh-url="/system/logs">
+    {% include "system_logs_results.html" %}
+  </div>
+</section>
+{% endblock %}

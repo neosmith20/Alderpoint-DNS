@@ -1,0 +1,92 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  configure)
+    if ! getent group alderpointdns >/dev/null; then
+      addgroup --system alderpointdns
+    fi
+    if ! id alderpointdns >/dev/null 2>&1; then
+      adduser --system --home /var/lib/alderpointdns --no-create-home --ingroup alderpointdns --disabled-login alderpointdns
+    fi
+    install -d -o alderpointdns -g alderpointdns -m 0750 /var/lib/alderpointdns/backups /var/lib/alderpointdns/imports /var/lib/alderpointdns/staging
+    # 0755, not 0750: named and dnsdist (separate system accounts,
+    # unrelated to alderpointdns) must be able to traverse into these two
+    # directories to reach their own generated config under
+    # compiled/bind/ and compiled/dnsdist/ -- those files are root-owned
+    # and world-readable already (written by the root-escalated deploy
+    # path), so these two directories only need to be enterable, not
+    # additionally restricted. backups/imports/staging above hold
+    # sensitive content directly and stay locked to the alderpointdns
+    # group only.
+    install -d -o alderpointdns -g alderpointdns -m 0755 /var/lib/alderpointdns /var/lib/alderpointdns/compiled
+    install -d -o alderpointdns -g alderpointdns -m 0755 /var/log/alderpointdns
+    # named (its own "bind" system user, unrelated to alderpointdns) writes
+    # its own log/statistics files directly here; it must own this
+    # subdirectory rather than inherit the alderpointdns ownership above.
+    install -d -o bind -g bind -m 0750 /var/log/alderpointdns/bind
+    # 0755, not 0750: dnsdist's separate "_dnsdist" system account (and any
+    # other daemon reading its own narrowly-owned subdirectory here, such as
+    # named's log directory above) needs to traverse into this directory by
+    # default; the sensitive files/subdirs directly inside it (secrets.env,
+    # dnsdist-api.key, dnsdist-web.creds, certs/) are individually locked
+    # down to their own owner/group instead.
+    install -d -o root -g alderpointdns -m 0755 /etc/alderpointdns
+    # ensure_tls_cert.sh creates /etc/alderpointdns/certs itself, owned
+    # root:_dnsdist -- dnsdist (a separate system account, unrelated to
+    # alderpointdns) must be able to read its own TLS certificate/key
+    # directly. It is deliberately not created here with the alderpointdns
+    # group above, which would leave dnsdist unable to load its TLS material
+    # and crash-loop as soon as an encrypted listener (DoH/DoT/DoQ, enabled
+    # by default in packaging/dnsdist.service.d/alderpointdns.conf) starts.
+    /opt/alderpointdns/scripts/ensure_tls_cert.sh
+    if [ ! -e /etc/alderpointdns/secrets.env ]; then
+      # Subshell: `umask` is a whole-process setting with no block scope in
+      # POSIX sh, and everything alderpointdns_compiler.py's deploy step
+      # creates below (compiled zone/config files named needs to read) must
+      # not inherit this restrictive 077 meant only for the secret itself.
+      (
+        umask 077
+        printf 'ALDERPOINTDNS_SESSION_SECRET=%s\n' "$(openssl rand -base64 48)" > /etc/alderpointdns/secrets.env
+      )
+      chown root:alderpointdns /etc/alderpointdns/secrets.env
+    fi
+    # Base BIND/dnsdist configuration that `include`s the generated files
+    # under /var/lib/alderpointdns/compiled -- without these, named and
+    # dnsdist run with the upstream bind9/dnsdist packages' stock defaults
+    # and never load Alderpoint DNS's RPZ filtering, ACLs, or listeners at
+    # all. Only written on first install (never overwritten on upgrade,
+    # matching scripts/install.sh's equivalent one-time template install)
+    # so operator edits to these files are never clobbered by a reinstall.
+    if [ ! -e /etc/bind/named.conf.options.alderpointdns-installed ]; then
+      install -D -m 0644 /opt/alderpointdns/packaging/named.conf.options /etc/bind/named.conf.options
+      install -D -m 0644 /opt/alderpointdns/packaging/named.conf.local /etc/bind/named.conf.local
+      : > /etc/bind/named.conf.options.alderpointdns-installed
+    fi
+    if [ ! -e /etc/dnsdist/dnsdist.conf.alderpointdns-installed ]; then
+      install -D -m 0644 /opt/alderpointdns/packaging/dnsdist.conf /etc/dnsdist/dnsdist.conf
+      : > /etc/dnsdist/dnsdist.conf.alderpointdns-installed
+    fi
+    install -d -m 0755 /etc/systemd/system/dnsdist.service.d
+    install -m 0644 /opt/alderpointdns/packaging/dnsdist.service.d/alderpointdns.conf /etc/systemd/system/dnsdist.service.d/alderpointdns.conf
+    PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/analytics.py init-db || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    # Generate the actual RPZ/local-zone/upstream config under
+    # /var/lib/alderpointdns/compiled and reload named/dnsdist so they pick
+    # it up -- bind9/dnsdist's own postinst scripts may have already
+    # started them (with stock config, before the files above existed).
+    PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py deploy --no-download >/dev/null 2>&1 || true
+    systemctl restart named dnsdist >/dev/null 2>&1 || true
+    systemctl enable --now alderpointdns alderpointdns-analytics >/dev/null 2>&1 || true
+    # Scheduled backups and automatic filter updates are both timer-driven.
+    # Enabling is idempotent, and filter-schedule-deploy writes the
+    # filter-update timer drop-in from the stored Filter Update Interval
+    # (preserved across upgrades; 1 Day on a fresh install).
+    systemctl enable alderpointdns-backup.timer >/dev/null 2>&1 || true
+    systemctl enable alderpointdns-filter-update.timer >/dev/null 2>&1 || true
+    PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py filter-schedule-deploy >/dev/null 2>&1 || true
+    ;;
+esac
+
+#DEBHELPER#
+exit 0

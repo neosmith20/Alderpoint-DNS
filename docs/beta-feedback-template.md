@@ -1,0 +1,34 @@
+# Beta Feedback Template
+
+- Tester name/contact:
+- Date:
+- Alderpoint DNS version:
+- Hardware or VM platform:
+- CPU/RAM/disk:
+- Operating system:
+- Network topology:
+- Router/firewall rules:
+- Installation method:
+- Installation experience:
+- Features tested:
+- DNS resolution results:
+- Local DNS/PTR results:
+- Filtering results:
+- Upstream resolver changes tested:
+- DoH/DoT upstreams tested:
+- Client-facing encrypted DNS tested:
+- Resolver failover observations:
+- Dashboard analytics observations:
+- Responsive UI observations:
+- User/permission observations:
+- Backup/restore tested:
+- Import/migration tested:
+- Replication tested:
+- Diagnostics bundle attached:
+- Failures encountered:
+- Sanitized logs or diagnostics:
+- Performance observations:
+- Features liked:
+- Features disliked:
+- Missing functionality:
+- Additional notes:

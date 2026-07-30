@@ -1,0 +1,14 @@
+[Unit]
+Description=Alderpoint DNS Scheduled Backup Timer
+
+[Timer]
+# Default interval; overridden at runtime by app/backup.py's
+# deploy_backup_schedule() writing
+# /etc/systemd/system/alderpointdns-backup.timer.d/alderpointdns.conf from the
+# backup_settings.schedule_interval_hours DB setting.
+OnBootSec=24h
+OnUnitActiveSec=24h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

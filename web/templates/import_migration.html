@@ -1,0 +1,297 @@
+{% extends "base.html" %}
+{% import "components.html" as ui %}
+{% block title %}Import - Alderpoint DNS{% endblock %}
+{% block content %}
+{{ ui.page_header("Import and Migration", "Migrate from AdGuard Home, Pi-hole, hosts files, BIND zones, CSV/XLSX, or a Alderpoint DNS-native JSON export.") }}
+
+{% if error %}
+  <div class="alert error" role="alert">{{ error }}</div>
+{% endif %}
+
+{% if applied_counts %}
+  <section class="panel stack">
+    <div class="panel__head"><h2>Migration Applied</h2></div>
+    <p class="mono wrap-anywhere">{{ applied_counts }}</p>
+  </section>
+{% endif %}
+
+{% if not job and not adguard %}
+<section class="grid">
+  <form class="panel stack" method="post" action="/import/upload" enctype="multipart/form-data" data-confirm="Upload and parse this file? Nothing is applied to Alderpoint DNS yet.">
+    <div class="panel__head"><h2>Spreadsheet / Text Import</h2></div>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Source type
+      <select name="source_type">
+        <option value="csv">CSV (arbitrary columns)</option>
+        <option value="alderpointdns_csv">Alderpoint DNS-exported CSV</option>
+        <option value="xlsx">XLSX</option>
+        <option value="hosts">Hosts file</option>
+        <option value="zone">BIND-style zone data</option>
+        <option value="pihole">Pi-hole export/list text</option>
+        <option value="alderpointdns_json">Alderpoint DNS-native JSON</option>
+      </select>
+    </label>
+    <label>Default domain (for hosts/zone files, and bare hostnames)
+      <input name="default_domain" placeholder="home.arpa" autocomplete="off">
+    </label>
+    <label>File<input type="file" name="upload" required></label>
+    <p class="muted">Parsing never modifies Alderpoint DNS's live configuration. You will review a preview and choose how to resolve conflicts before anything is applied.</p>
+    <div class="form-actions">
+      <button>Upload and preview</button>
+      <a class="button secondary" href="/import/export/alderpointdns.json">Export Alderpoint DNS JSON</a>
+    </div>
+  </form>
+
+  <div class="panel stack">
+    <div class="panel__head"><h2>AdGuard Home Migration</h2></div>
+    <form method="post" action="/import/migration/adguard/yaml" enctype="multipart/form-data" data-confirm="Upload and parse this AdGuardHome.yaml? Nothing is applied yet.">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label>AdGuardHome.yaml<input type="file" name="upload" required></label>
+      <div class="form-actions"><button class="secondary">Upload and preview</button></div>
+    </form>
+    <form method="post" action="/import/migration/adguard/api" data-confirm="Connect to this AdGuard Home instance and read its configuration? No changes are made to AdGuard Home; Alderpoint DNS only reads.">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label>AdGuard Home base URL<input name="base_url" placeholder="http://192.168.1.2:3000" required></label>
+      <label>Username<input name="username" autocomplete="off" required></label>
+      <label>Password<input name="password" type="password" autocomplete="off" required></label>
+      <p class="muted">Credentials are used only for this one request and are never stored.</p>
+      <div class="form-actions"><button class="secondary">Connect and preview</button></div>
+    </form>
+  </div>
+</section>
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Column Mapping Reference</h2></div>
+  <p class="muted">CSV/XLSX columns are auto-detected where names match; you can remap any column after upload. Recognized fields: <span class="mono wrap-anywhere">{{ [
+    "hostname", "fqdn", "domain", "ipv4", "ipv6", "record_type", "target",
+    "create_ptr", "ttl", "comment", "enabled", "client_alias", "client_id_or_cidr"
+  ]|join(", ") }}</span></p>
+</section>
+
+{% if jobs %}
+<section class="panel">
+  <div class="panel__head"><h2>Recent Import Jobs</h2></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Created</th><th>Source</th><th>Status</th><th>Valid</th><th>Applied</th><th></th></tr></thead>
+      <tbody>
+        {% for j in jobs %}
+          <tr>
+            <td class="mono">{{ j.created_at }}</td>
+            <td class="wrap-anywhere">{{ j.source_type }}: {{ j.source_name }}</td>
+            <td>{{ ui.status_badge(j.status|title, "healthy" if j.status == "applied" else "down" if j.status == "failed" else "neutral") }}</td>
+            <td>{{ j.valid_rows }}</td>
+            <td>{{ j.applied_rows }}</td>
+            <td><a href="/import/jobs/{{ j.id }}">View</a></td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+{% endif %}
+
+{% if job %}
+<section class="panel stack">
+  <div class="panel__head"><h2>Import Job #{{ job.id }}</h2>{{ ui.status_badge(job.status|title, "healthy" if job.status == "applied" else "down" if job.status == "failed" else "neutral") }}</div>
+  <p class="muted">{{ job.source_type }}: <span class="wrap-anywhere">{{ job.source_name }}</span></p>
+
+  {% if headers and job.status in ("uploaded", "previewed") %}
+  <form method="post" action="/import/jobs/{{ job.id }}/remap" data-async-form data-success-message="Column mapping updated.">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="grid compact">
+      {% for field in canonical_fields %}
+        <label>{{ field }}
+          <select name="map_{{ field }}">
+            <option value="">(not mapped)</option>
+            {% for h in headers %}
+              <option value="{{ h }}" {% if column_map.get(field) == h %}selected{% endif %}>{{ h }}</option>
+            {% endfor %}
+          </select>
+        </label>
+      {% endfor %}
+    </div>
+    <div class="form-actions"><button class="secondary">Update mapping and re-preview</button></div>
+  </form>
+  {% endif %}
+
+  {% if preview %}
+    <div class="grid">
+      {{ ui.metric_card("Valid", preview.valid|length, "", "Ready to import without conflicts", "success") }}
+      {{ ui.metric_card("Conflicts", preview.conflicts|length, "", "Existing record(s) affected", "warning") }}
+      {{ ui.metric_card("Duplicates", preview.duplicates|length, "", "Repeated within this file", "neutral") }}
+      {{ ui.metric_card("Invalid", preview.invalid|length, "", "Failed validation", "blocked") }}
+    </div>
+
+    {% if preview.invalid %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Row</th><th>Reason</th></tr></thead>
+        <tbody>
+          {% for item in preview.invalid[:50] %}
+            <tr><td>{{ item.index }}</td><td class="wrap-anywhere">{{ item.error }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+
+    {% if preview.conflicts %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Row</th><th>FQDN</th><th>Type</th><th>Value</th><th>Conflict</th></tr></thead>
+        <tbody>
+          {% for item in preview.conflicts[:50] %}
+            <tr><td>{{ item.index }}</td><td class="mono wrap-anywhere">{{ item.fqdn }}</td><td>{{ item.record_type }}</td><td class="mono wrap-anywhere">{{ item.value }}</td><td class="wrap-anywhere">{{ item.warnings|join("; ") }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+
+    <form method="post" action="/import/jobs/{{ job.id }}/apply" data-confirm="Apply this import? A backup is taken automatically first, and the change deploys through the normal validated path.">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label>Conflict resolution
+        <select name="default_policy">
+          <option value="skip">Skip conflicting rows</option>
+          <option value="merge">Merge (add alongside existing)</option>
+          <option value="replace">Replace existing record(s)</option>
+        </select>
+      </label>
+      <div class="form-actions"><button {% if not preview.valid and not preview.conflicts %}disabled{% endif %}>Apply import</button></div>
+    </form>
+  {% endif %}
+
+  {% if job.status in ("applied", "deploy_failed", "failed") %}
+    {% if job.status == "deploy_failed" %}
+      <div class="alert error" role="alert">{{ job.message }} The previously deployed configuration remains active. Roll back to revert the imported data, or retry deployment from the Blocklists page.</div>
+    {% elif job.status == "failed" %}
+      <div class="alert error" role="alert">{{ job.message }} No changes were kept: the transaction was rolled back.</div>
+    {% else %}
+      <p>{{ job.message }}</p>
+    {% endif %}
+    <div class="form-actions">
+      <a class="button secondary" href="/import/jobs/{{ job.id }}/report">Download report</a>
+      {% if job.status in ("applied", "deploy_failed") %}
+      <form method="post" action="/import/jobs/{{ job.id }}/rollback" data-confirm="Roll back this import? Everything it added will be removed and Alderpoint DNS redeployed.">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="secondary">Roll back this import</button>
+      </form>
+      {% endif %}
+    </div>
+  {% elif job.status == "rolled_back" %}
+    {{ ui.empty_state("This import was rolled back", "The objects it added have been removed.") }}
+  {% endif %}
+</section>
+{% endif %}
+
+{% if adguard %}
+{% macro item_rows(items) %}
+  {% for item in items %}
+    <tr>
+      <td>
+        {% if item.selectable %}
+          <input type="checkbox" name="sel" value="{{ item.key }}" {% if item.selected %}checked{% endif %} aria-label="Import {{ item.source }}">
+        {% else %}
+          <span class="muted">&mdash;</span>
+        {% endif %}
+      </td>
+      <td class="mono wrap-anywhere">{{ item.source }}</td>
+      <td class="wrap-anywhere">{{ item.detected }}</td>
+      <td>{{ item.destination }}</td>
+      <td class="mono wrap-anywhere">{{ item.normalized }}</td>
+      <td>{{ item.outcome }}</td>
+      <td class="wrap-anywhere">{% if item.warning %}{{ item.warning }}{% endif %}{% if item.warning and item.conflict %}; {% endif %}{% if item.conflict %}{{ item.conflict }}{% endif %}</td>
+    </tr>
+  {% endfor %}
+{% endmacro %}
+{% macro item_table(items) %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Import</th><th>Original</th><th>Detected as</th><th>Destination</th><th>Result</th><th>Outcome</th><th>Notes</th></tr></thead>
+      <tbody>{{ item_rows(items) }}</tbody>
+    </table>
+  </div>
+{% endmacro %}
+<section class="panel stack">
+  <div class="panel__head"><h2>{{ migration_title or "Migration Preview" }}</h2></div>
+  {% if adguard.fetch_errors %}
+    <div class="alert error" role="alert">Some AdGuard API endpoints could not be reached: {{ adguard.fetch_errors }}</div>
+  {% endif %}
+  {% if source_path %}
+    <p class="muted">Original source staged for troubleshooting: <span class="mono wrap-anywhere">{{ source_path }}</span>. Staged uploads are retained under Alderpoint DNS's import staging directory and can be pruned after troubleshooting.</p>
+  {% endif %}
+
+  {% if migration_summary %}
+    <div class="grid">
+      {{ ui.metric_card("Will import", migration_summary.counts.active, "", "Active after apply", "success") }}
+      {{ ui.metric_card("Kept inactive", migration_summary.counts.inactive, "", "Stored disabled with a reason", "warning") }}
+      {{ ui.metric_card("Conflicts", migration_summary.counts.conflicts, "", "Review before apply", "blocked") }}
+      {{ ui.metric_card("Existing", migration_summary.counts.existing, "", "Already present; will update or skip", "neutral") }}
+      {{ ui.metric_card("Duplicates", migration_summary.counts.duplicates, "", "Repeated within the import", "neutral") }}
+    </div>
+    <p class="muted">Nothing has been applied. Untick any item (or a whole category) to leave it out, then apply. Invalid and unsupported entries are imported as inactive rules with their reason, so nothing is silently lost.</p>
+    <form method="post" action="/import/jobs/{{ migration_job_id }}/apply" data-confirm="Apply the selected items to Alderpoint DNS? A verified backup is taken first, all changes are written in one transaction, and the change deploys through the normal validated path.">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="itemized" value="1">
+      {% for section in migration_summary.categories %}
+        <details class="stack" {% if section['items']|length <= 15 %}open{% endif %}>
+          <summary>
+            <strong>{{ section.label }}</strong> ({{ section['items']|length }})
+            <label class="row"><input type="checkbox" class="cat-toggle" data-category="{{ section.name }}" checked> select all</label>
+          </summary>
+          {{ item_table(section['items'][:150]) }}
+          {% if section['items']|length > 150 %}
+            <details>
+              <summary>Show all {{ section['items']|length }} items in {{ section.label }}</summary>
+              {{ item_table(section['items'][150:]) }}
+            </details>
+          {% endif %}
+        </details>
+      {% endfor %}
+      <div class="form-actions"><button>Apply selected items</button></div>
+    </form>
+
+    {% if migration_summary.conflicts %}
+      <div class="panel stack">
+        <div class="panel__head"><h2>Conflicts</h2></div>
+        <ul>
+          {% for entry in migration_summary.conflicts[:80] %}<li class="wrap-anywhere"><span class="mono">{{ entry.key }}</span>: {{ entry.label }}</li>{% endfor %}
+        </ul>
+      </div>
+    {% endif %}
+    {% if migration_summary.existing %}
+      <div class="panel stack">
+        <div class="panel__head"><h2>Existing Objects That Change</h2></div>
+        <ul>
+          {% for entry in migration_summary.existing[:80] %}<li class="wrap-anywhere"><span class="mono">{{ entry.key }}</span>: {{ entry.label }}</li>{% endfor %}
+        </ul>
+      </div>
+    {% endif %}
+  {% endif %}
+
+  <div class="form-actions">
+    <a class="button secondary" href="/import/jobs/{{ migration_job_id }}/status">Job status</a>
+    <form method="post" action="/import/jobs/{{ migration_job_id }}/cancel" data-confirm="Cancel this migration job? Nothing has been applied yet.">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="secondary">Cancel job</button>
+    </form>
+  </div>
+</section>
+{% endif %}
+{% endblock %}
+{% block scripts %}
+<script>
+  document.querySelectorAll(".cat-toggle").forEach(function (toggle) {
+    toggle.addEventListener("click", function (event) { event.stopPropagation(); });
+    toggle.addEventListener("change", function () {
+      var section = toggle.closest("details");
+      if (!section) { return; }
+      section.querySelectorAll('input[name="sel"]').forEach(function (box) {
+        box.checked = toggle.checked;
+      });
+    });
+  });
+</script>
+{% endblock %}

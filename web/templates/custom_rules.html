@@ -1,0 +1,220 @@
+{% extends "base.html" %}
+{% import "components.html" as ui %}
+{% set type_tones = {"block": "blocked", "regex_block": "blocked", "allow": "healthy", "regex_allow": "healthy", "rewrite": "degraded", "comment": "unavailable", "unsupported": "down"} %}
+{% set type_labels = {"block": "Block", "regex_block": "Regex block", "allow": "Allow", "regex_allow": "Regex allow", "rewrite": "Rewrite", "comment": "Comment", "unsupported": "Unsupported"} %}
+{% set source_labels = {"manual": "Manual", "adguard": "AdGuard", "pihole": "Pi-hole", "legacy": "Legacy", "import": "Import"} %}
+{% block content %}
+{{ ui.page_header("Filters", "Custom allow, block, rewrite, and regex rules deployed through Alderpoint DNS validation.") }}
+
+{% if error %}
+  <div class="alert error" role="alert">{{ error }}</div>
+{% endif %}
+{% if notice %}
+  <div class="alert" role="status">{{ notice }}</div>
+{% endif %}
+
+<section class="panel">
+  <div class="row" style="flex-wrap: wrap; gap: 0.5rem">
+    {{ ui.status_badge(counts.total ~ " total", "neutral") }}
+    {{ ui.status_badge(counts.active ~ " active", "healthy") }}
+    {{ ui.status_badge(counts.disabled ~ " disabled", "unavailable") }}
+    {{ ui.status_badge(counts.block ~ " block", "blocked") }}
+    {{ ui.status_badge(counts.allow ~ " allow", "healthy") }}
+    {{ ui.status_badge(counts.rewrite ~ " rewrite", "degraded") }}
+    {{ ui.status_badge(counts.regex ~ " regex", "neutral") }}
+    {{ ui.status_badge(counts.comment ~ " comment", "unavailable") }}
+    {% if counts.unsupported %}{{ ui.status_badge(counts.unsupported ~ " unsupported", "degraded") }}{% endif %}
+    {% if counts.invalid %}{{ ui.status_badge(counts.invalid ~ " invalid", "down") }}{% endif %}
+  </div>
+</section>
+
+<form class="panel stack" method="post" action="/custom-rules/add">
+  <div class="panel__head"><h2>Add Rule</h2></div>
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <div class="grid compact">
+    <label>Rule <input name="rule_text" required placeholder="||ads.example.org^  ·  @@||cdn.example.org^  ·  192.168.1.50 nas.lan  ·  /^ads[0-9]+\./" class="mono"></label>
+    <label>Comment <input name="comment"></label>
+  </div>
+  <div class="form-actions"><button>Add and Deploy</button></div>
+</form>
+
+<details class="panel stack" {{ "open" if bulk_results else "" }}>
+  <summary><strong>Bulk Editor</strong></summary>
+  <form method="post" action="/custom-rules/bulk" class="stack">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>One rule per line (AdGuard, hosts, plain-domain, regex, and comment lines)
+      <textarea name="rules_text" rows="8" class="mono" placeholder="! my rules&#10;||ads.example.org^&#10;0.0.0.0 tracker.example.org"></textarea>
+    </label>
+    <p class="muted">Every line is validated server-side. Valid lines activate and deploy; invalid or unsupported lines are stored inactive and listed with the exact reason.</p>
+    <div class="form-actions"><button>Validate, Save, and Deploy</button></div>
+  </form>
+  {% if bulk_results %}
+    <p>
+      Added {{ bulk_results.added_active }} active rule(s),
+      {{ bulk_results.comments }} comment(s),
+      {{ bulk_results.duplicates }} duplicate(s) skipped,
+      {{ bulk_results.unsupported }} unsupported and {{ bulk_results.invalid }} invalid stored inactive.
+    </p>
+    {% call ui.table_wrap("table-compact") %}
+      <table>
+        <thead><tr><th>Line</th><th>Text</th><th>Result</th></tr></thead>
+        <tbody>
+          {% for line in bulk_results.lines %}
+            {% for result in line.results %}
+              <tr>
+                <td class="mono">{{ line.line }}</td>
+                <td class="mono truncate" title="{{ result.rule_text }}">{{ result.rule_text }}</td>
+                <td>
+                  {% if result.status == "duplicate" %}
+                    {{ ui.status_badge("Duplicate", "unavailable") }}
+                  {% elif result.validation_state == "invalid" %}
+                    {{ ui.status_badge("Invalid", "down") }} <span class="muted">{{ result.reason }}</span>
+                  {% elif result.validation_state == "unsupported" %}
+                    {{ ui.status_badge("Unsupported", "degraded") }} <span class="muted">{{ result.reason }}</span>
+                  {% elif result.rule_type == "comment" %}
+                    {{ ui.status_badge("Comment", "unavailable") }}
+                  {% else %}
+                    {{ ui.status_badge("Added", "healthy") }}
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endcall %}
+  {% endif %}
+</details>
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Test a Domain</h2></div>
+  <form method="post" action="/custom-rules/test" class="row">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label class="row">Domain <input name="domain" value="{{ test_domain }}" required placeholder="ads.example.org"></label>
+    <button class="secondary">Evaluate</button>
+  </form>
+  {% if test_result %}
+    {% if test_result.error %}
+      <div class="alert error" role="alert">{{ test_result.domain }}: {{ test_result.error }}</div>
+    {% else %}
+      <div class="stack">
+        <p>
+          <span class="mono">{{ test_result.domain }}</span> &rarr;
+          {% if test_result.final_action == "block" %}{{ ui.status_badge("Blocked", "blocked") }}
+          {% elif test_result.final_action == "allow" %}{{ ui.status_badge("Allowed", "healthy") }}
+          {% elif test_result.final_action == "rewrite" %}{{ ui.status_badge("Rewritten", "degraded") }}
+          {% elif test_result.final_action == "local" %}{{ ui.status_badge("Local DNS", "healthy") }}
+          {% else %}{{ ui.status_badge("Resolves", "neutral") }}{% endif %}
+          <span>{{ test_result.response }}</span>
+        </p>
+        {% if test_result.matched_rules %}
+          <p class="muted">Matched rule{{ "s" if test_result.matched_rules|length > 1 else "" }}:
+            {% for match in test_result.matched_rules %}<span class="mono">{{ match.rule_text }}</span>{{ ", " if not loop.last else "" }}{% endfor %}
+          </p>
+        {% endif %}
+        <p class="muted">
+          Compiled blocklist RPZ:
+          {% if not test_result.rpz.available %}not compiled yet
+          {% elif test_result.rpz.blocked %}would block via {{ test_result.rpz.match }} entry <span class="mono">{{ test_result.rpz.entry }}</span>
+          {% elif test_result.rpz.entry %}matching entry <span class="mono">{{ test_result.rpz.entry }}</span> ({{ test_result.rpz.rdata }})
+          {% else %}no matching entry{% endif %}
+        </p>
+      </div>
+    {% endif %}
+  {% endif %}
+</section>
+
+<section class="panel stack">
+  <div class="panel__head">
+    <h2>Rules</h2>
+    <form method="get" action="/custom-rules" class="toolbar">
+      <input type="search" name="search" value="{{ search }}" placeholder="Search rule, domain, or comment">
+      <select name="type" aria-label="Filter by type">
+        <option value="">All types</option>
+        {% for key, label in type_labels.items() %}
+          <option value="{{ key }}" {{ "selected" if type_filter == key else "" }}>{{ label }}</option>
+        {% endfor %}
+      </select>
+      <select name="status" aria-label="Filter by status">
+        <option value="">Any status</option>
+        <option value="enabled" {{ "selected" if status_filter == "enabled" else "" }}>Enabled</option>
+        <option value="disabled" {{ "selected" if status_filter == "disabled" else "" }}>Disabled</option>
+        <option value="unsupported" {{ "selected" if status_filter == "unsupported" else "" }}>Unsupported</option>
+        <option value="invalid" {{ "selected" if status_filter == "invalid" else "" }}>Invalid</option>
+      </select>
+      <button class="secondary">Apply</button>
+    </form>
+  </div>
+  {% if rules %}
+    {% call ui.table_wrap("table-compact") %}
+    <table>
+      <colgroup>
+        <col style="width: 4%"><col style="width: 28%"><col style="width: 10%"><col style="width: 10%">
+        <col style="width: 12%"><col style="width: 8%"><col style="width: 14%"><col style="width: 14%">
+      </colgroup>
+      <thead>
+        <tr>
+          <th><input type="checkbox" data-check-all="customRules" aria-label="Select all rules"></th>
+          <th>Rule</th><th>Type</th><th>Action</th><th>State</th><th>Source</th><th>Comment</th><th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rules %}
+        <tr>
+          <td><input type="checkbox" name="ids" value="{{ r.id }}" form="rulesSelectedForm" data-check-group="customRules" aria-label="Select rule {{ r.id }}"></td>
+          <td class="mono truncate" title="{{ r.rule_text }}">{{ r.rule_text }}</td>
+          <td>{{ ui.status_badge(type_labels.get(r.rule_type, r.rule_type), type_tones.get(r.rule_type, "neutral")) }}</td>
+          <td class="muted">{{ r.action if r.action != "none" else "—" }}{{ " +sub" if r.match_subdomains and r.action != "none" else "" }}{{ " !" if r.priority else "" }}</td>
+          <td>
+            {% if r.validation_state == "unsupported" %}
+              <span title="{{ r.unsupported_reason }}">{{ ui.status_badge("Unsupported", "degraded") }}</span>
+            {% elif r.validation_state == "invalid" %}
+              <span title="{{ r.unsupported_reason }}">{{ ui.status_badge("Invalid", "down") }}</span>
+            {% elif r.enabled %}
+              {{ ui.status_badge("Enabled", "healthy") }}
+            {% else %}
+              {{ ui.status_badge("Disabled", "unavailable") }}
+            {% endif %}
+          </td>
+          <td class="muted">{{ source_labels.get(r.source_system, r.source_system) }}</td>
+          <td class="truncate" title="{{ r.comment }}">{{ r.comment }}</td>
+          <td>
+            <div class="row">
+              <button type="button" class="secondary" data-row-edit-toggle aria-controls="ruleEdit{{ r.id }}" aria-expanded="false">Edit</button>
+              {% call ui.overflow_menu("ruleMenu" ~ r.id) %}
+                {% if r.validation_state == "valid" and r.rule_type != "comment" %}
+                  <form method="post" action="/custom-rules/{{ r.id }}/toggle"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="secondary" role="menuitem">{{ "Disable" if r.enabled else "Enable" }}</button></form>
+                  <div class="overflow-menu__divider" role="separator"></div>
+                {% endif %}
+                <form method="post" action="/custom-rules/{{ r.id }}/delete" data-confirm="Delete this rule and deploy?"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="danger" role="menuitem">Delete</button></form>
+              {% endcall %}
+            </div>
+          </td>
+        </tr>
+        <tr class="row-edit" id="ruleEdit{{ r.id }}" hidden>
+          <td colspan="8">
+            <form class="grid compact" method="post" action="/custom-rules/{{ r.id }}/edit">
+              <input type="hidden" name="csrf" value="{{ csrf }}">
+              <label>Rule <input name="rule_text" value="{{ r.rule_text }}" required class="mono"></label>
+              <label>Comment <input name="comment" value="{{ r.comment }}"></label>
+              <label class="row"><input type="checkbox" name="enabled" value="1" {{ "checked" if r.enabled and r.validation_state == "valid" else "" }} {{ "disabled" if r.validation_state != "valid" else "" }}> Enabled</label>
+              <div class="form-actions"><button type="submit" class="secondary">Save and Deploy</button></div>
+            </form>
+            {% if r.unsupported_reason %}<p class="bad">{{ r.unsupported_reason }}</p>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endcall %}
+    <form id="rulesSelectedForm" method="post" action="/custom-rules/selected" class="row">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button name="op" value="enable" class="secondary">Enable selected</button>
+      <button name="op" value="disable" class="secondary">Disable selected</button>
+      <button name="op" value="delete" class="danger" data-confirm="Delete the selected rules and deploy?">Delete selected</button>
+    </form>
+  {% else %}
+    {{ ui.empty_state("No custom rules match", "Add a rule above or clear the current filters.") }}
+  {% endif %}
+</section>
+{% endblock %}

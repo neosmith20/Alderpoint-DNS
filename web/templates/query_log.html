@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% import "components.html" as ui %}
+{% block content %}
+{{ ui.page_header("Query Log", "Search, filter, and act on recent DNS activity.", '<label class="row"><input type="checkbox" id="autoRefresh" data-refresh-target="queryLogResults"> Auto-refresh</label>') }}
+
+<form class="panel stack" method="get" action="/query-log">
+  <div class="grid compact">
+    <label>Search <input name="search" value="{{ log.filters.search }}" autocomplete="off"></label>
+    <label>Client <input name="client" value="{{ log.filters.client }}" autocomplete="off"></label>
+    <label>Domain <input name="domain" value="{{ log.filters.domain }}" autocomplete="off"></label>
+    <label>Query type <input name="qtype" value="{{ log.filters.qtype }}" autocomplete="off"></label>
+    <label>Protocol <input name="protocol" value="{{ log.filters.protocol }}" autocomplete="off"></label>
+    <label>Status
+      <select name="blocked">
+        <option value="" {{ "selected" if log.filters.blocked == "" else "" }}>Any</option>
+        <option value="0" {{ "selected" if log.filters.blocked == "0" else "" }}>Allowed</option>
+        <option value="1" {{ "selected" if log.filters.blocked == "1" else "" }}>Blocked</option>
+      </select>
+    </label>
+    <label>Response code <input name="rcode" value="{{ log.filters.rcode }}" autocomplete="off"></label>
+    <label>Limit <input name="limit" type="number" min="10" max="500" value="{{ log.limit }}"></label>
+  </div>
+  <div class="form-actions">
+    <button>Filter</button>
+    <a class="button secondary" href="/query-log">Reset</a>
+  </div>
+</form>
+
+<div id="queryLogResults" data-refresh-url="/query-log/partial">
+  {% include "query_log_results.html" %}
+</div>
+{% endblock %}

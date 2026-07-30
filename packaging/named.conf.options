@@ -1,0 +1,48 @@
+// Managed by Alderpoint DNS. Validate with named-checkconf before deployment.
+acl "alderpointdns_clients" {
+	10.0.0.0/8;
+	172.16.0.0/12;
+	192.168.0.0/16;
+	127.0.0.0/8;
+	::1/128;
+	fc00::/7;
+};
+
+options {
+	directory "/var/cache/bind";
+	listen-on port 5353 { 127.0.0.1; };
+	listen-on port 5354 proxy plain { 127.0.0.1; };
+	listen-on-v6 port 5353 { ::1; };
+	allow-proxy { 127.0.0.1; };
+	allow-proxy-on { 127.0.0.1; };
+	allow-query { "alderpointdns_clients"; };
+	allow-query-cache { "alderpointdns_clients"; };
+	allow-recursion { "alderpointdns_clients"; };
+	recursion yes;
+	forward only;
+	forwarders { 1.1.1.2; 1.0.0.2; 4.2.2.1; 4.2.2.2; };
+	dnssec-validation auto;
+	auth-nxdomain no;
+	minimal-responses yes;
+	empty-zones-enable yes;
+	version "not disclosed";
+	querylog no;
+	response-policy { zone "alderpointdns.rpz"; } break-dnssec yes;
+	statistics-file "/var/log/alderpointdns/bind/named.stats";
+	memstatistics-file "/var/log/alderpointdns/bind/named.memstats";
+};
+statistics-channels {
+	inet 127.0.0.1 port 8053 allow { 127.0.0.1; };
+};
+logging {
+	channel alderpointdns_default {
+		file "/var/log/alderpointdns/bind/named.log" versions 5 size 10m;
+		severity info;
+		print-time yes;
+		print-severity yes;
+		print-category yes;
+	};
+	category default { alderpointdns_default; };
+	category general { alderpointdns_default; };
+	category security { alderpointdns_default; };
+};

@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+{% import "components.html" as ui %}
+{% block content %}
+{{ ui.page_header("DNS Settings", "Listener, protocol, certificate, and client-address validation status.") }}
+
+{% if upstream_error %}
+  <div class="alert error">{{ upstream_error }}</div>
+{% endif %}
+
+<section class="grid">
+  <article class="card">
+    <div class="card__head"><h2>Allowed Clients</h2></div>
+    <div class="stack">
+      {% for client in allowed_clients %}
+        <div>{{ client }}</div>
+      {% endfor %}
+    </div>
+  </article>
+  <article class="card"><div class="card__head"><h2>BIND Backend</h2></div><p>{{ backend }}</p></article>
+  <article class="card"><div class="card__head"><h2>Maintenance DNS</h2></div><p>{{ maintenance }}</p></article>
+  <article class="card"><div class="card__head"><h2>Hostname</h2></div><p>{{ hostname }}</p></article>
+  <article class="card"><div class="card__head"><h2>DoH Path</h2></div><p><span class="mono">{{ doh_path }}</span></p></article>
+  <article class="card"><div class="card__head"><h2>dnsdist Version</h2></div><p><span class="mono">{{ dnsdist_version }}</span></p></article>
+  <article class="card"><div class="card__head"><h2>Certificate</h2>{{ ui.status_badge(cert.state|title, "healthy" if cert.state == "present" else "down") }}</div><p class="muted">{{ cert.detail }}</p></article>
+  <article class="card"><div class="card__head"><h2>PROXYv2 Backend</h2>{{ ui.status_badge(proxy_backend|title, "healthy" if proxy_backend == "enabled" else "degraded") }}</div></article>
+  <article class="card">
+    <div class="card__head"><h2>Client Address Test</h2>{{ ui.status_badge(client_address_test.state, "healthy" if client_address_test.state == "Passed" else "down" if client_address_test.state == "Failed" else "unavailable") }}</div>
+    <p class="muted mono">{{ client_address_test.filename }}</p>
+  </article>
+</section>
+
+<section class="panel stack">
+  <div class="panel__head">
+    <div>
+      <h2>Upstream Resolvers</h2>
+      <p class="muted">BIND forwards recursive lookups to a managed local dnsdist upstream pool after validation.</p>
+    </div>
+    {% if upstream_deployment %}
+      {{ ui.status_badge(upstream_deployment.status|replace("_", " ")|title, "healthy" if upstream_deployment.status == "deployed" else "down" if "failed" in upstream_deployment.status else "degraded") }}
+    {% else %}
+      {{ ui.status_badge("Not deployed", "unavailable") }}
+    {% endif %}
+  </div>
+  {% if upstream_deployment %}
+    <p class="muted wrap-anywhere">{{ upstream_deployment.message }}</p>
+  {% endif %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Name</th><th>Protocol</th><th>Resolver</th><th>Bootstrap / TLS</th><th>Health</th><th>Actions</th></tr></thead>
+      <tbody>
+        {% for resolver in upstream_resolvers %}
+          <tr>
+            <td>
+              <label>Name <input form="upstreamEdit{{ resolver.id }}" name="name" value="{{ resolver.name }}" required></label>
+            </td>
+            <td>
+                <label>Protocol
+                  <select form="upstreamEdit{{ resolver.id }}" name="protocol">
+                    <option value="plain" {{ "selected" if resolver.protocol == "plain" else "" }}>UDP/TCP DNS</option>
+                    <option value="dot" {{ "selected" if resolver.protocol == "dot" else "" }}>DNS-over-TLS</option>
+                    <option value="doh" {{ "selected" if resolver.protocol == "doh" else "" }}>DNS-over-HTTPS</option>
+                  </select>
+                </label>
+                <label class="row"><input form="upstreamEdit{{ resolver.id }}" type="checkbox" name="enabled" value="1" {{ "checked" if resolver.enabled else "" }}> Enabled</label>
+            </td>
+            <td>
+                <label>Address or DoH URL <input form="upstreamEdit{{ resolver.id }}" name="address" value="{{ resolver.address }}" required></label>
+                <label>Port <input form="upstreamEdit{{ resolver.id }}" name="port" inputmode="numeric" value="{{ resolver.port }}"></label>
+                <label>DoH path <input form="upstreamEdit{{ resolver.id }}" name="doh_path" value="{{ resolver.doh_path }}" placeholder="/dns-query"></label>
+            </td>
+            <td>
+                <label>TLS hostname <input form="upstreamEdit{{ resolver.id }}" name="tls_hostname" value="{{ resolver.tls_hostname }}"></label>
+                <label>Bootstrap IPs <textarea form="upstreamEdit{{ resolver.id }}" name="bootstrap_ips" rows="2">{{ resolver.bootstrap_ips }}</textarea></label>
+            </td>
+            <td>
+              {{ ui.status_badge(resolver.last_status|title, "healthy" if resolver.last_status == "healthy" else "down" if resolver.last_status == "failed" else "unavailable") }}
+              {% if resolver.last_latency_ms is not none %}<span class="secondary muted">{{ "%.1f"|format(resolver.last_latency_ms) }} ms</span>{% endif %}
+              {% if resolver.last_message %}<span class="secondary muted wrap-anywhere">{{ resolver.last_message }}</span>{% endif %}
+            </td>
+            <td>
+                <div class="actions">
+                  <form id="upstreamEdit{{ resolver.id }}" method="post" action="/dns-settings/upstreams/{{ resolver.id }}/edit" data-async-form data-success-message="Upstream resolver saved and deployed.">
+                    <input type="hidden" name="csrf" value="{{ csrf }}">
+                  </form>
+                  <button form="upstreamEdit{{ resolver.id }}">Save</button>
+                  <form method="post" action="/dns-settings/upstreams/{{ resolver.id }}/toggle" data-async-form data-success-message="Upstream resolver state changed and deployed.">
+                    <input type="hidden" name="csrf" value="{{ csrf }}">
+                    <input type="hidden" name="enabled" value="{{ 0 if resolver.enabled else 1 }}">
+                    <button class="secondary">{{ "Disable" if resolver.enabled else "Enable" }}</button>
+                  </form>
+                  {% call ui.overflow_menu("upstreamMenu" ~ resolver.id) %}
+                    <form method="post" action="/dns-settings/upstreams/{{ resolver.id }}/move" data-async-form data-success-message="Upstream resolver order changed and deployed.">
+                      <input type="hidden" name="csrf" value="{{ csrf }}">
+                      <input type="hidden" name="direction" value="up">
+                      <button type="submit" class="secondary" role="menuitem" aria-label="Move {{ resolver.name }} up">Move up</button>
+                    </form>
+                    <form method="post" action="/dns-settings/upstreams/{{ resolver.id }}/move" data-async-form data-success-message="Upstream resolver order changed and deployed.">
+                      <input type="hidden" name="csrf" value="{{ csrf }}">
+                      <input type="hidden" name="direction" value="down">
+                      <button type="submit" class="secondary" role="menuitem" aria-label="Move {{ resolver.name }} down">Move down</button>
+                    </form>
+                    <div class="overflow-menu__divider" role="separator"></div>
+                    <form method="post" action="/dns-settings/upstreams/{{ resolver.id }}/delete" data-async-form data-confirm="Delete this upstream resolver and deploy?" data-success-message="Upstream resolver deleted and deployed.">
+                      <input type="hidden" name="csrf" value="{{ csrf }}">
+                      <button type="submit" class="danger" role="menuitem">Delete</button>
+                    </form>
+                  {% endcall %}
+                </div>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="6">{{ ui.empty_state("No upstream resolvers configured", "Add at least one resolver before deploying.") }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <form method="post" action="/dns-settings/upstreams/add" class="stack" data-async-form data-success-message="Upstream resolver added and deployed.">
+    <div class="panel__head"><h2>Add Upstream Resolver</h2></div>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <section class="grid">
+      <label>Friendly name <input name="name" placeholder="Cloudflare DoH" required></label>
+      <label>Protocol
+        <select name="protocol">
+          <option value="plain">UDP/TCP DNS</option>
+          <option value="dot">DNS-over-TLS</option>
+          <option value="doh">DNS-over-HTTPS</option>
+        </select>
+      </label>
+      <label>Address or DoH URL <input name="address" placeholder="cloudflare-dns.com or full DoH URL" required></label>
+      <label>Port <input name="port" inputmode="numeric" placeholder="53 / 853 / 443"></label>
+      <label>DoH path <input name="doh_path" placeholder="/dns-query"></label>
+      <label>TLS hostname <input name="tls_hostname" placeholder="cloudflare-dns.com"></label>
+      <label>Bootstrap IPs <textarea name="bootstrap_ips" rows="2" placeholder="1.1.1.1, 1.0.0.1"></textarea></label>
+      <label class="row"><input type="checkbox" name="enabled" value="1" checked> Enabled</label>
+    </section>
+    <div class="form-actions"><button>Add and Deploy</button></div>
+  </form>
+</section>
+
+<section class="panel">
+  <div class="panel__head"><h2>Protocol Status</h2></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Protocol</th><th>Port</th><th>Status</th><th>Test</th></tr></thead>
+      <tbody>
+        {% for protocol in protocols %}
+          <tr>
+            <td>{{ protocol.name }}</td>
+            <td class="mono">{{ protocol.port }}</td>
+            <td>{{ ui.status_badge(protocol.state|title, "healthy" if protocol.state == "listening" else "unavailable" if "unavailable" in protocol.state else "degraded") }}</td>
+            <td class="mono">{{ protocol.tested }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Build Features</h2></div>
+  <p class="muted mono">{{ dnsdist_features }}</p>
+  <p class="muted">Replace certificate material by staging both <span class="mono">/etc/alderpointdns/certs/alderpointdns-lab.crt</span> and <span class="mono">/etc/alderpointdns/certs/alderpointdns-lab.key</span>, validating the pair, then restarting dnsdist. The bootstrap helper refuses partial replacement.</p>
+</section>
+{% endblock %}

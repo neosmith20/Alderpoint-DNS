@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""Create a sanitized Alderpoint DNS support bundle.
+
+The default bundle intentionally excludes private DNS records, query contents,
+private keys, API keys, passwords, session secrets, and authentication headers.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import platform
+import re
+import shutil
+import sqlite3
+import subprocess
+import tarfile
+import tempfile
+from pathlib import Path
+from typing import Iterable
+
+
+ROOT = Path("/")
+APP_DIR = Path("/opt/alderpointdns")
+DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
+VERSION_FILE = APP_DIR / "VERSION"
+REDACTION_PATTERNS = [
+    (re.compile(r"(?i)(authorization:\s*basic\s+)[A-Za-z0-9+/=._:-]+"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)(x-api-key:\s*)\S+"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)(api[_-]?key\s*[=:]\s*)['\"]?[^'\"\s,;]+"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)(password\s*[=:]\s*)['\"]?[^'\"\s,;]+"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)(session[_-]?secret\s*[=:]\s*)['\"]?[^'\"\s,;]+"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)(token\s*[=:]\s*)['\"]?[^'\"\s,;]+"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)(private[_-]?key\s*[=:]\s*)['\"]?[^'\"\s,;]+"), r"\1[REDACTED]"),
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S), "[REDACTED PRIVATE KEY]"),
+    (re.compile(r"(https://[^?\s]+)\?[^ \n\r\t]+"), r"\1?[REDACTED_QUERY]"),
+    # BIND config `key "name" { ...; secret "..."; };` blocks (rndc-key, TSIG
+    # keys). named-checkconf -p echoes these verbatim, so bind_validation.txt
+    # would otherwise leak the live RNDC/TSIG shared secret in plaintext.
+    (re.compile(r'(?i)(secret\s+)"[^"]*"'), r'\1"[REDACTED]"'),
+]
+
+
+def run(command: list[str], timeout: int = 8) -> str:
+    try:
+        proc = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout, check=False)
+        return proc.stdout
+    except Exception as exc:
+        return f"{command[0]} failed: {exc}\n"
+
+
+def redact(text: str) -> str:
+    out = text
+    for pattern, replacement in REDACTION_PATTERNS:
+        out = pattern.sub(replacement, out)
+    return out
+
+
+def write_text(base: Path, name: str, text: str) -> None:
+    target = base / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(redact(text), encoding="utf-8")
+
+
+def version() -> str:
+    if VERSION_FILE.exists():
+        return VERSION_FILE.read_text().strip()
+    try:
+        return run(["git", "-C", str(APP_DIR), "rev-parse", "--short", "HEAD"]).strip()
+    except Exception:
+        return "unknown"
+
+
+def sqlite_schema_summary() -> dict[str, object]:
+    if not DB_PATH.exists():
+        return {"available": False, "reason": "database not found"}
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            rows = conn.execute("SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").fetchall()
+            migrations = conn.execute("PRAGMA user_version").fetchone()[0]
+        return {"available": True, "user_version": migrations, "objects": [{"type": t, "name": n} for t, n in rows]}
+    except Exception as exc:
+        return {"available": False, "reason": str(exc)}
+
+
+def config_metadata() -> dict[str, object]:
+    paths = [
+        "/etc/bind/named.conf",
+        "/etc/bind/named.conf.options",
+        "/etc/bind/named.conf.local",
+        "/etc/dnsdist/dnsdist.conf",
+        "/etc/systemd/system/alderpointdns.service",
+        "/etc/systemd/system/alderpointdns-analytics.service",
+        "/etc/sudoers.d/alderpointdns",
+    ]
+    entries = []
+    for raw in paths:
+        path = Path(raw)
+        if path.exists():
+            stat = path.stat()
+            entries.append({"path": raw, "mode": oct(stat.st_mode & 0o777), "owner_uid": stat.st_uid, "group_gid": stat.st_gid, "size": stat.st_size})
+        else:
+            entries.append({"path": raw, "missing": True})
+    return {"files": entries}
+
+
+def command_available(name: str) -> bool:
+    return shutil.which(name) is not None
+
+
+def gather(base: Path, include_private_dns: bool, include_journal: bool) -> None:
+    summary = {
+        "created_at": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
+        "alderpointdns_version": version(),
+        "os": platform.platform(),
+        "kernel": platform.release(),
+        "python": platform.python_version(),
+        "include_private_dns": include_private_dns,
+    }
+    write_text(base, "summary.json", json.dumps(summary, indent=2))
+    write_text(base, "services.txt", run(["systemctl", "status", "alderpointdns", "named", "dnsdist", "alderpointdns-analytics"], timeout=12))
+    write_text(base, "listeners.txt", run(["ss", "-ltnup"], timeout=8))
+    write_text(base, "bind_validation.txt", run(["named-checkconf", "-p", "/etc/bind/named.conf"], timeout=10) if command_available("named-checkconf") else "named-checkconf unavailable\n")
+    write_text(base, "dnsdist_check.txt", run(["dnsdist", "--check-config"], timeout=10) if command_available("dnsdist") else "dnsdist unavailable\n")
+    write_text(base, "database_schema.json", json.dumps(sqlite_schema_summary(), indent=2))
+    write_text(base, "configuration_metadata.json", json.dumps(config_metadata(), indent=2))
+    write_text(base, "network.txt", run(["ip", "-brief", "addr"], timeout=8) + "\n" + run(["ip", "route"], timeout=8))
+    write_text(base, "resources.txt", run(["df", "-h"], timeout=8) + "\n" + run(["free", "-h"], timeout=8))
+    health = {
+        "bind_backend": run(["dig", "@127.0.0.1", "-p", "5353", "cloudflare.com", "A", "+time=2", "+tries=1", "+short"], timeout=5),
+        "dnsdist_frontend": run(["dig", "@127.0.0.1", "-p", "53", "cloudflare.com", "A", "+time=2", "+tries=1", "+short"], timeout=5),
+    }
+    write_text(base, "health.json", json.dumps(health, indent=2))
+    if include_journal:
+        errors = ""
+        for unit in ("alderpointdns", "named", "dnsdist", "alderpointdns-analytics"):
+            errors += f"\n== {unit} ==\n"
+            errors += run(["journalctl", "-u", unit, "-b", "-p", "warning", "-n", "80", "--no-pager"], timeout=10)
+        write_text(base, "recent_warnings.txt", errors)
+    if include_private_dns:
+        write_text(base, "private_dns_opt_in.txt", "Private DNS export is intentionally not implemented in diagnostics yet. Use a dedicated encrypted backup when private DNS data is required.\n")
+
+
+def make_bundle(output: Path, include_private_dns: bool, include_journal: bool) -> Path:
+    output.mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    bundle = output / f"alderpointdns-diagnostics-{stamp}.tar.gz"
+    with tempfile.TemporaryDirectory(prefix="alderpointdns-diagnostics-") as tmp:
+        base = Path(tmp) / "alderpointdns-diagnostics"
+        base.mkdir()
+        gather(base, include_private_dns, include_journal)
+        with tarfile.open(bundle, "w:gz") as tar:
+            tar.add(base, arcname="alderpointdns-diagnostics")
+    return bundle
+
+
+def self_test_redaction() -> int:
+    sample = """Authorization: Basic abcdef==
+x-api-key: secret
+password = hunter2
+session_secret=abc
+https://resolver.example/dns-query?token=secret&client=private
+-----BEGIN PRIVATE KEY-----
+abc
+-----END PRIVATE KEY-----
+key "rndc-key" {
+	algorithm "hmac-sha256";
+	secret "ZXhhbXBsZS1ybmRjLWtleS1ub3QtYS1yZWFsLXNlY3JldA==";
+};
+"""
+    cleaned = redact(sample)
+    forbidden = ("hunter2", "abcdef", "secret&client", "BEGIN PRIVATE KEY", "x-api-key: secret", "ZXhhbXBsZS1ybmRjLWtleS1ub3QtYS1yZWFsLXNlY3JldA==")
+    if any(token in cleaned for token in forbidden):
+        print(cleaned)
+        return 1
+    print(cleaned)
+    return 0
+
+
+def main(argv: Iterable[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Create a sanitized Alderpoint DNS diagnostics bundle")
+    parser.add_argument("--output-dir", default="/tmp", help="directory for the generated tar.gz bundle")
+    parser.add_argument("--include-private-dns", action="store_true", help="explicit opt-in placeholder for private DNS diagnostics")
+    parser.add_argument("--no-journal", action="store_true", help="skip journal excerpts")
+    parser.add_argument("--self-test-redaction", action="store_true", help="run the redaction self-test and exit")
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    if args.self_test_redaction:
+        return self_test_redaction()
+    bundle = make_bundle(Path(args.output_dir), args.include_private_dns, not args.no_journal)
+    print(bundle)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

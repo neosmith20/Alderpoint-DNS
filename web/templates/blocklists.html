@@ -1,0 +1,198 @@
+{% extends "base.html" %}
+{% import "components.html" as ui %}
+{% block content %}
+{{ ui.page_header("Blocklists", "Manage external policy sources and categories.") }}
+
+{% if category_error %}
+  <div class="alert error" role="alert">{{ category_error }}</div>
+{% endif %}
+
+{% set fs = filter_schedule|default({}, true) %}
+<section class="panel stack">
+  <div class="panel__head">
+    <h2>Automatic Updates</h2>
+    {{ ui.status_badge("Enabled", "healthy") if fs.get("enabled") else ui.status_badge("Disabled", "neutral") }}
+  </div>
+  <form class="stack" method="post" action="/blocklists/schedule" data-async-form data-success-message="Filter update schedule saved.">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="grid compact">
+      <label>Filter Update Interval
+        <select name="interval">
+          {% for value, label in fs.get("options", []) %}
+            <option value="{{ value }}" {{ "selected" if value == fs.get("interval") else "" }}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <div>
+        <span class="muted secondary">Last automatic attempt</span>
+        <p class="mono wrap-anywhere">{{ fs.get("last_attempt") or "Never" }}</p>
+      </div>
+      <div>
+        <span class="muted secondary">Last successful automatic update</span>
+        <p class="mono wrap-anywhere">{{ fs.get("last_success") or "Never" }}</p>
+      </div>
+      <div>
+        <span class="muted secondary">Next scheduled update</span>
+        {% if fs.get("enabled") %}
+          <p class="mono wrap-anywhere">{{ fs.get("next_run") or "Unknown until timer deploys" }}</p>
+        {% else %}
+          <p class="muted">Automatic updates disabled</p>
+        {% endif %}
+      </div>
+    </div>
+    <div class="form-actions"><button>Save schedule</button></div>
+  </form>
+  {% set last = fs.get("last_result") %}
+  {% if last and last.get("error") %}
+    <p class="bad wrap-anywhere">Last automatic update ({{ last.get("status") }}): {{ last.get("error") }}</p>
+  {% endif %}
+  <div class="row">
+    <form method="post" action="/blocklists/update" data-confirm="Update all blocklist sources?">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="secondary" type="submit">Update All Now</button>
+    </form>
+    <p class="muted">Automatic updates refresh only enabled sources through the normal staged, validated, health-checked deployment, and never overlap another update. Manual updates stay available even when automatic updates are disabled.</p>
+  </div>
+</section>
+
+<form class="panel stack" method="post" action="/blocklists/add">
+  <div class="panel__head"><h2>Add Source</h2></div>
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <div class="grid compact">
+    <label>Name <input name="name" required></label>
+    <label>URL <input name="url" required></label>
+    <label>Category
+      <select name="category">
+        {% for cat in categories %}
+          <option value="{{ cat.key }}">{{ cat.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+  </div>
+  <div class="form-actions"><button>Add Source</button></div>
+</form>
+
+<details class="panel stack">
+  <summary><strong>Manage Categories</strong></summary>
+  {% call ui.table_wrap("table-compact") %}
+    <table>
+      <colgroup><col style="width: 26%"><col style="width: 14%"><col></colgroup>
+      <thead><tr><th>Category</th><th>Sources</th><th>Actions</th></tr></thead>
+      <tbody>
+        {% for cat in categories %}
+          <tr>
+            <td>{{ ui.category_badge(cat.name) }}</td>
+            <td class="mono">{{ cat.source_count }}</td>
+            <td>
+              {% if cat.key == "uncategorized" %}
+                <span class="muted secondary">Built-in</span>
+              {% else %}
+                <div class="row">
+                  <form method="post" action="/blocklists/categories/{{ cat.key }}/rename" class="row">
+                    <input type="hidden" name="csrf" value="{{ csrf }}">
+                    <input name="name" value="{{ cat.name }}" aria-label="Rename {{ cat.name }}" style="width: 14ch">
+                    <button class="secondary" type="submit">Rename</button>
+                  </form>
+                  <form method="post" action="/blocklists/categories/{{ cat.key }}/delete" data-confirm="Delete category &quot;{{ cat.name }}&quot;? Sources using it will move to Uncategorized.">
+                    <input type="hidden" name="csrf" value="{{ csrf }}">
+                    <button class="danger" type="submit">Delete</button>
+                  </form>
+                </div>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endcall %}
+  <form method="post" action="/blocklists/categories/add" class="row">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label class="row">New category <input name="name" placeholder="e.g. Streaming" required></label>
+      <button class="secondary" type="submit">Add Category</button>
+    </form>
+    <p class="muted">Renaming keeps existing sources assigned. Deleting a category in use moves its sources to Uncategorized.</p>
+  </details>
+
+<section class="panel stack">
+  <div class="panel__head">
+    <h2>Sources</h2>
+    <form method="get" action="/blocklists" class="toolbar">
+      <input type="search" name="search" value="{{ search }}" placeholder="Search name or URL">
+      <select name="category" aria-label="Filter by category">
+        <option value="">All categories</option>
+        {% for cat in categories %}
+          <option value="{{ cat.key }}" {{ "selected" if category_filter == cat.key else "" }}>{{ cat.name }}</option>
+        {% endfor %}
+      </select>
+      <select name="status" aria-label="Filter by status">
+        <option value="">Any status</option>
+        <option value="enabled" {{ "selected" if status_filter == "enabled" else "" }}>Enabled</option>
+        <option value="disabled" {{ "selected" if status_filter == "disabled" else "" }}>Disabled</option>
+        <option value="error" {{ "selected" if status_filter == "error" else "" }}>Has error</option>
+      </select>
+      <select name="sort" aria-label="Sort by">
+        <option value="name" {{ "selected" if sort == "name" else "" }}>Name</option>
+        <option value="category" {{ "selected" if sort == "category" else "" }}>Category</option>
+        <option value="updated" {{ "selected" if sort == "updated" else "" }}>Last update</option>
+        <option value="rules" {{ "selected" if sort == "rules" else "" }}>Rule count</option>
+      </select>
+      <button class="secondary">Apply</button>
+    </form>
+  </div>
+  {% if sources %}
+    {% call ui.table_wrap("table-compact") %}
+    <table>
+      <colgroup>
+        <col style="width: 19%"><col style="width: 19%"><col style="width: 11%"><col style="width: 8%">
+        <col style="width: 8%"><col style="width: 12%"><col style="width: 9%"><col style="width: 14%">
+      </colgroup>
+      <thead><tr><th>Name</th><th>Source URL</th><th>Category</th><th>Status</th><th>Rules</th><th>Last update</th><th>Health</th><th>Actions</th></tr></thead>
+      <tbody>
+        {% for s in sources %}
+          <tr>
+            <td class="truncate" title="{{ s.name }}">{{ s.name }}</td>
+            <td class="mono truncate" title="{{ s.url }}">{{ s.url }}</td>
+            <td class="truncate">{{ ui.category_badge((categories|selectattr("key", "equalto", s.category)|first).name if categories|selectattr("key", "equalto", s.category)|list else s.category) }}</td>
+            <td>{{ ui.status_badge("Enabled", "healthy") if s.enabled else ui.status_badge("Disabled", "unavailable") }}</td>
+            <td class="mono" title="{{ s.accepted_domains }} accepted, {{ s.invalid_rules }} invalid, {{ s.unsupported_rules }} unsupported">{{ s.accepted_domains }}</td>
+            <td class="mono truncate">{{ s.last_success or "Never" }}</td>
+            <td>{% if s.last_error %}{{ ui.status_badge("Error", "down") }}{% elif not s.last_success %}{{ ui.status_badge("Pending", "unavailable") }}{% else %}{{ ui.status_badge("Healthy", "healthy") }}{% endif %}</td>
+            <td>
+              <div class="row">
+                <button type="button" class="secondary" data-row-edit-toggle aria-controls="blocklistEdit{{ s.id }}" aria-expanded="false">Edit</button>
+                {% call ui.overflow_menu("blocklistMenu" ~ s.id) %}
+                  <form method="post" action="/blocklists/{{ s.id }}/update"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="secondary" role="menuitem">Update now</button></form>
+                  <form method="post" action="/blocklists/{{ s.id }}/toggle"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="secondary" role="menuitem">{{ "Disable" if s.enabled else "Enable" }}</button></form>
+                  <div class="overflow-menu__divider" role="separator"></div>
+                  <form method="post" action="/blocklists/{{ s.id }}/delete" data-confirm="Delete this blocklist source?"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="danger" role="menuitem">Delete</button></form>
+                {% endcall %}
+              </div>
+            </td>
+          </tr>
+          <tr class="row-edit" id="blocklistEdit{{ s.id }}" hidden>
+            <td colspan="8">
+              <form class="grid compact" method="post" action="/blocklists/{{ s.id }}/edit">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <label>Name <input name="name" value="{{ s.name }}" required></label>
+                <label>URL <input name="url" value="{{ s.url }}" required></label>
+                <label>Category
+                  <select name="category">
+                    {% for cat in categories %}
+                      <option value="{{ cat.key }}" {{ "selected" if cat.key == s.category else "" }}>{{ cat.name }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+                <div class="form-actions"><button type="submit" class="secondary">Save</button></div>
+              </form>
+              {% if s.last_error %}<p class="bad">{{ s.last_error }}</p>{% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endcall %}
+  {% else %}
+    {{ ui.empty_state("No blocklists match", "Add a source to begin compiling filtering policy, or clear the current filters.") }}
+  {% endif %}
+</section>
+{% endblock %}

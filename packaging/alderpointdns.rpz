@@ -1,0 +1,6 @@
+$TTL 60
+@ IN SOA localhost. hostmaster.localhost. (
+	2026072801 3600 600 86400 60
+)
+	IN NS localhost.
+

@@ -1,0 +1,188 @@
+{% extends "base.html" %}
+{% import "components.html" as ui %}
+{% block title %}Backup - Alderpoint DNS{% endblock %}
+{% block content %}
+{{ ui.page_header("Backup and Restore", "Versioned, checksummed backup archives with a preview-first, staged, and automatically-rolled-back restore path.") }}
+
+{% if error %}
+  <div class="alert error" role="alert">{{ error }}</div>
+{% endif %}
+
+<section class="grid">
+  <article class="card"><div class="card__head"><h2>Last Backup</h2>{% if last_backup %}{{ ui.status_badge(last_backup.status|title, "healthy" if last_backup.status == "deployed" else "down" if last_backup.status == "failed" else "neutral") }}{% endif %}</div>{% if last_backup %}<p class="muted mono">{{ last_backup.created_at }}</p><p class="muted">{{ (last_backup.size_bytes / 1048576)|round(2) }} MB</p>{% else %}<p class="muted">No backups yet.</p>{% endif %}</article>
+  <article class="card"><div class="card__head"><h2>Last Restore</h2>{% if last_restore %}{{ ui.status_badge(last_restore.status|title, "healthy" if last_restore.status == "deployed" else "down" if last_restore.status in ("failed", "rollback_failed") else "neutral") }}{% endif %}</div>{% if last_restore %}<p class="muted mono">{{ last_restore.finished_at or last_restore.started_at }}</p>{% else %}<p class="muted">No restores yet.</p>{% endif %}</article>
+  <article class="card"><div class="card__head"><h2>Schedule</h2>{{ ui.status_badge("Enabled" if backup_settings.schedule_enabled == "1" else "Disabled", "healthy" if backup_settings.schedule_enabled == "1" else "neutral") }}</div><p class="muted">Every {{ backup_settings.schedule_interval_hours }}h, keep {{ backup_settings.retention_count }} newest</p></article>
+  <article class="card"><div class="card__head"><h2>Stored Backups</h2></div><p class="muted">{{ backups|length }} archive{{ "s" if backups|length != 1 else "" }} in <span class="mono">/var/lib/alderpointdns/backups</span></p></article>
+</section>
+
+<section class="grid align-start">
+  <form class="panel stack" method="post" action="/backup/create" enctype="multipart/form-data" data-async-form data-success-message="Backup created.">
+    <div class="panel__head"><h2>Create Backup</h2></div>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="grid compact">
+      {% for key in component_keys %}
+        {% if key not in ("private_keys",) %}
+          <label class="row"><input type="checkbox" name="{{ key }}" value="1" {% if component_defaults[key] %}checked{% endif %}> {{ key|replace("_", " ")|title }}</label>
+        {% endif %}
+      {% endfor %}
+    </div>
+    <details>
+      <summary>Private keys and credentials (off by default)</summary>
+      <p class="alert error" role="alert" style="display:block">Including private keys bundles TLS private keys, the DNSCrypt provider/resolver private keys, the web session-signing secret, and dnsdist API/webserver credentials into the archive. Anyone who obtains this archive (and its password, if set) can impersonate this server or the admin UI. Only enable this for a full disaster-recovery backup stored somewhere trusted.</p>
+      <label class="row"><input type="checkbox" name="private_keys" value="1"> Include private keys and credentials</label>
+      <label class="row"><input type="checkbox" name="confirm_private_keys" value="1"> I understand the risk and confirm including private keys and credentials</label>
+    </details>
+    <label>Password (optional, encrypts the archive with openssl aes-256-cbc)
+      <input type="password" name="password" autocomplete="new-password" placeholder="leave blank for an unencrypted archive">
+    </label>
+    <div class="form-actions">
+      <button>Create backup</button>
+    </div>
+  </form>
+
+  <div class="panel stack">
+    <div class="panel__head"><h2>Import Backup</h2></div>
+    <p class="muted">Upload a backup archive (.tar.gz or .tar.gz.enc) from another Alderpoint DNS install or an older manual copy to preview or restore it.</p>
+    <form method="post" action="/backup/import" enctype="multipart/form-data" data-async-form data-success-message="Backup imported for preview.">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label>Backup archive
+        <input type="file" name="upload" accept=".gz,.enc" required>
+      </label>
+      <div class="form-actions"><button class="secondary">Upload</button></div>
+    </form>
+    {% if imported %}
+      <p class="muted">Imported as <span class="mono wrap-anywhere">{{ imported }}</span>. Use it as the source below to preview or restore it.</p>
+    {% endif %}
+  </div>
+</section>
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Preview a Restore</h2></div>
+  <p class="muted">Restore is always preview-first: this extracts the archive to a temporary staging directory, checks compatibility, and shows exactly what would change. Nothing live is touched by a preview.</p>
+  <form method="post" action="/backup/preview" data-async-form data-success-message="Preview loaded below.">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Backup source (history id or filename)
+      <input name="source" value="{{ preview_source or imported or '' }}" placeholder="e.g. 12 or alderpointdns-backup-20260729T101719Z.tar.gz" required>
+    </label>
+    <label>Password (only if this backup is encrypted)
+      <input type="password" name="password" autocomplete="off">
+    </label>
+    <div class="form-actions"><button class="secondary">Preview restore</button></div>
+  </form>
+</section>
+
+{% if preview %}
+<section class="panel stack">
+  <div class="panel__head"><h2>Restore Preview</h2>{{ ui.status_badge("Compatible" if preview.compatible else "Format mismatch", "healthy" if preview.compatible else "down") }}</div>
+  <p class="mono">source node: {{ preview.manifest.source_node_id }} &middot; created: {{ preview.manifest.created_at }} &middot; app version: {{ preview.manifest.alderpointdns_app_version }} &middot; schema: {{ preview.manifest.database_schema_version }}</p>
+  {% if preview.warnings %}
+    {% for warning in preview.warnings %}
+      <div class="alert error" role="alert">{{ warning }}</div>
+    {% endfor %}
+  {% endif %}
+  <p>Included components: <span class="mono wrap-anywhere">{{ preview.included_components|join(", ") }}</span></p>
+
+  {% if preview.table_diffs %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Table</th><th>Component</th><th>Live rows</th><th>Backup rows</th></tr></thead>
+        <tbody>
+          {% for diff in preview.table_diffs %}
+            <tr>
+              <td class="mono">{{ diff.table }}</td>
+              <td>{{ diff.component|replace("_", " ")|title }}</td>
+              <td>{{ diff.live_rows if diff.live_rows is not none else "n/a" }}</td>
+              <td>{{ diff.backup_rows if diff.backup_rows is not none else "n/a" }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    {{ ui.empty_state("No database row-count differences") }}
+  {% endif %}
+
+  {% if preview.file_diffs %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>File</th><th>Change</th></tr></thead>
+        <tbody>
+          {% for diff in preview.file_diffs %}
+            <tr><td class="mono wrap-anywhere">{{ diff.path }}</td><td>{{ diff.diff }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    {{ ui.empty_state("No file differences", (preview.unchanged_file_count|string) ~ " file(s) already match live state") }}
+  {% endif %}
+
+  <form method="post" action="/backup/restore" class="stack" data-confirm="Restore the selected components from this backup? A fresh safety backup of the current state is taken automatically first, and Alderpoint DNS will roll back and restore that safety backup if any post-restore health check fails.">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="source" value="{{ preview_source }}">
+    <div class="grid compact">
+      {% for key in component_keys %}
+        <label class="row"><input type="checkbox" name="{{ key }}" value="1" {% if key in preview.included_components %}checked{% endif %}> {{ key|replace("_", " ")|title }}</label>
+      {% endfor %}
+    </div>
+    <label>Password (re-enter if this backup is encrypted)
+      <input type="password" name="password" autocomplete="off">
+    </label>
+    <div class="form-actions"><button>Confirm restore</button></div>
+  </form>
+</section>
+{% endif %}
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Stored Backups</h2></div>
+  {% if backups %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Created</th><th>Size</th><th>Components</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody>
+          {% for row in backups %}
+            <tr>
+              <td class="mono">{{ row.created_at }}</td>
+              <td>{{ (row.size_bytes / 1048576)|round(2) }} MB</td>
+              <td class="mono wrap-anywhere">{{ row.components_summary }}</td>
+              <td>{{ ui.status_badge(row.status|title, "healthy" if row.status in ("deployed", "unchanged") else "down" if row.status == "failed" else "neutral") }}</td>
+              <td class="row">
+                <a class="button secondary" href="/backup/{{ row.id if row.id else (row.path.split('/')[-1]) }}/download">Download</a>
+                <form method="post" action="/backup/{{ row.id if row.id else (row.path.split('/')[-1]) }}/delete" data-confirm="Delete this backup archive? This cannot be undone.">
+                  <input type="hidden" name="csrf" value="{{ csrf }}">
+                  <button class="secondary">Delete</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    {{ ui.empty_state("No backups yet", "Create one above to get started.") }}
+  {% endif %}
+</section>
+
+<section class="grid">
+  <form class="panel stack" method="post" action="/backup/schedule" data-async-form data-success-message="Backup schedule saved.">
+    <div class="panel__head"><h2>Scheduled Backups</h2></div>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label class="row"><input type="checkbox" name="schedule_enabled" value="1" {% if backup_settings.schedule_enabled == "1" %}checked{% endif %}> Enable scheduled backups</label>
+    <div class="grid compact">
+      <label>Interval (hours)
+        <input name="schedule_interval_hours" type="number" min="1" max="720" value="{{ backup_settings.schedule_interval_hours }}">
+      </label>
+      <label>Retention (newest kept)
+        <input name="retention_count" type="number" min="1" max="1000" value="{{ backup_settings.retention_count }}">
+      </label>
+    </div>
+    <p class="muted">Scheduled backups use the same component defaults as a manual backup with no password (unencrypted), and are pruned to the retention count after each run.</p>
+    <div class="form-actions"><button>Save schedule</button></div>
+  </form>
+
+  <div class="panel stack">
+    <div class="panel__head"><h2>Notes</h2></div>
+    <p class="muted">The SQLite database is always captured through SQLite's own online backup API, never a raw file copy, so a concurrently-writing web app or analytics collector can never produce a torn archive. Restores always take a fresh safety backup of the current state first and automatically roll back if any post-restore health check fails.</p>
+  </div>
+</section>
+{% endblock %}

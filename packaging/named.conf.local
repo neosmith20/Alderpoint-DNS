@@ -1,0 +1,15 @@
+// Managed by Alderpoint DNS.
+include "/etc/bind/rndc.key";
+controls {
+	inet 127.0.0.1 port 953
+		allow { 127.0.0.1; }
+		keys { "rndc-key"; };
+};
+zone "alderpointdns.rpz" {
+	type primary;
+	file "/var/lib/alderpointdns/compiled/bind/alderpointdns.rpz";
+	allow-query { localhost; };
+	allow-transfer { none; };
+};
+
+include "/var/lib/alderpointdns/compiled/bind/local-zones.conf";

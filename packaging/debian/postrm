@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  purge)
+    rm -rf /etc/alderpointdns /var/lib/alderpointdns /var/log/alderpointdns
+    # Runtime timer drop-in directories written from stored schedule settings.
+    rm -rf /etc/systemd/system/alderpointdns-backup.timer.d \
+      /etc/systemd/system/alderpointdns-filter-update.timer.d
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    ;;
+  remove)
+    echo "Alderpoint DNS persistent data remains in /etc/alderpointdns, /var/lib/alderpointdns, and /var/log/alderpointdns." >&2
+    echo "Use apt purge alderpointdns only when permanent data removal is intended." >&2
+    ;;
+esac
+
+#DEBHELPER#
+exit 0

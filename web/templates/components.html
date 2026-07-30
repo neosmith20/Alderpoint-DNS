@@ -1,0 +1,83 @@
+{% macro page_header(title, subtitle='', actions='') -%}
+  <section class="page-header">
+    <div class="page-header__copy">
+      <h1>{{ title }}</h1>
+      {% if subtitle %}<p>{{ subtitle }}</p>{% endif %}
+    </div>
+    {% if actions %}<div class="page-header__actions">{{ actions|safe }}</div>{% endif %}
+  </section>
+{%- endmacro %}
+
+{% macro status_badge(label, tone='neutral') -%}
+  <span class="status-badge status-badge--{{ tone }}">{{ label }}</span>
+{%- endmacro %}
+
+{% macro empty_state(title, body='') -%}
+  <div class="empty-state" role="status">
+    <strong>{{ title }}</strong>
+    {% if body %}<span>{{ body }}</span>{% endif %}
+  </div>
+{%- endmacro %}
+
+{% macro metric_card(label, value, unit='', hint='', tone='accent', sparkline='') -%}
+  <article class="metric-card" title="{{ hint }}">
+    <div class="metric-card__head">
+      <span>{{ label }}</span>
+      <span class="metric-card__dot metric-card__dot--{{ tone }}" aria-hidden="true"></span>
+    </div>
+    <div class="metric-card__value">
+      <strong>{{ value }}</strong>{% if unit %}<span>{{ unit }}</span>{% endif %}
+    </div>
+    <div class="metric-card__foot">
+      <span>{{ hint or "Stored Alderpoint DNS analytics" }}</span>
+      {% if sparkline %}<canvas class="sparkline" data-series="{{ sparkline|e }}" aria-hidden="true"></canvas>{% endif %}
+    </div>
+  </article>
+{%- endmacro %}
+
+{% macro ranked_list(title, rows, total=0, href='', empty='No data yet.') -%}
+  <article class="panel">
+    <div class="panel__head">
+      <h2>{{ title }}</h2>
+      {% if href %}<a href="{{ href }}">View all</a>{% endif %}
+    </div>
+    {% if rows %}
+      <div class="ranked-list">
+        {% for row in rows %}
+          {% set percent = ((row.value / total * 100) if total else 0) %}
+          <div class="ranked-row">
+            <div class="ranked-row__top">
+              <span class="ranked-row__label mono" title="{{ row.label }}">{{ row.label }}</span>
+              <span class="ranked-row__value">{{ row.value }}</span>
+            </div>
+            <div class="ranked-row__meta">
+              <span class="meter"><span style="width: {{ "%.1f"|format(percent if percent <= 100 else 100) }}%"></span></span>
+              <span>{{ "%.1f"|format(percent) }}%</span>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      {{ empty_state(empty) }}
+    {% endif %}
+  </article>
+{%- endmacro %}
+
+{% macro table_wrap(class_name='') -%}
+  <div class="table-wrap{% if class_name %} {{ class_name }}{% endif %}">{{ caller() }}</div>
+{%- endmacro %}
+
+{% macro category_badge(label) -%}
+  <span class="category-badge">{{ label }}</span>
+{%- endmacro %}
+
+{% macro overflow_menu(id) -%}
+  <div class="overflow-menu" data-overflow-menu>
+    <button type="button" class="secondary overflow-menu__trigger" data-overflow-trigger aria-haspopup="true" aria-expanded="false" aria-controls="{{ id }}" aria-label="More actions" title="More actions">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
+    </button>
+    <div class="overflow-menu__panel" id="{{ id }}" role="menu" hidden>
+      {{ caller() }}
+    </div>
+  </div>
+{%- endmacro %}

@@ -1,0 +1,65 @@
+# Sanitized, representative AdGuardHome.yaml migration fixture.
+# Covers every user_rules form the importer must classify.
+filters:
+  - name: Ads Filter
+    url: https://filters.example/ads.txt
+    enabled: true
+  - name: Malware Protection List
+    url: https://filters.example/malware.txt
+    enabled: false
+  - name: Mystery List
+    url: https://filters.example/other.txt?auth=filtertoken123
+    enabled: true
+whitelist_filters:
+  - name: Allowlist Subscription
+    url: https://filters.example/allow.txt
+user_rules:
+  - '||ads.example^'
+  - '@@||safe.example^'
+  - '|exact.example^'
+  - '@@|exactallow.example^'
+  - 'plainblock.example'
+  - '0.0.0.0 hosts-blocked.example'
+  - ':: hosts-blocked-v6.example'
+  - '127.0.0.1 loopback.example'
+  - 'fd00::9 hosts-v6.example nas-alias.example # media box'
+  - '! adguard style comment'
+  - '# hosts style comment'
+  - '! ||disabled-rule.example^'
+  - '/^ads[0-9]+\./'
+  - '@@/^goodcdn[0-9]+\./'
+  - '/bad(?!lookahead)/'
+  - '||important.example^$important'
+  - '||clientscoped.example^$client=192.168.1.44'
+  - '||typerestricted.example^$dnstype=AAAA'
+  - '||rewritten.example^$dnsrewrite=192.168.1.10'
+  - '||ctagged.example^$ctag=device_phone'
+  - 'not_a_valid_domain_-.example..'
+filtering:
+  rewrites:
+    - domain: nas.home.arpa
+      answer: 192.168.1.50
+    - domain: printer.home.arpa
+      answer: fd00::50
+    - domain: external.example.com
+      answer: 192.168.1.51
+    - domain: '*.wildcard.example'
+      answer: 192.168.1.52
+    - domain: alias.home.arpa
+      answer: target.home.arpa
+    - domain: badalias.home.arpa
+      answer: 'not..a..domain..'
+clients:
+  persistent:
+    - name: Phone
+      ids: ['192.168.1.77']
+      filtering_enabled: true
+    - name: Laptop
+      ids: ['192.168.1.0/28']
+dns:
+  bootstrap_dns:
+    - 1.1.1.1
+  upstream_dns:
+    - 'https://dns.example/dns-query'
+    - '9.9.9.9:53'
+    - '[/corp.example/]10.0.0.53'

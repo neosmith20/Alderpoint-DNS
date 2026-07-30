@@ -1,0 +1,17 @@
+app opt/alderpointdns/
+docs opt/alderpointdns/
+packaging opt/alderpointdns/
+scripts opt/alderpointdns/
+tests opt/alderpointdns/
+web opt/alderpointdns/
+VERSION opt/alderpointdns/
+requirements.txt opt/alderpointdns/
+requirements-debian.txt opt/alderpointdns/
+packaging/alderpointdns.service lib/systemd/system/
+packaging/alderpointdns-analytics.service lib/systemd/system/
+packaging/alderpointdns-backup.service lib/systemd/system/
+packaging/alderpointdns-backup.timer lib/systemd/system/
+packaging/alderpointdns-filter-update.service lib/systemd/system/
+packaging/alderpointdns-filter-update.timer lib/systemd/system/
+packaging/sudoers-alderpointdns etc/sudoers.d/alderpointdns
+scripts/alderpointdns-diagnostics usr/sbin/alderpointdns-diagnostics

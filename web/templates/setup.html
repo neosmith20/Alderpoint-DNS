@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block content %}
+<form class="auth-card stack" method="post" action="/setup">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">
+      <svg width="19" height="21" viewBox="0 0 19 21" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M9.5 1.6 16.6 4v5.7c0 4.5-2.8 8.3-7.1 9.8-4.3-1.5-7.1-5.3-7.1-9.8V4l7.1-2.4Z" stroke="currentColor" stroke-width="1.7"/>
+        <path d="M6 10.2 8.5 13l4.8-5.7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </span>
+    <span>Alderpoint DNS</span>
+  </div>
+  <h1>Initial administrator setup</h1>
+  <p class="muted">Create the first local administrator. No default password exists.</p>
+  <label>Username <input name="username" value="admin"></label>
+  <label>Password <input name="password" type="password" minlength="12" required></label>
+  <div class="stack">
+    <label class="row"><input type="checkbox" name="create_local_dns" value="1" checked> Create Alderpoint DNS local DNS records</label>
+    <label>Alderpoint DNS hostname
+      <input name="server_hostname" value="{{ (local_dns.server_hostname if local_dns is defined else 'alderpointdns') or 'alderpointdns' }}">
+    </label>
+    <label>Alderpoint DNS IP address
+      <input name="server_ip" value="{{ (local_dns.server_ip if local_dns is defined else '192.168.1.101') or '192.168.1.101' }}">
+    </label>
+    <p class="muted">Creates <span class="mono">alderpointdns.home.arpa</span>, a reverse PTR record, and the Alderpoint DNS client alias. The IP is detected when available and can be changed later.</p>
+  </div>
+  <div class="form-actions"><button>Create administrator</button></div>
+</form>
+{% endblock %}

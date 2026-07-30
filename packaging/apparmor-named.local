@@ -1,0 +1,6 @@
+# Alderpoint DNS generated RPZ and statistics/logging paths.
+/var/lib/alderpointdns/compiled/bind/ r,
+/var/lib/alderpointdns/compiled/bind/** r,
+/var/log/alderpointdns/bind/ rw,
+/var/log/alderpointdns/bind/** rw,
+

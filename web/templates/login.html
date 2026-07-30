@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block content %}
+<form class="auth-card stack" method="post" action="/login">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">
+      <svg width="19" height="21" viewBox="0 0 19 21" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M9.5 1.6 16.6 4v5.7c0 4.5-2.8 8.3-7.1 9.8-4.3-1.5-7.1-5.3-7.1-9.8V4l7.1-2.4Z" stroke="currentColor" stroke-width="1.7"/>
+        <path d="M6 10.2 8.5 13l4.8-5.7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </span>
+    <span>Alderpoint DNS</span>
+  </div>
+  <h1>Login</h1>
+  {% if error %}<p class="alert error">{{ error }}</p>{% endif %}
+  <label>Username <input name="username" autocomplete="username" required></label>
+  <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+  <div class="form-actions"><button>Login</button></div>
+</form>
+{% endblock %}

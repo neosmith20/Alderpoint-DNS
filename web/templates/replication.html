@@ -1,0 +1,204 @@
+{% extends "base.html" %}
+{% import "components.html" as ui %}
+{% block title %}Replication - Alderpoint DNS{% endblock %}
+{% block content %}
+{{ ui.page_header("Replication", "One-way primary-to-replica configuration sync over mutual TLS.") }}
+
+{% if error %}
+  <div class="alert error" role="alert">{{ error }}</div>
+{% endif %}
+
+<section class="grid">
+  <article class="card"><div class="card__head"><h2>Role</h2>{{ ui.status_badge(cfg.role|title, "healthy" if cfg.role != "standalone" else "neutral") }}</div><p class="muted mono">node id: {{ cfg.node_id if cfg.node_id else "-" }}</p></article>
+  {% if cfg.role == "primary" %}
+    <article class="card"><div class="card__head"><h2>Listener</h2>{{ ui.status_badge("Running" if listener_running else "Stopped", "healthy" if listener_running else "down") }}</div><p class="muted mono">{{ cfg.listen_host }}:{{ cfg.listen_port }}</p></article>
+    <article class="card"><div class="card__head"><h2>Latest Generation</h2></div>{% if latest_generation %}<p class="mono">#{{ latest_generation.generation_number }}</p><p class="muted mono wrap-anywhere">{{ latest_generation.content_hash }}</p>{% else %}<p class="muted">No generation created yet. Deploy a change to create the first one.</p>{% endif %}</article>
+    <article class="card"><div class="card__head"><h2>Replicas</h2></div><p class="muted">{{ replicas|length }} enrolled</p></article>
+  {% elif cfg.role == "replica" %}
+    <article class="card"><div class="card__head"><h2>Primary</h2>{{ ui.status_badge("Paused" if cfg.paused == "1" else "Active", "neutral" if cfg.paused == "1" else "healthy") }}</div><p class="muted mono">{{ cfg.primary_address or "not connected" }}</p></article>
+    <article class="card"><div class="card__head"><h2>Last Applied</h2></div><p class="mono">generation #{{ cfg.last_applied_generation }}</p><p class="muted">{{ cfg.last_sync_status or "never synced" }}</p></article>
+    <article class="card"><div class="card__head"><h2>Drift</h2>{{ ui.status_badge("Drifted" if cfg.drift_detected == "1" else "In sync", "down" if cfg.drift_detected == "1" else "healthy") }}</div><p class="muted mono">{{ cfg.drift_checked_at or "not checked yet" }}</p></article>
+  {% endif %}
+</section>
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Node Role</h2></div>
+  <form method="post" action="/replication/role" data-confirm="Change this node's replication role? Switching away from a role stops its listener/sync activity, but never interrupts DNS service.">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Role
+      <select name="role">
+        <option value="standalone" {% if cfg.role == "standalone" %}selected{% endif %}>Standalone</option>
+        <option value="primary" {% if cfg.role == "primary" %}selected{% endif %}>Primary</option>
+        <option value="replica" {% if cfg.role == "replica" %}selected{% endif %}>Replica</option>
+      </select>
+    </label>
+    <div class="form-actions"><button class="secondary">Save role</button></div>
+  </form>
+</section>
+
+{% if cfg.role == "primary" %}
+<section class="grid">
+  <form class="panel stack" method="post" action="/replication/token">
+    <div class="panel__head"><h2>Clone to Replica</h2></div>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>New replica name
+      <input name="node_name" placeholder="replica-1" autocomplete="off" required>
+    </label>
+    <p class="muted">Generates a one-time, single-use enrollment token, valid for 15 minutes. Copy it to the replica's own Replication page along with this primary's reachable address and port.</p>
+    <div class="form-actions"><button>Generate enrollment token</button></div>
+  </form>
+
+  {% if issued_token %}
+  <div class="panel stack">
+    <div class="panel__head"><h2>Enrollment Token</h2></div>
+    <p class="muted">This token is shown once. Copy it now.</p>
+    <p class="mono wrap-anywhere">{{ issued_token.token }}</p>
+    <p class="muted">For <span class="mono">{{ issued_token.node_name }}</span>, expires {{ issued_token.expires_at }}.</p>
+    <p class="muted">Give the replica this primary's reachable address (not <span class="mono">0.0.0.0</span>) and port <span class="mono">{{ cfg.listen_port }}</span> along with the token above.</p>
+  </div>
+  {% endif %}
+</section>
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Pending Enrollments</h2></div>
+  {% if enrollments %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Name</th><th>Created</th><th>Expires</th><th>Status</th><th></th></tr></thead>
+        <tbody>
+          {% for e in enrollments %}
+            <tr>
+              <td class="wrap-anywhere">{{ e.node_name }}</td>
+              <td class="mono">{{ e.created_at }}</td>
+              <td class="mono">{{ e.expires_at }}</td>
+              <td>{{ ui.status_badge(e.status|title, "healthy" if e.status == "consumed" else "down" if e.status in ("revoked", "expired") else "neutral") }}</td>
+              <td>
+                {% if e.status == "pending" %}
+                <form method="post" action="/replication/enrollment/{{ e.id }}/revoke" data-confirm="Revoke this enrollment token before it is used?">
+                  <input type="hidden" name="csrf" value="{{ csrf }}">
+                  <button class="secondary">Revoke</button>
+                </form>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    {{ ui.empty_state("No enrollments yet") }}
+  {% endif %}
+</section>
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Replica Health</h2></div>
+  {% if replicas %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Name</th><th>Status</th><th>Last seen</th><th>Last generation acked</th><th>Last result</th><th>Actions</th></tr></thead>
+        <tbody>
+          {% for r in replicas %}
+            <tr>
+              <td class="wrap-anywhere">{{ r.display_name }}</td>
+              <td>{{ ui.status_badge(r.status|title, "healthy" if r.status == "active" else "down" if r.status == "revoked" else "neutral") }}</td>
+              <td class="mono">{{ r.last_seen_at or "never" }}</td>
+              <td class="mono">{{ r.last_generation_acked }}</td>
+              <td class="wrap-anywhere">{{ r.last_result }}</td>
+              <td class="row">
+                {% if r.status != "paused" %}
+                <form method="post" action="/replication/replica/{{ r.id }}/status"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="status" value="paused"><button class="secondary">Pause</button></form>
+                {% else %}
+                <form method="post" action="/replication/replica/{{ r.id }}/status"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="status" value="active"><button class="secondary">Resume</button></form>
+                {% endif %}
+                {% if r.status != "revoked" %}
+                <form method="post" action="/replication/replica/{{ r.id }}/status" data-confirm="Revoke this replica? Its certificate will no longer be accepted even though it remains cryptographically valid.">
+                  <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="status" value="revoked"><button class="secondary">Revoke</button>
+                </form>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    {{ ui.empty_state("No replicas enrolled yet") }}
+  {% endif %}
+</section>
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Primary Settings</h2></div>
+  <form method="post" action="/replication/settings" data-async-form data-success-message="Replication settings saved.">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="grid compact">
+      <label>Listen address<input name="listen_host" value="{{ cfg.listen_host }}"></label>
+      <label>Listen port<input name="listen_port" type="number" min="1" max="65535" value="{{ cfg.listen_port }}"></label>
+      <label class="row"><input type="checkbox" name="include_encryption_settings" value="1" {% if cfg.include_encryption_settings == "1" %}checked{% endif %}> Include Encryption Settings in generations</label>
+      <label class="row"><input type="checkbox" name="include_certificates" value="1" {% if cfg.include_certificates == "1" %}checked{% endif %}> Include certificate material in generations</label>
+    </div>
+    <div class="form-actions"><button class="secondary">Save settings</button></div>
+  </form>
+</section>
+{% endif %}
+
+{% if cfg.role == "replica" %}
+<section class="grid">
+  <form class="panel stack" method="post" action="/replication/connect" data-confirm="Connect to this primary and enroll? This installs a client certificate and starts syncing.">
+    <div class="panel__head"><h2>Connect to Primary</h2></div>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Primary address<input name="primary_host" placeholder="192.168.1.10" autocomplete="off" required></label>
+    <label>Primary port<input name="primary_port" type="number" min="1" max="65535" value="8843" required></label>
+    <label>Enrollment token<input name="token" autocomplete="off" required></label>
+    <div class="form-actions"><button>Enroll</button></div>
+  </form>
+
+  <div class="panel stack">
+    <div class="panel__head"><h2>Sync Controls</h2></div>
+    <form method="post" action="/replication/sync-now" data-async-form data-success-message="Sync requested."><input type="hidden" name="csrf" value="{{ csrf }}"><div class="form-actions"><button class="secondary">Sync now</button></div></form>
+    <form method="post" action="/replication/drift-check" data-async-form data-success-message="Drift check complete."><input type="hidden" name="csrf" value="{{ csrf }}"><div class="form-actions"><button class="secondary">Check drift</button></div></form>
+    <form method="post" action="/replication/pause">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="paused" value="{{ '0' if cfg.paused == '1' else '1' }}">
+      <div class="form-actions"><button class="secondary">{{ "Resume sync" if cfg.paused == "1" else "Pause sync" }}</button></div>
+    </form>
+  </div>
+</section>
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Sync History</h2></div>
+  {% if sync_history %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Attempted</th><th>Generation</th><th>Result</th><th>Message</th></tr></thead>
+        <tbody>
+          {% for h in sync_history %}
+            <tr>
+              <td class="mono">{{ h.attempted_at }}</td>
+              <td class="mono">{{ h.generation_number if h.generation_number is not none else "-" }}</td>
+              <td>{{ ui.status_badge(h.result|title, "healthy" if h.result in ("success", "up_to_date") else "down" if h.result in ("failed", "error") else "neutral") }}</td>
+              <td class="wrap-anywhere">{{ h.message }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    {{ ui.empty_state("No sync attempts yet") }}
+  {% endif %}
+</section>
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Poll Settings</h2></div>
+  <form method="post" action="/replication/settings" data-async-form data-success-message="Replication settings saved.">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Poll interval (seconds)<input name="poll_interval_seconds" type="number" min="10" max="3600" value="{{ cfg.poll_interval_seconds }}"></label>
+    <div class="form-actions"><button class="secondary">Save settings</button></div>
+  </form>
+</section>
+{% endif %}
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Manual Promotion</h2></div>
+  <p class="muted">Promoting a replica to primary is a manual, deliberate action, documented in <span class="mono">docs/replication-promotion.md</span>, not an automated failover -- automatic bidirectional sync is intentionally not implemented.</p>
+</section>
+{% endblock %}

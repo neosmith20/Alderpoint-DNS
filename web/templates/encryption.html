@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+{% import "components.html" as ui %}
+{% block title %}Encryption - Alderpoint DNS{% endblock %}
+{% block content %}
+{{ ui.page_header("Encryption", "Encrypted DNS transports, TLS certificates, and client connection information.") }}
+
+{% if error %}
+  <div class="alert error" role="alert">{{ error }}</div>
+{% endif %}
+
+<section class="grid">
+  <article class="card"><div class="card__head"><h2>Plain DNS</h2>{{ ui.status_badge("Always on", "healthy") }}</div><p class="muted">UDP/TCP port 53 is never disabled from this page, so Alderpoint DNS always has a working fallback transport.</p></article>
+  <article class="card"><div class="card__head"><h2>Last Deployment</h2>{% if deployment %}{{ ui.status_badge(deployment.status|title, "healthy" if deployment.status in ("deployed", "unchanged") else "down" if deployment.status in ("failed", "rollback_failed") else "neutral") }}{% endif %}</div>{% if deployment %}<p class="muted mono">{{ deployment.finished_at or deployment.started_at }}</p>{% endif %}</article>
+  <article class="card"><div class="card__head"><h2>Certificate</h2>{% if cert.available %}{{ ui.status_badge("Expiring soon" if cert.expiring_soon else ("Expired" if cert.expired else "Valid"), "down" if cert.expired else ("warning" if cert.expiring_soon else "healthy")) }}{% else %}{{ ui.status_badge("Missing", "down") }}{% endif %}</div>{% if cert.available %}<p class="muted">{{ cert.days_remaining }} days remaining</p>{% endif %}</article>
+</section>
+
+{% if deployment and deployment.protocol_tests and deployment.protocol_tests != "{}" %}
+<section class="panel stack">
+  <div class="panel__head"><h2>Last Protocol Test Results</h2></div>
+  <p class="mono wrap-anywhere">{{ deployment.protocol_tests }}</p>
+  {% if deployment.message %}<p class="muted wrap-anywhere">{{ deployment.message }}</p>{% endif %}
+</section>
+{% endif %}
+
+<section class="grid align-start">
+  <form class="panel stack" method="post" action="/encryption/settings" data-async-form data-success-message="Encryption settings saved and deployed.">
+    <div class="panel__head"><h2>Protocols</h2></div>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="grid compact">
+      <label>Server hostname
+        <input name="server_hostname" value="{{ cfg.server_hostname }}" autocomplete="off" required>
+      </label>
+      <label>Bootstrap / server IP
+        <input name="bootstrap_ip" value="{{ cfg.bootstrap_ip }}" autocomplete="off">
+      </label>
+      <label>Listen IPv4
+        <input name="listen_ipv4" value="{{ cfg.listen_ipv4 or '' }}" autocomplete="off" placeholder="0.0.0.0 or 127.0.0.1">
+      </label>
+      <label>Listen IPv6
+        <input name="listen_ipv6" value="{{ cfg.listen_ipv6 or '' }}" autocomplete="off" placeholder=":: or ::1">
+      </label>
+    </div>
+    <p class="muted">Wildcard listen addresses such as <span class="mono">0.0.0.0</span> and <span class="mono">::</span> expose client DNS listeners on every host interface allowed by dnsdist ACLs and firewall policy. Use loopback or a specific LAN address for private testing.</p>
+    <div class="grid compact">
+      <label class="row"><input type="checkbox" name="doh_enabled" value="1" {% if cfg.doh_enabled == "1" %}checked{% endif %}> DoH (TCP 443)</label>
+      <label>DoH port<input name="doh_port" type="number" min="1" max="65535" value="{{ cfg.doh_port }}"></label>
+      <label>DoH path<input name="doh_path" value="{{ cfg.doh_path }}"></label>
+      <label class="row"><input type="checkbox" name="doh3_enabled" value="1" {% if cfg.doh3_enabled == "1" %}checked{% endif %}> DoH3 (UDP 443)</label>
+      <label>DoH3 port<input name="doh3_port" type="number" min="1" max="65535" value="{{ cfg.doh3_port }}"></label>
+      <label class="row"><input type="checkbox" name="dot_enabled" value="1" {% if cfg.dot_enabled == "1" %}checked{% endif %}> DoT (TCP 853)</label>
+      <label>DoT port<input name="dot_port" type="number" min="1" max="65535" value="{{ cfg.dot_port }}"></label>
+      <label class="row"><input type="checkbox" name="doq_enabled" value="1" {% if cfg.doq_enabled == "1" %}checked{% endif %}> DoQ (UDP 853)</label>
+      <label>DoQ port<input name="doq_port" type="number" min="1" max="65535" value="{{ cfg.doq_port }}"></label>
+    </div>
+    <details>
+      <summary>DNSCrypt (experimental)</summary>
+      <p class="muted">DNSCrypt requires generating provider/resolver key material through dnsdist's own console interface. This is not reliably available on every install; if generation fails, DNSCrypt is automatically left disabled and the deployment message explains why, without blocking DoH/DoH3/DoT/DoQ.</p>
+      <div class="grid compact">
+        <label class="row"><input type="checkbox" name="dnscrypt_enabled" value="1" {% if cfg.dnscrypt_enabled == "1" %}checked{% endif %}> Enable DNSCrypt</label>
+        <label>DNSCrypt port<input name="dnscrypt_port" type="number" min="1" max="65535" value="{{ cfg.dnscrypt_port }}"></label>
+        <label>Provider name<input name="dnscrypt_provider" value="{{ cfg.dnscrypt_provider }}"></label>
+      </div>
+      {% if dnscrypt_fingerprint %}<p class="muted mono wrap-anywhere">Provider public key: {{ dnscrypt_fingerprint }}</p>{% endif %}
+    </details>
+    <div class="form-actions">
+      <button>Save and deploy</button>
+    </div>
+  </form>
+
+  <div class="panel stack">
+    <div class="panel__head"><h2>Certificate</h2></div>
+    {% if cert.available %}
+      <div class="stack">
+        <p>Subject: <span class="mono wrap-anywhere">{{ cert.subject }}</span></p>
+        <p>Issuer: <span class="mono wrap-anywhere">{{ cert.issuer }}</span></p>
+        <p>Valid: <span class="mono">{{ cert.not_before }}</span> &ndash; <span class="mono">{{ cert.not_after }}</span> ({{ cert.days_remaining }} days remaining)</p>
+        <p>SANs: <span class="mono wrap-anywhere">{{ cert.sans|join(", ") }}</span></p>
+        <p>SHA-256 fingerprint: <span class="mono wrap-anywhere">{{ cert.fingerprint_sha256 }}</span></p>
+        <p>{{ ui.status_badge("Self-signed" if cert.self_signed else "CA-issued", "neutral") }}</p>
+      </div>
+      <div class="form-actions"><a class="button secondary" href="/encryption/certificate/download">Download public certificate</a></div>
+    {% else %}
+      {{ ui.empty_state("No certificate deployed yet") }}
+    {% endif %}
+
+    <details {% if cfg.cert_mode == "self_signed" %}open{% endif %}>
+      <summary>Self-signed certificate</summary>
+      <form method="post" action="/encryption/certificate/self-signed" data-confirm="Generate a new self-signed certificate and deploy it? This replaces the current certificate.">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <p class="muted">Generates a fresh self-signed certificate for <span class="mono">{{ cfg.server_hostname }}</span>.</p>
+        <div class="form-actions"><button class="secondary">Generate self-signed certificate</button></div>
+      </form>
+    </details>
+
+    <details {% if cfg.cert_mode == "local_ca" %}open{% endif %}>
+      <summary>Local certificate authority</summary>
+      <form method="post" action="/encryption/certificate/local-ca" data-confirm="Issue a certificate from Alderpoint DNS's local CA (creating the CA first if needed) and deploy it?">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <p class="muted">Creates (or reuses) a local Alderpoint DNS CA and issues a leaf certificate signed by it. Trust the CA certificate on clients to avoid browser/OS warnings.</p>
+        <div class="form-actions"><button class="secondary">Issue from local CA</button></div>
+      </form>
+    </details>
+
+    <details {% if cfg.cert_mode == "uploaded" %}open{% endif %}>
+      <summary>Upload certificate and key</summary>
+      <form method="post" action="/encryption/certificate/upload" enctype="multipart/form-data" data-confirm="Upload and deploy this certificate and key?">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <label>Certificate file (PEM)<input type="file" name="cert_file" accept=".crt,.pem" required></label>
+        <label>Key file (PEM)<input type="file" name="key_file" accept=".key,.pem" required></label>
+        <p class="muted">Private key contents are never displayed back in the UI.</p>
+        <div class="form-actions"><button class="secondary">Upload and deploy</button></div>
+      </form>
+    </details>
+
+    <details {% if cfg.cert_mode == "existing_path" %}open{% endif %}>
+      <summary>Existing server-side paths</summary>
+      <form method="post" action="/encryption/certificate/existing-path" data-confirm="Deploy the certificate and key at these existing server paths?">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <label>Certificate path<input name="cert_path" value="{{ cfg.cert_path if cfg.cert_mode == 'existing_path' else '' }}" placeholder="/etc/alderpointdns/certs/custom.crt" required></label>
+        <label>Key path<input name="key_path" value="{{ cfg.key_path if cfg.cert_mode == 'existing_path' else '' }}" placeholder="/etc/alderpointdns/certs/custom.key" required></label>
+        <div class="form-actions"><button class="secondary">Use these paths</button></div>
+      </form>
+    </details>
+  </div>
+</section>
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Client Connection Information</h2></div>
+  {% if connection_info %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Protocol</th><th>Connect using</th></tr></thead>
+        <tbody>
+          {% for protocol, value in connection_info.items() %}
+            <tr><td>{{ protocol }}</td><td class="mono wrap-anywhere">{{ value }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    {{ ui.empty_state("No encrypted protocols enabled") }}
+  {% endif %}
+  <div class="form-actions">
+    {% if cfg.doh_enabled == "1" %}<a class="button secondary" href="/encryption/apple/doh.mobileconfig">Apple profile: DoH</a>{% endif %}
+    {% if cfg.dot_enabled == "1" %}<a class="button secondary" href="/encryption/apple/dot.mobileconfig">Apple profile: DoT</a>{% endif %}
+  </div>
+</section>
+{% endblock %}

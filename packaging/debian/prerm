@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  remove|deconfigure)
+    systemctl stop alderpointdns.service alderpointdns-analytics.service alderpointdns-backup.timer alderpointdns-filter-update.timer >/dev/null 2>&1 || true
+    systemctl disable alderpointdns-backup.timer alderpointdns-filter-update.timer >/dev/null 2>&1 || true
+    ;;
+esac
+
+#DEBHELPER#
+exit 0
