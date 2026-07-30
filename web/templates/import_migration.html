@@ -236,16 +236,16 @@
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="itemized" value="1">
       {% for section in migration_summary.categories %}
-        <details class="stack" {% if section.items|length <= 15 %}open{% endif %}>
+        <details class="stack" {% if section['items']|length <= 15 %}open{% endif %}>
           <summary>
-            <strong>{{ section.label }}</strong> ({{ section.items|length }})
+            <strong>{{ section.label }}</strong> ({{ section['items']|length }})
             <label class="row"><input type="checkbox" class="cat-toggle" data-category="{{ section.name }}" checked> select all</label>
           </summary>
-          {{ item_table(section.items[:150]) }}
-          {% if section.items|length > 150 %}
+          {{ item_table(section['items'][:150]) }}
+          {% if section['items']|length > 150 %}
             <details>
-              <summary>Show all {{ section.items|length }} items in {{ section.label }}</summary>
-              {{ item_table(section.items[150:]) }}
+              <summary>Show all {{ section['items']|length }} items in {{ section.label }}</summary>
+              {{ item_table(section['items'][150:]) }}
             </details>
           {% endif %}
         </details>

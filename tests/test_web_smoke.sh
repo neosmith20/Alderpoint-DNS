@@ -450,24 +450,30 @@ for expected in ("Import Job #", "Conflicts", "data-async-form", long_domain):
     if expected not in import_job_html:
         raise SystemExit(f"import job page missing {expected}")
 
+import_adguard_translation = {
+    "blocklist_sources": [{"name": "EasyList", "url": long_upstream, "enabled": True, "category": "ads_trackers"}],
+    "allowlist_unsupported": [{"name": "Allow", "url": long_upstream, "note": "n/a"}],
+    "custom_rules": [
+        {"text": "||" + long_domain + "^", "rule": "||" + long_domain + "^", "plain_domain_subdomains": True, "origin": "user_rules", "comment": ""},
+    ],
+    "custom_allow": [], "custom_block": [],
+    "unsupported_rules": [],
+    "rewrites_as_local_dns": [{"fqdn": long_domain, "record_type": "A", "value": "172.16.43.12", "ttl": 300, "origin": "dns_rewrites"}],
+    "clients_as_aliases": [{"display_name": "Phone", "cidr_or_ip": "172.16.43.77", "all_ids": []}],
+    "client_scoped": ["Phone: filtering_enabled has no Alderpoint DNS per-client equivalent yet (schema exists, not enforced at runtime)"],
+    "upstream_resolvers": [{"name": "Imported upstream", "protocol": "plain", "address": "9.9.9.9", "port": 53}],
+    "untranslatable": ["filtering.safe_search: SafeSearch enforcement is not implemented in Alderpoint DNS"],
+}
+import_adguard_summary = importer.summarize_migration(import_adguard_translation, "home.arpa")
 import_adguard_html = TEMPLATES.get_template("import_migration.html").render(
     **base, error=None, jobs=[], job=None, preview=None,
-    adguard={
-        "blocklist_sources": [{"name": "EasyList", "url": long_upstream, "enabled": True}],
-        "allowlist_unsupported": [{"name": "Allow", "url": long_upstream, "note": "n/a"}],
-        "custom_allow": ["a.example"], "custom_block": ["b.example"],
-        "unsupported_rules": ["example.com##.ad"],
-        "rewrites_as_local_dns": [{"fqdn": long_domain, "record_type": "A", "value": "172.16.43.12"}],
-        "clients_as_aliases": [{"display_name": "Phone", "cidr_or_ip": "172.16.43.77", "all_ids": []}],
-        "upstream_resolvers": [{"name": "Imported upstream", "protocol": "plain", "address": "9.9.9.9", "port": 53}],
-        "untranslatable": ["safe_search: not implemented"],
-    },
-    adguard_json="{}",
-    migration_summary={"items_to_add": ["upstream Imported upstream"], "items_to_update": [], "conflicts": [], "skipped": [], "unsupported": ["safe_search: not implemented"]},
+    adguard=import_adguard_translation,
+    migration_summary=import_adguard_summary,
     migration_title="AdGuard Home Migration Preview",
+    migration_job_id=1,
     source_path="/var/lib/alderpointdns/imports/AdGuardHome.yaml",
 )
-for expected in ("AdGuard Home Migration Preview", "Settings With No Alderpoint DNS Equivalent", "Upstream resolvers", "Items to add", long_upstream):
+for expected in ("AdGuard Home Migration Preview", "Client-scoped items", "Upstream resolvers", "Will import", long_upstream):
     if expected not in import_adguard_html:
         raise SystemExit(f"import adguard preview page missing {expected}")
 
