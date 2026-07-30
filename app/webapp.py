@@ -22,6 +22,7 @@ from itsdangerous import BadSignature, URLSafeTimedSerializer
 
 from app import analytics, backup, dns_cache, encryption, importer, local_dns, replication, upstream_dns
 from app import blocklist_categories
+from app import service_logs
 from app.alderpointdns_compiler import DB_PATH, add_source, init_db, normalize_domain
 
 
@@ -1903,9 +1904,52 @@ def replication_settings_post(
     return redirect("/replication")
 
 
+def fetch_service_log_entries(unit: str) -> tuple[bool, list[dict[str, Any]] | str]:
+    if unit not in service_logs.ALLOWED_UNITS:
+        return False, "this service is not on the supported log allowlist"
+    # Deliberately keep stdout and stderr separate here (unlike the shared
+    # run() helper, which merges them for admin actions where any output is
+    # useful to surface). The "logs" subcommand's stdout must be strict JSON;
+    # sudo itself can print unrelated warnings to stderr (e.g. hostname
+    # resolution notices) that would otherwise corrupt the parse.
+    proc = subprocess.run(
+        ["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "logs", unit],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if proc.returncode != 0:
+        return False, "log access is not available right now; the log-access helper did not run successfully"
+    try:
+        entries = json.loads(proc.stdout)
+    except (json.JSONDecodeError, TypeError):
+        return False, "log data could not be read"
+    if not isinstance(entries, list):
+        return False, "log data could not be read"
+    return True, entries
+
+
+def system_logs_context(request: Request) -> dict[str, Any]:
+    service = request.query_params.get("service", "alderpointdns")
+    if service not in service_logs.ALLOWED_UNITS:
+        service = "alderpointdns"
+    severity = request.query_params.get("severity", "all")
+    if severity not in ("all", *service_logs.SEVERITY_LEVELS.keys()):
+        severity = "all"
+    try:
+        lines = int(request.query_params.get("lines", "100"))
+    except ValueError:
+        lines = 100
+    lines = max(10, min(service_logs.MAX_LINES_FETCHED, lines))
+    ok, result = fetch_service_log_entries(service)
+    if not ok:
+        return {"available": False, "error": result, "service": service, "severity": severity, "lines": lines, "entries": []}
+    entries = service_logs.filter_entries(result, severity, lines)
+    return {"available": True, "error": None, "service": service, "severity": severity, "lines": lines, "entries": entries}
+
+
 @app.get("/system", response_class=HTMLResponse)
 def system_page(request: Request, _: sqlite3.Row = Depends(current_admin)):
-    code, logs = run(["journalctl", "-u", "alderpointdns", "-n", "80", "--no-pager"])
     named = service_state("named")
     dnsdist = service_state("dnsdist")
     alderpointdns = service_state("alderpointdns")
@@ -1916,9 +1960,14 @@ def system_page(request: Request, _: sqlite3.Row = Depends(current_admin)):
         dnsdist=dnsdist,
         alderpointdns=alderpointdns,
         health=system_health(named, dnsdist, alderpointdns),
-        logs=logs,
+        logs=system_logs_context(request),
         compiler=compiler_status(),
     )
+
+
+@app.get("/system/logs", response_class=HTMLResponse)
+def system_logs_partial(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    return render(request, "system_logs_results.html", logs=system_logs_context(request))
 
 
 def query_log_context(request: Request) -> dict[str, Any]:

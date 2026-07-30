@@ -1,0 +1,24 @@
+{% import "components.html" as ui %}
+{% if logs.available %}
+  {% if logs.entries %}
+    {% call ui.table_wrap("table-compact") %}
+    <table>
+      <colgroup><col style="width: 21%"><col style="width: 10%"><col></colgroup>
+      <thead><tr><th>Time</th><th>Severity</th><th>Message</th></tr></thead>
+      <tbody>
+        {% for entry in logs.entries %}
+          <tr>
+            <td class="mono" style="white-space: nowrap">{{ entry.ts }}</td>
+            <td>{{ ui.status_badge(entry.severity|title, "down" if entry.severity in ("emerg", "alert", "crit", "err") else "warning" if entry.severity == "warning" else "neutral") }}</td>
+            <td class="mono wrap-anywhere">{{ entry.message }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endcall %}
+  {% else %}
+    {{ ui.empty_state("No matching log entries", "No recent " ~ logs.service ~ " log lines matched the current filters.") }}
+  {% endif %}
+{% else %}
+  {{ ui.empty_state("Logs unavailable for " ~ logs.service, logs.error) }}
+{% endif %}

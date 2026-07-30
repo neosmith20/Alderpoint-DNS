@@ -28,6 +28,34 @@ grep -q "Alderpoint DNS upgrade completed" "$ROOT/upgrade.out" || {
   exit 1
 }
 
+# Recent Logs access (System Status page) is granted through the same
+# sudoers drop-in every other privileged web action uses, so both fresh
+# install and upgrade must plan to (re)install it, and it must actually
+# authorize the fixed, allowlisted "logs <unit>" commands the web app calls
+# -- never an unrestricted journalctl/systemctl escape hatch.
+grep -q "sudoers-alderpointdns" "$ROOT/install.out" || {
+  echo "installer dry-run did not plan to install the sudoers drop-in" >&2
+  exit 1
+}
+grep -q "sudoers-alderpointdns" "$ROOT/upgrade.out" || {
+  echo "upgrade dry-run did not plan to reinstall the sudoers drop-in" >&2
+  exit 1
+}
+for unit in alderpointdns alderpointdns-analytics named dnsdist; do
+  grep -q "alderpointdns_compiler.py logs $unit" /opt/alderpointdns/packaging/sudoers-alderpointdns || {
+    echo "sudoers drop-in is missing the log-access entry for $unit" >&2
+    exit 1
+  }
+done
+if grep -Eq 'ALL=\(root\) NOPASSWD: ALL|alderpointdns_compiler\.py logs \$|alderpointdns_compiler\.py logs \*' /opt/alderpointdns/packaging/sudoers-alderpointdns; then
+  echo "sudoers drop-in grants unrestricted or wildcard log access" >&2
+  exit 1
+fi
+visudo -cf /opt/alderpointdns/packaging/sudoers-alderpointdns >/dev/null || {
+  echo "sudoers drop-in has invalid syntax" >&2
+  exit 1
+}
+
 /opt/alderpointdns/scripts/alderpointdns-diagnostics --self-test-redaction > "$ROOT/redaction.out"
 if grep -Eq 'hunter2|abcdef|secret&client|BEGIN PRIVATE KEY|x-api-key: secret' "$ROOT/redaction.out"; then
   echo "diagnostics redaction self-test leaked secret text" >&2

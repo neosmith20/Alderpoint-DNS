@@ -23,10 +23,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 try:
-    from app import backup, dns_cache, encryption, local_dns, replication, upstream_dns
+    from app import backup, dns_cache, encryption, local_dns, replication, service_logs, upstream_dns
 except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from app import backup, dns_cache, encryption, local_dns, replication, upstream_dns
+    from app import backup, dns_cache, encryption, local_dns, replication, service_logs, upstream_dns
 
 
 DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
@@ -763,6 +763,10 @@ def replication_consume_enrollment(_: argparse.Namespace) -> None:
     print(json.dumps(result))
 
 
+def logs_command(args: argparse.Namespace) -> None:
+    print(json.dumps(service_logs.fetch_unit_logs(args.unit)))
+
+
 def local_dns_add_host(args: argparse.Namespace) -> None:
     local_dns.add_host(args.hostname, args.domain, args.address, args.ttl, args.comment or "", args.auto_ptr, args.override)
     print(f"local_dns_host={args.hostname}.{args.domain}")
@@ -839,6 +843,9 @@ def main(argv: list[str] | None = None) -> int:
     update_one.set_defaults(func=update_source)
     status = sub.add_parser("status")
     status.set_defaults(func=list_status)
+    logs_parser = sub.add_parser("logs")
+    logs_parser.add_argument("unit", choices=service_logs.ALLOWED_UNITS)
+    logs_parser.set_defaults(func=logs_command)
     args = parser.parse_args(argv)
     args.func(args)
     return 0
