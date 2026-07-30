@@ -12,6 +12,7 @@ sys.path.insert(0, "/opt/alderpointdns")
 
 from app import analytics  # noqa: E402
 from app import alderpointdns_compiler as compiler  # noqa: E402
+from app import local_dns  # noqa: E402
 
 
 def enc_varint(value: int) -> bytes:
@@ -38,15 +39,18 @@ class AnalyticsTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
+        self.old_local_dns_db_path = local_dns.DB_PATH
         compiler.DB_PATH = root / "alderpointdns.db"
         compiler.DOWNLOAD_DIR = root / "downloads"
         compiler.STAGING_DIR = root / "staging"
         compiler.COMPILED_RPZ = root / "compiled" / "alderpointdns.rpz"
         analytics.DB_PATH = compiler.DB_PATH
+        local_dns.DB_PATH = compiler.DB_PATH
         analytics.SECRET_FILE = root / "analytics.secret"
         analytics.init_analytics_db()
 
     def tearDown(self) -> None:
+        local_dns.DB_PATH = self.old_local_dns_db_path
         self.tmp.cleanup()
 
     def test_time_bucketing(self) -> None:

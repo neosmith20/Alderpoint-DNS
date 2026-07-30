@@ -1286,3 +1286,26 @@ Validation:
   after one transient immediate-after-restore DoQ query failure during an
   earlier backup/restore run; dnsdist listeners and logs showed the DoQ
   listener active.
+
+## v0.4.0-beta.2 post-reboot unit-test isolation fix
+
+Full `python3 -m unittest discover -s tests -p "test_*.py"` initially failed
+in `tests/test_analytics.py::AnalyticsTests.test_query_log_filtering` with
+`sqlite3.OperationalError: attempt to write a readonly database`.
+
+Root cause: analytics tests redirected `analytics.DB_PATH` and
+`alderpointdns_compiler.DB_PATH` to a temporary database, but
+`analytics.query_log()` decorates query rows through
+`local_dns.alias_for_client()`. `local_dns.DB_PATH` was not redirected in the
+analytics test fixture, so full-suite order could leave it pointing at another
+test's cleaned-up database.
+
+Fix: `tests/test_analytics.py` now redirects `local_dns.DB_PATH` to the same
+temporary database during setup and restores the original path during teardown.
+
+Validation:
+
+- `python3 -B tests/test_analytics.py`: 24 tests passed.
+- `python3 -m unittest discover -s tests -p "test_*.py"`: 190 tests passed.
+  The known pre-existing backup-test SQLite `ResourceWarning` messages still
+  print, but the final exit status was zero.
