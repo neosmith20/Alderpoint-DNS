@@ -16,8 +16,8 @@ Current lab configuration:
 - dnsdist console: `127.0.0.1:5199`, random local key
 
 Set `ALDERPOINTDNS_DNS_ALLOW_ALL=1` in the dnsdist service environment to allow
-queries from all IPv4 and IPv6 clients. Alderpoint DNS expects pfSense VLAN and
-firewall rules to be the network exposure boundary.
+queries from all IPv4 and IPv6 clients. Alderpoint DNS expects your network firewall (VLAN/segmentation rules) to
+be the network exposure boundary.
 
 Encryption Settings writes `ALDERPOINTDNS_DNS_LISTEN_IPV4` and
 `ALDERPOINTDNS_DNS_LISTEN_IPV6` into the dnsdist systemd override. The defaults

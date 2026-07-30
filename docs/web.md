@@ -223,13 +223,6 @@ checks the shared no-overflow CSS contract, mobile navigation hooks, chart data
 endpoint, local-only static assets, and dashboard/query-log/settings page
 rendering.
 
-Sanitized before-and-after screenshots are stored under `docs/screenshots/`:
-
-- `dashboard-before-desktop.png`
-- `dashboard-after-desktop.png`
-- `dashboard-before-mobile.png`
-- `dashboard-after-mobile.png`
-
 The admin listener binds to `0.0.0.0:3000` and requires a Alderpoint DNS admin
-session. pfSense VLAN/firewall rules are responsible for restricting network
-reachability to the management UI.
+session. Your network firewall (VLAN/segmentation rules) is responsible for
+restricting network reachability to the management UI.

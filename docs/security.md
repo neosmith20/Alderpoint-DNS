@@ -8,8 +8,8 @@ to report a vulnerability.
 - The web process runs as `alderpointdns`, not root.
 - Privileged web operations are restricted by `/etc/sudoers.d/alderpointdns` to
   exact compiler commands.
-- The admin UI requires authentication and relies on pfSense VLAN/firewall
-  policy for network reachability.
+- The admin UI requires authentication and relies on your network firewall
+  (VLAN/segmentation rules) for network reachability.
 - Encryption Settings certificate uploads and generation write to
   root:_dnsdist-owned `/etc/alderpointdns/certs` only through the privileged,
   argument-free `alderpointdns_compiler.py encryption-deploy` sudo entry; the

@@ -1,7 +1,8 @@
 # Known limitations
 
 - The management UI and DNS listeners intentionally bind to VM interfaces.
-  pfSense VLAN/firewall rules must restrict who can reach them.
+  Your network firewall (VLAN/segmentation rules) must restrict who can
+  reach them.
 - The automatically generated self-signed certificate is not publicly trusted.
   Replace `/etc/alderpointdns/certs/alderpointdns-lab.crt` and
   `/etc/alderpointdns/certs/alderpointdns-lab.key` together when production TLS

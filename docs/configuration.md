@@ -28,8 +28,8 @@ Current configuration:
 - Maintenance DNS: `1.1.1.2`, `1.0.0.2`, `4.2.2.1`, `4.2.2.2`
 
 dnsdist accepts RFC1918 private clients by default. Set
-`ALDERPOINTDNS_DNS_ALLOW_ALL=1` only when pfSense rules are ready to enforce the
-intended boundary. The generated self-signed certificate lives at
+`ALDERPOINTDNS_DNS_ALLOW_ALL=1` only when your firewall rules are ready to
+enforce the intended boundary. The generated self-signed certificate lives at
 `/etc/alderpointdns/certs/alderpointdns-lab.crt`; replace both cert and key together to
 install production TLS material, or manage this from the Encryption page
 (`/encryption`), which also supports a local CA, cert upload, and existing
