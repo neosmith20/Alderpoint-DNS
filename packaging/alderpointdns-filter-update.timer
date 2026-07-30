@@ -1,0 +1,15 @@
+[Unit]
+Description=Alderpoint DNS Automatic Filter Update Timer
+
+[Timer]
+# Default interval (the fresh-install "1 Day" setting); overridden at runtime
+# by app/filter_schedule.py's deploy_filter_schedule() writing
+# /etc/systemd/system/alderpointdns-filter-update.timer.d/alderpointdns.conf
+# from the filter_update_settings.interval_hours DB setting. That drop-in is
+# rendered only from the fixed interval allowlist, never from operator text.
+OnBootSec=24h
+OnUnitActiveSec=24h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

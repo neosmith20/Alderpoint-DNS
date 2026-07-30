@@ -77,6 +77,19 @@ single-source update, update-all, and compile/deploy. Single-source updates are
 unprivileged because they only write Alderpoint DNS's database and download cache;
 deployment remains privileged and enumerated.
 
+The Blocklists page also has a compact Automatic Updates panel holding the
+global Filter Update Interval (`Disabled — No Updates`, `1 Hour`, `12 Hours`,
+`1 Day`, `3 Days`, `1 Week`), an enabled/disabled badge, the last automatic
+attempt, the last successful automatic update, the next scheduled update, and
+the `Update All Now` action. Saving posts to `/blocklists/schedule`, which
+validates the value against the fixed allowlist, stores it, and immediately
+redeploys the `alderpointdns-filter-update.timer` schedule through the
+allowlisted `filter-schedule-deploy` command; a helper failure is shown as a
+page error. When updates are disabled the panel shows
+`Automatic updates disabled` and no next-run time, while manual per-source
+updates and `Update All Now` keep working. See docs/configuration.md for the
+stored values, defaults, and systemd units.
+
 The Local DNS page supports:
 
 - Internal domain settings, defaulting to `home.arpa`.

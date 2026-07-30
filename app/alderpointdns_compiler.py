@@ -23,10 +23,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 try:
-    from app import backup, dns_cache, encryption, local_dns, replication, service_logs, upstream_dns
+    from app import backup, dns_cache, encryption, filter_schedule, local_dns, replication, service_logs, upstream_dns
 except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from app import backup, dns_cache, encryption, local_dns, replication, service_logs, upstream_dns
+    from app import backup, dns_cache, encryption, filter_schedule, local_dns, replication, service_logs, upstream_dns
 
 
 DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
@@ -115,6 +115,12 @@ def connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, factory=AlderpointDNSConnection)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        conn.execute(f'ALTER TABLE {table} ADD COLUMN "{column}" {definition}')
 
 
 def init_db() -> None:
@@ -232,7 +238,13 @@ def init_db() -> None:
                 for category in categories
             ],
         )
+        # Distinguishes automatic (timer-driven) deployments from manual ones.
+        # Added as an idempotent ALTER-if-missing migration so existing
+        # installations pick it up on upgrade without a schema rewrite; older
+        # rows keep NULL, which reads as "manual".
+        _ensure_column(conn, "deployments", "trigger", "TEXT")
         local_dns.init_db(conn)
+        filter_schedule.init_db(conn)
 
 
 def normalize_domain(raw: str) -> str | None:
@@ -486,7 +498,7 @@ def wait_until(predicate, timeout: int = 50) -> bool:
     return predicate()
 
 
-def deploy(download: bool = True) -> int:
+def deploy(download: bool = True, trigger: str | None = None) -> int:
     init_db()
     DEPLOY_LOCK.parent.mkdir(parents=True, exist_ok=True)
     with DEPLOY_LOCK.open("w") as lock_handle:
@@ -495,8 +507,11 @@ def deploy(download: bool = True) -> int:
         try:
             started = now()
             cursor = conn.execute(
-                "INSERT INTO deployments(started_at, status, message) VALUES (?, 'running', '')",
-                (started,),
+                """
+                INSERT INTO deployments(started_at, status, message, "trigger")
+                VALUES (?, 'running', '', ?)
+                """,
+                (started, trigger),
             )
             deployment_id = cursor.lastrowid
             conn.commit()
@@ -747,6 +762,45 @@ def backup_schedule_deploy(_: argparse.Namespace) -> None:
     print(backup.deploy_backup_schedule())
 
 
+def filter_schedule_deploy(_: argparse.Namespace) -> None:
+    print(filter_schedule.deploy_filter_schedule())
+
+
+def deployment_row(deployment_id: int) -> sqlite3.Row | None:
+    with connect() as conn:
+        return conn.execute("SELECT * FROM deployments WHERE id=?", (deployment_id,)).fetchone()
+
+
+def filter_update_run(_: argparse.Namespace) -> None:
+    """Timer entry point for automatic filter updates.
+
+    Records the attempt, then runs the ordinary full deployment pipeline
+    (download enabled sources, recompile, validate, atomic activation,
+    health check, automatic rollback, recorded deployment row). deploy() holds
+    the exclusive deploy flock, so this can never overlap a manual deploy or a
+    previous timer run, and a single list's failed download still leaves the
+    remaining lists updated with the last valid policy active. Only the
+    success path records last_success; the stored result summary holds counts
+    and a sanitized error description only.
+    """
+    filter_schedule.record_attempt()
+    try:
+        deployment_id = deploy(download=True, trigger="scheduled")
+    except Exception as exc:
+        result = filter_schedule.record_result(status="failed", error=str(exc))
+        print(json.dumps(result))
+        raise SystemExit(1) from None
+    row = deployment_row(deployment_id)
+    result = filter_schedule.record_result(
+        status=row["status"] if row else "deployed",
+        active_domains=row["active_domains"] if row else 0,
+        error=row["message"] if row else "",
+        deployment_id=deployment_id,
+    )
+    filter_schedule.record_success()
+    print(json.dumps(result))
+
+
 def replication_primary_init(_: argparse.Namespace) -> None:
     # Ensures /etc/alderpointdns/certs (root:_dnsdist, not writable by the
     # unprivileged alderpointdns web process) has the CA + replication server
@@ -818,6 +872,10 @@ def main(argv: list[str] | None = None) -> int:
     backup_preview_parser.set_defaults(func=backup_preview)
     backup_schedule_parser = sub.add_parser("backup-schedule-deploy")
     backup_schedule_parser.set_defaults(func=backup_schedule_deploy)
+    filter_schedule_parser = sub.add_parser("filter-schedule-deploy")
+    filter_schedule_parser.set_defaults(func=filter_schedule_deploy)
+    filter_update_parser = sub.add_parser("filter-update-run")
+    filter_update_parser.set_defaults(func=filter_update_run)
     repl_primary_init_parser = sub.add_parser("replication-primary-init")
     repl_primary_init_parser.set_defaults(func=replication_primary_init)
     repl_consume_parser = sub.add_parser("replication-consume-enrollment")

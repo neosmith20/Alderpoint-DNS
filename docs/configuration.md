@@ -64,6 +64,69 @@ latency. Alderpoint DNS does not add per-query upstream labels unless dnsdist
 exposes that exact attribution; current client query rows remain client/domain
 analytics, not fabricated resolver traces.
 
+## Filter Update Interval
+
+Automatic blocklist (filter) updates are controlled by one global setting on
+the Blocklists page (`/blocklists`, Automatic Updates panel). The selectable
+values are a fixed server-side allowlist:
+
+| Label | Stored value | Timer interval |
+| --- | --- | --- |
+| `Disabled — No Updates` | `disabled` | timer stopped and disabled |
+| `1 Hour` | `1` | `OnUnitActiveSec=1h` |
+| `12 Hours` | `12` | `OnUnitActiveSec=12h` |
+| `1 Day` | `24` | `OnUnitActiveSec=24h` |
+| `3 Days` | `72` | `OnUnitActiveSec=72h` |
+| `1 Week` | `168` | `OnUnitActiveSec=168h` |
+
+Fresh installs default to `1 Day`. An existing setting is never overwritten by
+a reinstall, upgrade, or database migration; only a value that is not in the
+allowlist (a hand-edited row) is reset to the default. Anything else --
+arbitrary numbers, cron expressions, systemd time expressions, unit names,
+paths, or shell text -- is rejected with an error and never reaches a unit file
+or a `systemctl` argument. The timer expression is always looked up from the
+allowlist mapping above, never built from submitted text.
+
+Settings live in the `filter_update_settings` key/value table in
+`/var/lib/alderpointdns/alderpointdns.db` (the same shape as `backup_settings`):
+`interval_hours`, `last_attempt`, `last_success`, and `last_result` (a
+sanitized JSON summary holding the deployment status, active-rule count, and a
+short error description with URLs stripped; it never stores query data or
+credentials). Because the setting is in the database and the schedule is a
+systemd timer, it survives restarts, reboots, and upgrades.
+
+When updates are enabled, the Blocklists panel shows the interval, an
+`Enabled` badge, the last automatic attempt, the last successful automatic
+update, and the next scheduled update (read unprivileged from
+`systemctl show alderpointdns-filter-update.timer
+--property=NextElapseUSecRealtime`). When disabled, it shows
+`Automatic updates disabled` and no next-run time, and the timer is stopped and
+disabled. Manual per-source updates and `Update All Now` keep working in both
+states.
+
+Each automatic run executes the ordinary deployment pipeline: only enabled
+sources are downloaded, the RPZ is recompiled, validated, activated
+atomically, health-checked, and rolled back automatically on failure, and the
+result is recorded as a `deployments` row marked `trigger='scheduled'`
+(manual deployments leave `trigger` NULL). The pipeline holds an exclusive
+lock, so a scheduled run can never overlap a manual deploy or another
+scheduled run, and one list failing to download still leaves the other lists
+updated with the last valid policy active.
+
+systemd units and privileged commands:
+
+- `/etc/systemd/system/alderpointdns-filter-update.service` -- oneshot,
+  `ExecStart=/opt/alderpointdns/app/alderpointdns_compiler.py filter-update-run`.
+- `/etc/systemd/system/alderpointdns-filter-update.timer` -- packaged defaults
+  `OnBootSec=24h`/`OnUnitActiveSec=24h`, `Persistent=true`.
+- `/etc/systemd/system/alderpointdns-filter-update.timer.d/alderpointdns.conf`
+  -- runtime drop-in regenerated from the stored setting; removed while
+  updates are disabled.
+- Sudoers entries in `/etc/sudoers.d/alderpointdns` (exact commands, no
+  wildcards): `alderpointdns_compiler.py filter-schedule-deploy` and
+  `alderpointdns_compiler.py filter-update-run`. The web app uses
+  `filter-schedule-deploy` after Save; the timer itself already runs as root.
+
 Encryption Settings manages client-facing encrypted DNS listeners separately
 from upstream resolver encryption. The listener IPv4/IPv6 addresses default to
 `0.0.0.0` and `::` to preserve existing lab behavior, but can be changed to

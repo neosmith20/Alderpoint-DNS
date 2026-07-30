@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
-from app import analytics, backup, dns_cache, encryption, importer, local_dns, replication, upstream_dns
+from app import analytics, backup, dns_cache, encryption, filter_schedule, importer, local_dns, replication, upstream_dns
 from app import blocklist_categories
 from app import service_logs
 from app.alderpointdns_compiler import DB_PATH, add_source, init_db, normalize_domain
@@ -610,7 +610,35 @@ def logout():
     return response
 
 
-def blocklist_categories_error(request: Request, message: str) -> HTMLResponse:
+def filter_schedule_apply() -> tuple[int, str]:
+    return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "filter-schedule-deploy"])
+
+
+def filter_schedule_apply_or_raise() -> None:
+    code, out = filter_schedule_apply()
+    if code != 0:
+        raise RuntimeError(out.strip() or "filter update schedule deployment failed")
+
+
+def filter_schedule_context() -> dict[str, Any]:
+    cfg = filter_schedule.settings()
+    value = filter_schedule.interval_value(cfg)
+    enabled = value != filter_schedule.DISABLED
+    return {
+        "options": filter_schedule.INTERVAL_CHOICES,
+        "interval": value,
+        "interval_label": filter_schedule.interval_label(value),
+        "enabled": enabled,
+        "last_attempt": cfg.get("last_attempt") or "",
+        "last_success": cfg.get("last_success") or "",
+        "last_result": filter_schedule.last_result(cfg),
+        # Only queried when scheduling is on; a disabled schedule must not
+        # display a next-run time at all.
+        "next_run": filter_schedule.next_run_at() if enabled else None,
+    }
+
+
+def blocklists_error(request: Request, message: str) -> HTMLResponse:
     return render(
         request,
         "blocklists.html",
@@ -621,6 +649,7 @@ def blocklist_categories_error(request: Request, message: str) -> HTMLResponse:
         status_filter="",
         search="",
         sort="name",
+        filter_schedule=filter_schedule_context(),
         status_code=400,
     )
 
@@ -666,6 +695,7 @@ def blocklists(request: Request, _: sqlite3.Row = Depends(current_admin)):
         status_filter=status_filter,
         search=search,
         sort=sort,
+        filter_schedule=filter_schedule_context(),
     )
 
 
@@ -691,7 +721,7 @@ def blocklist_category_add(request: Request, name: str = Form(...), csrf: str = 
     try:
         blocklist_categories.create_category(name)
     except blocklist_categories.CategoryError as exc:
-        return blocklist_categories_error(request, str(exc))
+        return blocklists_error(request, str(exc))
     return redirect("/blocklists")
 
 
@@ -701,7 +731,7 @@ def blocklist_category_rename(request: Request, key: str, name: str = Form(...),
     try:
         blocklist_categories.rename_category(key, name)
     except blocklist_categories.CategoryError as exc:
-        return blocklist_categories_error(request, str(exc))
+        return blocklists_error(request, str(exc))
     return redirect("/blocklists")
 
 
@@ -711,7 +741,7 @@ def blocklist_category_merge(request: Request, key: str, target: str = Form(...)
     try:
         blocklist_categories.merge_category(key, target)
     except blocklist_categories.CategoryError as exc:
-        return blocklist_categories_error(request, str(exc))
+        return blocklists_error(request, str(exc))
     return redirect("/blocklists")
 
 
@@ -721,7 +751,7 @@ def blocklist_category_delete(request: Request, key: str, reassign_to: str = For
     try:
         blocklist_categories.delete_category(key, reassign_to.strip() or None)
     except blocklist_categories.CategoryError as exc:
-        return blocklist_categories_error(request, str(exc))
+        return blocklists_error(request, str(exc))
     return redirect("/blocklists")
 
 
@@ -779,6 +809,20 @@ def blocklist_delete(request: Request, source_id: int, csrf: str = Form(...), _:
 def blocklist_update(request: Request, csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
     check_csrf(request, csrf)
     run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "update-sources"])
+    return redirect("/blocklists")
+
+
+@app.post("/blocklists/schedule")
+def blocklist_schedule(request: Request, csrf: str = Form(...), interval: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    """Saves the global Filter Update Interval and redeploys the systemd
+    timer immediately. Manual per-source updates and Update All Now stay
+    available regardless of this setting."""
+    check_csrf(request, csrf)
+    try:
+        filter_schedule.update_settings({"interval_hours": interval})
+        filter_schedule_apply_or_raise()
+    except Exception as exc:
+        return blocklists_error(request, str(exc))
     return redirect("/blocklists")
 
 
