@@ -4,8 +4,8 @@ After=network-online.target dnsdist.service named.service
 Wants=network-online.target
 
 [Service]
-User=bindguard
-Group=bindguard
+User=alderpointdns
+Group=alderpointdns
 WorkingDirectory=/opt/alderpointdns
 Environment=PYTHONPATH=/opt/alderpointdns
 ExecStart=/opt/alderpointdns/app/analytics.py run
