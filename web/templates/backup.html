@@ -15,7 +15,7 @@
   <article class="card"><div class="card__head"><h2>Stored Backups</h2></div><p class="muted">{{ backups|length }} archive{{ "s" if backups|length != 1 else "" }} in <span class="mono">/var/lib/alderpointdns/backups</span></p></article>
 </section>
 
-<section class="grid">
+<section class="grid align-start">
   <form class="panel stack" method="post" action="/backup/create" enctype="multipart/form-data" data-async-form data-success-message="Backup created.">
     <div class="panel__head"><h2>Create Backup</h2></div>
     <input type="hidden" name="csrf" value="{{ csrf }}">
