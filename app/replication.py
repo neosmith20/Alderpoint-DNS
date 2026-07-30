@@ -566,6 +566,12 @@ def _replica_by_fingerprint(db: sqlite3.Connection, fingerprint: str) -> sqlite3
 REPLICABLE_TABLES: dict[str, tuple[str, ...]] = {
     "sources": ("name", "url", "enabled", "category"),
     "custom_rules": ("domain", "action", "enabled", "comment", "created_at"),
+    "custom_filter_rules": (
+        "rule_text", "normalized", "rule_type", "action", "domain", "match_subdomains",
+        "pattern", "rewrite_address", "address_family", "qtype_restriction", "priority",
+        "enabled", "validation_state", "unsupported_reason", "source_system", "comment",
+        "created_at", "updated_at",
+    ),
     "categories": ("key", "name", "description"),
     "policy_profiles": ("key", "name", "description", "is_custom"),
     "profile_categories": ("profile_key", "category_key", "enabled"),

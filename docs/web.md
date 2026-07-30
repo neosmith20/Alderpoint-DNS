@@ -90,6 +90,24 @@ page error. When updates are disabled the panel shows
 updates and `Update All Now` keep working. See docs/configuration.md for the
 stored values, defaults, and systemd units.
 
+The Filters page (`/custom-rules`) manages first-class custom filtering
+rules (see `docs/filtering.md` for semantics and precedence): a summary
+counts strip; a single-line add form and a collapsible bulk editor with
+per-line server-side validation results (valid lines activate; invalid and
+unsupported lines are stored inactive with exact reasons); server-side
+search/type/status filters; a compact bulk-selectable table with type,
+action, state, and source badges, hidden per-row editors, and overflow-menu
+enable/disable/delete; and a "Test a domain" panel backed by
+`custom_rules.evaluate_domain` showing the final action, the matching rule,
+and whether the compiled blocklist RPZ would block the name. Routes:
+`/custom-rules`, `/custom-rules/add`, `/custom-rules/bulk`,
+`/custom-rules/test`, `/custom-rules/selected` (bulk enable/disable/delete
+of selected ids), `/custom-rules/{id}/edit`, `/custom-rules/{id}/toggle`,
+`/custom-rules/{id}/delete`, and the query-log quick-add
+`/custom-rules/add-from-query`. All are session- and CSRF-protected and run
+the normal staged no-download deployment, surfacing deploy errors as page
+errors.
+
 The Local DNS page supports:
 
 - Internal domain settings, defaulting to `home.arpa`.

@@ -172,6 +172,7 @@ COMPONENT_DEFAULTS = {
 TABLE_COMPONENT_MAP = {
     "sources": "blocklist_source_definitions",
     "custom_rules": "custom_rules",
+    "custom_filter_rules": "custom_rules",
     "local_dns_records": "local_dns_zones",
     "local_dns_settings": "local_dns_zones",
     "client_aliases": "client_aliases",

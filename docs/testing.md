@@ -12,6 +12,7 @@ Run individual suites:
 /opt/alderpointdns/tests/test_dns_cache.py
 /opt/alderpointdns/tests/test_dns_cache_benchmark.sh
 /opt/alderpointdns/tests/test_encryption.py
+/opt/alderpointdns/tests/test_custom_rules.py
 /opt/alderpointdns/tests/test_importer.py
 /opt/alderpointdns/tests/test_backup.py
 /opt/alderpointdns/tests/test_web_smoke.sh
@@ -110,6 +111,16 @@ without blocking other protocols, client connection info, and Apple
 real per-protocol queries (`dig` for plain, `dnspython`'s
 `dns.query.https`/`dns.query.quic` for DoH/DoH3/DoQ, `kdig +tls` for DoT)
 through the actual deploy path, not just mocked unit tests.
+
+The Custom Filtering Rules suite (`tests/test_custom_rules.py`) is fully
+sandboxed (temp database and directories, stubbed subprocess calls on the
+deploy paths) and covers the rule parser (every supported form, AdGuard vs
+Pi-hole plain-domain conformance, modifier and POSIX-regex rejection with
+reasons), the legacy `custom_rules` migration, duplicate detection, the
+evaluation API, RPZ rendering exactness and precedence conflicts, dnsdist
+data-file/static-Lua rendering, the dnsdist.conf include migration, the
+change-detecting dnsdist-layer deploy/rollback, and the `/custom-rules`
+web routes.
 
 The Import and Migration suite (`tests/test_importer.py`) covers CSV/hosts/
 zone/Alderpoint DNS-CSV parsing, Pi-hole text/list parsing, Alderpoint DNS-native JSON
