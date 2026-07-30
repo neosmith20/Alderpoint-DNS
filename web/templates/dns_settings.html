@@ -88,20 +88,23 @@
                     <input type="hidden" name="enabled" value="{{ 0 if resolver.enabled else 1 }}">
                     <button class="secondary">{{ "Disable" if resolver.enabled else "Enable" }}</button>
                   </form>
-                  <form method="post" action="/dns-settings/upstreams/{{ resolver.id }}/move" data-async-form data-success-message="Upstream resolver order changed and deployed.">
-                    <input type="hidden" name="csrf" value="{{ csrf }}">
-                    <input type="hidden" name="direction" value="up">
-                    <button class="secondary" aria-label="Move {{ resolver.name }} up">Up</button>
-                  </form>
-                  <form method="post" action="/dns-settings/upstreams/{{ resolver.id }}/move" data-async-form data-success-message="Upstream resolver order changed and deployed.">
-                    <input type="hidden" name="csrf" value="{{ csrf }}">
-                    <input type="hidden" name="direction" value="down">
-                    <button class="secondary" aria-label="Move {{ resolver.name }} down">Down</button>
-                  </form>
-                  <form method="post" action="/dns-settings/upstreams/{{ resolver.id }}/delete" data-async-form data-confirm="Delete this upstream resolver and deploy?" data-success-message="Upstream resolver deleted and deployed.">
-                    <input type="hidden" name="csrf" value="{{ csrf }}">
-                    <button class="danger">Delete</button>
-                  </form>
+                  {% call ui.overflow_menu("upstreamMenu" ~ resolver.id) %}
+                    <form method="post" action="/dns-settings/upstreams/{{ resolver.id }}/move" data-async-form data-success-message="Upstream resolver order changed and deployed.">
+                      <input type="hidden" name="csrf" value="{{ csrf }}">
+                      <input type="hidden" name="direction" value="up">
+                      <button type="submit" class="secondary" role="menuitem" aria-label="Move {{ resolver.name }} up">Move up</button>
+                    </form>
+                    <form method="post" action="/dns-settings/upstreams/{{ resolver.id }}/move" data-async-form data-success-message="Upstream resolver order changed and deployed.">
+                      <input type="hidden" name="csrf" value="{{ csrf }}">
+                      <input type="hidden" name="direction" value="down">
+                      <button type="submit" class="secondary" role="menuitem" aria-label="Move {{ resolver.name }} down">Move down</button>
+                    </form>
+                    <div class="overflow-menu__divider" role="separator"></div>
+                    <form method="post" action="/dns-settings/upstreams/{{ resolver.id }}/delete" data-async-form data-confirm="Delete this upstream resolver and deploy?" data-success-message="Upstream resolver deleted and deployed.">
+                      <input type="hidden" name="csrf" value="{{ csrf }}">
+                      <button type="submit" class="danger" role="menuitem">Delete</button>
+                    </form>
+                  {% endcall %}
                 </div>
             </td>
           </tr>
