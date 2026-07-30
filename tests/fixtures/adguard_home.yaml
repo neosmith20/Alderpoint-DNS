@@ -38,13 +38,13 @@ user_rules:
 filtering:
   rewrites:
     - domain: nas.home.arpa
-      answer: 172.16.43.50
+      answer: 192.168.1.50
     - domain: printer.home.arpa
       answer: fd00::50
     - domain: external.example.com
-      answer: 172.16.43.51
+      answer: 192.168.1.51
     - domain: '*.wildcard.example'
-      answer: 172.16.43.52
+      answer: 192.168.1.52
     - domain: alias.home.arpa
       answer: target.home.arpa
     - domain: badalias.home.arpa
@@ -52,10 +52,10 @@ filtering:
 clients:
   persistent:
     - name: Phone
-      ids: ['172.16.43.77']
+      ids: ['192.168.1.77']
       filtering_enabled: true
     - name: Laptop
-      ids: ['172.16.43.0/28']
+      ids: ['192.168.1.0/28']
 dns:
   bootstrap_dns:
     - 1.1.1.1

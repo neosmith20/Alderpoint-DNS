@@ -70,7 +70,7 @@ context = {
     "global_status": {"label": "Active", "tone": "healthy", "detail": "all core services active"},
     "error": None,
     "cfg": {
-        "server_hostname": "alderpointdns.local", "bootstrap_ip": "172.16.43.101",
+        "server_hostname": "alderpointdns.local", "bootstrap_ip": "192.168.1.101",
         "listen_ipv4": "0.0.0.0", "listen_ipv6": "::",
         "doh_enabled": "1", "doh3_enabled": "1", "dot_enabled": "1", "doq_enabled": "1", "dnscrypt_enabled": "0",
         "doh_path": "/dns-query", "doh_port": "443", "doh3_port": "443", "dot_port": "853", "doq_port": "853",
@@ -82,7 +82,7 @@ context = {
         "available": True, "subject": "CN=" + long_domain, "issuer": "CN=" + long_domain,
         "not_before": "Jul 29 00:00:00 2026 GMT", "not_after": "Oct 31 00:00:00 2028 GMT",
         "days_remaining": 824, "expiring_soon": False, "expired": False,
-        "fingerprint_sha256": "AA:BB:CC:DD", "sans": ["DNS:" + long_domain, "IP Address:172.16.43.101"],
+        "fingerprint_sha256": "AA:BB:CC:DD", "sans": ["DNS:" + long_domain, "IP Address:192.168.1.101"],
         "self_signed": True,
     },
     "deployment": {
