@@ -19,13 +19,6 @@ DRY_RUN=0
 SKIP_RESTART=0
 SOURCE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
-# Deprecated BindGuard-era environment variable name, recognized long enough
-# to migrate operators to ALDERPOINTDNS_INSTALL_ROOT. See docs/compatibility.md
-# for the planned removal version.
-if [ -n "${BINDGUARD_INSTALL_ROOT:-}" ] && [ -z "${ALDERPOINTDNS_INSTALL_ROOT:-}" ]; then
-  echo "warning: BINDGUARD_INSTALL_ROOT is deprecated, use ALDERPOINTDNS_INSTALL_ROOT (see docs/compatibility.md)" >&2
-  ALDERPOINTDNS_INSTALL_ROOT="$BINDGUARD_INSTALL_ROOT"
-fi
 ROOT="${ALDERPOINTDNS_INSTALL_ROOT:-/}"
 
 while [ "$#" -gt 0 ]; do
@@ -89,178 +82,10 @@ check_existing_install() {
   fi
 }
 
-legacy_install_present() {
-  [ ! -e "$(root_path /opt/alderpointdns/app/webapp.py)" ] && [ -e "$(root_path /opt/bindguard/app/webapp.py)" ]
-}
-
-# One-time migration of a pre-rename BindGuard installation, run before any
-# other upgrade step so the rest of upgrade.sh only ever sees Alderpoint DNS
-# paths. A legacy install is backed up with its own (still fully consistent,
-# unmigrated) backup.sh before anything is touched, so the original state is
-# always recoverable even if the migration itself fails partway through.
-migrate_legacy_layout() {
-  echo "legacy BindGuard installation detected at $(root_path /opt/bindguard); migrating to Alderpoint DNS paths"
-
-  # If the new-source tree we're about to install from is inside the legacy
-  # directory we're about to move out from under ourselves (e.g. an
-  # in-place git checkout used as both the running legacy install and the
-  # new release), SOURCE_DIR would silently stop existing the moment that
-  # mv happens below, breaking replace_application/install_units later in
-  # this script. Stage a plain copy outside the legacy tree first so
-  # SOURCE_DIR keeps resolving no matter what gets moved.
-  case "$SOURCE_DIR" in
-    "$(root_path /opt/bindguard)"|"$(root_path /opt/bindguard)"/*)
-      staged_source="$(mktemp -d /tmp/alderpointdns-upgrade-source.XXXXXX)"
-      run cp -a "$SOURCE_DIR/." "$staged_source/"
-      echo "staged upgrade source to $staged_source before moving the legacy installation directory"
-      SOURCE_DIR="$staged_source"
-      ;;
-  esac
-
-  if [ -x "$(root_path /opt/bindguard/scripts/backup.sh)" ] && [ "$ROOT" = "/" ]; then
-    run "$(root_path /opt/bindguard/scripts/backup.sh)"
-  else
-    echo "warning: legacy backup script unavailable or test root in use; skipping pre-migration native backup" >&2
-  fi
-
-  if [ "$ROOT" = "/" ] && [ "$DRY_RUN" -eq 0 ]; then
-    systemctl stop bindguard.service bindguard-analytics.service bindguard-backup.timer >/dev/null 2>&1 || true
-    systemctl stop named dnsdist >/dev/null 2>&1 || true
-  fi
-
-  # Rewrite only the literal bindguard/BindGuard/BINDGUARD tokens in the live
-  # BIND/dnsdist/apparmor config, in place -- this must never overwrite these
-  # files wholesale from packaging templates, since they carry live secrets
-  # (dnsdist console key, webserver credentials) and any local customization.
-  for cfg in /etc/bind/named.conf.local /etc/bind/named.conf.options /etc/dnsdist/dnsdist.conf /etc/apparmor.d/local/usr.sbin.named; do
-    live="$(root_path "$cfg")"
-    if [ -f "$live" ]; then
-      run sed -i \
-        -e 's/BindGuard/Alderpoint DNS/g' \
-        -e 's/BINDGUARD_/ALDERPOINTDNS_/g' \
-        -e 's/BINDGUARD/ALDERPOINTDNS/g' \
-        -e 's/bindguard/alderpointdns/g' \
-        "$live"
-    fi
-  done
-
-  # A plain `mv src dst` only renames in place when dst does not already
-  # exist; if dst exists (e.g. a stray directory created by something else
-  # touching the new path before migration ran), mv instead moves src
-  # *inside* dst, silently nesting the whole legacy tree one level too deep
-  # and leaving every path below wrong. Fail loudly instead of guessing.
-  for pair in "/opt/bindguard:/opt/alderpointdns" "/etc/bindguard:/etc/alderpointdns" \
-    "/var/lib/bindguard:/var/lib/alderpointdns" "/var/log/bindguard:/var/log/alderpointdns"; do
-    dst="$(root_path "${pair#*:}")"
-    if [ -e "$dst" ]; then
-      echo "refusing to migrate: $dst already exists, which would nest the legacy directory inside it instead of renaming it. Remove or relocate $dst first." >&2
-      exit 1
-    fi
-  done
-
-  run mv "$(root_path /opt/bindguard)" "$(root_path /opt/alderpointdns)"
-
-  if [ -e "$(root_path /etc/bindguard)" ]; then
-    run mv "$(root_path /etc/bindguard)" "$(root_path /etc/alderpointdns)"
-    if [ -f "$(root_path /etc/alderpointdns/secrets.env)" ]; then
-      # Rename the env var key in place; the secret *value* is deliberately
-      # left untouched so existing web sessions/cookies keep validating.
-      run sed -i 's/^BINDGUARD_SESSION_SECRET=/ALDERPOINTDNS_SESSION_SECRET=/' "$(root_path /etc/alderpointdns/secrets.env)"
-    fi
-    for pair in "bindguard-ca.crt:alderpointdns-ca.crt" "bindguard-ca.key:alderpointdns-ca.key" \
-      "bindguard-ca.srl:alderpointdns-ca.srl" "bindguard-lab.crt:alderpointdns-lab.crt" \
-      "bindguard-lab.key:alderpointdns-lab.key"; do
-        old="$(root_path "/etc/alderpointdns/certs/${pair%%:*}")"
-        new="$(root_path "/etc/alderpointdns/certs/${pair#*:}")"
-        [ -e "$old" ] && run mv "$old" "$new"
-    done
-  fi
-
-  if [ -e "$(root_path /var/lib/bindguard)" ]; then
-    run mv "$(root_path /var/lib/bindguard)" "$(root_path /var/lib/alderpointdns)"
-    if [ -e "$(root_path /var/lib/alderpointdns/bindguard.db)" ]; then
-      for suffix in "" -wal -shm; do
-        old="$(root_path "/var/lib/alderpointdns/bindguard.db${suffix}")"
-        new="$(root_path "/var/lib/alderpointdns/alderpointdns.db${suffix}")"
-        [ -e "$old" ] && run mv "$old" "$new"
-      done
-    fi
-    if [ -e "$(root_path /var/lib/alderpointdns/compiled/bind/bindguard.rpz)" ]; then
-      run mv "$(root_path /var/lib/alderpointdns/compiled/bind/bindguard.rpz)" "$(root_path /var/lib/alderpointdns/compiled/bind/alderpointdns.rpz)"
-    fi
-    # Generated BIND/dnsdist config under compiled/ carries its own product
-    # comments, ACL/pool names, and path references baked in from the last
-    # deploy. Only rewrite the known-safe infrastructure tokens here (never
-    # the actual .zone record files, which can contain real user hostnames
-    # that just happen to match these substrings) -- see
-    # docs/migrating-from-bindguard.md.
-    for cfg in bind/local-zones.conf bind/cache-options.conf bind/upstream-forwarders.conf dnsdist/upstream-forwarder.conf; do
-      live="$(root_path "/var/lib/alderpointdns/compiled/$cfg")"
-      if [ -f "$live" ]; then
-        run sed -i \
-          -e 's/Managed by BindGuard/Managed by Alderpoint DNS/' \
-          -e 's/"bindguard_clients"/"alderpointdns_clients"/g' \
-          -e 's#/var/lib/bindguard/#/var/lib/alderpointdns/#g' \
-          -e 's/bindguardUpstreamsEnabled/alderpointdnsUpstreamsEnabled/g' \
-          -e 's/bindguard_upstreams/alderpointdns_upstreams/g' \
-          "$live"
-      fi
-    done
-  fi
-
-  if [ -e "$(root_path /var/log/bindguard)" ]; then
-    run mv "$(root_path /var/log/bindguard)" "$(root_path /var/log/alderpointdns)"
-  fi
-
-  # The dnsdist drop-in is operator-editable state (app/encryption.py's
-  # DNSDIST_ENV_OVERRIDE, written whenever the operator changes DoH/DoT/DoQ/
-  # DoH3/DNSCrypt settings on the Encryption Settings page), unlike the
-  # static bindguard*.service unit files below -- rename and token-patch it
-  # in place instead of deleting it, so per-operator toggles/ports survive
-  # the rename instead of silently reverting to packaging defaults. This
-  # runs unconditionally (not just for ROOT="/") since it is pure file
-  # manipulation, not a real systemctl/symlink action.
-  legacy_dnsdist_env="$(root_path /etc/systemd/system/dnsdist.service.d/bindguard.conf)"
-  if [ -f "$legacy_dnsdist_env" ]; then
-    run mv "$legacy_dnsdist_env" "$(root_path /etc/systemd/system/dnsdist.service.d/alderpointdns.conf)"
-    run sed -i \
-      -e 's/BindGuard/Alderpoint DNS/g' \
-      -e 's/BINDGUARD_/ALDERPOINTDNS_/g' \
-      -e 's/BINDGUARD/ALDERPOINTDNS/g' \
-      -e 's/bindguard/alderpointdns/g' \
-      "$(root_path /etc/systemd/system/dnsdist.service.d/alderpointdns.conf)"
-  fi
-
-  if [ "$ROOT" = "/" ] && [ "$DRY_RUN" -eq 0 ]; then
-    run ln -sfn /opt/alderpointdns /opt/bindguard
-    run ln -sfn /etc/alderpointdns /etc/bindguard
-    run ln -sfn /var/lib/alderpointdns /var/lib/bindguard
-    run ln -sfn /var/log/alderpointdns /var/log/bindguard
-    run rm -f /etc/sudoers.d/bindguard
-    # bindguard.service/-analytics/-backup.timer are static packaging
-    # content with no operator-editable state, so removing them here (they
-    # get freshly reinstalled by install_units() later in this run) is
-    # fine.
-    run rm -f /etc/systemd/system/bindguard.service /etc/systemd/system/bindguard-analytics.service \
-      /etc/systemd/system/bindguard-backup.service /etc/systemd/system/bindguard-backup.timer
-    run systemctl daemon-reload
-    command -v apparmor_parser >/dev/null 2>&1 && run apparmor_parser -r /etc/apparmor.d/usr.sbin.named >/dev/null 2>&1 || true
-    run systemctl start named
-    run systemctl start dnsdist
-  fi
-
-  echo "legacy path migration complete; continuing upgrade with Alderpoint DNS paths (bindguard system user/group intentionally kept, see docs/compatibility.md)"
-}
-
 pre_upgrade_backup() {
   if [ -x "$(root_path /opt/alderpointdns/scripts/backup.sh)" ]; then
-    # scripts/backup.sh archives the current systemd units/sudoers file by
-    # path and hard-fails if any are missing. Immediately after a legacy
-    # migration those files briefly don't exist yet (install_units() below
-    # is what (re)creates them) -- don't let that abort the whole upgrade;
-    # the rollback snapshot() right after this still provides a safety net.
     run "$(root_path /opt/alderpointdns/scripts/backup.sh)" || \
-      echo "warning: scripts/backup.sh failed (likely first upgrade after a rename/migration, before install_units() has run); continuing with the rollback snapshot as the safety net" >&2
+      echo "warning: scripts/backup.sh failed; continuing with the rollback snapshot as the safety net" >&2
   else
     echo "warning: backup script is unavailable; rollback snapshot will still be created" >&2
   fi
@@ -293,8 +118,7 @@ replace_application() {
   # pull in place, then run scripts/upgrade.sh from the checkout" workflow,
   # and also upgrade.sh's own default --source when none is passed -- the
   # rm -rf below would delete SOURCE_DIR's contents before the tar pipe
-  # reads them. realpath sees through the /opt/bindguard compatibility
-  # symlink too, so this also covers a legacy-named source path.
+  # reads them.
   if [ "$DRY_RUN" -eq 0 ]; then
     resolved_source="$(CDPATH= cd -- "$SOURCE_DIR" && pwd -P)"
     resolved_target="$(CDPATH= cd -- "$target" && pwd -P 2>/dev/null || true)"
@@ -328,9 +152,7 @@ install_units() {
   run install -D -m 0644 "$SOURCE_DIR/packaging/alderpointdns-filter-update.timer" "$(root_path /etc/systemd/system/alderpointdns-filter-update.timer)"
   run install -D -m 0440 "$SOURCE_DIR/packaging/sudoers-alderpointdns" "$(root_path /etc/sudoers.d/alderpointdns)"
   # On a normal upgrade these units already exist and are already enabled,
-  # so this is a no-op. Immediately after a legacy-install migration these
-  # are brand new unit files that have never been enabled, so without this
-  # the migrated install would not survive a reboot.
+  # so this is a no-op.
   if [ "$ROOT" = "/" ] && [ "$DRY_RUN" -eq 0 ]; then
     run systemctl enable alderpointdns.service alderpointdns-analytics.service
   fi
@@ -383,23 +205,10 @@ restart_services() {
 
 main() {
   require_root
-  was_legacy=0
-  if legacy_install_present; then
-    was_legacy=1
-    migrate_legacy_layout
-  fi
   check_existing_install
   echo "Current Alderpoint DNS version: $(current_version)"
   echo "Target Alderpoint DNS version: $(target_version)"
-  if [ "$was_legacy" -eq 0 ]; then
-    # In the legacy case, migrate_legacy_layout() already took a native
-    # backup of the fully self-consistent pre-migration install; the
-    # just-moved application source still has old BindGuard-era path
-    # constants baked in until replace_application below installs the
-    # renamed source, so calling the (already-renamed) backup.sh again here
-    # would look for files under names that no longer exist.
-    pre_upgrade_backup
-  fi
+  pre_upgrade_backup
   rollback="$(snapshot)"
   if replace_application && install_units && validate && migrate && restart_services; then
     echo "Alderpoint DNS upgrade completed."
