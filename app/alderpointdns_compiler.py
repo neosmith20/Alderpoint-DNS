@@ -23,10 +23,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 try:
-    from app import backup, dns_cache, encryption, local_dns, replication, service_logs, upstream_dns
+    from app import backup, custom_rules, dns_cache, encryption, local_dns, replication, service_logs, upstream_dns
 except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from app import backup, dns_cache, encryption, local_dns, replication, service_logs, upstream_dns
+    from app import backup, custom_rules, dns_cache, encryption, local_dns, replication, service_logs, upstream_dns
 
 
 DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
@@ -233,6 +233,7 @@ def init_db() -> None:
             ],
         )
         local_dns.init_db(conn)
+        custom_rules.init_db(conn)
 
 
 def normalize_domain(raw: str) -> str | None:
@@ -592,14 +593,12 @@ def add_custom(args: argparse.Namespace) -> None:
     domain = normalize_domain(args.domain)
     if not domain:
         raise SystemExit(f"invalid domain: {args.domain}")
-    with connect() as conn:
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO custom_rules(domain, action, enabled, comment, created_at)
-            VALUES (?, ?, 1, ?, ?)
-            """,
-            (domain, args.action, args.comment or "", now()),
-        )
+    # Legacy CLI semantics always covered subdomains, so write the
+    # subdomain-anchored form through the new custom-rule model.
+    text = ("@@||" if args.action == "allow" else "||") + domain + "^"
+    results = custom_rules.add_rule(text, source_system="manual", comment=args.comment or "")
+    for result in results:
+        print(f"custom_rule_id={result['id']} status={result['status']}")
 
 
 def list_status(_: argparse.Namespace) -> None:
@@ -609,7 +608,9 @@ def list_status(_: argparse.Namespace) -> None:
         for row in conn.execute("SELECT id, name, enabled, accepted_domains, invalid_rules, unsupported_rules, last_error FROM sources ORDER BY id"):
             print(dict(row))
         print("Custom rules:")
-        for row in conn.execute("SELECT id, domain, action, enabled, comment FROM custom_rules ORDER BY id"):
+        for row in conn.execute(
+            "SELECT id, rule_text, rule_type, action, enabled, validation_state, comment FROM custom_filter_rules ORDER BY id"
+        ):
             print(dict(row))
         print("Deployments:")
         for row in conn.execute("SELECT id, status, active_domains, finished_at, message FROM deployments ORDER BY id DESC LIMIT 5"):

@@ -31,6 +31,21 @@ Local DNS tables:
 Local DNS records are stored separately from RPZ filtering data. Host records
 are never written into the RPZ zone.
 
+Custom filtering rule tables:
+
+- `custom_filter_rules`: first-class custom rules (see `docs/filtering.md`):
+  original rule text, normalized form, rule type
+  (`block`/`allow`/`rewrite`/`regex_block`/`regex_allow`/`comment`/
+  `unsupported`), match domain and exact-vs-subdomain flag, regex pattern,
+  rewrite address and family, priority (`$important`), enabled state,
+  validation state (`valid`/`unsupported`/`invalid`) with the exact reason,
+  source system (`manual`/`adguard`/`pihole`/`legacy`/`import`), and an
+  optional `import_jobs` reference.
+- `custom_rules` (legacy): the original allow/block table. Kept intact for
+  backup and replication compatibility; rows are copied once into
+  `custom_filter_rules` (tracked by a `migrated_to_v2` column) and the
+  compile path and UI read only the new table afterwards.
+
 BIND cache tables:
 
 - `dns_cache_settings`: key/value cache tuning (max size, positive/negative
