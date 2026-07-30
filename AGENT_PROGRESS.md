@@ -1309,3 +1309,140 @@ Validation:
 - `python3 -m unittest discover -s tests -p "test_*.py"`: 190 tests passed.
   The known pre-existing backup-test SQLite `ResourceWarning` messages still
   print, but the final exit status was zero.
+
+## v0.4.0-beta.2 post-reboot verification closeout
+
+Completed the post-reboot handoff on the already-rebooted VM. No second reboot
+was performed.
+
+Commits created after checkpoint `6fe3788` during this continuation:
+
+- `462e90f` Clean interrupted backup artifacts.
+- `0c32547` Fix analytics test database isolation.
+
+Service verification:
+
+- `systemctl is-active named dnsdist alderpointdns alderpointdns-analytics`:
+  all four `active`.
+- `systemctl is-enabled named dnsdist alderpointdns alderpointdns-analytics`:
+  all four `enabled`.
+- Recent warning-level journals for the four services showed only the expected
+  BIND `allow-proxy` / `allow-proxy-on` experimental warnings. No startup
+  failures, crash loops, permission errors, migrations failures, TLS/listener
+  failures, or backup errors were found.
+
+Listener and DNS verification:
+
+- `ss -ltnup` confirmed dnsdist on UDP/TCP `0.0.0.0:53` and `[::]:53`, DoH/
+  DoH3 on `:443`, DoT/DoQ on `:853`, BIND backend on `127.0.0.1:5353`/
+  `127.0.0.1:5354` and `::1:5353`, web on `0.0.0.0:3000` and `0.0.0.0:8843`,
+  analytics on `127.0.0.1:5301`, and dnsdist management on loopback only
+  (`127.0.0.1:8083`, `127.0.0.1:5199`).
+- dnsdist frontend resolution: `dig @127.0.0.1 example.com A +short` returned
+  A records.
+- BIND backend resolution: `dig @127.0.0.1 -p 5353 example.com A +short`
+  returned A records.
+- Local A: `dig @127.0.0.1 -p 5353 adguard.mylan.network A +short` returned
+  `172.16.43.9`.
+- Local AAAA: no AAAA record is configured for `adguard.mylan.network`; the
+  query returned no answer with exit status 0.
+- PTR: `dig @127.0.0.1 -p 5353 -x 172.16.43.9 +short` returned
+  `adguard.mylan.network.`.
+- RPZ filtering: `dig @127.0.0.1 doubleclick.net A` returned `NXDOMAIN` with
+  the `alderpointdns.rpz` SOA.
+- DNSSEC path: `dig @127.0.0.1 . DNSKEY +dnssec +short` returned DNSKEY/RRSIG
+  data.
+- `/opt/alderpointdns/tests/test_dnsdist_frontend.sh`: passed, covering UDP,
+  TCP, DoH, DoT, DoQ, DoH3 capability config, dnsdist stats authentication,
+  loopback-only management listeners, ACL config, restart/recovery, and PROXYv2
+  client-address preservation.
+- Upstream resolver health: four imported plain upstreams (`1.1.1.2`,
+  `1.0.0.2`, `4.2.2.1`, `4.2.2.2`) are enabled and `healthy`.
+- Per-upstream analytics: live
+  `upstream_resolver_aggregate_buckets` rows exist with `health_state='up'`;
+  recent resolver 1 buckets showed successful query counts with zero failures.
+- Recursion ACLs: dnsdist runtime environment does not set
+  `ALDERPOINTDNS_DNS_ALLOW_ALL`; config uses the intended RFC1918, loopback,
+  and `fc00::/7` ACL set. No accidental open-resolver exposure was found.
+
+Recent Logs verification:
+
+- `runuser -u bindguard -- sudo -n /opt/alderpointdns/app/alderpointdns_compiler.py logs alderpointdns`
+  returned valid JSON log entries. The known unrelated `sudo: unable to
+  resolve host bindguard-1` warning still prints to stderr, but does not
+  corrupt stdout JSON.
+- `runuser -u bindguard -- sudo -n /opt/alderpointdns/app/alderpointdns_compiler.py logs sshd`
+  was denied by sudo itself (`sudo: a password is required`).
+- Rendered System Status did not show raw `journalctl` or insufficient-
+  permissions notices.
+
+Rendered UI verification:
+
+- Created temporary admin `codex_post_reboot` only for Chromium inspection;
+  removed it afterward and confirmed zero remaining rows for that username.
+- `python3 /tmp/alderpointdns_ui_inspect.py` drove headless Chromium through
+  DevTools Protocol and passed all rendered checks:
+  login, desktop expanded sidebar, desktop collapsed sidebar, collapsed
+  persistence across reload, expansion restore, mobile drawer open, compact
+  Local DNS rows/edit controls, PTR relationship display, DNS Settings overflow
+  actions, Blocklist category controls/compact table, Recent Logs content with
+  no permission notice, and Dashboard health labels/status text.
+- Screenshots were captured under `/tmp/alderpointdns-ui/` for Dashboard,
+  Local DNS, DNS Settings, Blocklists, and System at desktop (`1440x900`),
+  tablet (`900x900`), and mobile (`390x844`) widths. Sampled desktop Dashboard
+  and mobile Local DNS screenshots showed intact layout with no incoherent
+  overlap or normal-word mid-word splitting.
+
+Backup and restore verification:
+
+- `/opt/alderpointdns/tests/test_backup_restore.sh`: passed, covering live
+  successful backup, restore health, concurrent-write backup race regression,
+  archive mode `0640`, interrupted `INT`/`TERM`/`HUP` cleanup, no orphaned
+  `.tmp` archives, and no orphaned snapshot directories.
+- Fresh live low-level backup:
+  `/var/lib/alderpointdns/backups/alderpointdns-backup-20260730T035950Z.tar.gz`
+  exited 0, mode `0640`, included the SQLite snapshot, and the extracted
+  database returned `PRAGMA integrity_check = ok`.
+- App-managed default backup:
+  `/var/lib/alderpointdns/backups/alderpointdns-backup-20260730T040030Z.tar.gz`
+  included `manifest.json`, had zero checksum mismatches, excluded private
+  keys and `etc/alderpointdns/secrets.env`, and the extracted database returned
+  `PRAGMA integrity_check = ok`.
+- Final cleanup checks found no `*.tar.gz.tmp` files in
+  `/var/lib/alderpointdns/backups` and no `backup-snapshot.*` directories in
+  `/var/lib/alderpointdns/staging`.
+- Live services remained active after backup checks.
+
+Test verification:
+
+- `python3 -B tests/test_backup.py`: 36 tests passed.
+- `/opt/alderpointdns/tests/test_backup_restore.sh`: passed.
+- `python3 -B tests/test_analytics.py`: 24 tests passed.
+- `python3 -m unittest discover -s tests -p "test_*.py"`: 190 tests passed
+  (known pre-existing SQLite `ResourceWarning` messages still print).
+- `./tests/test_web_smoke.sh`: passed.
+- `./tests/test_acceptance.sh`: passed with final line
+  `Alderpoint DNS acceptance suite passed`. Expected invalid-RPZ and forced
+  rollback tracebacks appeared during negative-path tests.
+- `./tests/test_beta_hardening_docs.sh`: passed.
+- `./tests/test_install_upgrade_diagnostics.sh`: passed.
+- `python3 -B tests/test_local_dns.py`: 17 tests passed.
+- `python3 -B tests/test_blocklist_categories.py`: 12 tests passed.
+- `python3 -B tests/test_service_logs.py`: 9 tests passed.
+- `python3 -B tests/test_upstream_dns.py`: 7 tests passed.
+- `/opt/alderpointdns/tests/test_dnsdist_frontend.sh`: passed.
+
+Known limitations / notes:
+
+- The VM still has the pre-existing hostname-resolution warning
+  `sudo: unable to resolve host bindguard-1`; it is unrelated to beta.2
+  correctness and does not break Recent Logs because stdout/stderr are kept
+  separate.
+- The documented BIND `allow-proxy` and `allow-proxy-on` experimental warnings
+  remain expected.
+- Default app-managed backups strip secrets/private keys; the low-level
+  `scripts/backup.sh` full system archive intentionally includes
+  `/etc/alderpointdns` as part of disaster-recovery coverage.
+
+Result: Alderpoint DNS v0.4.0-beta.2 post-reboot verification is complete and
+ready for external testing.
