@@ -12,12 +12,13 @@ ss -ltnup | grep -Eq '(^|[[:space:]])(0[.]0[.]0[.]0|\*):3000' || fail "alderpoin
 setup_response="$(curl --silent --show-error --include --max-time 5 http://127.0.0.1:3000/setup)"
 printf '%s' "$setup_response" | grep -Eq 'Initial administrator setup|303 See Other' || fail "setup page missing or setup redirect invalid"
 curl --silent --show-error --include --max-time 5 http://127.0.0.1:3000/ | grep -q '303 See Other' || fail "unauthenticated dashboard did not redirect"
-for protected_path in /query-log /custom-rules /blocklists /local-dns /dns-settings /dns-cache /encryption /import /backup /replication /statistics-settings /system /status/summary
+for protected_path in /query-log /custom-rules /blocklists /local-dns /dns-settings /dns-cache /encryption /import /backup /replication /statistics-settings /system /system/logs /status/summary
 do
   curl --silent --show-error --include --max-time 5 "http://127.0.0.1:3000${protected_path}" | grep -q '303 See Other' || fail "unauthenticated ${protected_path} did not redirect"
 done
 runuser -u bindguard -- sudo -n /opt/alderpointdns/app/alderpointdns_compiler.py update-sources | grep -q 'active_domains=' || fail "alderpointdns sudo helper failed"
 python3 -B - <<'PY' || fail "web interface layout and analytics checks failed"
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -53,10 +54,31 @@ required_css = [
     ".nav-section__panel",
     ".nav-subitem",
     ".status-badge",
+    ".sidebar-collapse-toggle",
+    "html.sidebar-collapsed",
+    ".grid.health",
+    ".overflow-menu",
+    ".category-badge",
+    ".table-compact",
+    "data-sidebar-collapse",
+    "data-row-edit-toggle",
+    "alderpointdnsSidebarCollapsed",
 ]
-missing = [rule for rule in required_css if rule not in template + css]
+missing = [rule for rule in required_css if rule not in template + css + js]
 if missing:
     raise SystemExit("missing CSS: " + ", ".join(missing))
+
+# Regression guard: a status badge, heading, or card/panel head row must
+# never be forced into character-level word wrapping again (this is what
+# previously split "Healthy" -> "Heal"/"thy" and "DNSSEC" -> "DNSSE"/"C" on
+# the Dashboard System Health cards). The old bug came from a blanket
+# ".card *, .panel *" selector pulling in overflow-wrap:anywhere/word-break;
+# guard against that shape reappearing rather than just checking today's
+# rendered output.
+if re.search(r"\.card\s*\*", css) or re.search(r"\.panel\s*\*", css):
+    raise SystemExit("a blanket .card */.panel * selector would re-break word wrapping on status badges")
+if "overflow-wrap: normal" not in css or "word-break: normal" not in css:
+    raise SystemExit("status-badge/heading word-break protection rule is missing")
 if "https://" in template + css + js or "http://" in css + js:
     raise SystemExit("runtime CDN or public asset reference found")
 if "/static/app.css" not in template or "/static/app.js" not in template:
@@ -69,6 +91,11 @@ for nav_hook in ('nav_section("dns"', 'nav_section("security"', 'nav_section("op
 for js_hook in ("document.addEventListener('keydown'", "event.key === 'Escape'", "closest('#appNav')", "matchMedia('(max-width: 840px)'", "setNavOpen", "data-nav-section-toggle", "aria-expanded", "panel.hidden", "js-global-service-status"):
     if js_hook not in js:
         raise SystemExit(f"keyboard/click navigation behavior missing: {js_hook}")
+for js_hook in ("data-sidebar-collapse", "sidebar-collapsed", "alderpointdnsSidebarCollapsed", "data-row-edit-toggle", "data-overflow-trigger", "closeOverflowMenus"):
+    if js_hook not in js:
+        raise SystemExit(f"compact UI interaction behavior missing: {js_hook}")
+if "localStorage.getItem('alderpointdnsSidebarCollapsed')" not in template:
+    raise SystemExit("sidebar collapse anti-flash inline script is missing from base.html")
 if "queryChart" not in template or 'data-chart="traffic"' not in template:
     raise SystemExit("dashboard chart hooks are missing")
 if "analytics/chart-data" not in Path("/opt/alderpointdns/app/webapp.py").read_text():
@@ -90,6 +117,16 @@ if 'href="/dns-cache"' not in template:
 for route in ("/dns-settings/upstreams/add", "/dns-settings/upstreams/{resolver_id}/edit", "/dns-settings/upstreams/{resolver_id}/toggle", "/dns-settings/upstreams/{resolver_id}/move", "/dns-settings/upstreams/{resolver_id}/delete"):
     if route not in webapp_text:
         raise SystemExit(f"upstream resolver route missing: {route}")
+for route in ("/blocklists/categories/add", "/blocklists/categories/{key}/rename", "/blocklists/categories/{key}/merge", "/blocklists/categories/{key}/delete"):
+    if route not in webapp_text:
+        raise SystemExit(f"blocklist category route missing: {route}")
+if "blocklist_categories" not in webapp_text:
+    raise SystemExit("blocklists route does not use the managed category module")
+for route in ("/system/logs", "fetch_service_log_entries", "service_logs.ALLOWED_UNITS"):
+    if route not in webapp_text:
+        raise SystemExit(f"system log-access route missing: {route}")
+if "journalctl" in webapp_text:
+    raise SystemExit("webapp.py calls journalctl directly instead of going through the scoped log-access helper")
 for route in ("/encryption", "encryption_settings_post", "/encryption/certificate/self-signed", "/encryption/certificate/local-ca", "/encryption/certificate/upload", "/encryption/certificate/existing-path", "/encryption/certificate/download", "/encryption/apple/"):
     if route not in webapp_text:
         raise SystemExit(f"encryption route missing: {route}")
@@ -191,6 +228,10 @@ for expected in (
     "Add Upstream Resolver",
     'action="/dns-settings/upstreams/1/edit"',
     'action="/dns-settings/upstreams/add"',
+    "overflow-menu",
+    "Move up",
+    "Move down",
+    "overflow-menu__divider",
     "data-async-form",
 ):
     if expected not in html:
@@ -323,7 +364,7 @@ local_dns = TEMPLATES.get_template("local_dns.html").render(
         "record_type": "PTR",
         "value": "alex-pc.home.arpa",
         "ttl": 300,
-        "comment": "reverse",
+        "comment": "reverse for alex-pc." + long_domain,
         "enabled": 1,
         "ptr_record_id": None,
     }],
@@ -335,7 +376,7 @@ local_dns = TEMPLATES.get_template("local_dns.html").render(
     csv_text="fqdn,record_type,value,ttl,enabled,comment\ncsv.home.arpa,A,172.16.43.70,300,1,imported\n",
     hosts_text="172.16.43.80 printer",
 )
-for expected in ("Local DNS", "home.arpa", "Add Host", "Advanced Record", "Automatically create reverse PTR record", "Client Aliases", "Import CSV and deploy", long_domain, long_client):
+for expected in ("Local DNS", "home.arpa", "Add Host", "Advanced Record", "Automatically create reverse PTR record", "Client Aliases", "Import CSV and deploy", long_domain, long_client, "table-compact", "editRow1", "data-row-edit-toggle", "reverse of"):
     if expected not in local_dns:
         raise SystemExit(f"local DNS page missing {expected}")
 
@@ -459,18 +500,49 @@ for public_html, name in ((setup_html, "setup"), (login_html, "login")):
     if "app-nav" in public_html or "data-nav-section" in public_html:
         raise SystemExit(f"{name} page renders protected navigation while logged out")
 
+blocklist_categories_fixture = [
+    {"key": "uncategorized", "name": "Uncategorized", "description": "", "source_count": 0},
+    {"key": "ads_trackers", "name": "Ads and trackers", "description": "", "source_count": 1},
+    {"key": "malware", "name": "Malware", "description": "", "source_count": 0},
+]
+blocklists_html = TEMPLATES.get_template("blocklists.html").render(**base, sources=[{
+    "id": 1,
+    "name": "Long Source",
+    "url": long_upstream,
+    "category": "ads_trackers",
+    "enabled": 1,
+    "accepted_domains": 1,
+    "invalid_rules": 0,
+    "unsupported_rules": 0,
+    "last_error": long_domain,
+    "last_success": "2026-07-29T00:00:00Z",
+}], categories=blocklist_categories_fixture, category_error=None, category_filter="", status_filter="", search="", sort="name")
+for expected in ("Manage Categories", "Ads and trackers", "table-compact", "blocklistEdit1", "category-badge", "overflow-menu", long_upstream, long_domain):
+    if expected not in blocklists_html:
+        raise SystemExit(f"blocklists page missing {expected}")
+
+system_logs_fixture = {
+    "available": True, "error": None, "service": "alderpointdns", "severity": "all", "lines": 100,
+    "entries": [{"ts": "2026-07-29T00:00:00Z", "priority": 6, "severity": "info", "message": long_upstream}],
+}
+system_html = TEMPLATES.get_template("system.html").render(**base, health=[{"name": "Analytics collector", "state": "Healthy", "tone": "healthy"}], logs=system_logs_fixture, compiler={"deployment": None})
+for expected in ("Recent Logs", "systemLogsResults", 'data-refresh-url="/system/logs"', "Severity", long_upstream):
+    if expected not in system_html:
+        raise SystemExit(f"system page missing {expected}")
+if "journalctl" in system_html.lower():
+    raise SystemExit("system page still exposes raw journalctl command-line details")
+
+system_logs_error_html = TEMPLATES.get_template("system.html").render(
+    **base, health=[], compiler={"deployment": None},
+    logs={"available": False, "error": "log access is not available right now", "service": "named", "severity": "all", "lines": 100, "entries": []},
+)
+if "Logs unavailable for named" not in system_logs_error_html:
+    raise SystemExit("system page does not show a friendly empty state when logs are unavailable")
+if "journalctl" in system_logs_error_html.lower() or "insufficient permissions" in system_logs_error_html.lower():
+    raise SystemExit("system page leaks raw journalctl error text instead of a friendly message")
+
 for name, rendered in {
-    "blocklists": TEMPLATES.get_template("blocklists.html").render(**base, sources=[{
-        "id": 1,
-        "name": "Long Source",
-        "url": long_upstream,
-        "category": "ads_trackers",
-        "enabled": 1,
-        "accepted_domains": 1,
-        "invalid_rules": 0,
-        "unsupported_rules": 0,
-        "last_error": long_domain,
-    }]),
+    "blocklists": blocklists_html,
     "custom_rules": TEMPLATES.get_template("custom_rules.html").render(**base, rules=[{
         "id": 1,
         "domain": long_domain,
@@ -489,7 +561,7 @@ for name, rendered in {
         "collection_interval": "15",
         "recent_query_limit": "100",
     }, db_size=1234),
-    "system": TEMPLATES.get_template("system.html").render(**base, health=[{"name": "Analytics collector", "state": "Healthy", "tone": "healthy"}], logs=long_upstream, compiler={"deployment": None}),
+    "system": system_html,
     "local_dns": local_dns,
     "dns_cache": dns_cache_html,
     "encryption": encryption_html,
