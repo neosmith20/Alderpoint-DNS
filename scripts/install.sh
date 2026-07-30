@@ -187,8 +187,21 @@ initialize() {
     PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/analytics.py init-db
     PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py deploy --no-download
     chown -R alderpointdns:alderpointdns /var/lib/alderpointdns /var/log/alderpointdns
-    chown -R root:alderpointdns /etc/alderpointdns
+    # Deliberately not recursive: /etc/alderpointdns/certs is owned and
+    # managed entirely by ensure_tls_cert.sh/app/encryption.py (root:_dnsdist
+    # for the TLS-serving cert/key, root:root for the CA key) so that
+    # dnsdist -- a separate system account with no relationship to
+    # alderpointdns -- can read its own TLS material directly. Recursing
+    # into it here would silently reassign that directory back to
+    # alderpointdns and break dnsdist's cert access.
+    chown root:alderpointdns /etc/alderpointdns
+    chown root:alderpointdns /etc/alderpointdns/secrets.env /etc/alderpointdns/dnsdist-api.key /etc/alderpointdns/dnsdist-web.creds
     chmod 0640 /etc/alderpointdns/secrets.env /etc/alderpointdns/dnsdist-api.key /etc/alderpointdns/dnsdist-web.creds
+    # named (running as its own "bind" system user, not alderpointdns) writes
+    # its own log/statistics files directly into this subdirectory per
+    # named.conf.options -- it must own it, so re-assert that ownership after
+    # the blanket alderpointdns chown above.
+    install -d -o bind -g bind -m 0750 "$(root_path /var/log/alderpointdns/bind)"
     systemctl daemon-reload
     systemctl enable --now named dnsdist alderpointdns alderpointdns-analytics
     systemctl enable alderpointdns-backup.timer

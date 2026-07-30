@@ -11,7 +11,25 @@ case "$1" in
     fi
     install -d -o alderpointdns -g alderpointdns -m 0750 /var/lib/alderpointdns /var/lib/alderpointdns/backups /var/lib/alderpointdns/compiled /var/lib/alderpointdns/imports /var/lib/alderpointdns/staging
     install -d -o alderpointdns -g alderpointdns -m 0755 /var/log/alderpointdns
-    install -d -o root -g alderpointdns -m 0750 /etc/alderpointdns /etc/alderpointdns/certs
+    # named (its own "bind" system user, unrelated to alderpointdns) writes
+    # its own log/statistics files directly here; it must own this
+    # subdirectory rather than inherit the alderpointdns ownership above.
+    install -d -o bind -g bind -m 0750 /var/log/alderpointdns/bind
+    # 0755, not 0750: dnsdist's separate "_dnsdist" system account (and any
+    # other daemon reading its own narrowly-owned subdirectory here, such as
+    # named's log directory above) needs to traverse into this directory by
+    # default; the sensitive files/subdirs directly inside it (secrets.env,
+    # dnsdist-api.key, dnsdist-web.creds, certs/) are individually locked
+    # down to their own owner/group instead.
+    install -d -o root -g alderpointdns -m 0755 /etc/alderpointdns
+    # ensure_tls_cert.sh creates /etc/alderpointdns/certs itself, owned
+    # root:_dnsdist -- dnsdist (a separate system account, unrelated to
+    # alderpointdns) must be able to read its own TLS certificate/key
+    # directly. It is deliberately not created here with the alderpointdns
+    # group above, which would leave dnsdist unable to load its TLS material
+    # and crash-loop as soon as an encrypted listener (DoH/DoT/DoQ, enabled
+    # by default in packaging/dnsdist.service.d/alderpointdns.conf) starts.
+    /opt/alderpointdns/scripts/ensure_tls_cert.sh
     if [ ! -e /etc/alderpointdns/secrets.env ]; then
       umask 077
       printf 'ALDERPOINTDNS_SESSION_SECRET=%s\n' "$(openssl rand -base64 48)" > /etc/alderpointdns/secrets.env
