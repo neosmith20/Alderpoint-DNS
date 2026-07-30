@@ -167,11 +167,11 @@ abc
 -----END PRIVATE KEY-----
 key "rndc-key" {
 	algorithm "hmac-sha256";
-	secret "5O1I/TE1qQor6HqTnazGaL8sAPVtCM2TsdkZX6FnGbU=";
+	secret "ZXhhbXBsZS1ybmRjLWtleS1ub3QtYS1yZWFsLXNlY3JldA==";
 };
 """
     cleaned = redact(sample)
-    forbidden = ("hunter2", "abcdef", "secret&client", "BEGIN PRIVATE KEY", "x-api-key: secret", "5O1I/TE1qQor6HqTnazGaL8sAPVtCM2TsdkZX6FnGbU=")
+    forbidden = ("hunter2", "abcdef", "secret&client", "BEGIN PRIVATE KEY", "x-api-key: secret", "ZXhhbXBsZS1ybmRjLWtleS1ub3QtYS1yZWFsLXNlY3JldA==")
     if any(token in cleaned for token in forbidden):
         print(cleaned)
         return 1
