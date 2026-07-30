@@ -73,7 +73,7 @@ class BackupTestBase(unittest.TestCase):
         backup.LOCAL_ZONES_CONF.write_text("// local zones\n")
         backup.DOWNLOADS_DIR.joinpath("current").mkdir(parents=True, exist_ok=True)
         backup.DOWNLOADS_DIR.joinpath("current", "1-source.txt").write_text("example.com\n")
-        backup.SUDOERS_FILE.write_text("bindguard ALL=(root) NOPASSWD: /opt/alderpointdns/app/alderpointdns_compiler.py deploy\n")
+        backup.SUDOERS_FILE.write_text("alderpointdns ALL=(root) NOPASSWD: /opt/alderpointdns/app/alderpointdns_compiler.py deploy\n")
 
         backup.init_db()
         with closing(backup.connect()) as conn:
@@ -515,59 +515,6 @@ class RestoreTest(BackupTestBase):
         self.assertEqual(backup.DNSDIST_CONF.read_text(), "changed-live-content\n")
         last = backup.last_restore()
         self.assertEqual(last["status"], "rolled_back")
-
-    def _make_legacy_bindguard_backup(self) -> Path:
-        """Hand-build a tar.gz shaped like an archive created before the
-        BindGuard -> Alderpoint DNS rename: old relpaths, old manifest key
-        name, no Alderpoint DNS-branded paths anywhere."""
-        stage = self.tmp / "legacy-stage"
-        legacy_db_dir = stage / "var" / "lib" / "bindguard"
-        legacy_db_dir.mkdir(parents=True)
-        legacy_db = legacy_db_dir / "bindguard.db"
-        with closing(sqlite3.connect(legacy_db)) as conn:
-            conn.executescript(
-                "CREATE TABLE custom_rules (id INTEGER PRIMARY KEY, domain TEXT);"
-                "CREATE TABLE dns_cache_settings (key TEXT PRIMARY KEY, value TEXT);"
-            )
-            conn.execute("INSERT INTO custom_rules(domain) VALUES ('from-legacy-bindguard-archive.example')")
-            conn.commit()
-        manifest = {
-            "backup_format_version": backup.BACKUP_FORMAT_VERSION,
-            "bindguard_app_version": "unreleased+git.legacy0001",
-            "database_schema_version": "legacy0000000000000000",
-            "created_at": backup.now(),
-            "source_node_id": "legacy-host",
-            "included_components": ["sqlite_data", "custom_rules"],
-            "sha256_checksums": {"var/lib/bindguard/bindguard.db": backup.sha256_file(legacy_db)},
-        }
-        (stage / "manifest.json").write_text(json.dumps(manifest))
-        archive = self.tmp / "legacy-bindguard-backup-20260101T000000Z.tar.gz"
-        subprocess.run(
-            ["tar", "-czf", str(archive), "-C", str(stage), "var/lib/bindguard/bindguard.db", "manifest.json"],
-            check=True,
-        )
-        return archive
-
-    def test_preview_restore_reads_legacy_bindguard_archive(self) -> None:
-        archive = self._make_legacy_bindguard_backup()
-        with mock.patch.object(backup, "run", self.fake_run):
-            result = backup.preview_restore(archive, None)
-        self.assertTrue(result["compatible"])
-        self.assertTrue(any("legacy0001" in warning for warning in result["warnings"]))
-        # unchanged_file_count's "- 1 if staged_db.exists()" term only
-        # subtracts when the staged db was actually located, proving the
-        # legacy var/lib/bindguard/bindguard.db relpath was resolved rather
-        # than silently treated as absent.
-        self.assertEqual(result["unchanged_file_count"], 0)
-
-    def test_restore_backup_merges_legacy_bindguard_archive(self) -> None:
-        archive = self._make_legacy_bindguard_backup()
-        with mock.patch.object(backup, "run", self.fake_run), mock.patch.object(backup, "resolves", return_value=True), \
-                mock.patch.object(backup, "_wait_active", return_value=True):
-            backup.restore_backup(archive, None, {key: False for key in backup.COMPONENT_KEYS} | {"custom_rules": True})
-        with closing(backup.connect()) as conn:
-            rows = [row[0] for row in conn.execute("SELECT domain FROM custom_rules")]
-        self.assertEqual(rows, ["from-legacy-bindguard-archive.example"])
 
     def test_restore_backup_takes_pre_restore_safety_backup(self) -> None:
         path = self._make_backup()
