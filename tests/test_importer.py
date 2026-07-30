@@ -704,6 +704,21 @@ class ImporterTest(unittest.TestCase):
         self.assertNotIn("api_key", cleaned["nested"])
         self.assertEqual(cleaned["nested"]["note"], "keep https://a.example/p")
 
+    def test_redact_sensitive_matches_compound_and_camelcase_keys(self) -> None:
+        # Exact-match-only key checking misses compound field names; these
+        # must be caught too.
+        for key in ("admin_password", "AuthToken", "apiKey", "auth_secret"):
+            cleaned = importer.redact_sensitive({key: "x", "keep": "y"})
+            self.assertNotIn(key, cleaned, key)
+            self.assertIn("keep", cleaned)
+
+    def test_redact_sensitive_preserves_legitimate_key_fields(self) -> None:
+        # Bare "key" and compounds like "deselected_keys" are real,
+        # non-secret preview-selection fields and must survive redaction.
+        payload = {"key": "blocklists:0", "deselected_keys": ["a:1"], "_dupkeys": [], "_upstream_key": ["plain", "1.1.1.1", 53, ""]}
+        cleaned = importer.redact_sensitive(payload)
+        self.assertEqual(set(cleaned.keys()), set(payload.keys()))
+
     # -- native round trip ---------------------------------------------------
 
     def test_native_export_parse_round_trip(self) -> None:

@@ -153,17 +153,37 @@ def sanitize_url(url: str) -> str:
 
 
 _URL_RE = re.compile(r"https?://[^\s\"'<>]+")
-_SENSITIVE_KEYS = {"password", "passwd", "token", "secret", "api_key", "apikey", "authorization", "auth", "credentials"}
+_CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+# Individual word-boundary tokens that make a key sensitive on their own
+# (e.g. "admin_password", "AuthToken" -> tokens "admin"/"password",
+# "auth"/"token"). Deliberately excludes bare "key", since this codebase has
+# legitimate non-secret fields named "key"/"keys" (the migration preview's
+# stable item-selection keys).
+_SENSITIVE_KEY_TOKENS = {"password", "passwd", "token", "secret", "authorization", "auth", "credentials", "credential"}
+# Compound forms only sensitive without a separator, checked against the key
+# with all separators stripped (so "api_key" and "apikey" both match, but
+# "api"/"key" alone do not).
+_SENSITIVE_KEY_COMPOUNDS = {"apikey"}
+
+
+def _is_sensitive_key(key: Any) -> bool:
+    normalized = _CAMEL_BOUNDARY_RE.sub("_", str(key)).lower()
+    if _NON_ALNUM_RE.sub("", normalized) in _SENSITIVE_KEY_COMPOUNDS:
+        return True
+    return any(token in _SENSITIVE_KEY_TOKENS for token in _NON_ALNUM_RE.split(normalized) if token)
 
 
 def redact_sensitive(value: Any) -> Any:
     """Recursively sanitize a report payload: drop credential-named keys and
-    strip userinfo/query strings from every embedded URL."""
+    strip userinfo/query strings from every embedded URL. Key matching is
+    token-based (word-boundary and camelCase aware), not exact-string, so
+    compound names like "admin_password" or "AuthToken" are caught too."""
     if isinstance(value, dict):
         return {
             key: redact_sensitive(item)
             for key, item in value.items()
-            if str(key).lower() not in _SENSITIVE_KEYS
+            if not _is_sensitive_key(key)
         }
     if isinstance(value, (list, tuple)):
         return [redact_sensitive(item) for item in value]
