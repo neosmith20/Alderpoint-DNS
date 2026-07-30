@@ -18,8 +18,65 @@ Run individual suites:
 /opt/alderpointdns/tests/test_web_smoke.sh
 /opt/alderpointdns/tests/test_encryption_layout.sh
 /opt/alderpointdns/tests/test_backup_restore.sh
+/opt/alderpointdns/tests/test_deb_package_contents.sh
 /opt/alderpointdns/tests/test_release_hygiene.sh
 ```
+
+Two more suites require tooling most CI environments won't have by default,
+so they aren't run implicitly by the above and are called out separately:
+
+```sh
+/opt/alderpointdns/tests/test_clean_install_container.sh
+```
+
+`tests/test_deb_package_contents.sh` builds the `.deb` and statically
+inspects its actual contents (control metadata, maintainer scripts,
+`packaging/dnsdist.conf`, service units) for the fixes from the first clean
+Debian 13 install failure: `secrets.env`/`dnsdist-api.key`/`dnsdist-web.creds`
+chowned `root:alderpointdns` and chmod `0640`; the database and
+`/var/log/alderpointdns` ownership recursively fixed after generation
+(including reasserting `bind:bind` on the BIND log subdirectory, not just
+recreating the directory); the AppArmor local override for named installed
+and reloaded; `dnsdist (>= 2.0.0)` required in `Depends` so installing
+against Debian's own older archive `dnsdist` fails cleanly at dependency
+resolution instead of silently pulling an incompatible build; the
+`newRemoteLogger`/`RemoteLogResponseAction` calls fixed/made version-aware
+for that older build; DoH3/DoQ/DNSCrypt listener setup routed through a
+capability-safe wrapper; the web password/API key hashed with dnsdist's own
+`hashPassword()` before being written into `dnsdist.conf` (never the
+plaintext); the `.dnsdist-conf-installed`/`.named-conf-installed`
+first-install markers scoped under `/etc/alderpointdns` so `apt purge` +
+reinstall doesn't reuse stale hashed credentials; `StartLimitIntervalSec`/
+`StartLimitBurst` on the alderpointdns/analytics units and a dnsdist
+drop-in override (the upstream unit ships `StartLimitInterval=0`, i.e. no
+cap at all); and postinst no longer swallowing failures from database init,
+config deploy, or service restart/enable with `|| true`, ending with an
+explicit active-service gate for all four core services. It requires no
+root access and no live system, only `dpkg-deb`.
+
+`tests/test_clean_install_container.sh` builds the `.deb` and installs it in
+a disposable, genuinely clean Debian 13 + systemd container (via `podman` or
+`docker`) that inherits no alderpointdns users, groups, files, database, or
+generated configuration from the development machine it runs on -- unlike
+running the installer or postinst directly against that machine, which
+already has all of those from prior installs. It installs the PowerDNS
+dnsdist apt repository per `docs/dnsdist.md` before installing the package,
+then verifies: `dpkg -i` succeeds; all four core services (`named`,
+`dnsdist`, `alderpointdns`, `alderpointdns-analytics`) reach the active
+state with zero restarts; `secrets.env`/`dnsdist-api.key`/
+`dnsdist-web.creds` are `root:alderpointdns 640` and readable by the
+`alderpointdns` account; the database is `alderpointdns:alderpointdns` and
+actually writable by that account; named's AppArmor local override is
+installed and named actually resolves through both the BIND backend and the
+dnsdist frontend; dnsdist logs no plain-text credential warnings and
+`dnsdist.conf` has no unresolved placeholder; the web app's own credential
+files authenticate successfully against dnsdist's stats API. It then purges
+and reinstalls to prove two independent installations mint different
+console/web/API credentials (every credential line differs, not just the
+file as a whole), and reinstalls once more without purging to prove
+credentials are preserved across an upgrade. Requires outbound network
+access (to pull the base image and the PowerDNS repository) and takes a few
+minutes.
 
 `tests/test_backup_restore.sh` (script-based, exercises `scripts/backup.sh`/
 `scripts/restore.sh`) and `tests/test_backup.py` (native `app/backup.py`)

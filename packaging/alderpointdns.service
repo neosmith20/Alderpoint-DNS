@@ -2,6 +2,12 @@
 Description=Alderpoint DNS Web Application
 After=network-online.target named.service dnsdist.service
 Wants=network-online.target
+# Caps runaway restart loops (e.g. a bad secrets.env/database permission
+# regression) at 5 attempts per minute instead of restarting forever;
+# systemd marks the unit failed once the limit is hit rather than pounding
+# it indefinitely.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 User=alderpointdns

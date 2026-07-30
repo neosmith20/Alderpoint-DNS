@@ -99,3 +99,21 @@ may still change between releases before a stable 1.0.
 - Hardened migration report redaction to match credential-bearing field
   names by word-boundary/camelCase token instead of exact string, so
   compound field names are caught too.
+- Fixed a first-clean-install failure where all four core services
+  (`alderpointdns`, `alderpointdns-analytics`, `named`, `dnsdist`) crash-
+  looped after a "successful" package install: `secrets.env`/dnsdist API
+  and web credentials are now group-readable (0640) instead of 0600; the
+  database is chowned to `alderpointdns` after generation; named's
+  AppArmor local override is installed and reloaded; `packaging/dnsdist.conf`
+  is fixed and made capability-aware for Debian 13's own (non-PowerDNS-repo)
+  dnsdist build, and the package now requires `dnsdist (>= 2.0.0)` so
+  installing without the documented PowerDNS repository fails cleanly at
+  dependency resolution instead of silently pulling an incompatible
+  version. dnsdist's web password and API key are now hashed with
+  `hashPassword()` before being written into `dnsdist.conf`, eliminating
+  the plaintext-credential warning without weakening authentication.
+  `postinst` now validates configuration and verifies all four services
+  actually reach the active state before reporting success, and
+  `StartLimitBurst`/`StartLimitIntervalSec` caps prevent runaway restart
+  loops if that ever fails again. Added a container-based clean-install
+  regression test and a static built-package inspection test.

@@ -29,8 +29,31 @@ alderpointdns (0.4.0~beta2-1) unstable; urgency=medium
   * build-deb.sh now derives the Debian package version from VERSION
     (0.4.0-beta.2 -> 0.4.0~beta2-1) instead of embedding the semver-style
     string verbatim.
+  * Fixed a first-clean-install failure where all four core services
+    crash-looped after a "successful" install: secrets.env/dnsdist API
+    and web credentials are group-readable (0640, not 0600); the
+    database is chowned to alderpointdns after generation, without
+    broadening ownership of the root-owned, world-readable compiled
+    BIND/dnsdist config; named's AppArmor local override is installed
+    and reloaded; postinst now generates unique per-install dnsdist
+    console/web/API credentials, hashes the web password/API key with
+    dnsdist's own hashPassword() before writing dnsdist.conf (no more
+    plaintext-credential warning, no weaker auth), and preserves those
+    credentials across upgrades while regenerating them on a genuine
+    purge + reinstall. dnsdist.conf's newRemoteLogger/RemoteLogResponseAction
+    calls and DoH3/DoQ/DNSCrypt listener setup are now compatible with
+    (and gracefully degrade against) Debian 13's own archive dnsdist
+    package, and the package now requires dnsdist (>= 2.0.0) so
+    installing without the documented PowerDNS repository fails cleanly
+    at dependency resolution instead of silently pulling an incompatible
+    build. postinst validates configuration and verifies all four
+    services reach the active state before reporting success;
+    StartLimitBurst/StartLimitIntervalSec caps prevent runaway restart
+    loops. Added tests/test_clean_install_container.sh (fresh Debian 13 +
+    systemd container, no inherited dev-machine state) and
+    tests/test_deb_package_contents.sh (static built-package inspection).
 
- -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Wed, 29 Jul 2026 21:02:00 -0600
+ -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Thu, 30 Jul 2026 23:15:00 -0600
 
 alderpointdns (0.4.0~beta1-1) unstable; urgency=medium
 

@@ -2,6 +2,11 @@
 Description=Alderpoint DNS Analytics Collector
 After=network-online.target dnsdist.service named.service
 Wants=network-online.target
+# Caps runaway restart loops (e.g. a bad database permission regression) at
+# 5 attempts per minute instead of restarting forever; systemd marks the
+# unit failed once the limit is hit rather than pounding it indefinitely.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 User=alderpointdns
