@@ -63,6 +63,21 @@
   </article>
 {%- endmacro %}
 
-{% macro table_wrap() -%}
-  <div class="table-wrap">{{ caller() }}</div>
+{% macro table_wrap(class_name='') -%}
+  <div class="table-wrap{% if class_name %} {{ class_name }}{% endif %}">{{ caller() }}</div>
+{%- endmacro %}
+
+{% macro category_badge(label) -%}
+  <span class="category-badge">{{ label }}</span>
+{%- endmacro %}
+
+{% macro overflow_menu(id) -%}
+  <div class="overflow-menu" data-overflow-menu>
+    <button type="button" class="secondary overflow-menu__trigger" data-overflow-trigger aria-haspopup="true" aria-expanded="false" aria-controls="{{ id }}" aria-label="More actions" title="More actions">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
+    </button>
+    <div class="overflow-menu__panel" id="{{ id }}" role="menu" hidden>
+      {{ caller() }}
+    </div>
+  </div>
 {%- endmacro %}

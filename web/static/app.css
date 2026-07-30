@@ -810,6 +810,115 @@ pre {
   max-height: 520px;
 }
 
+/* Shared compact-UI primitives (compact tables, category badges, overflow
+   action menus, row-level expandable editors) used across Local DNS,
+   DNS Settings, and Blocklists. */
+
+.table-compact th,
+.table-compact td {
+  padding: 7px 10px;
+  font-size: 0.89rem;
+}
+
+.table-compact .truncate { max-width: 1px; }
+
+.table-compact td .row {
+  flex-wrap: nowrap;
+}
+
+.table-compact td .row button,
+.table-compact td .row .overflow-menu__trigger {
+  min-height: 30px;
+  padding: 5px 9px;
+  font-size: 0.82rem;
+}
+
+.table-compact td .overflow-menu__trigger {
+  width: 30px;
+  padding: 0;
+}
+
+.row-edit {
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.row-edit[hidden] { display: none; }
+
+.row-edit .grid.compact { margin: 2px 0; }
+
+.category-badge {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  border: 1px solid rgba(103, 232, 249, 0.28);
+  border-radius: 999px;
+  padding: 3px 9px;
+  background: rgba(103, 232, 249, 0.09);
+  color: var(--accent-strong);
+  font-size: 0.78rem;
+  font-weight: 650;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.overflow-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.overflow-menu__trigger {
+  width: 34px;
+  height: 34px;
+  min-height: auto;
+  padding: 0;
+}
+
+.overflow-menu__trigger svg { width: 16px; height: 16px; fill: currentColor; }
+
+.overflow-menu__panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 25;
+  display: grid;
+  gap: 2px;
+  min-width: 168px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-elevated);
+  box-shadow: var(--shadow);
+  padding: 6px;
+}
+
+.overflow-menu__panel[hidden] { display: none; }
+
+.overflow-menu__panel form,
+.overflow-menu__panel button,
+.overflow-menu__panel .button {
+  width: 100%;
+  justify-content: flex-start;
+  background: transparent;
+  border-color: transparent;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.overflow-menu__panel button:hover,
+.overflow-menu__panel .button:hover { background: rgba(255, 255, 255, 0.075); }
+
+.overflow-menu__panel button.danger,
+.overflow-menu__panel .button.danger { color: var(--danger); }
+
+.overflow-menu__panel button.danger:hover,
+.overflow-menu__panel .button.danger:hover { background: rgba(248, 113, 113, 0.12); }
+
+.overflow-menu__divider {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--border);
+}
+
 .auth-shell {
   min-height: 100vh;
   display: grid;

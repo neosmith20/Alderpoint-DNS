@@ -183,6 +183,50 @@
     }
   });
 
+  // Row-level expandable editors (Local DNS, etc): collapsed by default so
+  // records don't render a full edit form for every row; toggled via a
+  // delegated listener so it keeps working after data-async-form swaps in
+  // new markup.
+  document.addEventListener('click', (event) => {
+    const toggle = event.target.closest('[data-row-edit-toggle]');
+    if (!toggle) return;
+    const panel = document.getElementById(toggle.getAttribute('aria-controls') || '');
+    if (!panel) return;
+    const open = panel.hidden;
+    panel.hidden = !open;
+    toggle.setAttribute('aria-expanded', String(open));
+    toggle.textContent = open ? 'Close' : 'Edit';
+  });
+
+  // Compact overflow action menus (DNS Settings, Blocklists, etc).
+  function closeOverflowMenus(except) {
+    document.querySelectorAll('[data-overflow-menu]').forEach((menu) => {
+      if (menu === except) return;
+      const trigger = menu.querySelector('[data-overflow-trigger]');
+      const panel = menu.querySelector('.overflow-menu__panel');
+      if (!trigger || !panel || panel.hidden) return;
+      panel.hidden = true;
+      trigger.setAttribute('aria-expanded', 'false');
+    });
+  }
+  document.addEventListener('click', (event) => {
+    const trigger = event.target.closest('[data-overflow-trigger]');
+    if (trigger) {
+      const menu = trigger.closest('[data-overflow-menu]');
+      const panel = menu && menu.querySelector('.overflow-menu__panel');
+      if (!panel) return;
+      const open = panel.hidden;
+      closeOverflowMenus(open ? menu : null);
+      panel.hidden = !open;
+      trigger.setAttribute('aria-expanded', String(open));
+      return;
+    }
+    if (!event.target.closest('.overflow-menu__panel')) closeOverflowMenus();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') closeOverflowMenus();
+  });
+
   const refreshToggle = document.getElementById('autoRefresh');
   let refreshTimer = null;
   if (refreshToggle) {

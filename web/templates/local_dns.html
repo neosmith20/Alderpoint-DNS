@@ -114,27 +114,38 @@
     </form>
   </div>
   {% if records %}
-    {% call ui.table_wrap() %}
+    {% call ui.table_wrap("table-compact") %}
     <table>
-      <thead><tr><th>Hostname</th><th>Type</th><th>IP address or target</th><th>PTR</th><th>TTL</th><th>Comment</th><th>Status</th><th>Actions</th></tr></thead>
+      <colgroup>
+        <col style="width: 21%"><col style="width: 7%"><col style="width: 20%"><col style="width: 8%">
+        <col style="width: 5%"><col style="width: 14%"><col style="width: 8%"><col style="width: 17%">
+      </colgroup>
+      <thead><tr><th>Hostname</th><th>Type</th><th>Value / target</th><th>PTR</th><th>TTL</th><th>Comment</th><th>Status</th><th>Actions</th></tr></thead>
       <tbody>
         {% for record in records %}
+          {% set reverse_target = record.comment[12:] if record.comment and record.comment.startswith("reverse for ") else None %}
           <tr>
-            <td class="mono wrap-anywhere" title="{{ record.fqdn }}">{{ record.fqdn }}</td>
+            <td class="mono truncate" title="{{ record.fqdn }}">{{ record.fqdn }}</td>
             <td>{{ ui.status_badge(record.record_type, "neutral") }}</td>
-            <td class="mono wrap-anywhere" title="{{ record.value }}">{{ record.value }}</td>
+            <td class="mono truncate" title="{{ record.value }}">{{ record.value }}</td>
             <td>{% if record.record_type == "PTR" %}{{ ui.status_badge("PTR", "healthy") }}{% elif record.ptr_record_id %}{{ ui.status_badge("Automatic", "healthy") }}{% else %}{{ ui.status_badge("None", "unavailable") }}{% endif %}</td>
             <td class="mono">{{ record.ttl }}</td>
-            <td class="wrap-anywhere">{{ record.comment }}</td>
+            <td class="truncate" title="{{ record.comment }}">
+              {% if reverse_target %}<span class="category-badge" title="Automatically generated reverse record for {{ reverse_target }}">&#8617; reverse of <span class="mono">{{ reverse_target }}</span></span>{% else %}{{ record.comment }}{% endif %}
+            </td>
             <td>{{ ui.status_badge("Enabled" if record.enabled else "Disabled", "healthy" if record.enabled else "unavailable") }}</td>
             <td>
               <div class="row">
-                <form method="post" action="/local-dns/records/{{ record.id }}/toggle" data-async-form data-success-message="Local DNS record updated and deployed."><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">{{ "Disable" if record.enabled else "Enable" }}</button></form>
-                <form method="post" action="/local-dns/records/{{ record.id }}/delete" data-confirm="Delete this local DNS record and deploy?"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="danger">Delete</button></form>
+                <button type="button" class="secondary" data-row-edit-toggle aria-controls="editRow{{ record.id }}" aria-expanded="false">Edit</button>
+                {% call ui.overflow_menu("recordMenu" ~ record.id) %}
+                  <form method="post" action="/local-dns/records/{{ record.id }}/toggle" data-async-form data-success-message="Local DNS record updated and deployed."><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="secondary" role="menuitem">{{ "Disable" if record.enabled else "Enable" }}</button></form>
+                  <div class="overflow-menu__divider" role="separator"></div>
+                  <form method="post" action="/local-dns/records/{{ record.id }}/delete" data-confirm="Delete this local DNS record and deploy?"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="danger" role="menuitem">Delete</button></form>
+                {% endcall %}
               </div>
             </td>
           </tr>
-          <tr>
+          <tr class="row-edit" id="editRow{{ record.id }}" hidden>
             <td colspan="8">
               <form method="post" action="/local-dns/records/{{ record.id }}/edit" class="grid compact" data-async-form data-success-message="Local DNS record saved and deployed.">
                 <input type="hidden" name="csrf" value="{{ csrf }}">
