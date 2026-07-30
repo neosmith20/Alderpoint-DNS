@@ -80,5 +80,9 @@ tar -C / -czf "$tmp" \
   -C "$snapshot_root" var/lib/alderpointdns/alderpointdns.db
 
 mv "$tmp" "$dest"
+# This script always runs as root (upgrade.sh's pre-upgrade safety net), so
+# the archive would otherwise be root:root and unreadable by the alderpointdns
+# web process -- matching app/backup.py's harden_backup_file_permissions().
+chown root:alderpointdns "$dest" 2>/dev/null || true
 chmod 0640 "$dest"
 echo "$dest"
