@@ -171,7 +171,7 @@ outcome is reached in a different file/process" rather than a gap.
 
 | AdGuard feature | Where in AdGuard | Alderpoint DNS equivalent | Implementation location | Status | Missing tests | Notes |
 |---|---|---|---|---|---|---|
-| Built-in DHCP server (IPv4/IPv6 pools, gateway, lease time) | Settings → DHCP settings | Not implemented | — | intentionally not applicable | n/a | Alderpoint DNS is a DNS-filtering appliance sitting behind pfSense, which already provides DHCP on this network (`docs/baseline.md` notes `dhcpcd`-managed addressing). Building a competing DHCP server is out of scope by design, not a gap. |
+| Built-in DHCP server (IPv4/IPv6 pools, gateway, lease time) | Settings → DHCP settings | Not implemented | — | intentionally not applicable | n/a | Alderpoint DNS is a DNS-filtering appliance meant to sit behind an existing router/firewall that already provides DHCP. Building a competing DHCP server is out of scope by design, not a gap. |
 | Static DHCP leases | DHCP settings | Not implemented | — | intentionally not applicable | n/a | Same reasoning — Local DNS host records serve Alderpoint DNS's equivalent need (stable name→IP mapping) without owning IP address assignment. |
 | Active DHCP server detection | `POST /dhcp/find_active_dhcp` | Not implemented | — | intentionally not applicable | n/a | |
 

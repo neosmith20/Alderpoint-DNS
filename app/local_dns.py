@@ -173,7 +173,7 @@ def detect_server_ip() -> str:
                 return str(ip)
     except Exception:
         pass
-    return "172.16.43.101"
+    return "127.0.0.1"
 
 
 def normalize_domain(value: str) -> str:
