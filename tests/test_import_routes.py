@@ -30,10 +30,10 @@ user_rules:
   - '@@||safe.example^'
 filtering:
   rewrites:
-    - {domain: nas.home.arpa, answer: 172.16.43.50}
+    - {domain: nas.home.arpa, answer: 192.168.1.50}
 clients:
   persistent:
-    - {name: Phone, ids: ['172.16.43.77'], filtering_enabled: true}
+    - {name: Phone, ids: ['192.168.1.77'], filtering_enabled: true}
 dns:
   bootstrap_dns: ['1.1.1.1']
   upstream_dns:

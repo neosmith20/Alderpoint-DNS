@@ -115,7 +115,7 @@ class EncryptionTest(unittest.TestCase):
     # -- certificate generation and validation ----------------------------
 
     def test_generate_self_signed_creates_matching_pair(self) -> None:
-        encryption.generate_self_signed("dns.example.com", ["172.16.43.101"], days=30)
+        encryption.generate_self_signed("dns.example.com", ["192.168.1.101"], days=30)
         self.assertTrue(encryption.CERT_PATH_DEFAULT.exists())
         self.assertTrue(encryption.KEY_PATH_DEFAULT.exists())
         self.assertTrue(encryption.validate_cert_key_match(encryption.CERT_PATH_DEFAULT, encryption.KEY_PATH_DEFAULT))
@@ -339,7 +339,7 @@ class EncryptionTest(unittest.TestCase):
 
     def test_connection_info_only_lists_enabled_protocols(self) -> None:
         cfg = dict(encryption.DEFAULTS)
-        cfg.update(doh_enabled="1", dot_enabled="0", doq_enabled="0", doh3_enabled="0", dnscrypt_enabled="0", bootstrap_ip="172.16.43.101")
+        cfg.update(doh_enabled="1", dot_enabled="0", doq_enabled="0", doh3_enabled="0", dnscrypt_enabled="0", bootstrap_ip="192.168.1.101")
         info = encryption.connection_info(cfg)
         self.assertIn("DoH", info)
         self.assertNotIn("DoT", info)
@@ -355,10 +355,10 @@ class EncryptionTest(unittest.TestCase):
     def test_apple_mobileconfig_dot_uses_tls_protocol(self) -> None:
         cfg = dict(encryption.DEFAULTS)
         cfg["server_hostname"] = "dns.example.com"
-        cfg["bootstrap_ip"] = "172.16.43.101"
+        cfg["bootstrap_ip"] = "192.168.1.101"
         data = encryption.apple_mobileconfig(cfg, "dot")
         self.assertIn(b"TLS", data)
-        self.assertIn(b"172.16.43.101", data)
+        self.assertIn(b"192.168.1.101", data)
 
     def test_apple_mobileconfig_rejects_unknown_protocol(self) -> None:
         with self.assertRaises(encryption.EncryptionError):

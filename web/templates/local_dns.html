@@ -36,7 +36,7 @@
   <form class="panel stack" method="post" action="/local-dns/server-record" data-confirm="Create or update Alderpoint DNS's own local DNS and reverse records?">
     <div class="panel__head"><h2>Alderpoint DNS Identity</h2></div>
     <input type="hidden" name="csrf" value="{{ csrf }}">
-    <p>Suggested record: <span class="mono">{{ cfg.server_hostname or 'alderpointdns' }}.{{ cfg.internal_domain or 'home.arpa' }}</span> to <span class="mono">{{ cfg.server_ip or '172.16.43.101' }}</span>.</p>
+    <p>Suggested record: <span class="mono">{{ cfg.server_hostname or 'alderpointdns' }}.{{ cfg.internal_domain or 'home.arpa' }}</span> to <span class="mono">{{ cfg.server_ip or '192.168.1.101' }}</span>.</p>
     <p class="muted">Creates the forward record, reverse PTR, and a client alias for analytics display.</p>
     <div class="form-actions">
       <button class="secondary">Create server records</button>
@@ -56,7 +56,7 @@
         <input name="domain" value="{{ cfg.internal_domain or 'home.arpa' }}" autocomplete="off">
       </label>
       <label>IPv4 or IPv6 address
-        <input name="address" placeholder="172.16.43.50" autocomplete="off" required>
+        <input name="address" placeholder="192.168.1.50" autocomplete="off" required>
       </label>
       <label>TTL
         <input name="ttl" type="number" min="30" max="86400" value="{{ cfg.default_ttl or 300 }}">
@@ -174,7 +174,7 @@
     <div class="panel__head"><h2>Client Aliases</h2></div>
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <div class="grid compact">
-      <label>Client IP or CIDR <input name="cidr" placeholder="172.16.43.50" autocomplete="off" required></label>
+      <label>Client IP or CIDR <input name="cidr" placeholder="192.168.1.50" autocomplete="off" required></label>
       <label>Friendly name <input name="display_name" placeholder="Alex-PC" autocomplete="off" required></label>
     </div>
     <label>Description <input name="description" autocomplete="off"></label>
@@ -213,7 +213,7 @@
       <textarea name="csv_text" rows="6" placeholder="fqdn,record_type,value,ttl,enabled,comment">{{ csv_text or "" }}</textarea>
     </label>
     <label>Bind-style hosts data
-      <textarea name="hosts_text" rows="4" placeholder="172.16.43.50 alex-pc alex-pc.home.arpa">{{ hosts_text or "" }}</textarea>
+      <textarea name="hosts_text" rows="4" placeholder="192.168.1.50 alex-pc alex-pc.home.arpa">{{ hosts_text or "" }}</textarea>
     </label>
     <div class="form-actions"><button class="secondary">Preview import</button></div>
   </form>

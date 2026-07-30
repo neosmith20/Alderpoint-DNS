@@ -24,7 +24,7 @@ regex bad(?=lookahead)\.example
 regex whitelist ^alsogood\.example$
 
 # custom.list
-172.16.43.90 printer
+192.168.1.90 printer
 fd00::91 nas nas-alias
 
 # cname records

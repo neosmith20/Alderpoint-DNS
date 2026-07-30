@@ -20,7 +20,7 @@
       <input name="server_hostname" value="{{ (local_dns.server_hostname if local_dns is defined else 'alderpointdns') or 'alderpointdns' }}">
     </label>
     <label>Alderpoint DNS IP address
-      <input name="server_ip" value="{{ (local_dns.server_ip if local_dns is defined else '172.16.43.101') or '172.16.43.101' }}">
+      <input name="server_ip" value="{{ (local_dns.server_ip if local_dns is defined else '192.168.1.101') or '192.168.1.101' }}">
     </label>
     <p class="muted">Creates <span class="mono">alderpointdns.home.arpa</span>, a reverse PTR record, and the Alderpoint DNS client alias. The IP is detected when available and can be changed later.</p>
   </div>

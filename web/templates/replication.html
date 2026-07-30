@@ -146,7 +146,7 @@
   <form class="panel stack" method="post" action="/replication/connect" data-confirm="Connect to this primary and enroll? This installs a client certificate and starts syncing.">
     <div class="panel__head"><h2>Connect to Primary</h2></div>
     <input type="hidden" name="csrf" value="{{ csrf }}">
-    <label>Primary address<input name="primary_host" placeholder="172.16.43.10" autocomplete="off" required></label>
+    <label>Primary address<input name="primary_host" placeholder="192.168.1.10" autocomplete="off" required></label>
     <label>Primary port<input name="primary_port" type="number" min="1" max="65535" value="8843" required></label>
     <label>Enrollment token<input name="token" autocomplete="off" required></label>
     <div class="form-actions"><button>Enroll</button></div>

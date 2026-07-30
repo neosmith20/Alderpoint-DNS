@@ -349,19 +349,19 @@ if 'data-nav-section="dns"' not in query_log or 'aria-controls="nav-panel-dns" a
 
 local_dns = TEMPLATES.get_template("local_dns.html").render(
     **page_base("/local-dns"),
-    settings={"internal_domain": "home.arpa", "default_ttl": "300", "server_hostname": "alderpointdns", "server_ip": "172.16.43.101"},
+    settings={"internal_domain": "home.arpa", "default_ttl": "300", "server_hostname": "alderpointdns", "server_ip": "192.168.1.101"},
     records=[{
         "id": 1,
         "fqdn": "alex-pc." + long_domain,
         "record_type": "A",
-        "value": "172.16.43.50",
+        "value": "192.168.1.50",
         "ttl": 300,
         "comment": long_upstream,
         "enabled": 1,
         "ptr_record_id": 2,
     }, {
         "id": 2,
-        "fqdn": "50.43.16.172.in-addr.arpa",
+        "fqdn": "50.1.168.192.in-addr.arpa",
         "record_type": "PTR",
         "value": "alex-pc.home.arpa",
         "ttl": 300,
@@ -372,10 +372,10 @@ local_dns = TEMPLATES.get_template("local_dns.html").render(
     aliases=[{"id": 1, "cidr": long_client + "/128", "display_name": "Alex-PC", "description": long_upstream}],
     deployment={"status": "deployed", "forward_zone": "home.arpa", "reverse_zones": 1, "serial": 2026072901, "message": "deployed", "validation_output": "zone home.arpa/IN: loaded serial 2026072901"},
     error=None,
-    preview=[{"line": 2, "record": {"fqdn": "csv.home.arpa", "record_type": "A", "value": "172.16.43.70"}, "valid": True, "warnings": []}],
+    preview=[{"line": 2, "record": {"fqdn": "csv.home.arpa", "record_type": "A", "value": "192.168.1.70"}, "valid": True, "warnings": []}],
     hosts_preview=[{"line": 1, "valid": True, "records": [{"fqdn": "printer.home.arpa"}]}],
-    csv_text="fqdn,record_type,value,ttl,enabled,comment\ncsv.home.arpa,A,172.16.43.70,300,1,imported\n",
-    hosts_text="172.16.43.80 printer",
+    csv_text="fqdn,record_type,value,ttl,enabled,comment\ncsv.home.arpa,A,192.168.1.70,300,1,imported\n",
+    hosts_text="192.168.1.80 printer",
 )
 for expected in ("Local DNS", "home.arpa", "Add Host", "Advanced Record", "Automatically create reverse PTR record", "Client Aliases", "Import CSV and deploy", long_domain, long_client, "table-compact", "editRow1", "data-row-edit-toggle", "reverse of"):
     if expected not in local_dns:
@@ -404,7 +404,7 @@ encryption_html = TEMPLATES.get_template("encryption.html").render(
     **page_base("/encryption"),
     error=None,
     cfg={
-        "server_hostname": "alderpointdns.local", "bootstrap_ip": "172.16.43.101",
+        "server_hostname": "alderpointdns.local", "bootstrap_ip": "192.168.1.101",
         "listen_ipv4": "0.0.0.0", "listen_ipv6": "::",
         "doh_enabled": "1", "doh3_enabled": "1", "dot_enabled": "1", "doq_enabled": "1", "dnscrypt_enabled": "0",
         "doh_path": "/dns-query", "doh_port": "443", "doh3_port": "443", "dot_port": "853", "doq_port": "853",
@@ -415,7 +415,7 @@ encryption_html = TEMPLATES.get_template("encryption.html").render(
         "available": True, "subject": "CN=" + long_domain, "issuer": "CN=" + long_domain,
         "not_before": "Jul 29 00:00:00 2026 GMT", "not_after": "Oct 31 00:00:00 2028 GMT",
         "days_remaining": 824, "expiring_soon": False, "expired": False,
-        "fingerprint_sha256": "AA:BB:CC:DD", "sans": ["DNS:" + long_domain, "IP Address:172.16.43.101"], "self_signed": True,
+        "fingerprint_sha256": "AA:BB:CC:DD", "sans": ["DNS:" + long_domain, "IP Address:192.168.1.101"], "self_signed": True,
     },
     deployment={"status": "deployed", "started_at": "2026-07-29T00:00:00Z", "finished_at": "2026-07-29T00:00:00Z", "message": "deployed with protocols: {'plain': 'ok'}", "protocol_tests": "{'plain': 'ok'}"},
     connection_info={"DoH": "https://" + long_domain + "/dns-query", "DoT": "tls://alderpointdns.local:853"},
@@ -439,10 +439,10 @@ import_job_html = TEMPLATES.get_template("import_migration.html").render(
     job={"id": 1, "source_type": "csv", "source_name": long_domain, "status": "previewed", "message": "", "report_json": "{}"},
     headers=["Hostname", "IP"], column_map={"hostname": "Hostname", "ipv4": "IP"}, canonical_fields=importer.CANONICAL_FIELDS,
     preview={
-        "valid": [{"index": 0, "fqdn": "a." + long_domain, "record_type": "A", "value": "172.16.43.10"}],
+        "valid": [{"index": 0, "fqdn": "a." + long_domain, "record_type": "A", "value": "192.168.1.10"}],
         "invalid": [{"index": 1, "error": "bad row"}],
         "duplicates": [],
-        "conflicts": [{"index": 2, "fqdn": "b." + long_domain, "record_type": "A", "value": "172.16.43.11", "warnings": ["A hostname already exists."]}],
+        "conflicts": [{"index": 2, "fqdn": "b." + long_domain, "record_type": "A", "value": "192.168.1.11", "warnings": ["A hostname already exists."]}],
     },
     adguard=None,
 )
@@ -458,8 +458,8 @@ import_adguard_translation = {
     ],
     "custom_allow": [], "custom_block": [],
     "unsupported_rules": [],
-    "rewrites_as_local_dns": [{"fqdn": long_domain, "record_type": "A", "value": "172.16.43.12", "ttl": 300, "origin": "dns_rewrites"}],
-    "clients_as_aliases": [{"display_name": "Phone", "cidr_or_ip": "172.16.43.77", "all_ids": []}],
+    "rewrites_as_local_dns": [{"fqdn": long_domain, "record_type": "A", "value": "192.168.1.12", "ttl": 300, "origin": "dns_rewrites"}],
+    "clients_as_aliases": [{"display_name": "Phone", "cidr_or_ip": "192.168.1.77", "all_ids": []}],
     "client_scoped": ["Phone: filtering_enabled has no Alderpoint DNS per-client equivalent yet (schema exists, not enforced at runtime)"],
     "upstream_resolvers": [{"name": "Imported upstream", "protocol": "plain", "address": "9.9.9.9", "port": 53}],
     "untranslatable": ["filtering.safe_search: SafeSearch enforcement is not implemented in Alderpoint DNS"],
@@ -498,8 +498,8 @@ for expected in ("Create Backup", "Preview a Restore", "Restore Preview", "Sched
     if expected not in backup_html:
         raise SystemExit(f"backup page missing {expected}")
 
-setup_html = TEMPLATES.get_template("setup.html").render(**{**base, "admin": None}, local_dns={"server_hostname": "alderpointdns", "server_ip": "172.16.43.101"})
-for expected in ("Create Alderpoint DNS local DNS records", "172.16.43.101", "alderpointdns.home.arpa"):
+setup_html = TEMPLATES.get_template("setup.html").render(**{**base, "admin": None}, local_dns={"server_hostname": "alderpointdns", "server_ip": "192.168.1.101"})
+for expected in ("Create Alderpoint DNS local DNS records", "192.168.1.101", "alderpointdns.home.arpa"):
     if expected not in setup_html:
         raise SystemExit(f"setup local DNS option missing {expected}")
 login_html = TEMPLATES.get_template("login.html").render(**{**base, "admin": None}, error=None)
