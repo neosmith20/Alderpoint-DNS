@@ -321,8 +321,8 @@ def ensure_server_cert() -> tuple[Path, Path]:
     SERVER_KEY_PATH.write_bytes(key_pem)
     SERVER_KEY_PATH.chmod(0o644)
     try:
-        shutil.chown(SERVER_KEY_PATH, user="bindguard", group="bindguard")
-        shutil.chown(SERVER_CERT_PATH, user="bindguard", group="bindguard")
+        shutil.chown(SERVER_KEY_PATH, user="alderpointdns", group="alderpointdns")
+        shutil.chown(SERVER_CERT_PATH, user="alderpointdns", group="alderpointdns")
     except (LookupError, PermissionError):
         pass
     return SERVER_CERT_PATH, SERVER_KEY_PATH

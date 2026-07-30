@@ -127,11 +127,11 @@ create_users() {
     echo "test root in use; skipping system user/group creation"
     return
   fi
-  if ! getent group bindguard >/dev/null; then
-    run groupadd --system bindguard
+  if ! getent group alderpointdns >/dev/null; then
+    run groupadd --system alderpointdns
   fi
-  if ! id bindguard >/dev/null 2>&1; then
-    run useradd --system --home /var/lib/alderpointdns --shell /usr/sbin/nologin --gid bindguard bindguard
+  if ! id alderpointdns >/dev/null 2>&1; then
+    run useradd --system --home /var/lib/alderpointdns --shell /usr/sbin/nologin --gid alderpointdns alderpointdns
   fi
 }
 
@@ -186,8 +186,8 @@ initialize() {
     /opt/alderpointdns/scripts/ensure_tls_cert.sh
     PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/analytics.py init-db
     PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py deploy --no-download
-    chown -R bindguard:bindguard /var/lib/alderpointdns /var/log/alderpointdns
-    chown -R root:bindguard /etc/alderpointdns
+    chown -R alderpointdns:alderpointdns /var/lib/alderpointdns /var/log/alderpointdns
+    chown -R root:alderpointdns /etc/alderpointdns
     chmod 0640 /etc/alderpointdns/secrets.env /etc/alderpointdns/dnsdist-api.key /etc/alderpointdns/dnsdist-web.creds
     systemctl daemon-reload
     systemctl enable --now named dnsdist alderpointdns alderpointdns-analytics

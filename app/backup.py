@@ -103,35 +103,6 @@ FILENAME_PREFIX = "alderpointdns-backup-"
 # DB_PATH so the two can never drift apart.
 DB_ARCHIVE_RELPATH = str(DB_PATH.relative_to("/"))
 
-# BindGuard-branded archive-relative paths, recognized on *read* only, so
-# archives created before the Alderpoint DNS rename remain restorable. New
-# archives are always written using the paths above. Old-named systemd unit
-# files and the old sudoers filename are deliberately not restored from
-# legacy archives (see restore_backup): the units and sudoers rule installed
-# for this product name are the current, correct ones, and reinstalling an
-# obsolete unit referencing paths that no longer exist would do nothing
-# useful.
-LEGACY_DB_ARCHIVE_RELPATH = "var/lib/bindguard/bindguard.db"
-LEGACY_COMPILED_RELPATH = "var/lib/bindguard/compiled"
-LEGACY_LOCAL_ZONE_RELPATH = "var/lib/bindguard/compiled/bind/local"
-LEGACY_LOCAL_ZONES_CONF_RELPATH = "var/lib/bindguard/compiled/bind/local-zones.conf"
-LEGACY_DOWNLOADS_RELPATH = "var/lib/bindguard/downloads"
-LEGACY_ETC_RELPATH = "etc/bindguard"
-
-
-def _extracted_path(extract_dir: Path, new_relpath: str, legacy_relpath: str) -> Path:
-    """Resolve a path inside an extracted archive, preferring the current
-    Alderpoint DNS-branded relpath and falling back to the legacy
-    BindGuard-branded one. Callers still need their own ``.exists()`` check,
-    since a component may be absent from the archive under either name."""
-    new_path = extract_dir / new_relpath
-    if new_path.exists():
-        return new_path
-    legacy_path = extract_dir / legacy_relpath
-    if legacy_path.exists():
-        return legacy_path
-    return new_path
-
 FUNCTIONAL_TEST_TIMEOUT = 5
 
 COMPONENT_KEYS = (
@@ -224,7 +195,7 @@ def run(command: list[str], check: bool = True, input_text: str | None = None, e
 
 def harden_backup_file_permissions(path: Path) -> None:
     try:
-        shutil.chown(path, user="root", group="bindguard")
+        shutil.chown(path, user="root", group="alderpointdns")
     except (LookupError, PermissionError, OSError):
         pass
     os.chmod(path, 0o640)
@@ -799,17 +770,14 @@ def preview_restore(path: Path, password: str | None) -> dict[str, Any]:
             conn.close()
         if manifest.get("database_schema_version") and manifest.get("database_schema_version") != live_schema:
             compat_warnings.append("database schema fingerprint differs from this install; some tables may not exist yet on one side")
-        # Older BindGuard-branded manifests use "bindguard_app_version"
-        # instead of "alderpointdns_app_version"; check both so a legacy
-        # archive's preview still reports its build version.
-        manifest_app_version = manifest.get("alderpointdns_app_version") or manifest.get("bindguard_app_version")
+        manifest_app_version = manifest.get("alderpointdns_app_version")
         if manifest_app_version and manifest_app_version != alderpointdns_app_version():
             compat_warnings.append(f"backup was created by {manifest_app_version}, this install is {alderpointdns_app_version()}")
 
         included = set(manifest.get("included_components", []))
 
         table_diffs: list[dict[str, Any]] = []
-        staged_db = _extracted_path(extract_dir, DB_ARCHIVE_RELPATH, LEGACY_DB_ARCHIVE_RELPATH)
+        staged_db = extract_dir / DB_ARCHIVE_RELPATH
         if staged_db.exists():
             backup_conn = sqlite3.connect(staged_db)
             backup_conn.row_factory = sqlite3.Row
@@ -1026,14 +994,8 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
             except Exception as exc:
                 raise BackupError(f"could not take pre-restore safety backup, aborting restore: {exc}") from None
 
-            # Resolve the staged compiled-BIND directory once, preferring the
-            # current Alderpoint DNS-branded path and falling back to the
-            # legacy BindGuard-branded one from older archives. The RPZ zone
-            # name used for validation follows whichever archive layout
-            # actually matched.
-            compiled_source = _extracted_path(extract_dir, "var/lib/alderpointdns/compiled", LEGACY_COMPILED_RELPATH)
-            compiled_is_legacy = compiled_source == extract_dir / LEGACY_COMPILED_RELPATH
-            rpz_zone_label = "bindguard.rpz" if compiled_is_legacy else "alderpointdns.rpz"
+            compiled_source = extract_dir / "var/lib/alderpointdns/compiled"
+            rpz_zone_label = "alderpointdns.rpz"
 
             # Cheap standalone pre-activation checks (no include resolution
             # needed): validate any staged zone files in isolation before
@@ -1065,17 +1027,17 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
                 named_touched = True
 
             if effective.get("local_dns_zones"):
-                staged = _extracted_path(extract_dir, "var/lib/alderpointdns/compiled/bind/local", LEGACY_LOCAL_ZONE_RELPATH)
+                staged = extract_dir / "var/lib/alderpointdns/compiled/bind/local"
                 if staged.exists():
                     _replace_path(LOCAL_ZONE_DIR, staged, file_backups)
                     named_touched = True
-                staged_conf = _extracted_path(extract_dir, "var/lib/alderpointdns/compiled/bind/local-zones.conf", LEGACY_LOCAL_ZONES_CONF_RELPATH)
+                staged_conf = extract_dir / "var/lib/alderpointdns/compiled/bind/local-zones.conf"
                 if staged_conf.exists():
                     _replace_path(LOCAL_ZONES_CONF, staged_conf, file_backups)
                     named_touched = True
 
             if effective.get("last_downloaded_lists"):
-                staged = _extracted_path(extract_dir, "var/lib/alderpointdns/downloads", LEGACY_DOWNLOADS_RELPATH)
+                staged = extract_dir / "var/lib/alderpointdns/downloads"
                 _replace_path(DOWNLOADS_DIR, staged, file_backups)
 
             if effective.get("dnsdist_source_config"):
@@ -1091,7 +1053,7 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
                         _replace_path(ETC_BIND / name, staged, file_backups)
                         named_touched = True
 
-            staged_cert_dir = _extracted_path(extract_dir, "etc/alderpointdns/certs", f"{LEGACY_ETC_RELPATH}/certs")
+            staged_cert_dir = extract_dir / "etc/alderpointdns/certs"
             if staged_cert_dir.exists():
                 for staged_file in sorted(staged_cert_dir.iterdir()):
                     if not staged_file.is_file():
@@ -1106,11 +1068,11 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
 
             if effective.get("private_keys") or effective.get("user_auth_data"):
                 for name in ("secrets.env", "dnsdist-api.key", "dnsdist-web.creds"):
-                    staged = _extracted_path(extract_dir, f"etc/alderpointdns/{name}", f"{LEGACY_ETC_RELPATH}/{name}")
+                    staged = extract_dir / f"etc/alderpointdns/{name}"
                     if staged.exists():
                         _replace_path(ETC_ALDERPOINTDNS / name, staged, file_backups)
 
-            staged_db = _extracted_path(extract_dir, DB_ARCHIVE_RELPATH, LEGACY_DB_ARCHIVE_RELPATH)
+            staged_db = extract_dir / DB_ARCHIVE_RELPATH
             merged_tables = _merge_database(staged_db, effective)
             if merged_tables:
                 db_touched = True
