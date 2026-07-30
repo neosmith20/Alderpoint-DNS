@@ -33,6 +33,7 @@ tests/test_web_smoke.sh
 tests/test_rename_migration.sh
 docs/compatibility.md
 docs/migrating-from-bindguard.md
+docs/testing.md
 '
 for f in $STALE; do
   rel="${f#"$ROOT_DIR"/}"
