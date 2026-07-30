@@ -16,7 +16,7 @@ for protected_path in /query-log /custom-rules /blocklists /local-dns /dns-setti
 do
   curl --silent --show-error --include --max-time 5 "http://127.0.0.1:3000${protected_path}" | grep -q '303 See Other' || fail "unauthenticated ${protected_path} did not redirect"
 done
-runuser -u bindguard -- sudo -n /opt/alderpointdns/app/alderpointdns_compiler.py update-sources | grep -q 'active_domains=' || fail "alderpointdns sudo helper failed"
+runuser -u alderpointdns -- sudo -n /opt/alderpointdns/app/alderpointdns_compiler.py update-sources | grep -q 'active_domains=' || fail "alderpointdns sudo helper failed"
 python3 -B - <<'PY' || fail "web interface layout and analytics checks failed"
 import re
 import sys
