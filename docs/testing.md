@@ -3,19 +3,19 @@
 Run individual suites:
 
 ```sh
-/opt/bindguard/tests/test_bind_backend.sh
-/opt/bindguard/tests/test_dnsdist_frontend.sh
-/opt/bindguard/tests/test_blocklist_deploy.sh
-/opt/bindguard/tests/test_blocklist_failure_paths.sh
-/opt/bindguard/tests/test_analytics.py
-/opt/bindguard/tests/test_local_dns.py
-/opt/bindguard/tests/test_dns_cache.py
-/opt/bindguard/tests/test_dns_cache_benchmark.sh
-/opt/bindguard/tests/test_encryption.py
-/opt/bindguard/tests/test_importer.py
-/opt/bindguard/tests/test_backup.py
-/opt/bindguard/tests/test_web_smoke.sh
-/opt/bindguard/tests/test_backup_restore.sh
+/opt/alderpointdns/tests/test_bind_backend.sh
+/opt/alderpointdns/tests/test_dnsdist_frontend.sh
+/opt/alderpointdns/tests/test_blocklist_deploy.sh
+/opt/alderpointdns/tests/test_blocklist_failure_paths.sh
+/opt/alderpointdns/tests/test_analytics.py
+/opt/alderpointdns/tests/test_local_dns.py
+/opt/alderpointdns/tests/test_dns_cache.py
+/opt/alderpointdns/tests/test_dns_cache_benchmark.sh
+/opt/alderpointdns/tests/test_encryption.py
+/opt/alderpointdns/tests/test_importer.py
+/opt/alderpointdns/tests/test_backup.py
+/opt/alderpointdns/tests/test_web_smoke.sh
+/opt/alderpointdns/tests/test_backup_restore.sh
 ```
 
 `tests/test_backup_restore.sh` (script-based, exercises `scripts/backup.sh`/
@@ -94,7 +94,7 @@ resolution through both BIND (`127.0.0.1:5353`) and client-facing dnsdist
 Run the combined suite:
 
 ```sh
-/opt/bindguard/tests/test_acceptance.sh
+/opt/alderpointdns/tests/test_acceptance.sh
 ```
 
 The Encryption Settings suite (`tests/test_encryption.py`) covers settings
@@ -111,7 +111,7 @@ real per-protocol queries (`dig` for plain, `dnspython`'s
 through the actual deploy path, not just mocked unit tests.
 
 The Import and Migration suite (`tests/test_importer.py`) covers CSV/hosts/
-zone/BindGuard-CSV parsing, Pi-hole text/list parsing, BindGuard-native JSON
+zone/Alderpoint DNS-CSV parsing, Pi-hole text/list parsing, Alderpoint DNS-native JSON
 export/import round-tripping, upload filename sanitization and size limits,
 column-mapping auto-detection, preview classification
 (valid/invalid/duplicate/conflict) against a real Local DNS database, all
@@ -140,12 +140,26 @@ see `docs/progress.md`'s Backup and Restore milestone for detail.
 
 The installation, upgrade, diagnostics, and packaging suite
 (`tests/test_install_upgrade_diagnostics.sh`) runs the installer in dry-run
-mode against an isolated `BINDGUARD_INSTALL_ROOT`, runs the upgrader in dry-run
+mode against an isolated `ALDERPOINTDNS_INSTALL_ROOT`, runs the upgrader in dry-run
 mode against a staged fake installation, verifies diagnostics redaction with a
 self-test sample, creates a sanitized diagnostics tarball without journal
 excerpts, checks that the bundle contains schema/summary metadata without
 secret-like content, and builds/inspects a local test `.deb` with
 `scripts/build-deb.sh`.
+
+The rename/migration suite (`tests/test_rename_migration.sh`) guards the
+BindGuard -> Alderpoint DNS rename: it greps the tree for stale product-name
+references outside the historical/compatibility allowlist, then runs
+`scripts/upgrade.sh` against a synthetic legacy BindGuard installation layout
+(`/opt/bindguard`, `/etc/bindguard`, `/var/lib/bindguard/bindguard.db`,
+`/var/lib/bindguard/compiled/bind/bindguard.rpz`, `/var/log/bindguard`) inside
+an isolated `ALDERPOINTDNS_INSTALL_ROOT` and asserts the legacy layout is
+detected, migrated (not treated as a fresh install), and ends up fully
+Alderpoint DNS-branded. `tests/test_backup.py`'s
+`test_preview_restore_reads_legacy_bindguard_archive` and
+`test_restore_backup_merges_legacy_bindguard_archive` cover the complementary
+case: restoring a backup archive that was created before the rename. See
+`docs/compatibility.md` and `docs/migrating-from-bindguard.md`.
 
 The Replication suite (`tests/test_replication.py`) covers payload allowlist
 exclusion, replica rollback when deploy fails, successful replacement of
@@ -161,7 +175,7 @@ Manual protocol tests:
 ```sh
 dig @127.0.0.1 -p 53 cloudflare.com A
 dig @127.0.0.1 -p 53 cloudflare.com A +tcp
-kdig +https @127.0.0.1 -p 443 +tls-ca=/etc/bindguard/certs/bindguard-lab.crt +tls-hostname=bindguard.local cloudflare.com A
-kdig +tls @127.0.0.1 -p 853 +tls-ca=/etc/bindguard/certs/bindguard-lab.crt +tls-hostname=bindguard.local cloudflare.com A
+kdig +https @127.0.0.1 -p 443 +tls-ca=/etc/alderpointdns/certs/alderpointdns-lab.crt +tls-hostname=alderpointdns.local cloudflare.com A
+kdig +tls @127.0.0.1 -p 853 +tls-ca=/etc/alderpointdns/certs/alderpointdns-lab.crt +tls-hostname=alderpointdns.local cloudflare.com A
 kdig +quic @127.0.0.1 -p 853 cloudflare.com A
 ```

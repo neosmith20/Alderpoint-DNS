@@ -23,23 +23,23 @@ from app import backup  # noqa: E402
 
 class BackupTestBase(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = Path(tempfile.mkdtemp(prefix="bindguard-backup-test-"))
+        self.tmp = Path(tempfile.mkdtemp(prefix="alderpointdns-backup-test-"))
         self.old = {name: getattr(backup, name) for name in (
             "DB_PATH", "BACKUP_DIR", "STAGING_DIR", "IMPORTS_DIR",
-            "ETC_BINDGUARD", "CERT_DIR", "SECRETS_ENV", "DNSDIST_API_KEY", "DNSDIST_WEB_CREDS",
+            "ETC_ALDERPOINTDNS", "CERT_DIR", "SECRETS_ENV", "DNSDIST_API_KEY", "DNSDIST_WEB_CREDS",
             "ETC_BIND", "ETC_DNSDIST", "DNSDIST_CONF", "COMPILED_DIR", "LOCAL_ZONE_DIR",
             "LOCAL_ZONES_CONF", "DOWNLOADS_DIR", "SYSTEMD_DIR", "SUDOERS_FILE",
         )}
 
-        backup.DB_PATH = self.tmp / "bindguard.db"
+        backup.DB_PATH = self.tmp / "alderpointdns.db"
         backup.BACKUP_DIR = self.tmp / "backups"
         backup.STAGING_DIR = self.tmp / "staging"
         backup.IMPORTS_DIR = backup.STAGING_DIR / "backup-imports"
-        backup.ETC_BINDGUARD = self.tmp / "etc" / "bindguard"
-        backup.CERT_DIR = backup.ETC_BINDGUARD / "certs"
-        backup.SECRETS_ENV = backup.ETC_BINDGUARD / "secrets.env"
-        backup.DNSDIST_API_KEY = backup.ETC_BINDGUARD / "dnsdist-api.key"
-        backup.DNSDIST_WEB_CREDS = backup.ETC_BINDGUARD / "dnsdist-web.creds"
+        backup.ETC_ALDERPOINTDNS = self.tmp / "etc" / "alderpointdns"
+        backup.CERT_DIR = backup.ETC_ALDERPOINTDNS / "certs"
+        backup.SECRETS_ENV = backup.ETC_ALDERPOINTDNS / "secrets.env"
+        backup.DNSDIST_API_KEY = backup.ETC_ALDERPOINTDNS / "dnsdist-api.key"
+        backup.DNSDIST_WEB_CREDS = backup.ETC_ALDERPOINTDNS / "dnsdist-web.creds"
         backup.ETC_BIND = self.tmp / "etc" / "bind"
         backup.ETC_DNSDIST = self.tmp / "etc" / "dnsdist"
         backup.DNSDIST_CONF = backup.ETC_DNSDIST / "dnsdist.conf"
@@ -48,9 +48,9 @@ class BackupTestBase(unittest.TestCase):
         backup.LOCAL_ZONES_CONF = backup.COMPILED_DIR / "bind" / "local-zones.conf"
         backup.DOWNLOADS_DIR = self.tmp / "downloads"
         backup.SYSTEMD_DIR = self.tmp / "systemd"
-        backup.SUDOERS_FILE = self.tmp / "sudoers-bindguard"
+        backup.SUDOERS_FILE = self.tmp / "sudoers-alderpointdns"
 
-        for path in (backup.STAGING_DIR, backup.BACKUP_DIR, backup.ETC_BINDGUARD, backup.CERT_DIR,
+        for path in (backup.STAGING_DIR, backup.BACKUP_DIR, backup.ETC_ALDERPOINTDNS, backup.CERT_DIR,
                      backup.ETC_BIND, backup.ETC_DNSDIST, backup.COMPILED_DIR, backup.LOCAL_ZONE_DIR,
                      backup.DOWNLOADS_DIR, backup.SYSTEMD_DIR):
             path.mkdir(parents=True, exist_ok=True)
@@ -59,9 +59,9 @@ class BackupTestBase(unittest.TestCase):
         backup.ETC_BIND.joinpath("named.conf.local").write_text("// local\n")
         backup.ETC_BIND.joinpath("named.conf.options").write_text("options {};\n")
         backup.DNSDIST_CONF.write_text("setLocal('127.0.0.1:53')\n")
-        backup.CERT_DIR.joinpath("bindguard-lab.crt").write_text("PUBLIC CERT\n")
-        backup.CERT_DIR.joinpath("bindguard-lab.key").write_text("PRIVATE KEY\n")
-        backup.SECRETS_ENV.write_text("BINDGUARD_SESSION_SECRET=topsecret\n")
+        backup.CERT_DIR.joinpath("alderpointdns-lab.crt").write_text("PUBLIC CERT\n")
+        backup.CERT_DIR.joinpath("alderpointdns-lab.key").write_text("PRIVATE KEY\n")
+        backup.SECRETS_ENV.write_text("ALDERPOINTDNS_SESSION_SECRET=topsecret\n")
         backup.DNSDIST_API_KEY.write_text("apikeyvalue\n")
         backup.DNSDIST_WEB_CREDS.write_text("webcredsvalue\n")
         backup.COMPILED_DIR.joinpath("bind").mkdir(parents=True, exist_ok=True)
@@ -71,7 +71,7 @@ class BackupTestBase(unittest.TestCase):
         backup.LOCAL_ZONES_CONF.write_text("// local zones\n")
         backup.DOWNLOADS_DIR.joinpath("current").mkdir(parents=True, exist_ok=True)
         backup.DOWNLOADS_DIR.joinpath("current", "1-source.txt").write_text("example.com\n")
-        backup.SUDOERS_FILE.write_text("bindguard ALL=(root) NOPASSWD: /opt/bindguard/app/bindguard_compiler.py deploy\n")
+        backup.SUDOERS_FILE.write_text("bindguard ALL=(root) NOPASSWD: /opt/alderpointdns/app/alderpointdns_compiler.py deploy\n")
 
         backup.init_db()
         with closing(backup.connect()) as conn:
@@ -123,8 +123,8 @@ class ManifestAndComponentsTest(BackupTestBase):
         components = backup.validate_components(None)
         entries = backup.select_files(components)
         names = set(entries.keys())
-        self.assertTrue(any(name.endswith("bindguard-lab.crt") for name in names))
-        self.assertFalse(any(name.endswith("bindguard-lab.key") for name in names))
+        self.assertTrue(any(name.endswith("alderpointdns-lab.crt") for name in names))
+        self.assertFalse(any(name.endswith("alderpointdns-lab.key") for name in names))
         self.assertFalse(any(name.endswith("secrets.env") for name in names))
         self.assertFalse(any(name.endswith("dnsdist-api.key") for name in names))
 
@@ -132,7 +132,7 @@ class ManifestAndComponentsTest(BackupTestBase):
         components = backup.validate_components({"private_keys": True})
         entries = backup.select_files(components)
         names = set(entries.keys())
-        self.assertTrue(any(name.endswith("bindguard-lab.key") for name in names))
+        self.assertTrue(any(name.endswith("alderpointdns-lab.key") for name in names))
         self.assertTrue(any(name.endswith("secrets.env") for name in names))
         self.assertTrue(any(name.endswith("dnsdist-api.key") for name in names))
 
@@ -141,7 +141,7 @@ class ManifestAndComponentsTest(BackupTestBase):
         entries = backup.select_files(components)
         names = set(entries.keys())
         self.assertTrue(any(name.endswith("secrets.env") for name in names))
-        self.assertFalse(any(name.endswith("bindguard-lab.key") for name in names))
+        self.assertFalse(any(name.endswith("alderpointdns-lab.key") for name in names))
 
     def test_select_files_respects_component_toggles(self) -> None:
         components = backup.validate_components({"bind_source_config": False, "dnsdist_source_config": False})
@@ -150,8 +150,8 @@ class ManifestAndComponentsTest(BackupTestBase):
         self.assertFalse(any("named.conf" in name for name in names))
         self.assertFalse(any("dnsdist.conf" in name for name in names))
 
-    def test_bindguard_app_version_not_fake_semver(self) -> None:
-        version = backup.bindguard_app_version()
+    def test_alderpointdns_app_version_not_fake_semver(self) -> None:
+        version = backup.alderpointdns_app_version()
         self.assertTrue(version.startswith("unreleased+git.") or version.startswith("released+git."))
 
     def test_database_schema_version_stable_and_changes_with_schema(self) -> None:
@@ -236,7 +236,7 @@ class CreateBackupTest(BackupTestBase):
             for relpath, expected in manifest["sha256_checksums"].items():
                 actual = backup.sha256_file(extract / relpath)
                 self.assertEqual(actual, expected, relpath)
-            self.assertTrue((extract / "var/lib/bindguard/bindguard.db").exists())
+            self.assertTrue((extract / "var/lib/alderpointdns/alderpointdns.db").exists())
 
     def test_create_backup_records_history_row(self) -> None:
         with mock.patch.object(backup, "run", self.fake_run):
@@ -402,17 +402,70 @@ class RestoreTest(BackupTestBase):
         path = self._make_backup()
         original = backup.DNSDIST_CONF.read_text()
         backup.DNSDIST_CONF.write_text("changed-live-content\n")
-        os.environ["BINDGUARD_TEST_FORCE_RESTORE_FAIL"] = "1"
+        os.environ["ALDERPOINTDNS_TEST_FORCE_RESTORE_FAIL"] = "1"
         try:
             with mock.patch.object(backup, "run", self.fake_run), mock.patch.object(backup, "resolves", return_value=True), \
                     mock.patch.object(backup, "_wait_active", return_value=True):
                 with self.assertRaises(RuntimeError):
                     backup.restore_backup(path, None, dict.fromkeys(backup.COMPONENT_KEYS, True))
         finally:
-            del os.environ["BINDGUARD_TEST_FORCE_RESTORE_FAIL"]
+            del os.environ["ALDERPOINTDNS_TEST_FORCE_RESTORE_FAIL"]
         self.assertEqual(backup.DNSDIST_CONF.read_text(), "changed-live-content\n")
         last = backup.last_restore()
         self.assertEqual(last["status"], "rolled_back")
+
+    def _make_legacy_bindguard_backup(self) -> Path:
+        """Hand-build a tar.gz shaped like an archive created before the
+        BindGuard -> Alderpoint DNS rename: old relpaths, old manifest key
+        name, no Alderpoint DNS-branded paths anywhere."""
+        stage = self.tmp / "legacy-stage"
+        legacy_db_dir = stage / "var" / "lib" / "bindguard"
+        legacy_db_dir.mkdir(parents=True)
+        legacy_db = legacy_db_dir / "bindguard.db"
+        with closing(sqlite3.connect(legacy_db)) as conn:
+            conn.executescript(
+                "CREATE TABLE custom_rules (id INTEGER PRIMARY KEY, domain TEXT);"
+                "CREATE TABLE dns_cache_settings (key TEXT PRIMARY KEY, value TEXT);"
+            )
+            conn.execute("INSERT INTO custom_rules(domain) VALUES ('from-legacy-bindguard-archive.example')")
+            conn.commit()
+        manifest = {
+            "backup_format_version": backup.BACKUP_FORMAT_VERSION,
+            "bindguard_app_version": "unreleased+git.legacy0001",
+            "database_schema_version": "legacy0000000000000000",
+            "created_at": backup.now(),
+            "source_node_id": "legacy-host",
+            "included_components": ["sqlite_data", "custom_rules"],
+            "sha256_checksums": {"var/lib/bindguard/bindguard.db": backup.sha256_file(legacy_db)},
+        }
+        (stage / "manifest.json").write_text(json.dumps(manifest))
+        archive = self.tmp / "legacy-bindguard-backup-20260101T000000Z.tar.gz"
+        subprocess.run(
+            ["tar", "-czf", str(archive), "-C", str(stage), "var/lib/bindguard/bindguard.db", "manifest.json"],
+            check=True,
+        )
+        return archive
+
+    def test_preview_restore_reads_legacy_bindguard_archive(self) -> None:
+        archive = self._make_legacy_bindguard_backup()
+        with mock.patch.object(backup, "run", self.fake_run):
+            result = backup.preview_restore(archive, None)
+        self.assertTrue(result["compatible"])
+        self.assertTrue(any("legacy0001" in warning for warning in result["warnings"]))
+        # unchanged_file_count's "- 1 if staged_db.exists()" term only
+        # subtracts when the staged db was actually located, proving the
+        # legacy var/lib/bindguard/bindguard.db relpath was resolved rather
+        # than silently treated as absent.
+        self.assertEqual(result["unchanged_file_count"], 0)
+
+    def test_restore_backup_merges_legacy_bindguard_archive(self) -> None:
+        archive = self._make_legacy_bindguard_backup()
+        with mock.patch.object(backup, "run", self.fake_run), mock.patch.object(backup, "resolves", return_value=True), \
+                mock.patch.object(backup, "_wait_active", return_value=True):
+            backup.restore_backup(archive, None, {key: False for key in backup.COMPONENT_KEYS} | {"custom_rules": True})
+        with closing(backup.connect()) as conn:
+            rows = [row[0] for row in conn.execute("SELECT domain FROM custom_rules")]
+        self.assertEqual(rows, ["from-legacy-bindguard-archive.example"])
 
     def test_restore_backup_takes_pre_restore_safety_backup(self) -> None:
         path = self._make_backup()
