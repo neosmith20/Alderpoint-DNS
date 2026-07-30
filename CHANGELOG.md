@@ -104,3 +104,55 @@
 - Added a shared compact-UI component set (compact table rows, category
   badges, overflow action menus, row-level expandable editors) reused
   across Local DNS, DNS Settings, and Blocklists.
+- Added a first-class custom filtering rule subsystem (a new `custom_filter_
+  rules` table, replacing the old flat allow/block-only list) that classifies
+  `||domain^` and `@@||domain^` (domain-and-subdomain block/allow), hosts-
+  style lines (exact-host blocks for `0.0.0.0`/`::` sentinels, exact address
+  rewrites preserving IPv4/IPv6 for any other address, multiple aliases per
+  line, inline comments), `!`/`#` comments, `/REGEX/` rules (validated
+  against a POSIX-ERE-compatible subset and safely compiled into a dnsdist
+  layer with no rule text ever interpolated into generated Lua), plain
+  domains, and AdGuard `$` modifiers (`$important` honored as priority;
+  unsupported modifiers such as `$client`/`$dnstype`/`$ctag` are kept
+  visible and inactive with an exact reason instead of silently activating a
+  broadened base rule). Deterministic, documented compile-time precedence:
+  local DNS, exact rewrites, explicit allow, explicit block, regex allow,
+  regex block, external blocklists -- allow rules survive blocklist
+  refreshes without ever modifying stored blocklist data. Existing custom
+  rules migrate automatically and idempotently. Adds a compact Filters page
+  (`/custom-rules`) with search/filter, bulk enable/disable/delete, a
+  multiline bulk editor with per-line validation, and a "Test a Domain"
+  panel.
+- Corrected AdGuard Home and Pi-hole migration to route every custom rule
+  through the new filtering subsystem instead of a lossy allow/block-only
+  classifier, with AdGuard's subdomain-inclusive and Pi-hole's exact-only
+  plain-domain semantics both preserved. AdGuard DNS rewrites now split
+  correctly between Local DNS (names under the operator's internal domain)
+  and exact rewrite rules (everything else); Pi-hole exports now separate
+  adlists, exact allow/block lists, regex allow/block lists, local DNS hosts
+  records, and `cname=` records into their own destinations instead of one
+  generic import type. Migration preview is now fully itemized and
+  categorized with per-item and per-category deselection, and never applies
+  anything on its own. Apply is transactional (a verified pre-import backup,
+  then every destination write in one transaction; any failure rolls back
+  completely and reports the exact failing stage) and reversible (rollback
+  removes exactly the imported objects). Migration reports strip credential-
+  named fields and URL userinfo/query strings before they are ever stored or
+  downloaded.
+- Added a configurable global Filter Update Interval on the Blocklists page
+  (`Disabled — No Updates`, `1 Hour`, `12 Hours`, `1 Day`, `3 Days`, `1
+  Week`; default `1 Day` on fresh installs), backed by a new systemd
+  service/timer pair and a fixed, server-side validated allowlist -- no
+  arbitrary intervals, cron syntax, or shell input ever reaches the
+  scheduler. The panel shows current status, last automatic attempt/
+  success, and next scheduled update, and clearly reads "Automatic updates
+  disabled" with no misleading next-run time when turned off; manual
+  per-source updates and "Update All Now" keep working regardless of the
+  automatic schedule.
+- Fixed the Encryption page's Certificate panel stretching to match the
+  Protocols panel's height whenever a Certificate section (self-signed,
+  local CA, upload, existing paths) was expanded, leaving artificial empty
+  space in Protocols. Both panels now size independently from their own
+  content, verified with a headless-Chromium regression check across four
+  viewport widths; the same fix was applied to the equivalent Cache Tuning/
+  Flush Cache and Create Backup/Import Backup panel pairs.
