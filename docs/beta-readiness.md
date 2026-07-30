@@ -10,7 +10,7 @@ required but not sufficient for v1.0 readiness.
 - [x] Import and migration supports representative sources with preview.
 - [x] Replication enrollment, sync, drift, and revocation tested.
 - [x] Service restart test in acceptance.
-- [ ] Full reboot test after the final beta commit.
+- [x] Full reboot test after the final beta commit.
 - [x] DNS resolution through BIND backend and dnsdist frontend.
 - [x] Local DNS and PTR records acceptance-tested.
 - [x] Filtering and rollback paths acceptance-tested.
