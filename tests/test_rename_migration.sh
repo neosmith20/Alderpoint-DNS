@@ -55,10 +55,24 @@ mkdir -p "$TESTROOT/etc/bindguard/certs" "$TESTROOT/var/lib/bindguard/compiled/b
 echo "legacy webapp placeholder" > "$TESTROOT/opt/bindguard/app/webapp.py"
 printf '#!/bin/sh\necho fake-legacy-backup\n' > "$TESTROOT/opt/bindguard/scripts/backup.sh"
 chmod +x "$TESTROOT/opt/bindguard/scripts/backup.sh"
-echo "old secret" > "$TESTROOT/etc/bindguard/secrets.env"
+printf 'BINDGUARD_SESSION_SECRET=super-secret-value-must-survive\n' > "$TESTROOT/etc/bindguard/secrets.env"
 : > "$TESTROOT/var/lib/bindguard/bindguard.db"
 echo "rpz-data" > "$TESTROOT/var/lib/bindguard/compiled/bind/bindguard.rpz"
 echo "log line" > "$TESTROOT/var/log/bindguard/named.log"
+mkdir -p "$TESTROOT/var/lib/bindguard/compiled/dnsdist"
+cat > "$TESTROOT/var/lib/bindguard/compiled/bind/local-zones.conf" <<'EOF'
+// Managed by BindGuard Local DNS. Do not edit by hand.
+zone "home.arpa" {
+	file "/var/lib/bindguard/compiled/bind/local/home.arpa.zone";
+	allow-query { "bindguard_clients"; localhost; };
+};
+EOF
+cat > "$TESTROOT/var/lib/bindguard/compiled/dnsdist/upstream-forwarder.conf" <<'EOF'
+-- Managed by BindGuard. Generated upstream forwarder; do not edit by hand.
+bindguardUpstreamsEnabled = true
+setPoolServerPolicy(firstAvailable, "bindguard_upstreams")
+newServer({address="1.1.1.2:53", name="upstream-1-Imported-upstream-1", pool="bindguard_upstreams"})
+EOF
 
 ALDERPOINTDNS_INSTALL_ROOT="$TESTROOT" "$ROOT_DIR/scripts/upgrade.sh" --source "$ROOT_DIR" --skip-service-restart > "$TESTROOT/upgrade.out" 2>&1 || {
   echo "legacy migration upgrade failed:" >&2
@@ -82,6 +96,21 @@ test -f "$TESTROOT/var/lib/alderpointdns/compiled/bind/alderpointdns.rpz" || { e
 test -f "$TESTROOT/etc/alderpointdns/secrets.env" || { echo "/etc config was not migrated" >&2; exit 1; }
 test -f "$TESTROOT/var/log/alderpointdns/named.log" || { echo "log directory was not migrated" >&2; exit 1; }
 test -f "$TESTROOT/etc/systemd/system/alderpointdns.service" || { echo "new systemd unit was not installed" >&2; exit 1; }
+
+grep -q "^ALDERPOINTDNS_SESSION_SECRET=super-secret-value-must-survive$" "$TESTROOT/etc/alderpointdns/secrets.env" || {
+  echo "secrets.env env var key was not migrated (or the secret value was lost/changed)" >&2
+  cat "$TESTROOT/etc/alderpointdns/secrets.env" >&2
+  exit 1
+}
+if grep -q "bindguard" "$TESTROOT/var/lib/alderpointdns/compiled/bind/local-zones.conf" "$TESTROOT/var/lib/alderpointdns/compiled/dnsdist/upstream-forwarder.conf"; then
+  echo "compiled BIND/dnsdist config still has stale bindguard tokens after migration" >&2
+  cat "$TESTROOT/var/lib/alderpointdns/compiled/bind/local-zones.conf" "$TESTROOT/var/lib/alderpointdns/compiled/dnsdist/upstream-forwarder.conf" >&2
+  exit 1
+fi
+grep -q 'pool="alderpointdns_upstreams"' "$TESTROOT/var/lib/alderpointdns/compiled/dnsdist/upstream-forwarder.conf" || {
+  echo "compiled dnsdist upstream pool name was not migrated" >&2
+  exit 1
+}
 
 echo "legacy install correctly migrated to Alderpoint DNS paths"
 

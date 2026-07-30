@@ -144,10 +144,36 @@ migrate_legacy_layout() {
     fi
   done
 
+  # A plain `mv src dst` only renames in place when dst does not already
+  # exist; if dst exists (e.g. a stray directory created by something else
+  # touching the new path before migration ran), mv instead moves src
+  # *inside* dst, silently nesting the whole legacy tree one level too deep
+  # and leaving every path below wrong. Fail loudly instead of guessing.
+  for pair in "/opt/bindguard:/opt/alderpointdns" "/etc/bindguard:/etc/alderpointdns" \
+    "/var/lib/bindguard:/var/lib/alderpointdns" "/var/log/bindguard:/var/log/alderpointdns"; do
+    dst="$(root_path "${pair#*:}")"
+    if [ -e "$dst" ]; then
+      echo "refusing to migrate: $dst already exists, which would nest the legacy directory inside it instead of renaming it. Remove or relocate $dst first." >&2
+      exit 1
+    fi
+  done
+
   run mv "$(root_path /opt/bindguard)" "$(root_path /opt/alderpointdns)"
 
   if [ -e "$(root_path /etc/bindguard)" ]; then
     run mv "$(root_path /etc/bindguard)" "$(root_path /etc/alderpointdns)"
+    if [ -f "$(root_path /etc/alderpointdns/secrets.env)" ]; then
+      # Rename the env var key in place; the secret *value* is deliberately
+      # left untouched so existing web sessions/cookies keep validating.
+      run sed -i 's/^BINDGUARD_SESSION_SECRET=/ALDERPOINTDNS_SESSION_SECRET=/' "$(root_path /etc/alderpointdns/secrets.env)"
+    fi
+    for pair in "bindguard-ca.crt:alderpointdns-ca.crt" "bindguard-ca.key:alderpointdns-ca.key" \
+      "bindguard-ca.srl:alderpointdns-ca.srl" "bindguard-lab.crt:alderpointdns-lab.crt" \
+      "bindguard-lab.key:alderpointdns-lab.key"; do
+        old="$(root_path "/etc/alderpointdns/certs/${pair%%:*}")"
+        new="$(root_path "/etc/alderpointdns/certs/${pair#*:}")"
+        [ -e "$old" ] && run mv "$old" "$new"
+    done
   fi
 
   if [ -e "$(root_path /var/lib/bindguard)" ]; then
@@ -162,6 +188,24 @@ migrate_legacy_layout() {
     if [ -e "$(root_path /var/lib/alderpointdns/compiled/bind/bindguard.rpz)" ]; then
       run mv "$(root_path /var/lib/alderpointdns/compiled/bind/bindguard.rpz)" "$(root_path /var/lib/alderpointdns/compiled/bind/alderpointdns.rpz)"
     fi
+    # Generated BIND/dnsdist config under compiled/ carries its own product
+    # comments, ACL/pool names, and path references baked in from the last
+    # deploy. Only rewrite the known-safe infrastructure tokens here (never
+    # the actual .zone record files, which can contain real user hostnames
+    # that just happen to match these substrings) -- see
+    # docs/migrating-from-bindguard.md.
+    for cfg in bind/local-zones.conf bind/cache-options.conf bind/upstream-forwarders.conf dnsdist/upstream-forwarder.conf; do
+      live="$(root_path "/var/lib/alderpointdns/compiled/$cfg")"
+      if [ -f "$live" ]; then
+        run sed -i \
+          -e 's/Managed by BindGuard/Managed by Alderpoint DNS/' \
+          -e 's/"bindguard_clients"/"alderpointdns_clients"/g' \
+          -e 's#/var/lib/bindguard/#/var/lib/alderpointdns/#g' \
+          -e 's/bindguardUpstreamsEnabled/alderpointdnsUpstreamsEnabled/g' \
+          -e 's/bindguard_upstreams/alderpointdns_upstreams/g' \
+          "$live"
+      fi
+    done
   fi
 
   if [ -e "$(root_path /var/log/bindguard)" ]; then
@@ -259,6 +303,13 @@ install_units() {
   run install -D -m 0644 "$SOURCE_DIR/packaging/alderpointdns-backup.service" "$(root_path /etc/systemd/system/alderpointdns-backup.service)"
   run install -D -m 0644 "$SOURCE_DIR/packaging/alderpointdns-backup.timer" "$(root_path /etc/systemd/system/alderpointdns-backup.timer)"
   run install -D -m 0440 "$SOURCE_DIR/packaging/sudoers-alderpointdns" "$(root_path /etc/sudoers.d/alderpointdns)"
+  # On a normal upgrade these units already exist and are already enabled,
+  # so this is a no-op. Immediately after a legacy-install migration these
+  # are brand new unit files that have never been enabled, so without this
+  # the migrated install would not survive a reboot.
+  if [ "$ROOT" = "/" ] && [ "$DRY_RUN" -eq 0 ]; then
+    run systemctl enable alderpointdns.service alderpointdns-analytics.service
+  fi
 }
 
 validate() {
