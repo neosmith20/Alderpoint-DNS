@@ -9,7 +9,17 @@ case "$1" in
     if ! id alderpointdns >/dev/null 2>&1; then
       adduser --system --home /var/lib/alderpointdns --no-create-home --ingroup alderpointdns --disabled-login alderpointdns
     fi
-    install -d -o alderpointdns -g alderpointdns -m 0750 /var/lib/alderpointdns /var/lib/alderpointdns/backups /var/lib/alderpointdns/compiled /var/lib/alderpointdns/imports /var/lib/alderpointdns/staging
+    install -d -o alderpointdns -g alderpointdns -m 0750 /var/lib/alderpointdns/backups /var/lib/alderpointdns/imports /var/lib/alderpointdns/staging
+    # 0755, not 0750: named and dnsdist (separate system accounts,
+    # unrelated to alderpointdns) must be able to traverse into these two
+    # directories to reach their own generated config under
+    # compiled/bind/ and compiled/dnsdist/ -- those files are root-owned
+    # and world-readable already (written by the root-escalated deploy
+    # path), so these two directories only need to be enterable, not
+    # additionally restricted. backups/imports/staging above hold
+    # sensitive content directly and stay locked to the alderpointdns
+    # group only.
+    install -d -o alderpointdns -g alderpointdns -m 0755 /var/lib/alderpointdns /var/lib/alderpointdns/compiled
     install -d -o alderpointdns -g alderpointdns -m 0755 /var/log/alderpointdns
     # named (its own "bind" system user, unrelated to alderpointdns) writes
     # its own log/statistics files directly here; it must own this

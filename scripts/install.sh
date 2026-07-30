@@ -116,7 +116,13 @@ create_layout() {
   run install -d -m 0750 "$(root_path /etc/alderpointdns/certs)"
   run install -d -m 0755 "$(root_path /var/lib/alderpointdns)"
   run install -d -m 0750 "$(root_path /var/lib/alderpointdns/backups)"
-  run install -d -m 0750 "$(root_path /var/lib/alderpointdns/compiled)"
+  # 0755, not 0750: named and dnsdist (separate system accounts, unrelated
+  # to alderpointdns) must be able to traverse into this directory to
+  # reach their own generated config under compiled/bind/ and
+  # compiled/dnsdist/ -- those files are root-owned and world-readable
+  # already (written by the root-escalated deploy path), so this
+  # directory only needs to be enterable, not additionally restricted.
+  run install -d -m 0755 "$(root_path /var/lib/alderpointdns/compiled)"
   run install -d -m 0750 "$(root_path /var/lib/alderpointdns/imports)"
   run install -d -m 0750 "$(root_path /var/lib/alderpointdns/staging)"
   run install -d -m 0755 "$(root_path /var/log/alderpointdns)"
