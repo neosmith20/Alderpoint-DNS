@@ -324,15 +324,16 @@ def validate_components(values: dict[str, Any] | None) -> dict[str, bool]:
 # ---------------------------------------------------------------------------
 
 def alderpointdns_app_version() -> str:
-    changelog = APP_ROOT / "CHANGELOG.md"
+    version_file = APP_ROOT / "VERSION"
     proc = run(["git", "-C", str(APP_ROOT), "rev-parse", "--short", "HEAD"], check=False)
     commit = proc.stdout.strip() if proc.returncode == 0 and proc.stdout.strip() else "unknown"
-    # No formal semver exists yet in this project (CHANGELOG.md only has an
-    # "Unreleased" section); using the git commit hash is honest instead of
-    # inventing a fake version number.
+    # VERSION holds the current semver (e.g. "0.4.0-beta.2"); a hyphenated
+    # pre-release suffix means this build has not had a stable release yet.
     marker = "unreleased"
-    if changelog.exists() and "Unreleased" not in changelog.read_text():
-        marker = "released"
+    if version_file.exists():
+        version = version_file.read_text().strip()
+        if version and "-" not in version:
+            marker = "released"
     return f"{marker}+git.{commit}"
 
 
