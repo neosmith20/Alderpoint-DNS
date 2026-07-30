@@ -217,6 +217,24 @@ restore_snapshot() {
 
 replace_application() {
   target="$(root_path /opt/alderpointdns)"
+  # If SOURCE_DIR is the target itself (or inside it) -- the normal "git
+  # pull in place, then run scripts/upgrade.sh from the checkout" workflow,
+  # and also upgrade.sh's own default --source when none is passed -- the
+  # rm -rf below would delete SOURCE_DIR's contents before the tar pipe
+  # reads them. realpath sees through the /opt/bindguard compatibility
+  # symlink too, so this also covers a legacy-named source path.
+  if [ "$DRY_RUN" -eq 0 ]; then
+    resolved_source="$(CDPATH= cd -- "$SOURCE_DIR" && pwd -P)"
+    resolved_target="$(CDPATH= cd -- "$target" && pwd -P 2>/dev/null || true)"
+    case "$resolved_source" in
+      "$resolved_target"|"$resolved_target"/*)
+        staged_source="$(mktemp -d /tmp/alderpointdns-upgrade-source.XXXXXX)"
+        cp -a "$SOURCE_DIR/." "$staged_source/"
+        echo "staged upgrade source to $staged_source (--source pointed at the install target itself)"
+        SOURCE_DIR="$staged_source"
+        ;;
+    esac
+  fi
   if [ "$DRY_RUN" -eq 0 ]; then
     find "$target" -mindepth 1 -maxdepth 1 \
       ! -name .git ! -name venv ! -name vendor \

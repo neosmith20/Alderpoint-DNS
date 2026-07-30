@@ -116,4 +116,31 @@ test -f "$TESTROOT2/opt/alderpointdns/app/webapp.py" || {
 rm -rf "$TESTROOT2"
 echo "self-referential --source case handled correctly"
 
+echo "== replace_application() stages a self-referential source before rm -rf =="
+# pre_upgrade_backup() unconditionally shells out to the real (non-sandboxed)
+# scripts/backup.sh against the real filesystem, so the normal (non-legacy)
+# upgrade path can't be driven end-to-end from an ALDERPOINTDNS_INSTALL_ROOT
+# sandbox here. Exercise replace_application()'s staging logic directly
+# instead: same realpath-based self-reference check as the legacy path
+# above, applied whenever --source resolves inside the install target.
+TESTROOT3="$(mktemp -d /tmp/alderpointdns-rename-migration-normal-selfref-test.XXXXXX)"
+mkdir -p "$TESTROOT3/opt/alderpointdns"
+tar -C "$ROOT_DIR" --exclude .git --exclude __pycache__ --exclude '*.pyc' -cf - . | tar -C "$TESTROOT3/opt/alderpointdns" -xf -
+(
+  SOURCE_DIR="$TESTROOT3/opt/alderpointdns"
+  ROOT="$TESTROOT3"
+  DRY_RUN=0
+  root_path() { printf '%s%s\n' "$TESTROOT3" "$1"; }
+  eval "$(sed -n '/^replace_application() {/,/^}/p' "$ROOT_DIR/scripts/upgrade.sh")"
+  replace_application
+)
+LINES_AFTER="$(wc -l < "$TESTROOT3/opt/alderpointdns/app/webapp.py")"
+if [ "${LINES_AFTER:-0}" -lt 100 ]; then
+  echo "replace_application lost the application source on self-referential --source (webapp.py has $LINES_AFTER lines)" >&2
+  rm -rf "$TESTROOT3"
+  exit 1
+fi
+rm -rf "$TESTROOT3"
+echo "replace_application() self-referential --source handled correctly"
+
 echo "rename migration tests passed"
