@@ -14,3 +14,7 @@
   unsupported, not executed. AdGuard domain-specific upstream routing and
   encrypted upstream schemes that cannot be mapped directly are also reported
   rather than fabricated.
+- System Status's Recent Logs is intentionally scoped to Alderpoint DNS's own
+  four service units (`alderpointdns`, `alderpointdns-analytics`, `named`,
+  `dnsdist`); it is not a general journal viewer and cannot show logs for
+  other host services by design.

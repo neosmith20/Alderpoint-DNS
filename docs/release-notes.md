@@ -1,5 +1,31 @@
 # Release Notes
 
+## 0.4.0-beta.2
+
+Usability and interface-polish beta build. No DNS, filtering, backup, or
+replication behavior changed; this release focuses on the admin UI.
+
+Highlights:
+
+- Collapsible desktop sidebar (icon rail, flyout submenus, persisted state).
+- Compact, scannable Local DNS record table with a collapsed-by-default
+  row editor and a relationship badge instead of a repeated "reverse for"
+  comment sentence.
+- Clearer DNS Settings upstream resolver action hierarchy (primary Save/
+  Enable actions, overflow menu for reorder/delete).
+- Managed Blocklists categories (create/rename/merge/delete-with-
+  reassignment) replacing a free-text field, plus a compact, filterable
+  source table.
+- System Status Recent Logs now shows real, sanitized service logs through
+  a narrowly scoped privileged helper instead of a raw permission-denied
+  journalctl error.
+- Fixed Dashboard/System Status health cards splitting words like
+  "Healthy" and "DNSSEC" mid-character on narrow layouts.
+- Fixed a live-database backup race in `scripts/backup.sh` (SQLite online-
+  backup-API snapshot instead of tarring the live WAL-mode file).
+
+Known release caveats: same as 0.4.0-beta.1 below.
+
 ## 0.4.0-beta.1
 
 This is a beta-preparation build, not a v1.0 release.

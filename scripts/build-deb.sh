@@ -13,6 +13,13 @@ EOF
 OUTPUT_DIR="/tmp"
 SOURCE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 VERSION="$(cat "$SOURCE_DIR/VERSION")"
+# The VERSION file uses semver-style pre-release tags (e.g. 0.4.0-beta.2) for
+# release notes/UI display, but Debian's version syntax treats the *last*
+# hyphen as the start of the debian_revision, so passing that string through
+# unchanged would make dpkg parse "0.4.0-beta.2" as upstream "0.4.0-beta"
+# revision "2". Derive the conventional Debian pre-release form instead
+# (0.4.0~beta2-1), matching packaging/debian/changelog.
+DEB_VERSION="$(printf '%s' "$VERSION" | sed -E 's/-beta\.([0-9]+)/~beta\1/')-1"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -35,7 +42,7 @@ mkdir -p "$PKG/DEBIAN" "$PKG/opt/alderpointdns" "$PKG/usr/sbin" "$PKG/lib/system
 
 cat > "$PKG/DEBIAN/control" <<EOF
 Package: alderpointdns
-Version: ${VERSION}
+Version: ${DEB_VERSION}
 Section: net
 Priority: optional
 Architecture: all
@@ -66,5 +73,5 @@ cp "$SOURCE_DIR/packaging/sudoers-alderpointdns" "$PKG/etc/sudoers.d/alderpointd
 chmod 0440 "$PKG/etc/sudoers.d/alderpointdns"
 
 mkdir -p "$OUTPUT_DIR"
-dpkg-deb --build --root-owner-group "$PKG" "$OUTPUT_DIR/alderpointdns_${VERSION}_all.deb" >/dev/null
-echo "$OUTPUT_DIR/alderpointdns_${VERSION}_all.deb"
+dpkg-deb --build --root-owner-group "$PKG" "$OUTPUT_DIR/alderpointdns_${DEB_VERSION}_all.deb" >/dev/null
+echo "$OUTPUT_DIR/alderpointdns_${DEB_VERSION}_all.deb"

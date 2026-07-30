@@ -60,3 +60,47 @@
   reading pre-rename BindGuard-branded archives. Migrated this VM's live
   installation via the real upgrade tooling; see `docs/compatibility.md`
   and `docs/migrating-from-bindguard.md`.
+- Fixed a live-database backup race: `scripts/backup.sh` previously tarred
+  the live WAL-mode SQLite database file directly, which could race a
+  checkpoint and trip tar's "file changed as we read it" (aborting the
+  acceptance suite under `set -eu`). It now takes a transactionally
+  consistent snapshot via SQLite's own online backup API first and archives
+  that instead, with ownership/permissions preserved and the temporary
+  snapshot always cleaned up.
+- Added a collapsible desktop sidebar: an icon-only rail with tooltip/
+  `aria-label`led icons, flyout submenus for grouped sections, visible
+  active-page state in both modes, and a `localStorage`-persisted collapsed
+  state applied before first paint (no layout jump). The mobile drawer is
+  a separate, unaffected code path.
+- Redesigned Local DNS's record table to be compact and scannable: single-
+  line truncated hostnames/values with full text on hover, a compact
+  relationship badge replacing the repetitive "reverse for <fqdn>" comment
+  text, and a collapsed-by-default row editor (toggled via an Edit button)
+  instead of a permanently expanded edit form under every row.
+- Reworked DNS Settings' upstream resolver actions into a clear hierarchy:
+  Save and Enable/Disable stay inline as primary/common actions; Move up,
+  Move down, and the destructive Delete move into a compact overflow menu
+  with a visual divider before Delete.
+- Replaced Blocklists' free-text category field with a managed category
+  system backed by the existing `categories` table: a dropdown populated
+  from real categories (including a built-in Uncategorized), plus
+  create/rename/merge/delete-with-reassignment category management and a
+  one-time migration that normalizes and deduplicates any legacy free-text
+  category values already stored on sources. The source list itself is now
+  compact, with category/status/health badges, sorting, and filtering.
+- Fixed System Status's Recent Logs, which previously ran `journalctl -u
+  alderpointdns` directly as the unprivileged web user and rendered
+  journald's raw permission-denied hint text into the page. It now goes
+  through a narrowly scoped, sudoers-allowlisted helper (a fixed `logs
+  <unit>` subcommand covering only `alderpointdns`, `alderpointdns-
+  analytics`, `named`, and `dnsdist`) that returns sanitized, structured
+  log entries, with web-side service/severity/line-count filters and a
+  friendly empty state when logs are unavailable.
+- Fixed Dashboard/System Status health cards splitting whole words mid-
+  character on narrow layouts (e.g. "Healthy" -> "Heal"/"thy", "DNSSEC" ->
+  "DNSSE"/"C"): a blanket `.card *`/`.panel *` word-break override was
+  scoped away from headings and status badges, and table headers no longer
+  inherit the same aggressive wrapping arbitrary long data values use.
+- Added a shared compact-UI component set (compact table rows, category
+  badges, overflow action menus, row-level expandable editors) reused
+  across Local DNS, DNS Settings, and Blocklists.
