@@ -21,6 +21,7 @@ from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
 from app import analytics, backup, dns_cache, encryption, importer, local_dns, replication, upstream_dns
+from app import blocklist_categories
 from app.alderpointdns_compiler import DB_PATH, add_source, init_db, normalize_domain
 
 
@@ -593,14 +594,69 @@ def logout():
     return response
 
 
+def blocklist_categories_error(request: Request, message: str) -> HTMLResponse:
+    return render(
+        request,
+        "blocklists.html",
+        sources=compiler_status()["sources"],
+        categories=blocklist_categories.list_categories(),
+        category_error=message,
+        category_filter="",
+        status_filter="",
+        search="",
+        sort="name",
+        status_code=400,
+    )
+
+
+def resolve_category_key(requested: str) -> str:
+    clean = (requested or "").strip()
+    known_keys = {row["key"] for row in blocklist_categories.list_categories()}
+    return clean if clean in known_keys else blocklist_categories.UNCATEGORIZED_KEY
+
+
 @app.get("/blocklists", response_class=HTMLResponse)
 def blocklists(request: Request, _: sqlite3.Row = Depends(current_admin)):
-    return render(request, "blocklists.html", sources=compiler_status()["sources"])
+    blocklist_categories.migrate_existing_categories()
+    sources = compiler_status()["sources"]
+    category_filter = request.query_params.get("category", "")
+    status_filter = request.query_params.get("status", "")
+    search = request.query_params.get("search", "").strip().lower()
+    sort = request.query_params.get("sort", "name")
+    if category_filter:
+        sources = [s for s in sources if s["category"] == category_filter]
+    if status_filter == "enabled":
+        sources = [s for s in sources if s["enabled"]]
+    elif status_filter == "disabled":
+        sources = [s for s in sources if not s["enabled"]]
+    elif status_filter == "error":
+        sources = [s for s in sources if s["last_error"]]
+    if search:
+        sources = [s for s in sources if search in s["name"].lower() or search in s["url"].lower()]
+    sort_keys = {
+        "name": lambda s: s["name"].lower(),
+        "category": lambda s: s["category"] or "",
+        "updated": lambda s: s["last_success"] or "",
+        "rules": lambda s: s["final_active_domains"] or 0,
+    }
+    sources = sorted(sources, key=sort_keys.get(sort, sort_keys["name"]), reverse=sort == "updated" or sort == "rules")
+    return render(
+        request,
+        "blocklists.html",
+        sources=sources,
+        categories=blocklist_categories.list_categories(),
+        category_error=None,
+        category_filter=category_filter,
+        status_filter=status_filter,
+        search=search,
+        sort=sort,
+    )
 
 
 @app.post("/blocklists/add")
-def blocklist_add(request: Request, name: str = Form(...), url: str = Form(...), category: str = Form("ads_trackers"), csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+def blocklist_add(request: Request, name: str = Form(...), url: str = Form(...), category: str = Form(""), csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
     check_csrf(request, csrf)
+    clean_category = resolve_category_key(category)
     with db() as conn:
         conn.execute(
             """
@@ -608,8 +664,48 @@ def blocklist_add(request: Request, name: str = Form(...), url: str = Form(...),
             VALUES (?, ?, 1, ?)
             ON CONFLICT(name) DO UPDATE SET url=excluded.url, category=excluded.category
             """,
-            (name.strip(), url.strip(), category.strip() or "ads_trackers"),
+            (name.strip(), url.strip(), clean_category),
         )
+    return redirect("/blocklists")
+
+
+@app.post("/blocklists/categories/add")
+def blocklist_category_add(request: Request, name: str = Form(...), csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    try:
+        blocklist_categories.create_category(name)
+    except blocklist_categories.CategoryError as exc:
+        return blocklist_categories_error(request, str(exc))
+    return redirect("/blocklists")
+
+
+@app.post("/blocklists/categories/{key}/rename")
+def blocklist_category_rename(request: Request, key: str, name: str = Form(...), csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    try:
+        blocklist_categories.rename_category(key, name)
+    except blocklist_categories.CategoryError as exc:
+        return blocklist_categories_error(request, str(exc))
+    return redirect("/blocklists")
+
+
+@app.post("/blocklists/categories/{key}/merge")
+def blocklist_category_merge(request: Request, key: str, target: str = Form(...), csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    try:
+        blocklist_categories.merge_category(key, target)
+    except blocklist_categories.CategoryError as exc:
+        return blocklist_categories_error(request, str(exc))
+    return redirect("/blocklists")
+
+
+@app.post("/blocklists/categories/{key}/delete")
+def blocklist_category_delete(request: Request, key: str, reassign_to: str = Form(""), csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    try:
+        blocklist_categories.delete_category(key, reassign_to.strip() or None)
+    except blocklist_categories.CategoryError as exc:
+        return blocklist_categories_error(request, str(exc))
     return redirect("/blocklists")
 
 
@@ -627,14 +723,14 @@ def blocklist_edit(
     source_id: int,
     name: str = Form(...),
     url: str = Form(...),
-    category: str = Form("ads_trackers"),
+    category: str = Form(""),
     csrf: str = Form(...),
     _: sqlite3.Row = Depends(current_admin),
 ):
     check_csrf(request, csrf)
     clean_name = name.strip()
     clean_url = url.strip()
-    clean_category = category.strip() or "ads_trackers"
+    clean_category = resolve_category_key(category)
     if not clean_name or not clean_url:
         raise HTTPException(status_code=400, detail="source name and url are required")
     try:
