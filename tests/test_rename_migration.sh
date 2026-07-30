@@ -52,6 +52,12 @@ trap 'rm -rf "$TESTROOT"' EXIT
 
 mkdir -p "$TESTROOT/opt/bindguard/app" "$TESTROOT/opt/bindguard/scripts"
 mkdir -p "$TESTROOT/etc/bindguard/certs" "$TESTROOT/var/lib/bindguard/compiled/bind" "$TESTROOT/var/log/bindguard"
+mkdir -p "$TESTROOT/etc/systemd/system/dnsdist.service.d"
+cat > "$TESTROOT/etc/systemd/system/dnsdist.service.d/bindguard.conf" <<'EOF'
+[Service]
+Environment=BINDGUARD_DNS_DOQ=1
+Environment=BINDGUARD_DNSCRYPT_PROVIDER=2.dnscrypt-cert.bindguard.local
+EOF
 echo "legacy webapp placeholder" > "$TESTROOT/opt/bindguard/app/webapp.py"
 printf '#!/bin/sh\necho fake-legacy-backup\n' > "$TESTROOT/opt/bindguard/scripts/backup.sh"
 chmod +x "$TESTROOT/opt/bindguard/scripts/backup.sh"
@@ -109,6 +115,19 @@ if grep -q "bindguard" "$TESTROOT/var/lib/alderpointdns/compiled/bind/local-zone
 fi
 grep -q 'pool="alderpointdns_upstreams"' "$TESTROOT/var/lib/alderpointdns/compiled/dnsdist/upstream-forwarder.conf" || {
   echo "compiled dnsdist upstream pool name was not migrated" >&2
+  exit 1
+}
+grep -q '^Environment=ALDERPOINTDNS_DNS_DOQ=1$' "$TESTROOT/etc/systemd/system/dnsdist.service.d/alderpointdns.conf" || {
+  echo "operator-configured dnsdist env drop-in was lost or not renamed (DoQ toggle)" >&2
+  cat "$TESTROOT/etc/systemd/system/dnsdist.service.d/alderpointdns.conf" 2>&1 >&2
+  exit 1
+}
+grep -q '2.dnscrypt-cert.alderpointdns.local' "$TESTROOT/etc/systemd/system/dnsdist.service.d/alderpointdns.conf" || {
+  echo "operator-configured dnsdist env drop-in DNSCrypt provider hostname was not migrated" >&2
+  exit 1
+}
+test ! -e "$TESTROOT/etc/systemd/system/dnsdist.service.d/bindguard.conf" || {
+  echo "old dnsdist env drop-in still present after migration" >&2
   exit 1
 }
 

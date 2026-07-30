@@ -212,15 +212,37 @@ migrate_legacy_layout() {
     run mv "$(root_path /var/log/bindguard)" "$(root_path /var/log/alderpointdns)"
   fi
 
+  # The dnsdist drop-in is operator-editable state (app/encryption.py's
+  # DNSDIST_ENV_OVERRIDE, written whenever the operator changes DoH/DoT/DoQ/
+  # DoH3/DNSCrypt settings on the Encryption Settings page), unlike the
+  # static bindguard*.service unit files below -- rename and token-patch it
+  # in place instead of deleting it, so per-operator toggles/ports survive
+  # the rename instead of silently reverting to packaging defaults. This
+  # runs unconditionally (not just for ROOT="/") since it is pure file
+  # manipulation, not a real systemctl/symlink action.
+  legacy_dnsdist_env="$(root_path /etc/systemd/system/dnsdist.service.d/bindguard.conf)"
+  if [ -f "$legacy_dnsdist_env" ]; then
+    run mv "$legacy_dnsdist_env" "$(root_path /etc/systemd/system/dnsdist.service.d/alderpointdns.conf)"
+    run sed -i \
+      -e 's/BindGuard/Alderpoint DNS/g' \
+      -e 's/BINDGUARD_/ALDERPOINTDNS_/g' \
+      -e 's/BINDGUARD/ALDERPOINTDNS/g' \
+      -e 's/bindguard/alderpointdns/g' \
+      "$(root_path /etc/systemd/system/dnsdist.service.d/alderpointdns.conf)"
+  fi
+
   if [ "$ROOT" = "/" ] && [ "$DRY_RUN" -eq 0 ]; then
     run ln -sfn /opt/alderpointdns /opt/bindguard
     run ln -sfn /etc/alderpointdns /etc/bindguard
     run ln -sfn /var/lib/alderpointdns /var/lib/bindguard
     run ln -sfn /var/log/alderpointdns /var/log/bindguard
     run rm -f /etc/sudoers.d/bindguard
+    # bindguard.service/-analytics/-backup.timer are static packaging
+    # content with no operator-editable state, so removing them here (they
+    # get freshly reinstalled by install_units() later in this run) is
+    # fine.
     run rm -f /etc/systemd/system/bindguard.service /etc/systemd/system/bindguard-analytics.service \
       /etc/systemd/system/bindguard-backup.service /etc/systemd/system/bindguard-backup.timer
-    run rm -f /etc/systemd/system/dnsdist.service.d/bindguard.conf
     run systemctl daemon-reload
     command -v apparmor_parser >/dev/null 2>&1 && run apparmor_parser -r /etc/apparmor.d/usr.sbin.named >/dev/null 2>&1 || true
     run systemctl start named
