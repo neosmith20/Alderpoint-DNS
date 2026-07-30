@@ -407,6 +407,12 @@ main > div + section { margin-top: 14px; }
 .grid.health { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
 .grid.wide { grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
 
+/* Opt-in modifier for grid sections whose panels must be sized by their own
+   content. The default stretch alignment is what card grids want, but it makes
+   an expandable panel (a <details> accordion, for example) drag every panel
+   beside it to the same height and leave artificial empty space. */
+.grid.align-start { align-items: start; }
+
 .dashboard-grid {
   display: grid;
   grid-template-columns: minmax(0, 2fr) minmax(280px, 0.8fr);

@@ -57,6 +57,7 @@ required_css = [
     ".sidebar-collapse-toggle",
     "html.sidebar-collapsed",
     ".grid.health",
+    ".grid.align-start",
     ".overflow-menu",
     ".category-badge",
     ".table-compact",

@@ -15,6 +15,7 @@ Run individual suites:
 /opt/alderpointdns/tests/test_importer.py
 /opt/alderpointdns/tests/test_backup.py
 /opt/alderpointdns/tests/test_web_smoke.sh
+/opt/alderpointdns/tests/test_encryption_layout.sh
 /opt/alderpointdns/tests/test_backup_restore.sh
 ```
 

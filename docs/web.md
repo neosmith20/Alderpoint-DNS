@@ -129,6 +129,15 @@ per-protocol connectivity tests on every deploy, ready-to-copy client
 connection info, and Apple `.mobileconfig` downloads for DoH/DoT. Plain
 UDP/TCP 53 has no control on this page and cannot be disabled from the UI.
 
+The Encryption page's Protocols and Certificate panels sit in a grid section
+marked `grid align-start`, so each panel is sized only by its own content.
+Expanding a Certificate disclosure section (self-signed, local CA, upload,
+existing paths) grows the Certificate panel alone and leaves the Protocols
+panel at its natural height instead of stretching it and opening artificial
+empty space. The section still collapses to a single stacked column at narrow
+widths. `tests/test_encryption_layout.sh` measures this in headless Chromium
+at wide desktop, standard desktop, tablet, and mobile widths.
+
 The Import page (`/import`) and Migration entry point (`/import/migration`)
 migrate from AdGuard Home (uploaded `AdGuardHome.yaml` or a direct read-only API
 connection), Pi-hole text/list exports, and Alderpoint DNS-native JSON exports.
