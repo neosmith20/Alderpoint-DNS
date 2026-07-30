@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""BindGuard Backup and Restore.
+"""Alderpoint DNS Backup and Restore.
 
-Builds versioned, checksummed BindGuard backup archives (tar.gz, optionally
-openssl-encrypted) covering BindGuard-owned configuration, generated BIND/
+Builds versioned, checksummed Alderpoint DNS backup archives (tar.gz, optionally
+openssl-encrypted) covering Alderpoint DNS-owned configuration, generated BIND/
 dnsdist config, the SQLite database (captured through SQLite's own online
 backup API so a concurrently-writing web app or analytics collector can never
 produce a torn/corrupt copy), downloaded blocklists, and certificate
@@ -12,7 +12,7 @@ rolled back on any failure -- the same shape as app/dns_cache.py and
 app/encryption.py.
 
 Component design decision (documented per the task's request to explain the
-choice rather than invent partial-SQLite files): BindGuard's SQLite database
+choice rather than invent partial-SQLite files): Alderpoint DNS's SQLite database
 is always captured as a single consistent online-backup copy when
 ``sqlite_data`` is selected, since splitting a live SQLite file into partial
 per-table files is fragile and not something SQLite is designed for.
@@ -42,12 +42,12 @@ places:
    etc.) are gated only by ``sqlite_data``. This means an operator can
    restore just one narrow table (e.g. only ``custom_rules``) without ever
    touching any other table -- important on a shared appliance where other
-   BindGuard subsystems may hold live settings an operator does not intend
+   Alderpoint DNS subsystems may hold live settings an operator does not intend
    to disturb.
 
-Sensitive material handling: ``/etc/bindguard/secrets.env`` (the web
-session-signing secret), ``/etc/bindguard/dnsdist-api.key``, and
-``/etc/bindguard/dnsdist-web.creds`` (dnsdist webserver/API credentials) are
+Sensitive material handling: ``/etc/alderpointdns/secrets.env`` (the web
+session-signing secret), ``/etc/alderpointdns/dnsdist-api.key``, and
+``/etc/alderpointdns/dnsdist-web.creds`` (dnsdist webserver/API credentials) are
 all treated as key material -- they grant the same kind of access a stolen
 private key would. They are included only when ``private_keys`` or
 ``user_auth_data`` is explicitly set, never as part of the default
@@ -70,34 +70,67 @@ from pathlib import Path
 from typing import Any
 
 
-DB_PATH = Path("/var/lib/bindguard/bindguard.db")
-BACKUP_DIR = Path("/var/lib/bindguard/backups")
-STAGING_DIR = Path("/var/lib/bindguard/staging")
+DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
+BACKUP_DIR = Path("/var/lib/alderpointdns/backups")
+STAGING_DIR = Path("/var/lib/alderpointdns/staging")
 IMPORTS_DIR = STAGING_DIR / "backup-imports"
 
-ETC_BINDGUARD = Path("/etc/bindguard")
-CERT_DIR = ETC_BINDGUARD / "certs"
-SECRETS_ENV = ETC_BINDGUARD / "secrets.env"
-DNSDIST_API_KEY = ETC_BINDGUARD / "dnsdist-api.key"
-DNSDIST_WEB_CREDS = ETC_BINDGUARD / "dnsdist-web.creds"
+ETC_ALDERPOINTDNS = Path("/etc/alderpointdns")
+CERT_DIR = ETC_ALDERPOINTDNS / "certs"
+SECRETS_ENV = ETC_ALDERPOINTDNS / "secrets.env"
+DNSDIST_API_KEY = ETC_ALDERPOINTDNS / "dnsdist-api.key"
+DNSDIST_WEB_CREDS = ETC_ALDERPOINTDNS / "dnsdist-web.creds"
 
 ETC_BIND = Path("/etc/bind")
 BIND_CONF_FILES = ("named.conf", "named.conf.local", "named.conf.options")
 ETC_DNSDIST = Path("/etc/dnsdist")
 DNSDIST_CONF = ETC_DNSDIST / "dnsdist.conf"
 
-COMPILED_DIR = Path("/var/lib/bindguard/compiled")
+COMPILED_DIR = Path("/var/lib/alderpointdns/compiled")
 LOCAL_ZONE_DIR = COMPILED_DIR / "bind" / "local"
 LOCAL_ZONES_CONF = COMPILED_DIR / "bind" / "local-zones.conf"
-DOWNLOADS_DIR = Path("/var/lib/bindguard/downloads")
+DOWNLOADS_DIR = Path("/var/lib/alderpointdns/downloads")
 
 SYSTEMD_DIR = Path("/etc/systemd/system")
-SUDOERS_FILE = Path("/etc/sudoers.d/bindguard")
+SUDOERS_FILE = Path("/etc/sudoers.d/alderpointdns")
 
-APP_ROOT = Path("/opt/bindguard")
+APP_ROOT = Path("/opt/alderpointdns")
 
 BACKUP_FORMAT_VERSION = 1
-FILENAME_PREFIX = "bindguard-backup-"
+FILENAME_PREFIX = "alderpointdns-backup-"
+
+# Archive-relative path the SQLite database is stored under. Derived from
+# DB_PATH so the two can never drift apart.
+DB_ARCHIVE_RELPATH = str(DB_PATH.relative_to("/"))
+
+# BindGuard-branded archive-relative paths, recognized on *read* only, so
+# archives created before the Alderpoint DNS rename remain restorable. New
+# archives are always written using the paths above. Old-named systemd unit
+# files and the old sudoers filename are deliberately not restored from
+# legacy archives (see restore_backup): the units and sudoers rule installed
+# for this product name are the current, correct ones, and reinstalling an
+# obsolete unit referencing paths that no longer exist would do nothing
+# useful.
+LEGACY_DB_ARCHIVE_RELPATH = "var/lib/bindguard/bindguard.db"
+LEGACY_COMPILED_RELPATH = "var/lib/bindguard/compiled"
+LEGACY_LOCAL_ZONE_RELPATH = "var/lib/bindguard/compiled/bind/local"
+LEGACY_LOCAL_ZONES_CONF_RELPATH = "var/lib/bindguard/compiled/bind/local-zones.conf"
+LEGACY_DOWNLOADS_RELPATH = "var/lib/bindguard/downloads"
+LEGACY_ETC_RELPATH = "etc/bindguard"
+
+
+def _extracted_path(extract_dir: Path, new_relpath: str, legacy_relpath: str) -> Path:
+    """Resolve a path inside an extracted archive, preferring the current
+    Alderpoint DNS-branded relpath and falling back to the legacy
+    BindGuard-branded one. Callers still need their own ``.exists()`` check,
+    since a component may be absent from the archive under either name."""
+    new_path = extract_dir / new_relpath
+    if new_path.exists():
+        return new_path
+    legacy_path = extract_dir / legacy_relpath
+    if legacy_path.exists():
+        return legacy_path
+    return new_path
 
 FUNCTIONAL_TEST_TIMEOUT = 5
 
@@ -166,7 +199,7 @@ SETTINGS_DEFAULTS = {
     "default_components": json.dumps(COMPONENT_DEFAULTS),
 }
 
-BACKUP_TIMER_OVERRIDE = SYSTEMD_DIR / "bindguard-backup.timer.d" / "bindguard.conf"
+BACKUP_TIMER_OVERRIDE = SYSTEMD_DIR / "alderpointdns-backup.timer.d" / "alderpointdns.conf"
 
 
 class BackupError(ValueError):
@@ -318,7 +351,7 @@ def validate_components(values: dict[str, Any] | None) -> dict[str, bool]:
 # Manifest metadata
 # ---------------------------------------------------------------------------
 
-def bindguard_app_version() -> str:
+def alderpointdns_app_version() -> str:
     changelog = APP_ROOT / "CHANGELOG.md"
     proc = run(["git", "-C", str(APP_ROOT), "rev-parse", "--short", "HEAD"], check=False)
     commit = proc.stdout.strip() if proc.returncode == 0 and proc.stdout.strip() else "unknown"
@@ -415,9 +448,9 @@ def select_files(components: dict[str, bool]) -> dict[str, Path]:
     if components.get("app_config"):
         for path in _walk_files(COMPILED_DIR):
             add(path)
-        for name in ("bindguard.service", "bindguard-analytics.service"):
+        for name in ("alderpointdns.service", "alderpointdns-analytics.service"):
             add(SYSTEMD_DIR / name)
-        for name in ("bindguard.service.d", "bindguard-analytics.service.d", "dnsdist.service.d"):
+        for name in ("alderpointdns.service.d", "alderpointdns-analytics.service.d", "dnsdist.service.d"):
             for path in _walk_files(SYSTEMD_DIR / name):
                 add(path)
         add(SUDOERS_FILE)
@@ -481,7 +514,7 @@ def create_backup(components: dict[str, bool] | None = None, password: str | Non
     manifest: dict[str, Any] = {}
     STAGING_DIR.mkdir(parents=True, exist_ok=True)
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    stage = Path(tempfile.mkdtemp(prefix="bindguard-backup-", dir=str(STAGING_DIR)))
+    stage = Path(tempfile.mkdtemp(prefix="alderpointdns-backup-", dir=str(STAGING_DIR)))
     try:
         included_components = [key for key in COMPONENT_KEYS if components.get(key)]
         checksums: dict[str, str] = {}
@@ -493,13 +526,13 @@ def create_backup(components: dict[str, bool] | None = None, password: str | Non
             tar_pairs.append((Path("/"), relpath))
 
         if components.get("sqlite_data"):
-            staged_db = stage / "var" / "lib" / "bindguard" / "bindguard.db"
+            staged_db = stage / DB_ARCHIVE_RELPATH
             sqlite_backup_copy(
                 staged_db,
                 include_analytics=bool(components.get("analytics_history")),
                 include_auth=bool(components.get("user_auth_data")),
             )
-            relpath = "var/lib/bindguard/bindguard.db"
+            relpath = DB_ARCHIVE_RELPATH
             checksums[relpath] = sha256_file(staged_db)
             tar_pairs.append((stage, relpath))
 
@@ -507,7 +540,7 @@ def create_backup(components: dict[str, bool] | None = None, password: str | Non
 
         manifest = {
             "backup_format_version": BACKUP_FORMAT_VERSION,
-            "bindguard_app_version": bindguard_app_version(),
+            "alderpointdns_app_version": alderpointdns_app_version(),
             "database_schema_version": schema_version,
             "created_at": created_at,
             "source_node_id": socket.gethostname(),
@@ -549,7 +582,7 @@ def create_backup(components: dict[str, bool] | None = None, password: str | Non
 
 
 def _fix_backup_dir_permissions() -> None:
-    """Make every backup file readable by the bindguard group, including
+    """Make every backup file readable by the alderpointdns group, including
     orphaned files created by the older scripts/backup.sh (root:root 0640),
     so the web process can list and serve downloads without a sudo round
     trip per download."""
@@ -765,13 +798,17 @@ def preview_restore(path: Path, password: str | None) -> dict[str, Any]:
             conn.close()
         if manifest.get("database_schema_version") and manifest.get("database_schema_version") != live_schema:
             compat_warnings.append("database schema fingerprint differs from this install; some tables may not exist yet on one side")
-        if manifest.get("bindguard_app_version") and manifest.get("bindguard_app_version") != bindguard_app_version():
-            compat_warnings.append(f"backup was created by {manifest.get('bindguard_app_version')}, this install is {bindguard_app_version()}")
+        # Older BindGuard-branded manifests use "bindguard_app_version"
+        # instead of "alderpointdns_app_version"; check both so a legacy
+        # archive's preview still reports its build version.
+        manifest_app_version = manifest.get("alderpointdns_app_version") or manifest.get("bindguard_app_version")
+        if manifest_app_version and manifest_app_version != alderpointdns_app_version():
+            compat_warnings.append(f"backup was created by {manifest_app_version}, this install is {alderpointdns_app_version()}")
 
         included = set(manifest.get("included_components", []))
 
         table_diffs: list[dict[str, Any]] = []
-        staged_db = extract_dir / "var" / "lib" / "bindguard" / "bindguard.db"
+        staged_db = _extracted_path(extract_dir, DB_ARCHIVE_RELPATH, LEGACY_DB_ARCHIVE_RELPATH)
         if staged_db.exists():
             backup_conn = sqlite3.connect(staged_db)
             backup_conn.row_factory = sqlite3.Row
@@ -801,7 +838,7 @@ def preview_restore(path: Path, password: str | None) -> dict[str, Any]:
 
         file_diffs: list[dict[str, str]] = []
         for relpath in sorted(manifest.get("sha256_checksums", {})):
-            if relpath == "var/lib/bindguard/bindguard.db":
+            if relpath in (DB_ARCHIVE_RELPATH, LEGACY_DB_ARCHIVE_RELPATH):
                 continue
             staged_file = extract_dir / relpath
             live_file = Path("/") / relpath
@@ -974,47 +1011,56 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
             except Exception as exc:
                 raise BackupError(f"could not take pre-restore safety backup, aborting restore: {exc}") from None
 
+            # Resolve the staged compiled-BIND directory once, preferring the
+            # current Alderpoint DNS-branded path and falling back to the
+            # legacy BindGuard-branded one from older archives. The RPZ zone
+            # name used for validation follows whichever archive layout
+            # actually matched.
+            compiled_source = _extracted_path(extract_dir, "var/lib/alderpointdns/compiled", LEGACY_COMPILED_RELPATH)
+            compiled_is_legacy = compiled_source == extract_dir / LEGACY_COMPILED_RELPATH
+            rpz_zone_label = "bindguard.rpz" if compiled_is_legacy else "alderpointdns.rpz"
+
             # Cheap standalone pre-activation checks (no include resolution
             # needed): validate any staged zone files in isolation before
             # touching anything live.
-            for zone_file in sorted((extract_dir / "var" / "lib" / "bindguard" / "compiled" / "bind").glob("**/*.rpz")) if effective.get("app_config") else []:
-                run(["named-checkzone", "bindguard.rpz", str(zone_file)])
+            for zone_file in sorted((compiled_source / "bind").glob("**/*.rpz")) if effective.get("app_config") else []:
+                run(["named-checkzone", rpz_zone_label, str(zone_file)])
                 validation_output += f"named-checkzone {zone_file.name}: ok\n"
 
             # Stage -> backup -> atomically activate each selected, present
             # filesystem component.
             if effective.get("app_config"):
-                staged_compiled = extract_dir / "var" / "lib" / "bindguard" / "compiled"
+                staged_compiled = compiled_source
                 _replace_path(COMPILED_DIR, staged_compiled, file_backups)
-                for name in ("bindguard.service", "bindguard-analytics.service"):
+                for name in ("alderpointdns.service", "alderpointdns-analytics.service"):
                     staged = extract_dir / "etc" / "systemd" / "system" / name
                     if staged.exists():
                         _replace_path(SYSTEMD_DIR / name, staged, file_backups)
                         systemd_touched = True
-                for name in ("bindguard.service.d", "bindguard-analytics.service.d", "dnsdist.service.d"):
+                for name in ("alderpointdns.service.d", "alderpointdns-analytics.service.d", "dnsdist.service.d"):
                     staged = extract_dir / "etc" / "systemd" / "system" / name
                     if staged.exists():
                         _replace_path(SYSTEMD_DIR / name, staged, file_backups)
                         systemd_touched = True
                         if name == "dnsdist.service.d":
                             dnsdist_touched = True
-                staged_sudoers = extract_dir / "etc" / "sudoers.d" / "bindguard"
+                staged_sudoers = extract_dir / "etc" / "sudoers.d" / "alderpointdns"
                 if staged_sudoers.exists():
                     _replace_path(SUDOERS_FILE, staged_sudoers, file_backups)
                 named_touched = True
 
             if effective.get("local_dns_zones"):
-                staged = extract_dir / "var" / "lib" / "bindguard" / "compiled" / "bind" / "local"
+                staged = _extracted_path(extract_dir, "var/lib/alderpointdns/compiled/bind/local", LEGACY_LOCAL_ZONE_RELPATH)
                 if staged.exists():
                     _replace_path(LOCAL_ZONE_DIR, staged, file_backups)
                     named_touched = True
-                staged_conf = extract_dir / "var" / "lib" / "bindguard" / "compiled" / "bind" / "local-zones.conf"
+                staged_conf = _extracted_path(extract_dir, "var/lib/alderpointdns/compiled/bind/local-zones.conf", LEGACY_LOCAL_ZONES_CONF_RELPATH)
                 if staged_conf.exists():
                     _replace_path(LOCAL_ZONES_CONF, staged_conf, file_backups)
                     named_touched = True
 
             if effective.get("last_downloaded_lists"):
-                staged = extract_dir / "var" / "lib" / "bindguard" / "downloads"
+                staged = _extracted_path(extract_dir, "var/lib/alderpointdns/downloads", LEGACY_DOWNLOADS_RELPATH)
                 _replace_path(DOWNLOADS_DIR, staged, file_backups)
 
             if effective.get("dnsdist_source_config"):
@@ -1030,7 +1076,7 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
                         _replace_path(ETC_BIND / name, staged, file_backups)
                         named_touched = True
 
-            staged_cert_dir = extract_dir / "etc" / "bindguard" / "certs"
+            staged_cert_dir = _extracted_path(extract_dir, "etc/alderpointdns/certs", f"{LEGACY_ETC_RELPATH}/certs")
             if staged_cert_dir.exists():
                 for staged_file in sorted(staged_cert_dir.iterdir()):
                     if not staged_file.is_file():
@@ -1045,16 +1091,16 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
 
             if effective.get("private_keys") or effective.get("user_auth_data"):
                 for name in ("secrets.env", "dnsdist-api.key", "dnsdist-web.creds"):
-                    staged = extract_dir / "etc" / "bindguard" / name
+                    staged = _extracted_path(extract_dir, f"etc/alderpointdns/{name}", f"{LEGACY_ETC_RELPATH}/{name}")
                     if staged.exists():
-                        _replace_path(ETC_BINDGUARD / name, staged, file_backups)
+                        _replace_path(ETC_ALDERPOINTDNS / name, staged, file_backups)
 
-            staged_db = extract_dir / "var" / "lib" / "bindguard" / "bindguard.db"
+            staged_db = _extracted_path(extract_dir, DB_ARCHIVE_RELPATH, LEGACY_DB_ARCHIVE_RELPATH)
             merged_tables = _merge_database(staged_db, effective)
             if merged_tables:
                 db_touched = True
 
-            if os.environ.get("BINDGUARD_TEST_FORCE_RESTORE_FAIL") == "1":
+            if os.environ.get("ALDERPOINTDNS_TEST_FORCE_RESTORE_FAIL") == "1":
                 raise RuntimeError("forced restore failure for rollback test")
 
             if named_touched:
@@ -1074,8 +1120,8 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
             if dnsdist_touched:
                 run(["systemctl", "restart", "dnsdist"])
             if db_touched or systemd_touched:
-                run(["systemctl", "restart", "bindguard-analytics"], check=False)
-                run(["systemctl", "restart", "bindguard"], check=False)
+                run(["systemctl", "restart", "alderpointdns-analytics"], check=False)
+                run(["systemctl", "restart", "alderpointdns"], check=False)
 
             if named_touched and not _wait_active("named", timeout=20):
                 raise RuntimeError("named did not become active after restore")
@@ -1095,7 +1141,7 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
                     with tempfile.TemporaryDirectory(dir=str(STAGING_DIR)) as rtmp:
                         rextract = Path(rtmp) / "rextract"
                         extract_backup(pre_restore_backup_path, None, rextract)
-                        rdb = rextract / "var" / "lib" / "bindguard" / "bindguard.db"
+                        rdb = rextract / DB_ARCHIVE_RELPATH
                         _merge_database(rdb, dict.fromkeys(COMPONENT_KEYS, True))
                 if systemd_touched:
                     run(["systemctl", "daemon-reload"], check=False)
@@ -1104,8 +1150,8 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
                 if dnsdist_touched:
                     run(["systemctl", "restart", "dnsdist"], check=False)
                 if db_touched or systemd_touched:
-                    run(["systemctl", "restart", "bindguard-analytics"], check=False)
-                    run(["systemctl", "restart", "bindguard"], check=False)
+                    run(["systemctl", "restart", "alderpointdns-analytics"], check=False)
+                    run(["systemctl", "restart", "alderpointdns"], check=False)
                 if resolves("cloudflare.com", "53"):
                     status = "rolled_back"
                 else:
@@ -1209,10 +1255,10 @@ def deploy_backup_schedule(conn: sqlite3.Connection | None = None) -> str:
         )
         run(["systemctl", "daemon-reload"])
         if enabled:
-            run(["systemctl", "enable", "--now", "bindguard-backup.timer"])
+            run(["systemctl", "enable", "--now", "alderpointdns-backup.timer"])
             state = "enabled"
         else:
-            run(["systemctl", "disable", "--now", "bindguard-backup.timer"], check=False)
+            run(["systemctl", "disable", "--now", "alderpointdns-backup.timer"], check=False)
             state = "disabled"
         return f"backup schedule {state}, interval={interval}h, retention={cfg.get('retention_count')}"
     finally:

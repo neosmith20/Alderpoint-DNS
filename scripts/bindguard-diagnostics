@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+"""Deprecated name for alderpointdns-diagnostics.
+
+BindGuard was renamed to Alderpoint DNS. This wrapper is kept so existing
+scripts, cron jobs, and muscle memory keep working during the transition.
+See docs/compatibility.md for the planned removal version.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+if __name__ == "__main__":
+    print(
+        "warning: 'bindguard-diagnostics' is deprecated, use 'alderpointdns-diagnostics' instead "
+        "(see docs/compatibility.md)",
+        file=sys.stderr,
+    )
+    target = Path(__file__).resolve().parent / "alderpointdns-diagnostics"
+    os.execv(str(target), [str(target)] + sys.argv[1:])

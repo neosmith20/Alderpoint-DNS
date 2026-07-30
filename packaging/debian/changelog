@@ -1,5 +1,15 @@
-bindguard (0.4.0~beta1-1) unstable; urgency=medium
+alderpointdns (0.4.0~beta2-1) unstable; urgency=medium
+
+  * Renamed the project from BindGuard to Alderpoint DNS ahead of external
+    beta. Package, service, path, and environment-variable names now use
+    alderpointdns/ALDERPOINTDNS_; the underlying bindguard system user/group
+    is intentionally kept for upgrade safety. See docs/compatibility.md and
+    docs/migrating-from-bindguard.md.
+
+ -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Wed, 29 Jul 2026 20:00:00 -0600
+
+alderpointdns (0.4.0~beta1-1) unstable; urgency=medium
 
   * Beta packaging scaffold for fresh installation and upgrade testing.
 
- -- BindGuard Maintainers <maintainers@example.invalid>  Wed, 29 Jul 2026 16:00:00 -0600
+ -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Wed, 29 Jul 2026 16:00:00 -0600
