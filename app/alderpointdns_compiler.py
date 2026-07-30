@@ -539,6 +539,17 @@ def deploy(download: bool = True, trigger: str | None = None) -> int:
                     rpz_text += "this is not a valid zone record\n"
                 staged_rpz.write_text(rpz_text)
                 validate_rpz(staged_rpz)
+                # named.conf.local unconditionally `include`s this file, so on
+                # the very first deploy ever run (nothing under
+                # /var/lib/alderpointdns/compiled/ exists yet) named-checkconf
+                # fails to parse the config before local_dns.deploy_zones()
+                # below ever gets a chance to generate it. An empty file is a
+                # safe, honest bootstrap default (equivalent to "no local
+                # zones configured yet") and deploy_zones() below replaces it
+                # with the real content in the same run regardless.
+                if not local_dns.LOCAL_ZONES_CONF.exists():
+                    local_dns.LOCAL_ZONES_CONF.parent.mkdir(parents=True, exist_ok=True)
+                    local_dns.LOCAL_ZONES_CONF.write_text("")
                 validate_bind()
                 if COMPILED_RPZ.exists():
                     shutil.copy2(COMPILED_RPZ, backup_path)
