@@ -4,8 +4,7 @@ alderpointdns (0.4.0~beta2-1) unstable; urgency=medium
     variables used by the package: package, service, path, and
     environment-variable names all use alderpointdns/ALDERPOINTDNS_
     consistently, including the system user/group that the daemons run
-    as and own their data, log, and config directories under. See
-    docs/compatibility.md.
+    as and own their data, log, and config directories under.
   * Fixed a live-database backup race: scripts/backup.sh now takes a
     SQLite online-backup-API snapshot instead of tarring the live WAL-mode
     database file directly.

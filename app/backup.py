@@ -807,7 +807,7 @@ def preview_restore(path: Path, password: str | None) -> dict[str, Any]:
 
         file_diffs: list[dict[str, str]] = []
         for relpath in sorted(manifest.get("sha256_checksums", {})):
-            if relpath in (DB_ARCHIVE_RELPATH, LEGACY_DB_ARCHIVE_RELPATH):
+            if relpath == DB_ARCHIVE_RELPATH:
                 continue
             staged_file = extract_dir / relpath
             live_file = Path("/") / relpath
