@@ -1016,3 +1016,217 @@ The post-reboot acceptance check is now complete: the backup race is
 fixed at its source (not masked), covered by regression tests at both the
 Python and shell layers, and the full acceptance suite passes cleanly
 end-to-end.
+
+## v0.4.0-beta.2 usability/interface-polish milestone
+
+Checkpoint commit: `129cb97`. Version bumped `0.4.0-beta.1` ->
+`0.4.0-beta.2` (Debian package version `0.4.0~beta2-1`). Scope was
+explicitly limited to the 7 named UI/UX items below plus versioning
+closeout -- no unrelated major features, no reboot performed (that is
+reserved for the human operator per the request).
+
+### 1. Collapsible desktop sidebar (`web/templates/base.html`, `app.css`, `app.js`)
+
+Icon-only rail toggled by a button in the sidebar header; `aria-label`/
+`title` on every nav link/section button so meaning survives when the
+text label is visually hidden; grouped sections keep their existing
+click-to-open behavior but render as a flyout next to the icon instead of
+pushing content down while collapsed; state persisted to
+`localStorage('alderpointdnsSidebarCollapsed')` and applied via a tiny
+blocking inline `<script>` in `<head>` before first paint (no expand-
+then-collapse flash). Scoped to `@media (min-width: 841px)` so the
+existing separate mobile drawer is untouched.
+
+### 2. Compact Local DNS page (`web/templates/local_dns.html`)
+
+The record table previously rendered a full edit form as a second,
+always-visible `<tr>` under every row (that, not the text wrapping, was
+the main source of the reported bloat) plus `wrap-anywhere` on hostname/
+comment cells, which is what produced the `reverse for adguard.mylan.netwo` /
+`rk` mid-word split in the bug report. Fixed: the edit row now starts
+`hidden` and opens via a delegated `data-row-edit-toggle` click handler
+(so it survives `data-async-form`'s `<main>` innerHTML swaps); hostname/
+value cells use `.truncate` (single line, ellipsis, full value in
+`title=`) instead of forced character wrapping; the auto-generated
+`reverse for <fqdn>` PTR comment renders as a compact "&#8617; reverse of
+<target>" badge instead of the raw sentence (the underlying stored
+`comment` text is unchanged -- this is a display-only transform, so
+export/import/compat behavior is untouched). Actions column uses Edit +
+the new overflow menu (see below) instead of three stacked buttons, which
+turned out to be the second, larger source of excess row height (button
+wrap forced ~150px rows before that fix).
+
+### 3. DNS Settings action cleanup (`web/templates/dns_settings.html`)
+
+Upstream resolver rows: Save (primary) and Enable/Disable (secondary)
+stay inline; Move up/Move down/Delete move into a compact overflow menu
+with a divider separating the destructive Delete from the routine
+reorder actions.
+
+### 4. Blocklists + managed categories (`app/blocklist_categories.py`, `web/templates/blocklists.html`, `app/webapp.py`)
+
+Discovered the database already has a `categories` table (key/name/
+description) seeded with sensible defaults -- built for a not-yet-exposed
+per-network policy-profile feature (`policy_profiles`/`network_policies`/
+`profile_categories`, confirmed still unused by the actual `deploy()` RPZ
+compilation path; this remains accurately described by the existing
+"modeled but not fully enforced" line in `docs/known-limitations.md`, now
+also linked from a new bullet about Recent Logs' scope). Reused that same
+table as the managed-category taxonomy for Blocklists instead of adding a
+parallel schema: `sources.category` already stored the category *key*
+(not display name) in the common case, so **renaming** a category is a
+pure metadata update (no source rows touched); **merge** and **delete-
+with-reassignment** repoint `sources.category` to the target/fallback
+key; a **migration** function normalizes/deduplicates whatever free-text
+values existing rows had (matches by normalized display name first, so
+e.g. "Ads and Trackers" typed with different casing merges into the
+existing `ads_trackers` category instead of creating a near-duplicate)
+and is idempotent. `Uncategorized` is a protected built-in that can't be
+renamed/merged/deleted. The source table itself is compact with category/
+status/health badges, an Edit-row + overflow-menu actions column, and
+server-side search/category/status filters plus sorting.
+
+### 5. System Status Recent Logs (`app/service_logs.py`, `app/alderpointdns_compiler.py`, `packaging/sudoers-alderpointdns`)
+
+Root cause: `system_page()` ran `journalctl -u alderpointdns` directly as
+the unprivileged `bindguard` web user, which has no journal group
+membership on a fresh install, so the page rendered journald's own
+"insufficient permissions" hint text. Fixed with the same pattern every
+other privileged web action in this app already uses -- a fixed,
+sudoers-enumerated subcommand (`alderpointdns_compiler.py logs <unit>`),
+one literal sudoers line per allowed unit (`alderpointdns`,
+`alderpointdns-analytics`, `named`, `dnsdist`; verified a 5th, disallowed
+unit is rejected by sudo itself, not just by application-layer
+validation). The helper always fetches a fixed-size window via
+`journalctl -o json --output-fields=...` (line count/severity are never
+threaded through to the privileged call -- they're applied web-side to
+the already-fetched, already-sanitized buffer) and redacts common secret
+shapes (passwords, API keys, tokens, Basic/Bearer auth headers, PEM
+private keys) before the JSON ever leaves the root process. Discovered
+and fixed a real robustness bug while wiring this up: `sudo` on this VM
+prints `sudo: unable to resolve host bindguard-1: ...` to stderr on every
+invocation (a pre-existing `/etc/hosts` mismatch left over from the
+BindGuard->Alderpoint rename, unrelated to this milestone and out of
+scope to fix here) -- the shared `run()` helper merges stderr into
+stdout, which would have corrupted the strict-JSON parse, so the new
+`fetch_service_log_entries()` calls `subprocess.run()` directly with
+stdout/stderr kept separate instead of reusing `run()`. System Status now
+has service/severity/line-count selects, Refresh, and auto-refresh
+(reusing the existing generic `#autoRefresh`/`data-refresh-url`
+mechanism), and a friendly empty state (no raw journalctl text) when logs
+are unavailable. Fresh installs and upgrades both pick up the new
+sudoers entries automatically since both already deploy
+`packaging/sudoers-alderpointdns` verbatim -- verified via the dry-run
+installer/upgrade tests plus a real `install -D` + `visudo -cf` onto this
+VM's actual `/etc/sudoers.d/alderpointdns` and an end-to-end
+`runuser -u bindguard -- sudo -n ... logs <unit>` call.
+
+### 6. Dashboard/System Status health card word-splitting (`web/static/app.css`)
+
+Root cause: a blanket `.card *, .panel *` selector forced
+`overflow-wrap: anywhere; word-break: break-word` onto every descendant
+of a card/panel, including status badges and headings, so short single-
+word labels split mid-character whenever a card got tight ("Healthy" ->
+"Heal"/"thy", "DNSSEC" -> "DNSSE"/"C", "Alderpoint DNS"/"Backend health"
+wrapping was actually fine -- only the *badge* text below them was
+splitting). Removed `.card`/`.card *`/`.panel`/`.panel *` from that rule,
+added a targeted rule forcing normal word wrapping on card/panel
+headings and `.status-badge`, and let the card head row itself
+`flex-wrap` so a badge that doesn't fit drops to its own line instead of
+being crushed into a mid-word split. Table headers (`th`) had the same
+generic rule and produced the same bug on narrow columns (confirmed live:
+"HEALTH" -> "HEA"/"LTH" in the Blocklists table header) -- given their
+own `white-space: nowrap; text-overflow: ellipsis` treatment instead.
+Also widened the Dashboard System Health grid's minimum card width
+(190px -> 210px via a new `.grid.health` class).
+
+### 7. Shared compact visual standards
+
+Added reusable primitives in `app.css`/`components.html`/`app.js`:
+`.table-compact` (reduced padding/row height, including a rule that keeps
+Edit+overflow-menu-trigger on one line instead of wrapping to two, which
+was the single largest remaining source of excess row height after the
+Local DNS edit-row fix), `.category-badge`, `.overflow-menu` (event-
+delegated open/close/outside-click/Escape, `role="menu"`/`menuitem`), and
+the `data-row-edit-toggle` pattern -- all reused across Local DNS, DNS
+Settings, and Blocklists rather than three separate implementations.
+
+### Verification
+
+- `python3 -m unittest discover -s tests -p "test_*.py"`: 190 tests, all
+  pass (includes two new modules: `tests/test_service_logs.py`,
+  `tests/test_blocklist_categories.py`).
+- `sh tests/test_web_smoke.sh`: passed, including new assertions for the
+  sidebar-collapse/table-compact/overflow-menu CSS+JS hooks, a regression
+  guard against the `.card */.panel *` selector reappearing, rendered-
+  content checks for the category dropdown/management panel, the reverse-
+  record badge, the DNS Settings overflow menu, and Recent Logs' friendly
+  empty state (plus an assertion `webapp.py` never calls `journalctl`
+  directly).
+- `sh tests/test_install_upgrade_diagnostics.sh`: passed, including new
+  assertions that both the fresh-install and upgrade dry-run plans
+  install `packaging/sudoers-alderpointdns`, that the file's log-access
+  entries are the exact 4 allowlisted units (no wildcards), and that
+  `visudo -cf` accepts it.
+- `sh tests/test_beta_hardening_docs.sh`: passed.
+- Full `sh tests/test_acceptance.sh`: exit code 0, ends with "Alderpoint
+  DNS acceptance suite passed" (the BIND `allow-proxy` experimental-
+  option notices and the invalid-RPZ/forced-post-deploy tracebacks are
+  the suite's own expected negative-path tests).
+- Service restart cycle: `systemctl restart named dnsdist alderpointdns
+  alderpointdns-analytics` -- all four `active` afterward.
+- DNS checks after restart: plain query resolves (`example.com` via
+  `127.0.0.1:5353`), local DNS resolves (`adguard.mylan.network` ->
+  `172.16.43.9`), reverse DNS resolves (`172.16.43.9` -> PTR), filtering
+  confirmed (`doubleclick.net` -> `NXDOMAIN` through the real client
+  frontend on port 53), encrypted listeners confirmed bound on `:443`/
+  `:853` (both IPv4 and IPv6).
+- Fresh backup: `scripts/backup.sh` run manually post-restart, exit 0, no
+  tar warning; extracted snapshot's `PRAGMA integrity_check` = `ok`. This
+  file was left in place (a real, valid backup, not test scratch).
+- Visual verification: logged in as a temporary admin account (created
+  for this purpose, deleted afterward -- only the original `admin`
+  account remains), fetched each changed page's authenticated HTML,
+  screenshotted with headless `chromium --screenshot` at 1440x900
+  (desktop), 834x1112 (tablet), and 390x844 (mobile) for Dashboard, Local
+  DNS, DNS Settings, Blocklists, and System Status, plus an isolated
+  System-Health-fragment screenshot confirming no word ever splits mid-
+  character at any width. Screenshots are in the session scratchpad
+  (`/tmp/.../scratchpad/shots/`), not committed to the repo. This process
+  caught two real layout bugs neither the CSS-substring test nor a code
+  read would have surfaced (both fixed and reverified before committing):
+  the Actions-column button-wrap row-height regression in Local DNS/
+  Blocklists, and the `th` mid-word split / header-overlap on Blocklists'
+  "Health" column.
+- Commit self-containment: each of the first 5 commits was checked out
+  into an isolated `git worktree` and `import app.webapp` (plus, for the
+  Recent Logs commit, the new unit test module) verified to succeed
+  standalone -- catching and fixing (via a targeted `git update-index` +
+  `commit --amend`, safe here since none of this was pushed anywhere) one
+  real mistake where the Blocklists commit's import-line hunk had pulled
+  in an unrelated `service_logs` import that didn't exist as a file until
+  the next commit.
+
+### Side notes (not milestone bugs, disclosed for transparency)
+
+- While cleaning up the temporary screenshot-verification admin account,
+  a stray SQL statement (`DELETE FROM login_attempts WHERE ip NOT IN
+  (... LIMIT 0)`) unintentionally cleared the `login_attempts` table
+  (used only for the 15-minute failed-login rate-limit window). No
+  functional impact -- no real admin data, DNS records, config,
+  certificates, or backups were affected -- but noted here rather than
+  silently left out.
+- The `sudo: unable to resolve host bindguard-1: ...` stderr warning seen
+  on every sudo call on this VM is a pre-existing `/etc/hosts` leftover
+  from the BindGuard->Alderpoint rename (the hostname is still literally
+  `bindguard-1`, but `/etc/hosts` only maps `alderpointdns-1...`). Out of
+  scope for this milestone; worked around (not fixed) in the new Recent
+  Logs code by not relying on merged stdout/stderr.
+- `packaging/sudoers-alderpointdns` was installed onto this VM's real
+  `/etc/sudoers.d/alderpointdns` (via the same `install -D -m 0440` +
+  `visudo -cf` the installer/upgrade scripts already run) to verify the
+  Recent Logs feature end-to-end as the real `bindguard` user. This is
+  the expected steady-state file content going forward, not a one-off.
+
+Remaining for the human operator: reboot the VM and follow
+`POST_REBOOT_HANDOFF.md`.
