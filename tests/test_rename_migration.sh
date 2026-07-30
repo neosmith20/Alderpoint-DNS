@@ -84,4 +84,36 @@ test -f "$TESTROOT/var/log/alderpointdns/named.log" || { echo "log directory was
 test -f "$TESTROOT/etc/systemd/system/alderpointdns.service" || { echo "new systemd unit was not installed" >&2; exit 1; }
 
 echo "legacy install correctly migrated to Alderpoint DNS paths"
+
+echo "== self-referential --source (new source tree == legacy install dir) survives the move =="
+TESTROOT2="$(mktemp -d /tmp/alderpointdns-rename-migration-selfref-test.XXXXXX)"
+mkdir -p "$TESTROOT2/opt/bindguard/app" "$TESTROOT2/opt/bindguard/scripts" "$TESTROOT2/opt/bindguard/packaging"
+echo "legacy webapp placeholder" > "$TESTROOT2/opt/bindguard/app/webapp.py"
+printf '#!/bin/sh\necho fake-legacy-backup\n' > "$TESTROOT2/opt/bindguard/scripts/backup.sh"
+chmod +x "$TESTROOT2/opt/bindguard/scripts/backup.sh"
+cp "$ROOT_DIR/packaging/alderpointdns.service" "$ROOT_DIR/packaging/alderpointdns-analytics.service" \
+  "$ROOT_DIR/packaging/alderpointdns-backup.service" "$ROOT_DIR/packaging/alderpointdns-backup.timer" \
+  "$ROOT_DIR/packaging/sudoers-alderpointdns" "$TESTROOT2/opt/bindguard/packaging/"
+
+ALDERPOINTDNS_INSTALL_ROOT="$TESTROOT2" "$ROOT_DIR/scripts/upgrade.sh" \
+  --source "$TESTROOT2/opt/bindguard" --skip-service-restart > "$TESTROOT2/upgrade.out" 2>&1 || {
+  echo "self-referential-source legacy migration failed:" >&2
+  cat "$TESTROOT2/upgrade.out" >&2
+  rm -rf "$TESTROOT2"
+  exit 1
+}
+grep -q "staged upgrade source to" "$TESTROOT2/upgrade.out" || {
+  echo "upgrade.sh did not stage the source tree before moving it out from under itself" >&2
+  cat "$TESTROOT2/upgrade.out" >&2
+  rm -rf "$TESTROOT2"
+  exit 1
+}
+test -f "$TESTROOT2/opt/alderpointdns/app/webapp.py" || {
+  echo "self-referential-source migration lost the application source" >&2
+  rm -rf "$TESTROOT2"
+  exit 1
+}
+rm -rf "$TESTROOT2"
+echo "self-referential --source case handled correctly"
+
 echo "rename migration tests passed"

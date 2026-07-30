@@ -101,6 +101,22 @@ legacy_install_present() {
 migrate_legacy_layout() {
   echo "legacy BindGuard installation detected at $(root_path /opt/bindguard); migrating to Alderpoint DNS paths"
 
+  # If the new-source tree we're about to install from is inside the legacy
+  # directory we're about to move out from under ourselves (e.g. an
+  # in-place git checkout used as both the running legacy install and the
+  # new release), SOURCE_DIR would silently stop existing the moment that
+  # mv happens below, breaking replace_application/install_units later in
+  # this script. Stage a plain copy outside the legacy tree first so
+  # SOURCE_DIR keeps resolving no matter what gets moved.
+  case "$SOURCE_DIR" in
+    "$(root_path /opt/bindguard)"|"$(root_path /opt/bindguard)"/*)
+      staged_source="$(mktemp -d /tmp/alderpointdns-upgrade-source.XXXXXX)"
+      run cp -a "$SOURCE_DIR/." "$staged_source/"
+      echo "staged upgrade source to $staged_source before moving the legacy installation directory"
+      SOURCE_DIR="$staged_source"
+      ;;
+  esac
+
   if [ -x "$(root_path /opt/bindguard/scripts/backup.sh)" ] && [ "$ROOT" = "/" ]; then
     run "$(root_path /opt/bindguard/scripts/backup.sh)"
   else
