@@ -110,7 +110,11 @@ def init_db(conn: sqlite3.Connection | None = None) -> None:
     try:
         if close:
             db.execute("PRAGMA journal_mode=WAL")
-        db.executescript(
+        # Individual execute() calls, not executescript(): executescript issues
+        # an implicit COMMIT first, which would silently break callers (the
+        # importer's transactional apply) that hold an open transaction while
+        # calling add_rule(conn=...).
+        db.execute(
             """
             CREATE TABLE IF NOT EXISTS custom_filter_rules (
                 id INTEGER PRIMARY KEY,
@@ -133,11 +137,11 @@ def init_db(conn: sqlite3.Connection | None = None) -> None:
                 comment TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_custom_filter_rules_domain ON custom_filter_rules(domain);
-            CREATE INDEX IF NOT EXISTS idx_custom_filter_rules_enabled ON custom_filter_rules(enabled);
+            )
             """
         )
+        db.execute("CREATE INDEX IF NOT EXISTS idx_custom_filter_rules_domain ON custom_filter_rules(domain)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_custom_filter_rules_enabled ON custom_filter_rules(enabled)")
         _migrate_legacy_rules(db)
         if close:
             db.commit()

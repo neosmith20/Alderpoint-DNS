@@ -1680,7 +1680,7 @@ def import_job_preview(request: Request, job_id: int = PathParam(..., gt=0), _: 
             "pihole": "Pi-hole Migration Preview",
             "alderpointdns_json": "Alderpoint DNS Native Import Preview",
         }.get(job["source_type"], "Migration Preview")
-        return render(request, "import_migration.html", error=None, jobs=importer.list_jobs(), job=None, preview=None, adguard=result["translation"], adguard_json=json.dumps(result["translation"]), migration_summary=result["summary"], migration_title=title, source_path=job["source_path"], migration_job_id=job_id)
+        return render(request, "import_migration.html", error=None, jobs=importer.list_jobs(), job=None, preview=None, adguard=result["translation"], migration_summary=result["summary"], migration_title=title, source_path=job["source_path"], migration_job_id=job_id)
     return import_job_page(request, job_id, _)
 
 
@@ -1700,18 +1700,38 @@ async def import_job_remap(request: Request, job_id: int = PathParam(..., gt=0),
 async def import_job_apply(request: Request, job_id: int = PathParam(..., gt=0), _: sqlite3.Row = Depends(current_admin)):
     form = await request.form()
     check_csrf(request, str(form.get("csrf", "")))
+    is_migration = False
     try:
         job = importer.get_job(job_id)
         if not job:
             raise importer.ImportError_(f"import job {job_id} not found")
-        if importer.is_migration_source(job["source_type"]):
-            groups = {key[len("group_"):] for key in form.keys() if key.startswith("group_")}
-            importer.apply_migration_job(job_id, groups)
+        is_migration = importer.is_migration_source(job["source_type"])
+        if is_migration:
+            # The preview form posts one `sel` value per checked item key
+            # (`category:index`) plus an `itemized` marker so an empty
+            # selection is distinguishable from a keyless (apply-defaults)
+            # request.
+            selected = set(form.getlist("sel")) if "itemized" in form else None
+            importer.apply_migration_job(job_id, selected=selected)
         else:
             default_policy = str(form.get("default_policy", "skip"))
             importer.apply_job(job_id, default_policy=default_policy)
-        deploy_no_download()
     except Exception as exc:
+        return import_error(request, str(exc))
+    try:
+        deploy_no_download_or_raise()
+    except Exception as exc:
+        if is_migration:
+            # The database writes stay (deploy() already rolled the compiled
+            # config back to the previous good state); record the outcome so
+            # the operator can roll the database back or retry.
+            importer.mark_job_deploy_failed(job_id, str(exc))
+            return import_error(
+                request,
+                f"The import was applied to the database, but deployment failed: {exc} "
+                "The previously deployed configuration remains active. "
+                "Use \"Roll back this import\" to revert the imported data, or retry the deployment.",
+            )
         return import_error(request, str(exc))
     return redirect(f"/import/jobs/{job_id}")
 
@@ -1721,7 +1741,7 @@ def import_job_rollback(request: Request, job_id: int = PathParam(..., gt=0), cs
     check_csrf(request, csrf)
     try:
         importer.rollback_job(job_id)
-        deploy_no_download()
+        deploy_no_download_or_raise()
     except Exception as exc:
         return import_error(request, str(exc))
     return redirect(f"/import/jobs/{job_id}")
@@ -1742,7 +1762,11 @@ def import_job_report(job_id: int = PathParam(..., gt=0), _: sqlite3.Row = Depen
     job = importer.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="import job not found")
-    return PlainTextResponse(job["report_json"], media_type="application/json")
+    return PlainTextResponse(
+        importer.job_report(job),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="import-job-{job_id}-report.json"'},
+    )
 
 
 @app.post("/import/migration/adguard/yaml")
@@ -1768,7 +1792,10 @@ def import_adguard_api(request: Request, csrf: str = Form(...), base_url: str = 
     check_csrf(request, csrf)
     try:
         translation = importer.fetch_adguard_api(base_url, username, password)
-        job_id = importer.create_migration_job("adguard_api", base_url, translation)
+        # Only the sanitized base URL (scheme + host + port, no userinfo or
+        # query string) is ever stored on the job row; the credentials are
+        # used solely for the fetch above.
+        job_id = importer.create_migration_job("adguard_api", importer.sanitize_adguard_base_url(base_url), translation)
         importer.migration_preview_job(job_id)
     except Exception as exc:
         return import_error(request, str(exc))
