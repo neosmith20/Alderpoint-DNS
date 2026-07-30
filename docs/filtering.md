@@ -81,6 +81,13 @@ accepts only a conservative POSIX-ERE-compatible subset:
   (`\d`, `\w`, `\s`, `\b`, any alphanumeric escape), lookaround and every
   other `(?...)` group construct, backreferences (`\1`), non-greedy
   quantifiers (`*?`, `+?`, `??`, `{n,m}?`), and named groups
+- rejected as unsupported (kept, inactive, exact reason): a quantified atom
+  directly nested inside a quantified group (`(a+)+`, `(a*)*`, `(ab+)*`, ...).
+  dnsdist's own POSIX `regcomp` is a non-backtracking automaton and immune to
+  this, but the same stored pattern is also matched with Python's
+  backtracking `re` engine for the admin-facing "Test a domain" evaluation
+  panel (`evaluate_domain`), so it is rejected unconditionally rather than
+  only when reachable from that panel
 
 dnsdist matches the query name via `DNSName::toStringNoDot()` (no trailing
 dot) case-insensitively. To stay robust either way, the *deployed* copy of a

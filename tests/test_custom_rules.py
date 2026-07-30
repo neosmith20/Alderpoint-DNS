@@ -138,6 +138,39 @@ class ParserTests(CustomRulesTestBase):
             self.assertEqual(rule.validation_state, "unsupported", text)
             self.assertTrue(rule.unsupported_reason, text)
 
+    def test_nested_quantifier_redos_shapes_rejected_as_unsupported(self) -> None:
+        # These are valid POSIX ERE (no lookaround/backreferences/non-greedy)
+        # and would pass posix_ere_incompatibility, but a quantified atom
+        # directly inside a quantified group causes catastrophic
+        # backtracking in Python's `re` engine, which evaluate_domain() uses
+        # for the admin-facing "Test a domain" panel. dnsdist's own POSIX
+        # regcomp is a non-backtracking automaton and unaffected, but the
+        # same stored pattern must never be usable against Python's `re`.
+        cases = [
+            "/^(a+)+$/",
+            "/(a*)*b/",
+            "/(ab+)*c/",
+            "/(a+)*(a+)*b/",
+            "/^(.*)*$/",
+        ]
+        for text in cases:
+            rule = self.parse_one(text)
+            self.assertEqual(rule.validation_state, "unsupported", text)
+            self.assertIn("backtracking", rule.unsupported_reason, text)
+
+    def test_bounded_and_alternation_regex_stay_valid(self) -> None:
+        # Regression guard: the nested-quantifier check must not reject
+        # ordinary bounded repetition or alternation that happens to contain
+        # a group.
+        for text in (
+            "/[a-z0-9]{3,10}\\.example/",
+            "/(ads|tracking|metrics)\\.example/",
+            "/(abc){2,4}\\.example/",
+            "/^ads[0-9]+\\./",
+        ):
+            rule = self.parse_one(text)
+            self.assertEqual(rule.validation_state, "valid", text)
+
     def test_regex_limits_and_compile_failures(self) -> None:
         too_long = "/" + "a" * 600 + "/"
         self.assertEqual(self.parse_one(too_long).validation_state, "unsupported")

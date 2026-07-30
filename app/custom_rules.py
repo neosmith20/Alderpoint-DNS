@@ -257,6 +257,72 @@ def posix_ere_incompatibility(pattern: str) -> str | None:
     return None
 
 
+_QUANTIFIER_START = "*+{"
+
+
+def nested_quantifier_risk(pattern: str) -> str | None:
+    """Reject the classic catastrophic-backtracking shape: a quantified atom
+    directly inside a group that is itself quantified (`(a+)+`, `(a*)*`,
+    `(ab+)*`, ...). dnsdist's own POSIX regcomp is a non-backtracking
+    automaton and is not vulnerable to this, but the same stored pattern is
+    also matched with Python's backtracking `re.search` for the admin-facing
+    "Test a domain" evaluation panel (evaluate_domain -> _regex_matches), so
+    it must never be classified valid regardless of POSIX portability."""
+    i = 0
+    n = len(pattern)
+    stack = [False]  # one "has a quantified atom" flag per group nesting level
+    last_quantifiable = False
+    while i < n:
+        ch = pattern[i]
+        if ch == "\\":
+            i += 2
+            last_quantifiable = True
+            continue
+        if ch == "[":
+            end = _class_end(pattern, i)
+            if end is None:
+                return None  # unterminated class: posix_ere_incompatibility reports this
+            i = end + 1
+            last_quantifiable = True
+            continue
+        if ch == "(":
+            stack.append(False)
+            last_quantifiable = False
+            i += 1
+            continue
+        if ch == ")":
+            inner_risk = stack.pop() if len(stack) > 1 else False
+            i += 1
+            if i < n and pattern[i] in _QUANTIFIER_START and inner_risk:
+                return "pattern contains a quantified atom nested inside a quantified group (catastrophic backtracking risk, e.g. (a+)+)"
+            last_quantifiable = True
+            continue
+        if ch in "*+":
+            if last_quantifiable:
+                stack[-1] = True
+            last_quantifiable = False
+            i += 1
+            continue
+        if ch == "{":
+            end = pattern.find("}", i)
+            if end == -1:
+                last_quantifiable = False
+                i += 1
+                continue
+            if last_quantifiable:
+                stack[-1] = True
+            last_quantifiable = False
+            i = end + 1
+            continue
+        if ch in "|^$":
+            last_quantifiable = False
+            i += 1
+            continue
+        last_quantifiable = True
+        i += 1
+    return None
+
+
 def deployed_pattern(pattern: str) -> str:
     """The pattern actually written to the dnsdist data file. dnsdist's
     RegexRule matches the query name via DNSName::toStringNoDot() with
@@ -283,6 +349,9 @@ def _validate_regex(rule: ParsedRule) -> ParsedRule:
     except re.error as exc:
         return _unsupported(rule, f"regex does not compile: {exc}")
     reason = posix_ere_incompatibility(pattern)
+    if reason:
+        return _unsupported(rule, reason)
+    reason = nested_quantifier_risk(pattern)
     if reason:
         return _unsupported(rule, reason)
     return rule
