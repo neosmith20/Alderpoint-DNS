@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% import "components.html" as ui %}
-{% block title %}Encryption - BindGuard{% endblock %}
+{% block title %}Encryption - Alderpoint DNS{% endblock %}
 {% block content %}
 {{ ui.page_header("Encryption", "Encrypted DNS transports, TLS certificates, and client connection information.") }}
 
@@ -9,7 +9,7 @@
 {% endif %}
 
 <section class="grid">
-  <article class="card"><div class="card__head"><h2>Plain DNS</h2>{{ ui.status_badge("Always on", "healthy") }}</div><p class="muted">UDP/TCP port 53 is never disabled from this page, so BindGuard always has a working fallback transport.</p></article>
+  <article class="card"><div class="card__head"><h2>Plain DNS</h2>{{ ui.status_badge("Always on", "healthy") }}</div><p class="muted">UDP/TCP port 53 is never disabled from this page, so Alderpoint DNS always has a working fallback transport.</p></article>
   <article class="card"><div class="card__head"><h2>Last Deployment</h2>{% if deployment %}{{ ui.status_badge(deployment.status|title, "healthy" if deployment.status in ("deployed", "unchanged") else "down" if deployment.status in ("failed", "rollback_failed") else "neutral") }}{% endif %}</div>{% if deployment %}<p class="muted mono">{{ deployment.finished_at or deployment.started_at }}</p>{% endif %}</article>
   <article class="card"><div class="card__head"><h2>Certificate</h2>{% if cert.available %}{{ ui.status_badge("Expiring soon" if cert.expiring_soon else ("Expired" if cert.expired else "Valid"), "down" if cert.expired else ("warning" if cert.expiring_soon else "healthy")) }}{% else %}{{ ui.status_badge("Missing", "down") }}{% endif %}</div>{% if cert.available %}<p class="muted">{{ cert.days_remaining }} days remaining</p>{% endif %}</article>
 </section>
@@ -94,9 +94,9 @@
 
     <details {% if cfg.cert_mode == "local_ca" %}open{% endif %}>
       <summary>Local certificate authority</summary>
-      <form method="post" action="/encryption/certificate/local-ca" data-confirm="Issue a certificate from BindGuard's local CA (creating the CA first if needed) and deploy it?">
+      <form method="post" action="/encryption/certificate/local-ca" data-confirm="Issue a certificate from Alderpoint DNS's local CA (creating the CA first if needed) and deploy it?">
         <input type="hidden" name="csrf" value="{{ csrf }}">
-        <p class="muted">Creates (or reuses) a local BindGuard CA and issues a leaf certificate signed by it. Trust the CA certificate on clients to avoid browser/OS warnings.</p>
+        <p class="muted">Creates (or reuses) a local Alderpoint DNS CA and issues a leaf certificate signed by it. Trust the CA certificate on clients to avoid browser/OS warnings.</p>
         <div class="form-actions"><button class="secondary">Issue from local CA</button></div>
       </form>
     </details>
@@ -116,8 +116,8 @@
       <summary>Existing server-side paths</summary>
       <form method="post" action="/encryption/certificate/existing-path" data-confirm="Deploy the certificate and key at these existing server paths?">
         <input type="hidden" name="csrf" value="{{ csrf }}">
-        <label>Certificate path<input name="cert_path" value="{{ cfg.cert_path if cfg.cert_mode == 'existing_path' else '' }}" placeholder="/etc/bindguard/certs/custom.crt" required></label>
-        <label>Key path<input name="key_path" value="{{ cfg.key_path if cfg.cert_mode == 'existing_path' else '' }}" placeholder="/etc/bindguard/certs/custom.key" required></label>
+        <label>Certificate path<input name="cert_path" value="{{ cfg.cert_path if cfg.cert_mode == 'existing_path' else '' }}" placeholder="/etc/alderpointdns/certs/custom.crt" required></label>
+        <label>Key path<input name="key_path" value="{{ cfg.key_path if cfg.cert_mode == 'existing_path' else '' }}" placeholder="/etc/alderpointdns/certs/custom.key" required></label>
         <div class="form-actions"><button class="secondary">Use these paths</button></div>
       </form>
     </details>

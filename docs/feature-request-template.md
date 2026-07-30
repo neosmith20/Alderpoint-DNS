@@ -1,6 +1,6 @@
 # Feature Request Template
 
-- BindGuard version:
+- Alderpoint DNS version:
 - Problem to solve:
 - Proposed behavior:
 - Current workaround:

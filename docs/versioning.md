@@ -1,6 +1,6 @@
 # Versioning
 
-BindGuard uses semantic versioning:
+Alderpoint DNS uses semantic versioning:
 
 - `MAJOR`: incompatible data, configuration, or API changes.
 - `MINOR`: backward-compatible features.

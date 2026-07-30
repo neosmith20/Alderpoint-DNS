@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 {% import "components.html" as ui %}
-{% block title %}Import - BindGuard{% endblock %}
+{% block title %}Import - Alderpoint DNS{% endblock %}
 {% block content %}
-{{ ui.page_header("Import and Migration", "Migrate from AdGuard Home, Pi-hole, hosts files, BIND zones, CSV/XLSX, or a BindGuard-native JSON export.") }}
+{{ ui.page_header("Import and Migration", "Migrate from AdGuard Home, Pi-hole, hosts files, BIND zones, CSV/XLSX, or a Alderpoint DNS-native JSON export.") }}
 
 {% if error %}
   <div class="alert error" role="alert">{{ error }}</div>
@@ -17,28 +17,28 @@
 
 {% if not job and not adguard %}
 <section class="grid">
-  <form class="panel stack" method="post" action="/import/upload" enctype="multipart/form-data" data-confirm="Upload and parse this file? Nothing is applied to BindGuard yet.">
+  <form class="panel stack" method="post" action="/import/upload" enctype="multipart/form-data" data-confirm="Upload and parse this file? Nothing is applied to Alderpoint DNS yet.">
     <div class="panel__head"><h2>Spreadsheet / Text Import</h2></div>
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <label>Source type
       <select name="source_type">
         <option value="csv">CSV (arbitrary columns)</option>
-        <option value="bindguard_csv">BindGuard-exported CSV</option>
+        <option value="alderpointdns_csv">Alderpoint DNS-exported CSV</option>
         <option value="xlsx">XLSX</option>
         <option value="hosts">Hosts file</option>
         <option value="zone">BIND-style zone data</option>
         <option value="pihole">Pi-hole export/list text</option>
-        <option value="bindguard_json">BindGuard-native JSON</option>
+        <option value="alderpointdns_json">Alderpoint DNS-native JSON</option>
       </select>
     </label>
     <label>Default domain (for hosts/zone files, and bare hostnames)
       <input name="default_domain" placeholder="home.arpa" autocomplete="off">
     </label>
     <label>File<input type="file" name="upload" required></label>
-    <p class="muted">Parsing never modifies BindGuard's live configuration. You will review a preview and choose how to resolve conflicts before anything is applied.</p>
+    <p class="muted">Parsing never modifies Alderpoint DNS's live configuration. You will review a preview and choose how to resolve conflicts before anything is applied.</p>
     <div class="form-actions">
       <button>Upload and preview</button>
-      <a class="button secondary" href="/import/export/bindguard.json">Export BindGuard JSON</a>
+      <a class="button secondary" href="/import/export/alderpointdns.json">Export Alderpoint DNS JSON</a>
     </div>
   </form>
 
@@ -49,7 +49,7 @@
       <label>AdGuardHome.yaml<input type="file" name="upload" required></label>
       <div class="form-actions"><button class="secondary">Upload and preview</button></div>
     </form>
-    <form method="post" action="/import/adguard/api" data-confirm="Connect to this AdGuard Home instance and read its configuration? No changes are made to AdGuard Home; BindGuard only reads.">
+    <form method="post" action="/import/adguard/api" data-confirm="Connect to this AdGuard Home instance and read its configuration? No changes are made to AdGuard Home; Alderpoint DNS only reads.">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <label>AdGuard Home base URL<input name="base_url" placeholder="http://192.168.1.2:3000" required></label>
       <label>Username<input name="username" autocomplete="off" required></label>
@@ -167,7 +167,7 @@
     <p>{{ job.message }}</p>
     <div class="form-actions">
       <a class="button secondary" href="/import/{{ job.id }}/report">Download report</a>
-      <form method="post" action="/import/{{ job.id }}/rollback" data-confirm="Roll back this import? Records it added will be removed and BindGuard redeployed.">
+      <form method="post" action="/import/{{ job.id }}/rollback" data-confirm="Roll back this import? Records it added will be removed and Alderpoint DNS redeployed.">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <button class="secondary">Roll back this import</button>
       </form>
@@ -185,9 +185,9 @@
     <div class="alert error" role="alert">Some AdGuard API endpoints could not be reached: {{ adguard.fetch_errors }}</div>
   {% endif %}
   {% if source_path %}
-    <p class="muted">Original source staged for troubleshooting: <span class="mono wrap-anywhere">{{ source_path }}</span>. Staged uploads are retained under BindGuard's import staging directory and can be pruned after troubleshooting.</p>
+    <p class="muted">Original source staged for troubleshooting: <span class="mono wrap-anywhere">{{ source_path }}</span>. Staged uploads are retained under Alderpoint DNS's import staging directory and can be pruned after troubleshooting.</p>
   {% endif %}
-  <form method="post" action="/import/migration/apply" data-confirm="Apply the selected groups to BindGuard? This deploys through the normal validated path.">
+  <form method="post" action="/import/migration/apply" data-confirm="Apply the selected groups to Alderpoint DNS? This deploys through the normal validated path.">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <input type="hidden" name="translation_json" value='{{ adguard_json }}'>
     <div class="grid compact">
@@ -226,14 +226,14 @@
   {% endif %}
 
   {% if adguard.allowlist_unsupported %}
-    <div class="alert error" role="alert">Allowlist subscriptions cannot be automatically translated (BindGuard has no allowlist-subscription object): {% for a in adguard.allowlist_unsupported %}{{ a.name }} ({{ a.url }}){% if not loop.last %}, {% endif %}{% endfor %}</div>
+    <div class="alert error" role="alert">Allowlist subscriptions cannot be automatically translated (Alderpoint DNS has no allowlist-subscription object): {% for a in adguard.allowlist_unsupported %}{{ a.name }} ({{ a.url }}){% if not loop.last %}, {% endif %}{% endfor %}</div>
   {% endif %}
   {% if adguard.unsupported_rules %}
-    <div class="alert error" role="alert">{{ adguard.unsupported_rules|length }} custom rule(s) use syntax BindGuard cannot translate (regex/modifiers/cosmetic rules): <span class="mono wrap-anywhere">{{ adguard.unsupported_rules|join(", ") }}</span></div>
+    <div class="alert error" role="alert">{{ adguard.unsupported_rules|length }} custom rule(s) use syntax Alderpoint DNS cannot translate (regex/modifiers/cosmetic rules): <span class="mono wrap-anywhere">{{ adguard.unsupported_rules|join(", ") }}</span></div>
   {% endif %}
   {% if adguard.untranslatable %}
     <div class="panel stack">
-      <div class="panel__head"><h2>Settings With No BindGuard Equivalent</h2></div>
+      <div class="panel__head"><h2>Settings With No Alderpoint DNS Equivalent</h2></div>
       <ul>
         {% for note in adguard.untranslatable %}<li class="wrap-anywhere">{{ note }}</li>{% endfor %}
       </ul>

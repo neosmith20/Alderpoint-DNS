@@ -1,6 +1,6 @@
 # Bug Report Template
 
-- BindGuard version:
+- Alderpoint DNS version:
 - Installation method:
 - Operating system:
 - Hardware/VM details:

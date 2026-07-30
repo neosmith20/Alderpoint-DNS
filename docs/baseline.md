@@ -1,10 +1,10 @@
-# BindGuard VM baseline
+# Alderpoint DNS VM baseline
 
 Captured: 2026-07-28 (America/Denver)
 
 ## Platform
 
-- Hostname: `bindguard-1`
+- Hostname: `alderpointdns-1`
 - OS: Debian GNU/Linux 13.6 (trixie)
 - Kernel: `6.12.96+deb13-amd64`
 - Architecture: x86_64 KVM virtual machine
@@ -40,10 +40,10 @@ and explicitly uses:
 - `1.1.1.2`
 - `1.0.0.2`
 
-This is the management resolution path and is independent from BindGuard's BIND
+This is the management resolution path and is independent from Alderpoint DNS's BIND
 and dnsdist services. `getent ahosts debian.org` succeeded through this path.
 Fallback maintenance resolvers will be recorded as `4.2.2.1` and `4.2.2.2`.
-BindGuard download code must use the host resolver and must never rewrite
+Alderpoint DNS download code must use the host resolver and must never rewrite
 `/etc/resolv.conf` to point at the client-facing service.
 
 ## Security controls
@@ -51,7 +51,7 @@ BindGuard download code must use the host resolver and must never rewrite
 - AppArmor: loaded and active; 105 profiles loaded at capture.
 - nftables: no rules were printed (empty ruleset).
 - UFW: not installed.
-- No BindGuard ports were exposed.
+- No Alderpoint DNS ports were exposed.
 
 ## Package capabilities at capture
 

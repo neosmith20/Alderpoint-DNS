@@ -1,6 +1,6 @@
 # dnsdist frontend
 
-BindGuard uses dnsdist as the only client-facing DNS frontend.
+Alderpoint DNS uses dnsdist as the only client-facing DNS frontend.
 
 Current lab configuration:
 
@@ -15,12 +15,12 @@ Current lab configuration:
 - dnsdist web/API: `127.0.0.1:8083`, random local credentials
 - dnsdist console: `127.0.0.1:5199`, random local key
 
-Set `BINDGUARD_DNS_ALLOW_ALL=1` in the dnsdist service environment to allow
-queries from all IPv4 and IPv6 clients. BindGuard expects pfSense VLAN and
+Set `ALDERPOINTDNS_DNS_ALLOW_ALL=1` in the dnsdist service environment to allow
+queries from all IPv4 and IPv6 clients. Alderpoint DNS expects pfSense VLAN and
 firewall rules to be the network exposure boundary.
 
-Encryption Settings writes `BINDGUARD_DNS_LISTEN_IPV4` and
-`BINDGUARD_DNS_LISTEN_IPV6` into the dnsdist systemd override. The defaults
+Encryption Settings writes `ALDERPOINTDNS_DNS_LISTEN_IPV4` and
+`ALDERPOINTDNS_DNS_LISTEN_IPV6` into the dnsdist systemd override. The defaults
 are `0.0.0.0` and `::`; blanking either family disables listeners for that
 family, and at least one family must remain configured.
 
@@ -33,5 +33,5 @@ Validation commands:
 ```sh
 dnsdist --check-config -C /etc/dnsdist/dnsdist.conf
 systemctl status dnsdist --no-pager
-/opt/bindguard/tests/test_dnsdist_frontend.sh
+/opt/alderpointdns/tests/test_dnsdist_frontend.sh
 ```

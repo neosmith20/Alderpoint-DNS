@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% import "components.html" as ui %}
-{% block title %}Cache - BindGuard{% endblock %}
+{% block title %}Cache - Alderpoint DNS{% endblock %}
 {% block content %}
 {{ ui.page_header("Cache", "BIND recursive-cache tuning, flush controls, and effectiveness.") }}
 
@@ -127,7 +127,7 @@
     <p class="muted mono">{{ deployment.finished_at or deployment.started_at }}</p>
     <p>{{ deployment.message }}</p>
   {% else %}
-    {{ ui.empty_state("No cache deployment recorded yet", "Cache settings deploy automatically the next time BindGuard applies a configuration change.") }}
+    {{ ui.empty_state("No cache deployment recorded yet", "Cache settings deploy automatically the next time Alderpoint DNS applies a configuration change.") }}
   {% endif %}
 </section>
 

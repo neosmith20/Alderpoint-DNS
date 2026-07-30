@@ -11,7 +11,7 @@ Highlights:
 - Per-upstream resolver analytics from dnsdist backend counters.
 - Client-facing encrypted DNS listener controls.
 - Expanded import and migration for AdGuard Home, Pi-hole text/list exports,
-  BIND zones, hosts files, CSV/XLSX, and BindGuard-native JSON.
+  BIND zones, hosts files, CSV/XLSX, and Alderpoint DNS-native JSON.
 - Fresh-install, upgrade, diagnostics, and local test `.deb` tooling.
 - BIND cache management with TTL, size, recursive-client, prefetch,
   serve-stale, and flush controls.
@@ -19,7 +19,7 @@ Highlights:
 Known release caveats:
 
 - Admin UI HTTPS is not implemented yet; use private networks or a trusted
-  reverse proxy and enable `BINDGUARD_COOKIE_SECURE=1` when served over HTTPS.
+  reverse proxy and enable `ALDERPOINTDNS_COOKIE_SECURE=1` when served over HTTPS.
 - Pi-hole import targets practical text/list data, not Pi-hole's live gravity
   database internals.
 - AdGuard domain-specific upstream routing is reported as unsupported.

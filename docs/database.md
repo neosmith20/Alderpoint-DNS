@@ -1,7 +1,7 @@
 # Database
 
-BindGuard stores configuration, compiler state, and analytics in
-`/var/lib/bindguard/bindguard.db` using SQLite WAL mode.
+Alderpoint DNS stores configuration, compiler state, and analytics in
+`/var/lib/alderpointdns/alderpointdns.db` using SQLite WAL mode.
 
 Analytics tables:
 
@@ -51,7 +51,7 @@ Upstream resolver tables:
   deployment history for the generated BIND forwarder include and dnsdist
   upstream-forwarder include.
 - `upstream_resolver_aggregate_buckets`: one-minute per-resolver analytics
-  snapshots from dnsdist's `bindguard_upstreams` backend counters, including
+  snapshots from dnsdist's `alderpointdns_upstreams` backend counters, including
   resolver name/protocol/endpoint snapshots, enabled and health state, queries
   attempted, successful responses, failures, timeouts, latency aggregates, and
   last success/failure timestamps. Historical rows intentionally do not depend
@@ -73,13 +73,13 @@ Encryption tables:
 Import table:
 
 - `import_jobs`: one row per row-oriented upload (CSV/XLSX/hosts/BIND-zone/
-  BindGuard CSV), storing raw parsed rows, the sanitized staged source path,
+  Alderpoint DNS CSV), storing raw parsed rows, the sanitized staged source path,
   the column mapping, preview counts, the list of inserted `local_dns_records`
   IDs (used by rollback), a downloadable JSON report, and status
   (`uploaded`/`previewed`/`applied`/`rolled_back`/`failed`). Migration-style
-  imports such as AdGuard Home, Pi-hole, and BindGuard-native JSON are
+  imports such as AdGuard Home, Pi-hole, and Alderpoint DNS-native JSON are
   previewed as structured translations before apply; their original upload is
-  staged under `/var/lib/bindguard/imports` for troubleshooting.
+  staged under `/var/lib/alderpointdns/imports` for troubleshooting.
 
 Backup tables:
 

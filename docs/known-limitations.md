@@ -3,8 +3,8 @@
 - The management UI and DNS listeners intentionally bind to VM interfaces.
   pfSense VLAN/firewall rules must restrict who can reach them.
 - The automatically generated self-signed certificate is not publicly trusted.
-  Replace `/etc/bindguard/certs/bindguard-lab.crt` and
-  `/etc/bindguard/certs/bindguard-lab.key` together when production TLS
+  Replace `/etc/alderpointdns/certs/alderpointdns-lab.crt` and
+  `/etc/alderpointdns/certs/alderpointdns-lab.key` together when production TLS
   material is available.
 - Per-network policy profiles and SafeSearch enforcement are modeled but not
   fully enforced at runtime yet.

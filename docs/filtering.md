@@ -1,10 +1,10 @@
 # Filtering and RPZ deployment
 
-BindGuard v1 filtering is implemented by `app/bindguard_compiler.py`.
+Alderpoint DNS v1 filtering is implemented by `app/alderpointdns_compiler.py`.
 
 Current capabilities:
 
-- SQLite state at `/var/lib/bindguard/bindguard.db`
+- SQLite state at `/var/lib/alderpointdns/alderpointdns.db`
 - Public source tracking with per-source parse statistics and last errors
 - A curated 19-source public blocklist catalog seeded with `seed-public`,
   spanning AdGuard-hosted assets and GitHub raw URLs
@@ -19,9 +19,9 @@ Current capabilities:
   counts
 - Custom allow and block rules
 - Custom allow precedence over all block rules
-- Generated RPZ at `/var/lib/bindguard/compiled/bind/bindguard.rpz`
+- Generated RPZ at `/var/lib/alderpointdns/compiled/bind/alderpointdns.rpz`
 - `named-checkzone` and `named-checkconf` validation before deploy
-- Atomic RPZ replacement, `rndc reload bindguard.rpz`, post-deploy DNS tests,
+- Atomic RPZ replacement, `rndc reload alderpointdns.rpz`, post-deploy DNS tests,
   and rollback to the previous RPZ on failure
 - Download-only updates with `update-sources`, used for maintenance-resolution
   testing while DNS services are stopped
@@ -29,24 +29,24 @@ Current capabilities:
 Seed the lab source and deploy:
 
 ```sh
-/opt/bindguard/app/bindguard_compiler.py init-db
-/opt/bindguard/app/bindguard_compiler.py seed-lab
-/opt/bindguard/app/bindguard_compiler.py deploy
-/opt/bindguard/app/bindguard_compiler.py update-sources
+/opt/alderpointdns/app/alderpointdns_compiler.py init-db
+/opt/alderpointdns/app/alderpointdns_compiler.py seed-lab
+/opt/alderpointdns/app/alderpointdns_compiler.py deploy
+/opt/alderpointdns/app/alderpointdns_compiler.py update-sources
 ```
 
 Refresh one source without touching the other configured sources:
 
 ```sh
-/opt/bindguard/app/bindguard_compiler.py update-source 1
+/opt/alderpointdns/app/alderpointdns_compiler.py update-source 1
 ```
 
 Seed the larger public catalog when operationally ready:
 
 ```sh
-/opt/bindguard/app/bindguard_compiler.py seed-public
-/opt/bindguard/app/bindguard_compiler.py update-sources
-/opt/bindguard/app/bindguard_compiler.py deploy
+/opt/alderpointdns/app/alderpointdns_compiler.py seed-public
+/opt/alderpointdns/app/alderpointdns_compiler.py update-sources
+/opt/alderpointdns/app/alderpointdns_compiler.py deploy
 ```
 
 Use `seed-public --disabled` to load the catalog metadata without enabling the
@@ -55,8 +55,8 @@ sources immediately.
 Run tests:
 
 ```sh
-/opt/bindguard/tests/test_blocklist_deploy.sh
-/opt/bindguard/tests/test_blocklist_failure_paths.sh
+/opt/alderpointdns/tests/test_blocklist_deploy.sh
+/opt/alderpointdns/tests/test_blocklist_failure_paths.sh
 ```
 
 Unsupported AdGuard syntax such as regex rules, modifiers, cosmetic rules, and

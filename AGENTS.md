@@ -1,27 +1,27 @@
-# BindGuard Agent Instructions
+# Alderpoint DNS Agent Instructions
 
-These instructions are binding for all BindGuard work in this repository and
-on this isolated BindGuard VM.
+These instructions are binding for all Alderpoint DNS work in this repository and
+on this isolated Alderpoint DNS VM.
 
 ## Scope
 
-BindGuard consists of all application code, databases, documentation, generated
+Alderpoint DNS consists of all application code, databases, documentation, generated
 configuration, systemd units, dedicated users, package dependencies, tests,
 BIND configuration, dnsdist configuration, TLS certificates, backups, and
 project-owned files on this isolated VM.
 
 ## Standing Authorization
 
-Within the BindGuard VM and BindGuard project, the user has already authorized:
+Within the Alderpoint DNS VM and Alderpoint DNS project, the user has already authorized:
 
-- Reading, creating, editing, moving, and deleting BindGuard-owned files.
+- Reading, creating, editing, moving, and deleting Alderpoint DNS-owned files.
 - Installing, upgrading, downgrading, and removing required packages.
-- Adding reputable package repositories required by BindGuard.
+- Adding reputable package repositories required by Alderpoint DNS.
 - Creating system users, groups, directories, ACLs, capabilities, and narrowly
   scoped sudo rules.
-- Starting, stopping, restarting, reloading, enabling, and disabling BindGuard,
-  BIND, dnsdist, and BindGuard-owned supporting services.
-- Rebooting the BindGuard VM when testing requires it.
+- Starting, stopping, restarting, reloading, enabling, and disabling Alderpoint DNS,
+  BIND, dnsdist, and Alderpoint DNS-owned supporting services.
+- Rebooting the Alderpoint DNS VM when testing requires it.
 - Creating databases and running schema migrations.
 - Generating temporary self-signed certificates and local certificate
   authorities.
@@ -40,7 +40,7 @@ Only ask the user when an action:
 - Requires a credential, private key, public hostname, or external service
   account that is not available.
 - Would destroy unrelated user data.
-- Would expose BindGuard publicly or change production network routing.
+- Would expose Alderpoint DNS publicly or change production network routing.
 - Requires a subjective user decision that cannot safely remain configurable.
 
 Missing optional deployment values are not blockers. Add settings,

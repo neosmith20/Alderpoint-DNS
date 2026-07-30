@@ -5,32 +5,32 @@ The repository contains an initial Debian packaging scaffold in
 
 Package contents:
 
-- `/opt/bindguard`: application code, templates, static assets, scripts, tests,
+- `/opt/alderpointdns`: application code, templates, static assets, scripts, tests,
   docs, and version metadata
-- `/usr/sbin/bindguard-diagnostics`: diagnostics command
-- `/lib/systemd/system`: BindGuard service and timer units
-- `/etc/sudoers.d/bindguard`: narrow sudo allowlist used by privileged deploy
+- `/usr/sbin/alderpointdns-diagnostics`: diagnostics command
+- `/lib/systemd/system`: Alderpoint DNS service and timer units
+- `/etc/sudoers.d/alderpointdns`: narrow sudo allowlist used by privileged deploy
   operations
 
 Maintainer scripts:
 
-- `postinst`: creates the `bindguard` user/group, creates persistent
+- `postinst`: creates the `alderpointdns` user/group, creates persistent
   directories, initializes local secrets when missing, initializes the database,
   and reloads systemd.
-- `prerm`: stops BindGuard-owned services/timers on remove.
+- `prerm`: stops Alderpoint DNS-owned services/timers on remove.
 - `postrm remove`: prints where persistent data remains.
-- `postrm purge`: removes `/etc/bindguard`, `/var/lib/bindguard`, and
-  `/var/log/bindguard`.
+- `postrm purge`: removes `/etc/alderpointdns`, `/var/lib/alderpointdns`, and
+  `/var/log/alderpointdns`.
 
 A normal uninstall must not destroy persistent data. Only `apt purge
-bindguard` is allowed to remove configuration, database, generated DNS files,
+alderpointdns` is allowed to remove configuration, database, generated DNS files,
 backups, import staging, and logs.
 
 Local test package build:
 
 ```sh
 ./scripts/build-deb.sh --output-dir /tmp
-dpkg-deb --info /tmp/bindguard_0.4.0-beta.1_all.deb
+dpkg-deb --info /tmp/alderpointdns_0.4.0-beta.1_all.deb
 ```
 
 This lightweight `dpkg-deb` path validates package contents without requiring

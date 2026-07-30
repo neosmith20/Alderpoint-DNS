@@ -8,7 +8,7 @@ Reviewed areas:
   setup is only available before an admin exists.
 - CSRF: all mutating form routes require a signed-session CSRF token.
 - Session cookies: `HttpOnly`, `SameSite=Strict`, and `Secure` when
-  `BINDGUARD_COOKIE_SECURE=1`. Current lab HTTP mode keeps `Secure` off.
+  `ALDERPOINTDNS_COOKIE_SECURE=1`. Current lab HTTP mode keeps `Secure` off.
 - Input validation: DNS records, upstream resolvers, cache settings,
   encryption settings, imports, backup components, and replication enrollment
   all validate before apply.
@@ -16,14 +16,14 @@ Reviewed areas:
   controls; uploaded certificate keys are validated and never displayed.
 - Command execution: privileged operations go through fixed sudoers entries
   without user-controlled command arguments.
-- Permissions/ownership: service units use the `bindguard` user; generated
+- Permissions/ownership: service units use the `alderpointdns` user; generated
   secrets and private keys are mode-restricted.
-- Secret storage: local secrets live under `/etc/bindguard`; diagnostics and
+- Secret storage: local secrets live under `/etc/alderpointdns`; diagnostics and
   default backups redact or exclude them.
 - Logging/redaction: diagnostics redacts credentials and excludes private DNS
   data by default.
 - DNS recursion ACLs: BIND and dnsdist are restricted to private/loopback
-  clients; BindGuard must not be deployed as a public open resolver.
+  clients; Alderpoint DNS must not be deployed as a public open resolver.
 - Public exposure: encrypted DNS listener wildcard binds require external
   firewall review; public admin UI exposure is unsupported.
 - Backup encryption: optional backup password encryption is available for
@@ -34,7 +34,7 @@ Reviewed areas:
 Accepted beta risks:
 
 - Admin UI HTTPS is not implemented natively yet. Use private access or a
-  trusted reverse proxy and set `BINDGUARD_COOKIE_SECURE=1`.
+  trusted reverse proxy and set `ALDERPOINTDNS_COOKIE_SECURE=1`.
 - Signed apt repository publishing is not implemented; beta packages are local
   test artifacts.
 - `--include-private-dns` diagnostics remains a placeholder; private DNS data

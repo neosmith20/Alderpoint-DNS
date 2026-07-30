@@ -17,8 +17,8 @@ Client DNS is forwarded to the configured maintenance-grade upstream set:
 This upstream path is separate from management resolution: management software
 uses the host resolver from `/etc/resolv.conf`.
 
-The filtering zone is `bindguard.rpz`. Its generated file is
-`/var/lib/bindguard/compiled/bind/bindguard.rpz`.
+The filtering zone is `alderpointdns.rpz`. Its generated file is
+`/var/lib/alderpointdns/compiled/bind/alderpointdns.rpz`.
 
 ## Operations
 
@@ -26,13 +26,13 @@ Validate:
 
 ```sh
 named-checkconf /etc/bind/named.conf
-named-checkzone bindguard.rpz /var/lib/bindguard/compiled/bind/bindguard.rpz
+named-checkzone alderpointdns.rpz /var/lib/alderpointdns/compiled/bind/alderpointdns.rpz
 ```
 
 Test:
 
 ```sh
-/opt/bindguard/tests/test_bind_backend.sh
+/opt/alderpointdns/tests/test_bind_backend.sh
 ```
 
 Inspect:
@@ -45,5 +45,5 @@ curl http://127.0.0.1:8053/json/v1/status
 ```
 
 The package-default configurations are preserved under
-`/var/lib/bindguard/backups`. AppArmor additions are isolated in
+`/var/lib/alderpointdns/backups`. AppArmor additions are isolated in
 `/etc/apparmor.d/local/usr.sbin.named`.

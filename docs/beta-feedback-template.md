@@ -2,7 +2,7 @@
 
 - Tester name/contact:
 - Date:
-- BindGuard version:
+- Alderpoint DNS version:
 - Hardware or VM platform:
 - CPU/RAM/disk:
 - Operating system:

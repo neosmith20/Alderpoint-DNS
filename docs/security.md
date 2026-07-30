@@ -1,15 +1,15 @@
 # Security
 
-- The web process runs as `bindguard`, not root.
-- Privileged web operations are restricted by `/etc/sudoers.d/bindguard` to
+- The web process runs as `alderpointdns`, not root.
+- Privileged web operations are restricted by `/etc/sudoers.d/alderpointdns` to
   exact compiler commands.
 - The admin UI requires authentication and relies on pfSense VLAN/firewall
   policy for network reachability.
 - Encryption Settings certificate uploads and generation write to
-  root:_dnsdist-owned `/etc/bindguard/certs` only through the privileged,
-  argument-free `bindguard_compiler.py encryption-deploy` sudo entry; the
+  root:_dnsdist-owned `/etc/alderpointdns/certs` only through the privileged,
+  argument-free `alderpointdns_compiler.py encryption-deploy` sudo entry; the
   unprivileged web process only ever stages bytes under
-  `/var/lib/bindguard/staging`. Private key contents are never rendered back
+  `/var/lib/alderpointdns/staging`. Private key contents are never rendered back
   to the browser.
 - Backup archives exclude TLS/DNSCrypt private keys, the web session-signing
   secret, and dnsdist API/webserver credentials by default; including them
@@ -24,7 +24,7 @@
 - No default administrator exists.
 - Passwords are hashed with Argon2.
 - Session cookies are signed, `HttpOnly`, and `SameSite=Strict`. Set
-  `BINDGUARD_COOKIE_SECURE=1` in the web service environment when the admin UI
+  `ALDERPOINTDNS_COOKIE_SECURE=1` in the web service environment when the admin UI
   is served over HTTPS.
 - CSRF tokens are required for mutating forms.
 - dnsdist ACLs allow RFC1918 private networks by default, with an explicit
@@ -39,7 +39,7 @@
 - The default Local DNS domain is `home.arpa`; `.local` is rejected because it
   conflicts with multicast DNS.
 - AppArmor remains enabled for BIND.
-- The analytics collector runs as the restricted `bindguard` account and
+- The analytics collector runs as the restricted `alderpointdns` account and
   listens only on `127.0.0.1:5301`.
 - dnsdist's web/API and control sockets remain loopback-only; analytics never
   exposes dnsdist credentials or private TLS keys.

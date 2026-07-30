@@ -3,16 +3,16 @@
 Start with:
 
 ```sh
-systemctl status bindguard named dnsdist bindguard-analytics
+systemctl status alderpointdns named dnsdist alderpointdns-analytics
 ss -ltnup
 dig @127.0.0.1 -p 5353 cloudflare.com A
 dig @127.0.0.1 -p 53 cloudflare.com A
-/opt/bindguard/scripts/bindguard-diagnostics --output-dir /tmp
+/opt/alderpointdns/scripts/alderpointdns-diagnostics --output-dir /tmp
 ```
 
 Common failures:
 
-- Web app down: DNS should still work. Check `journalctl -u bindguard`.
+- Web app down: DNS should still work. Check `journalctl -u alderpointdns`.
 - dnsdist down: frontend DNS and encrypted listeners fail, but BIND backend on
   loopback can still be tested on port `5353`.
 - BIND down: DNS resolution fails. Check `named-checkconf -p /etc/bind/named.conf`
@@ -23,5 +23,5 @@ Common failures:
   `/encryption`.
 - Cache flush fails: check the `dns_cache_flushes` history and `rndc status`.
 
-Do not expose BindGuard publicly while troubleshooting. Keep firewall rules
+Do not expose Alderpoint DNS publicly while troubleshooting. Keep firewall rules
 restricted to intended private clients.

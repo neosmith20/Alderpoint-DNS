@@ -1,12 +1,12 @@
 # Web application
 
-BindGuard's web interface is a FastAPI/Jinja application served by
-`bindguard.service`.
+Alderpoint DNS's web interface is a FastAPI/Jinja application served by
+`alderpointdns.service`.
 
 Current lab mode:
 
 - URL: `http://<vm-lan-ip>:3000`
-- Service user: `bindguard`
+- Service user: `alderpointdns`
 - Listener: `0.0.0.0:3000`
 - Initial admin: none. The first administrator must be created through
   `/setup`.
@@ -19,9 +19,9 @@ The web process does not run as root. It can call only these exact privileged
 commands through sudo:
 
 ```sh
-/opt/bindguard/app/bindguard_compiler.py deploy
-/opt/bindguard/app/bindguard_compiler.py deploy --no-download
-/opt/bindguard/app/bindguard_compiler.py update-sources
+/opt/alderpointdns/app/alderpointdns_compiler.py deploy
+/opt/alderpointdns/app/alderpointdns_compiler.py deploy --no-download
+/opt/alderpointdns/app/alderpointdns_compiler.py update-sources
 ```
 
 The interface uses a shared dark-theme application shell across all admin
@@ -41,7 +41,7 @@ The dashboard is organized around DNS-appliance information hierarchy:
 - Primary metric cards for DNS queries, blocked queries, percentage blocked,
   active clients, average response time, and active filtering rules.
 - Real sparklines and a responsive local canvas time-series chart using stored
-  BindGuard analytics buckets only.
+  Alderpoint DNS analytics buckets only.
 - Query outcome bars for allowed, blocked, and recorded policy categories.
 - Ranked panels for clients, queried domains, blocked domains, query types,
   response codes, protocol usage, and clear unavailable states for upstream
@@ -74,13 +74,13 @@ container through `/query-log/partial`; it does not reload the full page.
 
 Blocklist management supports add, inline edit, enable/disable, delete,
 single-source update, update-all, and compile/deploy. Single-source updates are
-unprivileged because they only write BindGuard's database and download cache;
+unprivileged because they only write Alderpoint DNS's database and download cache;
 deployment remains privileged and enumerated.
 
 The Local DNS page supports:
 
 - Internal domain settings, defaulting to `home.arpa`.
-- Setup and page actions to create BindGuard's own forward and reverse records.
+- Setup and page actions to create Alderpoint DNS's own forward and reverse records.
 - Simple host entries that create A/AAAA records and optional automatic PTR
   records together.
 - Advanced A, AAAA, PTR, and CNAME records with TTL, comments, and enabled
@@ -97,7 +97,7 @@ updates with toast feedback instead of browser confirmation prompts or full
 page reloads. Destructive record deletion still requires confirmation.
 
 Advanced Local DNS records can use fully qualified names outside the default
-internal domain. BindGuard generates an additional managed authoritative
+internal domain. Alderpoint DNS generates an additional managed authoritative
 forward zone for the parent domain and clears dnsdist packet-cache entries for
 managed local zones after activation, so stale frontend NODATA responses do not
 hide newly added records.
@@ -131,8 +131,8 @@ UDP/TCP 53 has no control on this page and cannot be disabled from the UI.
 
 The Import page (`/import`) migrates from AdGuard Home (uploaded
 `AdGuardHome.yaml` or a direct read-only API connection), Pi-hole text/list
-exports, and BindGuard-native JSON exports. It also imports Local DNS records
-from CSV/XLSX/hosts/BIND-zone/BindGuard-CSV sources, with column mapping, a
+exports, and Alderpoint DNS-native JSON exports. It also imports Local DNS records
+from CSV/XLSX/hosts/BIND-zone/Alderpoint DNS-CSV sources, with column mapping, a
 normalized preview (valid/invalid/duplicate/conflict), per-conflict
 skip/merge/replace resolution, an automatic pre-apply backup, and rollback of
 exactly the rows an import added. Migration previews show items to add, items
@@ -154,7 +154,7 @@ and serves numbered, content-hashed generations over mutual TLS. A replica
 enrolls with the primary, stores the returned CA/client certificate material,
 polls for the latest generation, verifies its hash, applies only the
 replication allowlist into local tables, and then reuses the normal
-`bindguard_compiler.py deploy --no-download` pipeline. Failed replica deploys
+`alderpointdns_compiler.py deploy --no-download` pipeline. Failed replica deploys
 roll back the replica SQLite changes as well as relying on the compiler's
 configuration rollback; revoked replicas are denied by certificate
 fingerprint before generation fetch or ACK.
@@ -162,11 +162,11 @@ fingerprint before generation fetch or ACK.
 Useful commands:
 
 ```sh
-systemctl status bindguard --no-pager
-systemctl status bindguard-analytics --no-pager
-systemctl restart bindguard
-systemctl restart bindguard-analytics
-/opt/bindguard/tests/test_web_smoke.sh
+systemctl status alderpointdns --no-pager
+systemctl status alderpointdns-analytics --no-pager
+systemctl restart alderpointdns
+systemctl restart alderpointdns-analytics
+/opt/alderpointdns/tests/test_web_smoke.sh
 ```
 
 Responsive review targets are 1920, 1440, 1024, 768, 430, and 360 pixels wide.
@@ -182,6 +182,6 @@ Sanitized before-and-after screenshots are stored under `docs/screenshots/`:
 - `dashboard-before-mobile.png`
 - `dashboard-after-mobile.png`
 
-The admin listener binds to `0.0.0.0:3000` and requires a BindGuard admin
+The admin listener binds to `0.0.0.0:3000` and requires a Alderpoint DNS admin
 session. pfSense VLAN/firewall rules are responsible for restricting network
 reachability to the management UI.

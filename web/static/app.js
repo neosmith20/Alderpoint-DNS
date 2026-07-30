@@ -53,7 +53,7 @@
   if (globalStatuses.length) {
     const refreshStatus = async () => {
       try {
-        const response = await fetch(globalStatuses[0].dataset.statusUrl, { headers: { 'X-Requested-With': 'BindGuardStatus' } });
+        const response = await fetch(globalStatuses[0].dataset.statusUrl, { headers: { 'X-Requested-With': 'AlderpointDNSStatus' } });
         if (!response.ok) return;
         const data = await response.json();
         const tone = data.tone || 'unavailable';
@@ -81,7 +81,7 @@
   if (rangeLinks.length) {
     const params = new URLSearchParams(window.location.search);
     if (!params.has('range')) {
-      const stored = sessionStorage.getItem('bindguardRange');
+      const stored = sessionStorage.getItem('alderpointdnsRange');
       const current = document.querySelector('[data-current-range]');
       if (stored && current && current.dataset.currentRange !== stored) {
         params.set('range', stored);
@@ -89,7 +89,7 @@
       }
     }
     rangeLinks.forEach((link) => {
-      link.addEventListener('click', () => sessionStorage.setItem('bindguardRange', link.dataset.rangeLink));
+      link.addEventListener('click', () => sessionStorage.setItem('alderpointdnsRange', link.dataset.rangeLink));
     });
   }
 
@@ -124,7 +124,7 @@
       const response = await fetch(form.action, {
         method: form.method || 'POST',
         body: new FormData(form),
-        headers: { 'X-Requested-With': 'BindGuardAsyncForm' },
+        headers: { 'X-Requested-With': 'AlderpointDNSAsyncForm' },
       });
       const text = await response.text();
       const doc = new DOMParser().parseFromString(text, 'text/html');
@@ -151,7 +151,7 @@
   const refreshToggle = document.getElementById('autoRefresh');
   let refreshTimer = null;
   if (refreshToggle) {
-    const key = `bindguardAutoRefresh:${window.location.pathname}`;
+    const key = `alderpointdnsAutoRefresh:${window.location.pathname}`;
     const target = document.getElementById(refreshToggle.dataset.refreshTarget || '');
     const refresh = async () => {
       if (!target || !target.dataset.refreshUrl) {
@@ -160,7 +160,7 @@
       }
       const url = new URL(target.dataset.refreshUrl, window.location.origin);
       url.search = window.location.search;
-      const response = await fetch(url, { headers: { 'X-Requested-With': 'BindGuardAutoRefresh' } });
+      const response = await fetch(url, { headers: { 'X-Requested-With': 'AlderpointDNSAutoRefresh' } });
       if (response.ok) target.innerHTML = await response.text();
     };
     const schedule = () => {

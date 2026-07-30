@@ -10,7 +10,7 @@
 - The Debian dnsdist package must be replaced by the official PowerDNS package;
   acceptance requires `dnsdist --version` to report `dns-over-quic`.
 - Web cookies are not marked `Secure` in current lab HTTP mode. Set
-  `BINDGUARD_COOKIE_SECURE=1` when the admin interface is served over HTTPS.
+  `ALDERPOINTDNS_COOKIE_SECURE=1` when the admin interface is served over HTTPS.
 - Per-network policy runtime enforcement is not enabled yet; v1 now has the
   database and compiler-visible profile/category model needed to add it without
   a schema rewrite.
@@ -27,14 +27,14 @@
 ## Resolved during post-reboot recovery
 
 - Full VM reboot survival is verified for the combined stack. After reboot,
-  `bindguard.service`, `dnsdist.service`, and `named.service` were active,
+  `alderpointdns.service`, `dnsdist.service`, and `named.service` were active,
   listeners matched the intended topology, and the full acceptance
   suite passed with strengthened dnsdist protocol/security assertions.
 
 ## Resolved during public catalog preparation
 
 - A curated 19-source public blocklist catalog is available through
-  `/opt/bindguard/app/bindguard_compiler.py seed-public`. The catalog assigns
+  `/opt/alderpointdns/app/alderpointdns_compiler.py seed-public`. The catalog assigns
   categories and includes both `adguardteam.github.io` and GitHub raw URLs while
   preserving the faster one-source lab seed for routine acceptance runs.
 
@@ -46,6 +46,6 @@
 
 ## Resolved during BIND milestone
 
-- Debian's `named` AppArmor profile initially denied the BindGuard log path.
-  A narrow local profile permits only generated RPZ reads and BindGuard BIND
+- Debian's `named` AppArmor profile initially denied the Alderpoint DNS log path.
+  A narrow local profile permits only generated RPZ reads and Alderpoint DNS BIND
   log/statistics writes; confinement was not disabled.

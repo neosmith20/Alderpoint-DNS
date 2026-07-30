@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% import "components.html" as ui %}
-{% block title %}Local DNS - BindGuard{% endblock %}
+{% block title %}Local DNS - Alderpoint DNS{% endblock %}
 {% block content %}
 {% set cfg = settings %}
 {{ ui.page_header("Local DNS", "Authoritative internal hostnames, reverse DNS, rewrites, and client display aliases.", '<a class="button secondary" href="/local-dns/export">Export CSV</a>') }}
@@ -22,7 +22,7 @@
         <input name="default_ttl" type="number" min="30" max="86400" value="{{ cfg.default_ttl or 300 }}">
       </label>
       <label>Server hostname
-        <input name="server_hostname" value="{{ cfg.server_hostname or 'bindguard' }}" autocomplete="off">
+        <input name="server_hostname" value="{{ cfg.server_hostname or 'alderpointdns' }}" autocomplete="off">
       </label>
       <label>Server IP
         <input name="server_ip" value="{{ cfg.server_ip or '' }}" autocomplete="off">
@@ -33,10 +33,10 @@
     </div>
   </form>
 
-  <form class="panel stack" method="post" action="/local-dns/server-record" data-confirm="Create or update BindGuard's own local DNS and reverse records?">
-    <div class="panel__head"><h2>BindGuard Identity</h2></div>
+  <form class="panel stack" method="post" action="/local-dns/server-record" data-confirm="Create or update Alderpoint DNS's own local DNS and reverse records?">
+    <div class="panel__head"><h2>Alderpoint DNS Identity</h2></div>
     <input type="hidden" name="csrf" value="{{ csrf }}">
-    <p>Suggested record: <span class="mono">{{ cfg.server_hostname or 'bindguard' }}.{{ cfg.internal_domain or 'home.arpa' }}</span> to <span class="mono">{{ cfg.server_ip or '172.16.43.101' }}</span>.</p>
+    <p>Suggested record: <span class="mono">{{ cfg.server_hostname or 'alderpointdns' }}.{{ cfg.internal_domain or 'home.arpa' }}</span> to <span class="mono">{{ cfg.server_ip or '172.16.43.101' }}</span>.</p>
     <p class="muted">Creates the forward record, reverse PTR, and a client alias for analytics display.</p>
     <div class="form-actions">
       <button class="secondary">Create server records</button>

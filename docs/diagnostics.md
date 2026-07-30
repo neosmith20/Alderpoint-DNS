@@ -1,17 +1,17 @@
 # Diagnostics
 
-`bindguard-diagnostics` creates a sanitized support bundle:
+`alderpointdns-diagnostics` creates a sanitized support bundle:
 
 ```sh
-sudo /opt/bindguard/scripts/bindguard-diagnostics --output-dir /tmp
+sudo /opt/alderpointdns/scripts/alderpointdns-diagnostics --output-dir /tmp
 ```
 
 The bundle includes:
 
-- BindGuard version
+- Alderpoint DNS version
 - OS, kernel, and Python version
-- Service status for `bindguard`, `named`, `dnsdist`, and
-  `bindguard-analytics`
+- Service status for `alderpointdns`, `named`, `dnsdist`, and
+  `alderpointdns-analytics`
 - Listener status
 - BIND and dnsdist validation output
 - SQLite schema object names and `PRAGMA user_version`
@@ -41,5 +41,5 @@ backup when support truly needs private records.
 Redaction can be smoke-tested without creating a bundle:
 
 ```sh
-/opt/bindguard/scripts/bindguard-diagnostics --self-test-redaction
+/opt/alderpointdns/scripts/alderpointdns-diagnostics --self-test-redaction
 ```

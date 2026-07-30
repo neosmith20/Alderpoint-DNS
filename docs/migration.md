@@ -1,13 +1,13 @@
 # Migration Guide
 
-BindGuard supports preview-first imports from:
+Alderpoint DNS supports preview-first imports from:
 
 - AdGuard Home YAML or read-only API
 - Pi-hole text/list exports
 - Generic hosts files
 - BIND zone files
 - CSV/XLSX
-- BindGuard-native JSON
+- Alderpoint DNS-native JSON
 
 Migration rules:
 
@@ -21,6 +21,6 @@ Migration rules:
 Source limitations:
 
 - Pi-hole gravity database internals are not read directly.
-- AdGuard domain-specific upstream routing has no BindGuard equivalent yet.
+- AdGuard domain-specific upstream routing has no Alderpoint DNS equivalent yet.
 - AdGuard allowlist subscriptions are reported for manual review because
-  BindGuard has custom allow rules, not allowlist-subscription objects.
+  Alderpoint DNS has custom allow rules, not allowlist-subscription objects.

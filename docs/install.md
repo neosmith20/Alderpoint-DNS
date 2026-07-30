@@ -1,6 +1,6 @@
 # Install
 
-BindGuard supports installation from a reviewed local source tree on a fresh
+Alderpoint DNS supports installation from a reviewed local source tree on a fresh
 Debian-based server. Do not pipe an unreviewed remote script directly into a
 root shell; download a release artifact, verify its checksum/signature when
 published, inspect `scripts/install.sh`, then run it locally.
@@ -20,24 +20,24 @@ Minimum resources:
 
 The installer creates this layout:
 
-- Application code: `/opt/bindguard`
-- Configuration and secrets: `/etc/bindguard`
+- Application code: `/opt/alderpointdns`
+- Configuration and secrets: `/etc/alderpointdns`
 - Persistent database/generated DNS/backups/import staging:
-  `/var/lib/bindguard`
-- Logs: `/var/log/bindguard`
+  `/var/lib/alderpointdns`
+- Logs: `/var/log/alderpointdns`
 - Systemd units: `/etc/systemd/system`
 
 Run:
 
 ```sh
-cd /path/to/bindguard-release
+cd /path/to/alderpointdns-release
 sudo ./scripts/install.sh
 ```
 
 For isolated validation without changing the host:
 
 ```sh
-BINDGUARD_INSTALL_ROOT=/tmp/bindguard-install-root ./scripts/install.sh --dry-run --skip-apt
+ALDERPOINTDNS_INSTALL_ROOT=/tmp/alderpointdns-install-root ./scripts/install.sh --dry-run --skip-apt
 ```
 
 The PowerDNS dnsdist package is required for DNS-over-QUIC support.
@@ -79,7 +79,7 @@ dnsdist --version | grep dns-over-quic
 TLS bootstrap:
 
 ```sh
-/opt/bindguard/scripts/ensure_tls_cert.sh
+/opt/alderpointdns/scripts/ensure_tls_cert.sh
 ```
 
 Services:
@@ -87,7 +87,7 @@ Services:
 ```sh
 systemctl enable --now named
 systemctl enable --now dnsdist
-systemctl enable --now bindguard
+systemctl enable --now alderpointdns
 ```
 
 Lab web interface:
@@ -100,8 +100,8 @@ No default administrator exists. Create the first administrator through
 `/setup`.
 
 The installer performs OS/resource checks, installs packages, creates the
-`bindguard` system user/group, creates a Python virtual environment with
+`alderpointdns` system user/group, creates a Python virtual environment with
 system package access, generates local secrets, initializes the database,
 deploys generated DNS configuration, enables services, and runs final health
-checks. It refuses to overwrite an existing `/opt/bindguard` installation; use
+checks. It refuses to overwrite an existing `/opt/alderpointdns` installation; use
 `scripts/upgrade.sh` for upgrades.

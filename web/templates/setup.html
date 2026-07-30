@@ -8,21 +8,21 @@
         <path d="M6 10.2 8.5 13l4.8-5.7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
     </span>
-    <span>BindGuard</span>
+    <span>Alderpoint DNS</span>
   </div>
   <h1>Initial administrator setup</h1>
   <p class="muted">Create the first local administrator. No default password exists.</p>
   <label>Username <input name="username" value="admin"></label>
   <label>Password <input name="password" type="password" minlength="12" required></label>
   <div class="stack">
-    <label class="row"><input type="checkbox" name="create_local_dns" value="1" checked> Create BindGuard local DNS records</label>
-    <label>BindGuard hostname
-      <input name="server_hostname" value="{{ (local_dns.server_hostname if local_dns is defined else 'bindguard') or 'bindguard' }}">
+    <label class="row"><input type="checkbox" name="create_local_dns" value="1" checked> Create Alderpoint DNS local DNS records</label>
+    <label>Alderpoint DNS hostname
+      <input name="server_hostname" value="{{ (local_dns.server_hostname if local_dns is defined else 'alderpointdns') or 'alderpointdns' }}">
     </label>
-    <label>BindGuard IP address
+    <label>Alderpoint DNS IP address
       <input name="server_ip" value="{{ (local_dns.server_ip if local_dns is defined else '172.16.43.101') or '172.16.43.101' }}">
     </label>
-    <p class="muted">Creates <span class="mono">bindguard.home.arpa</span>, a reverse PTR record, and the BindGuard client alias. The IP is detected when available and can be changed later.</p>
+    <p class="muted">Creates <span class="mono">alderpointdns.home.arpa</span>, a reverse PTR record, and the Alderpoint DNS client alias. The IP is detected when available and can be changed later.</p>
   </div>
   <div class="form-actions"><button>Create administrator</button></div>
 </form>

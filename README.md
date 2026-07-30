@@ -1,6 +1,6 @@
-# BindGuard
+# Alderpoint DNS
 
-BindGuard is a DNS filtering appliance built from dnsdist, BIND 9, and a local
+Alderpoint DNS is a DNS filtering appliance built from dnsdist, BIND 9, and a local
 Python management application.
 
 Current lab endpoints:
@@ -16,9 +16,9 @@ No default administrator exists. Create the first admin through `/setup`.
 Useful commands:
 
 ```sh
-systemctl status named dnsdist bindguard --no-pager
-/opt/bindguard/tests/test_acceptance.sh
-/opt/bindguard/scripts/backup.sh
+systemctl status named dnsdist alderpointdns --no-pager
+/opt/alderpointdns/tests/test_acceptance.sh
+/opt/alderpointdns/scripts/backup.sh
 ```
 
 See `docs/progress.md`, `docs/issues.md`, and `docs/known-limitations.md` for

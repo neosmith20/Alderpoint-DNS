@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% import "components.html" as ui %}
-{% block title %}Backup - BindGuard{% endblock %}
+{% block title %}Backup - Alderpoint DNS{% endblock %}
 {% block content %}
 {{ ui.page_header("Backup and Restore", "Versioned, checksummed backup archives with a preview-first, staged, and automatically-rolled-back restore path.") }}
 
@@ -12,7 +12,7 @@
   <article class="card"><div class="card__head"><h2>Last Backup</h2>{% if last_backup %}{{ ui.status_badge(last_backup.status|title, "healthy" if last_backup.status == "deployed" else "down" if last_backup.status == "failed" else "neutral") }}{% endif %}</div>{% if last_backup %}<p class="muted mono">{{ last_backup.created_at }}</p><p class="muted">{{ (last_backup.size_bytes / 1048576)|round(2) }} MB</p>{% else %}<p class="muted">No backups yet.</p>{% endif %}</article>
   <article class="card"><div class="card__head"><h2>Last Restore</h2>{% if last_restore %}{{ ui.status_badge(last_restore.status|title, "healthy" if last_restore.status == "deployed" else "down" if last_restore.status in ("failed", "rollback_failed") else "neutral") }}{% endif %}</div>{% if last_restore %}<p class="muted mono">{{ last_restore.finished_at or last_restore.started_at }}</p>{% else %}<p class="muted">No restores yet.</p>{% endif %}</article>
   <article class="card"><div class="card__head"><h2>Schedule</h2>{{ ui.status_badge("Enabled" if backup_settings.schedule_enabled == "1" else "Disabled", "healthy" if backup_settings.schedule_enabled == "1" else "neutral") }}</div><p class="muted">Every {{ backup_settings.schedule_interval_hours }}h, keep {{ backup_settings.retention_count }} newest</p></article>
-  <article class="card"><div class="card__head"><h2>Stored Backups</h2></div><p class="muted">{{ backups|length }} archive{{ "s" if backups|length != 1 else "" }} in <span class="mono">/var/lib/bindguard/backups</span></p></article>
+  <article class="card"><div class="card__head"><h2>Stored Backups</h2></div><p class="muted">{{ backups|length }} archive{{ "s" if backups|length != 1 else "" }} in <span class="mono">/var/lib/alderpointdns/backups</span></p></article>
 </section>
 
 <section class="grid">
@@ -42,7 +42,7 @@
 
   <div class="panel stack">
     <div class="panel__head"><h2>Import Backup</h2></div>
-    <p class="muted">Upload a backup archive (.tar.gz or .tar.gz.enc) from another BindGuard install or an older manual copy to preview or restore it.</p>
+    <p class="muted">Upload a backup archive (.tar.gz or .tar.gz.enc) from another Alderpoint DNS install or an older manual copy to preview or restore it.</p>
     <form method="post" action="/backup/import" enctype="multipart/form-data" data-async-form data-success-message="Backup imported for preview.">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <label>Backup archive
@@ -62,7 +62,7 @@
   <form method="post" action="/backup/preview" data-async-form data-success-message="Preview loaded below.">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <label>Backup source (history id or filename)
-      <input name="source" value="{{ preview_source or imported or '' }}" placeholder="e.g. 12 or bindguard-backup-20260729T101719Z.tar.gz" required>
+      <input name="source" value="{{ preview_source or imported or '' }}" placeholder="e.g. 12 or alderpointdns-backup-20260729T101719Z.tar.gz" required>
     </label>
     <label>Password (only if this backup is encrypted)
       <input type="password" name="password" autocomplete="off">
@@ -74,7 +74,7 @@
 {% if preview %}
 <section class="panel stack">
   <div class="panel__head"><h2>Restore Preview</h2>{{ ui.status_badge("Compatible" if preview.compatible else "Format mismatch", "healthy" if preview.compatible else "down") }}</div>
-  <p class="mono">source node: {{ preview.manifest.source_node_id }} &middot; created: {{ preview.manifest.created_at }} &middot; app version: {{ preview.manifest.bindguard_app_version }} &middot; schema: {{ preview.manifest.database_schema_version }}</p>
+  <p class="mono">source node: {{ preview.manifest.source_node_id }} &middot; created: {{ preview.manifest.created_at }} &middot; app version: {{ preview.manifest.alderpointdns_app_version }} &middot; schema: {{ preview.manifest.database_schema_version }}</p>
   {% if preview.warnings %}
     {% for warning in preview.warnings %}
       <div class="alert error" role="alert">{{ warning }}</div>
@@ -117,7 +117,7 @@
     {{ ui.empty_state("No file differences", (preview.unchanged_file_count|string) ~ " file(s) already match live state") }}
   {% endif %}
 
-  <form method="post" action="/backup/restore" class="stack" data-confirm="Restore the selected components from this backup? A fresh safety backup of the current state is taken automatically first, and BindGuard will roll back and restore that safety backup if any post-restore health check fails.">
+  <form method="post" action="/backup/restore" class="stack" data-confirm="Restore the selected components from this backup? A fresh safety backup of the current state is taken automatically first, and Alderpoint DNS will roll back and restore that safety backup if any post-restore health check fails.">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <input type="hidden" name="source" value="{{ preview_source }}">
     <div class="grid compact">
