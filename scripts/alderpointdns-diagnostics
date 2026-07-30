@@ -137,7 +137,7 @@ def gather(base: Path, include_private_dns: bool, include_journal: bool) -> None
         errors = ""
         for unit in ("alderpointdns", "named", "dnsdist", "alderpointdns-analytics"):
             errors += f"\n== {unit} ==\n"
-            errors += run(["journalctl", "-u", unit, "-p", "warning", "-n", "80", "--no-pager"], timeout=10)
+            errors += run(["journalctl", "-u", unit, "-b", "-p", "warning", "-n", "80", "--no-pager"], timeout=10)
         write_text(base, "recent_warnings.txt", errors)
     if include_private_dns:
         write_text(base, "private_dns_opt_in.txt", "Private DNS export is intentionally not implemented in diagnostics yet. Use a dedicated encrypted backup when private DNS data is required.\n")

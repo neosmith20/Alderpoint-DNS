@@ -137,6 +137,17 @@ if tar -xOzf "$BUNDLE" | grep -Ei 'secret "[^"]{8,}"' | grep -qv '\[REDACTED\]';
   exit 1
 fi
 
+# The recent-warnings journal excerpt must be scoped to the current boot
+# (`journalctl -b`), not just the last N lines: an unscoped "-n 80" can
+# still surface warning-level lines from before a rename/cleanup if the
+# unit hasn't logged 80 fresh warnings since boot, which would leak
+# pre-cleanup identifiers (old hostname, old account name) into a bundle
+# generated after a clean reboot.
+grep -Eq 'journalctl", "-u", unit, "-b", "-p", "warning"' /opt/alderpointdns/scripts/alderpointdns-diagnostics || {
+  echo "diagnostics recent-warnings journal excerpt is not scoped to the current boot (-b)" >&2
+  exit 1
+}
+
 test -f /opt/alderpointdns/packaging/debian/control || {
   echo "debian control file missing" >&2
   exit 1
