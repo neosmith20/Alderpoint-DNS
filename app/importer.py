@@ -34,7 +34,6 @@ from app import custom_rules, local_dns, upstream_dns
 
 
 DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
-BACKUP_SCRIPT = Path("/opt/alderpointdns/scripts/backup.sh")
 IMPORT_UPLOAD_DIR = Path("/var/lib/alderpointdns/imports")
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 # Text imports are additionally line-capped (the 10 MiB byte cap alone would
@@ -1380,22 +1379,29 @@ def preview_job(job_id: int, column_map: dict[str, str], default_domain: str | N
     return {"job_id": job_id, "valid": valid, "invalid": invalid, "duplicates": duplicates, "conflicts": conflicts, "domain": domain}
 
 
+PRE_IMPORT_BACKUP_COMMAND = ["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "backup-create"]
+
+
 def create_pre_import_backup(strict: bool = False) -> str | None:
-    """Run the pre-import backup script. In strict mode (migration apply) a
-    missing or failing backup aborts the apply instead of continuing."""
-    if not BACKUP_SCRIPT.exists():
-        if strict:
-            raise ImportError_(
-                f"pre-import backup script {BACKUP_SCRIPT} is missing; refusing to apply a migration without a verified backup"
-            )
-        return None
+    """Create a verified pre-import safety backup through the same
+    privileged, already-tested path scheduled and manual backups use
+    (app/backup.py's create_backup(), run as root via the sudoers-allowlisted
+    `alderpointdns_compiler.py backup-create`). This module runs inside the
+    unprivileged web process, which cannot itself create a correctly-owned
+    backup archive -- shelling out to scripts/backup.sh directly here would
+    fail (it needs root to preserve file ownership in the archive). In strict
+    mode (migration apply) a failing backup aborts the apply instead of
+    continuing without a verified backup."""
     try:
-        proc = subprocess.run([str(BACKUP_SCRIPT)], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True, timeout=60)
-        return proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else None
+        proc = subprocess.run(PRE_IMPORT_BACKUP_COMMAND, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True, timeout=120)
     except Exception as exc:
         if strict:
             raise ImportError_(f"pre-import backup failed: {exc}") from exc
         return None
+    for line in reversed(proc.stdout.strip().splitlines()):
+        if line.startswith("backup_path="):
+            return line[len("backup_path="):]
+    return None
 
 
 def apply_job(job_id: int, default_policy: str = "skip", row_policies: dict[int, str] | None = None) -> dict[str, Any]:

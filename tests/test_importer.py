@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import time
@@ -30,16 +31,20 @@ class ImporterTest(unittest.TestCase):
         self.old_upstream_dns_db_path = upstream_dns.DB_PATH
         self.old_compiler_db_path = alderpointdns_compiler.DB_PATH
         self.old_custom_rules_db_path = custom_rules.DB_PATH
-        self.old_backup_script = importer.BACKUP_SCRIPT
         self.old_upload_dir = importer.IMPORT_UPLOAD_DIR
         importer.DB_PATH = self.tmp / "alderpointdns.db"
         local_dns.DB_PATH = importer.DB_PATH
         upstream_dns.DB_PATH = importer.DB_PATH
         alderpointdns_compiler.DB_PATH = importer.DB_PATH
         custom_rules.DB_PATH = importer.DB_PATH
-        importer.BACKUP_SCRIPT = self.tmp / "backup-stub.sh"
-        importer.BACKUP_SCRIPT.write_text("#!/bin/sh\necho /tmp/pre-import-backup.tar\n")
-        importer.BACKUP_SCRIPT.chmod(0o755)
+        # create_pre_import_backup() runs the privileged
+        # `sudo alderpointdns_compiler.py backup-create` command; stub the
+        # single subprocess.run call site so tests never invoke real sudo.
+        self._backup_patcher = mock.patch.object(
+            importer.subprocess, "run",
+            return_value=subprocess.CompletedProcess(importer.PRE_IMPORT_BACKUP_COMMAND, 0, "backup_path=/tmp/pre-import-backup.tar\n", ""),
+        )
+        self._backup_patcher.start()
         importer.IMPORT_UPLOAD_DIR = self.tmp / "imports"
         local_dns.STAGING_DIR = self.tmp / "staging"
         local_dns.BACKUP_DIR = self.tmp / "backups"
@@ -63,7 +68,7 @@ class ImporterTest(unittest.TestCase):
         upstream_dns.DB_PATH = self.old_upstream_dns_db_path
         alderpointdns_compiler.DB_PATH = self.old_compiler_db_path
         custom_rules.DB_PATH = self.old_custom_rules_db_path
-        importer.BACKUP_SCRIPT = self.old_backup_script
+        self._backup_patcher.stop()
         importer.IMPORT_UPLOAD_DIR = self.old_upload_dir
         import shutil
 
@@ -557,18 +562,21 @@ class ImporterTest(unittest.TestCase):
 
     def test_apply_requires_verified_backup(self) -> None:
         job_id, _summary = self._pihole_job()
-        importer.BACKUP_SCRIPT.write_text("#!/bin/sh\nexit 1\n")
         before = self.destination_counts()
-        with self.assertRaises(importer.ImportError_) as ctx:
-            importer.apply_migration_job(job_id, default_domain="home.arpa")
+        with mock.patch.object(importer.subprocess, "run", side_effect=subprocess.CalledProcessError(1, importer.PRE_IMPORT_BACKUP_COMMAND, "backup failed")):
+            with self.assertRaises(importer.ImportError_) as ctx:
+                importer.apply_migration_job(job_id, default_domain="home.arpa")
         self.assertIn("backup", str(ctx.exception))
         self.assertEqual(self.destination_counts(), before)
 
-    def test_apply_missing_backup_script_refuses(self) -> None:
+    def test_apply_refuses_when_privileged_backup_helper_is_unavailable(self) -> None:
         job_id, _summary = self._pihole_job()
-        importer.BACKUP_SCRIPT.unlink()
-        with self.assertRaises(importer.ImportError_):
-            importer.apply_migration_job(job_id, default_domain="home.arpa")
+        before = self.destination_counts()
+        with mock.patch.object(importer.subprocess, "run", side_effect=FileNotFoundError("sudo")):
+            with self.assertRaises(importer.ImportError_) as ctx:
+                importer.apply_migration_job(job_id, default_domain="home.arpa")
+        self.assertIn("backup", str(ctx.exception))
+        self.assertEqual(self.destination_counts(), before)
 
     def test_rollback_removes_exactly_the_imported_objects(self) -> None:
         local_dns.add_record("A", "keepme.home.arpa", "172.16.43.200", 300, "pre-existing", True)

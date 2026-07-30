@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -52,7 +53,6 @@ class ImportRouteTest(unittest.TestCase):
             "compiler_db": alderpointdns_compiler.DB_PATH,
             "custom_rules_db": custom_rules.DB_PATH,
             "import_dir": importer.IMPORT_UPLOAD_DIR,
-            "backup_script": importer.BACKUP_SCRIPT,
         }
         db_path = self.tmp / "alderpointdns.db"
         webapp.DB_PATH = db_path
@@ -62,9 +62,6 @@ class ImportRouteTest(unittest.TestCase):
         alderpointdns_compiler.DB_PATH = db_path
         custom_rules.DB_PATH = db_path
         importer.IMPORT_UPLOAD_DIR = self.tmp / "imports"
-        importer.BACKUP_SCRIPT = self.tmp / "backup-stub.sh"
-        importer.BACKUP_SCRIPT.write_text("#!/bin/sh\necho /tmp/pre-import-backup.tar\n")
-        importer.BACKUP_SCRIPT.chmod(0o755)
         local_dns.init_db()
         upstream_dns.init_db()
         alderpointdns_compiler.init_db()
@@ -73,6 +70,13 @@ class ImportRouteTest(unittest.TestCase):
         self.patches = [
             mock.patch.object(webapp, "deploy_no_download", lambda: (0, "ok")),
             mock.patch.object(webapp, "global_service_status", lambda: {"label": "Active", "tone": "healthy", "detail": "test"}),
+            # create_pre_import_backup() runs the privileged
+            # `sudo alderpointdns_compiler.py backup-create` command; stub the
+            # single subprocess.run call site so tests never invoke real sudo.
+            mock.patch.object(
+                importer.subprocess, "run",
+                return_value=subprocess.CompletedProcess(importer.PRE_IMPORT_BACKUP_COMMAND, 0, "backup_path=/tmp/pre-import-backup.tar\n", ""),
+            ),
         ]
         for patcher in self.patches:
             patcher.start()
@@ -87,7 +91,6 @@ class ImportRouteTest(unittest.TestCase):
         alderpointdns_compiler.DB_PATH = self.old_paths["compiler_db"]
         custom_rules.DB_PATH = self.old_paths["custom_rules_db"]
         importer.IMPORT_UPLOAD_DIR = self.old_paths["import_dir"]
-        importer.BACKUP_SCRIPT = self.old_paths["backup_script"]
         import shutil
 
         shutil.rmtree(self.tmp, ignore_errors=True)
