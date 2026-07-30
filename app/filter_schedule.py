@@ -335,10 +335,41 @@ def parse_next_elapse(output: str) -> str | None:
     return None
 
 
+def parse_next_from_timers_json(output: str) -> str | None:
+    try:
+        entries = json.loads(output or "[]")
+    except ValueError:
+        return None
+    if not isinstance(entries, list):
+        return None
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("unit") != TIMER_UNIT:
+            continue
+        next_usec = entry.get("next")
+        if isinstance(next_usec, int) and next_usec > 0:
+            stamp = dt.datetime.fromtimestamp(next_usec / 1_000_000, dt.timezone.utc)
+            return stamp.replace(microsecond=0).isoformat()
+    return None
+
+
 def next_run_at() -> str | None:
     """Best-effort next scheduled elapse, or None when it cannot be
     determined (systemd unavailable, unit not installed yet, timer inactive).
-    Never raises: the Blocklists page must render regardless."""
+    Never raises: the Blocklists page must render regardless.
+
+    Monotonic timers (OnBootSec/OnUnitActiveSec, which is what the filter
+    update drop-in writes) have an empty NextElapseUSecRealtime property;
+    only `systemctl list-timers` projects their next elapse onto the wall
+    clock, so prefer its JSON output and keep the property parse as a
+    fallback for systemd versions without JSON list-timers output."""
+    try:
+        result = run(["systemctl", "list-timers", TIMER_UNIT, "--all", "-o", "json"], check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode == 0:
+        parsed = parse_next_from_timers_json(result.stdout or "")
+        if parsed:
+            return parsed
     try:
         result = run(["systemctl", "show", TIMER_UNIT, "--property=NextElapseUSecRealtime"], check=False)
     except (OSError, subprocess.SubprocessError):

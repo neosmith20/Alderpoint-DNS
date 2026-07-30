@@ -302,11 +302,43 @@ class NextRunTest(FilterScheduleTestBase):
 
     def test_next_run_at_returns_the_parsed_timestamp(self) -> None:
         def showing(command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+            if command[:2] == ["systemctl", "list-timers"]:
+                return subprocess.CompletedProcess(command, 1, "")
             assert command == ["systemctl", "show", "alderpointdns-filter-update.timer", "--property=NextElapseUSecRealtime"]
             return subprocess.CompletedProcess(command, 0, "NextElapseUSecRealtime=Thu 2026-07-30 00:00:00 UTC\n")
 
         with mock.patch.object(filter_schedule, "run", showing):
             self.assertEqual(filter_schedule.next_run_at(), "Thu 2026-07-30 00:00:00 UTC")
+
+    def test_next_run_at_prefers_list_timers_json_for_monotonic_timers(self) -> None:
+        # OnBootSec/OnUnitActiveSec timers have an empty NextElapseUSecRealtime;
+        # only list-timers projects the next elapse onto the wall clock.
+        payload = json.dumps([
+            {
+                "next": 1785468006114791,
+                "left": 77000000000,
+                "last": 1785390054644816,
+                "passed": 0,
+                "unit": "alderpointdns-filter-update.timer",
+                "activates": "alderpointdns-filter-update.service",
+            }
+        ])
+
+        def listing(command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+            if command[:2] == ["systemctl", "list-timers"]:
+                assert command == ["systemctl", "list-timers", "alderpointdns-filter-update.timer", "--all", "-o", "json"]
+                return subprocess.CompletedProcess(command, 0, payload)
+            raise AssertionError("the show fallback must not run when JSON output has a next elapse")
+
+        with mock.patch.object(filter_schedule, "run", listing):
+            self.assertEqual(filter_schedule.next_run_at(), "2026-07-31T03:20:06+00:00")
+
+    def test_parse_next_from_timers_json_rejects_garbage(self) -> None:
+        for output in ("", "not json", "{}", "[]", json.dumps([{"unit": "other.timer", "next": 5}]),
+                       json.dumps([{"unit": "alderpointdns-filter-update.timer", "next": None}]),
+                       json.dumps([{"unit": "alderpointdns-filter-update.timer", "next": 0}])):
+            with self.subTest(output=output):
+                self.assertIsNone(filter_schedule.parse_next_from_timers_json(output))
 
 
 class ScheduledRunTest(FilterScheduleTestBase):
