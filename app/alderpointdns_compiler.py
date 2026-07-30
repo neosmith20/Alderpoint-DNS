@@ -381,13 +381,6 @@ def enabled_sources(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return list(conn.execute("SELECT * FROM sources WHERE enabled=1 ORDER BY id"))
 
 
-def custom_domains(conn: sqlite3.Connection, action: str) -> set[str]:
-    rows = conn.execute(
-        "SELECT domain FROM custom_rules WHERE enabled=1 AND action=? ORDER BY domain", (action,)
-    )
-    return {row["domain"] for row in rows}
-
-
 def collect_rules(conn: sqlite3.Connection, download: bool) -> tuple[set[str], set[str], dict[int, ParseStats], list[str]]:
     all_blocks: set[str] = set()
     all_allows: set[str] = set()
@@ -414,10 +407,9 @@ def collect_rules(conn: sqlite3.Connection, download: bool) -> tuple[set[str], s
         record_source_result(conn, result, stats)
         per_source[source["id"]] = stats
 
-    custom_blocks = custom_domains(conn, "block")
-    custom_allows = custom_domains(conn, "allow")
-    all_blocks.update(custom_blocks)
-    all_allows.update(custom_allows)
+    # Custom rules no longer merge into the external sets here; the deploy
+    # path reads only custom_filter_rules through custom_rules.collect_active
+    # and applies subdomain-aware allow subtraction on top of this result.
     active_blocks = all_blocks - all_allows
     conn.execute(
         "UPDATE sources SET final_active_domains=? WHERE enabled=1",
@@ -430,7 +422,7 @@ def rpz_name(domain: str) -> str:
     return domain.rstrip(".")
 
 
-def render_rpz(domains: set[str]) -> str:
+def render_rpz(domains: set[str], custom: custom_rules.ActiveRuleSet | None = None) -> str:
     serial = str(int(time.time()))
     lines = [
         "$TTL 2h",
@@ -438,10 +430,16 @@ def render_rpz(domains: set[str]) -> str:
         "@ IN NS localhost.",
         "",
     ]
+    occupied: set[str] = set()
+    if custom is not None:
+        custom_lines, occupied = custom_rules.rpz_records(custom)
+        lines.extend(custom_lines)
     for domain in sorted(domains):
         name = rpz_name(domain)
-        lines.append(f"{name} CNAME .")
-        lines.append(f"*.{name} CNAME .")
+        if name not in occupied:
+            lines.append(f"{name} CNAME .")
+        if f"*.{name}" not in occupied:
+            lines.append(f"*.{name} CNAME .")
     return "\n".join(lines) + "\n"
 
 
@@ -478,6 +476,11 @@ def resolves(domain: str) -> bool:
     return result.returncode == 0 and "status: NOERROR" in result.stdout and "\tA\t" in result.stdout
 
 
+def resolves_to(domain: str, rtype: str, address: str) -> bool:
+    result = run(["dig", "@127.0.0.1", "-p", "5353", domain, rtype, "+time=3", "+tries=1"], check=False)
+    return result.returncode == 0 and "status: NOERROR" in result.stdout and address in result.stdout
+
+
 def wait_until(predicate, timeout: int = 50) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -510,10 +513,13 @@ def deploy(download: bool = True) -> int:
             blocked_test = None
             allowed_test = None
             failure: Exception | None = None
+            dnsdist_layer: dict | None = None
             try:
                 active_blocks, allowed_domains, _, errors = collect_rules(conn, download)
-                active_domains = len(active_blocks)
-                rpz_text = render_rpz(active_blocks)
+                custom_active = custom_rules.collect_active(conn)
+                active_blocks = custom_rules.subtract_allowed(active_blocks, custom_active)
+                active_domains = len(active_blocks) + len(custom_active.blocks)
+                rpz_text = render_rpz(active_blocks, custom_active)
                 if os.environ.get("ALDERPOINTDNS_TEST_INVALID_RPZ") == "1":
                     rpz_text += "this is not a valid zone record\n"
                 staged_rpz.write_text(rpz_text)
@@ -527,24 +533,42 @@ def deploy(download: bool = True) -> int:
                 local_dns.deploy_zones(conn)
                 dns_cache.deploy_cache_options(conn)
                 upstream_dns.deploy_upstreams(conn)
+                # Restarts dnsdist only when the custom-rule dnsdist-layer
+                # files actually changed; rolls its own files back and
+                # re-raises on failure.
+                dnsdist_layer = custom_rules.deploy_dnsdist_layer(conn, custom_active)
                 if os.environ.get("ALDERPOINTDNS_TEST_FORCE_POSTCHECK_FAIL") == "1":
                     raise RuntimeError("forced post-deploy failure for rollback test")
                 if not resolves("cloudflare.com"):
                     raise RuntimeError("post-deploy ordinary resolution failed")
+                custom_blocks = {name for name, block in custom_active.blocks.items() if block["subdomains"] or block["exact"]}
                 if active_blocks:
                     blocked_test = "cloudflare-dns.com" if "cloudflare-dns.com" in active_blocks else sorted(active_blocks)[0]
+                elif custom_blocks:
+                    blocked_test = sorted(custom_blocks)[0]
+                if blocked_test:
                     if not wait_until(lambda: is_blocked(blocked_test)):
                         raise RuntimeError(f"post-deploy blocked-domain test failed for {blocked_test}")
+                allowed_domains = allowed_domains | set(custom_active.allows)
                 if allowed_domains:
                     allowed_test = "cloudflare.com" if "cloudflare.com" in allowed_domains else sorted(allowed_domains)[0]
                     if not resolves(allowed_test):
                         raise RuntimeError(f"post-deploy allowed-domain test failed for {allowed_test}")
+                if custom_active.rewrites:
+                    rewrite_name = sorted(custom_active.rewrites)[0]
+                    rewrite_entry = custom_active.rewrites[rewrite_name]
+                    rewrite_type = "A" if rewrite_entry["A"] else "AAAA"
+                    rewrite_addr = rewrite_entry[rewrite_type]
+                    if not wait_until(lambda: resolves_to(rewrite_name, rewrite_type, rewrite_addr)):
+                        raise RuntimeError(f"post-deploy rewrite test failed for {rewrite_name}")
                 status = "deployed"
                 message = "; ".join(errors)
                 replication.on_deploy_success(conn)
             except Exception as exc:
                 failure = exc
                 message = str(exc)
+                if dnsdist_layer:
+                    custom_rules.rollback_dnsdist_layer(dnsdist_layer)
                 if backup_path.exists():
                     os.replace(backup_path, COMPILED_RPZ)
                     try:

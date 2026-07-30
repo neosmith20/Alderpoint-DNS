@@ -375,5 +375,223 @@ class EvaluationTests(CustomRulesTestBase):
         self.assertEqual(verdict["local_zone"], "home.arpa")
 
 
+class CompileTests(CustomRulesTestBase):
+    def setUp(self) -> None:
+        super().setUp()
+        compiler.init_db()
+
+    def active(self) -> custom_rules.ActiveRuleSet:
+        with self.connect() as conn:
+            return custom_rules.collect_active(conn)
+
+    def test_exact_block_has_no_wildcard_and_subdomain_block_has_both(self) -> None:
+        custom_rules.add_rule("0.0.0.0 exact.example")
+        custom_rules.add_rule("||wild.example^")
+        text = compiler.render_rpz(set(), self.active())
+        self.assertIn("exact.example CNAME .", text)
+        self.assertNotIn("*.exact.example CNAME .", text)
+        self.assertIn("wild.example CNAME .", text)
+        self.assertIn("*.wild.example CNAME .", text)
+
+    def test_rewrite_records_a_vs_aaaa_and_no_parent_takeover(self) -> None:
+        custom_rules.add_rule("192.168.1.50 a.b.example.com")
+        custom_rules.add_rule("fd00::9 a.b.example.com")
+        text = compiler.render_rpz(set(), self.active())
+        self.assertIn("a.b.example.com A 192.168.1.50", text)
+        self.assertIn("a.b.example.com AAAA fd00::9", text)
+        self.assertNotIn("*.a.b.example.com", text)
+        for owner in ("b.example.com", "example.com"):
+            for line in text.splitlines():
+                self.assertFalse(line.startswith(f"{owner} ") or line.startswith(f"*.{owner} "), line)
+
+    def test_allow_subtracts_covered_external_blocks_and_emits_passthru(self) -> None:
+        custom_rules.add_rule("@@||good.example^")
+        external = {"good.example", "sub.good.example", "bad.example"}
+        active = self.active()
+        remaining = custom_rules.subtract_allowed(external, active)
+        self.assertEqual(remaining, {"bad.example"})
+        text = compiler.render_rpz(remaining, active)
+        self.assertIn("good.example CNAME rpz-passthru.", text)
+        self.assertIn("*.good.example CNAME rpz-passthru.", text)
+        self.assertIn("bad.example CNAME .", text)
+        self.assertNotIn("sub.good.example", text)
+
+    def test_exact_allow_subtracts_only_that_entry(self) -> None:
+        custom_rules.add_rule("@@|only.example^")
+        active = self.active()
+        remaining = custom_rules.subtract_allowed({"only.example", "other.example"}, active)
+        self.assertEqual(remaining, {"other.example"})
+        text = compiler.render_rpz(remaining, active)
+        self.assertIn("only.example CNAME rpz-passthru.", text)
+        self.assertNotIn("*.only.example CNAME rpz-passthru.", text)
+
+    def test_same_owner_conflicts_rewrite_allow_block_and_important(self) -> None:
+        custom_rules.add_rule("10.0.0.1 conflict.example")
+        custom_rules.add_rule("@@||conflict.example^")
+        custom_rules.add_rule("||conflict.example^")
+        active = self.active()
+        text = compiler.render_rpz(set(), active)
+        # rewrite wins the owner name; allow keeps only its wildcard; block is gone
+        self.assertIn("conflict.example A 10.0.0.1", text)
+        self.assertIn("*.conflict.example CNAME rpz-passthru.", text)
+        self.assertNotIn("conflict.example CNAME .", text.replace("*.conflict.example CNAME rpz-passthru.", ""))
+        custom_rules.add_rule("||important.example^$important")
+        custom_rules.add_rule("@@||important.example^")
+        text = compiler.render_rpz(set(), self.active())
+        self.assertIn("important.example CNAME .", text)
+        self.assertNotIn("important.example CNAME rpz-passthru.", text)
+
+    def test_disabled_and_non_valid_rules_do_not_compile(self) -> None:
+        rule_id = custom_rules.add_rule("||disabled.example^")[0]["id"]
+        custom_rules.set_enabled(rule_id, False)
+        custom_rules.add_rule("||narrowed.example^$client=10.0.0.8")
+        custom_rules.add_rule("! just a comment")
+        custom_rules.add_rule("# another comment")
+        active = self.active()
+        self.assertEqual(active.blocks, {})
+        self.assertEqual(active.rewrites, {})
+        text = compiler.render_rpz(set(), active)
+        self.assertNotIn("disabled.example", text)
+        self.assertNotIn("narrowed.example", text)
+        self.assertNotIn("comment", text)
+
+    def test_dnsdist_data_files_and_static_lua(self) -> None:
+        custom_rules.add_rule("@@||passme.example^")
+        custom_rules.add_rule("@@|exactpass.example^")
+        custom_rules.add_rule("10.0.0.7 rewriteme.example")
+        custom_rules.add_rule("/^ads[0-9]+\\.example$/")
+        custom_rules.add_rule("@@/^good\\.example$/")
+        data = custom_rules.render_dnsdist_data(self.active(), ["home.arpa"])
+        suffixes = data[custom_rules.PASS_SUFFIX_DATA].splitlines()
+        self.assertIn("home.arpa", suffixes)
+        self.assertIn("passme.example", suffixes)
+        exact = data[custom_rules.PASS_EXACT_DATA].splitlines()
+        self.assertIn("exactpass.example", exact)
+        self.assertIn("rewriteme.example", exact)
+        # patterns land in data files verbatim except the trailing-$ translation
+        self.assertEqual(data[custom_rules.REGEX_BLOCK_DATA].strip(), "^ads[0-9]+\\.example\\.?$")
+        self.assertEqual(data[custom_rules.REGEX_ALLOW_DATA].strip(), "^good\\.example\\.?$")
+        lua = custom_rules.render_dnsdist_lua(custom_rules.COMPILED_DNSDIST_DIR)
+        for user_text in ("passme", "exactpass", "rewriteme", "ads[0-9]", "good\\."):
+            self.assertNotIn(user_text, lua)
+        self.assertIn("RegexRule(entry)", lua)
+        self.assertIn('PoolAction("alderpointdns_bind")', lua)
+        self.assertIn("RCodeAction(DNSRCode.NXDOMAIN)", lua)
+
+    def test_include_migration_is_idempotent_and_backs_up(self) -> None:
+        marker = 'addAction(AllRule(), PoolAction("alderpointdns_bind"))'
+        custom_rules.DNSDIST_CONF.write_text("-- lab config\n" + marker + "\n")
+        self.assertTrue(custom_rules.ensure_dnsdist_custom_include())
+        first = custom_rules.DNSDIST_CONF.read_text()
+        self.assertIn(str(custom_rules.custom_rules_lua_path()), first)
+        self.assertLess(first.index("dofile(alderpointdnsCustomRulesConfig)"), first.index(marker))
+        self.assertFalse(custom_rules.ensure_dnsdist_custom_include())
+        self.assertEqual(custom_rules.DNSDIST_CONF.read_text(), first)
+        self.assertTrue(list(custom_rules.BACKUP_DIR.glob("dnsdist.conf.pre-custom-rules.*")))
+
+    def test_include_migration_requires_marker(self) -> None:
+        custom_rules.DNSDIST_CONF.write_text("-- config without the expected marker\n")
+        with self.assertRaises(custom_rules.CustomRuleError):
+            custom_rules.ensure_dnsdist_custom_include()
+
+    def test_packaging_conf_carries_the_include(self) -> None:
+        text = (ROOT / "packaging" / "dnsdist.conf").read_text()
+        self.assertIn("/var/lib/alderpointdns/compiled/dnsdist/custom-rules.conf", text)
+        self.assertLess(
+            text.index("RCodeAction(DNSRCode.REFUSED)"),
+            text.index("custom-rules.conf"),
+        )
+        self.assertLess(
+            text.index("custom-rules.conf"),
+            text.index('addAction(AllRule(), PoolAction("alderpointdns_bind"))'),
+        )
+
+
+class DeployTests(CustomRulesTestBase):
+    def setUp(self) -> None:
+        super().setUp()
+        compiler.init_db()
+        marker = 'addAction(AllRule(), PoolAction("alderpointdns_bind"))'
+        custom_rules.DNSDIST_CONF.write_text("-- lab config\n" + marker + "\n")
+
+    def fake_run(self, command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+        self.commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "ok\n")
+
+    def failing_check_config(self, command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+        self.commands.append(command)
+        if command[0] == "dnsdist":
+            raise subprocess.CalledProcessError(1, command, "bad config")
+        return subprocess.CompletedProcess(command, 0, "ok\n")
+
+    def test_dnsdist_layer_restart_only_on_change(self) -> None:
+        custom_rules.add_rule("/^blockme\\./")
+        self.commands: list[list[str]] = []
+        with self.connect() as conn:
+            with mock.patch.object(custom_rules, "run", self.fake_run):
+                info = custom_rules.deploy_dnsdist_layer(conn)
+        self.assertTrue(info["changed"])
+        self.assertTrue(any(command[:2] == ["systemctl", "restart"] for command in self.commands))
+        self.assertTrue(any(command[:2] == ["dnsdist", "--check-config"] for command in self.commands))
+        self.assertEqual(
+            (custom_rules.COMPILED_DNSDIST_DIR / custom_rules.REGEX_BLOCK_DATA).read_text().strip(),
+            "^blockme\\.",
+        )
+        self.commands = []
+        with self.connect() as conn:
+            with mock.patch.object(custom_rules, "run", self.fake_run):
+                info = custom_rules.deploy_dnsdist_layer(conn)
+        self.assertFalse(info["changed"])
+        self.assertEqual(self.commands, [])
+
+    def test_dnsdist_layer_rolls_back_on_check_failure(self) -> None:
+        custom_rules.add_rule("/^first\\./")
+        self.commands = []
+        with self.connect() as conn:
+            with mock.patch.object(custom_rules, "run", self.fake_run):
+                custom_rules.deploy_dnsdist_layer(conn)
+        before = (custom_rules.COMPILED_DNSDIST_DIR / custom_rules.REGEX_BLOCK_DATA).read_text()
+        custom_rules.add_rule("/^second\\./")
+        self.commands = []
+        with self.connect() as conn:
+            with mock.patch.object(custom_rules, "run", self.failing_check_config):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    custom_rules.deploy_dnsdist_layer(conn)
+        self.assertEqual(
+            (custom_rules.COMPILED_DNSDIST_DIR / custom_rules.REGEX_BLOCK_DATA).read_text(),
+            before,
+        )
+
+    def test_full_deploy_writes_custom_rpz_and_dnsdist_files(self) -> None:
+        custom_rules.add_rule("||deployblock.example^")
+        custom_rules.add_rule("@@||deployallow.example^")
+        custom_rules.add_rule("10.0.0.3 deployrewrite.example")
+        custom_rules.add_rule("/^deployregex\\./")
+        self.commands = []
+        with mock.patch.object(compiler, "run", self.fake_run), \
+                mock.patch.object(custom_rules, "run", self.fake_run), \
+                mock.patch.object(compiler, "resolves", lambda domain: True), \
+                mock.patch.object(compiler, "is_blocked", lambda domain: True), \
+                mock.patch.object(compiler, "resolves_to", lambda domain, rtype, address: True), \
+                mock.patch.object(compiler.local_dns, "deploy_zones", lambda conn=None: 1), \
+                mock.patch.object(compiler.dns_cache, "deploy_cache_options", lambda conn=None: 1), \
+                mock.patch.object(compiler.upstream_dns, "deploy_upstreams", lambda conn=None: 1), \
+                mock.patch.object(compiler.replication, "on_deploy_success", lambda conn=None: None):
+            deployment_id = compiler.deploy(download=False)
+        rpz = compiler.COMPILED_RPZ.read_text()
+        self.assertIn("deployblock.example CNAME .", rpz)
+        self.assertIn("*.deployblock.example CNAME .", rpz)
+        self.assertIn("deployallow.example CNAME rpz-passthru.", rpz)
+        self.assertIn("deployrewrite.example A 10.0.0.3", rpz)
+        self.assertIn(
+            "deployregex",
+            (custom_rules.COMPILED_DNSDIST_DIR / custom_rules.REGEX_BLOCK_DATA).read_text(),
+        )
+        with self.connect() as conn:
+            row = conn.execute("SELECT status, active_domains FROM deployments WHERE id=?", (deployment_id,)).fetchone()
+        self.assertEqual(row["status"], "deployed")
+        self.assertEqual(row["active_domains"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

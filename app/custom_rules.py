@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime as dt
 import ipaddress
+import os
 import re
 import shutil
 import sqlite3
@@ -1064,3 +1065,351 @@ def evaluate_domain(conn: sqlite3.Connection, domain: str) -> dict[str, Any]:
         result["final_action"] = "block"
         result["response"] = f"blocked by the compiled blocklist RPZ ({result['rpz']['match']} entry {result['rpz']['entry']})"
     return result
+
+
+# ---------------------------------------------------------------------------
+# Compilation: RPZ records and the dnsdist regex layer
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ActiveRuleSet:
+    """The resolved, conflict-free view of every enabled valid rule.
+    rewrites: name -> {"A": addr|None, "AAAA": addr|None, "subdomains": bool}
+    allows/blocks: name -> {"exact": bool, "subdomains": bool, "priority": int}
+    """
+
+    rewrites: dict[str, dict[str, Any]] = field(default_factory=dict)
+    allows: dict[str, dict[str, Any]] = field(default_factory=dict)
+    blocks: dict[str, dict[str, Any]] = field(default_factory=dict)
+    regex_allow: list[str] = field(default_factory=list)
+    regex_block: list[str] = field(default_factory=list)
+
+
+def collect_active(conn: sqlite3.Connection) -> ActiveRuleSet:
+    init_db(conn)
+    active = ActiveRuleSet()
+    rows = conn.execute(
+        "SELECT * FROM custom_filter_rules WHERE enabled=1 AND validation_state='valid' ORDER BY priority DESC, id"
+    ).fetchall()
+    for row in rows:
+        rule_type = row["rule_type"]
+        if rule_type == "rewrite":
+            entry = active.rewrites.setdefault(row["domain"], {"A": None, "AAAA": None, "subdomains": False})
+            rtype = "A" if row["address_family"] == "ipv4" else "AAAA"
+            if entry[rtype] is None:
+                entry[rtype] = row["rewrite_address"]
+            if row["match_subdomains"]:
+                entry["subdomains"] = True
+        elif rule_type == "allow":
+            entry = active.allows.setdefault(row["domain"], {"exact": False, "subdomains": False, "priority": 0})
+            if row["match_subdomains"]:
+                entry["subdomains"] = True
+            else:
+                entry["exact"] = True
+            entry["priority"] = max(entry["priority"], row["priority"])
+        elif rule_type == "block":
+            entry = active.blocks.setdefault(row["domain"], {"exact": False, "subdomains": False, "priority": 0})
+            if row["match_subdomains"]:
+                entry["subdomains"] = True
+            else:
+                entry["exact"] = True
+            entry["priority"] = max(entry["priority"], row["priority"])
+        elif rule_type == "regex_allow":
+            active.regex_allow.append(row["pattern"])
+        elif rule_type == "regex_block":
+            active.regex_block.append(row["pattern"])
+    _resolve_conflicts(active)
+    return active
+
+
+def _resolve_conflicts(active: ActiveRuleSet) -> None:
+    """RPZ cannot hold two conflicting records at one owner name, so
+    same-owner conflicts are resolved at compile time: rewrite > allow >
+    block, except that a block whose priority exceeds the allow's priority
+    ($important) beats the allow entirely."""
+    for name, blk in list(active.blocks.items()):
+        rewrite = active.rewrites.get(name)
+        allow = active.allows.get(name)
+        if rewrite:
+            blk["exact"] = False
+            if rewrite["subdomains"]:
+                blk["subdomains"] = False
+        if allow is not None:
+            if blk["priority"] > allow["priority"]:
+                del active.allows[name]
+            else:
+                blk["exact"] = False
+                if allow["subdomains"]:
+                    blk["subdomains"] = False
+        if not blk["exact"] and not blk["subdomains"]:
+            del active.blocks[name]
+    for name in list(active.allows):
+        rewrite = active.rewrites.get(name)
+        if not rewrite:
+            continue
+        if rewrite["subdomains"]:
+            del active.allows[name]
+        else:
+            active.allows[name]["exact"] = False
+            if not active.allows[name]["subdomains"]:
+                del active.allows[name]
+
+
+def subtract_allowed(domains: set[str], active: ActiveRuleSet) -> set[str]:
+    """Subdomain-aware subtraction of custom allow rules from the merged
+    external block set, recomputed on every compile so allows survive
+    blocklist refreshes without ever modifying stored blocklist data. An
+    exact allow removes the matching external entry (which always carries a
+    wildcard) entirely, matching the legacy exact-name subtraction."""
+    if not active.allows:
+        return set(domains)
+    subdomain_allows = [name for name, allow in active.allows.items() if allow["subdomains"]]
+    remaining = set()
+    for domain in domains:
+        if domain in active.allows:
+            continue
+        if any(domain == name or domain.endswith("." + name) for name in subdomain_allows):
+            continue
+        remaining.add(domain)
+    return remaining
+
+
+def rpz_records(active: ActiveRuleSet) -> tuple[list[str], set[str]]:
+    """Custom-rule RPZ record lines plus the set of owner names they occupy,
+    so external blocklist rendering can skip conflicting owners. Exact rules
+    emit no wildcard line, so an exact rewrite or block never takes over a
+    parent zone or its siblings."""
+    lines: list[str] = []
+    occupied: set[str] = set()
+
+    def emit(owner: str, rdata: str) -> None:
+        lines.append(f"{owner} {rdata}")
+
+    for name in sorted(active.rewrites):
+        entry = active.rewrites[name]
+        for rtype in ("A", "AAAA"):
+            if entry[rtype]:
+                emit(name, f"{rtype} {entry[rtype]}")
+                if entry["subdomains"]:
+                    emit(f"*.{name}", f"{rtype} {entry[rtype]}")
+        occupied.add(name)
+        if entry["subdomains"]:
+            occupied.add(f"*.{name}")
+    for name in sorted(active.allows):
+        allow = active.allows[name]
+        if (allow["exact"] or allow["subdomains"]) and name not in occupied:
+            emit(name, "CNAME rpz-passthru.")
+            occupied.add(name)
+        if allow["subdomains"] and f"*.{name}" not in occupied:
+            emit(f"*.{name}", "CNAME rpz-passthru.")
+            occupied.add(f"*.{name}")
+    for name in sorted(active.blocks):
+        block = active.blocks[name]
+        if block["exact"] and name not in occupied:
+            emit(name, "CNAME .")
+            occupied.add(name)
+        if block["subdomains"]:
+            if name not in occupied:
+                emit(name, "CNAME .")
+                occupied.add(name)
+            if f"*.{name}" not in occupied:
+                emit(f"*.{name}", "CNAME .")
+                occupied.add(f"*.{name}")
+    return lines, occupied
+
+
+def custom_rules_lua_path() -> Path:
+    return COMPILED_DNSDIST_DIR / CUSTOM_RULES_LUA_NAME
+
+
+def _check_line_safe(entry: str) -> str:
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in entry):
+        raise CustomRuleError("refusing to write a data-file entry containing control characters")
+    return entry
+
+
+def render_dnsdist_data(active: ActiveRuleSet, local_zones: list[str]) -> dict[str, str]:
+    """Plain, line-oriented data files consumed by the static Lua loader.
+    Pass suffixes preserve precedence 1-3 against dnsdist-layer regex
+    blocks: local zones, subdomain allows, and subdomain rewrites pass as
+    suffixes; exact allows and exact rewrites pass as exact names."""
+    pass_suffixes = set(local_zones)
+    pass_suffixes.update(name for name, allow in active.allows.items() if allow["subdomains"])
+    pass_suffixes.update(name for name, rewrite in active.rewrites.items() if rewrite["subdomains"])
+    pass_exact = {name for name, allow in active.allows.items() if allow["exact"] and not allow["subdomains"]}
+    pass_exact.update(name for name, rewrite in active.rewrites.items() if not rewrite["subdomains"])
+    pass_exact -= pass_suffixes
+
+    def text(entries: list[str]) -> str:
+        return "\n".join(_check_line_safe(entry) for entry in entries) + ("\n" if entries else "")
+
+    return {
+        PASS_SUFFIX_DATA: text(sorted(pass_suffixes)),
+        PASS_EXACT_DATA: text(sorted(pass_exact)),
+        REGEX_ALLOW_DATA: text([deployed_pattern(p) for p in active.regex_allow]),
+        REGEX_BLOCK_DATA: text([deployed_pattern(p) for p in active.regex_block]),
+    }
+
+
+def render_dnsdist_lua(data_dir: Path) -> str:
+    """Static Lua include. Every user-controlled value lives in the plain
+    data files read here line by line; nothing a user typed is ever
+    interpolated into this template."""
+    return f"""-- Managed by Alderpoint DNS custom filtering rules. Do not edit by hand.
+-- Static loader: user-controlled values live only in the data files below
+-- (one entry per line); no user text is ever interpolated into Lua code.
+local alderpointdnsCustomDataDir = "{data_dir}"
+
+local function alderpointdnsCustomLines(name)
+  local entries = {{}}
+  local handle = io.open(alderpointdnsCustomDataDir .. "/" .. name, "r")
+  if handle then
+    for line in handle:lines() do
+      if line ~= "" then
+        table.insert(entries, line)
+      end
+    end
+    handle:close()
+  end
+  return entries
+end
+
+-- 1. Local zones and subdomain allows/rewrites go straight to BIND.
+local alderpointdnsPassSuffixes = alderpointdnsCustomLines("{PASS_SUFFIX_DATA}")
+if #alderpointdnsPassSuffixes > 0 then
+  local suffixes = newSuffixMatchNode()
+  for _, entry in ipairs(alderpointdnsPassSuffixes) do
+    suffixes:add(newDNSName(entry))
+  end
+  addAction(SuffixMatchNodeRule(suffixes), PoolAction("alderpointdns_bind"))
+end
+
+-- 2. Exact allows and exact rewrites go straight to BIND.
+local alderpointdnsPassNames = alderpointdnsCustomLines("{PASS_EXACT_DATA}")
+if #alderpointdnsPassNames > 0 then
+  local names = newDNSNameSet()
+  for _, entry in ipairs(alderpointdnsPassNames) do
+    names:add(newDNSName(entry))
+  end
+  addAction(QNameSetRule(names), PoolAction("alderpointdns_bind"))
+end
+
+-- 3. Regex allows pass, then 4. regex blocks answer NXDOMAIN.
+for _, entry in ipairs(alderpointdnsCustomLines("{REGEX_ALLOW_DATA}")) do
+  addAction(RegexRule(entry), PoolAction("alderpointdns_bind"))
+end
+for _, entry in ipairs(alderpointdnsCustomLines("{REGEX_BLOCK_DATA}")) do
+  addAction(RegexRule(entry), RCodeAction(DNSRCode.NXDOMAIN))
+end
+"""
+
+
+def ensure_dnsdist_custom_include() -> bool:
+    """Idempotently insert the guarded custom-rules dofile include into an
+    existing dnsdist.conf that lacks it, after the REFUSED opcode rules and
+    upstream routing, immediately before the default bind-pool action.
+    Takes a backup copy first. Returns True when a change was made."""
+    lua_path = custom_rules_lua_path()
+    current = DNSDIST_CONF.read_text() if DNSDIST_CONF.exists() else DNSDIST_PACKAGING_CONF.read_text()
+    if str(lua_path) in current:
+        return False
+    marker = 'addAction(AllRule(), PoolAction("alderpointdns_bind"))'
+    if marker not in current:
+        raise CustomRuleError("dnsdist.conf is missing the default bind-pool action marker")
+    include_block = (
+        f'local alderpointdnsCustomRulesConfig = "{lua_path}"\n'
+        'local alderpointdnsCustomRulesFile = io.open(alderpointdnsCustomRulesConfig, "r")\n'
+        'if alderpointdnsCustomRulesFile then\n'
+        '  alderpointdnsCustomRulesFile:close()\n'
+        '  dofile(alderpointdnsCustomRulesConfig)\n'
+        'end\n'
+    )
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    if DNSDIST_CONF.exists():
+        shutil.copy2(DNSDIST_CONF, BACKUP_DIR / f"dnsdist.conf.pre-custom-rules.{int(time.time())}")
+    DNSDIST_CONF.write_text(current.replace(marker, include_block + "\n" + marker, 1))
+    return True
+
+
+def dnsdist_layer_counts(active: ActiveRuleSet) -> dict[str, int]:
+    return {
+        "regex_allow": len(active.regex_allow),
+        "regex_block": len(active.regex_block),
+        "rewrites": len(active.rewrites),
+        "allows": len(active.allows),
+        "blocks": len(active.blocks),
+    }
+
+
+def deploy_dnsdist_layer(conn: sqlite3.Connection, active: ActiveRuleSet | None = None) -> dict[str, Any]:
+    """Stage, validate, atomically install, and (only when content actually
+    changed) restart dnsdist for the custom-rule regex layer. Restores its
+    own files and restarts dnsdist on failure before re-raising, so the
+    caller's RPZ rollback stays independent. Returns {"changed", "backups"}
+    for the caller's outer rollback via rollback_dnsdist_layer()."""
+    if active is None:
+        active = collect_active(conn)
+    data_files = render_dnsdist_data(active, _local_zone_names(conn))
+    final_lua = render_dnsdist_lua(COMPILED_DNSDIST_DIR)
+    targets: dict[Path, str] = {custom_rules_lua_path(): final_lua}
+    for name, text in data_files.items():
+        targets[COMPILED_DNSDIST_DIR / name] = text
+    changed = any(not path.exists() or path.read_text() != text for path, text in targets.items())
+    info: dict[str, Any] = {"changed": changed, "backups": [], "counts": dnsdist_layer_counts(active)}
+    if not changed:
+        return info
+    STAGING_DIR.mkdir(parents=True, exist_ok=True)
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix="alderpointdns-custom-rules-", dir=str(STAGING_DIR)))
+    backups: list[tuple[Path, Path | None]] = []
+    try:
+        ensure_dnsdist_custom_include()
+        # Validate against a staged composite: the live dnsdist.conf with the
+        # include retargeted at a staged copy whose data dir is the stage.
+        staged_lua = stage / CUSTOM_RULES_LUA_NAME
+        staged_lua.write_text(render_dnsdist_lua(stage))
+        for name, text in data_files.items():
+            (stage / name).write_text(text)
+        if DNSDIST_CONF.exists():
+            composite = stage / "dnsdist-composite-check.conf"
+            composite.write_text(DNSDIST_CONF.read_text().replace(str(custom_rules_lua_path()), str(staged_lua)))
+            run(["dnsdist", "--check-config", "-C", str(composite)])
+        COMPILED_DNSDIST_DIR.mkdir(parents=True, exist_ok=True)
+        for path, text in targets.items():
+            backup = BACKUP_DIR / f"{path.name}.last-good.{int(time.time())}" if path.exists() else None
+            if backup:
+                shutil.copy2(path, backup)
+            backups.append((path, backup))
+            staged_final = stage / f"final-{path.name}"
+            staged_final.write_text(text)
+            os.replace(staged_final, path)
+        info["backups"] = backups
+        run(["systemctl", "restart", "dnsdist"])
+    except Exception:
+        _restore_dnsdist_backups(backups)
+        if backups:
+            run(["systemctl", "restart", "dnsdist"], check=False)
+        raise
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+    return info
+
+
+def _restore_dnsdist_backups(backups: list[tuple[Path, Path | None]]) -> None:
+    for path, backup in backups:
+        try:
+            if backup and backup.exists():
+                shutil.copy2(backup, path)
+            elif path.exists():
+                path.unlink()
+        except OSError:
+            continue
+
+
+def rollback_dnsdist_layer(info: dict[str, Any]) -> None:
+    """Outer rollback hook for the compiler deploy path: restores the
+    previously installed dnsdist-layer files and restarts dnsdist."""
+    if not info.get("changed") or not info.get("backups"):
+        return
+    _restore_dnsdist_backups(info["backups"])
+    run(["systemctl", "restart", "dnsdist"], check=False)
