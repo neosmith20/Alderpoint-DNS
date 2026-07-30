@@ -1,5 +1,9 @@
 # Troubleshooting
 
+Alderpoint DNS is currently beta software (v0.4.0-beta.2); please include a
+sanitized diagnostics bundle when reporting issues (see
+`.github/ISSUE_TEMPLATE/bug_report.md`).
+
 Start with:
 
 ```sh

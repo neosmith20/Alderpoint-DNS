@@ -1,5 +1,10 @@
 # Release Notes
 
+Alderpoint DNS is pre-release beta software. These notes describe what
+changed in each beta build; they are not a claim of production readiness or
+long-term stability. See `docs/known-limitations.md` and
+`docs/beta-readiness.md` for the current honest state of the project.
+
 ## 0.4.0-beta.2
 
 Usability and interface-polish beta build. No DNS, filtering, backup, or

@@ -1,7 +1,9 @@
 # Upgrade
 
-Use `scripts/upgrade.sh` from a reviewed release artifact to upgrade an
-existing Alderpoint DNS installation.
+Alderpoint DNS is currently beta software (v0.4.0-beta.2); upgrade paths are
+tested in dry-run and lab conditions but have not seen production-scale
+exposure. Use `scripts/upgrade.sh` from a reviewed release artifact to
+upgrade an existing Alderpoint DNS installation.
 
 ```sh
 cd /path/to/alderpointdns-release
