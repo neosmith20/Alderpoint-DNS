@@ -163,24 +163,57 @@
     </form>
   {% endif %}
 
-  {% if job.status == "applied" %}
-    <p>{{ job.message }}</p>
+  {% if job.status in ("applied", "deploy_failed", "failed") %}
+    {% if job.status == "deploy_failed" %}
+      <div class="alert error" role="alert">{{ job.message }} The previously deployed configuration remains active. Roll back to revert the imported data, or retry deployment from the Blocklists page.</div>
+    {% elif job.status == "failed" %}
+      <div class="alert error" role="alert">{{ job.message }} No changes were kept: the transaction was rolled back.</div>
+    {% else %}
+      <p>{{ job.message }}</p>
+    {% endif %}
     <div class="form-actions">
       <a class="button secondary" href="/import/jobs/{{ job.id }}/report">Download report</a>
-      {% if job.source_type not in ("adguard_yaml", "adguard_api", "pihole", "alderpointdns_json") %}
-      <form method="post" action="/import/jobs/{{ job.id }}/rollback" data-confirm="Roll back this import? Records it added will be removed and Alderpoint DNS redeployed.">
+      {% if job.status in ("applied", "deploy_failed") %}
+      <form method="post" action="/import/jobs/{{ job.id }}/rollback" data-confirm="Roll back this import? Everything it added will be removed and Alderpoint DNS redeployed.">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <button class="secondary">Roll back this import</button>
       </form>
       {% endif %}
     </div>
   {% elif job.status == "rolled_back" %}
-    {{ ui.empty_state("This import was rolled back", "The records it added have been removed.") }}
+    {{ ui.empty_state("This import was rolled back", "The objects it added have been removed.") }}
   {% endif %}
 </section>
 {% endif %}
 
 {% if adguard %}
+{% macro item_rows(items) %}
+  {% for item in items %}
+    <tr>
+      <td>
+        {% if item.selectable %}
+          <input type="checkbox" name="sel" value="{{ item.key }}" {% if item.selected %}checked{% endif %} aria-label="Import {{ item.source }}">
+        {% else %}
+          <span class="muted">&mdash;</span>
+        {% endif %}
+      </td>
+      <td class="mono wrap-anywhere">{{ item.source }}</td>
+      <td class="wrap-anywhere">{{ item.detected }}</td>
+      <td>{{ item.destination }}</td>
+      <td class="mono wrap-anywhere">{{ item.normalized }}</td>
+      <td>{{ item.outcome }}</td>
+      <td class="wrap-anywhere">{% if item.warning %}{{ item.warning }}{% endif %}{% if item.warning and item.conflict %}; {% endif %}{% if item.conflict %}{{ item.conflict }}{% endif %}</td>
+    </tr>
+  {% endfor %}
+{% endmacro %}
+{% macro item_table(items) %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Import</th><th>Original</th><th>Detected as</th><th>Destination</th><th>Result</th><th>Outcome</th><th>Notes</th></tr></thead>
+      <tbody>{{ item_rows(items) }}</tbody>
+    </table>
+  </div>
+{% endmacro %}
 <section class="panel stack">
   <div class="panel__head"><h2>{{ migration_title or "Migration Preview" }}</h2></div>
   {% if adguard.fetch_errors %}
@@ -189,18 +222,55 @@
   {% if source_path %}
     <p class="muted">Original source staged for troubleshooting: <span class="mono wrap-anywhere">{{ source_path }}</span>. Staged uploads are retained under Alderpoint DNS's import staging directory and can be pruned after troubleshooting.</p>
   {% endif %}
-  <form method="post" action="/import/jobs/{{ migration_job_id }}/apply" data-confirm="Apply the selected groups to Alderpoint DNS? This deploys through the normal validated path.">
-    <input type="hidden" name="csrf" value="{{ csrf }}">
-    <input type="hidden" name="translation_json" value='{{ adguard_json }}'>
-    <div class="grid compact">
-      <label class="row"><input type="checkbox" name="group_blocklist_sources" value="1" checked> Blocklist subscriptions ({{ adguard.blocklist_sources|length }})</label>
-      <label class="row"><input type="checkbox" name="group_custom_rules" value="1" checked> Custom allow/block rules ({{ adguard.custom_allow|length }} allow, {{ adguard.custom_block|length }} block)</label>
-      <label class="row"><input type="checkbox" name="group_rewrites" value="1" checked> DNS rewrites &rarr; Local DNS ({{ adguard.rewrites_as_local_dns|length }})</label>
-      <label class="row"><input type="checkbox" name="group_clients" value="1" checked> Persistent clients &rarr; client aliases ({{ adguard.clients_as_aliases|length }})</label>
-      <label class="row"><input type="checkbox" name="group_upstream_resolvers" value="1" checked> Upstream resolvers ({{ adguard.upstream_resolvers|length }})</label>
+
+  {% if migration_summary %}
+    <div class="grid">
+      {{ ui.metric_card("Will import", migration_summary.counts.active, "", "Active after apply", "success") }}
+      {{ ui.metric_card("Kept inactive", migration_summary.counts.inactive, "", "Stored disabled with a reason", "warning") }}
+      {{ ui.metric_card("Conflicts", migration_summary.counts.conflicts, "", "Review before apply", "blocked") }}
+      {{ ui.metric_card("Existing", migration_summary.counts.existing, "", "Already present; will update or skip", "neutral") }}
+      {{ ui.metric_card("Duplicates", migration_summary.counts.duplicates, "", "Repeated within the import", "neutral") }}
     </div>
-    <div class="form-actions"><button>Apply selected groups</button></div>
-  </form>
+    <p class="muted">Nothing has been applied. Untick any item (or a whole category) to leave it out, then apply. Invalid and unsupported entries are imported as inactive rules with their reason, so nothing is silently lost.</p>
+    <form method="post" action="/import/jobs/{{ migration_job_id }}/apply" data-confirm="Apply the selected items to Alderpoint DNS? A verified backup is taken first, all changes are written in one transaction, and the change deploys through the normal validated path.">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="itemized" value="1">
+      {% for section in migration_summary.categories %}
+        <details class="stack" {% if section.items|length <= 15 %}open{% endif %}>
+          <summary>
+            <strong>{{ section.label }}</strong> ({{ section.items|length }})
+            <label class="row"><input type="checkbox" class="cat-toggle" data-category="{{ section.name }}" checked> select all</label>
+          </summary>
+          {{ item_table(section.items[:150]) }}
+          {% if section.items|length > 150 %}
+            <details>
+              <summary>Show all {{ section.items|length }} items in {{ section.label }}</summary>
+              {{ item_table(section.items[150:]) }}
+            </details>
+          {% endif %}
+        </details>
+      {% endfor %}
+      <div class="form-actions"><button>Apply selected items</button></div>
+    </form>
+
+    {% if migration_summary.conflicts %}
+      <div class="panel stack">
+        <div class="panel__head"><h2>Conflicts</h2></div>
+        <ul>
+          {% for entry in migration_summary.conflicts[:80] %}<li class="wrap-anywhere"><span class="mono">{{ entry.key }}</span>: {{ entry.label }}</li>{% endfor %}
+        </ul>
+      </div>
+    {% endif %}
+    {% if migration_summary.existing %}
+      <div class="panel stack">
+        <div class="panel__head"><h2>Existing Objects That Change</h2></div>
+        <ul>
+          {% for entry in migration_summary.existing[:80] %}<li class="wrap-anywhere"><span class="mono">{{ entry.key }}</span>: {{ entry.label }}</li>{% endfor %}
+        </ul>
+      </div>
+    {% endif %}
+  {% endif %}
+
   <div class="form-actions">
     <a class="button secondary" href="/import/jobs/{{ migration_job_id }}/status">Job status</a>
     <form method="post" action="/import/jobs/{{ migration_job_id }}/cancel" data-confirm="Cancel this migration job? Nothing has been applied yet.">
@@ -208,46 +278,20 @@
       <button class="secondary">Cancel job</button>
     </form>
   </div>
-
-  {% if migration_summary %}
-    <div class="grid">
-      {{ ui.metric_card("Add", migration_summary.items_to_add|length, "", "New items in selected data", "success") }}
-      {{ ui.metric_card("Update", migration_summary.items_to_update|length, "", "Existing items that would be updated", "warning") }}
-      {{ ui.metric_card("Conflicts", migration_summary.conflicts|length, "", "Requires review before apply", "blocked") }}
-      {{ ui.metric_card("Skipped", migration_summary.skipped|length, "", "Invalid or duplicate source items", "neutral") }}
-    </div>
-    {% for title, items in [
-      ("Items to add", migration_summary.items_to_add),
-      ("Items to update", migration_summary.items_to_update),
-      ("Conflicts", migration_summary.conflicts),
-      ("Skipped", migration_summary.skipped),
-      ("Unsupported", migration_summary.unsupported)
-    ] %}
-      {% if items %}
-        <div class="panel stack">
-          <div class="panel__head"><h2>{{ title }}</h2></div>
-          <ul>
-            {% for item in items[:80] %}<li class="wrap-anywhere">{{ item }}</li>{% endfor %}
-          </ul>
-        </div>
-      {% endif %}
-    {% endfor %}
-  {% endif %}
-
-  {% if adguard.allowlist_unsupported %}
-    <div class="alert error" role="alert">Allowlist subscriptions cannot be automatically translated (Alderpoint DNS has no allowlist-subscription object): {% for a in adguard.allowlist_unsupported %}{{ a.name }} ({{ a.url }}){% if not loop.last %}, {% endif %}{% endfor %}</div>
-  {% endif %}
-  {% if adguard.unsupported_rules %}
-    <div class="alert error" role="alert">{{ adguard.unsupported_rules|length }} custom rule(s) use syntax Alderpoint DNS cannot translate (regex/modifiers/cosmetic rules): <span class="mono wrap-anywhere">{{ adguard.unsupported_rules|join(", ") }}</span></div>
-  {% endif %}
-  {% if adguard.untranslatable %}
-    <div class="panel stack">
-      <div class="panel__head"><h2>Settings With No Alderpoint DNS Equivalent</h2></div>
-      <ul>
-        {% for note in adguard.untranslatable %}<li class="wrap-anywhere">{{ note }}</li>{% endfor %}
-      </ul>
-    </div>
-  {% endif %}
 </section>
 {% endif %}
+{% endblock %}
+{% block scripts %}
+<script>
+  document.querySelectorAll(".cat-toggle").forEach(function (toggle) {
+    toggle.addEventListener("click", function (event) { event.stopPropagation(); });
+    toggle.addEventListener("change", function () {
+      var section = toggle.closest("details");
+      if (!section) { return; }
+      section.querySelectorAll('input[name="sel"]').forEach(function (box) {
+        box.checked = toggle.checked;
+      });
+    });
+  });
+</script>
 {% endblock %}
