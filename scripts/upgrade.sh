@@ -188,7 +188,13 @@ migrate_legacy_layout() {
 
 pre_upgrade_backup() {
   if [ -x "$(root_path /opt/alderpointdns/scripts/backup.sh)" ]; then
-    run "$(root_path /opt/alderpointdns/scripts/backup.sh)"
+    # scripts/backup.sh archives the current systemd units/sudoers file by
+    # path and hard-fails if any are missing. Immediately after a legacy
+    # migration those files briefly don't exist yet (install_units() below
+    # is what (re)creates them) -- don't let that abort the whole upgrade;
+    # the rollback snapshot() right after this still provides a safety net.
+    run "$(root_path /opt/alderpointdns/scripts/backup.sh)" || \
+      echo "warning: scripts/backup.sh failed (likely first upgrade after a rename/migration, before install_units() has run); continuing with the rollback snapshot as the safety net" >&2
   else
     echo "warning: backup script is unavailable; rollback snapshot will still be created" >&2
   fi
