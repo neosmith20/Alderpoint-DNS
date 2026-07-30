@@ -1446,3 +1446,548 @@ Known limitations / notes:
 
 Result: Alderpoint DNS v0.4.0-beta.2 post-reboot verification is complete and
 ready for external testing.
+
+## Final pre-public-release milestone (in progress, checkpoint `9082d98`)
+
+Started from clean `main` at `c4221c8` (Dex's Import/Migration route-conflict
+fix, already committed and verified: 8/8 tests in `tests/test_import_routes.py`
+pass; preserved as-is, not reimplemented). Mission: three remaining product
+requirements before the first public GitHub upload -- (1) first-class custom
+filtering rules + correct AdGuard Home/Pi-hole migration, (2) configurable
+automatic filter update interval, (3) certificate settings panel layout fix.
+Former-name cleanup is a separate, already-completed milestone; this pass
+preserves the zero-trace requirement throughout (verified: no new `bindguard`-
+product-name references introduced; the `bindguard` OS user is intentionally
+unchanged).
+
+Ran as four parallel subagents in isolated git worktrees (A/C/D built on `main`
+directly; B built on the post-A/C merged `main` since it depends on A's model),
+with this session doing central coordination, conflict resolution, live
+integration, and verification. Progress logged here mid-run per an explicit
+stop-and-log request; **Workstream B (migration) is still running in the
+background at this checkpoint** -- everything below it is what has actually
+landed and been live-verified so far, not a final closeout.
+
+### Workstream D -- Certificate settings panel layout (complete, merged `ac0c5ae`)
+
+Root cause: `web/templates/encryption.html`'s Protocols/Certificate `<section
+class="grid">` inherited CSS grid's default `align-items: stretch`, so
+expanding any Certificate `<details>` (self-signed, local CA, upload, existing
+paths) stretched the unrelated Protocols panel and left artificial empty space
+inside it (because `.stack` is itself a grid with `align-content: stretch`,
+redistributing the borrowed height across every Protocols control).
+
+Fix: added a scoped `.grid.align-start` utility (`align-items: start`) in
+`web/static/app.css` and applied it to that one section only -- the global
+`.grid` rule (used for card grids elsewhere) is untouched. Added
+`tests/test_encryption_layout.sh`, a headless-Chromium regression harness
+(renders the real template into a temp dir with file://-friendly static
+assets, measures real layout at 1680x1000/1366x900/900x900/390x844) wired into
+`tests/test_acceptance.sh`. Demonstrated the defect pre-fix (Protocols grew up
+to +172px at wide desktop) and a clean pass post-fix (Protocols delta 0px at
+every width across all four Certificate sections, Certificate panel grows
+normally, no horizontal overflow, mobile stacks correctly). Subagent D also
+found and reported (without touching, to stay scoped) the identical defect on
+two more pages; this session applied the same one-line `.grid.align-start` fix
+to both in a fast follow-up commit (`1799977`):
+`web/templates/dns_cache.html` (Cache Tuning / Flush Cache) and
+`web/templates/backup.html` (Create Backup / Import Backup).
+
+Verified live: re-ran `tests/test_encryption_layout.sh` from `/opt/alderpointdns`
+post-merge -- passes at all four widths with the exact figures above.
+
+### Workstream C -- Configurable filter update scheduling (complete, merged `6989ccb`, follow-up fix `9082d98`)
+
+New `app/filter_schedule.py` mirrors the existing `app/backup.py` scheduled-
+timer architecture exactly: a `filter_update_settings` key/value table
+(`interval_hours`, `last_attempt`, `last_success`, `last_result`), a fixed
+server-side allowlist (`disabled`, `1`, `12`, `24`, `72`, `168` hours mapped to
+the exact required labels `Disabled — No Updates`/`1 Hour`/`12 Hours`/
+`1 Day`/`3 Days`/`1 Week`, default `1 Day` on fresh init, never overwritten
+once set), and a `filter-schedule-deploy` compiler subcommand that renders the
+`OnBootSec=`/`OnUnitActiveSec=` drop-in from the allowlist mapping only (never
+from user text) at `/etc/systemd/system/alderpointdns-filter-update.timer.d/
+alderpointdns.conf`, enabling/disabling the new
+`alderpointdns-filter-update.{service,timer}` units. A `filter-update-run`
+subcommand (timer-invoked, root) records `last_attempt`, delegates to the
+existing `deploy(download=True, trigger="scheduled")` (unchanged flock/
+enabled-lists-only/rollback guarantees), and records `last_success` +a
+sanitized `last_result` only on success. Added a nullable `deployments.trigger`
+column via the existing idempotent `_ensure_column` migration pattern.
+Blocklists page gained a compact "Automatic Updates" panel (interval select,
+enabled/disabled badge, last attempt/success, next scheduled update, Save
+schedule, Update All Now) that shows "Automatic updates disabled" with no
+next-run time when disabled. Both new sudoers lines added as single literal
+command strings (no wildcards); `visudo -cf` clean. Installer/upgrade/Debian
+packaging updated to install and enable the new units per the backup-timer
+pattern.
+
+Live verification performed by this session after merging:
+- Installed the two new unit files + updated sudoers to the real system,
+  `visudo -cf` clean, `daemon-reload`.
+- `alderpointdns_compiler.py deploy --no-download` (creates the new schema),
+  then `filter-schedule-deploy` -- confirmed `alderpointdns-filter-update.timer`
+  enabled with the `1 Day` drop-in and a real scheduled next run.
+- Triggered a real scheduled run (`systemctl start
+  alderpointdns-filter-update.service`): produced `deployments` row (id 322,
+  `status=deployed`, `trigger=scheduled`, 481,823 active domains) and correct
+  `last_attempt`/`last_success`/`last_result` rows in the new settings table.
+- Full disable -> manual-update-still-works -> re-enable cycle tested live:
+  disabling stopped the timer cleanly (`systemctl is-active` -> inactive, no
+  drop-in confusion) while `runuser -u bindguard -- sudo -n ... update-sources`
+  still worked; re-enabling restored the exact prior cadence.
+- Restarted `alderpointdns`; all four services stayed active; web smoke suite
+  passed.
+- **Real defect found and fixed live** (`9082d98`, not just documented):
+  `next_run_at()` originally read only `systemctl show ... 
+  NextElapseUSecRealtime`, which is empty for monotonic
+  (`OnBootSec`/`OnUnitActiveSec`) timers -- exactly what this feature uses --
+  so the Blocklists panel showed "Unknown until timer deploys" even with the
+  timer correctly armed. Confirmed by direct Chromium screenshot inspection of
+  the live authenticated page. Fixed by preferring `systemctl list-timers
+  --all -o json`'s projected `next` field (converted from the epoch-microsecond
+  value to an ISO timestamp) with the original property parse kept as a
+  fallback for systemd versions without JSON list-timers support. Added 2 new
+  regression tests (`tests/test_filter_schedule.py`, now 51 tests, all
+  passing); reran live and confirmed the panel now shows a real timestamp
+  (`2026-07-31T03:20:06+00:00`) matching `systemctl list-timers` directly.
+
+### Workstream A -- First-class custom filtering rules (complete, merged `93c594e` + fixture fix `bbc1bd3`)
+
+New `app/custom_rules.py` (~1450 lines) and `custom_filter_rules` table --
+full typed model (`rule_text`, `normalized`, `rule_type`, `action`, `domain`,
+`match_subdomains`, `pattern`, `rewrite_address`, `address_family`,
+`qtype_restriction`, `priority`, `enabled`, `validation_state`,
+`unsupported_reason`, `source_system`, `import_job_id`, `comment`,
+timestamps). Parser (`parse_rule`) classifies `||domain^` (subdomain block),
+`@@||domain^` (subdomain allow/exception), hosts-style lines (`0.0.0.0`/
+`127.0.0.1`/`::`/`::1` sentinels -> exact block; any other address -> exact
+rewrite preserving IPv4/AAAA family; multiple aliases -> one rule per
+hostname; inline comments preserved), `!`/`#` comments (no DNS effect, never
+"failed"), `/REGEX/` (validated against a conservative POSIX-ERE-compatible
+subset since dnsdist's `RegexRule` uses `regcomp`; incompatible/invalid
+patterns stored inactive with an exact reason, never silently dropped or
+treated as a literal domain), plain domains (subdomain-inclusive by default
+per AdGuard semantics, with a `plain_domain_subdomains=False` parameter for
+exact-only callers like the coming Pi-hole importer), and AdGuard `$`
+modifiers (`$important` honored as a priority boost; `$dnsrewrite` with a
+plain address translated; everything else -- `$client`, `$dnstype`,
+`$ctag`, `$badfilter`, unsupported `$dnsrewrite` forms -- stored inactive with
+an exact reason, and the underlying base rule is never silently broadened and
+activated).
+
+Documented, deterministic compile-time precedence (`docs/filtering.md`): local
+DNS zones > exact rewrites > explicit allow rules (subdomain-aware
+compile-time subtraction from external blocklists + emitted `rpz-passthru.`
+records so allows survive blocklist refreshes without ever mutating stored
+blocklist data) > explicit block rules (exact rules emit no wildcard, so no
+accidental parent-zone takeover) > regex allow > regex block (dnsdist layer,
+ordered so it can never override local/rewrite/allow precedence) > external
+blocklists. Same-owner-name conflicts: rewrite > allow > block, with
+`$important` (priority 100) able to let a block beat a normal allow. RPZ
+rendering and a new guarded `dofile()` include in `packaging/dnsdist.conf`
+(`compiled/dnsdist/custom-rules.conf`, static Lua only -- rule text/patterns
+live in plain data files read with `io.lines`, never interpolated into Lua
+code) both extended; `deploy()` now stages, validates, atomically activates,
+health-checks (including a rewrite-resolves check), and rolls back the new
+layers under the existing `DEPLOY_LOCK`. Legacy `custom_rules` rows migrated
+once, idempotently, into the new table (`source_system='legacy'`,
+subdomain-inclusive, enabled/comment/created_at preserved) via the existing
+`_ensure_column`-style pattern; the legacy table is left intact but frozen
+(marked `migrated_to_v2`) and no longer read by the compile path. New compact
+Filters UI (`/custom-rules`): counts strip, single-line add form + collapsible
+bulk editor (per-line validation results), search/type/status filters,
+bulk-selectable compact table with type/action/state/source badges and hidden
+per-row editors, and a "Test a Domain" panel backed by a new
+`evaluate_domain()` API. `custom_filter_rules` wired into `app/backup.py`
+(existing `custom_rules` component now covers both tables) and
+`app/replication.py` (`REPLICABLE_TABLES`, excluding the node-local
+`import_job_id`).
+
+Merge required resolving 4 conflicts against the already-merged Workstream C
+(`app/alderpointdns_compiler.py` import list + `init_db` wiring, `app/webapp.py`
+import list, `docs/web.md`, `tests/test_analytics.py`) -- all simple unions,
+no logic lost on either side; verified with `py_compile` and a full test run
+immediately after. One test fixture broke on merge
+(`tests/test_web_smoke.sh`'s `custom_rules.html` mock context still used the
+old flat `rules=[{domain, action, enabled, comment}]` shape and was missing
+`counts`/filter/test-panel context the new template requires) -- fixed in
+`bbc1bd3` with a fixture matching the real row shape; smoke suite now passes.
+
+Live verification performed by this session after merging:
+- `alderpointdns_compiler.py deploy --no-download`: all 7 pre-existing legacy
+  custom rules (including the real `bindguard-block-test.invalid` deployment-
+  test record) migrated correctly with identical live DNS behavior to the
+  pre-migration baseline (apex and subdomain both NXDOMAIN, matching the
+  recorded baseline dig output).
+- Added 5 live test rules through the new `add_rule()` API covering every
+  required form -- a regex block, an anchored+case-varied regex block, a
+  non-sentinel IPv4 rewrite, a `0.0.0.0` exact block, and an allow overriding
+  an external blocklist entry (`doubleclick.net`) -- redeployed, and confirmed
+  every one live via `dig` through the real dnsdist frontend: regex blocks
+  return NXDOMAIN case-insensitively including with a trailing-`$` anchor,
+  the rewrite returns exactly `192.168.77.7` (not a generic block), the exact
+  `0.0.0.0` block carries the RPZ SOA on the apex but leaves an unrelated
+  subdomain fully unaffected (no parent-zone takeover), and the allow rule
+  made `doubleclick.net` resolve normally despite being on an active
+  subscription blocklist. Removed all 5 test rules, redeployed, and confirmed
+  `doubleclick.net` returned to NXDOMAIN (no residual state).
+  services stayed active throughout; the dnsdist restart path (only
+  restarted when the custom-rule dnsdist layer content hash actually changes)
+  worked correctly.
+- Ran the targeted shell suites this workstream's sandboxed tests could not
+  exercise: `tests/test_blocklist_deploy.sh`, `tests/test_blocklist_failure_paths.sh`
+  (rollback-on-failure still correct with the new layers present),
+  `tests/test_dnsdist_frontend.sh`, `tests/test_install_upgrade_diagnostics.sh`,
+  `tests/test_beta_hardening_docs.sh` -- all passed.
+- Chromium screenshots of the live authenticated Filters and Blocklists pages
+  at 1440x900/900x900/390x844 -- compact, correctly badged, correctly stacked
+  on mobile. Used a temporary throwaway admin account for the authenticated
+  fetch, confirmed deleted afterward (0 residual rows, 1 real admin remains).
+
+### Workstream B -- AdGuard Home / Pi-hole migration (in progress, not yet merged)
+
+Launched in its own worktree on top of the merged A+C `main`, with a detailed
+brief covering: routing every AdGuard `user_rules` line and Pi-hole export
+line through Workstream A's typed `parse_rule`/`add_rule` API (replacing the
+current lossy classification in `app/importer.py`) instead of the legacy
+`custom_rules` table; correct AdGuard-vs-Pi-hole plain-domain semantics
+(subdomain-inclusive vs exact-only); full per-item categorized preview with
+per-item/per-category deselection; transactional apply with a real
+mid-apply-failure test proving no partial state in any destination table;
+rollback extended to remove `custom_filter_rules` by `import_job_id`;
+sanitized downloadable migration reports (no credentials/tokens/URLs with
+embedded auth); SSRF/size/line-count limits on the AdGuard API fetch and file
+uploads; and explicit preservation of Dex's `/import/jobs/{job_id}` route
+fix. **Still running at this checkpoint -- not reviewed, not merged, no live
+verification performed yet.**
+
+### Overall test status at this checkpoint
+
+- `python3 -m unittest discover -s tests -p "test_*.py"`: **296 tests, all
+  passing** (198 baseline + 49 Workstream A + 48 Workstream C + 1 net from the
+  Workstream C next-run regression fix).
+- `tests/test_web_smoke.sh`: passing.
+- `tests/test_encryption_layout.sh`, `tests/test_blocklist_deploy.sh`,
+  `tests/test_blocklist_failure_paths.sh`, `tests/test_dnsdist_frontend.sh`,
+  `tests/test_install_upgrade_diagnostics.sh`,
+  `tests/test_beta_hardening_docs.sh`: all passing.
+- Not yet run at this checkpoint: the full `tests/test_acceptance.sh`,
+  `tests/test_replication.py`(spot-checked: 5 tests pass, `custom_filter_rules`
+  correctly present in `REPLICABLE_TABLES`), a full backup/restore round-trip
+  covering the two new tables/settings, and anything specific to Workstream B
+  once it lands.
+
+### Explicitly not done yet
+
+- Workstream B implementation, review, and merge.
+- Final full integration pass across all four workstreams together
+  (interactions like "custom allow rules survive a scheduler-triggered
+  automatic blocklist refresh with imported rules present" need an end-to-end
+  check once B is in).
+- Full `tests/test_acceptance.sh` run.
+- Independent final-review subagent.
+- Version/changelog/CHANGELOG.md closeout, final commit, and completion
+  report.
+- No reboot has been performed or requested at this checkpoint; not blocked
+  on one so far.
+
+Stopping here per an explicit stop-and-log-progress request. Subagent B
+continues running in the background and will be integrated (reviewed, merged,
+conflict-resolved, live-verified) when it completes, followed by the full
+verification battery, independent review, and closeout described in the
+mission brief.
+
+### Update: Workstream B interrupted (not a normal completion)
+
+Immediately after the log entry above was written, Subagent B's task
+notification arrived with `status: failed` -- terminated by the coordinating
+account hitting its monthly API spend limit, not a bug in B's own work. Its
+last progress line was `Full suite green (328 tests). Now the documentation.`,
+i.e. it had finished implementation and testing and was interrupted only
+during the documentation step, before making any of its three planned logical
+commits.
+
+Confirmed by inspecting its worktree directly (read-only `git status`/`log`,
+no further agent spend): `/opt/alderpointdns/.claude/worktrees/
+agent-ae3d7e95f4817a7d9` still exists, branch `worktree-agent-ae3d7e95f4817a7d9`,
+HEAD still at the pre-B checkpoint `bbc1bd3` (no commits made), with 10 files
+of real uncommitted work sitting in the worktree: modified
+`app/custom_rules.py`, `app/importer.py`, `app/webapp.py`,
+`docs/adguard-parity.md`, `docs/known-limitations.md`, `docs/migration.md`,
+`tests/test_import_routes.py`, `tests/test_importer.py`,
+`web/templates/import_migration.html`, plus a new untracked
+`tests/fixtures/` directory. **This work is not lost** -- it is intact on
+disk in the worktree, uncommitted, pending review and a resumed session.
+
+Per the explicit stop instruction, no further agent work was launched to
+avoid immediately re-hitting the same spend limit. Next session should:
+1. Resume/inspect the `agent-ae3d7e95f4817a7d9` worktree's uncommitted diff.
+2. Verify the claimed "328 tests, all green" independently
+   (`python3 -m unittest discover -s tests -p "test_*.py"` inside that
+   worktree) before trusting it.
+3. Have it (or a fresh reviewer) finish the documentation step and make the
+   three planned commits ("Import AdGuard custom filtering rules", "Import
+   Pi-hole filtering data correctly", "Add migration preview, apply,
+   rollback, and reports").
+4. Then proceed with merge, conflict resolution, live verification,
+   independent review, full acceptance run, and closeout as originally
+   planned.
+
+## Workstream B completed, integrated, and live-verified (checkpoint after `531ea25`/`dd4caa8`)
+
+Resumed from the interrupted worktree above. Independently verified the
+claimed test count first, per the note-to-self above: `python3 -m unittest
+discover -s tests -p "test_*.py"` in the worktree really did pass 328 tests
+before any further work.
+
+Reviewed the actual diff (not just the agent's report) before committing:
+`app/importer.py`'s AdGuard/Pi-hole translation now defers all rule
+classification to Workstream A's `custom_rules.parse_rule`/`add_rule`
+(replacing the old `||^`/`@@||^`/plain-only classification that dumped
+everything else into `unsupported_rules`), `build_migration_plan()` gives
+every preview item a stable `category:index` key derived only from the
+frozen job translation, `apply_migration_job()` wraps every destination
+write in one transaction with a traced exception path that records the
+exact failing stage, SSRF protections on the AdGuard API fetch
+(`_HttpOnlyRedirectHandler`, response size cap, credentials never stored --
+only the sanitized base URL lands in the job row), and `redact_sensitive()`
+applied at every `report_json` persistence and download point. The checked-in
+`tests/fixtures/adguard_home.yaml` deliberately includes adversarial cases
+(a lookahead regex that must be rejected, a wildcard CNAME-style rewrite, a
+malformed rewrite target, a subscription URL with an embedded token) --
+confirmed each is handled correctly, not just present.
+
+Committed as one commit (`7752930`, later folded into the merge at `6c8b0c0`):
+AdGuard mapping, Pi-hole mapping, and the preview/apply/rollback/report
+machinery share the same core functions (`build_migration_plan`,
+`apply_migration_job`) tightly enough that splitting into three separate
+commits after the fact would have produced individually non-functional
+intermediate states, so this was committed as a single cohesive change
+instead of forcing an artificial split.
+
+Merge into `main` was clean (no conflicts) since Workstream A had already
+landed. `python3 -m unittest discover` after merge: 330 tests, all passing.
+
+### Two real production defects found and fixed only by live testing (unit tests never caught either)
+
+The full 330-test suite passed throughout both of the following -- neither
+was a sandboxed-test gap that "should have" caught something obscure; both
+were basic, common-path defects that simply never got exercised because no
+test actually rendered the real Jinja template or ran the real privileged
+code path end-to-end.
+
+1. **`GET /import/jobs/{id}/preview` 500 on any real content** (`531ea25`).
+   `web/templates/import_migration.html`'s category loop uses
+   `section.items` where `section` is a plain dict with an `items` key.
+   Jinja's default `getattr()` tries attribute access before subscript, and
+   `dict.items` resolves to the dict's own bound method -- so this always
+   returned `<built-in method items of dict>`, and `|length` on that raised
+   `TypeError`. Caught by rendering the page with a real, non-empty
+   `migration_summary` (first through an updated `tests/test_web_smoke.sh`
+   fixture, matching the earlier `custom_rules.html` fixture fix pattern;
+   then reproduced against the live running app by actually uploading
+   `tests/fixtures/adguard_home.yaml` through the real `/import/migration/
+   adguard/yaml` route). Every existing test either checked `importer.py`'s
+   return values directly or grepped the template source text
+   (`test_preview_template_renders_itemized_selection` explicitly only does
+   `assertIn` on the raw template string) -- none rendered the template
+   through the real Jinja engine with populated categories. Fixed with
+   bracket subscript (`section['items']`) at all six call sites; scanned
+   every touched template for the same dict-method-name collision pattern
+   (`items`/`keys`/`values` via dot notation) and found no other instance
+   (existing `.get(...)` calls elsewhere are legitimate dict method calls,
+   not field-name collisions).
+
+2. **Every migration ever applied through the web UI silently proceeded
+   without a real backup** (`dd4caa8`) -- a latent defect predating this
+   milestone, exposed (not introduced) by Workstream B's mission-correct
+   strict backup check. `create_pre_import_backup()` shelled out directly to
+   `scripts/backup.sh` as whatever user calls it. Reproduced directly:
+   `runuser -u bindguard -- /opt/alderpointdns/scripts/backup.sh` fails with
+   `chown: changing ownership of '.../var/lib/alderpointdns.db': Operation
+   not permitted`, because the unprivileged web user cannot `chown` the
+   SQLite snapshot to match the live DB's ownership. The *old* migration
+   apply code called this with `strict=False` (silently swallowing the
+   failure and proceeding anyway) -- so on this VM, every AdGuard/Pi-hole
+   migration ever applied through the web UI before this milestone
+   proceeded with **no working pre-import safety backup**, undetected until
+   now. Workstream B's `apply_migration_job()` correctly uses
+   `strict=True` per the mission ("create a verified backup" before apply),
+   which turned the previously-silent failure into a hard, correct refusal
+   -- surfacing the defect instead of masking it further. Fixed by having
+   `create_pre_import_backup()` invoke the same privileged, already-tested
+   path scheduled/manual backups already use: `sudo alderpointdns_compiler.py
+   backup-create` (already in the sudoers allowlist, already runs as root).
+   Verified live end-to-end afterward: `runuser -u bindguard -- sudo -n
+   .../alderpointdns_compiler.py backup-create` now succeeds
+   (`backup_path=...`, `pruned=2`) as the real unprivileged web user.
+   Updated `tests/test_importer.py`/`tests/test_import_routes.py` to stub
+   the single `subprocess.run` call site instead of writing a fake
+   `backup.sh`; removed the now-dead `BACKUP_SCRIPT` constant.
+
+### Full live end-to-end migration verification (real upload, real apply, real rollback)
+
+Created a throwaway admin (`migration_inspect_tmp`, confirmed deleted
+afterward, 1 real admin remains), then drove the actual production HTTP
+routes with `curl` against the running `alderpointdns` service --
+deliberately not just calling `importer.py` functions directly, since that's
+exactly the gap that hid both defects above.
+
+- Uploaded `tests/fixtures/adguard_home.yaml` via `POST
+  /import/migration/adguard/yaml`; the first attempt (before restarting the
+  service to pick up the merged code) went through the *old* pre-merge
+  `importer.py` still loaded in the running uvicorn worker's memory --
+  caught this by comparing category counts against a standalone
+  reproduction and re-did the upload after `systemctl restart alderpointdns`
+  (worth noting for future sessions: a `git merge` alone does not make a
+  running service pick up new code).
+- `GET /import/jobs/2/preview`: 200 OK (previously 500, see defect #1
+  above), rendered all 11 populated categories with correct counts (34
+  active, matching `summarize_migration()`'s own count computation exactly)
+  and correct metric cards (`Will import` 27, `Kept inactive` 6, etc.).
+- `POST /import/jobs/2/apply` with the default itemized selection (33 of 34
+  selectable items, matching `counts['selected_default']`): 303, job status
+  `applied`, `34 object(s)` applied, 0 failed.
+- Live `dig` verification against the real dnsdist/BIND stack for every
+  required rule form from the fixture, using the RPZ SOA marker in the
+  additional section to distinguish "our rule actually fired" from "`.example`
+  doesn't exist upstream anyway" (the latter is a trap: NXDOMAIN alone proves
+  nothing for reserved TLDs):
+  - `ads.example`/`sub.ads.example` (`||...^` block): both NXDOMAIN with the
+    RPZ marker -- subdomain block correctly inherited.
+  - `exact.example` (`|...^` exact block): NXDOMAIN with RPZ marker;
+    `sub.exact.example`: NXDOMAIN **without** the RPZ marker -- proves the
+    exact-host-only distinction is real, not just a stored flag with no
+    effect.
+  - `safe.example`/`exactallow.example` (allow rules): NXDOMAIN without the
+    RPZ marker in both cases -- correct (an allow with nothing else trying
+    to block it is a no-op; this is not a false negative, it's the expected
+    outcome for a domain that plain doesn't exist upstream).
+  - `plainblock.example`/`sub.plainblock.example` (plain domain, AdGuard
+    subdomain-inclusive semantics): both blocked with the RPZ marker.
+  - `hosts-blocked.example` (`0.0.0.0` sentinel) and
+    `hosts-blocked-v6.example` (`::` sentinel, queried as AAAA): both exact
+    blocks with the RPZ marker.
+  - `loopback.example` (`127.0.0.1`, a non-sentinel literal-address
+    rewrite per this milestone's design decision): `NOERROR`, answer
+    `127.0.0.1`, RPZ marker present (local-data rewrite, not a passthru) --
+    confirms 127.0.0.1/::1 are treated as literal rewrite targets, not
+    block sentinels, matching the mission's "return the exact specified
+    address" requirement for that example line.
+  - `hosts-v6.example` and `nas-alias.example` (both aliases on one
+    `fd00::9 ... # media box` line, queried as AAAA): both `NOERROR`,
+    answer `fd00::9` -- multiple aliases per line and IPv6 family
+    preservation both confirmed; the DB row for both carries the inline
+    comment `media box`.
+  - `important.example` (`$important`): blocked with RPZ marker; DB row
+    confirms `priority=100` (`custom_rules.IMPORTANT_PRIORITY`).
+  - Regex rules: confirmed via the compiled dnsdist data files rather than
+    `.example` domain resolution (which can't prove a regex actually fired,
+    only that the domain doesn't exist upstream either way) --
+    `^ads[0-9]+\.` and `^goodcdn[0-9]+\.` both landed verbatim in
+    `/var/lib/alderpointdns/compiled/dnsdist/custom-regex-{block,allow}.txt`.
+    The underlying dnsdist regex enforcement mechanism itself (not specific
+    to these two patterns) was already proven live during the Workstream A
+    verification pass above.
+  - Direct DB inspection of every `custom_filter_rules` row for
+    `import_job_id=2` confirmed exact classification and reasons for every
+    remaining fixture line: `$client`/`$dnstype`/`$ctag` each stored
+    `enabled=0`, `validation_state='unsupported'`, with the precise reason
+    text (e.g. `"modifier $client cannot be preserved: Alderpoint DNS has
+    no per-client rule enforcement"`) and the underlying base rule (e.g.
+    `clientscoped.example`) never activated; the malformed domain and the
+    lookahead regex both stored `validation_state='invalid'`/`'unsupported'`
+    with exact reasons; all three comment lines (including one that reads
+    like a disabled rule, `! ||disabled-rule.example^` -- correct per
+    AdGuard's own convention that a `!`-prefixed line is always a comment,
+    including the common case of using it to comment out a rule) stored as
+    `rule_type='comment'`, no DNS effect.
+  - Local DNS vs. custom-rewrite routing verified against the live system's
+    actual configured internal domain (`mylan.network`, not the fixture's
+    `home.arpa`): `alias.home.arpa -> target.home.arpa` (CNAME-style answer)
+    correctly landed in `local_dns_records` regardless of domain match;
+    `nas.home.arpa`/`printer.home.arpa`/`external.example.com`/
+    `wildcard.example` (IP answers, none under the real internal domain)
+    correctly became exact/subdomain rewrite custom rules instead.
+  - Blocklist sources (3, including one with a `?auth=` token in its URL --
+    confirmed present verbatim in the live preview shown only to the
+    uploading admin, but absent from the persisted/downloadable report per
+    `redact_sensitive()`), upstream resolvers (2 new: a DoH and a plain
+    resolver, correctly distinct from 4 unrelated pre-existing "Imported
+    upstream" rows from an earlier, unrelated migration -- cosmetic
+    display-name collision only, no functional conflict since dedup keys on
+    protocol/address/port/path not name), and client aliases (Phone,
+    Laptop) all confirmed via direct DB query.
+- `POST /import/jobs/2/rollback`: 303, job status `rolled_back`, message
+  `removed 34 imported object(s)`. Verified precisely: `custom_filter_rules`
+  with `import_job_id=2` back to 0 rows; the 3 imported sources gone; the
+  pre-existing, unrelated `importtest-nas.mylan.network` Local DNS record
+  (predating this session) untouched; the 7 pre-existing legacy
+  `custom_rules` rows untouched; the 2 imported upstream resolvers and 2
+  imported client aliases gone. Re-ran the `loopback.example` dig check
+  after rollback: back to plain NXDOMAIN (the rewrite is actually gone from
+  the deployed config, not just the database).
+- Cleaned up after testing: removed the throwaway admin, the two staged
+  upload copies this session created, and canceled the superseded job 1
+  (created against the pre-restart old code before the fix). Also found and
+  removed one unrelated stray artifact predating this entire session -- an
+  unreferenced (`backup_history` has no matching row) extracted-backup
+  scratch directory `/var/lib/alderpointdns/staging/verify2-n0PFMK`, dated
+  well before this milestone started, evidently left over from an earlier
+  session's backup/restore inspection work.
+
+### Full verification battery (after all four workstreams merged)
+
+- `python3 -m unittest discover -s tests -p "test_*.py"`: 330 tests, all
+  passing.
+- `./tests/test_web_smoke.sh`: passing.
+- `./tests/test_acceptance.sh`: exit 0, final line "Alderpoint DNS
+  acceptance suite passed" -- includes `test_encryption_layout.sh` (all four
+  widths), install/upgrade/diagnostics, the stale-BindGuard-reference scan
+  (clean), rename-migration regression, beta-hardening docs,
+  `test_service_restart_analytics.sh`, and `test_backup_restore.sh`.
+- `python3 -B tests/test_replication.py`: 5 tests passing;
+  `custom_filter_rules` confirmed present in `REPLICABLE_TABLES` (excluding
+  the node-local `import_job_id`); confirmed `filter_update_settings` is
+  deliberately absent from replication, consistent with how every other
+  per-node operational-settings table (`dns_cache_settings`,
+  `encryption_settings`, `upstream_resolvers`) is handled -- only filtering
+  *policy* data replicates, not per-node scheduling preferences.
+- `python3 -B tests/test_backup.py`: 36 tests passing. Confirmed
+  `custom_filter_rules` has an explicit `TABLE_COMPONENT_MAP` entry
+  (reusing the existing `custom_rules` component); confirmed
+  `filter_update_settings`'s absence from the same map is consistent with
+  every other settings-style table that isn't explicitly listed (it falls
+  under the default `sqlite_data` bucket, not excluded from backup).
+- `scripts/alderpointdns-diagnostics` re-confirmed to select only `type,
+  name` from `sqlite_master` -- the new tables get the same schema-name-only
+  treatment as every existing table, no row contents ever exposed.
+- Installer/packaging cross-checked directly (not just trusting Workstream
+  C's report): `alderpointdns-filter-update.{service,timer}` are installed
+  by both `scripts/install.sh` and `scripts/upgrade.sh`, enabled in
+  `packaging/debian/postinst`, stopped/disabled in `prerm`, and the runtime
+  drop-in directory is purged in `postrm` alongside the existing backup
+  timer's.
+- Live service/DNS re-verification after all merges and fixes: all four
+  services (`named`, `dnsdist`, `alderpointdns`, `alderpointdns-analytics`)
+  active; plain recursive resolution and RPZ blocking both still correct;
+  DNSSEC (`. DNSKEY +dnssec`) returns DNSKEY/RRSIG data; PTR
+  (`172.16.43.9` -> `chat.mylan.network.`) resolves; encrypted listeners
+  bound on `:443` (DoH/DoH3) and `:853` (DoT/DoQ) on both IPv4 and IPv6; no
+  orphaned staging files, no abandoned import jobs (both test jobs ended in
+  a clean terminal state, `rolled_back`/`canceled`); the filter-update timer
+  correctly scheduled at `1 Day`.
+- Chromium-rendered the Blocklists page in the disabled-scheduler state
+  (`interval_hours='disabled'`, redeployed live): confirmed the "Disabled"
+  badge, "Automatic updates disabled" text, and **no** next-run time shown,
+  exactly per the mission requirement; confirmed manual "Update All Now"
+  (`update-sources` via the real sudo helper) still works while disabled;
+  restored the schedule to `1 Day` afterward.
+
+An independent review subagent (fresh, no context from this session, given
+an adversarial brief covering rule-parser safety, SQL/shell injection,
+CSRF/authz, SSRF, transactional-apply correctness, rollback precision,
+scheduler input validation, and public-release hygiene) was launched in a
+separate isolated worktree and is running concurrently with this log entry.
+Its findings will be recorded in a follow-up section once it reports back.
