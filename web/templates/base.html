@@ -6,6 +6,15 @@
   <meta name="color-scheme" content="dark">
   <title>{% block title %}Alderpoint DNS{% endblock %}</title>
   <link rel="stylesheet" href="/static/app.css">
+  <script>
+    (function () {
+      try {
+        if (window.localStorage.getItem('alderpointdnsSidebarCollapsed') === '1') {
+          document.documentElement.classList.add('sidebar-collapsed');
+        }
+      } catch (e) {}
+    }());
+  </script>
 </head>
 <body>
   {% if admin %}
@@ -32,7 +41,7 @@
     {%- endmacro %}
     {% macro nav_section(id, label, active, icon_name) -%}
       <section class="nav-section{% if active %} is-active{% endif %}" data-nav-section="{{ id }}">
-        <button class="nav-section__button" type="button" data-nav-section-toggle aria-controls="nav-panel-{{ id }}" aria-expanded="{{ 'true' if active else 'false' }}" {% if active %}aria-current="true"{% endif %}>
+        <button class="nav-section__button" type="button" data-nav-section-toggle aria-controls="nav-panel-{{ id }}" aria-expanded="{{ 'true' if active else 'false' }}" {% if active %}aria-current="true"{% endif %} aria-label="{{ label }}" title="{{ label }}">
           <span class="nav-icon">{{ nav_icon(icon_name) }}</span>
           <span class="nav-section__label">{{ label }}</span>
           <span class="nav-section__chevron">{{ nav_chevron() }}</span>
@@ -72,11 +81,14 @@
                 <path d="M6 10.2 8.5 13l4.8-5.7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
               </svg>
             </span>
-            <span>Alderpoint DNS</span>
+            <span class="brand__label">Alderpoint DNS</span>
           </a>
+          <button class="sidebar-collapse-toggle" type="button" data-sidebar-collapse aria-pressed="false" aria-label="Collapse sidebar" title="Collapse sidebar">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.4 5.3 8.7 12l6.7 6.7-1.9 1.8-8.5-8.5 8.5-8.5 1.9 1.8Z"/></svg>
+          </button>
         </div>
         <nav class="app-nav" aria-label="Primary navigation" data-primary-nav>
-          <a class="nav-link nav-link--primary{% if path == '/' %} is-active{% endif %}" href="/" {% if path == "/" %}aria-current="page"{% endif %}>
+          <a class="nav-link nav-link--primary{% if path == '/' %} is-active{% endif %}" href="/" {% if path == "/" %}aria-current="page"{% endif %} aria-label="Dashboard" title="Dashboard">
             <span class="nav-icon">{{ nav_icon("dashboard") }}</span>
             <span class="nav-link__label">Dashboard</span>
           </a>
@@ -105,7 +117,7 @@
           <span id="globalServiceStatus" class="status-badge status-badge--{{ service_status.tone }} js-global-service-status" data-status-url="/status/summary" title="{{ service_status.detail }}">
             <span data-status-label>{{ service_status.label }}</span>
           </span>
-          <form method="post" action="/logout"><button class="secondary">Logout</button></form>
+          <form method="post" action="/logout"><button class="secondary" aria-label="Logout" title="Logout"><span class="nav-link__label">Logout</span></button></form>
         </div>
       </aside>
       <main class="app-main">{% block content %}{% endblock %}</main>

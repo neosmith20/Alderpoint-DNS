@@ -28,6 +28,25 @@
     });
   }
 
+  const sidebarCollapseToggle = document.querySelector('[data-sidebar-collapse]');
+  if (sidebarCollapseToggle) {
+    const SIDEBAR_COLLAPSE_KEY = 'alderpointdnsSidebarCollapsed';
+    const setSidebarCollapsed = (collapsed) => {
+      document.documentElement.classList.toggle('sidebar-collapsed', collapsed);
+      sidebarCollapseToggle.setAttribute('aria-pressed', String(collapsed));
+      const label = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
+      sidebarCollapseToggle.setAttribute('aria-label', label);
+      sidebarCollapseToggle.title = label;
+      try {
+        window.localStorage.setItem(SIDEBAR_COLLAPSE_KEY, collapsed ? '1' : '0');
+      } catch (e) {}
+    };
+    setSidebarCollapsed(document.documentElement.classList.contains('sidebar-collapsed'));
+    sidebarCollapseToggle.addEventListener('click', () => {
+      setSidebarCollapsed(!document.documentElement.classList.contains('sidebar-collapsed'));
+    });
+  }
+
   document.querySelectorAll('[data-nav-section-toggle]').forEach((button) => {
     const panel = document.getElementById(button.getAttribute('aria-controls') || '');
     if (!panel) return;
@@ -46,6 +65,22 @@
         return;
       }
       setSectionOpen(nextOpen);
+    });
+  });
+
+  // In the collapsed desktop rail, an opened section renders as a flyout
+  // over the page content instead of pushing the nav down; close it when
+  // the user clicks elsewhere so it doesn't linger on top of the page.
+  document.addEventListener('click', (event) => {
+    if (!document.documentElement.classList.contains('sidebar-collapsed')) return;
+    document.querySelectorAll('[data-nav-section].is-expanded').forEach((section) => {
+      if (section.contains(event.target)) return;
+      const toggle = section.querySelector('[data-nav-section-toggle]');
+      const panel = toggle && document.getElementById(toggle.getAttribute('aria-controls') || '');
+      if (!toggle || !panel || toggle.getAttribute('aria-current') === 'true') return;
+      toggle.setAttribute('aria-expanded', 'false');
+      panel.hidden = true;
+      section.classList.remove('is-expanded');
     });
   });
 
