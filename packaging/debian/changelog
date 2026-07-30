@@ -52,8 +52,15 @@ alderpointdns (0.4.0~beta2-1) unstable; urgency=medium
     loops. Added tests/test_clean_install_container.sh (fresh Debian 13 +
     systemd container, no inherited dev-machine state) and
     tests/test_deb_package_contents.sh (static built-package inspection).
+  * Finalized the project license: source-available under the PolyForm
+    Noncommercial License 1.0.0 (LICENSE), not open source; commercial
+    use requires a separate license (COMMERCIAL_LICENSING.md). Added
+    COPYRIGHT, CONTRIBUTOR_LICENSE_AGREEMENT.md, TRADEMARKS.md, and
+    THIRD_PARTY_NOTICES.md. The package now installs LICENSE/copyright/
+    COMMERCIAL_LICENSING.md/THIRD_PARTY_NOTICES.md under
+    /usr/share/doc/alderpointdns/.
 
- -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Thu, 30 Jul 2026 23:15:00 -0600
+ -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Thu, 30 Jul 2026 23:45:00 -0600
 
 alderpointdns (0.4.0~beta1-1) unstable; urgency=medium
 

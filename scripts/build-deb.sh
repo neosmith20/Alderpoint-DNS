@@ -38,7 +38,7 @@ command -v dpkg-deb >/dev/null 2>&1 || {
 WORK="$(mktemp -d /tmp/alderpointdns-deb-build.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 PKG="$WORK/alderpointdns"
-mkdir -p "$PKG/DEBIAN" "$PKG/opt/alderpointdns" "$PKG/usr/sbin" "$PKG/lib/systemd/system" "$PKG/etc/sudoers.d"
+mkdir -p "$PKG/DEBIAN" "$PKG/opt/alderpointdns" "$PKG/usr/sbin" "$PKG/lib/systemd/system" "$PKG/etc/sudoers.d" "$PKG/usr/share/doc/alderpointdns"
 
 cat > "$PKG/DEBIAN/control" <<EOF
 Package: alderpointdns
@@ -73,6 +73,20 @@ cp "$SOURCE_DIR/packaging/alderpointdns-filter-update.service" "$PKG/lib/systemd
 cp "$SOURCE_DIR/packaging/alderpointdns-filter-update.timer" "$PKG/lib/systemd/system/alderpointdns-filter-update.timer"
 cp "$SOURCE_DIR/packaging/sudoers-alderpointdns" "$PKG/etc/sudoers.d/alderpointdns"
 chmod 0440 "$PKG/etc/sudoers.d/alderpointdns"
+
+# License/copyright/legal docs, installed under the standard Debian
+# documentation path. "copyright" (lowercase, no extension) is the
+# conventional filename apt frontends and packaging tools look for at
+# /usr/share/doc/<pkg>/copyright; the rest are shipped alongside it for
+# completeness. Package metadata otherwise has no "License:" field (not
+# a standard Debian control field) -- this is the actual authoritative
+# location for licensing information in the built package.
+cp "$SOURCE_DIR/LICENSE" "$PKG/usr/share/doc/alderpointdns/LICENSE"
+cp "$SOURCE_DIR/COPYRIGHT" "$PKG/usr/share/doc/alderpointdns/copyright"
+cp "$SOURCE_DIR/COMMERCIAL_LICENSING.md" "$PKG/usr/share/doc/alderpointdns/COMMERCIAL_LICENSING.md"
+cp "$SOURCE_DIR/THIRD_PARTY_NOTICES.md" "$PKG/usr/share/doc/alderpointdns/THIRD_PARTY_NOTICES.md"
+cp "$SOURCE_DIR/TRADEMARKS.md" "$PKG/usr/share/doc/alderpointdns/TRADEMARKS.md"
+chmod 0644 "$PKG/usr/share/doc/alderpointdns/"*
 
 mkdir -p "$OUTPUT_DIR"
 dpkg-deb --build --root-owner-group "$PKG" "$OUTPUT_DIR/alderpointdns_${DEB_VERSION}_all.deb" >/dev/null

@@ -19,8 +19,23 @@ Run individual suites:
 /opt/alderpointdns/tests/test_encryption_layout.sh
 /opt/alderpointdns/tests/test_backup_restore.sh
 /opt/alderpointdns/tests/test_deb_package_contents.sh
+/opt/alderpointdns/tests/test_licensing_hygiene.sh
 /opt/alderpointdns/tests/test_release_hygiene.sh
 ```
+
+`tests/test_licensing_hygiene.sh` verifies the finalized license set is
+intact and internally consistent: `LICENSE` contains the complete,
+unmodified PolyForm Noncommercial License 1.0.0 text; `COPYRIGHT` carries
+the exact Required Notice; `COMMERCIAL_LICENSING.md`,
+`CONTRIBUTOR_LICENSE_AGREEMENT.md`, `TRADEMARKS.md`, and
+`THIRD_PARTY_NOTICES.md` all exist; no tracked file (outside
+`THIRD_PARTY_NOTICES.md`, dependency metadata, and
+`CONTRIBUTOR_LICENSE_AGREEMENT.md`'s description of being adapted from the
+Apache ICLA) claims Alderpoint DNS is MIT/GPL/AGPL/Apache/BSD-licensed,
+"open source," unlicensed, or freely usable commercially; `README.md` and
+`CONTRIBUTING.md` reference the finalized documents; and the built `.deb`
+actually installs `LICENSE`/`copyright`/`COMMERCIAL_LICENSING.md`/
+`THIRD_PARTY_NOTICES.md` under `/usr/share/doc/alderpointdns/`.
 
 Two more suites require tooling most CI environments won't have by default,
 so they aren't run implicitly by the above and are called out separately:

@@ -1,0 +1,33 @@
+Alderpoint DNS — Copyright
+
+Required Notice: Copyright 2026 Alex (GitHub: neosmith20). Alderpoint DNS.
+
+This is the "Required Notice" referenced by the Notices section of the
+LICENSE file (PolyForm Noncommercial License 1.0.0): anyone who receives a
+copy of any part of this software must also receive a copy of the license
+terms (or the URL for them) and a copy of the plain-text line above.
+
+## Scope
+
+Alderpoint DNS's original source code, documentation, interface assets
+(templates, stylesheets, and client-side scripts written for this project),
+and other project-created materials are copyright Alex (GitHub: neosmith20)
+and are covered by the terms in `LICENSE` unless a file or directory states
+otherwise.
+
+No corporation, LLC, foundation, or other legal entity holds this
+copyright; it is held by the individual named above.
+
+## Third-party components
+
+Alderpoint DNS integrates with and depends on third-party software,
+including BIND 9, PowerDNS dnsdist, Python packages, and other operating
+system packages listed in `requirements.txt`, `requirements-debian.txt`,
+and `packaging/debian/control`. Those components remain under their own
+respective licenses. No ownership claim is made over BIND, dnsdist, any
+Python dependency, any operating-system package, or any other third-party
+component distributed, installed, or integrated with Alderpoint DNS.
+
+See `THIRD_PARTY_NOTICES.md` for a fuller inventory of third-party
+components this project depends on or integrates with, and their licenses
+where confidently determined.

@@ -15,6 +15,12 @@ a BIND RPZ zone and reloaded through a staged, validated deployment path.
 > `docs/hardening-review.md` for the honest current state before you rely on
 > it for anything important.
 
+**Source-available under the [PolyForm Noncommercial License
+1.0.0](LICENSE).** Alderpoint DNS is not open source; commercial use
+requires a separate license — see `LICENSE` and
+`COMMERCIAL_LICENSING.md`. Contributions are subject to the
+[Contributor License Agreement](CONTRIBUTOR_LICENSE_AGREEMENT.md).
+
 ## Key features
 
 - **DNS filtering with a custom rules engine.** Domain, subdomain, hosts-style,
@@ -121,10 +127,25 @@ pre-release checklist and accepted beta risks.
 ## Contributing and security
 
 Contributions are welcome — see `CONTRIBUTING.md` for how to run the test
-suite and what pull requests should include. To report a security issue,
-please follow `SECURITY.md` rather than opening a public issue. This project
-follows the `CODE_OF_CONDUCT.md`.
+suite, what pull requests should include, and the current state of the
+Contributor License Agreement acceptance process. To report a security
+issue, please follow `SECURITY.md` rather than opening a public issue. This
+project follows the `CODE_OF_CONDUCT.md`.
 
 ## License
 
-A license has not yet been finalized for Alderpoint DNS.
+Alderpoint DNS is **source-available**, not open source, under the
+[PolyForm Noncommercial License 1.0.0](LICENSE). You can read, run, modify,
+and share it for noncommercial purposes; see `LICENSE` for the complete
+terms and `COPYRIGHT` for the required copyright notice.
+
+Commercial use — selling Alderpoint DNS, bundling it into a paid product,
+offering it as a paid hosted or managed service, or commercially
+redistributing it — is not granted by this license and requires a separate
+agreement. See `COMMERCIAL_LICENSING.md`.
+
+Alderpoint DNS integrates with third-party software (BIND 9, PowerDNS
+dnsdist, and various Python/OS packages) that remains under its own
+license; see `THIRD_PARTY_NOTICES.md`. Contributions are governed by the
+[Contributor License Agreement](CONTRIBUTOR_LICENSE_AGREEMENT.md). Use of
+the "Alderpoint DNS" name and branding is governed by `TRADEMARKS.md`.

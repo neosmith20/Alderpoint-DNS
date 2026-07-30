@@ -1,0 +1,22 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: alderpointdns
+Source: https://github.com/neosmith20/Alderpoint-DNS
+
+Files: *
+Copyright: 2026 Alex (GitHub: neosmith20)
+License: PolyForm-Noncommercial-1.0.0
+ Required Notice: Copyright 2026 Alex (GitHub: neosmith20). Alderpoint DNS.
+ .
+ This package is licensed under the PolyForm Noncommercial License 1.0.0,
+ not a license in Debian's main archive license set. The complete license
+ text is installed at /usr/share/doc/alderpointdns/LICENSE (and in this
+ source tree's root LICENSE file). See /usr/share/doc/alderpointdns/copyright
+ (this project's own COPYRIGHT file) and
+ /usr/share/doc/alderpointdns/COMMERCIAL_LICENSING.md for scope and
+ commercial-use terms. This is not an OSI-approved open source license.
+
+Comment:
+ Alderpoint DNS depends on and integrates with third-party software
+ (BIND 9, PowerDNS dnsdist, and various Python/OS packages) that remains
+ under its own license and is not covered by the above. See
+ /usr/share/doc/alderpointdns/THIRD_PARTY_NOTICES.md for the full list.

@@ -117,3 +117,16 @@ may still change between releases before a stable 1.0.
   `StartLimitBurst`/`StartLimitIntervalSec` caps prevent runaway restart
   loops if that ever fails again. Added a container-based clean-install
   regression test and a static built-package inspection test.
+- Finalized Alderpoint DNS's license: source-available under the PolyForm
+  Noncommercial License 1.0.0 (`LICENSE`), not open source; commercial use
+  requires a separate license (`COMMERCIAL_LICENSING.md`). Added
+  `COPYRIGHT`, `CONTRIBUTOR_LICENSE_AGREEMENT.md` (structured on the Apache
+  Individual CLA, de-branded, contributors retain ownership and grant
+  Alderpoint DNS broad reuse/relicensing rights), `TRADEMARKS.md`, and
+  `THIRD_PARTY_NOTICES.md` (audit of BIND/dnsdist/Python/OS dependencies
+  and their licenses; nothing third-party is vendored into the repo).
+  Updated `README.md`/`CONTRIBUTING.md` accordingly and clarified that
+  opening a pull request is not, by itself, CLA acceptance. The `.deb` now
+  installs `LICENSE`/`copyright`/`COMMERCIAL_LICENSING.md`/
+  `THIRD_PARTY_NOTICES.md` under `/usr/share/doc/alderpointdns/`. Added a
+  permanent licensing-hygiene test.
