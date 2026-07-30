@@ -1985,9 +1985,126 @@ exactly the gap that hid both defects above.
   (`update-sources` via the real sudo helper) still works while disabled;
   restored the schedule to `1 Day` afterward.
 
+## Independent review and final security hardening (checkpoint `0304922`)
+
 An independent review subagent (fresh, no context from this session, given
 an adversarial brief covering rule-parser safety, SQL/shell injection,
 CSRF/authz, SSRF, transactional-apply correctness, rollback precision,
-scheduler input validation, and public-release hygiene) was launched in a
-separate isolated worktree and is running concurrently with this log entry.
-Its findings will be recorded in a follow-up section once it reports back.
+scheduler input validation, and public-release hygiene, explicitly told
+about the two live-only bugs above and instructed not to trust "tests
+pass" as proof of correctness) ran in a separate isolated worktree and
+reported back with one `should-fix` finding, two `minor` findings, and an
+extensive list of things it specifically tried to break and could not
+(SQL injection, XSS, credential leakage, path traversal, allowlist
+bypass, partial-apply state, and rollback damaging pre-existing objects).
+
+### Fixed: ReDoS via nested-quantifier regex patterns (`373fca0`)
+
+**Finding:** regex validation (`posix_ere_incompatibility`) correctly
+rejected PCRE-only syntax but had no defense against catastrophic-
+backtracking shapes that are perfectly valid POSIX ERE, e.g. `/^(a+)+$/`.
+dnsdist's own `RegexRule` compiles patterns with POSIX `regcomp`, a
+non-backtracking automaton immune to this, but the same stored pattern is
+also matched with Python's backtracking `re.search()` in
+`evaluate_domain()` for the admin-facing "Test a domain" panel
+(`/custom-rules/test`). The reviewer confirmed directly: `/^(a+)+$/`
+classified `valid`, then hung well past 120 seconds against an adversarial
+input. Independently reproduced: a 30-character input still had not
+returned after a 5-second `timeout`.
+
+**Fix:** added `nested_quantifier_risk()`, a single-pass scanner mirroring
+the existing `posix_ere_incompatibility()` structure -- it tracks a
+per-group-nesting flag for "a quantified atom occurred directly inside
+this group" and rejects when a group carrying that flag is itself
+quantified (`(a+)+`, `(a*)*`, `(ab+)*`, `(.*)*`, ...). Wired into
+`_validate_regex()` alongside the POSIX check. Verified against the
+reviewer's exact exploit shapes (all now rejected with a clear reason,
+kept inactive per the existing unsupported-rule policy) and against every
+regex pattern already relied upon across the fixtures and this session's
+prior live testing (`^ads[0-9]+\.`, alternation, bounded `{n,m}`
+repetition, character classes) -- all remain valid, zero false positives.
+No live regex rules existed on this system at fix time, so there was
+nothing to retroactively re-validate. 2 new tests added
+(`tests/test_custom_rules.py`, now 51 tests); full suite and acceptance
+run clean afterward.
+
+### Fixed: exact-match-only secret-key redaction (`0304922`)
+
+**Finding:** `redact_sensitive()` matched credential-bearing dict keys by
+exact string only (`"password"`, `"auth"`, ...), so a compound field name
+like `"admin_password"` or `"AuthToken"` would bypass redaction entirely.
+The reviewer confirmed no current report/summary payload actually
+contains such a compound key, and the accompanying URL-scrubbing regex
+independently strips embedded credentials from any string regardless of
+key name -- so this was not exploitable today, but a real gap for any
+field added later, explicitly called out given the mission's strong
+"never expose secrets" requirement for downloadable migration reports.
+
+**Fix:** replaced exact-match key checking with word-boundary/camelCase-
+aware token matching in `app/importer.py`. Deliberately does **not**
+treat bare `"key"` as sensitive, since this codebase has real, non-secret
+fields named `key`/`deselected_keys`/`_dupkeys`/`_upstream_key` (the
+migration preview's stable per-item selection keys, rendered as checkbox
+values in the itemized apply form) -- confirmed those must survive
+redaction for the preview/apply UI to keep working, both in a sandboxed
+test and by re-verifying live: restarted the service, re-uploaded the
+AdGuard fixture, fetched `/import/jobs/{id}/report`, and confirmed
+`item.key == "blocklists:0"` was still present in the downloaded,
+redacted report. 3 new tests added (`tests/test_importer.py`, now 52
+tests).
+
+### Accepted without a code change (documented, not exploitable today)
+
+- **AdGuard API fetch has no total-elapsed-time budget**, only a
+  per-socket-operation timeout (`timeout=8`); a slow-drip response could
+  keep a fetch thread alive longer than the stated timeout while still
+  respecting the response size cap. Low severity: the target is always an
+  admin-supplied AdGuard instance the operator already trusts by choosing
+  to connect to it, not attacker-controlled input from an untrusted party.
+  Not fixed in this pass; noted for a future hardening pass if this
+  becomes a real operational issue.
+- The reviewer flagged (as an observation, not a new defect) that
+  `create_pre_import_backup()`'s privileged `subprocess.run` call is
+  mocked in unit tests because it's inherently untestable unprivileged in
+  a sandboxed test run -- the same class of gap that produced both
+  previously-found live-only bugs. Recorded here as a standing caution for
+  future sessions: any privileged-helper call site in this codebase needs
+  a live smoke check in addition to its sandboxed unit test, not instead
+  of it.
+
+### Final verification after all hardening fixes
+
+- `python3 -m unittest discover -s tests -p "test_*.py"`: 334 tests, all
+  passing.
+- `./tests/test_web_smoke.sh`: passing.
+- `./tests/test_acceptance.sh`: exit 0, final line "Alderpoint DNS
+  acceptance suite passed" (includes the encryption layout check at all
+  four widths, install/upgrade/diagnostics, stale-reference scan,
+  rename-migration regression, backup/restore, service-restart-analytics).
+- Live re-verification after restarting `alderpointdns` with the security
+  fixes in place: re-uploaded `tests/fixtures/adguard_home.yaml` through
+  the real `/import/migration/adguard/yaml` route, confirmed
+  `GET /import/jobs/{id}/preview` still renders 200 OK with all categories
+  intact, confirmed `GET /import/jobs/{id}/report` still downloads with
+  the preview item `key` fields present and correct, canceled the test
+  job, and confirmed no admin/job/staging artifacts were left behind (1
+  real admin remains; the job ended in `canceled`, a clean terminal
+  state).
+- All four services (`named`, `dnsdist`, `alderpointdns`,
+  `alderpointdns-analytics`) active; `example.com` resolves;
+  `doubleclick.net` NXDOMAIN (RPZ still correctly enforced).
+
+## Milestone closeout
+
+This is the final pre-public-release feature and polish milestone.
+Checkpoint commit `0304922` on `main`. All three mission requirements
+(first-class custom filtering rules with correct AdGuard Home/Pi-hole
+migration, configurable automatic filter update interval, certificate
+settings panel layout correction) are implemented, integrated, live-
+verified end-to-end against the real running stack (not just sandboxed
+unit tests), and independently reviewed with all real findings fixed and
+re-verified. No reboot was required or performed. The project is ready
+for the final clean public export and GitHub upload, subject to whatever
+separate export/sanitization step that upload process itself requires
+(this session did not touch anything outside the `/opt/alderpointdns` git
+history).
