@@ -156,3 +156,9 @@
   content, verified with a headless-Chromium regression check across four
   viewport widths; the same fix was applied to the equivalent Cache Tuning/
   Flush Cache and Create Backup/Import Backup panel pairs.
+- Hardened custom regex rule validation to reject catastrophic-backtracking
+  patterns (e.g. `(a+)+`) that are valid POSIX ERE but can hang the
+  admin-facing "Test a domain" evaluation panel indefinitely; hardened
+  migration report redaction to match credential-bearing field names by
+  word-boundary/camelCase token instead of exact string, so compound names
+  are caught too.
