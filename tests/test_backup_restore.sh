@@ -6,6 +6,8 @@ fail() {
   exit 1
 }
 
+command -v setsid >/dev/null 2>&1 || fail "setsid is required"
+
 backup="$(/opt/alderpointdns/scripts/backup.sh)"
 [ -s "$backup" ] || fail "backup archive not created"
 tar -tzf "$backup" | grep -q 'var/lib/alderpointdns/alderpointdns.db' || fail "backup missing database"
@@ -76,6 +78,8 @@ wait "$writer_pid"
 grep -q "file changed as we read it" "$race_err" && \
   fail "backup.sh raced the live database (file changed as we read it): $(cat "$race_err")"
 [ -s "$race_backup" ] || fail "race backup archive not created"
+race_mode="$(stat -c '%a' "$race_backup")"
+[ "$race_mode" = "640" ] || fail "backup archive mode is $race_mode, expected 640"
 
 tar -C "$race_extract" -xzf "$race_backup" var/lib/alderpointdns/alderpointdns.db
 race_committed="$(cat "$race_count")"
@@ -90,5 +94,44 @@ rows = conn.execute("SELECT count(*) FROM backup_race_test").fetchone()[0]
 assert rows <= committed, f"race backup snapshot has more rows ({rows}) than were ever committed ({committed})"
 conn.close()
 PYEOF
+
+
+# Regression test: an interrupted backup.sh run must exit nonzero and must
+# not leave a permanent orphaned "<name>.tar.gz.tmp" file or snapshot
+# directory behind. Cover the three signals handled by backup.sh; TERM is the
+# same signal class a service stop/reboot sends.
+backups_dir=/var/lib/alderpointdns/backups
+staging_dir=/var/lib/alderpointdns/staging
+
+for signal in INT TERM HUP; do
+  before_tmp_count="$(find "$backups_dir" -name '*.tar.gz.tmp' | wc -l)"
+  before_snapshot_count="$(find "$staging_dir" -maxdepth 1 -type d -name 'backup-snapshot.*' | wc -l)"
+  set +e
+  setsid env --default-signal=INT --default-signal=TERM --default-signal=HUP \
+    ALDERPOINTDNS_BACKUP_TEST_PAUSE_AFTER_TMP_CREATE=5 /opt/alderpointdns/scripts/backup.sh \
+    >/tmp/alderpointdns-interrupt-backup.out 2>/tmp/alderpointdns-interrupt-backup.err &
+  backup_pid=$!
+  i=0
+  while [ "$i" -lt 50 ] && ! find "$backups_dir" -name '*.tar.gz.tmp' | grep -q .; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill "-$signal" "-$backup_pid" 2>/dev/null
+  kill_rc=$?
+  wait "$backup_pid"
+  backup_rc=$?
+  set -e
+  after_tmp_count="$(find "$backups_dir" -name '*.tar.gz.tmp' | wc -l)"
+  after_snapshot_count="$(find "$staging_dir" -maxdepth 1 -type d -name 'backup-snapshot.*' | wc -l)"
+  rm -f /tmp/alderpointdns-interrupt-backup.out /tmp/alderpointdns-interrupt-backup.err
+  if [ "$kill_rc" -eq 0 ]; then
+    [ "$backup_rc" -ne 0 ] || fail "interrupted backup.sh with $signal exited 0"
+    [ "$backup_rc" -eq 143 ] || fail "interrupted backup.sh with $signal exited $backup_rc, expected 143"
+  fi
+  [ "$after_tmp_count" -eq "$before_tmp_count" ] || \
+    fail "interrupted backup.sh with $signal left an orphaned .tmp archive behind (before=$before_tmp_count after=$after_tmp_count)"
+  [ "$after_snapshot_count" -eq "$before_snapshot_count" ] || \
+    fail "interrupted backup.sh with $signal left an orphaned snapshot directory behind (before=$before_snapshot_count after=$after_snapshot_count)"
+done
 
 echo "backup and restore tests passed"

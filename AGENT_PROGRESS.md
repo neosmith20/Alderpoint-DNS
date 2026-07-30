@@ -1230,3 +1230,59 @@ Settings, and Blocklists rather than three separate implementations.
 
 Remaining for the human operator: reboot the VM and follow
 `POST_REBOOT_HANDOFF.md`.
+
+## v0.4.0-beta.2 post-reboot backup interruption fix
+
+Started from Claude Code's unfinished post-reboot state after the VM had
+already rebooted. Initial audit showed exactly two modified files:
+`scripts/backup.sh` and `tests/test_backup_restore.sh`; no staged changes and
+no untracked files. Services (`named`, `dnsdist`, `alderpointdns`,
+`alderpointdns-analytics`) were enabled/active. Recent journals showed normal
+startup/restart activity, expected BIND `allow-proxy` warnings, and the
+pre-existing `sudo: unable to resolve host bindguard-1` warning, but no crash
+loops or migration failures.
+
+Defect: an interrupted `scripts/backup.sh` run could leave project-owned
+temporary artifacts behind, especially a partially-created
+`alderpointdns-backup-*.tar.gz.tmp` in the real backup directory. A failed
+regression attempt also reproduced a stale `backup-snapshot.*` directory when
+the test sent `INT` in a way `/bin/sh` could not trap.
+
+Root cause: the previous script only removed the SQLite snapshot directory via
+an `EXIT` trap. `/bin/sh` needs explicit `INT`/`TERM`/`HUP` traps to exit after
+cleanup, and cleanup must include the in-progress archive. The regression test
+also needed to reset inherited ignored `SIGINT` handling before launching the
+background backup process; otherwise dash cannot install an `INT` trap.
+
+Fix:
+
+- `scripts/backup.sh` now sets `umask 077` before creating temporary archive
+  files.
+- Cleanup is idempotent and pattern-constrained to
+  `/var/lib/alderpointdns/staging/backup-snapshot.*` and
+  `/var/lib/alderpointdns/backups/alderpointdns-backup-*.tar.gz.tmp`, so empty
+  or malformed variables cannot remove unrelated paths.
+- `INT`, `TERM`, and `HUP` run cleanup and exit `143`.
+- Normal success still atomically moves `$tmp` to the final archive path, then
+  chmods the completed archive to `0640`; the cleanup trap only targets the
+  `.tmp` path and cannot remove a completed final archive.
+- Added a narrow test-only pause hook
+  (`ALDERPOINTDNS_BACKUP_TEST_PAUSE_AFTER_TMP_CREATE`) so the live regression
+  can deterministically interrupt after the `.tmp` archive exists.
+- `tests/test_backup_restore.sh` now verifies successful backup creation,
+  archive mode `0640`, no live-database tar race warning, SQLite integrity,
+  restore health, and interrupted `INT`/`TERM`/`HUP` runs with no orphaned
+  `.tmp` archives or `backup-snapshot.*` directories.
+
+Validation:
+
+- `/opt/alderpointdns/tests/test_backup_restore.sh`: passed. It still prints
+  the known unrelated `sudo: unable to resolve host bindguard-1` warning.
+- `python3 -B tests/test_backup.py`: 36 tests passed, covering manifest
+  checksums, SQLite integrity, secret stripping, encrypted backup
+  round-trips, isolated restore, rollback behavior, and legacy archive
+  compatibility.
+- A direct rerun of `/opt/alderpointdns/tests/test_dnsdist_frontend.sh` passed
+  after one transient immediate-after-restore DoQ query failure during an
+  earlier backup/restore run; dnsdist listeners and logs showed the DoQ
+  listener active.
