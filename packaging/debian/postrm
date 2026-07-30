@@ -3,11 +3,11 @@ set -e
 
 case "$1" in
   purge)
-    rm -rf /etc/bindguard /var/lib/bindguard /var/log/bindguard
+    rm -rf /etc/alderpointdns /var/lib/alderpointdns /var/log/alderpointdns
     ;;
   remove)
-    echo "BindGuard persistent data remains in /etc/bindguard, /var/lib/bindguard, and /var/log/bindguard." >&2
-    echo "Use apt purge bindguard only when permanent data removal is intended." >&2
+    echo "Alderpoint DNS persistent data remains in /etc/alderpointdns, /var/lib/alderpointdns, and /var/log/alderpointdns." >&2
+    echo "Use apt purge alderpointdns only when permanent data removal is intended." >&2
     ;;
 esac
 

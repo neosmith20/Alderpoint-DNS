@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""BindGuard Import and Migration: AdGuard Home migration, and spreadsheet/
+"""Alderpoint DNS Import and Migration: AdGuard Home migration, and spreadsheet/
 text imports for Local DNS records, with staged preview, conflict
 resolution, automatic backup, and rollback on failure.
 
 Every function here only ever writes to SQLite (the same unprivileged
 operation ordinary Local DNS / blocklist source edits already perform); the
 privileged BIND/dnsdist deployment step is the existing, unmodified
-`sudo bindguard_compiler.py deploy [--no-download]` path already used by
+`sudo alderpointdns_compiler.py deploy [--no-download]` path already used by
 every other Local DNS and blocklist mutation. This module does not need any
 new sudo entries.
 """
@@ -32,9 +32,9 @@ import yaml
 from app import local_dns, upstream_dns
 
 
-DB_PATH = Path("/var/lib/bindguard/bindguard.db")
-BACKUP_SCRIPT = Path("/opt/bindguard/scripts/backup.sh")
-IMPORT_UPLOAD_DIR = Path("/var/lib/bindguard/imports")
+DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
+BACKUP_SCRIPT = Path("/opt/alderpointdns/scripts/backup.sh")
+IMPORT_UPLOAD_DIR = Path("/var/lib/alderpointdns/imports")
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 CANONICAL_FIELDS = [
@@ -261,7 +261,7 @@ def parse_zone_text(text: str, default_domain: str) -> list[dict[str, str]]:
     return rows
 
 
-def parse_bindguard_csv(text: str) -> list[dict[str, str]]:
+def parse_alderpointdns_csv(text: str) -> list[dict[str, str]]:
     _headers, rows = parse_csv_text(text)
     out = []
     for row in rows:
@@ -329,7 +329,7 @@ def parse_pihole_text(text: str, default_domain: str) -> dict[str, Any]:
     }
 
 
-def export_bindguard_native(conn: sqlite3.Connection | None = None) -> str:
+def export_alderpointdns_native(conn: sqlite3.Connection | None = None) -> str:
     close = conn is None
     db = conn or connect()
     try:
@@ -337,7 +337,7 @@ def export_bindguard_native(conn: sqlite3.Connection | None = None) -> str:
         upstream_dns.init_db(db)
         _init_filter_tables(db)
         payload = {
-            "format": "bindguard-native",
+            "format": "alderpointdns-native",
             "version": 1,
             "created_at": now(),
             "local_dns_records": [dict(row) for row in db.execute("SELECT fqdn, record_type, value, ttl, comment, enabled FROM local_dns_records ORDER BY fqdn, record_type, value")],
@@ -359,10 +359,10 @@ def export_bindguard_native(conn: sqlite3.Connection | None = None) -> str:
             db.close()
 
 
-def parse_bindguard_native_json(text: str) -> dict[str, Any]:
+def parse_alderpointdns_native_json(text: str) -> dict[str, Any]:
     data = json.loads(text)
-    if not isinstance(data, dict) or data.get("format") != "bindguard-native":
-        raise ImportError_("not a BindGuard native JSON export")
+    if not isinstance(data, dict) or data.get("format") != "alderpointdns-native":
+        raise ImportError_("not a Alderpoint DNS native JSON export")
     local_records = []
     for row in data.get("local_dns_records", []):
         if isinstance(row, dict):
@@ -498,7 +498,7 @@ def auto_map_columns(headers: list[str]) -> dict[str, str]:
 def apply_column_map(raw_rows: list[dict[str, str]], column_map: dict[str, str]) -> list[dict[str, str]]:
     out = []
     for raw in raw_rows:
-        # Rows already in canonical shape (hosts/zone/bindguard-csv parsers)
+        # Rows already in canonical shape (hosts/zone/alderpointdns-csv parsers)
         # have no mapping to apply; pass through unchanged.
         if not column_map:
             out.append({field: raw.get(field, "") for field in CANONICAL_FIELDS})
@@ -802,7 +802,7 @@ def _translate_adguard_config(data: dict[str, Any]) -> dict[str, Any]:
         allowlist_unsupported.append({
             "name": entry.get("name") or entry.get("url", "imported-allowlist"),
             "url": entry.get("url", ""),
-            "note": "BindGuard has no allowlist-subscription object; add matching custom allow rules manually if needed.",
+            "note": "Alderpoint DNS has no allowlist-subscription object; add matching custom allow rules manually if needed.",
         })
 
     custom_allow: list[str] = []
@@ -848,7 +848,7 @@ def _translate_adguard_config(data: dict[str, Any]) -> dict[str, Any]:
             clients_as_aliases.append({"display_name": name, "cidr_or_ip": cidr_or_ip, "all_ids": ids})
         for feature in ("filtering_enabled", "safe_search", "blocked_services", "upstreams", "ignore_querylog", "ignore_statistics"):
             if client.get(feature) not in (None, False, {}):
-                untranslatable_client_settings.append(f"{name or cidr_or_ip}: {feature} has no BindGuard per-client equivalent yet (schema exists, not enforced at runtime)")
+                untranslatable_client_settings.append(f"{name or cidr_or_ip}: {feature} has no Alderpoint DNS per-client equivalent yet (schema exists, not enforced at runtime)")
 
     untranslatable = list(untranslatable_client_settings)
     upstream_resolvers = []
@@ -859,9 +859,9 @@ def _translate_adguard_config(data: dict[str, Any]) -> dict[str, Any]:
         else:
             upstream_resolvers.append(parsed)
     if filtering.get("safe_search", {}).get("enabled") if isinstance(filtering.get("safe_search"), dict) else False:
-        untranslatable.append("filtering.safe_search: SafeSearch enforcement is not implemented in BindGuard")
+        untranslatable.append("filtering.safe_search: SafeSearch enforcement is not implemented in Alderpoint DNS")
     if filtering.get("blocked_services", {}).get("ids") if isinstance(filtering.get("blocked_services"), dict) else False:
-        untranslatable.append("filtering.blocked_services: named blocked-service bundles are not implemented in BindGuard")
+        untranslatable.append("filtering.blocked_services: named blocked-service bundles are not implemented in Alderpoint DNS")
 
     return {
         "blocklist_sources": blocklist_sources,
@@ -910,11 +910,11 @@ def _looks_like_ip_or_cidr(value: str) -> bool:
 
 
 def apply_adguard_translation(translation: dict[str, Any], groups: set[str]) -> dict[str, int]:
-    from app import bindguard_compiler
+    from app import alderpointdns_compiler
 
     create_pre_import_backup()
     counts = {"sources": 0, "custom_allow": 0, "custom_block": 0, "local_dns": 0, "aliases": 0, "upstream_resolvers": 0}
-    with bindguard_compiler.connect() as conn:
+    with alderpointdns_compiler.connect() as conn:
         _init_filter_tables(conn)
         upstream_dns.init_db(conn)
         if "blocklist_sources" in groups:

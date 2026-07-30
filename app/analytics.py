@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""BindGuard analytics collection, storage, and query helpers."""
+"""Alderpoint DNS analytics collection, storage, and query helpers."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ except ModuleNotFoundError:
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.bindguard_compiler import DB_PATH, connect, enabled_sources, init_db, normalize_domain, parse_rules, source_paths
+from app.alderpointdns_compiler import DB_PATH, connect, enabled_sources, init_db, normalize_domain, parse_rules, source_paths
 
 
 ANALYTICS_HOST = "127.0.0.1"
@@ -50,7 +50,7 @@ MAX_FRAME_BYTES = 1024 * 1024
 # margin for retries), so real slow queries are never dropped, but a
 # corrupted/misparsed protobuf timestamp cannot silently inflate aggregates.
 MAX_PLAUSIBLE_LATENCY_MS = 30_000
-SECRET_FILE = Path("/etc/bindguard/analytics.secret")
+SECRET_FILE = Path("/etc/alderpointdns/analytics.secret")
 DNSDIST_SERVER_API_URL = "http://127.0.0.1:8083/api/v1/servers/localhost"
 UPSTREAM_SERVER_RE = re.compile(r"^upstream-(?P<id>\d+)-")
 
@@ -587,8 +587,8 @@ def insert_events(conn: sqlite3.Connection, events: list[QueryEvent], detailed_e
 
 
 def dnsdist_stats() -> dict[str, Any]:
-    creds = Path("/etc/bindguard/dnsdist-web.creds").read_text().strip()
-    api_key = Path("/etc/bindguard/dnsdist-api.key").read_text().strip()
+    creds = Path("/etc/alderpointdns/dnsdist-web.creds").read_text().strip()
+    api_key = Path("/etc/alderpointdns/dnsdist-api.key").read_text().strip()
     request = urllib.request.Request("http://127.0.0.1:8083/jsonstat?command=stats")
     request.add_header("Authorization", "Basic " + base64.b64encode(creds.encode()).decode())
     request.add_header("x-api-key", api_key)
@@ -597,8 +597,8 @@ def dnsdist_stats() -> dict[str, Any]:
 
 
 def dnsdist_server_state() -> dict[str, Any]:
-    creds = Path("/etc/bindguard/dnsdist-web.creds").read_text().strip()
-    api_key = Path("/etc/bindguard/dnsdist-api.key").read_text().strip()
+    creds = Path("/etc/alderpointdns/dnsdist-web.creds").read_text().strip()
+    api_key = Path("/etc/alderpointdns/dnsdist-api.key").read_text().strip()
     request = urllib.request.Request(DNSDIST_SERVER_API_URL)
     request.add_header("Authorization", "Basic " + base64.b64encode(creds.encode()).decode())
     request.add_header("x-api-key", api_key)
@@ -723,7 +723,7 @@ def collect_upstream_resolver_aggregate(conn: sqlite3.Connection, state: dict[st
 
     dnsdist identifies the upstream backend selected for BIND's forwarded
     lookup through per-server counters. It does not expose the original client
-    query alongside that backend selection in this architecture, so BindGuard
+    query alongside that backend selection in this architecture, so Alderpoint DNS
     records resolver activity aggregates only and does not annotate individual
     query log rows with fabricated upstream identity.
     """
@@ -749,7 +749,7 @@ def collect_upstream_resolver_aggregate(conn: sqlite3.Connection, state: dict[st
         pools = set(server.get("pools") or [])
         name = str(server.get("name") or "")
         resolver_id = _resolver_id_from_server_name(name)
-        if "bindguard_upstreams" not in pools or resolver_id is None:
+        if "alderpointdns_upstreams" not in pools or resolver_id is None:
             continue
         row = resolver_rows.get(resolver_id)
         current = _server_counter_values(server)
@@ -1137,7 +1137,7 @@ def export_statistics() -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="BindGuard analytics collector")
+    parser = argparse.ArgumentParser(description="Alderpoint DNS analytics collector")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init-db").set_defaults(func=lambda _: init_analytics_db())
     sub.add_parser("collect-once").set_defaults(func=lambda _: collect_once())

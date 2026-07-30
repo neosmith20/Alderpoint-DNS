@@ -6,9 +6,9 @@ fail() {
   exit 1
 }
 
-systemctl is-active --quiet bindguard || fail "bindguard service is not active"
-systemctl is-enabled --quiet bindguard || fail "bindguard service is not enabled"
-ss -ltnup | grep -Eq '(^|[[:space:]])(0[.]0[.]0[.]0|\*):3000' || fail "bindguard is not listening on 0.0.0.0:3000"
+systemctl is-active --quiet alderpointdns || fail "alderpointdns service is not active"
+systemctl is-enabled --quiet alderpointdns || fail "alderpointdns service is not enabled"
+ss -ltnup | grep -Eq '(^|[[:space:]])(0[.]0[.]0[.]0|\*):3000' || fail "alderpointdns is not listening on 0.0.0.0:3000"
 setup_response="$(curl --silent --show-error --include --max-time 5 http://127.0.0.1:3000/setup)"
 printf '%s' "$setup_response" | grep -Eq 'Initial administrator setup|303 See Other' || fail "setup page missing or setup redirect invalid"
 curl --silent --show-error --include --max-time 5 http://127.0.0.1:3000/ | grep -q '303 See Other' || fail "unauthenticated dashboard did not redirect"
@@ -16,20 +16,20 @@ for protected_path in /query-log /custom-rules /blocklists /local-dns /dns-setti
 do
   curl --silent --show-error --include --max-time 5 "http://127.0.0.1:3000${protected_path}" | grep -q '303 See Other' || fail "unauthenticated ${protected_path} did not redirect"
 done
-runuser -u bindguard -- sudo -n /opt/bindguard/app/bindguard_compiler.py update-sources | grep -q 'active_domains=' || fail "bindguard sudo helper failed"
+runuser -u bindguard -- sudo -n /opt/alderpointdns/app/alderpointdns_compiler.py update-sources | grep -q 'active_domains=' || fail "alderpointdns sudo helper failed"
 python3 -B - <<'PY' || fail "web interface layout and analytics checks failed"
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-sys.path.insert(0, "/opt/bindguard")
+sys.path.insert(0, "/opt/alderpointdns")
 from app import importer, webapp  # noqa: E402
 from app.webapp import TEMPLATES  # noqa: E402
 
-template = "\n".join(path.read_text() for path in Path("/opt/bindguard/web/templates").glob("*.html"))
-css = Path("/opt/bindguard/web/static/app.css").read_text()
-js = Path("/opt/bindguard/web/static/app.js").read_text()
+template = "\n".join(path.read_text() for path in Path("/opt/alderpointdns/web/templates").glob("*.html"))
+css = Path("/opt/alderpointdns/web/static/app.css").read_text()
+js = Path("/opt/alderpointdns/web/static/app.js").read_text()
 required_css = [
     "grid-template-columns: repeat(auto-fit, minmax(260px, 1fr))",
     "min-width: 0",
@@ -71,10 +71,10 @@ for js_hook in ("document.addEventListener('keydown'", "event.key === 'Escape'",
         raise SystemExit(f"keyboard/click navigation behavior missing: {js_hook}")
 if "queryChart" not in template or 'data-chart="traffic"' not in template:
     raise SystemExit("dashboard chart hooks are missing")
-if "analytics/chart-data" not in Path("/opt/bindguard/app/webapp.py").read_text():
+if "analytics/chart-data" not in Path("/opt/alderpointdns/app/webapp.py").read_text():
     raise SystemExit("chart data endpoint is missing")
-webapp_text = Path("/opt/bindguard/app/webapp.py").read_text()
-for status_hook in ("globalServiceStatus", "BindGuardStatus", "data-status-label", "/status/summary"):
+webapp_text = Path("/opt/alderpointdns/app/webapp.py").read_text()
+for status_hook in ("globalServiceStatus", "AlderpointDNSStatus", "data-status-label", "/status/summary"):
     if status_hook not in template + js + webapp_text:
         raise SystemExit(f"global service status hook missing: {status_hook}")
 for route in ("/local-dns", "local_dns_add_host", "local_dns_add_alias", "local_dns_import_preview"):
@@ -110,13 +110,13 @@ for route in ('"/replication"', '"/replication/role"', '"/replication/token"', '
         raise SystemExit(f"replication route missing: {route}")
 if 'href="/replication"' not in template:
     raise SystemExit("replication nav link is missing")
-if "bindguardAutoRefresh" not in js or "sessionStorage" not in js or "target.innerHTML" not in js:
+if "alderpointdnsAutoRefresh" not in js or "sessionStorage" not in js or "target.innerHTML" not in js:
     raise SystemExit("query log auto-refresh stateful partial update is missing")
 if "setInterval(() => window.location.reload()" in js:
     raise SystemExit("query log auto-refresh still reloads the full page")
-if "data-async-form" not in template or "BindGuardAsyncForm" not in js or "showToast" not in js or ".toast" not in css:
+if "data-async-form" not in template or "AlderpointDNSAsyncForm" not in js or "showToast" not in js or ".toast" not in css:
     raise SystemExit("Local DNS async form and toast behavior is missing")
-local_dns_template = Path("/opt/bindguard/web/templates/local_dns.html").read_text()
+local_dns_template = Path("/opt/alderpointdns/web/templates/local_dns.html").read_text()
 for forbidden in (
     'data-confirm="Add this host',
     'data-confirm="Add this advanced record',
@@ -134,7 +134,7 @@ for expected in (
 ):
     if expected not in local_dns_template:
         raise SystemExit(f"Local DNS async form hook missing: {expected}")
-query_template = Path("/opt/bindguard/web/templates/query_log.html").read_text()
+query_template = Path("/opt/alderpointdns/web/templates/query_log.html").read_text()
 if "queryLogResults" not in query_template or 'data-refresh-url="/query-log/partial"' not in query_template:
     raise SystemExit("query log results refresh target is missing")
 
@@ -164,12 +164,12 @@ context = {
     ],
     "backend": "127.0.0.1:5353 plain health/recovery, 127.0.0.1:5354 PROXYv2",
     "maintenance": "1.1.1.2, 1.0.0.2, 4.2.2.1, 4.2.2.2",
-    "hostname": "bindguard.local",
+    "hostname": "alderpointdns.local",
     "doh_path": "/dns-query",
     "dnsdist_version": "dnsdist 2.0.0-alpha-really-long-version-string-for-layout-testing",
     "dnsdist_features": " ".join(["dns-over-https(nghttp2)-layout-long-token"] * 20),
     "protocols": [{"name": "Plain DNS", "port": "53/udp,tcp", "state": "listening", "tested": "acceptance-covered"}],
-    "cert": {"state": "present", "detail": "/etc/bindguard/certs/bindguard-lab.crt"},
+    "cert": {"state": "present", "detail": "/etc/alderpointdns/certs/alderpointdns-lab.crt"},
     "proxy_backend": "enabled",
     "client_address_test": {"state": "Passed", "filename": "test_dnsdist_frontend.sh"},
     "upstream_resolvers": [{"id": 1, "name": "Cloudflare DoH", "protocol": "doh", "address": long_domain, "port": 443, "doh_path": "/dns-query", "tls_hostname": long_domain, "bootstrap_ips": "1.1.1.1, 1.0.0.1", "enabled": 1, "last_status": "healthy", "last_latency_ms": 4.2, "last_message": "resolved through active upstream set"}],
@@ -195,14 +195,14 @@ for expected in (
 ):
     if expected not in html:
         raise SystemExit(f"missing rendered content: {expected}")
-if "/opt/bindguard/tests/test_dnsdist_frontend.sh" in html:
+if "/opt/alderpointdns/tests/test_dnsdist_frontend.sh" in html:
     raise SystemExit("client address test renders a raw path")
 if 'class="mono">/dns-query<' not in html or 'class="mono">dnsdist 2.0.0-alpha' not in html:
     raise SystemExit("monospace styling missing from path/version values")
 
 dashboard = TEMPLATES.get_template("dashboard.html").render(
     **base,
-    bindguard="active",
+    alderpointdns="active",
     bind="active",
     dnsdist="active",
     collector="active",
@@ -307,7 +307,7 @@ if 'data-nav-section="dns"' not in query_log or 'aria-controls="nav-panel-dns" a
 
 local_dns = TEMPLATES.get_template("local_dns.html").render(
     **page_base("/local-dns"),
-    settings={"internal_domain": "home.arpa", "default_ttl": "300", "server_hostname": "bindguard", "server_ip": "172.16.43.101"},
+    settings={"internal_domain": "home.arpa", "default_ttl": "300", "server_hostname": "alderpointdns", "server_ip": "172.16.43.101"},
     records=[{
         "id": 1,
         "fqdn": "alex-pc." + long_domain,
@@ -362,12 +362,12 @@ encryption_html = TEMPLATES.get_template("encryption.html").render(
     **page_base("/encryption"),
     error=None,
     cfg={
-        "server_hostname": "bindguard.local", "bootstrap_ip": "172.16.43.101",
+        "server_hostname": "alderpointdns.local", "bootstrap_ip": "172.16.43.101",
         "listen_ipv4": "0.0.0.0", "listen_ipv6": "::",
         "doh_enabled": "1", "doh3_enabled": "1", "dot_enabled": "1", "doq_enabled": "1", "dnscrypt_enabled": "0",
         "doh_path": "/dns-query", "doh_port": "443", "doh3_port": "443", "dot_port": "853", "doq_port": "853",
-        "dnscrypt_port": "5443", "dnscrypt_provider": "2.dnscrypt-cert.bindguard.local",
-        "cert_mode": "self_signed", "cert_path": "/etc/bindguard/certs/bindguard-lab.crt", "key_path": "/etc/bindguard/certs/bindguard-lab.key",
+        "dnscrypt_port": "5443", "dnscrypt_provider": "2.dnscrypt-cert.alderpointdns.local",
+        "cert_mode": "self_signed", "cert_path": "/etc/alderpointdns/certs/alderpointdns-lab.crt", "key_path": "/etc/alderpointdns/certs/alderpointdns-lab.key",
     },
     cert={
         "available": True, "subject": "CN=" + long_domain, "issuer": "CN=" + long_domain,
@@ -376,7 +376,7 @@ encryption_html = TEMPLATES.get_template("encryption.html").render(
         "fingerprint_sha256": "AA:BB:CC:DD", "sans": ["DNS:" + long_domain, "IP Address:172.16.43.101"], "self_signed": True,
     },
     deployment={"status": "deployed", "started_at": "2026-07-29T00:00:00Z", "finished_at": "2026-07-29T00:00:00Z", "message": "deployed with protocols: {'plain': 'ok'}", "protocol_tests": "{'plain': 'ok'}"},
-    connection_info={"DoH": "https://" + long_domain + "/dns-query", "DoT": "tls://bindguard.local:853"},
+    connection_info={"DoH": "https://" + long_domain + "/dns-query", "DoT": "tls://alderpointdns.local:853"},
     dnscrypt_fingerprint=None,
 )
 for expected in ("Protocols", "Listen IPv4", "Listen IPv6", "0.0.0.0", "Client Connection Information", "Self-signed certificate", "Upload certificate and key", long_domain, "data-async-form"):
@@ -423,9 +423,9 @@ import_adguard_html = TEMPLATES.get_template("import_migration.html").render(
     adguard_json="{}",
     migration_summary={"items_to_add": ["upstream Imported upstream"], "items_to_update": [], "conflicts": [], "skipped": [], "unsupported": ["safe_search: not implemented"]},
     migration_title="AdGuard Home Migration Preview",
-    source_path="/var/lib/bindguard/imports/AdGuardHome.yaml",
+    source_path="/var/lib/alderpointdns/imports/AdGuardHome.yaml",
 )
-for expected in ("AdGuard Home Migration Preview", "Settings With No BindGuard Equivalent", "Upstream resolvers", "Items to add", long_upstream):
+for expected in ("AdGuard Home Migration Preview", "Settings With No Alderpoint DNS Equivalent", "Upstream resolvers", "Items to add", long_upstream):
     if expected not in import_adguard_html:
         raise SystemExit(f"import adguard preview page missing {expected}")
 
@@ -436,10 +436,10 @@ backup_html = TEMPLATES.get_template("backup.html").render(
     last_backup={"created_at": "2026-07-29T00:00:00Z", "size_bytes": 1048576, "status": "deployed"},
     last_restore={"started_at": "2026-07-29T00:00:00Z", "finished_at": "2026-07-29T00:00:00Z", "status": "deployed"},
     backup_settings={"schedule_enabled": "1", "schedule_interval_hours": "24", "retention_count": "7"},
-    backups=[{"id": 1, "created_at": "2026-07-29T00:00:00Z", "size_bytes": 2097152, "components_summary": long_upstream, "status": "deployed", "path": "bindguard-backup-x.tar.gz"}],
+    backups=[{"id": 1, "created_at": "2026-07-29T00:00:00Z", "size_bytes": 2097152, "components_summary": long_upstream, "status": "deployed", "path": "alderpointdns-backup-x.tar.gz"}],
     preview={
         "compatible": True, "warnings": [],
-        "manifest": {"source_node_id": "bindguard-1", "created_at": "2026-07-29T00:00:00Z", "bindguard_app_version": "unreleased+git.abc", "database_schema_version": "abc123"},
+        "manifest": {"source_node_id": "alderpointdns-1", "created_at": "2026-07-29T00:00:00Z", "alderpointdns_app_version": "unreleased+git.abc", "database_schema_version": "abc123"},
         "included_components": ["app_config", "sqlite_data"],
         "table_diffs": [{"table": "custom_rules", "component": "custom_rules", "live_rows": 3, "backup_rows": 2}],
         "file_diffs": [{"path": long_domain, "diff": "modified"}],
@@ -450,8 +450,8 @@ for expected in ("Create Backup", "Preview a Restore", "Restore Preview", "Sched
     if expected not in backup_html:
         raise SystemExit(f"backup page missing {expected}")
 
-setup_html = TEMPLATES.get_template("setup.html").render(**{**base, "admin": None}, local_dns={"server_hostname": "bindguard", "server_ip": "172.16.43.101"})
-for expected in ("Create BindGuard local DNS records", "172.16.43.101", "bindguard.home.arpa"):
+setup_html = TEMPLATES.get_template("setup.html").render(**{**base, "admin": None}, local_dns={"server_hostname": "alderpointdns", "server_ip": "172.16.43.101"})
+for expected in ("Create Alderpoint DNS local DNS records", "172.16.43.101", "alderpointdns.home.arpa"):
     if expected not in setup_html:
         raise SystemExit(f"setup local DNS option missing {expected}")
 login_html = TEMPLATES.get_template("login.html").render(**{**base, "admin": None}, error=None)
@@ -509,7 +509,7 @@ with mock.patch.object(webapp, "service_state", side_effect=lambda name: "inacti
     inactive = webapp.global_service_status()
 if inactive["label"] != "Inactive" or inactive["tone"] != "down":
     raise SystemExit("global status inactive state is wrong")
-with mock.patch.object(webapp, "service_state", side_effect=lambda name: "inactive" if name == "bindguard-analytics" else "active"):
+with mock.patch.object(webapp, "service_state", side_effect=lambda name: "inactive" if name == "alderpointdns-analytics" else "active"):
     degraded = webapp.global_service_status()
 if degraded["label"] != "Degraded" or degraded["tone"] != "degraded":
     raise SystemExit("global status degraded state is wrong")
@@ -517,10 +517,10 @@ with mock.patch.object(webapp, "service_state", side_effect=RuntimeError("boom")
     unknown = webapp.global_service_status()
 if unknown["label"] != "Unknown" or unknown["tone"] != "unavailable":
     raise SystemExit("global status unknown state is wrong")
-with mock.patch.dict(webapp.os.environ, {"BINDGUARD_COOKIE_SECURE": "1"}):
+with mock.patch.dict(webapp.os.environ, {"ALDERPOINTDNS_COOKIE_SECURE": "1"}):
     if not webapp.secure_session_cookie_enabled():
         raise SystemExit("secure session cookie env toggle did not enable")
-with mock.patch.dict(webapp.os.environ, {"BINDGUARD_COOKIE_SECURE": "0"}):
+with mock.patch.dict(webapp.os.environ, {"ALDERPOINTDNS_COOKIE_SECURE": "0"}):
     if webapp.secure_session_cookie_enabled():
         raise SystemExit("secure session cookie env toggle did not disable")
 

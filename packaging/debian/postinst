@@ -7,17 +7,17 @@ case "$1" in
       addgroup --system bindguard
     fi
     if ! id bindguard >/dev/null 2>&1; then
-      adduser --system --home /var/lib/bindguard --no-create-home --ingroup bindguard --disabled-login bindguard
+      adduser --system --home /var/lib/alderpointdns --no-create-home --ingroup bindguard --disabled-login bindguard
     fi
-    install -d -o bindguard -g bindguard -m 0750 /var/lib/bindguard /var/lib/bindguard/backups /var/lib/bindguard/compiled /var/lib/bindguard/imports /var/lib/bindguard/staging
-    install -d -o bindguard -g bindguard -m 0755 /var/log/bindguard
-    install -d -o root -g bindguard -m 0750 /etc/bindguard /etc/bindguard/certs
-    if [ ! -e /etc/bindguard/secrets.env ]; then
+    install -d -o bindguard -g bindguard -m 0750 /var/lib/alderpointdns /var/lib/alderpointdns/backups /var/lib/alderpointdns/compiled /var/lib/alderpointdns/imports /var/lib/alderpointdns/staging
+    install -d -o bindguard -g bindguard -m 0755 /var/log/alderpointdns
+    install -d -o root -g bindguard -m 0750 /etc/alderpointdns /etc/alderpointdns/certs
+    if [ ! -e /etc/alderpointdns/secrets.env ]; then
       umask 077
-      printf 'BINDGUARD_SESSION_SECRET=%s\n' "$(openssl rand -base64 48)" > /etc/bindguard/secrets.env
-      chown root:bindguard /etc/bindguard/secrets.env
+      printf 'ALDERPOINTDNS_SESSION_SECRET=%s\n' "$(openssl rand -base64 48)" > /etc/alderpointdns/secrets.env
+      chown root:bindguard /etc/alderpointdns/secrets.env
     fi
-    PYTHONPATH=/opt/bindguard /opt/bindguard/app/analytics.py init-db || true
+    PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/analytics.py init-db || true
     systemctl daemon-reload >/dev/null 2>&1 || true
     ;;
 esac

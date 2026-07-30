@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local authoritative DNS records and client aliases for BindGuard."""
+"""Local authoritative DNS records and client aliases for Alderpoint DNS."""
 
 from __future__ import annotations
 
@@ -19,15 +19,15 @@ from pathlib import Path
 from typing import Any
 
 
-DB_PATH = Path("/var/lib/bindguard/bindguard.db")
-COMPILED_DIR = Path("/var/lib/bindguard/compiled/bind")
+DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
+COMPILED_DIR = Path("/var/lib/alderpointdns/compiled/bind")
 LOCAL_ZONE_DIR = COMPILED_DIR / "local"
 LOCAL_ZONES_CONF = COMPILED_DIR / "local-zones.conf"
 NAMED_LOCAL_CONF = Path("/etc/bind/named.conf.local")
-BACKUP_DIR = Path("/var/lib/bindguard/backups")
-STAGING_DIR = Path("/var/lib/bindguard/staging")
+BACKUP_DIR = Path("/var/lib/alderpointdns/backups")
+STAGING_DIR = Path("/var/lib/alderpointdns/staging")
 DEFAULT_DOMAIN = "home.arpa"
-LOCAL_NS = "bindguard-local-ns"
+LOCAL_NS = "alderpointdns-local-ns"
 LABEL_RE = re.compile(r"^(?=.{1,63}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 RECORD_TYPES = {"A", "AAAA", "PTR", "CNAME"}
@@ -37,15 +37,15 @@ class LocalDNSError(ValueError):
     pass
 
 
-class BindGuardConnection(sqlite3.Connection):
+class AlderpointDNSConnection(sqlite3.Connection):
     def __enter__(self):
-        self._bindguard_depth = getattr(self, "_bindguard_depth", 0) + 1
+        self._alderpointdns_depth = getattr(self, "_alderpointdns_depth", 0) + 1
         return super().__enter__()
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         super().__exit__(exc_type, exc_value, traceback)
-        self._bindguard_depth = getattr(self, "_bindguard_depth", 1) - 1
-        if self._bindguard_depth <= 0:
+        self._alderpointdns_depth = getattr(self, "_alderpointdns_depth", 1) - 1
+        if self._alderpointdns_depth <= 0:
             self.close()
 
 
@@ -62,7 +62,7 @@ def now() -> str:
 
 def connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, factory=BindGuardConnection)
+    conn = sqlite3.connect(DB_PATH, factory=AlderpointDNSConnection)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -126,7 +126,7 @@ def init_db(conn: sqlite3.Connection | None = None) -> None:
             (
                 ("internal_domain", DEFAULT_DOMAIN),
                 ("default_ttl", "300"),
-                ("server_hostname", "bindguard"),
+                ("server_hostname", "alderpointdns"),
                 ("server_ip", detect_server_ip()),
             ),
         )
@@ -511,7 +511,7 @@ def build_zone_files(conn: sqlite3.Connection, stage: Path, serial: int | None =
 
 
 def render_include(zones: list[ZoneFile]) -> str:
-    lines = ["// Managed by BindGuard Local DNS. Do not edit by hand.", ""]
+    lines = ["// Managed by Alderpoint DNS Local DNS. Do not edit by hand.", ""]
     for zone in zones:
         final_path = LOCAL_ZONE_DIR / zone.path.name
         lines.extend(
@@ -519,7 +519,7 @@ def render_include(zones: list[ZoneFile]) -> str:
                 f'zone "{zone.zone}" {{',
                 "\ttype primary;",
                 f'\tfile "{final_path}";',
-                '\tallow-query { "bindguard_clients"; localhost; };',
+                '\tallow-query { "alderpointdns_clients"; localhost; };',
                 "\tallow-transfer { none; };",
                 "};",
                 "",
@@ -563,7 +563,7 @@ def deploy_zones(conn: sqlite3.Connection | None = None) -> int:
     cursor = db.execute("INSERT INTO local_dns_deployments(started_at, status, message) VALUES (?, 'running', '')", (started,))
     deployment_id = cursor.lastrowid
     db.commit()
-    stage = Path(tempfile.mkdtemp(prefix="bindguard-localdns-", dir=str(STAGING_DIR)))
+    stage = Path(tempfile.mkdtemp(prefix="alderpointdns-localdns-", dir=str(STAGING_DIR)))
     backup = BACKUP_DIR / f"localdns.last-good.{int(time.time())}.{deployment_id}"
     status = "failed"
     message = ""
@@ -581,7 +581,7 @@ def deploy_zones(conn: sqlite3.Connection | None = None) -> int:
             validation_output += proc.stdout
         include_path = stage / "local-zones.conf"
         include_path.write_text(render_include(zones))
-        if os.environ.get("BINDGUARD_TEST_INVALID_LOCAL_ZONE") == "1":
+        if os.environ.get("ALDERPOINTDNS_TEST_INVALID_LOCAL_ZONE") == "1":
             zones[0].path.write_text(zones[0].path.read_text() + "invalid zone record\n")
             run(["named-checkzone", zones[0].zone, str(zones[0].path)])
         if LOCAL_ZONE_DIR.exists() or LOCAL_ZONES_CONF.exists():

@@ -18,7 +18,7 @@ from app import dns_cache  # noqa: E402
 
 class DNSCacheTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = Path(tempfile.mkdtemp(prefix="bindguard-dnscache-test-"))
+        self.tmp = Path(tempfile.mkdtemp(prefix="alderpointdns-dnscache-test-"))
         self.old = {
             "DB_PATH": dns_cache.DB_PATH,
             "COMPILED_DIR": dns_cache.COMPILED_DIR,
@@ -27,7 +27,7 @@ class DNSCacheTest(unittest.TestCase):
             "BACKUP_DIR": dns_cache.BACKUP_DIR,
             "STAGING_DIR": dns_cache.STAGING_DIR,
         }
-        dns_cache.DB_PATH = self.tmp / "bindguard.db"
+        dns_cache.DB_PATH = self.tmp / "alderpointdns.db"
         dns_cache.COMPILED_DIR = self.tmp / "compiled" / "bind"
         dns_cache.CACHE_OPTIONS_CONF = dns_cache.COMPILED_DIR / "cache-options.conf"
         dns_cache.NAMED_OPTIONS_CONF = self.tmp / "named.conf.options"

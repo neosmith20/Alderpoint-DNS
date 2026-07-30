@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""BindGuard Encryption Settings: DoH/DoH3/DoT/DoQ/DNSCrypt, TLS certificates,
+"""Alderpoint DNS Encryption Settings: DoH/DoH3/DoT/DoQ/DNSCrypt, TLS certificates,
 and Apple mobile configuration profiles.
 
 Plain UDP/TCP DNS on port 53 is never controlled from here — it is always on,
-per BindGuard's binding engineering requirements. This module only manages
+per Alderpoint DNS's binding engineering requirements. This module only manages
 the encrypted-DNS listeners dnsdist terminates and the certificate material
 they use.
 """
@@ -26,19 +26,19 @@ from pathlib import Path
 from typing import Any
 
 
-DB_PATH = Path("/var/lib/bindguard/bindguard.db")
-BACKUP_DIR = Path("/var/lib/bindguard/backups")
-STAGING_DIR = Path("/var/lib/bindguard/staging")
-CERT_DIR = Path("/etc/bindguard/certs")
-CERT_PATH_DEFAULT = CERT_DIR / "bindguard-lab.crt"
-KEY_PATH_DEFAULT = CERT_DIR / "bindguard-lab.key"
-CA_CERT_PATH = CERT_DIR / "bindguard-ca.crt"
-CA_KEY_PATH = CERT_DIR / "bindguard-ca.key"
-CA_SERIAL_PATH = CERT_DIR / "bindguard-ca.srl"
-UPLOADED_CERT_PATH = CERT_DIR / "bindguard-uploaded.crt"
-UPLOADED_KEY_PATH = CERT_DIR / "bindguard-uploaded.key"
-# Written by the unprivileged web process (staging is bindguard-writable);
-# consumed and cleared by the privileged deploy step, since /etc/bindguard/certs
+DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
+BACKUP_DIR = Path("/var/lib/alderpointdns/backups")
+STAGING_DIR = Path("/var/lib/alderpointdns/staging")
+CERT_DIR = Path("/etc/alderpointdns/certs")
+CERT_PATH_DEFAULT = CERT_DIR / "alderpointdns-lab.crt"
+KEY_PATH_DEFAULT = CERT_DIR / "alderpointdns-lab.key"
+CA_CERT_PATH = CERT_DIR / "alderpointdns-ca.crt"
+CA_KEY_PATH = CERT_DIR / "alderpointdns-ca.key"
+CA_SERIAL_PATH = CERT_DIR / "alderpointdns-ca.srl"
+UPLOADED_CERT_PATH = CERT_DIR / "alderpointdns-uploaded.crt"
+UPLOADED_KEY_PATH = CERT_DIR / "alderpointdns-uploaded.key"
+# Written by the unprivileged web process (staging is alderpointdns-writable);
+# consumed and cleared by the privileged deploy step, since /etc/alderpointdns/certs
 # is root:_dnsdist owned and not writable by the web app directly.
 PENDING_UPLOAD_CERT = STAGING_DIR / "pending-cert-upload.crt"
 PENDING_UPLOAD_KEY = STAGING_DIR / "pending-cert-upload.key"
@@ -48,12 +48,12 @@ DNSCRYPT_CERT = CERT_DIR / "dnscrypt-resolver.cert"
 DNSCRYPT_KEY = CERT_DIR / "dnscrypt-resolver.key"
 
 DNSDIST_CONF = Path("/etc/dnsdist/dnsdist.conf")
-DNSDIST_ENV_OVERRIDE = Path("/etc/systemd/system/dnsdist.service.d/bindguard.conf")
+DNSDIST_ENV_OVERRIDE = Path("/etc/systemd/system/dnsdist.service.d/alderpointdns.conf")
 
 MIGRATION_MARKER = "-- Encryption Settings (managed by app/encryption.py)"
 
 DEFAULTS = {
-    "server_hostname": "bindguard.local",
+    "server_hostname": "alderpointdns.local",
     "bootstrap_ip": "",
     "listen_ipv4": "0.0.0.0",
     "listen_ipv6": "::",
@@ -68,7 +68,7 @@ DEFAULTS = {
     "dot_port": "853",
     "doq_port": "853",
     "dnscrypt_port": "5443",
-    "dnscrypt_provider": "2.dnscrypt-cert.bindguard.local",
+    "dnscrypt_provider": "2.dnscrypt-cert.alderpointdns.local",
     "cert_mode": "self_signed",
     "cert_path": str(CERT_PATH_DEFAULT),
     "key_path": str(KEY_PATH_DEFAULT),
@@ -305,7 +305,7 @@ def ensure_local_ca() -> None:
         cert_out = tmp_path / "ca.crt"
         run([
             "openssl", "req", "-x509", "-newkey", "rsa:4096", "-sha256", "-days", "3650", "-nodes",
-            "-subj", "/CN=BindGuard Local CA",
+            "-subj", "/CN=Alderpoint DNS Local CA",
             "-addext", "basicConstraints=critical,CA:true",
             "-addext", "keyUsage=critical,keyCertSign,cRLSign",
             "-keyout", str(key_out),
@@ -462,7 +462,7 @@ def ensure_dnscrypt_provider_keys() -> None:
     # or live-console (`-c ... -e`) invocation, and the live console path is
     # additionally blocked by dnsdist.service's systemd sandboxing
     # (PrivateTmp, ProtectSystem=full, no ReadWritePaths for
-    # /etc/bindguard/certs). Rather than guess further at an unverifiable
+    # /etc/alderpointdns/certs). Rather than guess further at an unverifiable
     # invocation, this raises so callers (see deploy_encryption) treat
     # DNSCrypt as unavailable and disable it for the deployment instead of
     # claiming a certificate that does not exist.
@@ -525,7 +525,7 @@ def ensure_dnsdist_conf_parameterized(template_path: Path) -> bool:
     template, preserving the currently-installed console/webserver secrets.
     Returns True if a change was made."""
     current = DNSDIST_CONF.read_text() if DNSDIST_CONF.exists() else ""
-    if MIGRATION_MARKER in current and "BINDGUARD_DNS_LISTEN_IPV4" in current:
+    if MIGRATION_MARKER in current and "ALDERPOINTDNS_DNS_LISTEN_IPV4" in current:
         return False
     key_match = re.search(r'setKey\("([^"]+)"\)', current)
     password_match = re.search(r'password="([^"]+)"', current)
@@ -534,10 +534,10 @@ def ensure_dnsdist_conf_parameterized(template_path: Path) -> bool:
         raise EncryptionError("could not locate existing dnsdist console/webserver secrets to preserve")
     template = template_path.read_text()
     new_content = template
-    new_content = re.sub(r'setKey\("BINDGUARD_CONSOLE_KEY_PLACEHOLDER"\)', f'setKey("{key_match.group(1)}")', new_content)
-    new_content = new_content.replace('password="BINDGUARD_WEBSERVER_PASSWORD_PLACEHOLDER"', f'password="{password_match.group(1)}"')
-    new_content = new_content.replace('apiKey="BINDGUARD_WEBSERVER_API_KEY_PLACEHOLDER"', f'apiKey="{api_key_match.group(1)}"')
-    if "BINDGUARD_CONSOLE_KEY_PLACEHOLDER" in new_content or "BINDGUARD_WEBSERVER_PASSWORD_PLACEHOLDER" in new_content or "BINDGUARD_WEBSERVER_API_KEY_PLACEHOLDER" in new_content:
+    new_content = re.sub(r'setKey\("ALDERPOINTDNS_CONSOLE_KEY_PLACEHOLDER"\)', f'setKey("{key_match.group(1)}")', new_content)
+    new_content = new_content.replace('password="ALDERPOINTDNS_WEBSERVER_PASSWORD_PLACEHOLDER"', f'password="{password_match.group(1)}"')
+    new_content = new_content.replace('apiKey="ALDERPOINTDNS_WEBSERVER_API_KEY_PLACEHOLDER"', f'apiKey="{api_key_match.group(1)}"')
+    if "ALDERPOINTDNS_CONSOLE_KEY_PLACEHOLDER" in new_content or "ALDERPOINTDNS_WEBSERVER_PASSWORD_PLACEHOLDER" in new_content or "ALDERPOINTDNS_WEBSERVER_API_KEY_PLACEHOLDER" in new_content:
         raise EncryptionError("template still contains unresolved secret placeholders")
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     backup = BACKUP_DIR / f"dnsdist.conf.pre-encryption.{int(time.time())}"
@@ -554,25 +554,25 @@ def ensure_dnsdist_conf_parameterized(template_path: Path) -> bool:
 def render_env_override(cfg: dict[str, str]) -> str:
     lines = [
         "[Service]",
-        "Environment=BINDGUARD_DNS_PLAIN=1",
-        f"Environment=BINDGUARD_DNS_LISTEN_IPV4={cfg.get('listen_ipv4', DEFAULTS['listen_ipv4'])}",
-        f"Environment=BINDGUARD_DNS_LISTEN_IPV6={cfg.get('listen_ipv6', DEFAULTS['listen_ipv6'])}",
-        f"Environment=BINDGUARD_DNS_DOH={cfg['doh_enabled']}",
-        f"Environment=BINDGUARD_DNS_DOT={cfg['dot_enabled']}",
-        f"Environment=BINDGUARD_DNS_DOQ={cfg['doq_enabled']}",
-        f"Environment=BINDGUARD_DNS_DOH3={cfg['doh3_enabled']}",
-        f"Environment=BINDGUARD_DNS_DNSCRYPT={cfg['dnscrypt_enabled']}",
-        f"Environment=BINDGUARD_TLS_CERT={cfg['cert_path']}",
-        f"Environment=BINDGUARD_TLS_KEY={cfg['key_path']}",
-        f"Environment=BINDGUARD_DOH_PATH={cfg['doh_path']}",
-        f"Environment=BINDGUARD_DOH_PORT={cfg['doh_port']}",
-        f"Environment=BINDGUARD_DOH3_PORT={cfg['doh3_port']}",
-        f"Environment=BINDGUARD_DOT_PORT={cfg['dot_port']}",
-        f"Environment=BINDGUARD_DOQ_PORT={cfg['doq_port']}",
-        f"Environment=BINDGUARD_DNSCRYPT_PORT={cfg['dnscrypt_port']}",
-        f"Environment=BINDGUARD_DNSCRYPT_PROVIDER={cfg['dnscrypt_provider']}",
-        f"Environment=BINDGUARD_DNSCRYPT_CERT={DNSCRYPT_CERT}",
-        f"Environment=BINDGUARD_DNSCRYPT_KEY={DNSCRYPT_KEY}",
+        "Environment=ALDERPOINTDNS_DNS_PLAIN=1",
+        f"Environment=ALDERPOINTDNS_DNS_LISTEN_IPV4={cfg.get('listen_ipv4', DEFAULTS['listen_ipv4'])}",
+        f"Environment=ALDERPOINTDNS_DNS_LISTEN_IPV6={cfg.get('listen_ipv6', DEFAULTS['listen_ipv6'])}",
+        f"Environment=ALDERPOINTDNS_DNS_DOH={cfg['doh_enabled']}",
+        f"Environment=ALDERPOINTDNS_DNS_DOT={cfg['dot_enabled']}",
+        f"Environment=ALDERPOINTDNS_DNS_DOQ={cfg['doq_enabled']}",
+        f"Environment=ALDERPOINTDNS_DNS_DOH3={cfg['doh3_enabled']}",
+        f"Environment=ALDERPOINTDNS_DNS_DNSCRYPT={cfg['dnscrypt_enabled']}",
+        f"Environment=ALDERPOINTDNS_TLS_CERT={cfg['cert_path']}",
+        f"Environment=ALDERPOINTDNS_TLS_KEY={cfg['key_path']}",
+        f"Environment=ALDERPOINTDNS_DOH_PATH={cfg['doh_path']}",
+        f"Environment=ALDERPOINTDNS_DOH_PORT={cfg['doh_port']}",
+        f"Environment=ALDERPOINTDNS_DOH3_PORT={cfg['doh3_port']}",
+        f"Environment=ALDERPOINTDNS_DOT_PORT={cfg['dot_port']}",
+        f"Environment=ALDERPOINTDNS_DOQ_PORT={cfg['doq_port']}",
+        f"Environment=ALDERPOINTDNS_DNSCRYPT_PORT={cfg['dnscrypt_port']}",
+        f"Environment=ALDERPOINTDNS_DNSCRYPT_PROVIDER={cfg['dnscrypt_provider']}",
+        f"Environment=ALDERPOINTDNS_DNSCRYPT_CERT={DNSCRYPT_CERT}",
+        f"Environment=ALDERPOINTDNS_DNSCRYPT_KEY={DNSCRYPT_KEY}",
     ]
     return "\n".join(lines) + "\n"
 
@@ -719,7 +719,7 @@ def deploy_encryption(conn: sqlite3.Connection | None = None, template_path: Pat
                 # actually exist.
                 cfg["dnscrypt_enabled"] = "0"
                 dnscrypt_warning = f"DNSCrypt certificate generation failed, DNSCrypt was disabled for this deployment: {exc}"
-        conf_changed = ensure_dnsdist_conf_parameterized(template_path or Path("/opt/bindguard/packaging/dnsdist.conf"))
+        conf_changed = ensure_dnsdist_conf_parameterized(template_path or Path("/opt/alderpointdns/packaging/dnsdist.conf"))
         new_env_text = render_env_override(cfg)
         current_env_text = DNSDIST_ENV_OVERRIDE.read_text() if DNSDIST_ENV_OVERRIDE.exists() else ""
         if new_env_text == current_env_text and not conf_changed and not cert_material_changed:
@@ -731,7 +731,7 @@ def deploy_encryption(conn: sqlite3.Connection | None = None, template_path: Pat
             if DNSDIST_ENV_OVERRIDE.exists():
                 env_backup = BACKUP_DIR / f"dnsdist-encryption.conf.last-good.{int(time.time())}"
                 shutil.copy2(DNSDIST_ENV_OVERRIDE, env_backup)
-            staged = STAGING_DIR / f"bindguard-encryption-{deployment_id}.conf"
+            staged = STAGING_DIR / f"alderpointdns-encryption-{deployment_id}.conf"
             staged.write_text(new_env_text)
             DNSDIST_ENV_OVERRIDE.parent.mkdir(parents=True, exist_ok=True)
             os.replace(staged, DNSDIST_ENV_OVERRIDE)
@@ -843,16 +843,16 @@ def apple_mobileconfig(cfg: dict[str, str], protocol: str) -> bytes:
         raise EncryptionError("Apple profiles are only generated for doh or dot")
     payload = {
         "PayloadType": "com.apple.dnsSettings.managed",
-        "PayloadIdentifier": f"network.bindguard.dns.{protocol}",
+        "PayloadIdentifier": f"network.alderpointdns.dns.{protocol}",
         "PayloadUUID": payload_uuid,
         "PayloadVersion": 1,
-        "PayloadDisplayName": f"BindGuard {label}",
+        "PayloadDisplayName": f"Alderpoint DNS {label}",
         **dns_settings,
     }
     profile = {
         "PayloadContent": [payload],
-        "PayloadDisplayName": f"BindGuard {label} ({hostname})",
-        "PayloadIdentifier": f"network.bindguard.profile.{protocol}",
+        "PayloadDisplayName": f"Alderpoint DNS {label} ({hostname})",
+        "PayloadIdentifier": f"network.alderpointdns.profile.{protocol}",
         "PayloadRemovalDisallowed": False,
         "PayloadType": "Configuration",
         "PayloadUUID": profile_uuid,

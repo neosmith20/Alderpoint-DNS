@@ -1,1 +1,1 @@
-"""BindGuard application package."""
+"""Alderpoint DNS application package."""

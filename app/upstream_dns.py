@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Managed upstream DNS resolvers for BindGuard."""
+"""Managed upstream DNS resolvers for Alderpoint DNS."""
 
 from __future__ import annotations
 
@@ -17,15 +17,15 @@ from typing import Any
 from urllib.parse import urlparse
 
 
-DB_PATH = Path("/var/lib/bindguard/bindguard.db")
-COMPILED_DIR = Path("/var/lib/bindguard/compiled")
+DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
+COMPILED_DIR = Path("/var/lib/alderpointdns/compiled")
 BIND_FORWARDERS_CONF = COMPILED_DIR / "bind" / "upstream-forwarders.conf"
 DNSDIST_UPSTREAM_CONF = COMPILED_DIR / "dnsdist" / "upstream-forwarder.conf"
 NAMED_OPTIONS_CONF = Path("/etc/bind/named.conf.options")
 DNSDIST_CONF = Path("/etc/dnsdist/dnsdist.conf")
-DNSDIST_PACKAGING_CONF = Path("/opt/bindguard/packaging/dnsdist.conf")
-BACKUP_DIR = Path("/var/lib/bindguard/backups")
-STAGING_DIR = Path("/var/lib/bindguard/staging")
+DNSDIST_PACKAGING_CONF = Path("/opt/alderpointdns/packaging/dnsdist.conf")
+BACKUP_DIR = Path("/var/lib/alderpointdns/backups")
+STAGING_DIR = Path("/var/lib/alderpointdns/staging")
 LOOPBACK_FORWARDER = "127.0.0.1"
 LOOPBACK_FORWARDER_PORT = 5355
 TEST_DOMAIN = "cloudflare.com"
@@ -312,16 +312,16 @@ def _address_for_dnsdist(row: dict[str, Any]) -> str:
 
 def render_dnsdist_upstreams(rows: list[dict[str, Any]]) -> str:
     lines = [
-        "-- Managed by BindGuard. Generated upstream forwarder; do not edit by hand.",
-        "bindguardUpstreamsEnabled = true",
+        "-- Managed by Alderpoint DNS. Generated upstream forwarder; do not edit by hand.",
+        "alderpointdnsUpstreamsEnabled = true",
         f'addLocal("{LOOPBACK_FORWARDER}:{LOOPBACK_FORWARDER_PORT}", {{reusePort=true}})',
-        'setPoolServerPolicy(firstAvailable, "bindguard_upstreams")',
+        'setPoolServerPolicy(firstAvailable, "alderpointdns_upstreams")',
     ]
     for row in rows:
         opts = [
             f"address={_lua_quote(_address_for_dnsdist(row))}",
             f"name={_lua_quote('upstream-' + str(row['id']) + '-' + re.sub(r'[^a-zA-Z0-9_-]+', '-', row['name'])[:42])}",
-            'pool="bindguard_upstreams"',
+            'pool="alderpointdns_upstreams"',
             "checkName=\"cloudflare.com.\"",
             "checkType=\"A\"",
             "mustResolve=true",
@@ -338,7 +338,7 @@ def render_dnsdist_upstreams(rows: list[dict[str, Any]]) -> str:
 def render_bind_forwarders() -> str:
     return "\n".join(
         [
-            "// Managed by BindGuard. Generated upstream forwarder target; do not edit by hand.",
+            "// Managed by Alderpoint DNS. Generated upstream forwarder target; do not edit by hand.",
             f"forwarders port {LOOPBACK_FORWARDER_PORT} {{ {LOOPBACK_FORWARDER}; }};",
             "",
         ]
@@ -362,12 +362,12 @@ def ensure_named_forwarders_include() -> None:
 
 def ensure_dnsdist_include() -> None:
     include_block = (
-        f'bindguardUpstreamsEnabled = false\n'
-        f'local bindguardUpstreamConfig = "{DNSDIST_UPSTREAM_CONF}"\n'
-        'local bindguardUpstreamFile = io.open(bindguardUpstreamConfig, "r")\n'
-        'if bindguardUpstreamFile then\n'
-        '  bindguardUpstreamFile:close()\n'
-        '  dofile(bindguardUpstreamConfig)\n'
+        f'alderpointdnsUpstreamsEnabled = false\n'
+        f'local alderpointdnsUpstreamConfig = "{DNSDIST_UPSTREAM_CONF}"\n'
+        'local alderpointdnsUpstreamFile = io.open(alderpointdnsUpstreamConfig, "r")\n'
+        'if alderpointdnsUpstreamFile then\n'
+        '  alderpointdnsUpstreamFile:close()\n'
+        '  dofile(alderpointdnsUpstreamConfig)\n'
         'end\n'
     )
     current = DNSDIST_CONF.read_text() if DNSDIST_CONF.exists() else DNSDIST_PACKAGING_CONF.read_text()
@@ -379,10 +379,10 @@ def ensure_dnsdist_include() -> None:
     marker = "getPool(\"\"):setCache(pc)"
     if marker not in current:
         raise UpstreamDNSError("dnsdist.conf is missing packet-cache pool marker")
-    current = current.replace(marker, 'getPool("bindguard_bind"):setCache(pc)\n\n' + include_block, 1)
-    current = current.replace('newServer({\n  address="127.0.0.1:5354",', 'newServer({\n  address="127.0.0.1:5354",\n  pool="bindguard_bind",', 1)
+    current = current.replace(marker, 'getPool("alderpointdns_bind"):setCache(pc)\n\n' + include_block, 1)
+    current = current.replace('newServer({\n  address="127.0.0.1:5354",', 'newServer({\n  address="127.0.0.1:5354",\n  pool="alderpointdns_bind",', 1)
     route_marker = "}), RCodeAction(DNSRCode.REFUSED))"
-    route = 'if bindguardUpstreamsEnabled then\n  addAction(DSTPortRule(5355), PoolAction("bindguard_upstreams"))\nend\naddAction(AllRule(), PoolAction("bindguard_bind"))\n\n'
+    route = 'if alderpointdnsUpstreamsEnabled then\n  addAction(DSTPortRule(5355), PoolAction("alderpointdns_upstreams"))\nend\naddAction(AllRule(), PoolAction("alderpointdns_bind"))\n\n'
     if route_marker not in current:
         raise UpstreamDNSError("dnsdist.conf is missing action marker")
     current = current.replace(route_marker, route_marker + "\n\n" + route, 1)
@@ -419,7 +419,7 @@ def deploy_upstreams(conn: sqlite3.Connection | None = None) -> int:
             db.close()
         raise UpstreamDNSError(message)
     STAGING_DIR.mkdir(parents=True, exist_ok=True)
-    stage = Path(tempfile.mkdtemp(prefix="bindguard-upstreams-", dir=str(STAGING_DIR)))
+    stage = Path(tempfile.mkdtemp(prefix="alderpointdns-upstreams-", dir=str(STAGING_DIR)))
     backups: list[tuple[Path, Path | None]] = []
     status = "failed"
     message = ""

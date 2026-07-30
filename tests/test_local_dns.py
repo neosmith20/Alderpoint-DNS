@@ -16,12 +16,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 warnings.simplefilter("ignore", ResourceWarning)
 
-from app import analytics, bindguard_compiler, local_dns  # noqa: E402
+from app import analytics, alderpointdns_compiler, local_dns  # noqa: E402
 
 
 class LocalDNSTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = Path(tempfile.mkdtemp(prefix="bindguard-localdns-test-"))
+        self.tmp = Path(tempfile.mkdtemp(prefix="alderpointdns-localdns-test-"))
         self.old = {
             "DB_PATH": local_dns.DB_PATH,
             "COMPILED_DIR": local_dns.COMPILED_DIR,
@@ -31,9 +31,9 @@ class LocalDNSTest(unittest.TestCase):
             "BACKUP_DIR": local_dns.BACKUP_DIR,
             "STAGING_DIR": local_dns.STAGING_DIR,
             "ANALYTICS_DB_PATH": analytics.DB_PATH,
-            "COMPILER_DB_PATH": bindguard_compiler.DB_PATH,
+            "COMPILER_DB_PATH": alderpointdns_compiler.DB_PATH,
         }
-        local_dns.DB_PATH = self.tmp / "bindguard.db"
+        local_dns.DB_PATH = self.tmp / "alderpointdns.db"
         local_dns.COMPILED_DIR = self.tmp / "compiled" / "bind"
         local_dns.LOCAL_ZONE_DIR = local_dns.COMPILED_DIR / "local"
         local_dns.LOCAL_ZONES_CONF = local_dns.COMPILED_DIR / "local-zones.conf"
@@ -41,10 +41,10 @@ class LocalDNSTest(unittest.TestCase):
         local_dns.BACKUP_DIR = self.tmp / "backups"
         local_dns.STAGING_DIR = self.tmp / "staging"
         analytics.DB_PATH = local_dns.DB_PATH
-        bindguard_compiler.DB_PATH = local_dns.DB_PATH
+        alderpointdns_compiler.DB_PATH = local_dns.DB_PATH
         local_dns.STAGING_DIR.mkdir(parents=True)
         local_dns.NAMED_LOCAL_CONF.write_text(
-            'acl "bindguard_clients" { localhost; };\nzone "bindguard.rpz" { type primary; file "bindguard.rpz"; };\n'
+            'acl "alderpointdns_clients" { localhost; };\nzone "alderpointdns.rpz" { type primary; file "alderpointdns.rpz"; };\n'
         )
         local_dns.init_db()
 
@@ -53,7 +53,7 @@ class LocalDNSTest(unittest.TestCase):
             if key == "ANALYTICS_DB_PATH":
                 analytics.DB_PATH = value
             elif key == "COMPILER_DB_PATH":
-                bindguard_compiler.DB_PATH = value
+                alderpointdns_compiler.DB_PATH = value
             else:
                 setattr(local_dns, key, value)
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -158,13 +158,13 @@ class LocalDNSTest(unittest.TestCase):
         with mock.patch.object(local_dns, "run", self.fake_run):
             local_dns.deploy_zones()
         before = local_dns.LOCAL_ZONES_CONF.read_text()
-        os.environ["BINDGUARD_TEST_INVALID_LOCAL_ZONE"] = "1"
+        os.environ["ALDERPOINTDNS_TEST_INVALID_LOCAL_ZONE"] = "1"
         try:
             with self.assertRaises(subprocess.CalledProcessError):
                 with mock.patch.object(local_dns, "run", self.fake_run):
                     local_dns.deploy_zones()
         finally:
-            os.environ.pop("BINDGUARD_TEST_INVALID_LOCAL_ZONE", None)
+            os.environ.pop("ALDERPOINTDNS_TEST_INVALID_LOCAL_ZONE", None)
         self.assertEqual(local_dns.LOCAL_ZONES_CONF.read_text(), before)
 
     def test_deploy_flushes_dnsdist_packet_cache_for_local_zones(self) -> None:
@@ -216,13 +216,13 @@ class LocalDNSTest(unittest.TestCase):
 
     def test_analytics_client_aliases(self) -> None:
         analytics.init_analytics_db()
-        local_dns.upsert_alias("172.16.43.101", "BindGuard", "")
+        local_dns.upsert_alias("172.16.43.101", "Alderpoint DNS", "")
         with analytics.connect() as conn:
             analytics.insert_events(conn, [analytics.QueryEvent(analytics.utc_now(), "172.16.43.101", "x.home.arpa", "A", "UDP", "NOERROR", None, False)], True)
         data = analytics.dashboard_data("24h")
-        self.assertEqual(data["top_clients"][0]["label"], "BindGuard")
+        self.assertEqual(data["top_clients"][0]["label"], "Alderpoint DNS")
         log = analytics.query_log({}, 1, 10)
-        self.assertEqual(log["rows"][0]["client_display"], "BindGuard")
+        self.assertEqual(log["rows"][0]["client_display"], "Alderpoint DNS")
 
 
 if __name__ == "__main__":

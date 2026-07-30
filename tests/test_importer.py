@@ -12,22 +12,22 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 warnings.simplefilter("ignore", ResourceWarning)
 
-from app import bindguard_compiler, importer, local_dns, upstream_dns  # noqa: E402
+from app import alderpointdns_compiler, importer, local_dns, upstream_dns  # noqa: E402
 
 
 class ImporterTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = Path(tempfile.mkdtemp(prefix="bindguard-importer-test-"))
+        self.tmp = Path(tempfile.mkdtemp(prefix="alderpointdns-importer-test-"))
         self.old_importer_db_path = importer.DB_PATH
         self.old_local_dns_db_path = local_dns.DB_PATH
         self.old_upstream_dns_db_path = upstream_dns.DB_PATH
-        self.old_compiler_db_path = bindguard_compiler.DB_PATH
+        self.old_compiler_db_path = alderpointdns_compiler.DB_PATH
         self.old_backup_script = importer.BACKUP_SCRIPT
         self.old_upload_dir = importer.IMPORT_UPLOAD_DIR
-        importer.DB_PATH = self.tmp / "bindguard.db"
+        importer.DB_PATH = self.tmp / "alderpointdns.db"
         local_dns.DB_PATH = importer.DB_PATH
         upstream_dns.DB_PATH = importer.DB_PATH
-        bindguard_compiler.DB_PATH = importer.DB_PATH
+        alderpointdns_compiler.DB_PATH = importer.DB_PATH
         importer.BACKUP_SCRIPT = self.tmp / "no-such-backup-script.sh"
         importer.IMPORT_UPLOAD_DIR = self.tmp / "imports"
         local_dns.STAGING_DIR = self.tmp / "staging"
@@ -38,18 +38,18 @@ class ImporterTest(unittest.TestCase):
         local_dns.NAMED_LOCAL_CONF = self.tmp / "named.conf.local"
         local_dns.STAGING_DIR.mkdir(parents=True)
         local_dns.NAMED_LOCAL_CONF.write_text(
-            'acl "bindguard_clients" { localhost; };\nzone "bindguard.rpz" { type primary; file "bindguard.rpz"; };\n'
+            'acl "alderpointdns_clients" { localhost; };\nzone "alderpointdns.rpz" { type primary; file "alderpointdns.rpz"; };\n'
         )
         local_dns.init_db()
         upstream_dns.init_db()
-        bindguard_compiler.init_db()
+        alderpointdns_compiler.init_db()
         importer.init_db()
 
     def tearDown(self) -> None:
         importer.DB_PATH = self.old_importer_db_path
         local_dns.DB_PATH = self.old_local_dns_db_path
         upstream_dns.DB_PATH = self.old_upstream_dns_db_path
-        bindguard_compiler.DB_PATH = self.old_compiler_db_path
+        alderpointdns_compiler.DB_PATH = self.old_compiler_db_path
         importer.BACKUP_SCRIPT = self.old_backup_script
         importer.IMPORT_UPLOAD_DIR = self.old_upload_dir
         import shutil
@@ -79,9 +79,9 @@ class ImporterTest(unittest.TestCase):
         self.assertEqual(by_name["mail.example.home"]["record_type"], "AAAA")
         self.assertEqual(by_name["alias.example.home"]["record_type"], "CNAME")
 
-    def test_parse_bindguard_csv(self) -> None:
+    def test_parse_alderpointdns_csv(self) -> None:
         text = "fqdn,record_type,value,ttl,enabled,comment\nx.home.arpa,A,172.16.43.40,300,1,note\n"
-        rows = importer.parse_bindguard_csv(text)
+        rows = importer.parse_alderpointdns_csv(text)
         self.assertEqual(rows[0]["fqdn"], "x.home.arpa")
         self.assertEqual(rows[0]["target"], "172.16.43.40")
 
@@ -292,14 +292,14 @@ class ImporterTest(unittest.TestCase):
 
     def test_native_export_parse_round_trip(self) -> None:
         local_dns.add_record("A", "native.home.arpa", "172.16.43.101", 300, "native", True)
-        with bindguard_compiler.connect() as conn:
+        with alderpointdns_compiler.connect() as conn:
             conn.execute(
                 "INSERT OR IGNORE INTO custom_rules(domain, action, enabled, comment, created_at) VALUES (?, 'block', 1, 'native', ?)",
                 ("native-block.example", importer.now()),
             )
             conn.commit()
-        exported = importer.export_bindguard_native()
-        parsed = importer.parse_bindguard_native_json(exported)
+        exported = importer.export_alderpointdns_native()
+        parsed = importer.parse_alderpointdns_native_json(exported)
         self.assertTrue(any(row["fqdn"] == "native.home.arpa" for row in parsed["rewrites_as_local_dns"]))
         self.assertIn("native-block.example", parsed["custom_block"])
 
@@ -315,7 +315,7 @@ class ImporterTest(unittest.TestCase):
             "unsupported_rules": ["unsupported syntax"],
             "untranslatable": [],
         }
-        with bindguard_compiler.connect() as conn:
+        with alderpointdns_compiler.connect() as conn:
             conn.execute("INSERT INTO sources(name, url) VALUES ('Existing', 'https://old.invalid/list.txt')")
             conn.commit()
         summary = importer.summarize_migration(translation, "home.arpa")

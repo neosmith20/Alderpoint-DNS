@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a sanitized BindGuard support bundle.
+"""Create a sanitized Alderpoint DNS support bundle.
 
 The default bundle intentionally excludes private DNS records, query contents,
 private keys, API keys, passwords, session secrets, and authentication headers.
@@ -23,8 +23,8 @@ from typing import Iterable
 
 
 ROOT = Path("/")
-APP_DIR = Path("/opt/bindguard")
-DB_PATH = Path("/var/lib/bindguard/bindguard.db")
+APP_DIR = Path("/opt/alderpointdns")
+DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
 VERSION_FILE = APP_DIR / "VERSION"
 REDACTION_PATTERNS = [
     (re.compile(r"(?i)(authorization:\s*basic\s+)[A-Za-z0-9+/=._:-]+"), r"\1[REDACTED]"),
@@ -91,9 +91,9 @@ def config_metadata() -> dict[str, object]:
         "/etc/bind/named.conf.options",
         "/etc/bind/named.conf.local",
         "/etc/dnsdist/dnsdist.conf",
-        "/etc/systemd/system/bindguard.service",
-        "/etc/systemd/system/bindguard-analytics.service",
-        "/etc/sudoers.d/bindguard",
+        "/etc/systemd/system/alderpointdns.service",
+        "/etc/systemd/system/alderpointdns-analytics.service",
+        "/etc/sudoers.d/alderpointdns",
     ]
     entries = []
     for raw in paths:
@@ -113,14 +113,14 @@ def command_available(name: str) -> bool:
 def gather(base: Path, include_private_dns: bool, include_journal: bool) -> None:
     summary = {
         "created_at": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
-        "bindguard_version": version(),
+        "alderpointdns_version": version(),
         "os": platform.platform(),
         "kernel": platform.release(),
         "python": platform.python_version(),
         "include_private_dns": include_private_dns,
     }
     write_text(base, "summary.json", json.dumps(summary, indent=2))
-    write_text(base, "services.txt", run(["systemctl", "status", "bindguard", "named", "dnsdist", "bindguard-analytics"], timeout=12))
+    write_text(base, "services.txt", run(["systemctl", "status", "alderpointdns", "named", "dnsdist", "alderpointdns-analytics"], timeout=12))
     write_text(base, "listeners.txt", run(["ss", "-ltnup"], timeout=8))
     write_text(base, "bind_validation.txt", run(["named-checkconf", "-p", "/etc/bind/named.conf"], timeout=10) if command_available("named-checkconf") else "named-checkconf unavailable\n")
     write_text(base, "dnsdist_check.txt", run(["dnsdist", "--check-config"], timeout=10) if command_available("dnsdist") else "dnsdist unavailable\n")
@@ -135,7 +135,7 @@ def gather(base: Path, include_private_dns: bool, include_journal: bool) -> None
     write_text(base, "health.json", json.dumps(health, indent=2))
     if include_journal:
         errors = ""
-        for unit in ("bindguard", "named", "dnsdist", "bindguard-analytics"):
+        for unit in ("alderpointdns", "named", "dnsdist", "alderpointdns-analytics"):
             errors += f"\n== {unit} ==\n"
             errors += run(["journalctl", "-u", unit, "-p", "warning", "-n", "80", "--no-pager"], timeout=10)
         write_text(base, "recent_warnings.txt", errors)
@@ -146,13 +146,13 @@ def gather(base: Path, include_private_dns: bool, include_journal: bool) -> None
 def make_bundle(output: Path, include_private_dns: bool, include_journal: bool) -> Path:
     output.mkdir(parents=True, exist_ok=True)
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    bundle = output / f"bindguard-diagnostics-{stamp}.tar.gz"
-    with tempfile.TemporaryDirectory(prefix="bindguard-diagnostics-") as tmp:
-        base = Path(tmp) / "bindguard-diagnostics"
+    bundle = output / f"alderpointdns-diagnostics-{stamp}.tar.gz"
+    with tempfile.TemporaryDirectory(prefix="alderpointdns-diagnostics-") as tmp:
+        base = Path(tmp) / "alderpointdns-diagnostics"
         base.mkdir()
         gather(base, include_private_dns, include_journal)
         with tarfile.open(bundle, "w:gz") as tar:
-            tar.add(base, arcname="bindguard-diagnostics")
+            tar.add(base, arcname="alderpointdns-diagnostics")
     return bundle
 
 
@@ -180,7 +180,7 @@ key "rndc-key" {
 
 
 def main(argv: Iterable[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Create a sanitized BindGuard diagnostics bundle")
+    parser = argparse.ArgumentParser(description="Create a sanitized Alderpoint DNS diagnostics bundle")
     parser.add_argument("--output-dir", default="/tmp", help="directory for the generated tar.gz bundle")
     parser.add_argument("--include-private-dns", action="store_true", help="explicit opt-in placeholder for private DNS diagnostics")
     parser.add_argument("--no-journal", action="store_true", help="skip journal excerpts")

@@ -1,5 +1,5 @@
-// Managed by BindGuard. Validate with named-checkconf before deployment.
-acl "bindguard_clients" {
+// Managed by Alderpoint DNS. Validate with named-checkconf before deployment.
+acl "alderpointdns_clients" {
 	10.0.0.0/8;
 	172.16.0.0/12;
 	192.168.0.0/16;
@@ -15,9 +15,9 @@ options {
 	listen-on-v6 port 5353 { ::1; };
 	allow-proxy { 127.0.0.1; };
 	allow-proxy-on { 127.0.0.1; };
-	allow-query { "bindguard_clients"; };
-	allow-query-cache { "bindguard_clients"; };
-	allow-recursion { "bindguard_clients"; };
+	allow-query { "alderpointdns_clients"; };
+	allow-query-cache { "alderpointdns_clients"; };
+	allow-recursion { "alderpointdns_clients"; };
 	recursion yes;
 	forward only;
 	forwarders { 1.1.1.2; 1.0.0.2; 4.2.2.1; 4.2.2.2; };
@@ -27,22 +27,22 @@ options {
 	empty-zones-enable yes;
 	version "not disclosed";
 	querylog no;
-	response-policy { zone "bindguard.rpz"; } break-dnssec yes;
-	statistics-file "/var/log/bindguard/bind/named.stats";
-	memstatistics-file "/var/log/bindguard/bind/named.memstats";
+	response-policy { zone "alderpointdns.rpz"; } break-dnssec yes;
+	statistics-file "/var/log/alderpointdns/bind/named.stats";
+	memstatistics-file "/var/log/alderpointdns/bind/named.memstats";
 };
 statistics-channels {
 	inet 127.0.0.1 port 8053 allow { 127.0.0.1; };
 };
 logging {
-	channel bindguard_default {
-		file "/var/log/bindguard/bind/named.log" versions 5 size 10m;
+	channel alderpointdns_default {
+		file "/var/log/alderpointdns/bind/named.log" versions 5 size 10m;
 		severity info;
 		print-time yes;
 		print-severity yes;
 		print-category yes;
 	};
-	category default { bindguard_default; };
-	category general { bindguard_default; };
-	category security { bindguard_default; };
+	category default { alderpointdns_default; };
+	category general { alderpointdns_default; };
+	category security { alderpointdns_default; };
 };

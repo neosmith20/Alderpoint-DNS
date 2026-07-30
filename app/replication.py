@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""BindGuard-native one-way primary-to-replica configuration replication.
+"""Alderpoint DNS-native one-way primary-to-replica configuration replication.
 
-A `primary` BindGuard node compiles its filtering/Local DNS/policy state into
+A `primary` Alderpoint DNS node compiles its filtering/Local DNS/policy state into
 numbered, hashed "generations" every time it successfully deploys. A
 `replica` node enrolls once (a short-lived, single-use, hashed token bound to
 a specific replica identity), is issued a client certificate signed by the
@@ -10,9 +10,9 @@ than building a second CA), and from then on authenticates to the primary
 using mutual TLS only -- there is no password or SSH key anywhere in this
 flow. The replica polls (does not accept a push connection) for the latest
 generation, verifies the payload hash, stages the data, applies it into its
-own local tables, and reuses the *existing* `bindguard_compiler.py deploy`
+own local tables, and reuses the *existing* `alderpointdns_compiler.py deploy`
 pipeline (via the same enumerated, argument-free sudo path every other
-BindGuard feature uses) to regenerate and atomically activate BIND/dnsdist
+Alderpoint DNS feature uses) to regenerate and atomically activate BIND/dnsdist
 configuration -- this module never reimplements zone/RPZ generation.
 
 Replication failure (primary down, replica down, revoked cert, corrupted
@@ -42,10 +42,10 @@ from typing import Any, Callable
 from app import encryption
 
 
-DB_PATH = Path("/var/lib/bindguard/bindguard.db")
-BACKUP_DIR = Path("/var/lib/bindguard/backups")
-STAGING_DIR = Path("/var/lib/bindguard/staging")
-REPL_DIR = Path("/var/lib/bindguard/replication")
+DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
+BACKUP_DIR = Path("/var/lib/alderpointdns/backups")
+STAGING_DIR = Path("/var/lib/alderpointdns/staging")
+REPL_DIR = Path("/var/lib/alderpointdns/replication")
 SERVER_CERT_PATH = REPL_DIR / "replication-server.crt"
 SERVER_KEY_PATH = REPL_DIR / "replication-server.key"
 
@@ -246,7 +246,7 @@ def _serial_of(cert_pem: bytes) -> str:
 
 
 def _issue_cert(cn: str, ext_lines: list[str], days: int, is_server: bool) -> tuple[bytes, bytes]:
-    """Sign a CSR with BindGuard's local CA (app.encryption.ensure_local_ca).
+    """Sign a CSR with Alderpoint DNS's local CA (app.encryption.ensure_local_ca).
     Mirrors app.encryption.issue_from_local_ca's exact openssl invocation
     pattern but writes to caller-chosen in-memory PEM bytes instead of the
     fixed Encryption Settings server-cert path, and supports client-auth
@@ -296,21 +296,21 @@ def ensure_server_cert() -> tuple[Path, Path]:
     """Server certificate for the primary's mTLS replication listener.
 
     Design choice (documented per the task): the replication endpoint always
-    uses a certificate issued by BindGuard's own local CA, regardless of the
+    uses a certificate issued by Alderpoint DNS's own local CA, regardless of the
     Encryption Settings cert_mode (self-signed/local-CA/uploaded/existing-
     path) configured for DoH/DoT/etc. Replication's trust root must be the
     same CA that signs replica client certs, so mixing in an uploaded/
     external server cert here would add complexity without any real security
-    benefit -- replicas only ever need to trust BindGuard's own CA.
+    benefit -- replicas only ever need to trust Alderpoint DNS's own CA.
     """
     if SERVER_CERT_PATH.exists() and SERVER_KEY_PATH.exists():
         return SERVER_CERT_PATH, SERVER_KEY_PATH
     ip = encryption.detect_server_ip()
-    sans = ["DNS:bindguard-primary", "IP:127.0.0.1"]
+    sans = ["DNS:alderpointdns-primary", "IP:127.0.0.1"]
     if ip and ip != "127.0.0.1":
         sans.append(f"IP:{ip}")
     cert_pem, key_pem = _issue_cert(
-        "bindguard-replication-primary",
+        "alderpointdns-replication-primary",
         [f"subjectAltName={','.join(dict.fromkeys(sans))}", "extendedKeyUsage=serverAuth", "keyUsage=digitalSignature,keyEncipherment"],
         3650,
         is_server=True,
@@ -420,14 +420,14 @@ def consume_enrollment(raw_token: str, cert_days: int = 825, conn: sqlite3.Conne
             db.close()
 
 
-# /etc/bindguard/certs is root:_dnsdist 0750 -- the unprivileged bindguard
+# /etc/alderpointdns/certs is root:_dnsdist 0750 -- the unprivileged alderpointdns
 # web process (which is what runs the primary's HTTP replication listener,
 # see start_primary_listener/ensure_primary_listener_running) cannot write
 # the CA material consume_enrollment() needs. So, exactly like every other
-# BindGuard feature that needs a privileged filesystem write, the listener
+# Alderpoint DNS feature that needs a privileged filesystem write, the listener
 # only validates the token itself (a plain SQLite read, no privilege
 # required) and stages the *hash* for the privileged
-# bindguard_compiler.py replication-consume-enrollment sudo entry to
+# alderpointdns_compiler.py replication-consume-enrollment sudo entry to
 # actually read and process -- mirroring dns_cache's
 # request_flush/process_pending_flush and backup's
 # request_backup/process_pending_request handoff pattern.
@@ -723,7 +723,7 @@ def latest_generation(conn: sqlite3.Connection | None = None) -> dict[str, Any] 
 
 
 def on_deploy_success(conn: sqlite3.Connection | None = None) -> dict[str, Any] | None:
-    """Called at the end of a successful bindguard_compiler.py deploy(). A
+    """Called at the end of a successful alderpointdns_compiler.py deploy(). A
     no-op unless this node's role is 'primary'. Deliberately never allowed
     to raise into the caller -- a replication bug must never fail an
     otherwise-successful DNS deployment."""
@@ -786,7 +786,7 @@ class ServerContext:
 
 def _make_handler(ctx: ServerContext) -> type[http.server.BaseHTTPRequestHandler]:
     class Handler(http.server.BaseHTTPRequestHandler):
-        server_version = "BindGuardReplication/1"
+        server_version = "AlderpointDNSReplication/1"
         protocol_version = "HTTP/1.1"
 
         def log_message(self, fmt: str, *args: Any) -> None:  # noqa: A003 - stdlib signature
@@ -860,13 +860,13 @@ def _make_handler(ctx: ServerContext) -> type[http.server.BaseHTTPRequestHandler
             token = str(body.get("token", ""))
             if not token:
                 raise ReplicationError("token is required")
-            # This listener runs as the unprivileged bindguard user and
-            # cannot write /etc/bindguard/certs itself. request_enrollment_
+            # This listener runs as the unprivileged alderpointdns user and
+            # cannot write /etc/alderpointdns/certs itself. request_enrollment_
             # consumption() validates the token (read-only) and stages it;
             # the privileged sudo call does the actual CA-signing work and
             # returns the cert material to relay back to the replica.
             request_enrollment_consumption(token, conn=db)
-            proc = run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "replication-consume-enrollment"], check=False)
+            proc = run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "replication-consume-enrollment"], check=False)
             if proc.returncode != 0:
                 raise ReplicationError(f"enrollment could not be completed: {proc.stdout[-500:]}")
             result = json.loads(proc.stdout)
@@ -1005,7 +1005,7 @@ class ReplicaContext:
 
 def _default_deploy_fn() -> tuple[bool, str]:
     proc = subprocess.run(
-        ["sudo", "/opt/bindguard/app/bindguard_compiler.py", "deploy", "--no-download"],
+        ["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "deploy", "--no-download"],
         text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
     )
     return proc.returncode == 0, proc.stdout[-4000:]

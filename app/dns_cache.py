@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""BIND recursive-cache tuning, flush operations, and stats for BindGuard.
+"""BIND recursive-cache tuning, flush operations, and stats for Alderpoint DNS.
 
 BIND already provides recursive caching; this module exposes and manages the
 existing cache instead of adding a second one. dnsdist's separate packet
 cache (packaging/dnsdist.conf) is intentionally left alone here: it is safe
-today only because BindGuard v1 applies one global RPZ policy to every
+today only because Alderpoint DNS v1 applies one global RPZ policy to every
 client. It must be revisited (disabled or re-keyed) before any per-client or
 per-network policy is ever enforced at runtime, since its cache key does not
 vary by client/policy and could otherwise leak one client's filtered answer
@@ -26,12 +26,12 @@ from pathlib import Path
 from typing import Any
 
 
-DB_PATH = Path("/var/lib/bindguard/bindguard.db")
-COMPILED_DIR = Path("/var/lib/bindguard/compiled/bind")
+DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
+COMPILED_DIR = Path("/var/lib/alderpointdns/compiled/bind")
 CACHE_OPTIONS_CONF = COMPILED_DIR / "cache-options.conf"
 NAMED_OPTIONS_CONF = Path("/etc/bind/named.conf.options")
-BACKUP_DIR = Path("/var/lib/bindguard/backups")
-STAGING_DIR = Path("/var/lib/bindguard/staging")
+BACKUP_DIR = Path("/var/lib/alderpointdns/backups")
+STAGING_DIR = Path("/var/lib/alderpointdns/staging")
 STATS_URL = "http://127.0.0.1:8053/json/v1/server"
 
 # Well above dnsdist's configured 5s TCP / 2s UDP upstream timeouts, so a
@@ -203,7 +203,7 @@ def update_settings(values: dict[str, Any]) -> None:
 
 def render_cache_options(cfg: dict[str, str]) -> str:
     lines = [
-        "// Managed by BindGuard. Generated cache tuning options; do not edit by hand.",
+        "// Managed by Alderpoint DNS. Generated cache tuning options; do not edit by hand.",
         f"max-cache-size {int(cfg['max_cache_size_mb'])}m;",
         f"min-cache-ttl {int(cfg['min_cache_ttl'])};",
         f"max-cache-ttl {int(cfg['max_cache_ttl'])};",
@@ -267,7 +267,7 @@ def deploy_cache_options(conn: sqlite3.Connection | None = None) -> int:
     deployment_id = cursor.lastrowid
     db.commit()
     STAGING_DIR.mkdir(parents=True, exist_ok=True)
-    stage = Path(tempfile.mkdtemp(prefix="bindguard-cache-", dir=str(STAGING_DIR)))
+    stage = Path(tempfile.mkdtemp(prefix="alderpointdns-cache-", dir=str(STAGING_DIR)))
     options_backup = BACKUP_DIR / f"cache-options.conf.last-good.{int(time.time())}"
     status = "failed"
     message = ""

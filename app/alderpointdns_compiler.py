@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""BindGuard blocklist downloader, parser, RPZ compiler, and deployer."""
+"""Alderpoint DNS blocklist downloader, parser, RPZ compiler, and deployer."""
 
 from __future__ import annotations
 
@@ -29,20 +29,20 @@ except ModuleNotFoundError:
     from app import backup, dns_cache, encryption, local_dns, replication, upstream_dns
 
 
-DB_PATH = Path("/var/lib/bindguard/bindguard.db")
-DOWNLOAD_DIR = Path("/var/lib/bindguard/downloads")
-COMPILED_RPZ = Path("/var/lib/bindguard/compiled/bind/bindguard.rpz")
-STAGING_DIR = Path("/var/lib/bindguard/staging")
-BACKUP_DIR = Path("/var/lib/bindguard/backups")
-DEPLOY_LOCK = Path("/var/lib/bindguard/staging/deploy.lock")
+DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
+DOWNLOAD_DIR = Path("/var/lib/alderpointdns/downloads")
+COMPILED_RPZ = Path("/var/lib/alderpointdns/compiled/bind/alderpointdns.rpz")
+STAGING_DIR = Path("/var/lib/alderpointdns/staging")
+BACKUP_DIR = Path("/var/lib/alderpointdns/backups")
+DEPLOY_LOCK = Path("/var/lib/alderpointdns/staging/deploy.lock")
 MAX_SOURCE_BYTES = 25 * 1024 * 1024
 CONNECT_TIMEOUT = 10
 TOTAL_TIMEOUT = 60
-RPZ_ZONE = "bindguard.rpz"
+RPZ_ZONE = "alderpointdns.rpz"
 DOMAIN_RE = re.compile(r"^(?=.{1,253}\.?$)([a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?\.)+[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?\.?$")
 
 
-class BindGuardConnection(sqlite3.Connection):
+class AlderpointDNSConnection(sqlite3.Connection):
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         super().__exit__(exc_type, exc_value, traceback)
         self.close()
@@ -112,7 +112,7 @@ def slug(text: str) -> str:
 
 def connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, factory=BindGuardConnection)
+    conn = sqlite3.connect(DB_PATH, factory=AlderpointDNSConnection)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -327,7 +327,7 @@ def download_source(source: sqlite3.Row) -> SourceResult:
     staging_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     result = SourceResult(source["id"], source["name"], source["url"], False)
-    req = urllib.request.Request(source["url"], headers={"User-Agent": "BindGuard/1"})
+    req = urllib.request.Request(source["url"], headers={"User-Agent": "Alderpoint DNS/1"})
     try:
         with urllib.request.urlopen(req, timeout=CONNECT_TIMEOUT) as response:
             result.http_status = getattr(response, "status", None)
@@ -500,9 +500,9 @@ def deploy(download: bool = True) -> int:
             )
             deployment_id = cursor.lastrowid
             conn.commit()
-            backup_path = BACKUP_DIR / f"bindguard.rpz.last-good.{int(time.time())}"
-            stage = Path(tempfile.mkdtemp(prefix="bindguard-rpz-", dir=str(STAGING_DIR)))
-            staged_rpz = stage / "bindguard.rpz"
+            backup_path = BACKUP_DIR / f"alderpointdns.rpz.last-good.{int(time.time())}"
+            stage = Path(tempfile.mkdtemp(prefix="alderpointdns-rpz-", dir=str(STAGING_DIR)))
+            staged_rpz = stage / "alderpointdns.rpz"
             status = "failed"
             message = ""
             active_domains = 0
@@ -513,7 +513,7 @@ def deploy(download: bool = True) -> int:
                 active_blocks, allowed_domains, _, errors = collect_rules(conn, download)
                 active_domains = len(active_blocks)
                 rpz_text = render_rpz(active_blocks)
-                if os.environ.get("BINDGUARD_TEST_INVALID_RPZ") == "1":
+                if os.environ.get("ALDERPOINTDNS_TEST_INVALID_RPZ") == "1":
                     rpz_text += "this is not a valid zone record\n"
                 staged_rpz.write_text(rpz_text)
                 validate_rpz(staged_rpz)
@@ -526,7 +526,7 @@ def deploy(download: bool = True) -> int:
                 local_dns.deploy_zones(conn)
                 dns_cache.deploy_cache_options(conn)
                 upstream_dns.deploy_upstreams(conn)
-                if os.environ.get("BINDGUARD_TEST_FORCE_POSTCHECK_FAIL") == "1":
+                if os.environ.get("ALDERPOINTDNS_TEST_FORCE_POSTCHECK_FAIL") == "1":
                     raise RuntimeError("forced post-deploy failure for rollback test")
                 if not resolves("cloudflare.com"):
                     raise RuntimeError("post-deploy ordinary resolution failed")
@@ -748,8 +748,8 @@ def backup_schedule_deploy(_: argparse.Namespace) -> None:
 
 
 def replication_primary_init(_: argparse.Namespace) -> None:
-    # Ensures /etc/bindguard/certs (root:_dnsdist, not writable by the
-    # unprivileged bindguard web process) has the CA + replication server
+    # Ensures /etc/alderpointdns/certs (root:_dnsdist, not writable by the
+    # unprivileged alderpointdns web process) has the CA + replication server
     # cert the primary's in-process listener needs before it can start.
     replication.ensure_server_cert()
     print(json.dumps({"ok": True}))
@@ -774,7 +774,7 @@ def local_dns_add_alias(args: argparse.Namespace) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="BindGuard blocklist compiler")
+    parser = argparse.ArgumentParser(description="Alderpoint DNS blocklist compiler")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init-db").set_defaults(func=lambda args: init_db())
     seed = sub.add_parser("seed-lab")

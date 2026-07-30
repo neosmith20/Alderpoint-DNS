@@ -6,8 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import app.bindguard_compiler as compiler
-from app.bindguard_compiler import normalize_domain, parse_rules
+import app.alderpointdns_compiler as compiler
+from app.alderpointdns_compiler import normalize_domain, parse_rules
 
 
 class ParserTests(unittest.TestCase):
@@ -39,7 +39,7 @@ class ParserTests(unittest.TestCase):
     def test_public_source_catalog_seeds_large_list_set(self):
         with tempfile.TemporaryDirectory() as tmp:
             original_db = compiler.DB_PATH
-            compiler.DB_PATH = Path(tmp) / "bindguard.db"
+            compiler.DB_PATH = Path(tmp) / "alderpointdns.db"
             try:
                 with contextlib.redirect_stdout(io.StringIO()):
                     compiler.seed_public(argparse.Namespace(enabled=True))
@@ -61,7 +61,7 @@ class ParserTests(unittest.TestCase):
     def test_policy_schema_seed_supports_network_profiles(self):
         with tempfile.TemporaryDirectory() as tmp:
             original_db = compiler.DB_PATH
-            compiler.DB_PATH = Path(tmp) / "bindguard.db"
+            compiler.DB_PATH = Path(tmp) / "alderpointdns.db"
             try:
                 compiler.init_db()
                 with compiler.connect() as conn:
@@ -96,7 +96,7 @@ class ParserTests(unittest.TestCase):
             source_file.write_text("example.test\n||ads.example^\n@@||allowed.example^\n")
             original_db = compiler.DB_PATH
             original_download_dir = compiler.DOWNLOAD_DIR
-            compiler.DB_PATH = tmp_path / "bindguard.db"
+            compiler.DB_PATH = tmp_path / "alderpointdns.db"
             compiler.DOWNLOAD_DIR = tmp_path / "downloads"
             try:
                 compiler.init_db()

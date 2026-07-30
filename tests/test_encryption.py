@@ -18,7 +18,7 @@ from app import encryption  # noqa: E402
 
 class EncryptionTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = Path(tempfile.mkdtemp(prefix="bindguard-encryption-test-"))
+        self.tmp = Path(tempfile.mkdtemp(prefix="alderpointdns-encryption-test-"))
         self.old = {
             "DB_PATH": encryption.DB_PATH,
             "CERT_DIR": encryption.CERT_DIR,
@@ -40,21 +40,21 @@ class EncryptionTest(unittest.TestCase):
             "BACKUP_DIR": encryption.BACKUP_DIR,
             "STAGING_DIR": encryption.STAGING_DIR,
         }
-        encryption.DB_PATH = self.tmp / "bindguard.db"
+        encryption.DB_PATH = self.tmp / "alderpointdns.db"
         encryption.CERT_DIR = self.tmp / "certs"
-        encryption.CERT_PATH_DEFAULT = encryption.CERT_DIR / "bindguard-lab.crt"
-        encryption.KEY_PATH_DEFAULT = encryption.CERT_DIR / "bindguard-lab.key"
-        encryption.CA_CERT_PATH = encryption.CERT_DIR / "bindguard-ca.crt"
-        encryption.CA_KEY_PATH = encryption.CERT_DIR / "bindguard-ca.key"
-        encryption.CA_SERIAL_PATH = encryption.CERT_DIR / "bindguard-ca.srl"
-        encryption.UPLOADED_CERT_PATH = encryption.CERT_DIR / "bindguard-uploaded.crt"
-        encryption.UPLOADED_KEY_PATH = encryption.CERT_DIR / "bindguard-uploaded.key"
+        encryption.CERT_PATH_DEFAULT = encryption.CERT_DIR / "alderpointdns-lab.crt"
+        encryption.KEY_PATH_DEFAULT = encryption.CERT_DIR / "alderpointdns-lab.key"
+        encryption.CA_CERT_PATH = encryption.CERT_DIR / "alderpointdns-ca.crt"
+        encryption.CA_KEY_PATH = encryption.CERT_DIR / "alderpointdns-ca.key"
+        encryption.CA_SERIAL_PATH = encryption.CERT_DIR / "alderpointdns-ca.srl"
+        encryption.UPLOADED_CERT_PATH = encryption.CERT_DIR / "alderpointdns-uploaded.crt"
+        encryption.UPLOADED_KEY_PATH = encryption.CERT_DIR / "alderpointdns-uploaded.key"
         encryption.DNSCRYPT_PROVIDER_PUBLIC = encryption.CERT_DIR / "dnscrypt-provider.public"
         encryption.DNSCRYPT_PROVIDER_PRIVATE = encryption.CERT_DIR / "dnscrypt-provider.private"
         encryption.DNSCRYPT_CERT = encryption.CERT_DIR / "dnscrypt-resolver.cert"
         encryption.DNSCRYPT_KEY = encryption.CERT_DIR / "dnscrypt-resolver.key"
         encryption.DNSDIST_CONF = self.tmp / "dnsdist.conf"
-        encryption.DNSDIST_ENV_OVERRIDE = self.tmp / "bindguard.conf"
+        encryption.DNSDIST_ENV_OVERRIDE = self.tmp / "alderpointdns.conf"
         encryption.BACKUP_DIR = self.tmp / "backups"
         encryption.STAGING_DIR = self.tmp / "staging"
         encryption.PENDING_UPLOAD_CERT = encryption.STAGING_DIR / "pending-cert-upload.crt"
@@ -131,7 +131,7 @@ class EncryptionTest(unittest.TestCase):
         self.assertTrue(encryption.validate_cert_key_match(encryption.CERT_PATH_DEFAULT, encryption.KEY_PATH_DEFAULT))
         info = encryption.cert_info(encryption.CERT_PATH_DEFAULT)
         self.assertFalse(info["self_signed"])
-        self.assertEqual(info["issuer"], "CN=BindGuard Local CA")
+        self.assertEqual(info["issuer"], "CN=Alderpoint DNS Local CA")
 
     def test_local_ca_reused_across_multiple_leaf_certs(self) -> None:
         encryption.issue_from_local_ca("a.example.com", days=30)
@@ -190,9 +190,9 @@ class EncryptionTest(unittest.TestCase):
         template = self.tmp / "template.conf"
         template.write_text(
             '-- Encryption Settings (managed by app/encryption.py)\n'
-            'local listenIPv4 = os.getenv("BINDGUARD_DNS_LISTEN_IPV4") or "0.0.0.0"\n'
-            'setKey("BINDGUARD_CONSOLE_KEY_PLACEHOLDER")\n'
-            'setWebserverConfig({password="BINDGUARD_WEBSERVER_PASSWORD_PLACEHOLDER", apiKey="BINDGUARD_WEBSERVER_API_KEY_PLACEHOLDER"})\n'
+            'local listenIPv4 = os.getenv("ALDERPOINTDNS_DNS_LISTEN_IPV4") or "0.0.0.0"\n'
+            'setKey("ALDERPOINTDNS_CONSOLE_KEY_PLACEHOLDER")\n'
+            'setWebserverConfig({password="ALDERPOINTDNS_WEBSERVER_PASSWORD_PLACEHOLDER", apiKey="ALDERPOINTDNS_WEBSERVER_API_KEY_PLACEHOLDER"})\n'
         )
         encryption.DNSDIST_CONF.write_text(
             'setKey("realconsolekey")\n'
@@ -204,7 +204,7 @@ class EncryptionTest(unittest.TestCase):
         self.assertIn('setKey("realconsolekey")', new_content)
         self.assertIn('password="realpassword"', new_content)
         self.assertIn('apiKey="realapikey"', new_content)
-        self.assertIn("BINDGUARD_DNS_LISTEN_IPV4", new_content)
+        self.assertIn("ALDERPOINTDNS_DNS_LISTEN_IPV4", new_content)
         self.assertIn(encryption.MIGRATION_MARKER, new_content)
         # Idempotent: second call is a no-op.
         self.assertFalse(encryption.ensure_dnsdist_conf_parameterized(template))
@@ -213,9 +213,9 @@ class EncryptionTest(unittest.TestCase):
         template = self.tmp / "template.conf"
         template.write_text(
             '-- Encryption Settings (managed by app/encryption.py)\n'
-            'local listenIPv4 = os.getenv("BINDGUARD_DNS_LISTEN_IPV4") or "0.0.0.0"\n'
-            'setKey("BINDGUARD_CONSOLE_KEY_PLACEHOLDER")\n'
-            'setWebserverConfig({password="BINDGUARD_WEBSERVER_PASSWORD_PLACEHOLDER", apiKey="BINDGUARD_WEBSERVER_API_KEY_PLACEHOLDER"})\n'
+            'local listenIPv4 = os.getenv("ALDERPOINTDNS_DNS_LISTEN_IPV4") or "0.0.0.0"\n'
+            'setKey("ALDERPOINTDNS_CONSOLE_KEY_PLACEHOLDER")\n'
+            'setWebserverConfig({password="ALDERPOINTDNS_WEBSERVER_PASSWORD_PLACEHOLDER", apiKey="ALDERPOINTDNS_WEBSERVER_API_KEY_PLACEHOLDER"})\n'
         )
         encryption.DNSDIST_CONF.write_text(
             '-- Encryption Settings (managed by app/encryption.py)\n'
@@ -223,11 +223,11 @@ class EncryptionTest(unittest.TestCase):
             'setWebserverConfig({password="realpassword", apiKey="realapikey"})\n'
         )
         self.assertTrue(encryption.ensure_dnsdist_conf_parameterized(template))
-        self.assertIn("BINDGUARD_DNS_LISTEN_IPV4", encryption.DNSDIST_CONF.read_text())
+        self.assertIn("ALDERPOINTDNS_DNS_LISTEN_IPV4", encryption.DNSDIST_CONF.read_text())
 
     def test_ensure_dnsdist_conf_parameterized_requires_existing_secrets(self) -> None:
         template = self.tmp / "template.conf"
-        template.write_text('setKey("BINDGUARD_CONSOLE_KEY_PLACEHOLDER")\n')
+        template.write_text('setKey("ALDERPOINTDNS_CONSOLE_KEY_PLACEHOLDER")\n')
         encryption.DNSDIST_CONF.write_text("-- no secrets here\n")
         with self.assertRaises(encryption.EncryptionError):
             encryption.ensure_dnsdist_conf_parameterized(template)
@@ -238,12 +238,12 @@ class EncryptionTest(unittest.TestCase):
         cfg = dict(encryption.DEFAULTS)
         cfg.update(doh_enabled="1", dot_enabled="0", doq_enabled="1", doh3_enabled="0", dnscrypt_enabled="0")
         text = encryption.render_env_override(cfg)
-        self.assertIn("Environment=BINDGUARD_DNS_PLAIN=1", text)
-        self.assertIn("Environment=BINDGUARD_DNS_LISTEN_IPV4=0.0.0.0", text)
-        self.assertIn("Environment=BINDGUARD_DNS_LISTEN_IPV6=::", text)
-        self.assertIn("Environment=BINDGUARD_DNS_DOH=1", text)
-        self.assertIn("Environment=BINDGUARD_DNS_DOT=0", text)
-        self.assertIn(f"Environment=BINDGUARD_TLS_CERT={cfg['cert_path']}", text)
+        self.assertIn("Environment=ALDERPOINTDNS_DNS_PLAIN=1", text)
+        self.assertIn("Environment=ALDERPOINTDNS_DNS_LISTEN_IPV4=0.0.0.0", text)
+        self.assertIn("Environment=ALDERPOINTDNS_DNS_LISTEN_IPV6=::", text)
+        self.assertIn("Environment=ALDERPOINTDNS_DNS_DOH=1", text)
+        self.assertIn("Environment=ALDERPOINTDNS_DNS_DOT=0", text)
+        self.assertIn(f"Environment=ALDERPOINTDNS_TLS_CERT={cfg['cert_path']}", text)
 
     # -- deploy staged/validate/backup/atomic/health/rollback -------------
 
@@ -251,9 +251,9 @@ class EncryptionTest(unittest.TestCase):
         template = self.tmp / "template.conf"
         template.write_text(
             '-- Encryption Settings (managed by app/encryption.py)\n'
-            'local listenIPv4 = os.getenv("BINDGUARD_DNS_LISTEN_IPV4") or "0.0.0.0"\n'
-            'setKey("BINDGUARD_CONSOLE_KEY_PLACEHOLDER")\n'
-            'setWebserverConfig({password="BINDGUARD_WEBSERVER_PASSWORD_PLACEHOLDER", apiKey="BINDGUARD_WEBSERVER_API_KEY_PLACEHOLDER"})\n'
+            'local listenIPv4 = os.getenv("ALDERPOINTDNS_DNS_LISTEN_IPV4") or "0.0.0.0"\n'
+            'setKey("ALDERPOINTDNS_CONSOLE_KEY_PLACEHOLDER")\n'
+            'setWebserverConfig({password="ALDERPOINTDNS_WEBSERVER_PASSWORD_PLACEHOLDER", apiKey="ALDERPOINTDNS_WEBSERVER_API_KEY_PLACEHOLDER"})\n'
         )
         encryption.DNSDIST_CONF.write_text(
             'setKey("realconsolekey")\n'

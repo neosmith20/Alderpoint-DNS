@@ -21,7 +21,7 @@ from app import encryption, replication  # noqa: E402
 
 class ReplicationTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = Path(tempfile.mkdtemp(prefix="bindguard-replication-test-"))
+        self.tmp = Path(tempfile.mkdtemp(prefix="alderpointdns-replication-test-"))
         self.old = {
             "DB_PATH": replication.DB_PATH,
             "BACKUP_DIR": replication.BACKUP_DIR,
@@ -34,7 +34,7 @@ class ReplicationTest(unittest.TestCase):
             "CA_KEY_PATH": encryption.CA_KEY_PATH,
             "CA_SERIAL_PATH": encryption.CA_SERIAL_PATH,
         }
-        replication.DB_PATH = self.tmp / "bindguard.db"
+        replication.DB_PATH = self.tmp / "alderpointdns.db"
         replication.BACKUP_DIR = self.tmp / "backups"
         replication.STAGING_DIR = self.tmp / "staging"
         replication.REPL_DIR = self.tmp / "replication"

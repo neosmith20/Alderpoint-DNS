@@ -8,19 +8,19 @@ fail() {
 
 before="$(python3 - <<'PY'
 import sqlite3
-conn = sqlite3.connect('/var/lib/bindguard/bindguard.db')
+conn = sqlite3.connect('/var/lib/alderpointdns/alderpointdns.db')
 print(conn.execute('select count(*) from query_events').fetchone()[0])
 PY
 )"
 
 systemctl restart named
-systemctl restart bindguard-analytics
+systemctl restart alderpointdns-analytics
 systemctl restart dnsdist
-systemctl restart bindguard
+systemctl restart alderpointdns
 systemctl is-active --quiet named || fail "named is not active after restart"
 systemctl is-active --quiet dnsdist || fail "dnsdist is not active after restart"
-systemctl is-active --quiet bindguard-analytics || fail "bindguard-analytics is not active after restart"
-systemctl is-active --quiet bindguard || fail "bindguard is not active after restart"
+systemctl is-active --quiet alderpointdns-analytics || fail "alderpointdns-analytics is not active after restart"
+systemctl is-active --quiet alderpointdns || fail "alderpointdns is not active after restart"
 
 after="$before"
 for _ in 1 2 3 4 5 6 7 8 9 10; do
@@ -28,7 +28,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   sleep 2
   after="$(python3 - <<'PY'
 import sqlite3
-conn = sqlite3.connect('/var/lib/bindguard/bindguard.db')
+conn = sqlite3.connect('/var/lib/alderpointdns/alderpointdns.db')
 print(conn.execute('select count(*) from query_events').fetchone()[0])
 PY
 )"

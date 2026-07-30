@@ -1,6 +1,6 @@
-# BindGuard generated RPZ and statistics/logging paths.
-/var/lib/bindguard/compiled/bind/ r,
-/var/lib/bindguard/compiled/bind/** r,
-/var/log/bindguard/bind/ rw,
-/var/log/bindguard/bind/** rw,
+# Alderpoint DNS generated RPZ and statistics/logging paths.
+/var/lib/alderpointdns/compiled/bind/ r,
+/var/lib/alderpointdns/compiled/bind/** r,
+/var/log/alderpointdns/bind/ rw,
+/var/log/alderpointdns/bind/** rw,
 

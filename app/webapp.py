@@ -21,21 +21,21 @@ from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
 from app import analytics, backup, dns_cache, encryption, importer, local_dns, replication, upstream_dns
-from app.bindguard_compiler import DB_PATH, add_source, init_db, normalize_domain
+from app.alderpointdns_compiler import DB_PATH, add_source, init_db, normalize_domain
 
 
-ROOT = Path("/opt/bindguard")
+ROOT = Path("/opt/alderpointdns")
 TEMPLATES = Jinja2Templates(directory=str(ROOT / "web" / "templates"))
 STATIC_DIR = ROOT / "web" / "static"
 SESSION_MAX_AGE = 8 * 60 * 60
-SECRET_FILE = Path("/etc/bindguard/secrets.env")
+SECRET_FILE = Path("/etc/alderpointdns/secrets.env")
 ph = PasswordHasher()
-app = FastAPI(title="BindGuard")
+app = FastAPI(title="Alderpoint DNS")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 def secure_session_cookie_enabled() -> bool:
-    return os.getenv("BINDGUARD_COOKIE_SECURE", "").strip().lower() in {"1", "true", "yes", "on"}
+    return os.getenv("ALDERPOINTDNS_COOKIE_SECURE", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 @app.on_event("startup")
@@ -43,7 +43,7 @@ def _replication_autostart() -> None:
     # Re-establishes the primary listener or replica poller thread after a
     # service restart, matching whichever role was previously configured.
     # Deliberately best-effort (replication.autostart() never raises): a
-    # replication bug must never prevent bindguard.service from starting.
+    # replication bug must never prevent alderpointdns.service from starting.
     replication.autostart()
 
 
@@ -55,16 +55,16 @@ def get_secret() -> str:
     SECRET_FILE.parent.mkdir(parents=True, exist_ok=True)
     if SECRET_FILE.exists():
         for line in SECRET_FILE.read_text().splitlines():
-            if line.startswith("BINDGUARD_SESSION_SECRET="):
+            if line.startswith("ALDERPOINTDNS_SESSION_SECRET="):
                 return line.split("=", 1)[1].strip()
     secret = secrets.token_urlsafe(48)
     with SECRET_FILE.open("a") as handle:
-        handle.write(f"BINDGUARD_SESSION_SECRET={secret}\n")
+        handle.write(f"ALDERPOINTDNS_SESSION_SECRET={secret}\n")
     os.chmod(SECRET_FILE, 0o640)
     return secret
 
 
-serializer = URLSafeTimedSerializer(get_secret(), salt="bindguard-session")
+serializer = URLSafeTimedSerializer(get_secret(), salt="alderpointdns-session")
 
 
 def db() -> sqlite3.Connection:
@@ -95,7 +95,7 @@ def db() -> sqlite3.Connection:
 
 
 def signed_session(request: Request) -> dict[str, Any]:
-    raw = request.cookies.get("bindguard_session")
+    raw = request.cookies.get("alderpointdns_session")
     if not raw:
         return {}
     try:
@@ -106,7 +106,7 @@ def signed_session(request: Request) -> dict[str, Any]:
 
 def set_session(response: Response, data: dict[str, Any]) -> None:
     response.set_cookie(
-        "bindguard_session",
+        "alderpointdns_session",
         serializer.dumps(data),
         httponly=True,
         samesite="strict",
@@ -116,7 +116,7 @@ def set_session(response: Response, data: dict[str, Any]) -> None:
 
 
 def clear_session(response: Response) -> None:
-    response.delete_cookie("bindguard_session")
+    response.delete_cookie("alderpointdns_session")
 
 
 def admin_count() -> int:
@@ -186,13 +186,13 @@ def protection_state(active_rules: int, bind_state: str, dnsdist_state: str, col
 
 def global_service_status() -> dict[str, str]:
     try:
-        bindguard_state = service_state("bindguard")
+        alderpointdns_state = service_state("alderpointdns")
         bind_state = service_state("named")
         dnsdist_state = service_state("dnsdist")
-        collector_state = service_state("bindguard-analytics")
+        collector_state = service_state("alderpointdns-analytics")
     except Exception:
         return {"label": "Unknown", "tone": "unavailable", "detail": "service status unavailable"}
-    core = {"BindGuard": bindguard_state, "BIND": bind_state, "dnsdist": dnsdist_state}
+    core = {"Alderpoint DNS": alderpointdns_state, "BIND": bind_state, "dnsdist": dnsdist_state}
     if all(state == "active" for state in core.values()) and collector_state == "active":
         return {"label": "Active", "tone": "healthy", "detail": "all core services active"}
     if any(state in {"failed", "inactive"} for state in core.values()):
@@ -221,18 +221,18 @@ def analytics_category_breakdown(range_key: str) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def system_health(bind_state: str | None = None, dnsdist_state: str | None = None, bindguard_state: str | None = None) -> list[dict[str, str]]:
+def system_health(bind_state: str | None = None, dnsdist_state: str | None = None, alderpointdns_state: str | None = None) -> list[dict[str, str]]:
     named = bind_state or service_state("named")
     dnsdist_current = dnsdist_state or service_state("dnsdist")
-    bindguard_current = bindguard_state or service_state("bindguard")
-    collector = service_state("bindguard-analytics")
+    alderpointdns_current = alderpointdns_state or service_state("alderpointdns")
+    collector = service_state("alderpointdns-analytics")
     backend = "healthy" if named == "active" and dnsdist_current == "active" else "degraded"
     cert = cert_status()["state"]
     db_state = "healthy" if analytics.db_size() > 0 else "unavailable"
     return [
         {"name": "BIND", "state": "Healthy" if named == "active" else "Down", "tone": status_tone(named)},
         {"name": "dnsdist", "state": "Healthy" if dnsdist_current == "active" else "Down", "tone": status_tone(dnsdist_current)},
-        {"name": "BindGuard", "state": "Healthy" if bindguard_current == "active" else "Down", "tone": status_tone(bindguard_current)},
+        {"name": "Alderpoint DNS", "state": "Healthy" if alderpointdns_current == "active" else "Down", "tone": status_tone(alderpointdns_current)},
         {"name": "Analytics collector", "state": "Healthy" if collector == "active" else "Down", "tone": status_tone(collector)},
         {"name": "Backend health", "state": "Healthy" if backend == "healthy" else "Degraded", "tone": backend},
         {"name": "DNSSEC", "state": "Unavailable", "tone": "unavailable"},
@@ -250,7 +250,7 @@ def compiler_status() -> dict[str, Any]:
 
 
 def deploy_no_download() -> tuple[int, str]:
-    return run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "deploy", "--no-download"])
+    return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "deploy", "--no-download"])
 
 
 def deploy_no_download_or_raise() -> None:
@@ -260,7 +260,7 @@ def deploy_no_download_or_raise() -> None:
 
 
 def cache_flush_apply() -> tuple[int, str]:
-    return run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "cache-flush"])
+    return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "cache-flush"])
 
 
 def cache_flush_apply_or_raise() -> None:
@@ -270,13 +270,13 @@ def cache_flush_apply_or_raise() -> None:
 
 
 def encryption_deploy_apply() -> tuple[int, str]:
-    return run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "encryption-deploy"])
+    return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "encryption-deploy"])
 
 
 def dnsdist_stats() -> dict[str, Any]:
     try:
-        creds = Path("/etc/bindguard/dnsdist-web.creds").read_text().strip()
-        api_key = Path("/etc/bindguard/dnsdist-api.key").read_text().strip()
+        creds = Path("/etc/alderpointdns/dnsdist-web.creds").read_text().strip()
+        api_key = Path("/etc/alderpointdns/dnsdist-api.key").read_text().strip()
         request = urllib.request.Request("http://127.0.0.1:8083/jsonstat?command=stats")
         request.add_header("Authorization", "Basic " + base64.b64encode(creds.encode()).decode())
         request.add_header("x-api-key", api_key)
@@ -321,8 +321,8 @@ def file_contains(path: Path, needle: str) -> bool:
 
 
 def cert_status() -> dict[str, str]:
-    cert = Path("/etc/bindguard/certs/bindguard-lab.crt")
-    key = Path("/etc/bindguard/certs/bindguard-lab.key")
+    cert = Path("/etc/alderpointdns/certs/alderpointdns-lab.crt")
+    key = Path("/etc/alderpointdns/certs/alderpointdns-lab.key")
     if not cert.exists() or not key.exists():
         return {"state": "missing", "detail": "certificate and key must both be present"}
     code, out = run(["openssl", "x509", "-noout", "-subject", "-dates", "-in", str(cert)])
@@ -335,14 +335,14 @@ def cert_status() -> dict[str, str]:
 
 
 def dns_allow_all_enabled() -> bool:
-    if os.getenv("BINDGUARD_DNS_ALLOW_ALL") == "1":
+    if os.getenv("ALDERPOINTDNS_DNS_ALLOW_ALL") == "1":
         return True
     for path in (
-        Path("/etc/systemd/system/dnsdist.service.d/bindguard.conf"),
+        Path("/etc/systemd/system/dnsdist.service.d/alderpointdns.conf"),
         Path("/etc/systemd/system/dnsdist.service.d/override.conf"),
     ):
         try:
-            if "BINDGUARD_DNS_ALLOW_ALL=1" in path.read_text():
+            if "ALDERPOINTDNS_DNS_ALLOW_ALL=1" in path.read_text():
                 return True
         except Exception:
             continue
@@ -447,8 +447,8 @@ def dashboard(request: Request, _: sqlite3.Row = Depends(current_admin)):
     data = analytics.dashboard_data(range_key)
     bind_state = service_state("named")
     dnsdist_state = service_state("dnsdist")
-    bindguard_state = service_state("bindguard")
-    collector_state = service_state("bindguard-analytics")
+    alderpointdns_state = service_state("alderpointdns")
+    collector_state = service_state("alderpointdns-analytics")
     protection = protection_state(active_rules, bind_state, dnsdist_state, collector_state)
     chart_points = [
         {
@@ -464,7 +464,7 @@ def dashboard(request: Request, _: sqlite3.Row = Depends(current_admin)):
     return render(
         request,
         "dashboard.html",
-        bindguard=bindguard_state,
+        alderpointdns=alderpointdns_state,
         bind=bind_state,
         dnsdist=dnsdist_state,
         collector=collector_state,
@@ -476,7 +476,7 @@ def dashboard(request: Request, _: sqlite3.Row = Depends(current_admin)):
         chart_json=json.dumps(chart_points),
         category_breakdown=analytics_category_breakdown(range_key),
         protection=protection,
-        system_health=system_health(bind_state, dnsdist_state, bindguard_state),
+        system_health=system_health(bind_state, dnsdist_state, alderpointdns_state),
         cache_stats=dns_cache.cache_stats(),
         last_refresh=utc_now(),
     )
@@ -530,7 +530,7 @@ def setup_post(
     username: str = Form("admin"),
     password: str = Form(...),
     create_local_dns: str = Form("0"),
-    server_hostname: str = Form("bindguard"),
+    server_hostname: str = Form("alderpointdns"),
     server_ip: str = Form(""),
 ):
     if admin_count() > 0:
@@ -545,10 +545,10 @@ def setup_post(
     if create_local_dns == "1":
         cfg = local_dns.settings()
         ip = server_ip.strip() or cfg.get("server_ip") or local_dns.detect_server_ip()
-        host = server_hostname.strip() or "bindguard"
+        host = server_hostname.strip() or "alderpointdns"
         local_dns.update_settings({"server_hostname": host, "server_ip": ip})
-        local_dns.add_host(host, cfg.get("internal_domain", "home.arpa"), ip, cfg.get("default_ttl", 300), "BindGuard server", True, True)
-        local_dns.upsert_alias(ip, "BindGuard", "BindGuard DNS appliance")
+        local_dns.add_host(host, cfg.get("internal_domain", "home.arpa"), ip, cfg.get("default_ttl", 300), "Alderpoint DNS server", True, True)
+        local_dns.upsert_alias(ip, "Alderpoint DNS", "Alderpoint DNS DNS appliance")
     return redirect("/login")
 
 
@@ -651,7 +651,7 @@ def blocklist_edit(
 @app.post("/blocklists/{source_id}/update")
 def blocklist_update_one(request: Request, source_id: int, csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
     check_csrf(request, csrf)
-    run(["/opt/bindguard/app/bindguard_compiler.py", "update-source", str(source_id)])
+    run(["/opt/alderpointdns/app/alderpointdns_compiler.py", "update-source", str(source_id)])
     return redirect("/blocklists")
 
 
@@ -666,14 +666,14 @@ def blocklist_delete(request: Request, source_id: int, csrf: str = Form(...), _:
 @app.post("/blocklists/update")
 def blocklist_update(request: Request, csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
     check_csrf(request, csrf)
-    run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "update-sources"])
+    run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "update-sources"])
     return redirect("/blocklists")
 
 
 @app.post("/deploy")
 def deploy(request: Request, csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
     check_csrf(request, csrf)
-    run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "deploy"])
+    run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "deploy"])
     return redirect("/")
 
 
@@ -761,7 +761,7 @@ def local_dns_settings_post(
     csrf: str = Form(...),
     internal_domain: str = Form("home.arpa"),
     default_ttl: int = Form(300),
-    server_hostname: str = Form("bindguard"),
+    server_hostname: str = Form("alderpointdns"),
     server_ip: str = Form(""),
     _: sqlite3.Row = Depends(current_admin),
 ):
@@ -771,7 +771,7 @@ def local_dns_settings_post(
             {
                 "internal_domain": internal_domain,
                 "default_ttl": default_ttl,
-                "server_hostname": server_hostname.strip() or "bindguard",
+                "server_hostname": server_hostname.strip() or "alderpointdns",
                 "server_ip": server_ip.strip() or local_dns.detect_server_ip(),
             }
         )
@@ -786,10 +786,10 @@ def local_dns_server_record(request: Request, csrf: str = Form(...), _: sqlite3.
     check_csrf(request, csrf)
     try:
         cfg = local_dns.settings()
-        host = cfg.get("server_hostname", "bindguard")
+        host = cfg.get("server_hostname", "alderpointdns")
         ip = cfg.get("server_ip") or local_dns.detect_server_ip()
-        local_dns.add_host(host, cfg.get("internal_domain", "home.arpa"), ip, cfg.get("default_ttl", 300), "BindGuard server", True, True)
-        local_dns.upsert_alias(ip, "BindGuard", "BindGuard DNS appliance")
+        local_dns.add_host(host, cfg.get("internal_domain", "home.arpa"), ip, cfg.get("default_ttl", 300), "Alderpoint DNS server", True, True)
+        local_dns.upsert_alias(ip, "Alderpoint DNS", "Alderpoint DNS DNS appliance")
         deploy_no_download()
     except Exception as exc:
         return local_dns_error(request, str(exc))
@@ -1074,7 +1074,7 @@ def encryption_settings_post(
     dot_port: int = Form(853),
     doq_port: int = Form(853),
     dnscrypt_port: int = Form(5443),
-    dnscrypt_provider: str = Form("2.dnscrypt-cert.bindguard.local"),
+    dnscrypt_provider: str = Form("2.dnscrypt-cert.alderpointdns.local"),
     _: sqlite3.Row = Depends(current_admin),
 ):
     check_csrf(request, csrf)
@@ -1194,7 +1194,7 @@ def encryption_apple_profile(protocol: str, _: sqlite3.Row = Depends(current_adm
 def dns_settings(request: Request, _: sqlite3.Row = Depends(current_admin)):
     version = dnsdist_version_info()
     proxy_backend = proxy_backend_enabled()
-    client_address_test_path = Path("/opt/bindguard/tests/test_dnsdist_frontend.sh")
+    client_address_test_path = Path("/opt/alderpointdns/tests/test_dnsdist_frontend.sh")
     if proxy_backend and client_address_test_path.exists():
         client_address_test = {"state": "Passed", "filename": client_address_test_path.name}
     elif client_address_test_path.exists():
@@ -1212,7 +1212,7 @@ def dns_settings(request: Request, _: sqlite3.Row = Depends(current_admin)):
             f"Allow all: {'Enabled' if dns_allow_all_enabled() else 'Disabled'}",
         ],
         maintenance="1.1.1.2, 1.0.0.2, 4.2.2.1, 4.2.2.2",
-        hostname="bindguard.local",
+        hostname="alderpointdns.local",
         doh_path="/dns-query",
         dnsdist_version=version["version"],
         dnsdist_features=version["features"],
@@ -1342,8 +1342,8 @@ async def import_upload(
         if source_type == "csv":
             headers, rows = importer.parse_csv_text(data.decode("utf-8-sig", errors="replace"))
             column_map = importer.auto_map_columns(headers)
-        elif source_type == "bindguard_csv":
-            rows = importer.parse_bindguard_csv(data.decode("utf-8-sig", errors="replace"))
+        elif source_type == "alderpointdns_csv":
+            rows = importer.parse_alderpointdns_csv(data.decode("utf-8-sig", errors="replace"))
             headers, column_map = [], {}
         elif source_type == "xlsx":
             headers, rows = importer.parse_xlsx_bytes(data)
@@ -1358,10 +1358,10 @@ async def import_upload(
             translation = importer.parse_pihole_text(data.decode("utf-8", errors="replace"), domain)
             summary = importer.summarize_migration(translation, domain)
             return render(request, "import_migration.html", error=None, jobs=importer.list_jobs(), job=None, preview=None, adguard=translation, adguard_json=json.dumps(translation), migration_summary=summary, migration_title="Pi-hole Migration Preview", source_path=str(source_path))
-        elif source_type == "bindguard_json":
-            translation = importer.parse_bindguard_native_json(data.decode("utf-8", errors="replace"))
+        elif source_type == "alderpointdns_json":
+            translation = importer.parse_alderpointdns_native_json(data.decode("utf-8", errors="replace"))
             summary = importer.summarize_migration(translation, domain)
-            return render(request, "import_migration.html", error=None, jobs=importer.list_jobs(), job=None, preview=None, adguard=translation, adguard_json=json.dumps(translation), migration_summary=summary, migration_title="BindGuard Native Import Preview", source_path=str(source_path))
+            return render(request, "import_migration.html", error=None, jobs=importer.list_jobs(), job=None, preview=None, adguard=translation, adguard_json=json.dumps(translation), migration_summary=summary, migration_title="Alderpoint DNS Native Import Preview", source_path=str(source_path))
         else:
             raise importer.ImportError_(f"unknown source type {source_type!r}")
         if not rows:
@@ -1373,9 +1373,9 @@ async def import_upload(
     return redirect(f"/import/{job_id}")
 
 
-@app.get("/import/export/bindguard.json")
-def import_export_bindguard(_: sqlite3.Row = Depends(current_admin)):
-    return PlainTextResponse(importer.export_bindguard_native(), media_type="application/json")
+@app.get("/import/export/alderpointdns.json")
+def import_export_alderpointdns(_: sqlite3.Row = Depends(current_admin)):
+    return PlainTextResponse(importer.export_alderpointdns_native(), media_type="application/json")
 
 
 @app.get("/import/{job_id}", response_class=HTMLResponse)
@@ -1490,19 +1490,19 @@ def backup_component_flags(form: Any) -> dict[str, bool]:
 
 
 def backup_create_apply() -> tuple[int, str]:
-    return run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "backup-create"])
+    return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "backup-create"])
 
 
 def backup_restore_apply() -> tuple[int, str]:
-    return run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "backup-restore"])
+    return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "backup-restore"])
 
 
 def backup_preview_apply() -> tuple[int, str]:
-    return run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "backup-preview"])
+    return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "backup-preview"])
 
 
 def backup_schedule_apply() -> tuple[int, str]:
-    return run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "backup-schedule-deploy"])
+    return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "backup-schedule-deploy"])
 
 
 def backup_context() -> dict[str, Any]:
@@ -1647,7 +1647,7 @@ def backup_schedule_route(
 
 
 def replication_primary_init_apply() -> tuple[int, str]:
-    return run(["sudo", "/opt/bindguard/app/bindguard_compiler.py", "replication-primary-init"])
+    return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "replication-primary-init"])
 
 
 def replication_context() -> dict[str, Any]:
@@ -1809,17 +1809,17 @@ def replication_settings_post(
 
 @app.get("/system", response_class=HTMLResponse)
 def system_page(request: Request, _: sqlite3.Row = Depends(current_admin)):
-    code, logs = run(["journalctl", "-u", "bindguard", "-n", "80", "--no-pager"])
+    code, logs = run(["journalctl", "-u", "alderpointdns", "-n", "80", "--no-pager"])
     named = service_state("named")
     dnsdist = service_state("dnsdist")
-    bindguard = service_state("bindguard")
+    alderpointdns = service_state("alderpointdns")
     return render(
         request,
         "system.html",
         named=named,
         dnsdist=dnsdist,
-        bindguard=bindguard,
-        health=system_health(named, dnsdist, bindguard),
+        alderpointdns=alderpointdns,
+        health=system_health(named, dnsdist, alderpointdns),
         logs=logs,
         compiler=compiler_status(),
     )

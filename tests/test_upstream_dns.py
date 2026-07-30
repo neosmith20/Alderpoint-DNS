@@ -18,7 +18,7 @@ from app import upstream_dns  # noqa: E402
 
 class UpstreamDNSTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = Path(tempfile.mkdtemp(prefix="bindguard-upstream-test-"))
+        self.tmp = Path(tempfile.mkdtemp(prefix="alderpointdns-upstream-test-"))
         self.old = {
             "DB_PATH": upstream_dns.DB_PATH,
             "COMPILED_DIR": upstream_dns.COMPILED_DIR,
@@ -30,7 +30,7 @@ class UpstreamDNSTest(unittest.TestCase):
             "BACKUP_DIR": upstream_dns.BACKUP_DIR,
             "STAGING_DIR": upstream_dns.STAGING_DIR,
         }
-        upstream_dns.DB_PATH = self.tmp / "bindguard.db"
+        upstream_dns.DB_PATH = self.tmp / "alderpointdns.db"
         upstream_dns.COMPILED_DIR = self.tmp / "compiled"
         upstream_dns.BIND_FORWARDERS_CONF = self.tmp / "compiled" / "bind" / "upstream-forwarders.conf"
         upstream_dns.DNSDIST_UPSTREAM_CONF = self.tmp / "compiled" / "dnsdist" / "upstream-forwarder.conf"
@@ -97,7 +97,7 @@ class UpstreamDNSTest(unittest.TestCase):
         }]
         text = upstream_dns.render_dnsdist_upstreams(rows)
         self.assertIn('addLocal("127.0.0.1:5355"', text)
-        self.assertIn('pool="bindguard_upstreams"', text)
+        self.assertIn('pool="alderpointdns_upstreams"', text)
         self.assertIn('address="1.1.1.1:443"', text)
         self.assertIn('tls="openssl"', text)
         self.assertIn('subjectName="cloudflare-dns.com"', text)

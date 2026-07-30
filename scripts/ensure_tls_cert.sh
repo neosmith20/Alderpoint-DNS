@@ -1,9 +1,9 @@
 #!/bin/sh
 set -eu
 
-cert_dir=/etc/bindguard/certs
-cert_file="$cert_dir/bindguard-lab.crt"
-key_file="$cert_dir/bindguard-lab.key"
+cert_dir=/etc/alderpointdns/certs
+cert_file="$cert_dir/alderpointdns-lab.crt"
+key_file="$cert_dir/alderpointdns-lab.key"
 
 if [ -f "$cert_file" ] && [ -f "$key_file" ]; then
   exit 0
@@ -16,8 +16,8 @@ fi
 
 install -d -m 0750 -o root -g _dnsdist "$cert_dir"
 openssl req -x509 -newkey rsa:3072 -sha256 -days 825 -nodes \
-  -subj "/CN=bindguard.local" \
-  -addext "subjectAltName=DNS:bindguard.local,IP:127.0.0.1" \
+  -subj "/CN=alderpointdns.local" \
+  -addext "subjectAltName=DNS:alderpointdns.local,IP:127.0.0.1" \
   -keyout "$key_file" \
   -out "$cert_file"
 chown root:_dnsdist "$cert_file" "$key_file"

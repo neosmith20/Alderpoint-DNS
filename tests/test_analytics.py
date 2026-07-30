@@ -8,10 +8,10 @@ from pathlib import Path
 
 import sys
 
-sys.path.insert(0, "/opt/bindguard")
+sys.path.insert(0, "/opt/alderpointdns")
 
 from app import analytics  # noqa: E402
-from app import bindguard_compiler as compiler  # noqa: E402
+from app import alderpointdns_compiler as compiler  # noqa: E402
 
 
 def enc_varint(value: int) -> bytes:
@@ -38,10 +38,10 @@ class AnalyticsTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
-        compiler.DB_PATH = root / "bindguard.db"
+        compiler.DB_PATH = root / "alderpointdns.db"
         compiler.DOWNLOAD_DIR = root / "downloads"
         compiler.STAGING_DIR = root / "staging"
-        compiler.COMPILED_RPZ = root / "compiled" / "bindguard.rpz"
+        compiler.COMPILED_RPZ = root / "compiled" / "alderpointdns.rpz"
         analytics.DB_PATH = compiler.DB_PATH
         analytics.SECRET_FILE = root / "analytics.secret"
         analytics.init_analytics_db()
@@ -263,10 +263,10 @@ class AnalyticsTests(unittest.TestCase):
     def _server_state(self, *, queries: int, responses: int, failures: int = 0, timeouts: int = 0) -> dict:
         return {
             "servers": [
-                {"name": "bind-proxy", "pools": ["bindguard_bind"], "queries": 10, "responses": 10},
+                {"name": "bind-proxy", "pools": ["alderpointdns_bind"], "queries": 10, "responses": 10},
                 {
                     "name": "upstream-7-Quad9-DoT",
-                    "pools": ["bindguard_upstreams"],
+                    "pools": ["alderpointdns_upstreams"],
                     "address": "9.9.9.9:853",
                     "protocol": "Do53 UDP",
                     "state": "up",

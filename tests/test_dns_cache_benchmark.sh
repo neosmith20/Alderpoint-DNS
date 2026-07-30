@@ -9,7 +9,7 @@ fail() {
   exit 1
 }
 
-BENCH_DOMAIN="bindguard-cache-benchmark.debian.org"
+BENCH_DOMAIN="alderpointdns-cache-benchmark.debian.org"
 
 stat() {
   curl --silent --max-time 3 "http://127.0.0.1:8053/json/v1/server" |

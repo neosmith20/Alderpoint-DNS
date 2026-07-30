@@ -1,7 +1,7 @@
 [Unit]
-Description=BindGuard Scheduled Backup
-After=bindguard.service
+Description=Alderpoint DNS Scheduled Backup
+After=alderpointdns.service
 
 [Service]
 Type=oneshot
-ExecStart=/opt/bindguard/app/bindguard_compiler.py backup-create
+ExecStart=/opt/alderpointdns/app/alderpointdns_compiler.py backup-create
