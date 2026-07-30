@@ -14,7 +14,8 @@ from typing import Any
 
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Path as PathParam, Request, Response, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -432,6 +433,20 @@ def render(request: Request, template: str, status_code: int = 200, **context: A
         }
     )
     return TEMPLATES.TemplateResponse(template, context, status_code=status_code)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    accepts = request.headers.get("accept", "")
+    if "text/html" not in accepts:
+        return JSONResponse({"detail": exc.errors()}, status_code=422)
+    if request.url.path.startswith("/import"):
+        return import_error(
+            request,
+            "That import or migration link is not valid. Return to Import and Migration and choose a current job or workflow.",
+            status_code=404,
+        )
+    return render(request, "import_migration.html", error="The requested page is not valid.", jobs=[], job=None, preview=None, adguard=None, migration_summary=None, status_code=404)
 
 
 @app.get("/status/summary")
@@ -1421,6 +1436,11 @@ def import_page(request: Request, _: sqlite3.Row = Depends(current_admin)):
     return render(request, "import_migration.html", error=None, jobs=importer.list_jobs(), job=None, preview=None, adguard=None, migration_summary=None)
 
 
+@app.get("/import/migration", response_class=HTMLResponse)
+def import_migration_page(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    return import_page(request, _)
+
+
 @app.post("/import/upload")
 async def import_upload(
     request: Request,
@@ -1431,6 +1451,7 @@ async def import_upload(
     _: sqlite3.Row = Depends(current_admin),
 ):
     check_csrf(request, csrf)
+    source_path: Path | None = None
     try:
         data = await upload.read()
         source_path = importer.stage_uploaded_source(upload.filename or source_type, data)
@@ -1453,12 +1474,14 @@ async def import_upload(
             headers, column_map = [], {}
         elif source_type == "pihole":
             translation = importer.parse_pihole_text(data.decode("utf-8", errors="replace"), domain)
-            summary = importer.summarize_migration(translation, domain)
-            return render(request, "import_migration.html", error=None, jobs=importer.list_jobs(), job=None, preview=None, adguard=translation, adguard_json=json.dumps(translation), migration_summary=summary, migration_title="Pi-hole Migration Preview", source_path=str(source_path))
+            job_id = importer.create_migration_job("pihole", upload.filename or "Pi-hole import", translation, str(source_path))
+            importer.migration_preview_job(job_id, domain)
+            return redirect(f"/import/jobs/{job_id}/preview")
         elif source_type == "alderpointdns_json":
             translation = importer.parse_alderpointdns_native_json(data.decode("utf-8", errors="replace"))
-            summary = importer.summarize_migration(translation, domain)
-            return render(request, "import_migration.html", error=None, jobs=importer.list_jobs(), job=None, preview=None, adguard=translation, adguard_json=json.dumps(translation), migration_summary=summary, migration_title="Alderpoint DNS Native Import Preview", source_path=str(source_path))
+            job_id = importer.create_migration_job("alderpointdns_json", upload.filename or "Alderpoint DNS native JSON", translation, str(source_path))
+            importer.migration_preview_job(job_id, domain)
+            return redirect(f"/import/jobs/{job_id}/preview")
         else:
             raise importer.ImportError_(f"unknown source type {source_type!r}")
         if not rows:
@@ -1466,8 +1489,10 @@ async def import_upload(
         job_id = importer.create_job(source_type, upload.filename or source_type, headers, rows, str(source_path))
         preview = importer.preview_job(job_id, column_map, domain)
     except Exception as exc:
+        if source_path and source_path.exists():
+            source_path.unlink(missing_ok=True)
         return import_error(request, str(exc))
-    return redirect(f"/import/{job_id}")
+    return redirect(f"/import/jobs/{job_id}")
 
 
 @app.get("/import/export/alderpointdns.json")
@@ -1475,22 +1500,53 @@ def import_export_alderpointdns(_: sqlite3.Row = Depends(current_admin)):
     return PlainTextResponse(importer.export_alderpointdns_native(), media_type="application/json")
 
 
-@app.get("/import/{job_id}", response_class=HTMLResponse)
-def import_job_page(request: Request, job_id: int, _: sqlite3.Row = Depends(current_admin)):
+@app.get("/import/jobs/{job_id}", response_class=HTMLResponse)
+def import_job_page(request: Request, job_id: int = PathParam(..., gt=0), _: sqlite3.Row = Depends(current_admin)):
     job = importer.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="import job not found")
+    if importer.is_migration_source(job["source_type"]) and job["status"] in ("uploaded", "previewed"):
+        return redirect(f"/import/jobs/{job_id}/preview")
     headers = json.loads(job["headers_json"]) if job["headers_json"] else []
     column_map = json.loads(job["column_map_json"]) if job["column_map_json"] else (importer.auto_map_columns(headers) if headers else {})
     preview = None
     if job["status"] in ("uploaded", "previewed"):
         preview = importer.preview_job(job_id, column_map)
         job = importer.get_job(job_id)
-    return render(request, "import_migration.html", error=None, jobs=importer.list_jobs(), job=job, headers=headers, column_map=column_map, canonical_fields=importer.CANONICAL_FIELDS, preview=preview, adguard=None, migration_summary=None)
+    return render(request, "import_migration.html", error=None, jobs=importer.list_jobs(), job=job, headers=headers, column_map=column_map, canonical_fields=importer.CANONICAL_FIELDS, preview=preview, adguard=None, migration_summary=None, migration_job_id=None)
 
 
-@app.post("/import/{job_id}/remap")
-async def import_job_remap(request: Request, job_id: int, _: sqlite3.Row = Depends(current_admin)):
+@app.get("/import/jobs/{job_id}/status")
+def import_job_status(job_id: int = PathParam(..., gt=0), _: sqlite3.Row = Depends(current_admin)):
+    job = importer.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="import job not found")
+    return JSONResponse({key: job[key] for key in ("id", "source_type", "source_name", "status", "total_rows", "valid_rows", "invalid_rows", "duplicate_rows", "conflict_rows", "applied_rows", "skipped_rows", "failed_rows", "message")})
+
+
+@app.get("/import/jobs/{job_id}/preview", response_class=HTMLResponse)
+def import_job_preview(request: Request, job_id: int = PathParam(..., gt=0), _: sqlite3.Row = Depends(current_admin)):
+    job = importer.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="import job not found")
+    if importer.is_migration_source(job["source_type"]):
+        try:
+            result = importer.migration_preview_job(job_id)
+            job = importer.get_job(job_id)
+        except Exception as exc:
+            return import_error(request, str(exc))
+        title = {
+            "adguard_yaml": "AdGuard Home Migration Preview",
+            "adguard_api": "AdGuard Home Migration Preview",
+            "pihole": "Pi-hole Migration Preview",
+            "alderpointdns_json": "Alderpoint DNS Native Import Preview",
+        }.get(job["source_type"], "Migration Preview")
+        return render(request, "import_migration.html", error=None, jobs=importer.list_jobs(), job=None, preview=None, adguard=result["translation"], adguard_json=json.dumps(result["translation"]), migration_summary=result["summary"], migration_title=title, source_path=job["source_path"], migration_job_id=job_id)
+    return import_job_page(request, job_id, _)
+
+
+@app.post("/import/jobs/{job_id}/remap")
+async def import_job_remap(request: Request, job_id: int = PathParam(..., gt=0), _: sqlite3.Row = Depends(current_admin)):
     form = await request.form()
     check_csrf(request, str(form.get("csrf", "")))
     try:
@@ -1498,85 +1554,86 @@ async def import_job_remap(request: Request, job_id: int, _: sqlite3.Row = Depen
         importer.preview_job(job_id, column_map)
     except Exception as exc:
         return import_error(request, str(exc))
-    return redirect(f"/import/{job_id}")
+    return redirect(f"/import/jobs/{job_id}")
 
 
-@app.post("/import/{job_id}/apply")
-async def import_job_apply(request: Request, job_id: int, _: sqlite3.Row = Depends(current_admin)):
+@app.post("/import/jobs/{job_id}/apply")
+async def import_job_apply(request: Request, job_id: int = PathParam(..., gt=0), _: sqlite3.Row = Depends(current_admin)):
     form = await request.form()
     check_csrf(request, str(form.get("csrf", "")))
     try:
-        default_policy = str(form.get("default_policy", "skip"))
-        importer.apply_job(job_id, default_policy=default_policy)
+        job = importer.get_job(job_id)
+        if not job:
+            raise importer.ImportError_(f"import job {job_id} not found")
+        if importer.is_migration_source(job["source_type"]):
+            groups = {key[len("group_"):] for key in form.keys() if key.startswith("group_")}
+            importer.apply_migration_job(job_id, groups)
+        else:
+            default_policy = str(form.get("default_policy", "skip"))
+            importer.apply_job(job_id, default_policy=default_policy)
         deploy_no_download()
     except Exception as exc:
         return import_error(request, str(exc))
-    return redirect(f"/import/{job_id}")
+    return redirect(f"/import/jobs/{job_id}")
 
 
-@app.post("/import/{job_id}/rollback")
-def import_job_rollback(request: Request, job_id: int, csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+@app.post("/import/jobs/{job_id}/rollback")
+def import_job_rollback(request: Request, job_id: int = PathParam(..., gt=0), csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
     check_csrf(request, csrf)
     try:
         importer.rollback_job(job_id)
         deploy_no_download()
     except Exception as exc:
         return import_error(request, str(exc))
-    return redirect(f"/import/{job_id}")
+    return redirect(f"/import/jobs/{job_id}")
 
 
-@app.get("/import/{job_id}/report")
-def import_job_report(job_id: int, _: sqlite3.Row = Depends(current_admin)):
+@app.post("/import/jobs/{job_id}/cancel")
+def import_job_cancel(request: Request, job_id: int = PathParam(..., gt=0), csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    try:
+        importer.cancel_job(job_id)
+    except Exception as exc:
+        return import_error(request, str(exc))
+    return redirect("/import")
+
+
+@app.get("/import/jobs/{job_id}/report")
+def import_job_report(job_id: int = PathParam(..., gt=0), _: sqlite3.Row = Depends(current_admin)):
     job = importer.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="import job not found")
     return PlainTextResponse(job["report_json"], media_type="application/json")
 
 
-@app.post("/import/adguard/yaml")
+@app.post("/import/migration/adguard/yaml")
 async def import_adguard_yaml(request: Request, csrf: str = Form(...), upload: UploadFile = File(...), _: sqlite3.Row = Depends(current_admin)):
     check_csrf(request, csrf)
+    source_path: Path | None = None
     try:
         data = await upload.read()
         source_path = importer.stage_uploaded_source(upload.filename or "AdGuardHome.yaml", data)
         text = data.decode("utf-8", errors="replace")
         translation = importer.parse_adguard_yaml(text)
-        summary = importer.summarize_migration(translation)
+        job_id = importer.create_migration_job("adguard_yaml", upload.filename or "AdGuardHome.yaml", translation, str(source_path))
+        importer.migration_preview_job(job_id)
     except Exception as exc:
+        if source_path and source_path.exists():
+            source_path.unlink(missing_ok=True)
         return import_error(request, str(exc))
-    return render(request, "import_migration.html", error=None, jobs=importer.list_jobs(), job=None, preview=None, adguard=translation, adguard_json=json.dumps(translation), migration_summary=summary, migration_title="AdGuard Home Migration Preview", source_path=str(source_path))
+    return redirect(f"/import/jobs/{job_id}/preview")
 
 
-@app.post("/import/adguard/api")
+@app.post("/import/migration/adguard/api")
 def import_adguard_api(request: Request, csrf: str = Form(...), base_url: str = Form(...), username: str = Form(...), password: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
     check_csrf(request, csrf)
     try:
         translation = importer.fetch_adguard_api(base_url, username, password)
-        summary = importer.summarize_migration(translation)
+        job_id = importer.create_migration_job("adguard_api", base_url, translation)
+        importer.migration_preview_job(job_id)
     except Exception as exc:
         return import_error(request, str(exc))
-    return render(request, "import_migration.html", error=None, jobs=importer.list_jobs(), job=None, preview=None, adguard=translation, adguard_json=json.dumps(translation), migration_summary=summary, migration_title="AdGuard Home Migration Preview", source_path="")
-
-
-@app.post("/import/adguard/apply")
-async def import_adguard_apply(request: Request, _: sqlite3.Row = Depends(current_admin)):
-    return await import_migration_apply(request, _)
-
-
-@app.post("/import/migration/apply")
-async def import_migration_apply(request: Request, _: sqlite3.Row = Depends(current_admin)):
-    form = await request.form()
-    check_csrf(request, str(form.get("csrf", "")))
-    try:
-        translation = json.loads(str(form.get("translation_json", "{}")))
-        groups = {key[len("group_"):] for key in form.keys() if key.startswith("group_")}
-        counts = importer.apply_adguard_translation(translation, groups)
-        deploy_no_download()
-    except Exception as exc:
-        return import_error(request, str(exc))
-    context = {"error": None, "jobs": importer.list_jobs(), "job": None, "preview": None, "adguard": None, "migration_summary": None, "applied_counts": counts}
-    return render(request, "import_migration.html", **context)
-
+    return redirect(f"/import/jobs/{job_id}/preview")
 
 # ---------------------------------------------------------------------------
 # Backup and Restore

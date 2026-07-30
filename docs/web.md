@@ -129,15 +129,23 @@ per-protocol connectivity tests on every deploy, ready-to-copy client
 connection info, and Apple `.mobileconfig` downloads for DoH/DoT. Plain
 UDP/TCP 53 has no control on this page and cannot be disabled from the UI.
 
-The Import page (`/import`) migrates from AdGuard Home (uploaded
-`AdGuardHome.yaml` or a direct read-only API connection), Pi-hole text/list
-exports, and Alderpoint DNS-native JSON exports. It also imports Local DNS records
-from CSV/XLSX/hosts/BIND-zone/Alderpoint DNS-CSV sources, with column mapping, a
-normalized preview (valid/invalid/duplicate/conflict), per-conflict
-skip/merge/replace resolution, an automatic pre-apply backup, and rollback of
-exactly the rows an import added. Migration previews show items to add, items
-to update, conflicts, skipped source entries, and unsupported source features
-before anything is applied.
+The Import page (`/import`) and Migration entry point (`/import/migration`)
+migrate from AdGuard Home (uploaded `AdGuardHome.yaml` or a direct read-only API
+connection), Pi-hole text/list exports, and Alderpoint DNS-native JSON exports.
+They also import Local DNS records from CSV/XLSX/hosts/BIND-zone/Alderpoint
+DNS-CSV sources, with column mapping, a normalized preview
+(valid/invalid/duplicate/conflict), per-conflict skip/merge/replace resolution,
+an automatic pre-apply backup, and rollback of exactly the rows a Local DNS
+import added. Migration previews show items to add, items to update, conflicts,
+skipped source entries, and unsupported source features before anything is
+applied.
+
+Import jobs use non-overlapping routes: `/import/upload`,
+`/import/jobs/{job_id}`, `/import/jobs/{job_id}/status`,
+`/import/jobs/{job_id}/preview`, `/import/jobs/{job_id}/apply`,
+`/import/jobs/{job_id}/cancel`, and `/import/jobs/{job_id}/report`. Literal
+migration route components such as `/import/migration` are never parsed as job
+IDs.
 
 The Backup page (`/backup`) creates versioned, checksummed, optionally
 password-encrypted archives with selectable components (private keys and

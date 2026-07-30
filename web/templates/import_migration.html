@@ -44,12 +44,12 @@
 
   <div class="panel stack">
     <div class="panel__head"><h2>AdGuard Home Migration</h2></div>
-    <form method="post" action="/import/adguard/yaml" enctype="multipart/form-data" data-confirm="Upload and parse this AdGuardHome.yaml? Nothing is applied yet.">
+    <form method="post" action="/import/migration/adguard/yaml" enctype="multipart/form-data" data-confirm="Upload and parse this AdGuardHome.yaml? Nothing is applied yet.">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <label>AdGuardHome.yaml<input type="file" name="upload" required></label>
       <div class="form-actions"><button class="secondary">Upload and preview</button></div>
     </form>
-    <form method="post" action="/import/adguard/api" data-confirm="Connect to this AdGuard Home instance and read its configuration? No changes are made to AdGuard Home; Alderpoint DNS only reads.">
+    <form method="post" action="/import/migration/adguard/api" data-confirm="Connect to this AdGuard Home instance and read its configuration? No changes are made to AdGuard Home; Alderpoint DNS only reads.">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <label>AdGuard Home base URL<input name="base_url" placeholder="http://192.168.1.2:3000" required></label>
       <label>Username<input name="username" autocomplete="off" required></label>
@@ -82,7 +82,7 @@
             <td>{{ ui.status_badge(j.status|title, "healthy" if j.status == "applied" else "down" if j.status == "failed" else "neutral") }}</td>
             <td>{{ j.valid_rows }}</td>
             <td>{{ j.applied_rows }}</td>
-            <td><a href="/import/{{ j.id }}">View</a></td>
+            <td><a href="/import/jobs/{{ j.id }}">View</a></td>
           </tr>
         {% endfor %}
       </tbody>
@@ -98,7 +98,7 @@
   <p class="muted">{{ job.source_type }}: <span class="wrap-anywhere">{{ job.source_name }}</span></p>
 
   {% if headers and job.status in ("uploaded", "previewed") %}
-  <form method="post" action="/import/{{ job.id }}/remap" data-async-form data-success-message="Column mapping updated.">
+  <form method="post" action="/import/jobs/{{ job.id }}/remap" data-async-form data-success-message="Column mapping updated.">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <div class="grid compact">
       {% for field in canonical_fields %}
@@ -150,7 +150,7 @@
     </div>
     {% endif %}
 
-    <form method="post" action="/import/{{ job.id }}/apply" data-confirm="Apply this import? A backup is taken automatically first, and the change deploys through the normal validated path.">
+    <form method="post" action="/import/jobs/{{ job.id }}/apply" data-confirm="Apply this import? A backup is taken automatically first, and the change deploys through the normal validated path.">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <label>Conflict resolution
         <select name="default_policy">
@@ -166,11 +166,13 @@
   {% if job.status == "applied" %}
     <p>{{ job.message }}</p>
     <div class="form-actions">
-      <a class="button secondary" href="/import/{{ job.id }}/report">Download report</a>
-      <form method="post" action="/import/{{ job.id }}/rollback" data-confirm="Roll back this import? Records it added will be removed and Alderpoint DNS redeployed.">
+      <a class="button secondary" href="/import/jobs/{{ job.id }}/report">Download report</a>
+      {% if job.source_type not in ("adguard_yaml", "adguard_api", "pihole", "alderpointdns_json") %}
+      <form method="post" action="/import/jobs/{{ job.id }}/rollback" data-confirm="Roll back this import? Records it added will be removed and Alderpoint DNS redeployed.">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <button class="secondary">Roll back this import</button>
       </form>
+      {% endif %}
     </div>
   {% elif job.status == "rolled_back" %}
     {{ ui.empty_state("This import was rolled back", "The records it added have been removed.") }}
@@ -187,7 +189,7 @@
   {% if source_path %}
     <p class="muted">Original source staged for troubleshooting: <span class="mono wrap-anywhere">{{ source_path }}</span>. Staged uploads are retained under Alderpoint DNS's import staging directory and can be pruned after troubleshooting.</p>
   {% endif %}
-  <form method="post" action="/import/migration/apply" data-confirm="Apply the selected groups to Alderpoint DNS? This deploys through the normal validated path.">
+  <form method="post" action="/import/jobs/{{ migration_job_id }}/apply" data-confirm="Apply the selected groups to Alderpoint DNS? This deploys through the normal validated path.">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <input type="hidden" name="translation_json" value='{{ adguard_json }}'>
     <div class="grid compact">
@@ -199,6 +201,13 @@
     </div>
     <div class="form-actions"><button>Apply selected groups</button></div>
   </form>
+  <div class="form-actions">
+    <a class="button secondary" href="/import/jobs/{{ migration_job_id }}/status">Job status</a>
+    <form method="post" action="/import/jobs/{{ migration_job_id }}/cancel" data-confirm="Cancel this migration job? Nothing has been applied yet.">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="secondary">Cancel job</button>
+    </form>
+  </div>
 
   {% if migration_summary %}
     <div class="grid">

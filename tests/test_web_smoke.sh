@@ -132,7 +132,7 @@ for route in ("/encryption", "encryption_settings_post", "/encryption/certificat
         raise SystemExit(f"encryption route missing: {route}")
 if 'href="/encryption"' not in template:
     raise SystemExit("encryption nav link is missing")
-for route in ("/import", "import_upload", "/import/{job_id}", "/import/{job_id}/remap", "/import/{job_id}/apply", "/import/{job_id}/rollback", "/import/adguard/yaml", "/import/adguard/api", "/import/adguard/apply"):
+for route in ("/import", "/import/migration", "import_upload", "/import/jobs/{job_id}", "/import/jobs/{job_id}/status", "/import/jobs/{job_id}/preview", "/import/jobs/{job_id}/remap", "/import/jobs/{job_id}/apply", "/import/jobs/{job_id}/cancel", "/import/jobs/{job_id}/rollback", "/import/migration/adguard/yaml", "/import/migration/adguard/api"):
     if route not in webapp_text:
         raise SystemExit(f"import route missing: {route}")
 if 'href="/import"' not in template:

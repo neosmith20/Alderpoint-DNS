@@ -52,6 +52,7 @@ CANONICAL_FIELDS = [
     "client_alias",
     "client_id_or_cidr",
 ]
+MIGRATION_SOURCE_TYPES = {"adguard_yaml", "adguard_api", "pihole", "alderpointdns_json"}
 
 
 class ImportError_(ValueError):
@@ -547,6 +548,65 @@ def list_jobs(limit: int = 20) -> list[dict[str, Any]]:
         return [dict(row) for row in conn.execute("SELECT * FROM import_jobs ORDER BY id DESC LIMIT ?", (limit,))]
 
 
+def is_migration_source(source_type: str) -> bool:
+    return source_type in MIGRATION_SOURCE_TYPES
+
+
+def create_migration_job(source_type: str, source_name: str, translation: dict[str, Any], source_path: str = "") -> int:
+    if not is_migration_source(source_type):
+        raise ImportError_(f"unknown migration source type {source_type!r}")
+    return create_job(source_type, source_name, [], [translation], source_path)
+
+
+def migration_translation_from_job(job_id: int) -> dict[str, Any]:
+    job = get_job(job_id)
+    if not job:
+        raise ImportError_(f"import job {job_id} not found")
+    if not is_migration_source(job["source_type"]):
+        raise ImportError_(f"import job {job_id} is not a migration job")
+    rows = json.loads(job["raw_rows_json"])
+    if not rows or not isinstance(rows[0], dict):
+        raise ImportError_(f"migration job {job_id} has no translation payload")
+    return rows[0]
+
+
+def migration_preview_job(job_id: int, default_domain: str | None = None) -> dict[str, Any]:
+    translation = migration_translation_from_job(job_id)
+    summary = summarize_migration(translation, default_domain)
+    with connect() as conn:
+        init_db(conn)
+        conn.execute(
+            """
+            UPDATE import_jobs
+            SET status='previewed', total_rows=?, valid_rows=?, invalid_rows=?, conflict_rows=?, duplicate_rows=?, report_json=?
+            WHERE id=?
+            """,
+            (
+                len(summary["items_to_add"]) + len(summary["items_to_update"]),
+                len(summary["items_to_add"]) + len(summary["items_to_update"]),
+                len(summary["skipped"]),
+                len(summary["conflicts"]),
+                0,
+                json.dumps(summary, default=str),
+                job_id,
+            ),
+        )
+        conn.commit()
+    return {"job_id": job_id, "translation": translation, "summary": summary}
+
+
+def cancel_job(job_id: int) -> None:
+    job = get_job(job_id)
+    if not job:
+        raise ImportError_(f"import job {job_id} not found")
+    if job["status"] in {"applied", "rolled_back"}:
+        raise ImportError_("completed imports cannot be canceled")
+    with connect() as conn:
+        init_db(conn)
+        conn.execute("UPDATE import_jobs SET status='canceled', finished_at=?, message='canceled by operator' WHERE id=?", (now(), job_id))
+        conn.commit()
+
+
 def _record_from_row(row: dict[str, str], default_domain: str) -> tuple[str, str, str, str]:
     """Returns (fqdn, record_type, value, ttl_raw) derived from a normalized row."""
     domain = row.get("domain") or default_domain
@@ -910,55 +970,108 @@ def _looks_like_ip_or_cidr(value: str) -> bool:
 
 
 def apply_adguard_translation(translation: dict[str, Any], groups: set[str]) -> dict[str, int]:
-    from app import alderpointdns_compiler
-
     create_pre_import_backup()
     counts = {"sources": 0, "custom_allow": 0, "custom_block": 0, "local_dns": 0, "aliases": 0, "upstream_resolvers": 0}
-    with alderpointdns_compiler.connect() as conn:
+    with connect() as conn:
         _init_filter_tables(conn)
+        local_dns.init_db(conn)
         upstream_dns.init_db(conn)
-        if "blocklist_sources" in groups:
-            for source in translation.get("blocklist_sources", []):
-                if not source.get("url"):
-                    continue
-                conn.execute(
-                    """
-                    INSERT INTO sources(name, url, enabled, category) VALUES (?, ?, ?, 'ads_trackers')
-                    ON CONFLICT(name) DO UPDATE SET url=excluded.url
-                    """,
-                    (source["name"][:120], source["url"], 1 if source.get("enabled", True) else 0),
-                )
-                counts["sources"] += 1
-        if "custom_rules" in groups:
-            for domain in translation.get("custom_allow", []):
-                conn.execute(
-                    "INSERT OR IGNORE INTO custom_rules(domain, action, comment, created_at) VALUES (?, 'allow', 'imported from AdGuard Home', ?)",
-                    (domain, now()),
-                )
-                counts["custom_allow"] += 1
-            for domain in translation.get("custom_block", []):
-                conn.execute(
-                    "INSERT OR IGNORE INTO custom_rules(domain, action, comment, created_at) VALUES (?, 'block', 'imported from AdGuard Home', ?)",
-                    (domain, now()),
-                )
-                counts["custom_block"] += 1
-        if "upstream_resolvers" in groups:
-            counts["upstream_resolvers"] += _insert_upstream_resolvers(conn, translation.get("upstream_resolvers", []))
+        with conn:
+            if "blocklist_sources" in groups:
+                for source in translation.get("blocklist_sources", []):
+                    if not source.get("url"):
+                        continue
+                    conn.execute(
+                        """
+                        INSERT INTO sources(name, url, enabled, category) VALUES (?, ?, ?, 'ads_trackers')
+                        ON CONFLICT(name) DO UPDATE SET url=excluded.url, enabled=excluded.enabled
+                        """,
+                        (str(source["name"])[:120], str(source["url"]), 1 if source.get("enabled", True) else 0),
+                    )
+                    counts["sources"] += 1
+            if "custom_rules" in groups:
+                for domain in translation.get("custom_allow", []):
+                    cursor = conn.execute(
+                        "INSERT OR IGNORE INTO custom_rules(domain, action, comment, created_at) VALUES (?, 'allow', 'imported from AdGuard Home', ?)",
+                        (str(domain).strip().strip("."), now()),
+                    )
+                    counts["custom_allow"] += cursor.rowcount
+                for domain in translation.get("custom_block", []):
+                    cursor = conn.execute(
+                        "INSERT OR IGNORE INTO custom_rules(domain, action, comment, created_at) VALUES (?, 'block', 'imported from AdGuard Home', ?)",
+                        (str(domain).strip().strip("."), now()),
+                    )
+                    counts["custom_block"] += cursor.rowcount
+            if "upstream_resolvers" in groups:
+                counts["upstream_resolvers"] += _insert_upstream_resolvers(conn, translation.get("upstream_resolvers", []))
+            if "rewrites" in groups:
+                for rewrite in translation.get("rewrites_as_local_dns", []):
+                    rtype, fqdn, value, ttl = local_dns.validate_record(
+                        str(rewrite.get("record_type", "")),
+                        str(rewrite.get("fqdn", "")),
+                        str(rewrite.get("value", "")),
+                        rewrite.get("ttl", 300),
+                    )
+                    ts = now()
+                    conn.execute(
+                        """
+                        INSERT INTO local_dns_records(name, fqdn, record_type, value, ttl, comment, enabled, auto_ptr, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, 'imported from AdGuard Home', 1, 0, ?, ?)
+                        """,
+                        (fqdn.split(".", 1)[0], fqdn, rtype, value, ttl, ts, ts),
+                    )
+                    counts["local_dns"] += 1
+            if "clients" in groups:
+                for client in translation.get("clients_as_aliases", []):
+                    network = ipaddress.ip_network(str(client.get("cidr_or_ip", "")).strip(), strict=False)
+                    display_name = str(client.get("display_name", "")).strip()
+                    if not display_name:
+                        raise ImportError_("client alias display name is required")
+                    ts = now()
+                    conn.execute(
+                        """
+                        INSERT INTO client_aliases(cidr, display_name, description, created_at, updated_at)
+                        VALUES (?, ?, 'imported from AdGuard Home', ?, ?)
+                        ON CONFLICT(cidr) DO UPDATE SET display_name=excluded.display_name, description=excluded.description, updated_at=excluded.updated_at
+                        """,
+                        (str(network), display_name, ts, ts),
+                    )
+                    counts["aliases"] += 1
+    return counts
+
+
+def apply_migration_job(job_id: int, groups: set[str]) -> dict[str, int]:
+    job = get_job(job_id)
+    if not job:
+        raise ImportError_(f"import job {job_id} not found")
+    if not is_migration_source(job["source_type"]):
+        raise ImportError_(f"import job {job_id} is not a migration job")
+    if job["status"] == "applied":
+        raise ImportError_("migration job has already been applied")
+    translation = migration_translation_from_job(job_id)
+    try:
+        counts = apply_adguard_translation(translation, groups)
+    except Exception as exc:
+        with connect() as conn:
+            init_db(conn)
+            conn.execute(
+                "UPDATE import_jobs SET finished_at=?, status='failed', failed_rows=1, message=?, report_json=? WHERE id=?",
+                (now(), str(exc), json.dumps({"error": str(exc)}), job_id),
+            )
+            conn.commit()
+        raise
+    with connect() as conn:
+        init_db(conn)
+        conn.execute(
+            """
+            UPDATE import_jobs
+            SET finished_at=?, status='applied', applied_rows=?, skipped_rows=0, failed_rows=0,
+                report_json=?, message=?
+            WHERE id=?
+            """,
+            (now(), sum(counts.values()), json.dumps(counts), f"migration applied: {counts}", job_id),
+        )
         conn.commit()
-    if "rewrites" in groups:
-        for rewrite in translation.get("rewrites_as_local_dns", []):
-            try:
-                local_dns.add_record(rewrite["record_type"], rewrite["fqdn"], rewrite["value"], 300, "imported from AdGuard Home", True, override=True)
-                counts["local_dns"] += 1
-            except Exception:
-                continue
-    if "clients" in groups:
-        for client in translation.get("clients_as_aliases", []):
-            try:
-                local_dns.upsert_alias(client["cidr_or_ip"], client["display_name"], "imported from AdGuard Home")
-                counts["aliases"] += 1
-            except Exception:
-                continue
     return counts
 
 

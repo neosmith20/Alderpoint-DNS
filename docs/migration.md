@@ -17,6 +17,9 @@ Migration rules:
   shown before apply.
 - A backup is taken before apply.
 - Unsupported source features are documented rather than fabricated.
+- Migration creation, status polling, preview, apply, cancel, and report links
+  all use `/import/jobs/{job_id}/...`; `/import/migration` is a literal entry
+  point and is not eligible for integer job-ID parsing.
 
 Source limitations:
 
