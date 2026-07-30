@@ -53,3 +53,10 @@
   pattern and a bundle-level regression test.
 - Fixed unclosed SQLite connections in `tests/test_backup.py` that caused
   the pre-existing `ResourceWarning` noise during backup test runs.
+- Renamed the project from BindGuard to Alderpoint DNS: new public branding,
+  `alderpointdns`/`ALDERPOINTDNS_` machine identifiers, renamed paths/
+  services/package, deprecated compatibility wrappers and legacy-install
+  migration tooling in `scripts/upgrade.sh`, and backup/restore support for
+  reading pre-rename BindGuard-branded archives. Migrated this VM's live
+  installation via the real upgrade tooling; see `docs/compatibility.md`
+  and `docs/migrating-from-bindguard.md`.

@@ -807,3 +807,20 @@ verification pass:
      bundle.
 - See `AGENT_PROGRESS.md` for full command-level detail on this
   verification pass.
+
+## Rename to Alderpoint DNS milestone
+
+BindGuard was renamed to Alderpoint DNS pre-public-beta: new public name,
+`alderpointdns`/`ALDERPOINTDNS_` machine identifiers, renamed paths/services/
+package, and a live migration of this VM's own installation via the real
+`scripts/upgrade.sh` legacy-migration path (not just a source rename). The
+`bindguard` Linux system user/group is intentionally kept unchanged. Old
+BindGuard-branded backup archives remain restorable; new archives use the
+new branding exclusively. Full identifier map and deprecation timeline in
+`docs/compatibility.md`; step-by-step migration/rollback procedure in
+`docs/migrating-from-bindguard.md`. Full acceptance suite (including a new
+`tests/test_rename_migration.sh`) passed on the migrated, running system;
+several real bugs surfaced only by actually performing the live cutover
+(not caught by sandboxed tests alone) were fixed and are now covered by
+regression tests -- see `AGENT_PROGRESS.md`'s "Rename: BindGuard ->
+Alderpoint DNS" section for the full list.

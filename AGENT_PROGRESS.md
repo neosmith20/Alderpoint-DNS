@@ -771,3 +771,161 @@ lab TLS cert, admin UI HTTP-by-default requiring `BINDGUARD_COOKIE_SECURE=1`
 behind a reverse proxy for real HTTPS, signed apt repo not yet implemented,
 per-network policy runtime enforcement not yet wired up). BindGuard is ready
 to hand to a first external tester on this checkpoint.
+
+## Rename: BindGuard -> Alderpoint DNS (after checkpoint `0cf8045`)
+
+Deliberate pre-public-beta product rename, executed as source rename +
+compatibility tooling first (commits `83deadf`..`18a7143`), then a real,
+live cutover of this VM's own running installation.
+
+### Naming map
+
+Public name `Alderpoint DNS`; machine identifier `alderpointdns`; env var
+prefix `ALDERPOINTDNS_`; paths `/opt/alderpointdns`, `/etc/alderpointdns`,
+`/var/lib/alderpointdns`, `/var/log/alderpointdns`; services
+`alderpointdns.service`, `alderpointdns-analytics.service`,
+`alderpointdns-backup.service`/`.timer`; command `alderpointdns-diagnostics`;
+Debian package `alderpointdns`. Full table in `docs/compatibility.md`.
+
+**Intentionally not renamed:** the `bindguard` Linux system user/group
+(ownership-migration risk with no correctness benefit -- documented in
+`docs/compatibility.md`); HTTP routes, DB columns/table names, migration IDs,
+replication protocol field names (none of these referenced the product name
+in the first place); historical docs (`docs/progress.md` above this section,
+`CHANGELOG.md`'s pre-rename entries, `bindguard-handoff.md`) and the
+`audit/pre-proxyv2-20260728T233402/` snapshot, left untouched as frozen
+historical record; real user data (a local DNS host record literally named
+`bindguard.home.arpa` -> `172.16.43.101`, and an RPZ custom-rule test domain
+`bindguard-block-test.invalid`) -- confirmed intact and unmodified after
+migration by direct `dig` lookup.
+
+### Source rename (commits `83deadf`, `110201a`, `ccc6192`, `eff8704`)
+
+Ordered token substitution (`BindGuardConnection`/`AsyncForm`/`AutoRefresh`/
+`Status`/`Replication` -> `AlderpointDNS...`, then `BindGuard` -> `Alderpoint
+DNS`, `BINDGUARD_`/`BINDGUARD` -> `ALDERPOINTDNS_`/`ALDERPOINTDNS`, then
+`bindguard` -> `alderpointdns`) across ~105 files, with the Linux-account
+lines manually reverted afterward (`chown`/`useradd`/`groupadd`/sudoers
+leading field/systemd `User=`/`Group=`). File renames via `git mv`:
+`app/bindguard_compiler.py` -> `alderpointdns_compiler.py`,
+`scripts/bindguard-diagnostics` -> `alderpointdns-diagnostics`, all
+`packaging/bindguard*` -> `alderpointdns*`. Added deprecated exec-wrapper
+compatibility shims at both old filenames. `app/backup.py` gained
+`LEGACY_*` constants and an `_extracted_path()` resolver so
+BindGuard-branded backup archives remain restorable (verified against a
+real pre-rename archive during live-system checks, see below). New
+docs: `docs/compatibility.md`, `docs/migrating-from-bindguard.md`.
+
+### Live migration of this VM (commits `c1ba4a9`..`18a7143`)
+
+Ran the real `scripts/upgrade.sh` legacy-migration path against this VM's
+own installation (native backup, live BIND/dnsdist/AppArmor config
+token-rewrite, directory moves, new units/sudoers, compatibility symlinks,
+service restarts). This surfaced and fixed several real bugs the sandboxed
+tests hadn't caught, all now covered by `tests/test_rename_migration.sh`:
+
+1. `SOURCE_DIR` resolving inside the legacy directory being moved (this
+   VM's actual situation: the git checkout is both the running legacy
+   install and the new release) silently broke every step after the `mv`.
+   Fixed by staging `SOURCE_DIR` to a temp copy first, in both
+   `migrate_legacy_layout()` and `replace_application()` (the latter is a
+   separate, more general instance of the same bug: any `--source` pointing
+   at the install target itself, including this script's own default,
+   triggers it).
+2. `pre_upgrade_backup()` hard-failed on the very first post-migration
+   upgrade run, before `install_units()` had created the new unit/sudoers
+   files `scripts/backup.sh` looks for. Now warns and continues (the
+   rollback `snapshot()` right after is still a safety net).
+3. A stray empty database had been created at the new DB path earlier in
+   this session (an artifact of testing the compat wrapper against live
+   code before the physical migration), which made `mv
+   var/lib/bindguard -> var/lib/alderpointdns` nest instead of rename since
+   the destination already existed. Fixed by hand for this run and added a
+   loud pre-flight check in `migrate_legacy_layout()` so a pre-existing
+   destination now aborts the migration instead of silently corrupting the
+   layout.
+4. Generated BIND/dnsdist config under `compiled/` (ACL name, `/var/lib/
+   bindguard/` path prefixes, dnsdist pool name/enable flag, comment
+   headers) was never rewritten, so `named` failed to start (undefined ACL)
+   and dnsdist's upstream pool silently stopped matching. Fixed with a
+   targeted sed pass over exactly four generated files, deliberately never
+   touching the `.zone` record files themselves (which hold the real
+   `bindguard.home.arpa` user record above).
+5. `secrets.env` kept its old `BINDGUARD_SESSION_SECRET=` key after the
+   `/etc` move; the renamed `webapp.py` only recognizes
+   `ALDERPOINTDNS_SESSION_SECRET=`, doesn't find it, and crashes trying to
+   append a new one as an unprivileged user with only group-read on the
+   file. Fixed by rewriting just the key name in place, preserving the
+   secret value (existing sessions/cookies kept validating).
+5b. TLS cert/key/CA filenames (`bindguard-lab.*`, `bindguard-ca.*`) were
+   never renamed, so dnsdist failed to start (missing certificate file now
+   that `dnsdist.conf`'s already-rewritten paths expect `alderpointdns-*`).
+   Fixed by renaming the five files. Separately, the lab cert's own
+   CN/SAN literally encoded `bindguard.local`; regenerated it via the
+   (already-renamed) `ensure_tls_cert.sh` since it is a self-signed,
+   internally-trusted-only artifact, not a real credential -- old cert/key
+   backed up to `/root/pre-rename-cert-backup/` first.
+6. `/var/lib/alderpointdns` ended up `755` instead of the original `775`
+   as a side effect of fix #3's manual cleanup, so the analytics collector
+   (running as `bindguard:bindguard`) couldn't create WAL/journal files:
+   `sqlite3.OperationalError: attempt to write a readonly database`. Fixed
+   by restoring the directory mode.
+7. `install_units()` never called `systemctl enable`, so a freshly migrated
+   install would not have survived a reboot. Fixed.
+8. `migrate_legacy_layout()` deleted
+   `/etc/systemd/system/dnsdist.service.d/bindguard.conf` outright instead
+   of migrating it. That file is **operator-editable state**
+   (`app/encryption.py`'s `DNSDIST_ENV_OVERRIDE`, rewritten whenever DoH/
+   DoT/DoQ/DoH3/DNSCrypt toggles or ports are changed on the Encryption
+   Settings page) -- this VM's actual drop-in had DoQ/DoH3 enabled with
+   explicit ports and a DNSCrypt provider hostname, none of which would
+   have survived the delete. Fixed by rename+token-patch in place instead,
+   recovered from a pre-migration raw safety tar for this run since the
+   live file had already been deleted before the bug was caught.
+
+A pre-migration raw safety tar (`/root/alderpointdns-pre-rename-safety-
+20260730T004042Z.tar.gz`, taken after checkpointing the SQLite WAL) and a
+native BindGuard-branded backup (via the legacy `scripts/backup.sh`,
+`bindguard-backup-20260730T004700Z.tar.gz`) were both taken before any
+files moved.
+
+### Post-migration verification
+
+- All four services (`named`, `dnsdist`, `alderpointdns`,
+  `alderpointdns-analytics`) active and enabled; survived a full manual
+  stop/start cycle in dependency order (a literal OS reboot was not
+  performed -- it would terminate this session's shell -- this is the
+  documented substitute, matching the depth of the prior post-reboot
+  verification pass).
+- Full `tests/test_acceptance.sh` (19 suites including the new
+  `test_rename_migration.sh`) passed clean on the migrated system.
+- DNS verified end-to-end: `dnsdist:53` and BIND backend `:5353` both
+  resolve; RPZ blocks `bindguard-block-test.invalid` (NXDOMAIN); the real
+  local user record `bindguard.home.arpa` -> `172.16.43.101` resolves
+  correctly with a matching PTR, confirming user data was never touched.
+  `showACL()` on the live dnsdist console still shows only RFC1918/
+  loopback/ULA ranges -- no open-resolver exposure introduced.
+- DoH/DoT/DoQ/DoH3-capability config all verified via
+  `tests/test_dnsdist_frontend.sh` against the regenerated lab cert.
+- `alderpointdns-diagnostics --output-dir ... --no-journal` bundle
+  inspected: correctly branded, RNDC/TSIG secret still redacted, no
+  session secret/API key/private key leakage.
+- Native backup/restore verified on the live system three ways: (a) a
+  freshly created backup uses `alderpointdns-backup-` naming and a
+  `alderpointdns_app_version` manifest key; (b) `preview_restore()` against
+  a real pre-rename BindGuard-branded archive
+  (`bindguard-backup-20260729T231743Z.tar.gz`, found via `backup_history`)
+  correctly reports `compatible: True` with an app-version-mismatch warning
+  and real table/file diffs; (c) the unit-test suite's two new
+  legacy-archive regression tests pass.
+- Sudo-privileged path (`alderpointdns_compiler.py` via the new sudoers
+  rule, `bindguard` OS user unchanged) verified working end-to-end.
+- Cleaned up stray artifacts created while diagnosing the above: orphaned
+  `.tmp` backup files, and a scratch backup made purely to inspect manifest
+  content.
+
+No production-impacting failure was concealed or merely documented --
+every defect found above was fixed and is now covered by
+`tests/test_rename_migration.sh` or `tests/test_backup.py`'s new legacy-
+archive tests. Alderpoint DNS is ready to hand to a first external tester
+on this checkpoint.
