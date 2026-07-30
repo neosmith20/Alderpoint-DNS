@@ -8,7 +8,10 @@ from pathlib import Path
 
 import sys
 
-sys.path.insert(0, "/opt/alderpointdns")
+# Resolve the application package from this checkout, the way every other
+# test module does, so `unittest discover` never mixes modules from an
+# installed copy at /opt/alderpointdns with the tree under test.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import analytics  # noqa: E402
 from app import alderpointdns_compiler as compiler  # noqa: E402

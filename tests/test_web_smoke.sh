@@ -500,6 +500,23 @@ for public_html, name in ((setup_html, "setup"), (login_html, "login")):
     if "app-nav" in public_html or "data-nav-section" in public_html:
         raise SystemExit(f"{name} page renders protected navigation while logged out")
 
+filter_schedule_fixture = {
+    "options": (
+        ("disabled", "Disabled \u2014 No Updates"),
+        ("1", "1 Hour"),
+        ("12", "12 Hours"),
+        ("24", "1 Day"),
+        ("72", "3 Days"),
+        ("168", "1 Week"),
+    ),
+    "interval": "24",
+    "interval_label": "1 Day",
+    "enabled": True,
+    "last_attempt": "2026-07-29T00:00:00+00:00",
+    "last_success": "2026-07-29T00:00:00+00:00",
+    "last_result": {"status": "deployed", "active_domains": 1, "error": ""},
+    "next_run": "Thu 2026-07-30 00:00:00 UTC",
+}
 blocklist_categories_fixture = [
     {"key": "uncategorized", "name": "Uncategorized", "description": "", "source_count": 0},
     {"key": "ads_trackers", "name": "Ads and trackers", "description": "", "source_count": 1},
@@ -516,10 +533,25 @@ blocklists_html = TEMPLATES.get_template("blocklists.html").render(**base, sourc
     "unsupported_rules": 0,
     "last_error": long_domain,
     "last_success": "2026-07-29T00:00:00Z",
-}], categories=blocklist_categories_fixture, category_error=None, category_filter="", status_filter="", search="", sort="name")
+}], categories=blocklist_categories_fixture, category_error=None, category_filter="", status_filter="", search="", sort="name",
+    filter_schedule=filter_schedule_fixture)
 for expected in ("Manage Categories", "Ads and trackers", "table-compact", "blocklistEdit1", "category-badge", "overflow-menu", long_upstream, long_domain):
     if expected not in blocklists_html:
         raise SystemExit(f"blocklists page missing {expected}")
+for expected in ("Automatic Updates", "Filter Update Interval", "1 Day", "Next scheduled update", "Update All Now", 'action="/blocklists/schedule"'):
+    if expected not in blocklists_html:
+        raise SystemExit(f"blocklists automatic update panel missing {expected}")
+blocklists_disabled_html = TEMPLATES.get_template("blocklists.html").render(
+    **base, sources=[], categories=blocklist_categories_fixture, category_error=None,
+    category_filter="", status_filter="", search="", sort="name",
+    filter_schedule={**filter_schedule_fixture, "interval": "disabled", "interval_label": "Disabled \u2014 No Updates", "enabled": False, "next_run": None},
+)
+if "Automatic updates disabled" not in blocklists_disabled_html:
+    raise SystemExit("blocklists page does not report a disabled automatic update schedule")
+if "Thu 2026-07-30 00:00:00 UTC" in blocklists_disabled_html:
+    raise SystemExit("blocklists page shows a next automatic update time while updates are disabled")
+if 'action="/blocklists/update"' not in blocklists_disabled_html:
+    raise SystemExit("manual update-all action is gated by the automatic update schedule")
 
 system_logs_fixture = {
     "available": True, "error": None, "service": "alderpointdns", "severity": "all", "lines": 100,

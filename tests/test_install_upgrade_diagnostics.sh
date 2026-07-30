@@ -56,6 +56,58 @@ visudo -cf /opt/alderpointdns/packaging/sudoers-alderpointdns >/dev/null || {
   exit 1
 }
 
+# Automatic filter updates are timer-driven, so a fresh install and an upgrade
+# must both plan to install the unit files, and the fresh install must plan to
+# enable the timer for the default 1 Day interval. These are static checks on
+# the dry-run plan and packaged files; nothing here touches live units.
+for unit_file in alderpointdns-filter-update.service alderpointdns-filter-update.timer; do
+  grep -q "$unit_file" "$ROOT/install.out" || {
+    echo "installer dry-run did not plan to install $unit_file" >&2
+    exit 1
+  }
+  grep -q "$unit_file" "$ROOT/upgrade.out" || {
+    echo "upgrade dry-run did not plan to reinstall $unit_file" >&2
+    exit 1
+  }
+done
+grep -q "enable alderpointdns-filter-update.timer" "$ROOT/install.out" || {
+  echo "installer dry-run did not plan to enable the filter update timer" >&2
+  exit 1
+}
+grep -q "ExecStart=/opt/alderpointdns/app/alderpointdns_compiler.py filter-update-run" \
+  /opt/alderpointdns/packaging/alderpointdns-filter-update.service || {
+  echo "filter update service unit does not run the filter-update-run subcommand" >&2
+  exit 1
+}
+for expected in "OnUnitActiveSec=24h" "Persistent=true" "WantedBy=timers.target"; do
+  grep -q "$expected" /opt/alderpointdns/packaging/alderpointdns-filter-update.timer || {
+    echo "filter update timer unit is missing $expected" >&2
+    exit 1
+  }
+done
+for entry in filter-schedule-deploy filter-update-run; do
+  grep -q "alderpointdns_compiler.py $entry" /opt/alderpointdns/packaging/sudoers-alderpointdns || {
+    echo "sudoers drop-in is missing the $entry entry" >&2
+    exit 1
+  }
+done
+if grep -Eq 'filter-(schedule-deploy|update-run) +[^,]' /opt/alderpointdns/packaging/sudoers-alderpointdns; then
+  echo "sudoers drop-in grants wildcard or argument-taking filter schedule access" >&2
+  exit 1
+fi
+grep -q "alderpointdns-filter-update.timer" /opt/alderpointdns/packaging/debian/prerm || {
+  echo "debian prerm does not stop the filter update timer" >&2
+  exit 1
+}
+grep -q "alderpointdns-filter-update.timer.d" /opt/alderpointdns/packaging/debian/postrm || {
+  echo "debian purge does not clean the filter update timer drop-in directory" >&2
+  exit 1
+}
+grep -q "Filter Update Interval" /opt/alderpointdns/docs/configuration.md || {
+  echo "configuration documentation missing the Filter Update Interval section" >&2
+  exit 1
+}
+
 /opt/alderpointdns/scripts/alderpointdns-diagnostics --self-test-redaction > "$ROOT/redaction.out"
 if grep -Eq 'hunter2|abcdef|secret&client|BEGIN PRIVATE KEY|x-api-key: secret' "$ROOT/redaction.out"; then
   echo "diagnostics redaction self-test leaked secret text" >&2

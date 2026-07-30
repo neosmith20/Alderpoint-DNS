@@ -1,0 +1,7 @@
+[Unit]
+Description=Alderpoint DNS Automatic Filter Update
+After=alderpointdns.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/alderpointdns/app/alderpointdns_compiler.py filter-update-run

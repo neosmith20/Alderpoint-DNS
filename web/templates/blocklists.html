@@ -1,11 +1,59 @@
 {% extends "base.html" %}
 {% import "components.html" as ui %}
 {% block content %}
-{{ ui.page_header("Blocklists", "Manage external policy sources and categories.", '<form method="post" action="/blocklists/update" data-confirm="Update all blocklist sources?"><input type="hidden" name="csrf" value="' ~ csrf ~ '"><button>Update All Sources</button></form>') }}
+{{ ui.page_header("Blocklists", "Manage external policy sources and categories.") }}
 
 {% if category_error %}
   <div class="alert error" role="alert">{{ category_error }}</div>
 {% endif %}
+
+{% set fs = filter_schedule|default({}, true) %}
+<section class="panel stack">
+  <div class="panel__head">
+    <h2>Automatic Updates</h2>
+    {{ ui.status_badge("Enabled", "healthy") if fs.get("enabled") else ui.status_badge("Disabled", "neutral") }}
+  </div>
+  <form class="stack" method="post" action="/blocklists/schedule" data-async-form data-success-message="Filter update schedule saved.">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="grid compact">
+      <label>Filter Update Interval
+        <select name="interval">
+          {% for value, label in fs.get("options", []) %}
+            <option value="{{ value }}" {{ "selected" if value == fs.get("interval") else "" }}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <div>
+        <span class="muted secondary">Last automatic attempt</span>
+        <p class="mono wrap-anywhere">{{ fs.get("last_attempt") or "Never" }}</p>
+      </div>
+      <div>
+        <span class="muted secondary">Last successful automatic update</span>
+        <p class="mono wrap-anywhere">{{ fs.get("last_success") or "Never" }}</p>
+      </div>
+      <div>
+        <span class="muted secondary">Next scheduled update</span>
+        {% if fs.get("enabled") %}
+          <p class="mono wrap-anywhere">{{ fs.get("next_run") or "Unknown until timer deploys" }}</p>
+        {% else %}
+          <p class="muted">Automatic updates disabled</p>
+        {% endif %}
+      </div>
+    </div>
+    <div class="form-actions"><button>Save schedule</button></div>
+  </form>
+  {% set last = fs.get("last_result") %}
+  {% if last and last.get("error") %}
+    <p class="bad wrap-anywhere">Last automatic update ({{ last.get("status") }}): {{ last.get("error") }}</p>
+  {% endif %}
+  <div class="row">
+    <form method="post" action="/blocklists/update" data-confirm="Update all blocklist sources?">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="secondary" type="submit">Update All Now</button>
+    </form>
+    <p class="muted">Automatic updates refresh only enabled sources through the normal staged, validated, health-checked deployment, and never overlap another update. Manual updates stay available even when automatic updates are disabled.</p>
+  </div>
+</section>
 
 <form class="panel stack" method="post" action="/blocklists/add">
   <div class="panel__head"><h2>Add Source</h2></div>

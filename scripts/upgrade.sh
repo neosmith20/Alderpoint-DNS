@@ -324,6 +324,8 @@ install_units() {
   run install -D -m 0644 "$SOURCE_DIR/packaging/alderpointdns-analytics.service" "$(root_path /etc/systemd/system/alderpointdns-analytics.service)"
   run install -D -m 0644 "$SOURCE_DIR/packaging/alderpointdns-backup.service" "$(root_path /etc/systemd/system/alderpointdns-backup.service)"
   run install -D -m 0644 "$SOURCE_DIR/packaging/alderpointdns-backup.timer" "$(root_path /etc/systemd/system/alderpointdns-backup.timer)"
+  run install -D -m 0644 "$SOURCE_DIR/packaging/alderpointdns-filter-update.service" "$(root_path /etc/systemd/system/alderpointdns-filter-update.service)"
+  run install -D -m 0644 "$SOURCE_DIR/packaging/alderpointdns-filter-update.timer" "$(root_path /etc/systemd/system/alderpointdns-filter-update.timer)"
   run install -D -m 0440 "$SOURCE_DIR/packaging/sudoers-alderpointdns" "$(root_path /etc/sudoers.d/alderpointdns)"
   # On a normal upgrade these units already exist and are already enabled,
   # so this is a no-op. Immediately after a legacy-install migration these
@@ -349,6 +351,11 @@ migrate() {
   if [ "$ROOT" = "/" ]; then
     run /opt/alderpointdns/app/analytics.py init-db
     run /opt/alderpointdns/app/alderpointdns_compiler.py deploy --no-download
+    # Applies the stored Filter Update Interval (a pre-existing setting is
+    # preserved by the migration above; new installations default to 1 Day) to
+    # the timer drop-in, so an upgraded install ends up scheduled exactly as
+    # configured.
+    run /opt/alderpointdns/app/alderpointdns_compiler.py filter-schedule-deploy
   else
     echo "test root in use; skipping live database migrations and DNS deployment"
   fi

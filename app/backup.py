@@ -960,8 +960,22 @@ def _merge_database(staged_db: Path, components: dict[str, bool]) -> list[str]:
                 live_tables = {row[0] for row in live_conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 if table not in live_tables:
                     continue
+                # Copy only the columns both schemas share, named explicitly.
+                # A bare `INSERT ... SELECT *` breaks as soon as a schema
+                # migration adds a column (e.g. deployments.trigger for
+                # scheduled filter updates, import_jobs.source_path): an
+                # archive taken before the migration then has fewer columns
+                # than the live table and SQLite rejects the insert, failing
+                # an otherwise valid restore. Columns missing from the archive
+                # keep their column default.
+                live_columns = [row["name"] for row in live_conn.execute(f"PRAGMA table_info({table})")]
+                archive_columns = {row["name"] for row in live_conn.execute(f"PRAGMA backupdb.table_info({table})")}
+                shared = [name for name in live_columns if name in archive_columns]
+                if not shared:
+                    continue
+                column_list = ", ".join(f'"{name}"' for name in shared)
                 live_conn.execute(f"DELETE FROM {table}")
-                live_conn.execute(f"INSERT INTO {table} SELECT * FROM backupdb.{table}")
+                live_conn.execute(f"INSERT INTO {table}({column_list}) SELECT {column_list} FROM backupdb.{table}")
                 merged_tables.append(table)
             live_conn.commit()
         finally:

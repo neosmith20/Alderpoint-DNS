@@ -19,6 +19,13 @@ case "$1" in
     fi
     PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/analytics.py init-db || true
     systemctl daemon-reload >/dev/null 2>&1 || true
+    # Scheduled backups and automatic filter updates are both timer-driven.
+    # Enabling is idempotent, and filter-schedule-deploy writes the
+    # filter-update timer drop-in from the stored Filter Update Interval
+    # (preserved across upgrades; 1 Day on a fresh install).
+    systemctl enable alderpointdns-backup.timer >/dev/null 2>&1 || true
+    systemctl enable alderpointdns-filter-update.timer >/dev/null 2>&1 || true
+    PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py filter-schedule-deploy >/dev/null 2>&1 || true
     ;;
 esac
 

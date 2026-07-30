@@ -140,6 +140,8 @@ install_config() {
   run install -D -m 0644 "$SOURCE_DIR/packaging/alderpointdns-analytics.service" "$(root_path /etc/systemd/system/alderpointdns-analytics.service)"
   run install -D -m 0644 "$SOURCE_DIR/packaging/alderpointdns-backup.service" "$(root_path /etc/systemd/system/alderpointdns-backup.service)"
   run install -D -m 0644 "$SOURCE_DIR/packaging/alderpointdns-backup.timer" "$(root_path /etc/systemd/system/alderpointdns-backup.timer)"
+  run install -D -m 0644 "$SOURCE_DIR/packaging/alderpointdns-filter-update.service" "$(root_path /etc/systemd/system/alderpointdns-filter-update.service)"
+  run install -D -m 0644 "$SOURCE_DIR/packaging/alderpointdns-filter-update.timer" "$(root_path /etc/systemd/system/alderpointdns-filter-update.timer)"
   run install -D -m 0440 "$SOURCE_DIR/packaging/sudoers-alderpointdns" "$(root_path /etc/sudoers.d/alderpointdns)"
   run install -D -m 0644 "$SOURCE_DIR/packaging/named.conf.options" "$(root_path /etc/bind/named.conf.options)"
   run install -D -m 0644 "$SOURCE_DIR/packaging/named.conf.local" "$(root_path /etc/bind/named.conf.local)"
@@ -190,12 +192,16 @@ initialize() {
     systemctl daemon-reload
     systemctl enable --now named dnsdist alderpointdns alderpointdns-analytics
     systemctl enable alderpointdns-backup.timer
+    # Writes the filter-update timer drop-in from the stored Filter Update
+    # Interval (fresh installs default to 1 Day) and enables the timer.
+    PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py filter-schedule-deploy
     systemctl is-active --quiet named
     systemctl is-active --quiet dnsdist
     systemctl is-active --quiet alderpointdns
     systemctl is-active --quiet alderpointdns-analytics
   else
     echo "+ initialize database, TLS material, generated DNS config, ownership, systemd services, and health checks"
+    echo "+ enable alderpointdns-filter-update.timer for the default 1 Day filter update interval"
   fi
 }
 
