@@ -8,6 +8,8 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 import warnings
 from contextlib import closing
@@ -218,6 +220,106 @@ class SqliteOnlineBackupTest(BackupTestBase):
             self.assertEqual(conn.execute("SELECT count(*) FROM sources").fetchone()[0], 2)
         finally:
             conn.close()
+
+
+class ConcurrentWriteBackupTest(BackupTestBase):
+    """Regression coverage for the live-database tar race: scripts/backup.sh
+    used to tar var/lib/alderpointdns/alderpointdns.db directly, so a writer
+    checkpointing its WAL mid-archive could change the file out from under
+    tar ('file changed as we read it'), aborting the acceptance suite's
+    tests/test_backup_restore.sh. create_backup() must stay race-free under
+    the same load because it only ever archives a completed, already-static
+    SQLite online-backup snapshot -- never the live file."""
+
+    def test_backup_and_restore_survive_concurrent_writes(self) -> None:
+        stop = threading.Event()
+        committed = {"count": 0}
+        lock = threading.Lock()
+
+        def writer() -> None:
+            conn = sqlite3.connect(backup.DB_PATH, timeout=30)
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                i = 0
+                while not stop.is_set():
+                    conn.execute("INSERT INTO sources(name) VALUES (?)", (f"race-{i}",))
+                    conn.commit()
+                    if i % 10 == 0:
+                        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    with lock:
+                        committed["count"] = i + 1
+                    i += 1
+            finally:
+                conn.close()
+
+        thread = threading.Thread(target=writer, daemon=True)
+        thread.start()
+        time.sleep(0.05)  # let the writer get going so the backup genuinely overlaps writes
+
+        tar_output: list[str] = []
+
+        def capturing_run(command, check=True, input_text=None, env=None):
+            result = self.fake_run(command, check=check, input_text=input_text, env=env)
+            if command and command[0] == "tar":
+                tar_output.append(result.stdout or "")
+            return result
+
+        try:
+            with mock.patch.object(backup, "run", capturing_run):
+                path = backup.create_backup(backup.validate_components(None))
+        finally:
+            stop.set()
+            thread.join(timeout=5)
+
+        with lock:
+            final_committed = committed["count"]
+
+        # No tar warning about the file changing mid-read.
+        combined_tar_output = "".join(tar_output)
+        self.assertNotIn("file changed as we read it", combined_tar_output)
+
+        # Successful backup exit status (create_backup raises on failure;
+        # confirm the recorded history row agrees).
+        self.assertTrue(path.exists())
+        last = backup.last_backup()
+        self.assertEqual(last["status"], "deployed")
+
+        with tempfile.TemporaryDirectory(dir=str(backup.STAGING_DIR)) as tmp:
+            extract = Path(tmp) / "x"
+            extract.mkdir()
+            subprocess.run(["tar", "-xzf", str(path), "-C", str(extract)], check=True)
+
+            # Valid manifest checksums.
+            manifest = json.loads((extract / "manifest.json").read_text())
+            self.assertGreater(len(manifest["sha256_checksums"]), 0)
+            for relpath, expected in manifest["sha256_checksums"].items():
+                self.assertEqual(backup.sha256_file(extract / relpath), expected, relpath)
+
+            # Successful SQLite integrity check on the archived snapshot.
+            snapshot = extract / "var/lib/alderpointdns/alderpointdns.db"
+            snap_conn = sqlite3.connect(snapshot)
+            try:
+                self.assertEqual(snap_conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+                # Expected committed records: the snapshot must land on a real,
+                # fully-committed point in the writer's timeline -- at least the
+                # pre-existing seed row, and never more rows than the writer had
+                # actually committed by the time the backup finished (a torn
+                # read could otherwise report a phantom/partial count).
+                snapshot_count = snap_conn.execute("SELECT count(*) FROM sources").fetchone()[0]
+            finally:
+                snap_conn.close()
+
+        self.assertGreaterEqual(snapshot_count, 1)
+        self.assertLessEqual(snapshot_count, final_committed + 1)
+
+        # Successful isolated restore -- confined to this test's temp
+        # sandbox by BackupTestBase's path redirection, so this never
+        # touches real systemd/services.
+        with mock.patch.object(backup, "run", self.fake_run), mock.patch.object(backup, "resolves", return_value=True), \
+                mock.patch.object(backup, "_wait_active", return_value=True):
+            backup.restore_backup(path, None, dict.fromkeys(backup.COMPONENT_KEYS, True))
+        last_restore = backup.last_restore()
+        self.assertEqual(last_restore["status"], "deployed")
 
 
 class CreateBackupTest(BackupTestBase):

@@ -929,3 +929,90 @@ every defect found above was fixed and is now covered by
 `tests/test_rename_migration.sh` or `tests/test_backup.py`'s new legacy-
 archive tests. Alderpoint DNS is ready to hand to a first external tester
 on this checkpoint.
+
+## Post-reboot acceptance: live-database backup race (after rename checkpoint `0e689a0`)
+
+A post-reboot run of `tests/test_acceptance.sh` stopped with `tar:
+var/lib/alderpointdns/alderpointdns.db: file changed as we read it` (no
+saved run log existed to inspect after the fact, so this was reproduced
+live on this box instead).
+
+Root cause: `scripts/backup.sh` (the "native" backup used by
+`scripts/upgrade.sh`'s `pre_upgrade_backup()`, `app/importer.py`'s
+`create_pre_import_backup()`, and directly by
+`tests/test_backup_restore.sh`) tarred
+`var/lib/alderpointdns/alderpointdns.db` straight off disk while it was
+live -- the `alderpointdns`/`alderpointdns-analytics` services keep the DB
+in WAL mode and commit/checkpoint continuously, so a checkpoint landing
+mid-tar changes the file's size/mtime out from under `tar`, which reports
+the warning and exits 1. Under `set -eu` that aborts `backup.sh` before its
+final `mv`, which aborts `tests/test_backup_restore.sh` (a plain command
+substitution assignment), which aborts the whole `set -eu` acceptance
+suite -- so the run never reached "Alderpoint DNS acceptance suite passed"
+and returned a nonzero exit code. Reproduced directly: running the old
+`tar -C / -czf ... var/lib/alderpointdns/alderpointdns.db` against the live
+DB under a concurrent write+checkpoint loop reliably printed the same
+warning with tar exit 1; the app's own `app/backup.py` `create_backup()`
+path (used for scheduled timer backups and manual/web backups) was never
+affected, since it already builds the archive from a completed
+`sqlite3.Connection.backup()` snapshot rather than the live file.
+
+Fix, confined to `scripts/backup.sh`: before tarring, take an online
+backup-API snapshot of the live DB (`python3` + `sqlite3.Connection.backup()`,
+since this system has no `sqlite3` CLI binary installed) into a fresh
+`mktemp -d` under `/var/lib/alderpointdns/staging`, `chown
+--reference`/`chmod --reference` the snapshot against the live DB so
+ownership/mode survive into the archive, tar the snapshot instead of the
+live path (`-C snapshot_root var/lib/alderpointdns/alderpointdns.db`
+alongside the existing `-C /` entries), and `trap ... EXIT` the snapshot
+dir so it's removed whether the script succeeds or fails. The backup API
+handles WAL correctly on its own (folds in committed WAL frames), so no
+checkpoint/lock-out of writers was needed. `scripts/restore.sh` needed no
+changes -- it only ever extracts whatever `var/lib/alderpointdns/
+alderpointdns.db` path is inside the archive, which is now always the
+consistent snapshot.
+
+Verified this fixes every caller of the unsafe path: scheduled backups
+(timer -> `alderpointdns_compiler.py backup-create` -> `app/backup.py`)
+and manual/web backups were already safe; upgrade backups
+(`pre_upgrade_backup()`) and import safety backups
+(`create_pre_import_backup()`) both shell out to the now-fixed
+`scripts/backup.sh`; `alderpointdns-diagnostics` only ever opens the DB
+read-only for a schema summary (no tar involved, never affected).
+
+Regression coverage added:
+
+- `tests/test_backup.py::ConcurrentWriteBackupTest` -- runs a background
+  writer thread committing+checkpointing against the (redirected, sandboxed)
+  test DB while `create_backup()` runs concurrently, then asserts: no "file
+  changed as we read it" in the captured `tar` output, a `deployed` history
+  row, valid manifest sha256 checksums against the extracted archive,
+  `PRAGMA integrity_check` = `ok` on the archived snapshot, a committed-not-
+  torn row count, and a successful isolated `restore_backup()` (confined to
+  the test's temp sandbox, no real systemctl calls).
+- `tests/test_backup_restore.sh` -- extended with a live-system concurrency
+  check: creates a throwaway `backup_race_test` table (dropped in a trap
+  regardless of outcome), hammers it with committed writes + periodic
+  `wal_checkpoint(TRUNCATE)` from a background `python3` process for the
+  duration of a real `scripts/backup.sh` run, and asserts exit 0, no tar
+  warning in captured stderr, and (via an isolated `tar -x` into a scratch
+  dir, never touching live paths) `PRAGMA integrity_check` = `ok` plus a
+  row count that never exceeds what the writer had actually committed.
+
+Tests run: `python3 -m unittest tests.test_backup` (36 tests, all pass,
+including the new concurrency test); `sh tests/test_backup_restore.sh`
+(passed, including the new live race check, with the old raw-tar
+reproduction separately confirmed to fail the same way pre-fix);
+`sh tests/test_web_smoke.sh` (passed); full `sh tests/test_acceptance.sh`
+(exit code 0, ends with "Alderpoint DNS acceptance suite passed" -- the
+earlier BIND `allow-proxy` experimental-option notices and the invalid-
+RPZ/forced-post-deploy tracebacks are the suite's own expected negative-
+path tests, not failures). Services (`named`, `dnsdist`, `alderpointdns`,
+`alderpointdns-analytics`) confirmed active after the run. Scratch backup
+archives and the throwaway race table created while testing were cleaned
+up; pre-existing backup history/files were left untouched.
+
+The post-reboot acceptance check is now complete: the backup race is
+fixed at its source (not masked), covered by regression tests at both the
+Python and shell layers, and the full acceptance suite passes cleanly
+end-to-end.
