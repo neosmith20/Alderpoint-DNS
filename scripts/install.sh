@@ -113,7 +113,10 @@ copy_tree() {
 
 create_layout() {
   run install -d -m 0755 "$(root_path /etc/alderpointdns)"
-  run install -d -m 0750 "$(root_path /etc/alderpointdns/certs)"
+  # Superseded by ensure_tls_cert.sh below, which fixes owner/group to
+  # root:_dnsdist and mode to 0751 (traversable by the unprivileged
+  # alderpointdns web process) unconditionally, including on upgrades.
+  run install -d -m 0751 "$(root_path /etc/alderpointdns/certs)"
   run install -d -m 0755 "$(root_path /var/lib/alderpointdns)"
   run install -d -m 0750 "$(root_path /var/lib/alderpointdns/backups)"
   # 0755, not 0750: named and dnsdist (separate system accounts, unrelated
@@ -198,7 +201,21 @@ initialize() {
     /opt/alderpointdns/scripts/ensure_tls_cert.sh
     PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/analytics.py init-db
     PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py deploy --no-download
-    chown -R alderpointdns:alderpointdns /var/lib/alderpointdns /var/log/alderpointdns
+    # Narrowly the database (created above by init-db, running as root),
+    # not a blanket recursive chown of /var/lib/alderpointdns: backups/
+    # imports/staging are already alderpointdns-owned from create_layout()
+    # and never written to as root, and compiled/bind + compiled/dnsdist
+    # are deliberately kept root-owned and world-readable -- named/dnsdist
+    # only ever read them, and the only way to regenerate them is this
+    # same deploy path, run as root; handing alderpointdns direct
+    # ownership would let anything running as that account rewrite live
+    # BIND/dnsdist config without going through it. -wal/-shm may or may
+    # not exist yet depending on checkpoint timing.
+    for db_file in /var/lib/alderpointdns/alderpointdns.db /var/lib/alderpointdns/alderpointdns.db-wal /var/lib/alderpointdns/alderpointdns.db-shm; do
+      if [ -e "$db_file" ]; then
+        chown alderpointdns:alderpointdns "$db_file"
+      fi
+    done
     # Deliberately not recursive: /etc/alderpointdns/certs is owned and
     # managed entirely by ensure_tls_cert.sh/app/encryption.py (root:_dnsdist
     # for the TLS-serving cert/key, root:root for the CA key) so that
@@ -212,8 +229,17 @@ initialize() {
     # named (running as its own "bind" system user, not alderpointdns) writes
     # its own log/statistics files directly into this subdirectory per
     # named.conf.options -- it must own it, so re-assert that ownership after
-    # the blanket alderpointdns chown above.
+    # the blanket alderpointdns chown above. Recursive: if named was already
+    # running (e.g. auto-started by bind9's own postinst earlier in
+    # install_packages()) and picked up the new logging config during
+    # deploy()'s rndc reload above, it may already have written
+    # named.log/named.stats/named.memstats here -- an `install -d` alone
+    # only fixes the directory, leaving those files owned by alderpointdns
+    # from the chown -R just above and named unable to reopen them. install
+    # -d first so this is also correct on the (normal) case where named
+    # hasn't started yet and the directory doesn't exist at all.
     install -d -o bind -g bind -m 0750 "$(root_path /var/log/alderpointdns/bind)"
+    chown -R bind:bind "$(root_path /var/log/alderpointdns/bind)"
     systemctl daemon-reload
     systemctl enable --now named dnsdist alderpointdns alderpointdns-analytics
     systemctl enable alderpointdns-backup.timer

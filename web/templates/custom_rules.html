@@ -35,7 +35,7 @@
     <label>Rule <input name="rule_text" required placeholder="||ads.example.org^  ·  @@||cdn.example.org^  ·  192.168.1.50 nas.lan  ·  /^ads[0-9]+\./" class="mono"></label>
     <label>Comment <input name="comment"></label>
   </div>
-  <div class="form-actions"><button>Add and Deploy</button></div>
+  <div class="form-actions"><button data-pending-label="Adding and deploying…">Add and Deploy</button></div>
 </form>
 
 <details class="panel stack" {{ "open" if bulk_results else "" }}>
@@ -46,7 +46,7 @@
       <textarea name="rules_text" rows="8" class="mono" placeholder="! my rules&#10;||ads.example.org^&#10;0.0.0.0 tracker.example.org"></textarea>
     </label>
     <p class="muted">Every line is validated server-side. Valid lines activate and deploy; invalid or unsupported lines are stored inactive and listed with the exact reason.</p>
-    <div class="form-actions"><button>Validate, Save, and Deploy</button></div>
+    <div class="form-actions"><button data-pending-label="Validating and deploying…">Validate, Save, and Deploy</button></div>
   </form>
   {% if bulk_results %}
     <p>
@@ -155,7 +155,7 @@
       <thead>
         <tr>
           <th><input type="checkbox" data-check-all="customRules" aria-label="Select all rules"></th>
-          <th>Rule</th><th>Type</th><th>Action</th><th>State</th><th>Source</th><th>Comment</th><th>Actions</th>
+          <th>Rule</th><th>Type</th><th>Action</th><th>State</th><th>Source</th><th>Comment</th><th class="actions-col">Actions</th>
         </tr>
       </thead>
       <tbody>
@@ -178,7 +178,7 @@
           </td>
           <td class="muted">{{ source_labels.get(r.source_system, r.source_system) }}</td>
           <td class="truncate" title="{{ r.comment }}">{{ r.comment }}</td>
-          <td>
+          <td class="actions-col">
             <div class="row">
               <button type="button" class="secondary" data-row-edit-toggle aria-controls="ruleEdit{{ r.id }}" aria-expanded="false">Edit</button>
               {% call ui.overflow_menu("ruleMenu" ~ r.id) %}
@@ -198,7 +198,7 @@
               <label>Rule <input name="rule_text" value="{{ r.rule_text }}" required class="mono"></label>
               <label>Comment <input name="comment" value="{{ r.comment }}"></label>
               <label class="row"><input type="checkbox" name="enabled" value="1" {{ "checked" if r.enabled and r.validation_state == "valid" else "" }} {{ "disabled" if r.validation_state != "valid" else "" }}> Enabled</label>
-              <div class="form-actions"><button type="submit" class="secondary">Save and Deploy</button></div>
+              <div class="form-actions"><button type="submit" class="secondary" data-pending-label="Saving and deploying…">Save and Deploy</button></div>
             </form>
             {% if r.unsupported_reason %}<p class="bad">{{ r.unsupported_reason }}</p>{% endif %}
           </td>

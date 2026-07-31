@@ -27,7 +27,6 @@
         <option value="xlsx">XLSX</option>
         <option value="hosts">Hosts file</option>
         <option value="zone">BIND-style zone data</option>
-        <option value="pihole">Pi-hole export/list text</option>
         <option value="alderpointdns_json">Alderpoint DNS-native JSON</option>
       </select>
     </label>
@@ -55,7 +54,22 @@
       <label>Username<input name="username" autocomplete="off" required></label>
       <label>Password<input name="password" type="password" autocomplete="off" required></label>
       <p class="muted">Credentials are used only for this one request and are never stored.</p>
-      <div class="form-actions"><button class="secondary">Connect and preview</button></div>
+      <div class="form-actions"><button class="secondary" data-pending-label="Connecting and previewing…">Connect and preview</button></div>
+    </form>
+  </div>
+
+  <div class="panel stack">
+    <div class="panel__head"><h2>Pi-hole Migration</h2></div>
+    <p class="muted">Upload a Pi-hole text/list export -- <span class="mono">adlists.list</span> (blocklist subscription URLs, one per line), <span class="mono">whitelist.txt</span> / <span class="mono">blacklist.txt</span> (exact-match allow/block domains), <span class="mono">regex.list</span> (regex allow/block rules, including the <span class="mono">(\.|^)domain.tld$</span> wildcard-block idiom), <span class="mono">custom.list</span> (hosts-style entries, imported as Local DNS A/AAAA records), and dnsmasq <span class="mono">cname=alias,target[,ttl]</span> rewrite lines. Section headers such as <span class="mono">[whitelist]</span> or <span class="mono">[regex_black]</span> switch how bare lines are read; keyword-prefixed lines (<span class="mono">whitelist</span>, <span class="mono">blacklist</span>, <span class="mono">regex</span>, …) work anywhere in the file.</p>
+    <p class="muted">Pi-hole group assignments and per-client scoping have no Alderpoint DNS equivalent -- they are never silently dropped, but reported as explicit unsupported/client-scoped findings in the preview instead. Gravity database internals are not read directly; export one of the practical text files above from Pi-hole first.</p>
+    <form method="post" action="/import/upload" enctype="multipart/form-data" data-confirm="Upload and parse this Pi-hole export? Nothing is applied to Alderpoint DNS yet.">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="source_type" value="pihole">
+      <label>Default domain (for custom.list bare hostnames)
+        <input name="default_domain" placeholder="home.arpa" autocomplete="off">
+      </label>
+      <label>Pi-hole export file<input type="file" name="upload" required></label>
+      <div class="form-actions"><button class="secondary" data-pending-label="Importing…">Upload and preview</button></div>
     </form>
   </div>
 </section>
@@ -94,7 +108,7 @@
 
 {% if job %}
 <section class="panel stack">
-  <div class="panel__head"><h2>Import Job #{{ job.id }}</h2>{{ ui.status_badge(job.status|title, "healthy" if job.status == "applied" else "down" if job.status == "failed" else "neutral") }}</div>
+  <div class="panel__head"><h2>Import Job #{{ job.id }}</h2>{{ ui.status_badge(job.result_label if job.status == "applied" and job.result_label else job.status|title, "healthy" if job.status == "applied" and not job.result_label.startswith("Applied with") else "warning" if job.status == "applied" else "down" if job.status == "failed" else "neutral") }}</div>
   <p class="muted">{{ job.source_type }}: <span class="wrap-anywhere">{{ job.source_name }}</span></p>
 
   {% if headers and job.status in ("uploaded", "previewed") %}
@@ -112,14 +126,15 @@
         </label>
       {% endfor %}
     </div>
-    <div class="form-actions"><button class="secondary">Update mapping and re-preview</button></div>
+    <div class="form-actions"><button class="secondary" data-pending-label="Updating mapping…">Update mapping and re-preview</button></div>
   </form>
   {% endif %}
 
   {% if preview %}
     <div class="grid">
       {{ ui.metric_card("Valid", preview.valid|length, "", "Ready to import without conflicts", "success") }}
-      {{ ui.metric_card("Conflicts", preview.conflicts|length, "", "Existing record(s) affected", "warning") }}
+      {{ ui.metric_card("Conflicts", preview.conflicts|length, "", "Existing incompatible record(s); review before apply", "blocked") }}
+      {{ ui.metric_card("Warnings", preview.warnings|length, "", "Unusual but valid; imported as requested", "warning") }}
       {{ ui.metric_card("Duplicates", preview.duplicates|length, "", "Repeated within this file", "neutral") }}
       {{ ui.metric_card("Invalid", preview.invalid|length, "", "Failed validation", "blocked") }}
     </div>
@@ -150,6 +165,19 @@
     </div>
     {% endif %}
 
+    {% if preview.warnings %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Row</th><th>FQDN</th><th>Type</th><th>Value</th><th>Warning</th></tr></thead>
+        <tbody>
+          {% for item in preview.warnings[:50] %}
+            <tr><td>{{ item.index }}</td><td class="mono wrap-anywhere">{{ item.fqdn }}</td><td>{{ item.record_type }}</td><td class="mono wrap-anywhere">{{ item.value }}</td><td class="wrap-anywhere">{{ item.warnings|join("; ") }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+
     <form method="post" action="/import/jobs/{{ job.id }}/apply" data-confirm="Apply this import? A backup is taken automatically first, and the change deploys through the normal validated path.">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <label>Conflict resolution
@@ -169,14 +197,14 @@
     {% elif job.status == "failed" %}
       <div class="alert error" role="alert">{{ job.message }} No changes were kept: the transaction was rolled back.</div>
     {% else %}
-      <p>{{ job.message }}</p>
+      <pre class="mono">{{ job.message }}</pre>
     {% endif %}
     <div class="form-actions">
       <a class="button secondary" href="/import/jobs/{{ job.id }}/report">Download report</a>
       {% if job.status in ("applied", "deploy_failed") %}
       <form method="post" action="/import/jobs/{{ job.id }}/rollback" data-confirm="Roll back this import? Everything it added will be removed and Alderpoint DNS redeployed.">
         <input type="hidden" name="csrf" value="{{ csrf }}">
-        <button class="secondary">Roll back this import</button>
+        <button class="secondary" data-pending-label="Rolling back…">Roll back this import</button>
       </form>
       {% endif %}
     </div>
@@ -228,6 +256,8 @@
       {{ ui.metric_card("Will import", migration_summary.counts.active, "", "Active after apply", "success") }}
       {{ ui.metric_card("Kept inactive", migration_summary.counts.inactive, "", "Stored disabled with a reason", "warning") }}
       {{ ui.metric_card("Conflicts", migration_summary.counts.conflicts, "", "Review before apply", "blocked") }}
+      {{ ui.metric_card("Warnings", migration_summary.counts.warnings, "", "Unusual but valid; imported as requested", "warning") }}
+      {{ ui.metric_card("Unsupported", migration_summary.counts.unsupported, "", "Source data Alderpoint DNS cannot represent", "neutral") }}
       {{ ui.metric_card("Existing", migration_summary.counts.existing, "", "Already present; will update or skip", "neutral") }}
       {{ ui.metric_card("Duplicates", migration_summary.counts.duplicates, "", "Repeated within the import", "neutral") }}
     </div>
@@ -256,8 +286,18 @@
     {% if migration_summary.conflicts %}
       <div class="panel stack">
         <div class="panel__head"><h2>Conflicts</h2></div>
+        <p class="muted">Existing incompatible data that prevented automatic application; not overwritten.</p>
         <ul>
           {% for entry in migration_summary.conflicts[:80] %}<li class="wrap-anywhere"><span class="mono">{{ entry.key }}</span>: {{ entry.label }}</li>{% endfor %}
+        </ul>
+      </div>
+    {% endif %}
+    {% if migration_summary.warnings %}
+      <div class="panel stack">
+        <div class="panel__head"><h2>Warnings</h2></div>
+        <p class="muted">Unusual but valid data, imported as requested. These are not conflicts.</p>
+        <ul>
+          {% for entry in migration_summary.warnings[:80] %}<li class="wrap-anywhere"><span class="mono">{{ entry.key }}</span>: {{ entry.label }}</li>{% endfor %}
         </ul>
       </div>
     {% endif %}

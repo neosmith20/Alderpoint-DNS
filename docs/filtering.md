@@ -7,7 +7,9 @@ Alderpoint DNS filtering is implemented by `app/alderpointdns_compiler.py`
 ## External blocklists
 
 - SQLite state at `/var/lib/alderpointdns/alderpointdns.db`
-- Public source tracking with per-source parse statistics and last errors
+- Public source tracking with per-source download/parse statistics
+  (downloaded entries, parsed, invalid, unsupported, duplicates, unique
+  active contribution), sample rejected lines, and last error/warning
 - A curated 19-source public blocklist catalog seeded with `seed-public`,
   spanning AdGuard-hosted assets and GitHub raw URLs
 - Bulk source updates with `update-sources` and single-source refreshes with
@@ -15,14 +17,55 @@ Alderpoint DNS filtering is implemented by `app/alderpointdns_compiler.py`
 - Downloads through the host resolver with connection and total timeouts
 - Maximum source size limit of 25 MiB per list
 - Preservation of the last successful downloaded copy when an update fails
-- Plain domain, hosts-file, basic `||domain^`, and basic `@@||domain^`
-  parsing with IDN normalization and invalid/unsupported/duplicate counts
+  (`using_cached_copy`, surfaced as the "Using cached copy" health state)
+- Hosts-file (`0.0.0.0`/`127.0.0.1`/`::`/`::0`/`0:0:0:0:0:0:0:0`/any other
+  valid address form — for a blocklist source the address is always a
+  sinkhole marker, never an intentional rewrite target), plain domain,
+  `||domain^`, and `@@||domain^` parsing, sharing the same AdBlock-syntax
+  parser as custom filtering rules (`custom_rules.parse_rule`) rather than a
+  second implementation. Tabs/multiple spaces, inline `#` comments on hosts
+  lines, and the `localhost`/`localhost.localdomain`/`ip6-localhost`/
+  `ip6-loopback` aliases are handled; malformed entries are rejected with a
+  recorded reason instead of silently dropped.
+- `$dnsrewrite=<hostname>` support: AdGuard's own hosted DNS-filter registry
+  rewrites known ad/pop-up domains to `ad-block.dns.adguard.com` (a CNAME
+  landing page) instead of a plain block. Alderpoint DNS's RPZ pipeline has
+  no per-source CNAME/landing-page concept, so — as an explicit, documented
+  policy choice (`ADGUARD_DNSREWRITE_BLOCKPAGE_TARGETS` in
+  `app/alderpointdns_compiler.py`) — an exact, single-modifier match on that
+  specific target is normalized to an ordinary block and counted as parsed
+  and supported. Any other hostname-target `$dnsrewrite`, or that target
+  combined with another modifier, is reported unsupported with a reason
+  rather than silently discarded. IP-address `$dnsrewrite` targets (which
+  custom rules do support, see below) are not supported for blocklist
+  sources, since a subscribed list has no Local-DNS-equivalent destination.
 - Generated RPZ at `/var/lib/alderpointdns/compiled/bind/alderpointdns.rpz`
 
+### Health states
+
+Each source's dashboard/CLI health state is derived from its stored
+counters, not just whether the last download succeeded:
+
+| State | Meaning |
+| --- | --- |
+| Healthy | Downloaded and parsed cleanly, contributing at least one rule no other enabled source already contributes |
+| Healthy, redundant | Downloaded and parsed cleanly, but every domain is already contributed by another enabled source (e.g. a list's IPv4/IPv6 editions) |
+| Warning | Downloaded, and at least one entry parsed, but some entries were invalid or unsupported |
+| Unsupported format | Downloaded a nonempty source but zero entries parsed (a real download success is never reported as plain "Healthy" alongside zero usable rules) |
+| Using cached copy | The latest download attempt failed, but a previously-downloaded copy is still active |
+| Error | The latest download attempt failed and no usable cached copy exists |
+
+`update-sources` (and the `alderpointdns-filter-update` timer that calls it)
+exits `0` only when every enabled source is fully healthy, `2` when some
+sources are degraded/warning/cached but not all failed, and `1` when every
+enabled source is in a hard-failure state; the per-source health state also
+drives the `blocklist_update_failure` notification, which identifies the
+affected source by name.
+
 Unsupported AdGuard syntax inside downloaded blocklists (regex rules,
-modifiers, cosmetic rules, browser-only rules) is counted and reported, not
-interpreted as DNS policy. Custom rules the operator enters directly get the
-much richer treatment described below.
+non-block-page modifiers, cosmetic rules, browser-only rules) is counted and
+reported, not interpreted as DNS policy. Custom rules the operator enters
+directly get the much richer treatment described below.
 
 ## Custom filtering rules
 

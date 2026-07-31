@@ -62,8 +62,9 @@ def now() -> str:
 
 def connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, factory=AlderpointDNSConnection)
+    conn = sqlite3.connect(DB_PATH, factory=AlderpointDNSConnection, timeout=5.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -226,20 +227,25 @@ def ip_network_zone(address: str) -> str:
     return ptr_owner_for_ip(address)[1]
 
 
-def record_warnings(conn: sqlite3.Connection, fqdn: str, record_type: str, value: str, record_id: int | None = None) -> list[str]:
+def record_findings(conn: sqlite3.Connection, fqdn: str, record_type: str, value: str, record_id: int | None = None) -> list[tuple[str, str]]:
+    """Data-quality findings for a candidate record, each tagged with a
+    severity: 'conflict' for genuinely incompatible existing data that
+    blocks automatic application without an explicit override, or
+    'warning' for unusual-but-valid data that is imported/saved as
+    requested and never blocks."""
     params: list[Any] = [fqdn]
     extra = ""
     if record_id:
         extra = " AND id<>?"
         params.append(record_id)
-    warnings: list[str] = []
+    findings: list[tuple[str, str]] = []
     if conn.execute(f"SELECT 1 FROM local_dns_records WHERE fqdn=?{extra} AND enabled=1 LIMIT 1", params).fetchone():
-        warnings.append("A hostname already exists.")
+        findings.append(("conflict", "A hostname already exists."))
     if record_type == "CNAME":
         if conn.execute(f"SELECT 1 FROM local_dns_records WHERE fqdn=?{extra} AND record_type<>'CNAME' LIMIT 1", params).fetchone():
-            warnings.append("A CNAME conflicts with another record.")
+            findings.append(("conflict", "A CNAME conflicts with another record."))
     elif conn.execute(f"SELECT 1 FROM local_dns_records WHERE fqdn=?{extra} AND record_type='CNAME' LIMIT 1", params).fetchone():
-        warnings.append("This hostname already has a CNAME record.")
+        findings.append(("conflict", "This hostname already has a CNAME record."))
     if record_type in {"A", "AAAA"}:
         try:
             ip = str(ipaddress.ip_address(value))
@@ -253,13 +259,23 @@ def record_warnings(conn: sqlite3.Connection, fqdn: str, record_type: str, value
                 (ptr_fqdn,),
             ).fetchone()
             if ptr and ptr["value"].rstrip(".") != fqdn:
-                warnings.append("This IP already has a different PTR record.")
+                findings.append(("conflict", "This IP already has a different PTR record."))
             if not ipaddress.ip_address(ip).is_private:
-                warnings.append("This IP is outside common private local networks.")
+                findings.append(("warning", "Public IP address outside common private networks. Imported as requested."))
     if record_type == "PTR":
         if not conn.execute("SELECT 1 FROM local_dns_records WHERE fqdn=? AND record_type IN ('A','AAAA') LIMIT 1", (value.rstrip("."),)).fetchone():
-            warnings.append("The PTR target lacks a corresponding A or AAAA record.")
-    return warnings
+            findings.append(("conflict", "The PTR target lacks a corresponding A or AAAA record."))
+    return findings
+
+
+def record_conflicts(conn: sqlite3.Connection, fqdn: str, record_type: str, value: str, record_id: int | None = None) -> list[str]:
+    return [message for severity, message in record_findings(conn, fqdn, record_type, value, record_id) if severity == "conflict"]
+
+
+def record_warnings(conn: sqlite3.Connection, fqdn: str, record_type: str, value: str, record_id: int | None = None) -> list[str]:
+    """All findings (conflicts and warnings) as plain messages, for display.
+    Blocking decisions must use record_conflicts() instead."""
+    return [message for _severity, message in record_findings(conn, fqdn, record_type, value, record_id)]
 
 
 def validate_record(record_type: str, fqdn: str, value: str, ttl: Any) -> tuple[str, str, str, int]:
@@ -293,9 +309,10 @@ def add_host(hostname: str, domain: str, address: str, ttl: Any = 300, comment: 
             ip = ipaddress.ip_address(address.strip())
             rtype = "A" if isinstance(ip, ipaddress.IPv4Address) else "AAAA"
             ttl_int = validate_ttl(ttl)
-            warnings = record_warnings(conn, fqdn, rtype, str(ip))
-            if warnings and not override:
-                raise LocalDNSError(" ".join(warnings))
+            findings = record_findings(conn, fqdn, rtype, str(ip))
+            conflicts = [message for severity, message in findings if severity == "conflict"]
+            if conflicts and not override:
+                raise LocalDNSError(" ".join(conflicts))
             ts = now()
             cursor = conn.execute(
                 """
@@ -308,9 +325,9 @@ def add_host(hostname: str, domain: str, address: str, ttl: Any = 300, comment: 
             if auto_ptr:
                 owner, zone = ptr_owner_for_ip(str(ip))
                 ptr_fqdn = f"{owner}.{zone}"
-                ptr_warnings = record_warnings(conn, ptr_fqdn, "PTR", fqdn)
-                if ptr_warnings and not override:
-                    raise LocalDNSError(" ".join(ptr_warnings))
+                ptr_conflicts = record_conflicts(conn, ptr_fqdn, "PTR", fqdn)
+                if ptr_conflicts and not override:
+                    raise LocalDNSError(" ".join(ptr_conflicts))
                 ptr_cursor = conn.execute(
                     """
                     INSERT OR REPLACE INTO local_dns_records(name, fqdn, record_type, value, ttl, comment, enabled, auto_ptr, created_at, updated_at)
@@ -320,7 +337,7 @@ def add_host(hostname: str, domain: str, address: str, ttl: Any = 300, comment: 
                 )
                 ptr_id = ptr_cursor.lastrowid
                 conn.execute("UPDATE local_dns_records SET ptr_record_id=? WHERE id=?", (ptr_id, cursor.lastrowid))
-        return warnings
+        return [message for _severity, message in findings]
 
 
 def add_record(record_type: str, fqdn: str, value: str, ttl: Any = 300, comment: str = "", enabled: bool = True, override: bool = False) -> list[str]:
@@ -328,9 +345,10 @@ def add_record(record_type: str, fqdn: str, value: str, ttl: Any = 300, comment:
         init_db(conn)
         with conn:
             rtype, name, clean_value, ttl_int = validate_record(record_type, fqdn, value, ttl)
-            warnings = record_warnings(conn, name, rtype, clean_value)
-            if warnings and not override:
-                raise LocalDNSError(" ".join(warnings))
+            findings = record_findings(conn, name, rtype, clean_value)
+            conflicts = [message for severity, message in findings if severity == "conflict"]
+            if conflicts and not override:
+                raise LocalDNSError(" ".join(conflicts))
             ts = now()
             conn.execute(
                 """
@@ -339,7 +357,7 @@ def add_record(record_type: str, fqdn: str, value: str, ttl: Any = 300, comment:
                 """,
                 (name.split(".", 1)[0], name, rtype, clean_value, ttl_int, comment or "", 1 if enabled else 0, ts, ts),
             )
-        return warnings
+        return [message for _severity, message in findings]
 
 
 def list_records(search: str = "") -> dict[str, Any]:
@@ -360,9 +378,10 @@ def update_record(record_id: int, record_type: str, fqdn: str, value: str, ttl: 
         init_db(conn)
         with conn:
             rtype, name, clean_value, ttl_int = validate_record(record_type, fqdn, value, ttl)
-            warnings = record_warnings(conn, name, rtype, clean_value, record_id)
-            if warnings and not override:
-                raise LocalDNSError(" ".join(warnings))
+            findings = record_findings(conn, name, rtype, clean_value, record_id)
+            conflicts = [message for severity, message in findings if severity == "conflict"]
+            if conflicts and not override:
+                raise LocalDNSError(" ".join(conflicts))
             conn.execute(
                 """
                 UPDATE local_dns_records
@@ -371,7 +390,7 @@ def update_record(record_id: int, record_type: str, fqdn: str, value: str, ttl: 
                 """,
                 (name.split(".", 1)[0], name, rtype, clean_value, ttl_int, comment or "", 1 if enabled else 0, now(), record_id),
             )
-        return warnings
+        return [message for _severity, message in findings]
 
 
 def toggle_record(record_id: int) -> None:

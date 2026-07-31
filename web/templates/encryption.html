@@ -42,28 +42,31 @@
     </div>
     <p class="muted">Wildcard listen addresses such as <span class="mono">0.0.0.0</span> and <span class="mono">::</span> expose client DNS listeners on every host interface allowed by dnsdist ACLs and firewall policy. Use loopback or a specific LAN address for private testing.</p>
     <div class="grid compact">
-      <label class="row"><input type="checkbox" name="doh_enabled" value="1" {% if cfg.doh_enabled == "1" %}checked{% endif %}> DoH (TCP 443)</label>
+      <label class="row"><input type="checkbox" name="doh_enabled" value="1" {% if cfg.doh_enabled == "1" and capabilities.doh %}checked{% endif %} {% if not capabilities.doh %}disabled{% endif %}> DoH (TCP 443){% if not capabilities.doh %} {{ ui.status_badge("Unsupported by installed dnsdist", "neutral") }}{% endif %}</label>
       <label>DoH port<input name="doh_port" type="number" min="1" max="65535" value="{{ cfg.doh_port }}"></label>
       <label>DoH path<input name="doh_path" value="{{ cfg.doh_path }}"></label>
-      <label class="row"><input type="checkbox" name="doh3_enabled" value="1" {% if cfg.doh3_enabled == "1" %}checked{% endif %}> DoH3 (UDP 443)</label>
+      <label class="row"><input type="checkbox" name="doh3_enabled" value="1" {% if cfg.doh3_enabled == "1" and capabilities.doh3 %}checked{% endif %} {% if not capabilities.doh3 %}disabled{% endif %}> DoH3 (UDP 443){% if not capabilities.doh3 %} {{ ui.status_badge("Unsupported by installed dnsdist", "neutral") }}{% endif %}</label>
       <label>DoH3 port<input name="doh3_port" type="number" min="1" max="65535" value="{{ cfg.doh3_port }}"></label>
-      <label class="row"><input type="checkbox" name="dot_enabled" value="1" {% if cfg.dot_enabled == "1" %}checked{% endif %}> DoT (TCP 853)</label>
+      <label class="row"><input type="checkbox" name="dot_enabled" value="1" {% if cfg.dot_enabled == "1" and capabilities.dot %}checked{% endif %} {% if not capabilities.dot %}disabled{% endif %}> DoT (TCP 853){% if not capabilities.dot %} {{ ui.status_badge("Unsupported by installed dnsdist", "neutral") }}{% endif %}</label>
       <label>DoT port<input name="dot_port" type="number" min="1" max="65535" value="{{ cfg.dot_port }}"></label>
-      <label class="row"><input type="checkbox" name="doq_enabled" value="1" {% if cfg.doq_enabled == "1" %}checked{% endif %}> DoQ (UDP 853)</label>
+      <label class="row"><input type="checkbox" name="doq_enabled" value="1" {% if cfg.doq_enabled == "1" and capabilities.doq %}checked{% endif %} {% if not capabilities.doq %}disabled{% endif %}> DoQ (UDP 853){% if not capabilities.doq %} {{ ui.status_badge("Unsupported by installed dnsdist", "neutral") }}{% endif %}</label>
       <label>DoQ port<input name="doq_port" type="number" min="1" max="65535" value="{{ cfg.doq_port }}"></label>
     </div>
+    {% if not capabilities.doq or not capabilities.doh3 %}
+    <p class="muted">DoQ/DoH3 need a dnsdist build with QUIC support, which Debian's own default dnsdist package does not include. Installing dnsdist from the official PowerDNS repository (see <span class="mono">docs/dnsdist.md</span>) adds this support; Alderpoint DNS detects it automatically and enables these controls once it's present.</p>
+    {% endif %}
     <details>
-      <summary>DNSCrypt (experimental)</summary>
+      <summary>DNSCrypt (experimental){% if not capabilities.dnscrypt %} {{ ui.status_badge("Unsupported by installed dnsdist", "neutral") }}{% endif %}</summary>
       <p class="muted">DNSCrypt requires generating provider/resolver key material through dnsdist's own console interface. This is not reliably available on every install; if generation fails, DNSCrypt is automatically left disabled and the deployment message explains why, without blocking DoH/DoH3/DoT/DoQ.</p>
       <div class="grid compact">
-        <label class="row"><input type="checkbox" name="dnscrypt_enabled" value="1" {% if cfg.dnscrypt_enabled == "1" %}checked{% endif %}> Enable DNSCrypt</label>
+        <label class="row"><input type="checkbox" name="dnscrypt_enabled" value="1" {% if cfg.dnscrypt_enabled == "1" and capabilities.dnscrypt %}checked{% endif %} {% if not capabilities.dnscrypt %}disabled{% endif %}> Enable DNSCrypt</label>
         <label>DNSCrypt port<input name="dnscrypt_port" type="number" min="1" max="65535" value="{{ cfg.dnscrypt_port }}"></label>
         <label>Provider name<input name="dnscrypt_provider" value="{{ cfg.dnscrypt_provider }}"></label>
       </div>
       {% if dnscrypt_fingerprint %}<p class="muted mono wrap-anywhere">Provider public key: {{ dnscrypt_fingerprint }}</p>{% endif %}
     </details>
     <div class="form-actions">
-      <button>Save and deploy</button>
+      <button data-pending-label="Saving and deploying…">Save and deploy</button>
     </div>
   </form>
 
@@ -97,7 +100,7 @@
       <form method="post" action="/encryption/certificate/local-ca" data-confirm="Issue a certificate from Alderpoint DNS's local CA (creating the CA first if needed) and deploy it?">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <p class="muted">Creates (or reuses) a local Alderpoint DNS CA and issues a leaf certificate signed by it. Trust the CA certificate on clients to avoid browser/OS warnings.</p>
-        <div class="form-actions"><button class="secondary">Issue from local CA</button></div>
+        <div class="form-actions"><button class="secondary" data-pending-label="Issuing…">Issue from local CA</button></div>
       </form>
     </details>
 
@@ -108,7 +111,7 @@
         <label>Certificate file (PEM)<input type="file" name="cert_file" accept=".crt,.pem" required></label>
         <label>Key file (PEM)<input type="file" name="key_file" accept=".key,.pem" required></label>
         <p class="muted">Private key contents are never displayed back in the UI.</p>
-        <div class="form-actions"><button class="secondary">Upload and deploy</button></div>
+        <div class="form-actions"><button class="secondary" data-pending-label="Uploading and deploying…">Upload and deploy</button></div>
       </form>
     </details>
 

@@ -77,13 +77,13 @@
   {% call ui.table_wrap("table-compact") %}
     <table>
       <colgroup><col style="width: 26%"><col style="width: 14%"><col></colgroup>
-      <thead><tr><th>Category</th><th>Sources</th><th>Actions</th></tr></thead>
+      <thead><tr><th>Category</th><th>Sources</th><th class="actions-col">Actions</th></tr></thead>
       <tbody>
         {% for cat in categories %}
           <tr>
             <td>{{ ui.category_badge(cat.name) }}</td>
             <td class="mono">{{ cat.source_count }}</td>
-            <td>
+            <td class="actions-col">
               {% if cat.key == "uncategorized" %}
                 <span class="muted secondary">Built-in</span>
               {% else %}
@@ -143,21 +143,22 @@
     {% call ui.table_wrap("table-compact") %}
     <table>
       <colgroup>
-        <col style="width: 19%"><col style="width: 19%"><col style="width: 11%"><col style="width: 8%">
-        <col style="width: 8%"><col style="width: 12%"><col style="width: 9%"><col style="width: 14%">
+        <col style="width: 17%"><col style="width: 17%"><col style="width: 10%"><col style="width: 7%">
+        <col style="width: 8%"><col style="width: 11%"><col style="width: 12%"><col style="width: 18%">
       </colgroup>
-      <thead><tr><th>Name</th><th>Source URL</th><th>Category</th><th>Status</th><th>Rules</th><th>Last update</th><th>Health</th><th>Actions</th></tr></thead>
+      <thead><tr><th>Name</th><th>Source URL</th><th>Category</th><th>Status</th><th>Unique rules</th><th>Last update</th><th>Health</th><th class="actions-col">Actions</th></tr></thead>
       <tbody>
         {% for s in sources %}
+          {% set h = s.health %}
           <tr>
             <td class="truncate" title="{{ s.name }}">{{ s.name }}</td>
             <td class="mono truncate" title="{{ s.url }}">{{ s.url }}</td>
             <td class="truncate">{{ ui.category_badge((categories|selectattr("key", "equalto", s.category)|first).name if categories|selectattr("key", "equalto", s.category)|list else s.category) }}</td>
             <td>{{ ui.status_badge("Enabled", "healthy") if s.enabled else ui.status_badge("Disabled", "unavailable") }}</td>
-            <td class="mono" title="{{ s.accepted_domains }} accepted, {{ s.invalid_rules }} invalid, {{ s.unsupported_rules }} unsupported">{{ s.accepted_domains }}</td>
+            <td class="mono" title="{{ s.parsed_rules }} parsed, {{ s.duplicate_domains }} duplicates, {{ s.invalid_rules }} invalid, {{ s.unsupported_rules }} unsupported">{{ s.unique_active_domains }}</td>
             <td class="mono truncate">{{ s.last_success or "Never" }}</td>
-            <td>{% if s.last_error %}{{ ui.status_badge("Error", "down") }}{% elif not s.last_success %}{{ ui.status_badge("Pending", "unavailable") }}{% else %}{{ ui.status_badge("Healthy", "healthy") }}{% endif %}</td>
-            <td>
+            <td>{{ ui.status_badge(h.label, h.tone) }}{% if s.using_cached_copy %} <span class="muted secondary">(cached)</span>{% endif %}</td>
+            <td class="actions-col">
               <div class="row">
                 <button type="button" class="secondary" data-row-edit-toggle aria-controls="blocklistEdit{{ s.id }}" aria-expanded="false">Edit</button>
                 {% call ui.overflow_menu("blocklistMenu" ~ s.id) %}
@@ -184,7 +185,45 @@
                 </label>
                 <div class="form-actions"><button type="submit" class="secondary">Save</button></div>
               </form>
-              {% if s.last_error %}<p class="bad">{{ s.last_error }}</p>{% endif %}
+              {% if s.last_error %}<p class="bad wrap-anywhere">{{ s.last_error }}</p>{% endif %}
+            </td>
+          </tr>
+          <tr>
+            <td colspan="8">
+              <details>
+                <summary class="muted secondary">Details</summary>
+                <div class="grid compact" style="margin-top: 0.5rem">
+                  <div><span class="muted secondary">Last attempt</span><p class="mono wrap-anywhere">{{ s.last_attempt or "Never" }}</p></div>
+                  <div><span class="muted secondary">Last successful download</span><p class="mono wrap-anywhere">{{ s.last_success or "Never" }}</p></div>
+                  <div><span class="muted secondary">Last successful compilation</span><p class="mono wrap-anywhere">{{ s.last_compile_success or "Never" }}</p></div>
+                  <div><span class="muted secondary">Downloaded entries</span><p class="mono">{{ s.downloaded_entries }}</p></div>
+                  <div><span class="muted secondary">Parsed entries</span><p class="mono">{{ s.parsed_rules }}</p></div>
+                  <div><span class="muted secondary">Unique active rules</span><p class="mono">{{ s.unique_active_domains }}</p></div>
+                  <div><span class="muted secondary">Duplicates</span><p class="mono">{{ s.duplicate_domains }}</p></div>
+                  <div><span class="muted secondary">Invalid</span><p class="mono">{{ s.invalid_rules }}</p></div>
+                  <div><span class="muted secondary">Unsupported</span><p class="mono">{{ s.unsupported_rules }}</p></div>
+                  <div><span class="muted secondary">Cached copy active</span><p class="mono">{{ "Yes" if s.using_cached_copy else "No" }}</p></div>
+                  <div><span class="muted secondary">Last error/warning</span><p class="mono wrap-anywhere">{{ s.last_error or s.last_warning or "None" }}</p></div>
+                </div>
+                {% if s.rejected_samples_parsed %}
+                  <p class="muted secondary" style="margin-top: 0.75rem">Sample rejected lines</p>
+                  {% call ui.table_wrap("table-compact") %}
+                  <table>
+                    <thead><tr><th>Line</th><th>Kind</th><th>Reason</th><th>Excerpt</th></tr></thead>
+                    <tbody>
+                      {% for sample in s.rejected_samples_parsed %}
+                        <tr>
+                          <td class="mono">{{ sample.line }}</td>
+                          <td>{{ sample.kind }}</td>
+                          <td class="wrap-anywhere">{{ sample.reason }}</td>
+                          <td class="mono wrap-anywhere">{{ sample.excerpt }}</td>
+                        </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                  {% endcall %}
+                {% endif %}
+              </details>
             </td>
           </tr>
         {% endfor %}

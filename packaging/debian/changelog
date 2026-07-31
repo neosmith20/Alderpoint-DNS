@@ -29,8 +29,106 @@ alderpointdns (0.4.0~beta2-1) unstable; urgency=medium
   * build-deb.sh now derives the Debian package version from VERSION
     (0.4.0-beta.2 -> 0.4.0~beta2-1) instead of embedding the semver-style
     string verbatim.
+  * Fixed a first-clean-install failure where all four core services
+    crash-looped after a "successful" install: secrets.env/dnsdist API
+    and web credentials are group-readable (0640, not 0600); the
+    database is chowned to alderpointdns after generation, without
+    broadening ownership of the root-owned, world-readable compiled
+    BIND/dnsdist config; named's AppArmor local override is installed
+    and reloaded; postinst now generates unique per-install dnsdist
+    console/web/API credentials, hashes the web password/API key with
+    dnsdist's own hashPassword() before writing dnsdist.conf (no more
+    plaintext-credential warning, no weaker auth), and preserves those
+    credentials across upgrades while regenerating them on a genuine
+    purge + reinstall. dnsdist.conf's newRemoteLogger/RemoteLogResponseAction
+    calls and DoH3/DoQ/DNSCrypt listener setup are now compatible with
+    (and gracefully degrade against) Debian 13's own archive dnsdist
+    package, and the package now requires dnsdist (>= 2.0.0) so
+    installing without the documented PowerDNS repository fails cleanly
+    at dependency resolution instead of silently pulling an incompatible
+    build. postinst validates configuration and verifies all four
+    services reach the active state before reporting success;
+    StartLimitBurst/StartLimitIntervalSec caps prevent runaway restart
+    loops. Added tests/test_clean_install_container.sh (fresh Debian 13 +
+    systemd container, no inherited dev-machine state) and
+    tests/test_deb_package_contents.sh (static built-package inspection).
+  * Finalized the project license: source-available under the PolyForm
+    Noncommercial License 1.0.0 (LICENSE), not open source; commercial
+    use requires a separate license (COMMERCIAL_LICENSING.md). Added
+    COPYRIGHT, CONTRIBUTOR_LICENSE_AGREEMENT.md, TRADEMARKS.md, and
+    THIRD_PARTY_NOTICES.md. The package now installs LICENSE/copyright/
+    COMMERCIAL_LICENSING.md/THIRD_PARTY_NOTICES.md under
+    /usr/share/doc/alderpointdns/.
+  * Fixed a second clean-install failure introduced by the previous fix:
+    requiring dnsdist (>= 2.0.0) meant the package could not be installed
+    at all on a genuinely fresh Debian 13 system, since that version is
+    only available from the PowerDNS project's own (non-default) apt
+    repository and a .deb cannot configure a third-party repository to
+    satisfy its own dependency before apt resolves it. Depends now reads
+    dnsdist (>= 1.9.0), the lowest bound Debian 13's own archive dnsdist
+    (1.9.x) satisfies, so `apt-get install -y ./alderpointdns_*.deb`
+    resolves and installs cleanly with no third-party repository, key, or
+    pin required. Debian's own dnsdist build supports plain DNS, DoH, DoT,
+    DNSCrypt, and everything the BIND backend integration needs (packet
+    cache, ACLs, analytics logging, authenticated web/API access), but
+    lacks DNS-over-QUIC/DNS-over-HTTP/3; DoQ/DoH3 now ship disabled by
+    default (packaging/dnsdist.service.d/alderpointdns.conf) and
+    app/encryption.py detects the installed dnsdist's actual capabilities
+    (parsing `dnsdist --version`'s feature list) both to keep unsupported
+    protocols out of a deployment -- degrading just that protocol with a
+    clear message instead of failing/rolling back the whole deployment --
+    and to render them as unsupported, not enabled or broken, on the
+    Encryption Settings page. The PowerDNS repository remains available
+    (docs/dnsdist.md) as an optional upgrade path for DoQ/DoH3, detected
+    automatically with no package reinstall required. Rewrote
+    tests/test_clean_install_container.sh to install strictly from stock
+    Debian 13 repositories (`apt-get install -y ./package.deb`, no
+    repo.powerdns.com reference permitted anywhere in the run) and to
+    verify service state, DNS resolution, credential handling, and
+    reboot-equivalent restart behavior against that stock build.
+  * Fixed the Encryption Settings page (and the dashboard's System
+    Health cert card) throwing a 500 on a genuinely fresh install:
+    /etc/alderpointdns/certs was root:_dnsdist mode 0750, so the
+    unprivileged alderpointdns web process -- in neither group -- got
+    PermissionError on a bare stat() of its own certificate, despite the
+    certificate file itself being world-readable (0644). Changed the
+    directory to mode 0751 (traversable, but still no read/write for
+    "other", so the 0640 private key stays unreadable); ensure_tls_cert.sh
+    now applies this unconditionally, including on upgrades where
+    certificate material already exists. Also made unsupported-protocol
+    enforcement symmetric: encryption.enforce_capabilities(), factored
+    out of deploy_encryption(), is now applied when saving Encryption
+    Settings too, so a forged POST cannot persist doq_enabled=1/
+    doh3_enabled=1 on an installation whose dnsdist lacks that capability.
+  * Web interface usability pass from beta feedback: a reusable
+    pending-action button state (disables, swaps to an in-progress label
+    with a spinner, sets aria-busy, restores on failure) applied to every
+    form site-wide instead of per-page handlers; restructured status-tile
+    cards (name centered on top, status badge centered below it, not
+    beside the name) across System Health, System Status, Encryption,
+    Replication, Backup, and DNS Settings; a shared centered Actions-column
+    table utility applied to Local DNS, Blocklists, Custom Rules, DNS
+    Settings upstreams, Backup, and Replication; a recognizable icon,
+    accessible name, and tooltip for the collapsed-sidebar Logout control;
+    and sidebar nav sections that collapse again after opening (including
+    a section containing the active page) with expand/collapse state now
+    persisted across navigation.
+  * Added a first-class Pi-hole Migration panel to Import and Migration,
+    alongside AdGuard Home's, explaining the supported Pi-hole export
+    format and warning that group assignments have no Alderpoint DNS
+    equivalent. The Pi-hole importer backend and preview/apply/rollback
+    pipeline already existed; only the dedicated UI panel and end-to-end
+    route tests against the synthetic Pi-hole fixture were added.
+  * Closed import-idempotency gaps: blocklist sources are now also matched
+    by URL (not just name) so the same feed re-added under a different
+    name is skipped instead of duplicated, and comment/invalid/unsupported
+    custom-rule entries are now deduplicated the same way active rules
+    already were. Local DNS records, client aliases, and upstream
+    resolvers were already correctly deduplicated. Added tests proving
+    repeated AdGuard/Pi-hole imports (as separate jobs) do not increase
+    any destination table's row count.
 
- -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Wed, 29 Jul 2026 21:02:00 -0600
+ -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Thu, 30 Jul 2026 23:59:00 -0600
 
 alderpointdns (0.4.0~beta1-1) unstable; urgency=medium
 

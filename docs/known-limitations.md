@@ -25,3 +25,16 @@
   four service units (`alderpointdns`, `alderpointdns-analytics`, `named`,
   `dnsdist`); it is not a general journal viewer and cannot show logs for
   other host services by design.
+- System > Administration supports changing the administrator's password and
+  revoking sessions, but not renaming the administrator account. Deferred
+  deliberately: a rename would need to reconcile in-flight sessions and the
+  audit log's `username` column (a point-in-time label, not a live foreign
+  key) with the new name, and the local recovery CLI's `--username` targeting.
+  Single-admin deployments are unaffected; revisit if multi-admin support is
+  added.
+- System > Notifications' event catalog includes TLS certificate expiry, low
+  disk space, and abnormal SERVFAIL rate as subscribable categories, but no
+  detector evaluates them yet -- only service up/down/recovered, repeated
+  restarts, blocklist/deploy failure, backup failure, upstream resolver
+  degraded/all-unavailable, and replication delayed/failed are actually
+  wired to fire. Real detectors for the remaining three are follow-up work.

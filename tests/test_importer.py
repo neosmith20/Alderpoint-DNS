@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -16,10 +17,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 warnings.simplefilter("ignore", ResourceWarning)
 
-from app import alderpointdns_compiler, custom_rules, importer, local_dns, upstream_dns  # noqa: E402
+from app import alderpointdns_compiler, backup, custom_rules, importer, local_dns, upstream_dns  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 ADGUARD_FIXTURE = (FIXTURES / "adguard_home.yaml").read_text()
+ADGUARD_REWRITES_FIXTURE = (FIXTURES / "adguard_rewrites.yaml").read_text()
+ADGUARD_SCHEMA34_FIXTURE = (FIXTURES / "adguard_schema34.yaml").read_text()
 PIHOLE_FIXTURE = (FIXTURES / "pihole_export.txt").read_text()
 
 
@@ -295,16 +298,337 @@ class ImporterTest(unittest.TestCase):
             if item["selectable"]:
                 self.assertEqual(item["outcome"], "inactive")
 
-    def test_translate_adguard_rewrites_split_local_vs_custom(self) -> None:
+    def test_translate_adguard_rewrites_all_non_wildcard_go_to_local_dns(self) -> None:
+        # AdGuard's DNS Rewrites are AdGuard's own Local-DNS-equivalent
+        # feature: every non-wildcard rewrite maps to Local DNS regardless
+        # of whether the name falls under the configured internal domain
+        # (matching a real migration where every rewrite named a LAN host
+        # under the operator's own domain, e.g. internal.example, not the
+        # Alderpoint DNS internal domain, and all of them belong in Local
+        # DNS, not Custom Filtering Rules).
         translation = importer.parse_adguard_yaml(ADGUARD_FIXTURE, "home.arpa")
         local = {(r["fqdn"], r["record_type"], r["value"]) for r in translation["rewrites_as_local_dns"]}
         self.assertIn(("nas.home.arpa", "A", "192.168.1.50"), local)
         self.assertIn(("printer.home.arpa", "AAAA", "fd00::50"), local)
         self.assertIn(("alias.home.arpa", "CNAME", "target.home.arpa"), local)
+        self.assertIn(("external.example.com", "A", "192.168.1.51"), local)
         rules = {entry["text"]: entry["rule"] for entry in translation["custom_rules"]}
-        self.assertEqual(rules["external.example.com -> 192.168.1.51"], "|external.example.com^$dnsrewrite=192.168.1.51")
+        self.assertNotIn("external.example.com -> 192.168.1.51", rules)
+        # Only wildcard rewrites, which Local DNS cannot represent, fall
+        # back to a custom $dnsrewrite rule (IP answer) or an unsupported
+        # finding (CNAME-style answer).
         self.assertEqual(rules["*.wildcard.example -> 192.168.1.52"], "||wildcard.example^$dnsrewrite=192.168.1.52")
         self.assertTrue(any("badalias.home.arpa" in note for note in translation["unsupported_rules"]))
+
+    # -- AdGuard DNS rewrite support (current schema, legacy schema, and
+    #    the failure mode where a real migration reported "Applied" with
+    #    every Local DNS record silently omitted) -----------------------
+
+    def test_translate_adguard_rewrites_current_schema_multi_answer_and_disabled(self) -> None:
+        translation = importer.parse_adguard_yaml(ADGUARD_REWRITES_FIXTURE, "home.arpa")
+        local = {(r["fqdn"], r["record_type"], r["value"]): r for r in translation["rewrites_as_local_dns"]}
+        self.assertIn(("nas.home.arpa", "A", "192.168.1.50"), local)
+        self.assertIn(("nas.home.arpa", "A", "192.168.1.51"), local)
+        self.assertIn(("printer.home.arpa", "AAAA", "fd00::50"), local)
+        self.assertIn(("alias.home.arpa", "CNAME", "nas.home.arpa"), local)
+        self.assertIn(("retired.home.arpa", "A", "192.168.1.60"), local)
+        self.assertTrue(local[("nas.home.arpa", "A", "192.168.1.50")]["enabled"])
+        self.assertTrue(local[("nas.home.arpa", "A", "192.168.1.51")]["enabled"])
+        self.assertFalse(local[("retired.home.arpa", "A", "192.168.1.60")]["enabled"])
+        self.assertIn("disabled", local[("retired.home.arpa", "A", "192.168.1.60")]["disabled_reason"])
+        # AdGuard's "A"/"AAAA" pass-through/exclusion sentinel must never be
+        # read as a literal address or as a (nonsensical) single-label
+        # CNAME target -- it is reported, not silently dropped or misread.
+        self.assertTrue(any("excluded.home.arpa" in note and "'A'" in note for note in translation["unsupported_rules"]))
+        self.assertTrue(any("excluded6.home.arpa" in note and "'AAAA'" in note for note in translation["unsupported_rules"]))
+        self.assertFalse(any("excluded.home.arpa" in str(r) for r in translation["rewrites_as_local_dns"]))
+        self.assertFalse(any("excluded6.home.arpa" in str(r) for r in translation["rewrites_as_local_dns"]))
+
+    def test_build_migration_plan_local_dns_outcomes_new_and_disabled_at_source(self) -> None:
+        translation = importer.parse_adguard_yaml(ADGUARD_REWRITES_FIXTURE, "home.arpa")
+        plan = importer.build_migration_plan(translation, "home.arpa")
+        # Multiple valid answers for one hostname are distinct, selectable
+        # items -- not folded together or treated as duplicates of each
+        # other.
+        self.assertEqual(len(plan["categories"]["local_dns"]), 5)
+        by_record = {tuple(item["_record"]): item for item in plan["categories"]["local_dns"]}
+        self.assertEqual(by_record[("nas.home.arpa", "A", "192.168.1.50")]["outcome"], "new")
+        self.assertEqual(by_record[("nas.home.arpa", "A", "192.168.1.51")]["outcome"], "new")
+        self.assertEqual(by_record[("retired.home.arpa", "A", "192.168.1.60")]["outcome"], "disabled at source")
+        self.assertIn("disabled in AdGuard Home", by_record[("retired.home.arpa", "A", "192.168.1.60")]["warning"])
+        # Disabled-at-source items stay selected by default -- they are
+        # imported as an inactive record, never silently dropped from the
+        # import entirely.
+        self.assertTrue(by_record[("retired.home.arpa", "A", "192.168.1.60")]["selected"])
+
+    def test_translate_adguard_rewrites_legacy_top_level_location(self) -> None:
+        # Some AdGuard Home schema versions store the rewrite list at the
+        # top level instead of nested under `filtering:`.
+        text = "rewrites:\n  - domain: legacy.home.arpa\n    answer: 192.168.9.9\n"
+        translation = importer.parse_adguard_yaml(text, "home.arpa")
+        local = {(r["fqdn"], r["record_type"], r["value"]) for r in translation["rewrites_as_local_dns"]}
+        self.assertIn(("legacy.home.arpa", "A", "192.168.9.9"), local)
+
+    def test_translate_adguard_rewrites_global_toggle_disables_all(self) -> None:
+        text = (
+            "filtering:\n  rewrites_enabled: false\n  rewrites:\n"
+            "    - domain: a.home.arpa\n      answer: 192.168.1.1\n"
+            "    - domain: b.home.arpa\n      answer: 192.168.1.2\n"
+        )
+        translation = importer.parse_adguard_yaml(text, "home.arpa")
+        self.assertEqual(len(translation["rewrites_as_local_dns"]), 2)
+        for record in translation["rewrites_as_local_dns"]:
+            self.assertFalse(record["enabled"])
+            self.assertIn("rewrites_enabled", record["disabled_reason"])
+
+    def test_adguard_dnsrewrite_cname_form_reported_unsupported_not_dropped(self) -> None:
+        translation = importer.parse_adguard_yaml(
+            "user_rules:\n  - '||cname.example^$dnsrewrite=NOERROR;CNAME;target.example'\n", "home.arpa",
+        )
+        summary = importer.summarize_migration(translation, "home.arpa")
+        unsupported = self.summary_items(summary, "unsupported")
+        self.assertTrue(any("dnsrewrite" in item["warning"] for item in unsupported))
+        self.assertTrue(any(item["selectable"] and item["outcome"] == "inactive" for item in unsupported))
+
+    def test_apply_adguard_rewrites_fixture_respects_enabled_state_and_multi_answer(self) -> None:
+        translation = importer.parse_adguard_yaml(ADGUARD_REWRITES_FIXTURE, "home.arpa")
+        job_id = importer.create_migration_job("adguard_yaml", "adguard_rewrites.yaml", translation)
+        importer.migration_preview_job(job_id, "home.arpa")
+        result = importer.apply_migration_job(job_id, default_domain="home.arpa")
+        self.assertEqual(result["counts"]["local_dns_records"], 5)
+        # The second A answer for nas.home.arpa is flagged as conflicting
+        # (the hostname already has a record) but is still added alongside
+        # the first, never overwriting it -- this is Alderpoint DNS's
+        # supported multi-answer model, just reported rather than silent.
+        self.assertEqual(result["counts"]["local_dns_conflicts"], 1)
+        with self.connect() as conn:
+            rows = {
+                (row["fqdn"], row["record_type"], row["value"]): row["enabled"]
+                for row in conn.execute("SELECT fqdn, record_type, value, enabled FROM local_dns_records")
+            }
+        self.assertEqual(rows[("nas.home.arpa", "A", "192.168.1.50")], 1)
+        self.assertEqual(rows[("nas.home.arpa", "A", "192.168.1.51")], 1)
+        self.assertEqual(rows[("retired.home.arpa", "A", "192.168.1.60")], 0, "a rewrite disabled at the source must be imported disabled, not silently activated")
+        job = importer.get_job(job_id)
+        self.assertEqual(job["result_label"], "Applied with conflicts")
+        self.assertIn("Local DNS: 5 created, 1 conflicting", job["message"])
+
+    def test_reimporting_adguard_rewrites_fixture_is_idempotent(self) -> None:
+        translation = importer.parse_adguard_yaml(ADGUARD_REWRITES_FIXTURE, "home.arpa")
+        first_job = importer.create_migration_job("adguard_yaml", "adguard_rewrites.yaml", translation)
+        importer.migration_preview_job(first_job, "home.arpa")
+        importer.apply_migration_job(first_job, default_domain="home.arpa")
+        counts_after_first = self.destination_counts()
+
+        translation_again = importer.parse_adguard_yaml(ADGUARD_REWRITES_FIXTURE, "home.arpa")
+        second_job = importer.create_migration_job("adguard_yaml", "adguard_rewrites.yaml", translation_again)
+        importer.migration_preview_job(second_job, "home.arpa")
+        result = importer.apply_migration_job(second_job, default_domain="home.arpa")
+
+        self.assertEqual(self.destination_counts(), counts_after_first, "re-importing identical AdGuard rewrite data must not create duplicate Local DNS rows")
+        self.assertEqual(result["counts"]["local_dns_records"], 0)
+        self.assertEqual(result["counts"]["duplicates_skipped"], 5)
+        job = importer.get_job(second_job)
+        self.assertIn("Local DNS: 0 created", job["message"])
+
+    def test_local_dns_conflicting_record_is_reported_and_not_overwritten(self) -> None:
+        local_dns.add_record("A", "conflict.home.arpa", "192.168.1.10", 300, "original", True)
+        translation = {"rewrites_as_local_dns": [{"fqdn": "conflict.home.arpa", "record_type": "A", "value": "192.168.1.11", "enabled": True}]}
+        job_id = importer.create_migration_job("adguard_yaml", "conflict.yaml", translation)
+        preview = importer.migration_preview_job(job_id, "home.arpa")
+        item = self.summary_items(preview["summary"], "local_dns")[0]
+        self.assertEqual(item["outcome"], "conflicting")
+        result = importer.apply_migration_job(job_id, default_domain="home.arpa")
+        self.assertEqual(result["counts"]["local_dns_records"], 1)
+        self.assertEqual(result["counts"]["local_dns_conflicts"], 1)
+        with self.connect() as conn:
+            rows = conn.execute("SELECT value FROM local_dns_records WHERE fqdn='conflict.home.arpa' AND record_type='A' ORDER BY value").fetchall()
+        self.assertEqual([r["value"] for r in rows], ["192.168.1.10", "192.168.1.11"], "the existing record must not be overwritten; the conflicting one is added alongside it")
+        job = importer.get_job(job_id)
+        self.assertIn("conflicting", job["message"])
+
+    def test_public_ip_local_dns_rewrite_is_warning_not_conflict(self) -> None:
+        # Intentional public-IP Local DNS records (e.g. a VPN/WireGuard host)
+        # are valid, deliberate data -- not conflicts -- and must import
+        # successfully without the job being reported as "Applied with
+        # conflicts".
+        translation = {
+            "rewrites_as_local_dns": [
+                {"fqdn": "wg2.internal.example", "record_type": "A", "value": "9.9.9.10", "enabled": True},
+                {"fqdn": "dallas.internal.example", "record_type": "A", "value": "1.1.1.2", "enabled": True},
+            ]
+        }
+        job_id = importer.create_migration_job("adguard_yaml", "public_ip.yaml", translation)
+        preview = importer.migration_preview_job(job_id, "home.arpa")
+        summary = preview["summary"]
+        items = self.summary_items(summary, "local_dns")
+        for item in items:
+            self.assertEqual(item["outcome"], "warning")
+            self.assertIn("Public IP address", item["warning"])
+            self.assertEqual(item["conflict"], "")
+        self.assertEqual(summary["counts"]["conflicts"], 0)
+        self.assertEqual(summary["counts"]["warnings"], 2)
+        self.assertFalse(summary["conflicts"])
+        self.assertTrue(any("wg2.internal.example" in w["label"] for w in summary["warnings"]))
+
+        result = importer.apply_migration_job(job_id, default_domain="home.arpa")
+        self.assertEqual(result["counts"]["local_dns_records"], 2)
+        self.assertEqual(result["counts"]["local_dns_conflicts"], 0)
+        self.assertEqual(result["counts"]["local_dns_warnings"], 2)
+        job = importer.get_job(job_id)
+        self.assertNotIn("conflicts", job["result_label"])
+        self.assertNotEqual(job["result_label"], "Applied with conflicts")
+        self.assertIn("warnings", job["result_label"])
+        with self.connect() as conn:
+            rows = {
+                row["fqdn"]: row["value"]
+                for row in conn.execute("SELECT fqdn, value FROM local_dns_records WHERE record_type='A'")
+            }
+        self.assertEqual(rows["wg2.internal.example"], "9.9.9.10")
+        self.assertEqual(rows["dallas.internal.example"], "1.1.1.2")
+
+    def test_deselecting_local_dns_category_reports_explicit_note(self) -> None:
+        translation = importer.parse_adguard_yaml(ADGUARD_REWRITES_FIXTURE, "home.arpa")
+        job_id = importer.create_migration_job("adguard_yaml", "adguard_rewrites.yaml", translation)
+        preview = importer.migration_preview_job(job_id, "home.arpa")
+        summary = preview["summary"]
+        all_selected = {item["key"] for section in summary["categories"] for item in section["items"] if item["selected"]}
+        local_keys = {item["key"] for item in self.summary_items(summary, "local_dns")}
+        selected = all_selected - local_keys
+        result = importer.apply_migration_job(job_id, selected=selected, default_domain="home.arpa")
+        self.assertEqual(result["counts"]["local_dns_records"], 0)
+        self.assertEqual(result["counts"]["user_deselected"], 5)
+        job = importer.get_job(job_id)
+        self.assertIn("Applied with user-deselected items", job["result_label"])
+        self.assertIn("5 Local DNS records were not imported because Local DNS was deselected", job["message"])
+        self.assertIn("Local DNS: 0 created", job["message"])
+
+    # -- schema_version: 34 real-world fixture: filters/user_rules/rewrites
+    #    must stay semantically separate (Blocklists / Custom Filtering
+    #    Rules / Local DNS), regardless of whether a rewrite's domain
+    #    happens to fall under Alderpoint DNS's configured internal domain.
+
+    def test_translate_schema34_fixture_semantic_counts(self) -> None:
+        translation = importer.parse_adguard_yaml(ADGUARD_SCHEMA34_FIXTURE, "home.arpa")
+        self.assertEqual(len(translation["blocklist_sources"]), 18)
+        self.assertEqual(len(translation["custom_rules"]), 28)
+        self.assertEqual(len(translation["rewrites_as_local_dns"]), 44)
+        self.assertEqual(len(translation["upstream_resolvers"]), 2)
+        # The blank user_rules string must never surface as a rule entry.
+        self.assertFalse(any(not str(r.get("rule", "")).strip() for r in translation["custom_rules"]))
+
+    def test_build_migration_plan_schema34_preview_counts_and_destinations(self) -> None:
+        translation = importer.parse_adguard_yaml(ADGUARD_SCHEMA34_FIXTURE, "home.arpa")
+        plan = importer.build_migration_plan(translation, "home.arpa")
+        blocklist_items = plan["categories"]["blocklists"]
+        allow_items = plan["categories"]["custom_allows"]
+        local_dns_items = plan["categories"]["local_dns"]
+        self.assertEqual(len(blocklist_items), 18)
+        self.assertEqual(len(allow_items), 28)
+        self.assertEqual(len(local_dns_items), 44)
+        self.assertTrue(all(item["destination"] == "Blocklists" for item in blocklist_items))
+        self.assertTrue(all(item["destination"] == "Custom Rules" for item in allow_items))
+        self.assertTrue(all(item["destination"] == "Local DNS" for item in local_dns_items))
+        self.assertTrue(all(item["selected"] for item in blocklist_items + allow_items + local_dns_items))
+        # The blank user_rules entry must not create a preview item, count,
+        # or "unsupported" finding anywhere.
+        all_items = importer._plan_items(plan)
+        self.assertFalse(any(not item["source"].strip() for item in all_items))
+        self.assertEqual(len(all_items), 18 + 28 + 44 + 2)
+
+    def test_apply_schema34_fixture_reports_exact_per_component_breakdown(self) -> None:
+        translation = importer.parse_adguard_yaml(ADGUARD_SCHEMA34_FIXTURE, "home.arpa")
+        job_id = importer.create_migration_job("adguard_yaml", "adguard_schema34.yaml", translation)
+        importer.migration_preview_job(job_id, "home.arpa")
+        result = importer.apply_migration_job(job_id, default_domain="home.arpa")
+        counts = result["counts"]
+        self.assertEqual(counts["blocklists_added"], 18)
+        self.assertEqual(counts["allow_rules"], 28)
+        self.assertEqual(counts["block_rules"], 0)
+        self.assertEqual(counts["rewrite_rules"], 0)
+        self.assertEqual(counts["local_dns_records"], 44)
+        self.assertEqual(counts["upstream_resolvers"], 2)
+        self.assertEqual(counts["unsupported_kept_inactive"], 0)
+        self.assertEqual(counts["invalid_kept_inactive"], 0)
+        self.assertEqual(counts["user_deselected"], 0)
+        job = importer.get_job(job_id)
+        self.assertEqual(job["result_label"], "Applied")
+        self.assertIn("Blocklists: 18 created", job["message"])
+        self.assertIn("Custom rules: 28 created", job["message"])
+        self.assertIn("Local DNS: 44 created", job["message"])
+        self.assertIn("Unsupported: 0", job["message"])
+        self.assertIn("Deselected: 0", job["message"])
+        with self.connect() as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM custom_filter_rules").fetchone()[0], 28)
+            self.assertEqual(conn.execute("SELECT count(*) FROM local_dns_records").fetchone()[0], 44)
+            # No AdGuard rewrite leaked into Custom Filtering Rules, and no
+            # AdGuard custom/allow rule leaked into Local DNS.
+            rewrite_domains = conn.execute(
+                "SELECT count(*) FROM custom_filter_rules WHERE domain LIKE '%.internal.example'"
+            ).fetchone()[0]
+            self.assertEqual(rewrite_domains, 0)
+            allow_rule_hosts = conn.execute(
+                "SELECT count(*) FROM local_dns_records WHERE fqdn LIKE '%.live.com' OR fqdn LIKE '%.xboxlive.com'"
+            ).fetchone()[0]
+            self.assertEqual(allow_rule_hosts, 0)
+            local_dns_hosts = {row["fqdn"] for row in conn.execute("SELECT fqdn FROM local_dns_records")}
+            self.assertIn("host01.internal.example", local_dns_hosts)
+            self.assertIn("host44.internal.example", local_dns_hosts)
+
+    def test_apply_schema34_fixture_generates_bind_zone_for_rewrite_domain(self) -> None:
+        translation = importer.parse_adguard_yaml(ADGUARD_SCHEMA34_FIXTURE, "home.arpa")
+        job_id = importer.create_migration_job("adguard_yaml", "adguard_schema34.yaml", translation)
+        importer.migration_preview_job(job_id, "home.arpa")
+        importer.apply_migration_job(job_id, default_domain="home.arpa")
+        with local_dns.connect() as conn:
+            zones = local_dns.build_zone_files(conn, self.tmp / "schema34-stage", 2026073001)
+        by_name = {zone.zone: zone.text for zone in zones}
+        self.assertIn("internal.example", by_name)
+        self.assertIn("host01 300 IN A 172.16.40.1", by_name["internal.example"])
+        # None of the rewrite hostnames were instead emitted only as an RPZ
+        # / custom-rule artifact -- Local DNS zone data is the only place
+        # they appear.
+        self.assertNotIn("home.arpa", "".join(by_name.get("internal.example", "")))
+
+    def test_reimporting_schema34_fixture_is_idempotent_across_all_components(self) -> None:
+        translation = importer.parse_adguard_yaml(ADGUARD_SCHEMA34_FIXTURE, "home.arpa")
+        first_job = importer.create_migration_job("adguard_yaml", "adguard_schema34.yaml", translation)
+        importer.migration_preview_job(first_job, "home.arpa")
+        importer.apply_migration_job(first_job, default_domain="home.arpa")
+        counts_after_first = self.destination_counts()
+
+        translation_again = importer.parse_adguard_yaml(ADGUARD_SCHEMA34_FIXTURE, "home.arpa")
+        second_job = importer.create_migration_job("adguard_yaml", "adguard_schema34.yaml", translation_again)
+        importer.migration_preview_job(second_job, "home.arpa")
+        result = importer.apply_migration_job(second_job, default_domain="home.arpa")
+
+        self.assertEqual(self.destination_counts(), counts_after_first, "re-importing identical AdGuard data must not create duplicate rows")
+        counts = result["counts"]
+        self.assertEqual(counts["local_dns_records"], 0)
+        self.assertEqual(counts["allow_rules"], 0)
+        job = importer.get_job(second_job)
+        self.assertIn("Local DNS: 0 created", job["message"])
+
+    def test_schema34_changed_rewrite_answer_is_conflict_not_silent_overwrite(self) -> None:
+        translation = importer.parse_adguard_yaml(ADGUARD_SCHEMA34_FIXTURE, "home.arpa")
+        job_id = importer.create_migration_job("adguard_yaml", "adguard_schema34.yaml", translation)
+        importer.migration_preview_job(job_id, "home.arpa")
+        importer.apply_migration_job(job_id, default_domain="home.arpa")
+
+        changed = ADGUARD_SCHEMA34_FIXTURE.replace("answer: 172.16.40.1\n", "answer: 172.16.40.99\n")
+        self.assertNotEqual(changed, ADGUARD_SCHEMA34_FIXTURE)
+        translation2 = importer.parse_adguard_yaml(changed, "home.arpa")
+        job_id2 = importer.create_migration_job("adguard_yaml", "adguard_schema34.yaml", translation2)
+        importer.migration_preview_job(job_id2, "home.arpa")
+        result = importer.apply_migration_job(job_id2, default_domain="home.arpa")
+        self.assertEqual(result["counts"]["local_dns_conflicts"], 1)
+        job = importer.get_job(job_id2)
+        self.assertIn("conflicts", job["result_label"])
+        self.assertNotEqual(job["result_label"], "Applied")
+        with self.connect() as conn:
+            rows = {row["value"] for row in conn.execute("SELECT value FROM local_dns_records WHERE fqdn='host01.internal.example'")}
+            self.assertIn("172.16.40.1", rows, "the original record must not be silently overwritten")
+            self.assertIn("172.16.40.99", rows, "the conflicting answer is added, not dropped")
 
     def test_translate_adguard_sources_carry_enabled_state_and_category(self) -> None:
         translation = importer.parse_adguard_yaml(ADGUARD_FIXTURE, "home.arpa")
@@ -633,12 +957,16 @@ class ImporterTest(unittest.TestCase):
         self.assertEqual(counts["blocklists_added"], 3)
         self.assertEqual(counts["block_rules"], 6)
         self.assertEqual(counts["allow_rules"], 2)
-        self.assertEqual(counts["rewrite_rules"], 6)
+        # external.example.com -> 192.168.1.51 is now a Local DNS record
+        # (every non-wildcard AdGuard rewrite is Local DNS regardless of
+        # domain), so only the wildcard rewrite and the explicit user_rules
+        # $dnsrewrite line remain custom "rewrite" rules.
+        self.assertEqual(counts["rewrite_rules"], 5)
         self.assertEqual(counts["regex_rules"], 2)
         self.assertEqual(counts["comments"], 3)
         self.assertEqual(counts["invalid_kept_inactive"], 1)
         self.assertEqual(counts["unsupported_kept_inactive"], 4)
-        self.assertEqual(counts["local_dns_records"], 3)
+        self.assertEqual(counts["local_dns_records"], 4)
         self.assertEqual(counts["upstream_resolvers"], 2)
         self.assertEqual(counts["client_aliases"], 2)
         with self.connect() as conn:
@@ -649,6 +977,81 @@ class ImporterTest(unittest.TestCase):
             hosts_alias = conn.execute("SELECT comment FROM custom_filter_rules WHERE domain='nas-alias.example'").fetchone()
             self.assertEqual(hosts_alias["comment"], "media box")
             self.assertEqual(local_dns.alias_for_client("192.168.1.77"), "Phone")
+
+    # -- idempotent re-import (against an install that already has the data) -
+
+    def test_reimporting_identical_adguard_data_is_idempotent(self) -> None:
+        # Simulates a beta tester re-running the same AdGuard migration a
+        # second time (e.g. after re-uploading the same AdGuardHome.yaml)
+        # against an Alderpoint DNS install that already has everything from
+        # the first run: as two separate jobs, not a re-apply of the same
+        # job, since that's what create_migration_job/apply_migration_job
+        # look like from a fresh upload each time.
+        translation = importer.parse_adguard_yaml(ADGUARD_FIXTURE, "home.arpa")
+        first_job = importer.create_migration_job("adguard_yaml", "adguard_home.yaml", translation)
+        importer.migration_preview_job(first_job, "home.arpa")
+        importer.apply_migration_job(first_job, default_domain="home.arpa")
+        counts_after_first = self.destination_counts()
+
+        translation_again = importer.parse_adguard_yaml(ADGUARD_FIXTURE, "home.arpa")
+        second_job = importer.create_migration_job("adguard_yaml", "adguard_home.yaml", translation_again)
+        importer.migration_preview_job(second_job, "home.arpa")
+        result = importer.apply_migration_job(second_job, default_domain="home.arpa")
+
+        self.assertEqual(self.destination_counts(), counts_after_first, "re-importing identical AdGuard data must not create duplicate rows")
+        counts = result["counts"]
+        self.assertEqual(counts["blocklists_added"], 0)
+        self.assertEqual(counts["block_rules"], 0)
+        self.assertEqual(counts["allow_rules"], 0)
+        self.assertEqual(counts["rewrite_rules"], 0)
+        self.assertEqual(counts["regex_rules"], 0)
+        self.assertEqual(counts["local_dns_records"], 0)
+        self.assertEqual(counts["upstream_resolvers"], 0)
+        self.assertEqual(counts["invalid_kept_inactive"], 0)
+        self.assertEqual(counts["unsupported_kept_inactive"], 0)
+        self.assertEqual(counts["comments"], 0)
+        # blocklists_updated (matched by name) is expected -- an upsert, not
+        # a duplicate row -- as is client_aliases (also an upsert by CIDR).
+        # Everything else from the first import (every rule form, every
+        # local DNS record, every upstream resolver) is recognized as
+        # already present and skipped instead.
+        self.assertEqual(counts["duplicates_skipped"], 6 + 2 + 6 + 2 + 3 + 1 + 4 + 3 + 2)
+
+    def test_reimporting_identical_pihole_data_is_idempotent(self) -> None:
+        first_job, _summary = self._pihole_job()
+        importer.apply_migration_job(first_job, default_domain="home.arpa")
+        counts_after_first = self.destination_counts()
+
+        second_job, _summary = self._pihole_job()
+        result = importer.apply_migration_job(second_job, default_domain="home.arpa")
+
+        self.assertEqual(self.destination_counts(), counts_after_first, "re-importing identical Pi-hole data must not create duplicate rows")
+        counts = result["counts"]
+        self.assertEqual(counts["blocklists_added"], 0)
+        self.assertEqual(counts["block_rules"], 0)
+        self.assertEqual(counts["allow_rules"], 0)
+        self.assertEqual(counts["regex_rules"], 0)
+        self.assertEqual(counts["local_dns_records"], 0)
+        self.assertGreater(counts["duplicates_skipped"], 0)
+
+    def test_apply_skips_duplicate_blocklist_url_under_different_name(self) -> None:
+        # Same feed, re-imported under a different source name -- must not
+        # create a second subscription to the identical URL.
+        translation = {"blocklist_sources": [{"name": "Original Name", "url": "https://lists.example/ads.txt", "enabled": True}]}
+        job_id = importer.create_migration_job("pihole", "sources.txt", translation)
+        importer.migration_preview_job(job_id, "home.arpa")
+        importer.apply_migration_job(job_id, default_domain="home.arpa")
+
+        translation2 = {"blocklist_sources": [{"name": "Renamed Import", "url": "https://lists.example/ads.txt", "enabled": True}]}
+        job_id2 = importer.create_migration_job("pihole", "sources2.txt", translation2)
+        summary = importer.migration_preview_job(job_id2, "home.arpa")["summary"]
+        self.assertTrue(any("duplicate of Original Name" in e["label"] for e in summary["existing"]))
+        result = importer.apply_migration_job(job_id2, default_domain="home.arpa")
+        self.assertEqual(result["counts"]["blocklists_added"], 0)
+        self.assertEqual(result["counts"]["duplicates_skipped"], 1)
+        with self.connect() as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM sources WHERE url='https://lists.example/ads.txt'").fetchone()[0], 1)
+            self.assertIsNone(conn.execute("SELECT 1 FROM sources WHERE name='Renamed Import'").fetchone())
 
     def test_mark_job_deploy_failed_and_rollback_after_deploy_failure(self) -> None:
         job_id, _summary = self._pihole_job()
@@ -735,6 +1138,132 @@ class ImporterTest(unittest.TestCase):
         self.assertTrue(any(row["fqdn"] == "native.home.arpa" for row in parsed["rewrites_as_local_dns"]))
         self.assertIn("native-block.example", parsed["custom_block"])
         self.assertTrue(any(entry["rule"] == "||typed-rule.example^" for entry in parsed["custom_rules"]))
+
+
+class RealPreImportBackupTest(unittest.TestCase):
+    """ImporterTest.setUp() stubs out create_pre_import_backup()'s
+    subprocess call entirely (see the comment there), which is right for
+    every test in that class -- they're about migration semantics, not
+    backup/version-detection plumbing, and none of them can invoke real
+    `sudo`. (Deliberately not a subclass of ImporterTest: unittest would
+    then collect and re-run every inherited test_* method a second time
+    under this class too.)
+
+    These tests instead let the pre-import backup run for real: the fake
+    subprocess.run below calls straight through to backup.create_backup(),
+    the exact function `sudo alderpointdns_compiler.py backup-create`
+    invokes in production. That's the regression surface for the clean-VM
+    bug where alderpointdns_app_version() shelled out to a `git` binary
+    that a stock Debian 13 package install doesn't have: with git faked as
+    absent here too, an AdGuard or Pi-hole import apply must still create a
+    real, valid backup archive and go on to complete successfully."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="alderpointdns-real-backup-test-"))
+        self.old_importer_db_path = importer.DB_PATH
+        self.old_local_dns_db_path = local_dns.DB_PATH
+        self.old_upstream_dns_db_path = upstream_dns.DB_PATH
+        self.old_compiler_db_path = alderpointdns_compiler.DB_PATH
+        self.old_custom_rules_db_path = custom_rules.DB_PATH
+        self.old_upload_dir = importer.IMPORT_UPLOAD_DIR
+        importer.DB_PATH = self.tmp / "alderpointdns.db"
+        local_dns.DB_PATH = importer.DB_PATH
+        upstream_dns.DB_PATH = importer.DB_PATH
+        alderpointdns_compiler.DB_PATH = importer.DB_PATH
+        custom_rules.DB_PATH = importer.DB_PATH
+        importer.IMPORT_UPLOAD_DIR = self.tmp / "imports"
+        local_dns.STAGING_DIR = self.tmp / "staging"
+        local_dns.BACKUP_DIR = self.tmp / "backups"
+        local_dns.COMPILED_DIR = self.tmp / "compiled" / "bind"
+        local_dns.LOCAL_ZONE_DIR = local_dns.COMPILED_DIR / "local"
+        local_dns.LOCAL_ZONES_CONF = local_dns.COMPILED_DIR / "local-zones.conf"
+        local_dns.NAMED_LOCAL_CONF = self.tmp / "named.conf.local"
+        local_dns.STAGING_DIR.mkdir(parents=True)
+        local_dns.NAMED_LOCAL_CONF.write_text(
+            'acl "alderpointdns_clients" { localhost; };\nzone "alderpointdns.rpz" { type primary; file "alderpointdns.rpz"; };\n'
+        )
+        local_dns.init_db()
+        upstream_dns.init_db()
+        alderpointdns_compiler.init_db()
+        importer.init_db()
+        custom_rules.init_db()
+
+        self.real_backup_dir = self.tmp / "real-backups"
+        self.real_staging_dir = self.tmp / "real-staging"
+        self._old_backup_attrs = {name: getattr(backup, name) for name in ("DB_PATH", "BACKUP_DIR", "STAGING_DIR", "IMPORTS_DIR")}
+        backup.DB_PATH = importer.DB_PATH
+        backup.BACKUP_DIR = self.real_backup_dir
+        backup.STAGING_DIR = self.real_staging_dir
+        backup.IMPORTS_DIR = self.real_staging_dir / "backup-imports"
+
+        self._no_git_patcher = mock.patch.object(backup.shutil, "which", return_value=None)
+        self._no_git_patcher.start()
+
+        created_paths: list[Path] = []
+        # importer.subprocess and backup.subprocess are the same module
+        # object, so patching subprocess.run here also intercepts the tar
+        # invocations backup.create_backup() makes internally -- capture
+        # the real implementation first and fall through to it for every
+        # command that isn't the sudo backup-create call itself.
+        real_subprocess_run = subprocess.run
+
+        def real_backup_run(command, *args, **kwargs):
+            if command != importer.PRE_IMPORT_BACKUP_COMMAND:
+                return real_subprocess_run(command, *args, **kwargs)
+            path = backup.create_backup(backup.validate_components(None))
+            created_paths.append(path)
+            return subprocess.CompletedProcess(command, 0, f"backup_path={path}\n", "")
+
+        self.created_backup_paths = created_paths
+        self._backup_patcher = mock.patch.object(importer.subprocess, "run", side_effect=real_backup_run)
+        self._backup_patcher.start()
+
+    def tearDown(self) -> None:
+        self._backup_patcher.stop()
+        self._no_git_patcher.stop()
+        for name, value in self._old_backup_attrs.items():
+            setattr(backup, name, value)
+        importer.DB_PATH = self.old_importer_db_path
+        local_dns.DB_PATH = self.old_local_dns_db_path
+        upstream_dns.DB_PATH = self.old_upstream_dns_db_path
+        alderpointdns_compiler.DB_PATH = self.old_compiler_db_path
+        custom_rules.DB_PATH = self.old_custom_rules_db_path
+        importer.IMPORT_UPLOAD_DIR = self.old_upload_dir
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _pihole_job(self) -> tuple[int, dict]:
+        translation = importer.parse_pihole_text(PIHOLE_FIXTURE, "home.arpa")
+        job_id = importer.create_migration_job("pihole", "pihole_export.txt", translation)
+        preview = importer.migration_preview_job(job_id, "home.arpa")
+        return job_id, preview["summary"]
+
+    def _assert_one_real_backup_was_created(self) -> None:
+        self.assertEqual(len(self.created_backup_paths), 1)
+        path = self.created_backup_paths[0]
+        self.assertTrue(path.exists())
+        with tempfile.TemporaryDirectory(dir=str(self.real_staging_dir)) as tmp:
+            extract = Path(tmp) / "x"
+            extract.mkdir()
+            subprocess.run(["tar", "-xzf", str(path), "-C", str(extract)], check=True)
+            manifest = json.loads((extract / "manifest.json").read_text())
+            self.assertEqual(manifest["backup_format_version"], backup.BACKUP_FORMAT_VERSION)
+            version = manifest["alderpointdns_app_version"]
+            self.assertTrue(version)
+            self.assertNotIn("git.", version, "no git binary was available; a commit id must not have been fabricated")
+
+    def test_adguard_apply_succeeds_with_real_pre_import_backup_and_no_git(self) -> None:
+        translation = importer.parse_adguard_yaml(ADGUARD_FIXTURE, "home.arpa")
+        job_id = importer.create_migration_job("adguard_yaml", "adguard_home.yaml", translation)
+        importer.migration_preview_job(job_id, "home.arpa")
+        result = importer.apply_migration_job(job_id, default_domain="home.arpa")
+        self.assertGreater(result["counts"]["block_rules"], 0)
+        self._assert_one_real_backup_was_created()
+
+    def test_pihole_apply_succeeds_with_real_pre_import_backup_and_no_git(self) -> None:
+        job_id, _summary = self._pihole_job()
+        result = importer.apply_migration_job(job_id, default_domain="home.arpa")
+        self.assertGreater(result["counts"]["block_rules"], 0)
+        self._assert_one_real_backup_was_created()
 
 
 if __name__ == "__main__":

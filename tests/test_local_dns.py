@@ -114,6 +114,25 @@ class LocalDNSTest(unittest.TestCase):
         with self.assertRaises(local_dns.LocalDNSError):
             local_dns.add_record("CNAME", "target.home.arpa", "other.home.arpa")
 
+    def test_public_ip_a_record_is_warning_not_conflict(self) -> None:
+        # A Local DNS record intentionally pointing at a public IP (e.g. a
+        # VPN endpoint) is unusual but valid data, not a conflict -- it must
+        # never require the override flag to create.
+        warnings = local_dns.add_record("A", "wg2.internal.example", "9.9.9.10")
+        self.assertTrue(any("Public IP address" in message for message in warnings))
+        with local_dns.connect() as conn:
+            row = conn.execute("SELECT value FROM local_dns_records WHERE fqdn='wg2.internal.example'").fetchone()
+        self.assertEqual(row["value"], "9.9.9.10")
+
+    def test_record_findings_severity_split(self) -> None:
+        local_dns.add_host("alex-pc", "home.arpa", "192.168.1.50", auto_ptr=False)
+        with local_dns.connect() as conn:
+            findings = local_dns.record_findings(conn, "alex-pc.home.arpa", "A", "192.168.1.51")
+            public_findings = local_dns.record_findings(conn, "public-host.home.arpa", "A", "8.8.8.8")
+            self.assertEqual(local_dns.record_conflicts(conn, "public-host.home.arpa", "A", "8.8.8.8"), [])
+        self.assertEqual([severity for severity, _ in findings], ["conflict"])
+        self.assertEqual([severity for severity, _ in public_findings], ["warning"])
+
     def test_record_edit_delete_and_disable(self) -> None:
         local_dns.add_record("A", "edit.home.arpa", "192.168.1.60")
         row_id = local_dns.list_records()["records"][0]["id"]

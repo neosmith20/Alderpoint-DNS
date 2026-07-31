@@ -46,7 +46,7 @@
   {% endif %}
   <div class="table-wrap">
     <table>
-      <thead><tr><th>Name</th><th>Protocol</th><th>Resolver</th><th>Bootstrap / TLS</th><th>Health</th><th>Actions</th></tr></thead>
+      <thead><tr><th>Name</th><th>Protocol</th><th>Resolver</th><th>Bootstrap / TLS</th><th>Health</th><th class="actions-col">Actions</th></tr></thead>
       <tbody>
         {% for resolver in upstream_resolvers %}
           <tr>
@@ -77,7 +77,7 @@
               {% if resolver.last_latency_ms is not none %}<span class="secondary muted">{{ "%.1f"|format(resolver.last_latency_ms) }} ms</span>{% endif %}
               {% if resolver.last_message %}<span class="secondary muted wrap-anywhere">{{ resolver.last_message }}</span>{% endif %}
             </td>
-            <td>
+            <td class="actions-col">
                 <div class="actions">
                   <form id="upstreamEdit{{ resolver.id }}" method="post" action="/dns-settings/upstreams/{{ resolver.id }}/edit" data-async-form data-success-message="Upstream resolver saved and deployed.">
                     <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -133,7 +133,7 @@
       <label>Bootstrap IPs <textarea name="bootstrap_ips" rows="2" placeholder="1.1.1.1, 1.0.0.1"></textarea></label>
       <label class="row"><input type="checkbox" name="enabled" value="1" checked> Enabled</label>
     </section>
-    <div class="form-actions"><button>Add and Deploy</button></div>
+    <div class="form-actions"><button data-pending-label="Adding and deploying…">Add and Deploy</button></div>
   </form>
 </section>
 

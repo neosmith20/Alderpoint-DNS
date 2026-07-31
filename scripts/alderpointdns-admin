@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""Root-only local administrator account recovery for Alderpoint DNS.
+
+This is intentionally NOT reachable over HTTP: there is no unauthenticated
+remote reset route anywhere in the web app. It exists so a forgotten
+administrator password can be recovered by someone with local root access to
+the appliance (console, SSH with root, `sudo`) without requiring email or any
+other external channel. It writes directly to the same SQLite database the
+web app uses, hashing the new password with the identical implementation
+(app.auth, shared with app/webapp.py) so a CLI-issued reset verifies exactly
+like a web-issued one.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import getpass
+import os
+import sqlite3
+import sys
+from pathlib import Path
+
+sys.path.insert(0, "/opt/alderpointdns")
+from app.auth import hash_password, validate_password_length  # noqa: E402
+
+# ALDERPOINTDNS_DB_PATH overrides the database location for isolated tests
+# only (mirrors ALDERPOINTDNS_INSTALL_ROOT in scripts/install.sh); a real
+# install never sets it and always uses the real path below.
+DB_PATH = Path(os.environ.get("ALDERPOINTDNS_DB_PATH", "/var/lib/alderpointdns/alderpointdns.db"))
+
+_SESSIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    admin_id INTEGER,
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    ip TEXT,
+    user_agent TEXT,
+    csrf TEXT NOT NULL
+)
+"""
+
+_AUDIT_TABLE = """
+CREATE TABLE IF NOT EXISTS admin_audit_log (
+    id INTEGER PRIMARY KEY,
+    at TEXT NOT NULL,
+    admin_id INTEGER,
+    username TEXT NOT NULL DEFAULT '',
+    action TEXT NOT NULL,
+    success INTEGER NOT NULL,
+    ip TEXT,
+    detail TEXT NOT NULL DEFAULT ''
+)
+"""
+
+
+def _require_root() -> None:
+    if os.geteuid() != 0:
+        print("alderpointdns admin: must be run as root (try: sudo alderpointdns admin ...)", file=sys.stderr)
+        raise SystemExit(1)
+
+
+def _connect() -> sqlite3.Connection:
+    if not DB_PATH.exists():
+        print(f"alderpointdns admin: database not found at {DB_PATH}; is Alderpoint DNS installed and initialized?", file=sys.stderr)
+        raise SystemExit(1)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute(_SESSIONS_TABLE)
+    conn.execute(_AUDIT_TABLE)
+    return conn
+
+
+def _utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _audit(conn: sqlite3.Connection, admin_id: int, username: str, action: str, success: bool, detail: str = "") -> None:
+    conn.execute(
+        "INSERT INTO admin_audit_log(at, admin_id, username, action, success, ip, detail) VALUES (?, ?, ?, ?, ?, NULL, ?)",
+        (_utc_now(), admin_id, username, action, 1 if success else 0, detail),
+    )
+
+
+def _resolve_admin(conn: sqlite3.Connection, username: str | None) -> sqlite3.Row:
+    if username:
+        row = conn.execute("SELECT * FROM admins WHERE username=?", (username,)).fetchone()
+        if not row:
+            print(f"alderpointdns admin: no administrator named {username!r}", file=sys.stderr)
+            raise SystemExit(1)
+        return row
+    rows = conn.execute("SELECT * FROM admins").fetchall()
+    if not rows:
+        print("alderpointdns admin: no administrator account exists yet; complete first-run setup at /setup instead", file=sys.stderr)
+        raise SystemExit(1)
+    if len(rows) > 1:
+        names = ", ".join(row["username"] for row in rows)
+        print(f"alderpointdns admin: multiple administrators exist ({names}); specify --username", file=sys.stderr)
+        raise SystemExit(1)
+    return rows[0]
+
+
+def _read_new_password() -> str:
+    """Reads the new password from an interactive terminal (hidden input,
+    with confirmation) or from stdin (a single line, for scripted/piped use)
+    -- never from a command-line argument, so it never appears in process
+    listings or shell history."""
+    if sys.stdin.isatty():
+        password = getpass.getpass("New password: ")
+        confirm = getpass.getpass("Confirm new password: ")
+        if password != confirm:
+            print("alderpointdns admin: passwords do not match", file=sys.stderr)
+            raise SystemExit(1)
+        return password
+    line = sys.stdin.readline()
+    if not line:
+        print("alderpointdns admin: no password provided on stdin", file=sys.stderr)
+        raise SystemExit(1)
+    return line.rstrip("\n")
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    _require_root()
+    conn = _connect()
+    try:
+        rows = conn.execute("SELECT username, created_at FROM admins ORDER BY id").fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        print("No administrator accounts exist yet.")
+        return 0
+    for row in rows:
+        print(f"{row['username']}\tcreated {row['created_at']}")
+    return 0
+
+
+def cmd_reset_password(args: argparse.Namespace) -> int:
+    _require_root()
+    conn = _connect()
+    try:
+        admin = _resolve_admin(conn, args.username)
+        password = _read_new_password()
+        error = validate_password_length(password)
+        if error:
+            print(f"alderpointdns admin: {error}", file=sys.stderr)
+            with conn:
+                _audit(conn, admin["id"], admin["username"], "password_reset_local_recovery", False, "rejected: password too short")
+            return 1
+        with conn:
+            conn.execute("UPDATE admins SET password_hash=? WHERE id=?", (hash_password(password), admin["id"]))
+            revoked = conn.execute("DELETE FROM sessions WHERE admin_id=?", (admin["id"],)).rowcount
+            _audit(conn, admin["id"], admin["username"], "password_reset_local_recovery", True, f"{revoked} session(s) revoked; local root recovery")
+        print(f"Password reset for {admin['username']!r}. {revoked} active web session(s) were signed out.")
+        return 0
+    finally:
+        conn.close()
+
+
+def cmd_revoke_sessions(args: argparse.Namespace) -> int:
+    _require_root()
+    conn = _connect()
+    try:
+        admin = _resolve_admin(conn, args.username)
+        with conn:
+            revoked = conn.execute("DELETE FROM sessions WHERE admin_id=?", (admin["id"],)).rowcount
+            _audit(conn, admin["id"], admin["username"], "sessions_revoked_local_recovery", True, f"{revoked} session(s) revoked; local root recovery")
+        print(f"{revoked} active web session(s) for {admin['username']!r} were signed out.")
+        return 0
+    finally:
+        conn.close()
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="alderpointdns", description="Alderpoint DNS local administration")
+    sub = parser.add_subparsers(dest="section", required=True)
+
+    admin_parser = sub.add_parser("admin", help="administrator account recovery (requires local root)")
+    admin_sub = admin_parser.add_subparsers(dest="command", required=True)
+
+    list_parser = admin_sub.add_parser("list", help="list administrator accounts")
+    list_parser.set_defaults(func=cmd_list)
+
+    reset_parser = admin_sub.add_parser("reset-password", help="reset an administrator's password and sign out their web sessions")
+    reset_parser.add_argument("--username", default=None, help="administrator username (required if more than one account exists)")
+    reset_parser.set_defaults(func=cmd_reset_password)
+
+    revoke_parser = admin_sub.add_parser("revoke-sessions", help="sign out all active web sessions for an administrator, without changing the password")
+    revoke_parser.add_argument("--username", default=None, help="administrator username (required if more than one account exists)")
+    revoke_parser.set_defaults(func=cmd_revoke_sessions)
+
+    args = parser.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -25,9 +25,25 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-
 DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
 BACKUP_DIR = Path("/var/lib/alderpointdns/backups")
+
+
+class AlderpointDNSConnection(sqlite3.Connection):
+    """Closes on exit like a plain connection factory would, but only once
+    the outermost `with` block exits, so a nested `with conn: ...` reused as
+    a transaction boundary doesn't close the connection out from under the
+    rest of the function."""
+
+    def __enter__(self):
+        self._alderpointdns_depth = getattr(self, "_alderpointdns_depth", 0) + 1
+        return super().__enter__()
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        super().__exit__(exc_type, exc_value, traceback)
+        self._alderpointdns_depth = getattr(self, "_alderpointdns_depth", 1) - 1
+        if self._alderpointdns_depth <= 0:
+            self.close()
 STAGING_DIR = Path("/var/lib/alderpointdns/staging")
 CERT_DIR = Path("/etc/alderpointdns/certs")
 CERT_PATH_DEFAULT = CERT_DIR / "alderpointdns-lab.crt"
@@ -58,9 +74,9 @@ DEFAULTS = {
     "listen_ipv4": "0.0.0.0",
     "listen_ipv6": "::",
     "doh_enabled": "1",
-    "doh3_enabled": "1",
+    "doh3_enabled": "0",
     "dot_enabled": "1",
-    "doq_enabled": "1",
+    "doq_enabled": "0",
     "dnscrypt_enabled": "0",
     "doh_path": "/dns-query",
     "doh_port": "443",
@@ -89,13 +105,75 @@ def now() -> str:
 
 def connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, factory=AlderpointDNSConnection, timeout=5.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
 def run(command: list[str], check: bool = True, env: dict[str, str] | None = None, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=check, env=env, input=input_text)
+
+
+CAPABILITY_FEATURES = {
+    "doh": "dns-over-https",
+    "dot": "dns-over-tls",
+    "doq": "dns-over-quic",
+    "doh3": "dns-over-http3",
+    "dnscrypt": "dnscrypt",
+}
+
+
+def dnsdist_capabilities() -> dict[str, bool]:
+    """Detect which encrypted-DNS transports the installed dnsdist binary
+    actually supports, from the feature list `dnsdist --version` reports.
+
+    Debian's own archive dnsdist package (installable with no third-party
+    repository) commonly lacks dns-over-quic/dns-over-http3, while the
+    PowerDNS project's own repository build includes them. Rather than
+    assume a capability and let dnsdist silently refuse to start a
+    listener, Alderpoint DNS checks this directly so it can keep
+    unsupported protocols off and report them as unsupported instead of
+    enabled or broken. Fails closed (nothing reported as supported) if the
+    binary is missing or `--version` cannot be run.
+    """
+    output = ""
+    try:
+        result = run(["dnsdist", "--version"], check=False)
+        output = (result.stdout or "") + (result.stderr or "")
+    except (OSError, FileNotFoundError):
+        pass
+    lowered = output.lower()
+    return {name: feature in lowered for name, feature in CAPABILITY_FEATURES.items()}
+
+
+PROTOCOL_FLAGS = (
+    ("doh_enabled", "doh", "DoH"),
+    ("dot_enabled", "dot", "DoT"),
+    ("doh3_enabled", "doh3", "DoH3"),
+    ("doq_enabled", "doq", "DoQ"),
+    ("dnscrypt_enabled", "dnscrypt", "DNSCrypt"),
+)
+
+
+def enforce_capabilities(values: dict[str, Any], caps: dict[str, bool] | None = None, suffix: str = "") -> tuple[dict[str, Any], list[str]]:
+    """Force protocol-enable flags off for anything the installed dnsdist
+    build doesn't support.
+
+    Used both when saving settings (so a forged form submission can't
+    persist an unsupported protocol as enabled) and when deploying (so a
+    previously-saved or restored configuration never starts a listener
+    dnsdist would refuse to run), against the same authoritative
+    capability check -- never a second, template- or route-local guess.
+    """
+    caps = dnsdist_capabilities() if caps is None else caps
+    warnings: list[str] = []
+    out = dict(values)
+    for flag, cap_name, label in PROTOCOL_FLAGS:
+        if out.get(flag) == "1" and not caps.get(cap_name, False):
+            out[flag] = "0"
+            warnings.append(f"{label} was disabled{suffix}: not supported by the installed dnsdist build")
+    return out, warnings
 
 
 def detect_server_ip() -> str:
@@ -689,6 +767,14 @@ def deploy_encryption(conn: sqlite3.Connection | None = None, template_path: Pat
     cert_material_changed = False
     try:
         cfg = settings(db)
+        # Never attempt to start a listener the installed dnsdist build
+        # doesn't support (e.g. DoQ/DoH3 on Debian 13's own archive
+        # package, which lacks QUIC) -- even if it's stored as enabled
+        # (e.g. restored from a backup taken on a QUIC-capable install).
+        # Disable it for this deployment and say so, instead of
+        # restarting dnsdist into a protocol test failure that would roll
+        # back every other protocol along with it.
+        cfg, warnings = enforce_capabilities(cfg, suffix=" for this deployment")
         pending_action = cfg.get("pending_cert_action", "none")
         if pending_action == "generate_self_signed":
             generate_self_signed(cfg["server_hostname"], [cfg.get("bootstrap_ip", "")])
@@ -706,7 +792,6 @@ def deploy_encryption(conn: sqlite3.Connection | None = None, template_path: Pat
             raise EncryptionError(f"certificate material missing at {cert_path} / {key_path}")
         if not validate_cert_key_match(cert_path, key_path):
             raise EncryptionError("configured certificate and key do not match")
-        dnscrypt_warning = ""
         if cfg["dnscrypt_enabled"] == "1" and not (DNSCRYPT_CERT.exists() and DNSCRYPT_KEY.exists()):
             try:
                 issue_dnscrypt_certificate()
@@ -718,15 +803,15 @@ def deploy_encryption(conn: sqlite3.Connection | None = None, template_path: Pat
                 # other protocol or claiming a certificate that doesn't
                 # actually exist.
                 cfg["dnscrypt_enabled"] = "0"
-                dnscrypt_warning = f"DNSCrypt certificate generation failed, DNSCrypt was disabled for this deployment: {exc}"
+                warnings.append(f"DNSCrypt certificate generation failed, DNSCrypt was disabled for this deployment: {exc}")
         conf_changed = ensure_dnsdist_conf_parameterized(template_path or Path("/opt/alderpointdns/packaging/dnsdist.conf"))
         new_env_text = render_env_override(cfg)
         current_env_text = DNSDIST_ENV_OVERRIDE.read_text() if DNSDIST_ENV_OVERRIDE.exists() else ""
         if new_env_text == current_env_text and not conf_changed and not cert_material_changed:
             status = "unchanged"
             message = "encryption settings already match the deployed configuration"
-            if dnscrypt_warning:
-                message = f"{message}; {dnscrypt_warning}"
+            if warnings:
+                message = f"{message}; {'; '.join(warnings)}"
         else:
             if DNSDIST_ENV_OVERRIDE.exists():
                 env_backup = BACKUP_DIR / f"dnsdist-encryption.conf.last-good.{int(time.time())}"
@@ -747,8 +832,8 @@ def deploy_encryption(conn: sqlite3.Connection | None = None, template_path: Pat
                 raise RuntimeError(f"protocol test failed for: {', '.join(failed)} ({protocol_tests})")
             status = "deployed"
             message = f"deployed with protocols: {protocol_tests}"
-            if dnscrypt_warning:
-                message = f"{message}; {dnscrypt_warning}"
+            if warnings:
+                message = f"{message}; {'; '.join(warnings)}"
     except Exception as exc:
         message = str(exc)
         if env_backup is not None:

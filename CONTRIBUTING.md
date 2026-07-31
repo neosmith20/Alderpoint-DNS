@@ -5,6 +5,35 @@ Thanks for your interest in contributing. Alderpoint DNS is beta software
 in the product — please be patient and open an issue if something here is
 unclear or out of date.
 
+## Licensing and contribution policy
+
+Alderpoint DNS is source-available under the [PolyForm Noncommercial
+License 1.0.0](LICENSE) — see `README.md`'s License section and
+`COMMERCIAL_LICENSING.md` for what that does and does not permit.
+
+- **Bug reports, feature suggestions, logs, testing results, and general
+  feedback** may be submitted freely, without any license agreement.
+- **Code, documentation, artwork, or any other copyrightable contribution**
+  will not be merged until you have explicitly accepted the
+  [Contributor License Agreement](CONTRIBUTOR_LICENSE_AGREEMENT.md)
+  ("CLA"). Opening a pull request by itself is **not** acceptance of the
+  CLA — the specific electronic-signature or other explicit acceptance
+  workflow will be established and documented here before public,
+  external code contributions are merged. Until then, please raise issues
+  and discuss changes rather than opening pull requests with code you
+  intend to have merged.
+- If your Contribution may be owned in whole or in part by an employer or
+  another entity, the CLA requires you to disclose that, and merging may
+  require authorization from that employer or entity.
+- The project may decline any contribution that cannot be clearly and
+  confidently licensed, including where provenance, authorship, or
+  third-party rights are unclear.
+- Contributions must not include secrets, credentials, private user data,
+  copied proprietary code, or other material incompatible with this
+  project's license or its contributors' rights (see
+  `docs/security.md` for what counts as a secret in this codebase, and
+  `THIRD_PARTY_NOTICES.md` for currently tracked third-party components).
+
 ## Before you start
 
 - For anything beyond a small fix, please open an issue first to discuss the

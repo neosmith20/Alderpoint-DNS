@@ -15,6 +15,12 @@ a BIND RPZ zone and reloaded through a staged, validated deployment path.
 > `docs/hardening-review.md` for the honest current state before you rely on
 > it for anything important.
 
+**Source-available under the [PolyForm Noncommercial License
+1.0.0](LICENSE).** Alderpoint DNS is not open source; commercial use
+requires a separate license — see `LICENSE` and
+`COMMERCIAL_LICENSING.md`. Contributions are subject to the
+[Contributor License Agreement](CONTRIBUTOR_LICENSE_AGREEMENT.md).
+
 ## Key features
 
 - **DNS filtering with a custom rules engine.** Domain, subdomain, hosts-style,
@@ -37,16 +43,28 @@ a BIND RPZ zone and reloaded through a staged, validated deployment path.
   AdGuard Home (YAML or read-only API), Pi-hole text/list exports, BIND
   zones, hosts files, CSV/XLSX, and Alderpoint DNS's own JSON export, with
   unsupported source features reported explicitly rather than silently
-  dropped or fabricated. See `docs/migration.md`.
+  dropped or fabricated. AdGuard DNS Rewrites always map to Local DNS
+  (Alderpoint DNS's own local-authority feature), imports are idempotent
+  on re-run, and intentional public-IP Local DNS records (e.g. a VPN host)
+  are reported as warnings rather than blocking conflicts. See
+  `docs/migration.md`.
 - **Backup and restore.** Previewable, checksummed backups using SQLite's
   online-backup API (safe under concurrent writes), optional password
   encryption for off-host archives, and a restore path that takes its own
   safety backup and rolls back automatically on a failed health check. See
   `docs/backup-recovery.md`.
-- **Web admin UI.** A single-administrator, CSRF-protected, session-based
-  admin interface covering DNS settings, filtering, local DNS, analytics,
-  backup/restore, migration, replication, and system status. See
-  `docs/web.md`.
+- **Administration.** Server-side sessions (revocable individually or all
+  at once), a recent admin audit log, in-app password change, and a
+  root-only local `alderpointdns admin reset-password` recovery command
+  with no web-reachable route. See `docs/web.md`.
+- **Notifications.** A provider-neutral SMTP email and generic HTTP webhook
+  framework (with Discord/Slack/Microsoft Teams/ntfy/Gotify/Pushover
+  presets), per-event-category subscriptions and severity thresholds,
+  cooldown/dedup, recovery notices, and a local delivery history.
+- **Web admin UI.** A CSRF-protected, session-based admin interface
+  covering DNS settings, filtering, local DNS, analytics, backup/restore,
+  migration, replication, administration, notifications, and system
+  status. See `docs/web.md`.
 
 ## Supported systems
 
@@ -121,10 +139,25 @@ pre-release checklist and accepted beta risks.
 ## Contributing and security
 
 Contributions are welcome — see `CONTRIBUTING.md` for how to run the test
-suite and what pull requests should include. To report a security issue,
-please follow `SECURITY.md` rather than opening a public issue. This project
-follows the `CODE_OF_CONDUCT.md`.
+suite, what pull requests should include, and the current state of the
+Contributor License Agreement acceptance process. To report a security
+issue, please follow `SECURITY.md` rather than opening a public issue. This
+project follows the `CODE_OF_CONDUCT.md`.
 
 ## License
 
-A license has not yet been finalized for Alderpoint DNS.
+Alderpoint DNS is **source-available**, not open source, under the
+[PolyForm Noncommercial License 1.0.0](LICENSE). You can read, run, modify,
+and share it for noncommercial purposes; see `LICENSE` for the complete
+terms and `COPYRIGHT` for the required copyright notice.
+
+Commercial use — selling Alderpoint DNS, bundling it into a paid product,
+offering it as a paid hosted or managed service, or commercially
+redistributing it — is not granted by this license and requires a separate
+agreement. See `COMMERCIAL_LICENSING.md`.
+
+Alderpoint DNS integrates with third-party software (BIND 9, PowerDNS
+dnsdist, and various Python/OS packages) that remains under its own
+license; see `THIRD_PARTY_NOTICES.md`. Contributions are governed by the
+[Contributor License Agreement](CONTRIBUTOR_LICENSE_AGREEMENT.md). Use of
+the "Alderpoint DNS" name and branding is governed by `TRADEMARKS.md`.

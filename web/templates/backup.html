@@ -138,7 +138,7 @@
   {% if backups %}
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Created</th><th>Size</th><th>Components</th><th>Status</th><th>Actions</th></tr></thead>
+        <thead><tr><th>Created</th><th>Size</th><th>Components</th><th>Status</th><th class="actions-col">Actions</th></tr></thead>
         <tbody>
           {% for row in backups %}
             <tr>
@@ -146,7 +146,7 @@
               <td>{{ (row.size_bytes / 1048576)|round(2) }} MB</td>
               <td class="mono wrap-anywhere">{{ row.components_summary }}</td>
               <td>{{ ui.status_badge(row.status|title, "healthy" if row.status in ("deployed", "unchanged") else "down" if row.status == "failed" else "neutral") }}</td>
-              <td class="row">
+              <td class="row actions-col">
                 <a class="button secondary" href="/backup/{{ row.id if row.id else (row.path.split('/')[-1]) }}/download">Download</a>
                 <form method="post" action="/backup/{{ row.id if row.id else (row.path.split('/')[-1]) }}/delete" data-confirm="Delete this backup archive? This cannot be undone.">
                   <input type="hidden" name="csrf" value="{{ csrf }}">

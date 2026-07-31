@@ -15,11 +15,136 @@ Run individual suites:
 /opt/alderpointdns/tests/test_custom_rules.py
 /opt/alderpointdns/tests/test_importer.py
 /opt/alderpointdns/tests/test_backup.py
+/opt/alderpointdns/tests/test_admin_setup.py
+/opt/alderpointdns/tests/test_administration.py
+/opt/alderpointdns/tests/test_admin_cli.sh
+/opt/alderpointdns/tests/test_notifications.py
 /opt/alderpointdns/tests/test_web_smoke.sh
 /opt/alderpointdns/tests/test_encryption_layout.sh
 /opt/alderpointdns/tests/test_backup_restore.sh
+/opt/alderpointdns/tests/test_deb_package_contents.sh
+/opt/alderpointdns/tests/test_licensing_hygiene.sh
 /opt/alderpointdns/tests/test_release_hygiene.sh
 ```
+
+`tests/test_licensing_hygiene.sh` verifies the finalized license set is
+intact and internally consistent: `LICENSE` contains the complete,
+unmodified PolyForm Noncommercial License 1.0.0 text; `COPYRIGHT` carries
+the exact Required Notice; `COMMERCIAL_LICENSING.md`,
+`CONTRIBUTOR_LICENSE_AGREEMENT.md`, `TRADEMARKS.md`, and
+`THIRD_PARTY_NOTICES.md` all exist; no tracked file (outside
+`THIRD_PARTY_NOTICES.md`, dependency metadata, and
+`CONTRIBUTOR_LICENSE_AGREEMENT.md`'s description of being adapted from the
+Apache ICLA) claims Alderpoint DNS is MIT/GPL/AGPL/Apache/BSD-licensed,
+"open source," unlicensed, or freely usable commercially; `README.md` and
+`CONTRIBUTING.md` reference the finalized documents; and the built `.deb`
+actually installs `LICENSE`/`copyright`/`COMMERCIAL_LICENSING.md`/
+`THIRD_PARTY_NOTICES.md` under `/usr/share/doc/alderpointdns/`.
+
+The first-run setup suite (`tests/test_admin_setup.py`) covers matching and
+mismatched password confirmation, empty confirmation, username preservation
+across a failed submission, forged/CSRF-mismatched direct POSTs (with and
+without a prior page visit), and that neither password value ever appears in
+response HTML on failure.
+
+The Administration suite (`tests/test_administration.py`) covers password
+change success (verifying the new hash, and that exactly the other sessions
+-- never the acting one -- are revoked), wrong-current-password and
+mismatched-new-password rejection (password left unchanged), the standalone
+revoke-other-sessions action, successful and failed actions landing in the
+audit log without credential content, and that the session list never
+renders a raw session token.
+
+The root-only recovery CLI suite (`tests/test_admin_cli.sh`) covers rejection
+when run by a non-root account (via `runuser -u nobody`, regardless of the
+test runner's own privilege level), `admin list`, `admin reset-password` via
+both piped stdin and its own hashing round-tripping through `app.auth`
+(the same implementation `app/webapp.py` uses), session revocation on reset,
+the standalone `admin revoke-sessions` action, the ambiguous-multiple-admins
+`--username`-required error, and that the plaintext password never appears
+in CLI output or the audit log.
+
+The Notifications suite (`tests/test_notifications.py`) covers provider
+validation, secret masking (never rendered back), test-notification delivery
+against mocked SMTP/HTTP, cooldown suppression, duplicate-fingerprint
+suppression, recovery notices, delivery history accuracy, and each wired
+event-category checker firing against fixture database state without real
+systemd or network access.
+
+Two more suites require tooling most CI environments won't have by default,
+so they aren't run implicitly by the above and are called out separately:
+
+```sh
+/opt/alderpointdns/tests/test_clean_install_container.sh
+```
+
+`tests/test_deb_package_contents.sh` builds the `.deb` and statically
+inspects its actual contents (control metadata, maintainer scripts,
+`packaging/dnsdist.conf`, service units) for the fixes from the first clean
+Debian 13 install failure: `secrets.env`/`dnsdist-api.key`/`dnsdist-web.creds`
+chowned `root:alderpointdns` and chmod `0640`; the database and
+`/var/log/alderpointdns` ownership recursively fixed after generation
+(including reasserting `bind:bind` on the BIND log subdirectory, not just
+recreating the directory); the AppArmor local override for named installed
+and reloaded; `dnsdist (>= 1.9.0)` required in `Depends` -- the lowest bound
+Debian 13's own archive `dnsdist` (1.9.x) satisfies with no third-party
+repository, so a stock `apt-get install -y ./alderpointdns_*.deb` resolves
+cleanly, while genuinely too-old builds still fail cleanly at dependency
+resolution instead of silently pulling an incompatible one; the
+`newRemoteLogger`/`RemoteLogResponseAction` calls fixed/made version-aware
+for that build; DoH3/DoQ listener setup routed through a capability-safe
+Lua wrapper *and* kept off by default / reported as unsupported in
+Encryption Settings via `encryption.dnsdist_capabilities()`, since Debian's
+own archive `dnsdist` lacks QUIC support (see `docs/dnsdist.md`); the web
+password/API key hashed with dnsdist's own
+`hashPassword()` before being written into `dnsdist.conf` (never the
+plaintext); the `.dnsdist-conf-installed`/`.named-conf-installed`
+first-install markers scoped under `/etc/alderpointdns` so `apt purge` +
+reinstall doesn't reuse stale hashed credentials; `StartLimitIntervalSec`/
+`StartLimitBurst` on the alderpointdns/analytics units and a dnsdist
+drop-in override (the upstream unit ships `StartLimitInterval=0`, i.e. no
+cap at all); and postinst no longer swallowing failures from database init,
+config deploy, or service restart/enable with `|| true`, ending with an
+explicit active-service gate for all four core services. It requires no
+root access and no live system, only `dpkg-deb`.
+
+`tests/test_clean_install_container.sh` builds the `.deb` and installs it in
+a disposable, genuinely clean, **stock** Debian 13 + systemd container (via
+`podman` or `docker`) that inherits no alderpointdns users, groups, files,
+database, or generated configuration from the development machine it runs
+on -- unlike running the installer or postinst directly against that
+machine, which already has all of those from prior installs. It adds no
+third-party APT repository, signing key, or pin of any kind: only
+`apt-get update` against Debian's own repositories, then
+`apt-get install -y ./alderpointdns.deb`, exactly like a beta tester on an
+untouched Debian 13 VM, and it fails if `repo.powerdns.com` shows up
+anywhere under `/etc/apt` at any point in the run. It then verifies:
+`apt-get install` succeeds (dependency resolution against stock repos
+alone, no "unmet dependencies"/"not installable" errors) and the installed
+`dnsdist` came from Debian's own archive, not a third-party repository; all
+four core services (`named`, `dnsdist`, `alderpointdns`,
+`alderpointdns-analytics`) reach the active state with zero restarts;
+`secrets.env`/`dnsdist-api.key`/`dnsdist-web.creds` are `root:alderpointdns
+640` and readable by the `alderpointdns` account; the database is
+`alderpointdns:alderpointdns` and actually writable by that account;
+named's AppArmor local override is installed and named actually resolves
+through both the BIND backend and the dnsdist frontend; dnsdist logs no
+plain-text credential warnings and `dnsdist.conf` has no unresolved
+placeholder; the web app's own credential files authenticate successfully
+against dnsdist's stats API; `/setup` responds; DoQ/DoH3 are disabled by
+default (`ALDERPOINTDNS_DNS_DOQ`/`ALDERPOINTDNS_DNS_DOH3=0` in the dnsdist
+systemd override), nothing listens on UDP/853, `encryption.
+dnsdist_capabilities()` reports `doq`/`doh3` as unsupported and `doh`/`dot`
+as supported for this build, and the authenticated Encryption Settings page
+renders the DoQ/DoH3 checkboxes disabled with an "unsupported" explanation
+rather than silently enabled or broken; and stopping and restarting all
+four core services (a reboot-equivalent check) brings every service back
+active with working DNS resolution. It then purges and reinstalls to prove
+two independent installations mint different console/web/API credentials
+(every credential line differs, not just the file as a whole), and
+reinstalls once more without purging to prove credentials are preserved
+across an upgrade. Requires outbound network access (to pull the base image
+and Debian's own package repositories) and takes a few minutes.
 
 `tests/test_backup_restore.sh` (script-based, exercises `scripts/backup.sh`/
 `scripts/restore.sh`) and `tests/test_backup.py` (native `app/backup.py`)

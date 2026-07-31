@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% import "components.html" as ui %}
+{% block title %}Administration - Alderpoint DNS{% endblock %}
+{% block content %}
+{{ ui.page_header("Administration", "Rotate the administrator password and manage active sessions.") }}
+
+{% if error %}
+  <div class="alert error" role="alert">{{ error }}</div>
+{% endif %}
+
+<section class="grid align-start">
+  <form class="panel stack" method="post" action="/system/administration/password" data-async-form data-password-match data-success-message="Password changed. Other sessions were signed out.">
+    <div class="panel__head"><h2>Change Password</h2></div>
+    <p class="muted">Signed in as <span class="mono">{{ admin_username }}</span>. Changing the password signs out every other active session automatically.</p>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Current password
+      <span class="password-field">
+        <input name="current_password" type="password" required autocomplete="current-password" data-password-input>
+        <button type="button" class="password-toggle" data-password-toggle aria-pressed="false" aria-label="Show password">Show</button>
+      </span>
+    </label>
+    <label>New password
+      <span class="password-field">
+        <input name="new_password" type="password" minlength="12" required autocomplete="new-password" data-password-input>
+        <button type="button" class="password-toggle" data-password-toggle aria-pressed="false" aria-label="Show password">Show</button>
+      </span>
+    </label>
+    <label>Confirm new password
+      <span class="password-field">
+        <input name="confirm_new_password" type="password" minlength="12" required autocomplete="new-password" data-password-input>
+        <button type="button" class="password-toggle" data-password-toggle aria-pressed="false" aria-label="Show password">Show</button>
+      </span>
+    </label>
+    <div class="form-actions"><button data-pending-label="Changing password…">Change password</button></div>
+  </form>
+
+  <article class="panel stack">
+    <div class="panel__head"><h2>Sessions</h2></div>
+    <p class="muted">Sessions other than this one can be revoked without changing the password.</p>
+    <form method="post" action="/system/administration/revoke-sessions" data-async-form data-confirm="Sign out every other active session?" data-success-message="Other sessions revoked.">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <div class="form-actions"><button class="secondary" data-pending-label="Revoking…">Revoke all other sessions</button></div>
+    </form>
+    {% call ui.table_wrap() %}
+    <table>
+      <thead><tr><th>Session</th><th>Started</th><th>Last seen</th><th>IP</th><th>Client</th></tr></thead>
+      <tbody>
+        {% for item in sessions %}
+          <tr>
+            <td>{% if item.is_current %}{{ ui.status_badge("This session", "healthy") }}{% else %}&mdash;{% endif %}</td>
+            <td class="mono wrap-anywhere">{{ item.created_at }}</td>
+            <td class="mono wrap-anywhere">{{ item.last_seen_at }}</td>
+            <td class="mono wrap-anywhere">{{ item.ip }}</td>
+            <td class="wrap-anywhere">{{ item.user_agent }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endcall %}
+  </article>
+</section>
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Recent Administrative Activity</h2></div>
+  {% if audit_entries %}
+    {% call ui.table_wrap() %}
+    <table>
+      <thead><tr><th>When</th><th>Action</th><th>Result</th><th>IP</th><th>Detail</th></tr></thead>
+      <tbody>
+        {% for entry in audit_entries %}
+          <tr>
+            <td class="mono wrap-anywhere">{{ entry.at }}</td>
+            <td>{{ entry.action }}</td>
+            <td>{{ ui.status_badge("Success", "healthy") if entry.success else ui.status_badge("Failed", "down") }}</td>
+            <td class="mono wrap-anywhere">{{ entry.ip or "unknown" }}</td>
+            <td class="wrap-anywhere">{{ entry.detail }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endcall %}
+  {% else %}
+    {{ ui.empty_state("No administrative activity recorded yet") }}
+  {% endif %}
+</section>
+{% endblock %}

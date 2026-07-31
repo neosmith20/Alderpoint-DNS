@@ -97,6 +97,43 @@ for js_hook in ("data-sidebar-collapse", "sidebar-collapsed", "alderpointdnsSide
         raise SystemExit(f"compact UI interaction behavior missing: {js_hook}")
 if "localStorage.getItem('alderpointdnsSidebarCollapsed')" not in template:
     raise SystemExit("sidebar collapse anti-flash inline script is missing from base.html")
+
+# -- reusable pending-action button state (disable, spinner, aria-busy,
+# restore-on-failure, applied to every form submit) -------------------------
+for js_hook in ("startPending", "stopPending", "pendingGerund", "submitterFor", "aria-busy", "data-pending-active", "pageshow"):
+    if js_hook not in js:
+        raise SystemExit(f"pending-action button behavior missing: {js_hook}")
+if "button.disabled = true" not in js:
+    raise SystemExit("pending-action button does not disable itself to prevent duplicate submission")
+if ".btn-spinner" not in css or "@keyframes btn-spin" not in css:
+    raise SystemExit("pending-action spinner CSS is missing")
+
+# -- status-tile card layout (name centered on top, status badge centered
+# below it, list-content cards excluded rather than blindly centered) -------
+if ".card__head" not in css or "flex-direction: column" not in css:
+    raise SystemExit("status-tile card (.card__head) centered layout is missing")
+if ".card .stack" not in css:
+    raise SystemExit("card list-content exclusion (.card .stack left-aligned) is missing")
+
+# -- shared centered Actions-column table utility ----------------------------
+if "actions-col" not in css:
+    raise SystemExit("shared .actions-col table utility CSS is missing")
+for tpl_file in ("local_dns.html", "blocklists.html", "custom_rules.html", "dns_settings.html", "backup.html", "replication.html"):
+    text = (Path("/opt/alderpointdns/web/templates") / tpl_file).read_text()
+    if "actions-col" not in text:
+        raise SystemExit(f"{tpl_file} does not use the shared actions-col table utility")
+
+# -- collapsed-sidebar logout: icon, accessible name, tooltip ---------------
+if 'aria-label="Log out"' not in template or 'title="Log out"' not in template:
+    raise SystemExit("collapsed-sidebar logout is missing an accessible name/tooltip")
+if 'name == "logout"' not in template:
+    raise SystemExit("logout nav icon is missing")
+
+# -- collapsible nav sections with persisted expand/collapse state ----------
+for js_hook in ("NAV_SECTION_KEY_PREFIX", "alderpointdnsNavSectionOpen", "window.localStorage.setItem(storageKey", "window.localStorage.getItem(storageKey"):
+    if js_hook not in js:
+        raise SystemExit(f"nav-section collapse persistence missing: {js_hook}")
+
 if "queryChart" not in template or 'data-chart="traffic"' not in template:
     raise SystemExit("dashboard chart hooks are missing")
 if "analytics/chart-data" not in Path("/opt/alderpointdns/app/webapp.py").read_text():
@@ -138,6 +175,9 @@ for route in ("/import", "/import/migration", "import_upload", "/import/jobs/{jo
         raise SystemExit(f"import route missing: {route}")
 if 'href="/import"' not in template:
     raise SystemExit("import nav link is missing")
+import_migration_template = Path("/opt/alderpointdns/web/templates/import_migration.html").read_text()
+if "Pi-hole Migration" not in import_migration_template or 'value="pihole"' not in import_migration_template:
+    raise SystemExit("dedicated Pi-hole Migration panel is missing from Import and Migration")
 for route in ('"/backup"', '"/backup/create"', '"/backup/import"', '"/backup/preview"', '"/backup/restore"', '"/backup/{identifier}/download"', '"/backup/{identifier}/delete"', '"/backup/schedule"'):
     if route not in webapp_text:
         raise SystemExit(f"backup route missing: {route}")
@@ -420,6 +460,7 @@ encryption_html = TEMPLATES.get_template("encryption.html").render(
     deployment={"status": "deployed", "started_at": "2026-07-29T00:00:00Z", "finished_at": "2026-07-29T00:00:00Z", "message": "deployed with protocols: {'plain': 'ok'}", "protocol_tests": "{'plain': 'ok'}"},
     connection_info={"DoH": "https://" + long_domain + "/dns-query", "DoT": "tls://alderpointdns.local:853"},
     dnscrypt_fingerprint=None,
+    capabilities={"doh": True, "dot": True, "doh3": True, "doq": True, "dnscrypt": True},
 )
 for expected in ("Protocols", "Listen IPv4", "Listen IPv6", "0.0.0.0", "Client Connection Information", "Self-signed certificate", "Upload certificate and key", long_domain, "data-async-form"):
     if expected not in encryption_html:
@@ -536,10 +577,20 @@ blocklists_html = TEMPLATES.get_template("blocklists.html").render(**base, sourc
     "category": "ads_trackers",
     "enabled": 1,
     "accepted_domains": 1,
+    "parsed_rules": 1,
+    "unique_active_domains": 1,
+    "duplicate_domains": 0,
     "invalid_rules": 0,
     "unsupported_rules": 0,
+    "downloaded_entries": 1,
+    "using_cached_copy": 0,
     "last_error": long_domain,
+    "last_warning": "",
+    "last_attempt": "2026-07-29T00:00:00Z",
     "last_success": "2026-07-29T00:00:00Z",
+    "last_compile_success": "2026-07-29T00:00:00Z",
+    "health": {"state": "error", "label": "Error", "tone": "down"},
+    "rejected_samples_parsed": [{"line": 3, "kind": "invalid", "reason": long_domain, "excerpt": long_domain}],
 }], categories=blocklist_categories_fixture, category_error=None, category_filter="", status_filter="", search="", sort="name",
     filter_schedule=filter_schedule_fixture)
 for expected in ("Manage Categories", "Ads and trackers", "table-compact", "blocklistEdit1", "category-badge", "overflow-menu", long_upstream, long_domain):

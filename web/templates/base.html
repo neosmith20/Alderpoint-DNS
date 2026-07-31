@@ -22,7 +22,7 @@
     {% set dns_active = path in ["/query-log", "/local-dns", "/dns-settings", "/dns-cache"] %}
     {% set security_active = path in ["/custom-rules", "/blocklists"] or path.startswith("/encryption") %}
     {% set operations_active = path.startswith("/import") or path.startswith("/backup") or path == "/replication" %}
-    {% set system_active = path.startswith("/statistics-settings") or path == "/system" %}
+    {% set system_active = path.startswith("/statistics-settings") or path.startswith("/system") %}
     {% macro nav_chevron() -%}
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.7 5.3 15.4 12l-6.7 6.7 1.9 1.8 8.5-8.5-8.5-8.5-1.9 1.8Z"/></svg>
     {%- endmacro %}
@@ -37,6 +37,8 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4h10v3h3v10h-3v3H7v-3H4V7h3V4Zm2 3v10h6V7H9Z"/></svg>
       {% elif name == "system" %}
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v10H4V5Zm2 2v6h12V7H6Zm2 10h8v2H8v-2Z"/></svg>
+      {% elif name == "logout" %}
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5-5-5ZM4 5h8V3H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h8v-2H4V5Z"/></svg>
       {% endif %}
     {%- endmacro %}
     {% macro nav_section(id, label, active, icon_name) -%}
@@ -111,13 +113,20 @@
           {% call nav_section("system", "System", system_active, "system") %}
             <a class="nav-subitem{% if path.startswith('/statistics-settings') %} is-active{% endif %}" href="/statistics-settings" {% if path.startswith("/statistics-settings") %}aria-current="page"{% endif %}>Statistics</a>
             <a class="nav-subitem{% if path == '/system' %} is-active{% endif %}" href="/system" {% if path == "/system" %}aria-current="page"{% endif %}>System Status</a>
+            <a class="nav-subitem{% if path == '/system/administration' %} is-active{% endif %}" href="/system/administration" {% if path == "/system/administration" %}aria-current="page"{% endif %}>Administration</a>
+            <a class="nav-subitem{% if path == '/system/notifications' %} is-active{% endif %}" href="/system/notifications" {% if path == "/system/notifications" %}aria-current="page"{% endif %}>Notifications</a>
           {% endcall %}
         </nav>
         <div class="account-menu">
           <span id="globalServiceStatus" class="status-badge status-badge--{{ service_status.tone }} js-global-service-status" data-status-url="/status/summary" title="{{ service_status.detail }}">
             <span data-status-label>{{ service_status.label }}</span>
           </span>
-          <form method="post" action="/logout"><button class="secondary" aria-label="Logout" title="Logout"><span class="nav-link__label">Logout</span></button></form>
+          <form method="post" action="/logout">
+            <button class="nav-link" type="submit" aria-label="Log out" title="Log out">
+              <span class="nav-icon">{{ nav_icon("logout") }}</span>
+              <span class="nav-link__label">Log out</span>
+            </button>
+          </form>
         </div>
       </aside>
       <main class="app-main">{% block content %}{% endblock %}</main>

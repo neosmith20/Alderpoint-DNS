@@ -152,9 +152,10 @@ class ManifestAndComponentsTest(BackupTestBase):
         self.assertFalse(any("named.conf" in name for name in names))
         self.assertFalse(any("dnsdist.conf" in name for name in names))
 
-    def test_alderpointdns_app_version_not_fake_semver(self) -> None:
+    def test_alderpointdns_app_version_returns_something_sane(self) -> None:
         version = backup.alderpointdns_app_version()
-        self.assertTrue(version.startswith("unreleased+git.") or version.startswith("released+git."))
+        self.assertTrue(version)
+        self.assertNotEqual(version, "unknown+git.unknown")
 
     def test_database_schema_version_stable_and_changes_with_schema(self) -> None:
         with closing(backup.connect()) as conn:
@@ -166,6 +167,130 @@ class ManifestAndComponentsTest(BackupTestBase):
             conn.commit()
             v2 = backup.database_schema_version(conn)
         self.assertNotEqual(v1, v2)
+
+
+class AppVersionTest(BackupTestBase):
+    """alderpointdns_app_version() must work on a stock Debian package
+    install where /opt/alderpointdns is plain files, not a git checkout,
+    and `git` is not installed at all -- see the module docstring in
+    backup.py. These pin down the exact clean-VM failure mode: a
+    FileNotFoundError from subprocess when 'git' is absent must never
+    propagate out of version detection (and therefore out of
+    create_backup(), and therefore out of the mandatory pre-import
+    backup)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.approot = self.tmp / "approot"
+        self.approot.mkdir()
+        self.old_app_root = backup.APP_ROOT
+        backup.APP_ROOT = self.approot
+
+    def tearDown(self) -> None:
+        backup.APP_ROOT = self.old_app_root
+        super().tearDown()
+
+    def test_no_git_executable_falls_back_to_version_file(self) -> None:
+        (self.approot / "VERSION").write_text("1.2.3\n")
+        with mock.patch.object(backup.shutil, "which", return_value=None):
+            self.assertEqual(backup.alderpointdns_app_version(), "1.2.3")
+
+    def test_no_git_executable_never_raises_filenotfounderror(self) -> None:
+        # Direct reproduction of the clean-VM failure: no VERSION file, no
+        # git binary, no .git directory -- alderpointdns_app_version() must
+        # still return a plain string, not raise.
+        with mock.patch.object(backup.shutil, "which", return_value=None):
+            version = backup.alderpointdns_app_version()
+        self.assertIsInstance(version, str)
+        self.assertNotIn("git.", version)
+
+    def test_no_git_directory_omits_dev_metadata_even_if_git_installed(self) -> None:
+        (self.approot / "VERSION").write_text("1.2.3\n")
+        # git is "installed" (which() succeeds) but APP_ROOT/.git does not
+        # exist -- a real package install, not a checkout.
+        with mock.patch.object(backup.shutil, "which", return_value="/usr/bin/git"):
+            version = backup.alderpointdns_app_version()
+        self.assertEqual(version, "1.2.3")
+
+    def test_valid_version_file_is_used_verbatim(self) -> None:
+        (self.approot / "VERSION").write_text("0.4.0-beta.2\n")
+        with mock.patch.object(backup.shutil, "which", return_value=None):
+            self.assertEqual(backup.alderpointdns_app_version(), "0.4.0-beta.2")
+
+    def test_missing_version_file_falls_back_to_dpkg_metadata(self) -> None:
+        # No VERSION file at all.
+        with mock.patch.object(backup.shutil, "which", return_value=None), \
+             mock.patch.object(backup, "run", return_value=subprocess.CompletedProcess(["dpkg-query"], 0, "0.4.0-1\n")) as run_mock:
+            version = backup.alderpointdns_app_version()
+        self.assertEqual(version, "0.4.0-1")
+        run_mock.assert_called_once_with(["dpkg-query", "-W", "-f=${Version}", backup.DPKG_PACKAGE_NAME], check=False)
+
+    def test_malformed_version_file_falls_back_to_dpkg_metadata(self) -> None:
+        (self.approot / "VERSION").write_text("\x00binary garbage\nnot a version\n")
+        with mock.patch.object(backup.shutil, "which", return_value=None), \
+             mock.patch.object(backup, "run", return_value=subprocess.CompletedProcess(["dpkg-query"], 0, "0.4.0-1\n")):
+            self.assertEqual(backup.alderpointdns_app_version(), "0.4.0-1")
+
+    def test_empty_version_file_falls_back_to_dpkg_metadata(self) -> None:
+        (self.approot / "VERSION").write_text("   \n")
+        with mock.patch.object(backup.shutil, "which", return_value=None), \
+             mock.patch.object(backup, "run", return_value=subprocess.CompletedProcess(["dpkg-query"], 0, "0.4.0-1\n")):
+            self.assertEqual(backup.alderpointdns_app_version(), "0.4.0-1")
+
+    def test_no_version_file_and_dpkg_unavailable_reports_unknown_not_a_crash(self) -> None:
+        with mock.patch.object(backup.shutil, "which", return_value=None), \
+             mock.patch.object(backup, "run", side_effect=FileNotFoundError("dpkg-query")):
+            self.assertEqual(backup.alderpointdns_app_version(), "unknown")
+
+    def test_dpkg_query_nonzero_exit_falls_back_to_unknown(self) -> None:
+        # e.g. "dpkg-query: no packages found matching alderpointdns" on a
+        # non-package (source tree) install with no VERSION file.
+        with mock.patch.object(backup.shutil, "which", return_value=None), \
+             mock.patch.object(backup, "run", return_value=subprocess.CompletedProcess(["dpkg-query"], 1, "dpkg-query: no packages found matching alderpointdns\n")):
+            self.assertEqual(backup.alderpointdns_app_version(), "unknown")
+
+    def test_git_dev_metadata_included_when_git_and_dotgit_both_present(self) -> None:
+        (self.approot / "VERSION").write_text("1.2.3\n")
+        (self.approot / ".git").mkdir()
+
+        def fake_run(command, check=True, **kwargs):
+            self.assertEqual(command, ["git", "-C", str(self.approot), "rev-parse", "--short", "HEAD"])
+            return subprocess.CompletedProcess(command, 0, "abc1234\n")
+
+        with mock.patch.object(backup.shutil, "which", return_value="/usr/bin/git"), \
+             mock.patch.object(backup, "run", side_effect=fake_run):
+            self.assertEqual(backup.alderpointdns_app_version(), "1.2.3+git.abc1234")
+
+    def test_git_command_failure_is_caught_and_omits_metadata(self) -> None:
+        (self.approot / "VERSION").write_text("1.2.3\n")
+        (self.approot / ".git").mkdir()
+        with mock.patch.object(backup.shutil, "which", return_value="/usr/bin/git"), \
+             mock.patch.object(backup, "run", side_effect=FileNotFoundError("git")):
+            # which() says git exists but the exec itself races and fails --
+            # must not propagate, and must never fabricate a commit id.
+            self.assertEqual(backup.alderpointdns_app_version(), "1.2.3")
+
+    def test_git_rev_parse_nonzero_exit_omits_metadata(self) -> None:
+        (self.approot / "VERSION").write_text("1.2.3\n")
+        (self.approot / ".git").mkdir()
+        with mock.patch.object(backup.shutil, "which", return_value="/usr/bin/git"), \
+             mock.patch.object(backup, "run", return_value=subprocess.CompletedProcess(["git"], 128, "fatal: not a git repository\n")):
+            self.assertEqual(backup.alderpointdns_app_version(), "1.2.3")
+
+    def test_create_backup_succeeds_with_no_git_executable(self) -> None:
+        # The exact clean-VM scenario: stock Debian 13 package install,
+        # no git binary anywhere on PATH.
+        (self.approot / "VERSION").write_text("0.4.0-beta.2\n")
+        with mock.patch.object(backup, "run", self.fake_run), \
+             mock.patch.object(backup.shutil, "which", return_value=None):
+            path = backup.create_backup(backup.validate_components(None))
+        self.assertTrue(path.exists())
+        with tempfile.TemporaryDirectory(dir=str(backup.STAGING_DIR)) as tmp:
+            extract = Path(tmp) / "x"
+            extract.mkdir()
+            subprocess.run(["tar", "-xzf", str(path), "-C", str(extract)], check=True)
+            manifest = json.loads((extract / "manifest.json").read_text())
+            self.assertEqual(manifest["alderpointdns_app_version"], "0.4.0-beta.2")
 
 
 class SqliteOnlineBackupTest(BackupTestBase):

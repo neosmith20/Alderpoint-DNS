@@ -95,7 +95,7 @@
   {% if replicas %}
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Name</th><th>Status</th><th>Last seen</th><th>Last generation acked</th><th>Last result</th><th>Actions</th></tr></thead>
+        <thead><tr><th>Name</th><th>Status</th><th>Last seen</th><th>Last generation acked</th><th>Last result</th><th class="actions-col">Actions</th></tr></thead>
         <tbody>
           {% for r in replicas %}
             <tr>
@@ -104,7 +104,7 @@
               <td class="mono">{{ r.last_seen_at or "never" }}</td>
               <td class="mono">{{ r.last_generation_acked }}</td>
               <td class="wrap-anywhere">{{ r.last_result }}</td>
-              <td class="row">
+              <td class="row actions-col">
                 {% if r.status != "paused" %}
                 <form method="post" action="/replication/replica/{{ r.id }}/status"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="status" value="paused"><button class="secondary">Pause</button></form>
                 {% else %}

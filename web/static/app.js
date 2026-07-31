@@ -47,24 +47,39 @@
     });
   }
 
+  // Nav sections (DNS/Security/Operations/System) toggle open/closed on
+  // click, independently of one another, and remember their state across
+  // ordinary navigation (a full page load, not an SPA) via localStorage --
+  // otherwise every click would reset back to whatever the server
+  // rendered from the current path alone. A section containing the
+  // active page can be collapsed too; it stays visually identifiable via
+  // the .is-active styling on the section itself (set from the server
+  // regardless of open/closed state), so collapsing it doesn't lose that.
+  const NAV_SECTION_KEY_PREFIX = 'alderpointdnsNavSectionOpen:';
   document.querySelectorAll('[data-nav-section-toggle]').forEach((button) => {
     const panel = document.getElementById(button.getAttribute('aria-controls') || '');
     if (!panel) return;
     const section = button.closest('[data-nav-section]');
-    const setSectionOpen = (open) => {
+    const sectionId = section ? section.getAttribute('data-nav-section') : null;
+    const storageKey = sectionId ? NAV_SECTION_KEY_PREFIX + sectionId : null;
+    const setSectionOpen = (open, persist) => {
       button.setAttribute('aria-expanded', String(open));
       panel.hidden = !open;
       if (section) section.classList.toggle('is-expanded', open);
-    };
-    setSectionOpen(button.getAttribute('aria-expanded') === 'true');
-    button.addEventListener('click', () => {
-      const isActive = button.getAttribute('aria-current') === 'true';
-      const nextOpen = !(button.getAttribute('aria-expanded') === 'true');
-      if (isActive && !nextOpen) {
-        setSectionOpen(true);
-        return;
+      if (persist && storageKey) {
+        try { window.localStorage.setItem(storageKey, open ? '1' : '0'); } catch (e) {}
       }
-      setSectionOpen(nextOpen);
+    };
+    let initialOpen = button.getAttribute('aria-expanded') === 'true';
+    if (storageKey) {
+      try {
+        const stored = window.localStorage.getItem(storageKey);
+        if (stored !== null) initialOpen = stored === '1';
+      } catch (e) {}
+    }
+    setSectionOpen(initialOpen, false);
+    button.addEventListener('click', () => {
+      setSectionOpen(!(button.getAttribute('aria-expanded') === 'true'), true);
     });
   });
 
@@ -144,6 +159,54 @@
     showToast.timer = window.setTimeout(() => toast.classList.remove('toast--visible'), 3600);
   }
 
+  // Reusable pending-action button state, applied to every form submit
+  // across the app (Apply/Add/Delete/Import/Save/Deploy/Restore/Flush/
+  // Update/...): disables the submitted button immediately (so rapid
+  // double-clicks can't fire a second submission), swaps its label for an
+  // in-progress gerund with a spinner, and sets aria-busy -- without
+  // requiring every page to wire up its own one-off handler.
+  function pendingGerund(label) {
+    const trimmed = (label || '').trim();
+    if (!trimmed) return 'Working…';
+    const words = trimmed.replace(/[.…]+$/, '').split(' ');
+    let stem = words[0];
+    if (/e$/i.test(stem) && !/[eoy]e$/i.test(stem)) {
+      stem = stem.slice(0, -1);
+    }
+    words[0] = stem + 'ing';
+    return words.join(' ') + '…';
+  }
+
+  function startPending(button) {
+    if (!button || button.dataset.pendingActive === '1') return;
+    button.dataset.pendingActive = '1';
+    button.dataset.pendingOriginalHtml = button.innerHTML;
+    const label = button.dataset.pendingLabel || pendingGerund(button.textContent);
+    button.innerHTML = '';
+    const spinner = document.createElement('span');
+    spinner.className = 'btn-spinner';
+    spinner.setAttribute('aria-hidden', 'true');
+    const text = document.createElement('span');
+    text.textContent = label;
+    button.appendChild(spinner);
+    button.appendChild(text);
+    button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+  }
+
+  function stopPending(button) {
+    if (!button || button.dataset.pendingActive !== '1') return;
+    button.innerHTML = button.dataset.pendingOriginalHtml || button.innerHTML;
+    delete button.dataset.pendingActive;
+    delete button.dataset.pendingOriginalHtml;
+    button.disabled = false;
+    button.removeAttribute('aria-busy');
+  }
+
+  function submitterFor(form, event) {
+    return (event && event.submitter) || form.querySelector('button[type="submit"], button:not([type])');
+  }
+
   document.addEventListener('submit', async (event) => {
     const form = event.target.closest('form');
     if (!form) return;
@@ -151,10 +214,17 @@
       event.preventDefault();
       return;
     }
-    if (!form.matches('[data-async-form]')) return;
+    const button = submitterFor(form, event);
+    if (!form.matches('[data-async-form]')) {
+      // Regular form: let the browser navigate normally (no
+      // preventDefault), but still show the pending state immediately so
+      // there's visible feedback during the round-trip and the button
+      // can't be double-clicked while the new page loads.
+      if (button) startPending(button);
+      return;
+    }
     event.preventDefault();
-    const button = form.querySelector('button');
-    if (button) button.disabled = true;
+    if (button) startPending(button);
     try {
       const response = await fetch(form.action, {
         method: form.method || 'POST',
@@ -179,8 +249,22 @@
     } catch (error) {
       showToast('Local DNS change failed.', 'error');
     } finally {
-      if (button) button.disabled = false;
+      // On success/inline-error responses, main.innerHTML was already
+      // replaced above with a fresh (non-pending) render, so this is a
+      // harmless no-op on the now-detached old button. On a genuine
+      // network failure (caught above), the old button is still live in
+      // the DOM, so this is what actually restores it.
+      if (button) stopPending(button);
     }
+  });
+
+  // A page restored from the back/forward cache can still have a button
+  // frozen mid-"pending" from just before the user navigated away; reset
+  // any such buttons so the page isn't stuck looking like a submission is
+  // still in flight.
+  window.addEventListener('pageshow', (event) => {
+    if (!event.persisted) return;
+    document.querySelectorAll('[data-pending-active="1"]').forEach(stopPending);
   });
 
   // Row-level expandable editors (Local DNS, etc): collapsed by default so
@@ -437,4 +521,43 @@
     window.addEventListener('resize', () => drawSparkline(canvas));
   });
   document.querySelectorAll('canvas[data-chart="traffic"]').forEach(setupChart);
+
+  // Accessible show/hide toggle for password fields (setup, administration
+  // password change). Each toggle button lives inside a .password-field
+  // wrapper alongside the input it controls.
+  document.querySelectorAll('[data-password-toggle]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const wrapper = button.closest('.password-field');
+      const input = wrapper && wrapper.querySelector('[data-password-input]');
+      if (!input) return;
+      const showing = input.type === 'text';
+      input.type = showing ? 'password' : 'text';
+      button.textContent = showing ? 'Show' : 'Hide';
+      button.setAttribute('aria-pressed', String(!showing));
+      button.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
+    });
+  });
+
+  // Client-side password-confirmation check for forms carrying
+  // data-password-match (setup, administration change-password): mirrors
+  // the server-side check so a mismatch is caught before submission, using
+  // the browser's native validation UI. The server always re-validates
+  // regardless -- this is a usability improvement, not the source of truth.
+  document.querySelectorAll('form[data-password-match]').forEach((form) => {
+    const password = form.querySelector('[name="password"], [name="new_password"]');
+    const confirm = form.querySelector('[name="confirm_password"], [name="confirm_new_password"]');
+    if (!password || !confirm) return;
+    const check = () => {
+      confirm.setCustomValidity(confirm.value !== password.value ? 'Passwords do not match.' : '');
+    };
+    password.addEventListener('input', check);
+    confirm.addEventListener('input', check);
+    form.addEventListener('submit', (event) => {
+      check();
+      if (!confirm.checkValidity()) {
+        event.preventDefault();
+        confirm.reportValidity();
+      }
+    });
+  });
 }());

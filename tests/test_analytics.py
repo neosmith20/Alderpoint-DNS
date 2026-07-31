@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
+import sqlite3
 import tempfile
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import sys
@@ -50,6 +53,7 @@ class AnalyticsTests(unittest.TestCase):
         analytics.DB_PATH = compiler.DB_PATH
         local_dns.DB_PATH = compiler.DB_PATH
         analytics.SECRET_FILE = root / "analytics.secret"
+        analytics.HEARTBEAT_FILE = root / "analytics-writer-heartbeat.json"
         analytics.init_analytics_db()
 
     def tearDown(self) -> None:
@@ -345,6 +349,111 @@ class AnalyticsTests(unittest.TestCase):
             row = conn.execute("SELECT queries_attempted, successful_responses FROM upstream_resolver_aggregate_buckets WHERE bucket_start=180").fetchone()
             self.assertEqual(row["queries_attempted"], 2)
             self.assertEqual(row["successful_responses"], 2)
+
+
+class WriterResilienceTests(unittest.TestCase):
+    """Covers analytics.Collector's writer-loop resilience: transient
+    database-lock retry/backoff, cleanup-failure isolation, the writer
+    heartbeat used for "active but dead" detection, and the
+    consecutive-failure threshold that terminates the process so systemd
+    restarts it."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        compiler.DB_PATH = root / "alderpointdns.db"
+        analytics.DB_PATH = compiler.DB_PATH
+        analytics.SECRET_FILE = root / "analytics.secret"
+        analytics.HEARTBEAT_FILE = root / "analytics-writer-heartbeat.json"
+        analytics.init_analytics_db()
+        self.sleep_patch = unittest.mock.patch("app.analytics.time.sleep")
+        self.sleep_patch.start()
+
+    def tearDown(self) -> None:
+        self.sleep_patch.stop()
+        self.tmp.cleanup()
+
+    def _locked_error(self) -> sqlite3.OperationalError:
+        return sqlite3.OperationalError("database is locked")
+
+    def test_retry_on_lock_succeeds_after_transient_locks(self) -> None:
+        calls = {"n": 0}
+
+        def flaky():
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise self._locked_error()
+            return "ok"
+
+        result, retries = analytics._retry_on_lock(flaky)
+        self.assertEqual(result, "ok")
+        self.assertEqual(retries, 2)
+
+    def test_retry_on_lock_reraises_non_lock_errors_immediately(self) -> None:
+        def broken():
+            raise ValueError("not a lock problem")
+
+        with self.assertRaises(ValueError):
+            analytics._retry_on_lock(broken)
+
+    def test_retry_on_lock_gives_up_after_exhausting_attempts(self) -> None:
+        def always_locked():
+            raise self._locked_error()
+
+        with self.assertRaises(sqlite3.OperationalError):
+            analytics._retry_on_lock(always_locked, attempts=3, base_delay=0)
+
+    def test_heartbeat_roundtrip_and_staleness(self) -> None:
+        self.assertEqual(analytics.writer_health()["status"], "unknown")
+        analytics._write_heartbeat("ok")
+        health = analytics.writer_health()
+        self.assertEqual(health["status"], "ok")
+        self.assertFalse(health["stale"])
+        payload = json.loads(analytics.HEARTBEAT_FILE.read_text())
+        payload["ts"] -= analytics.WRITER_STALE_SECONDS + 5
+        analytics.HEARTBEAT_FILE.write_text(json.dumps(payload))
+        self.assertTrue(analytics.writer_health()["stale"])
+
+    def test_cleanup_lock_exhaustion_is_skipped_not_fatal(self) -> None:
+        collector = analytics.Collector()
+        with unittest.mock.patch.object(collector, "_write_events"):
+            with unittest.mock.patch.object(collector, "_run_cleanup", side_effect=self._locked_error()):
+                collector._writer_cycle([], {})
+        self.assertEqual(collector.writer_consecutive_failures, 1)
+        self.assertFalse(collector.fatal_error.is_set())
+
+    def test_writer_recovers_after_transient_failure_resets_counter(self) -> None:
+        collector = analytics.Collector()
+        collector.writer_consecutive_failures = 3
+        with unittest.mock.patch.object(collector, "_write_events"):
+            with unittest.mock.patch.object(collector, "_run_cleanup"):
+                with unittest.mock.patch.object(collector, "_notify_writer") as notify:
+                    collector._writer_cycle([], {})
+        self.assertEqual(collector.writer_consecutive_failures, 0)
+        notify.assert_called_once()
+        self.assertEqual(notify.call_args.kwargs.get("recovered"), True)
+        self.assertEqual(analytics.writer_health()["status"], "ok")
+
+    def test_writer_terminates_after_max_consecutive_failures(self) -> None:
+        collector = analytics.Collector()
+        with unittest.mock.patch.object(collector, "_write_events", side_effect=RuntimeError("db unreachable")):
+            with unittest.mock.patch.object(collector, "_notify_writer") as notify:
+                for _ in range(analytics.WRITER_MAX_CONSECUTIVE_FAILURES):
+                    collector._writer_cycle([], {})
+        self.assertTrue(collector.fatal_error.is_set())
+        self.assertTrue(collector.stop_event.is_set())
+        self.assertEqual(analytics.writer_health()["status"], "dead")
+        notify.assert_called_once()
+        self.assertEqual(notify.call_args.kwargs.get("recovered"), False)
+
+    def test_writer_does_not_terminate_below_failure_threshold(self) -> None:
+        collector = analytics.Collector()
+        with unittest.mock.patch.object(collector, "_write_events", side_effect=RuntimeError("db unreachable")):
+            for _ in range(analytics.WRITER_MAX_CONSECUTIVE_FAILURES - 1):
+                collector._writer_cycle([], {})
+        self.assertFalse(collector.fatal_error.is_set())
+        self.assertFalse(collector.stop_event.is_set())
+        self.assertEqual(analytics.writer_health()["status"], "degraded")
 
 
 if __name__ == "__main__":

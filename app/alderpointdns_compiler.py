@@ -41,22 +41,87 @@ TOTAL_TIMEOUT = 60
 RPZ_ZONE = "alderpointdns.rpz"
 DOMAIN_RE = re.compile(r"^(?=.{1,253}\.?$)([a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?\.)+[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?\.?$")
 
+# Hostnames that identify the local machine itself, not a real domain to
+# block. Some public hosts-format blocklists carry these (mirroring
+# /etc/hosts convention) even though they have no meaning as a DNS block.
+LOCALHOST_ALIASES = frozenset({"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"})
+
+# AdGuard's own hosted DNS-filter registry (e.g. the "AdGuard DNS Popup
+# Hosts filter" source) rewrites known ad/pop-up domains to this CNAME
+# landing page via `$dnsrewrite=ad-block.dns.adguard.com` instead of a plain
+# `||domain^` block. Alderpoint DNS's blocklist pipeline has no per-source
+# CNAME/landing-page concept, so -- as an explicit, documented policy choice
+# -- exact matches on this specific, known AdGuard target are normalized to
+# an ordinary block instead of being reported unsupported. Any other
+# hostname-target $dnsrewrite is left to the shared custom-rule parser's
+# normal modifier handling, which reports it unsupported with a reason.
+ADGUARD_DNSREWRITE_BLOCKPAGE_TARGETS = frozenset({"ad-block.dns.adguard.com"})
+
+HEALTH_HEALTHY = "healthy"
+HEALTH_HEALTHY_REDUNDANT = "healthy_redundant"
+HEALTH_WARNING = "warning"
+HEALTH_UNSUPPORTED_FORMAT = "unsupported_format"
+HEALTH_ERROR = "error"
+HEALTH_USING_CACHED = "using_cached"
+HEALTH_PENDING = "pending"
+HEALTH_DISABLED = "disabled"
+
+HEALTH_LABELS = {
+    HEALTH_HEALTHY: "Healthy",
+    HEALTH_HEALTHY_REDUNDANT: "Healthy, redundant",
+    HEALTH_WARNING: "Warning",
+    HEALTH_UNSUPPORTED_FORMAT: "Unsupported format",
+    HEALTH_ERROR: "Error",
+    HEALTH_USING_CACHED: "Using cached copy",
+    HEALTH_PENDING: "Pending",
+    HEALTH_DISABLED: "Disabled",
+}
+
+HEALTH_TONES = {
+    HEALTH_HEALTHY: "healthy",
+    HEALTH_HEALTHY_REDUNDANT: "healthy",
+    HEALTH_WARNING: "degraded",
+    HEALTH_UNSUPPORTED_FORMAT: "degraded",
+    HEALTH_ERROR: "down",
+    HEALTH_USING_CACHED: "degraded",
+    HEALTH_PENDING: "unavailable",
+    HEALTH_DISABLED: "unavailable",
+}
+
 
 class AlderpointDNSConnection(sqlite3.Connection):
+    """Closes on exit like a plain connection factory would, but only once
+    the outermost `with` block exits -- callers that reuse an already-open
+    connection as its own nested `with conn: ...` transaction boundary (a
+    common pattern for grouping a subset of statements into one commit)
+    would otherwise have the connection closed out from under them by the
+    first nested block's __exit__, breaking every statement after it."""
+
+    def __enter__(self):
+        self._alderpointdns_depth = getattr(self, "_alderpointdns_depth", 0) + 1
+        return super().__enter__()
+
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         super().__exit__(exc_type, exc_value, traceback)
-        self.close()
+        self._alderpointdns_depth = getattr(self, "_alderpointdns_depth", 1) - 1
+        if self._alderpointdns_depth <= 0:
+            self.close()
 
 
 @dataclass
 class ParseStats:
+    downloaded_entries: int = 0
     parsed_rules: int = 0
     accepted_domains: int = 0
     duplicate_domains: int = 0
     invalid_rules: int = 0
     unsupported_rules: int = 0
+    unique_active_domains: int = 0
     exceptions: int = 0
-    errors: list[str] = field(default_factory=list)
+    # Sample rejected (invalid/unsupported) lines for the UI's expandable
+    # details panel: {"line": N, "kind": "invalid"|"unsupported", "reason": str, "excerpt": str}.
+    # Capped so a badly-formed source can't bloat the sources row.
+    rejected_samples: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -112,8 +177,9 @@ def slug(text: str) -> str:
 
 def connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, factory=AlderpointDNSConnection)
+    conn = sqlite3.connect(DB_PATH, factory=AlderpointDNSConnection, timeout=5.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -243,6 +309,17 @@ def init_db() -> None:
         # installations pick it up on upgrade without a schema rewrite; older
         # rows keep NULL, which reads as "manual".
         _ensure_column(conn, "deployments", "trigger", "TEXT")
+        # Per-source download/parse breakdown and health-state fields, added
+        # as idempotent ALTER-if-missing migrations. "duplicate_domains"
+        # already existed (within-source only); its meaning is widened
+        # below to "did not contribute a new unique active rule" (within- or
+        # cross-source), matching what the UI displays.
+        _ensure_column(conn, "sources", "downloaded_entries", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "sources", "unique_active_domains", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "sources", "using_cached_copy", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "sources", "last_compile_success", "TEXT")
+        _ensure_column(conn, "sources", "last_warning", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "sources", "rejected_samples", "TEXT NOT NULL DEFAULT '[]'")
         local_dns.init_db(conn)
         filter_schedule.init_db(conn)
         custom_rules.init_db(conn)
@@ -267,38 +344,103 @@ def normalize_domain(raw: str) -> str | None:
         return value
 
 
-def parse_line(line: str) -> tuple[str, str | None]:
-    text = line.strip()
-    if not text or text.startswith("#") or text.startswith("!") or text.startswith("//"):
-        return "skip", None
-    if text.startswith("[") and text.endswith("]"):
-        return "skip", None
+def _adguard_blockpage_normalize(text: str) -> str:
+    """Strips `$dnsrewrite=<target>` when it is the line's *only* modifier
+    and the target is a recognized AdGuard block-page CNAME (see
+    ADGUARD_DNSREWRITE_BLOCKPAGE_TARGETS), turning the line back into a
+    plain `||domain^`/`|domain^` block before the shared parser sees it.
+    Any other modifier combination -- including this same target combined
+    with another modifier -- is left untouched and handled (as unsupported,
+    for a hostname dnsrewrite target) by custom_rules.parse_rule below."""
+    if "$dnsrewrite=" not in text:
+        return text
+    head, sep, modifiers = text.partition("$")
+    if not sep:
+        return text
+    modifiers = modifiers.strip()
+    for target in ADGUARD_DNSREWRITE_BLOCKPAGE_TARGETS:
+        if modifiers == f"dnsrewrite={target}":
+            return head.strip()
+    return text
 
-    if text.startswith("@@||"):
-        if "$" in text:
-            return "unsupported", None
-        end = text.find("^", 4)
-        candidate = text[4:end if end != -1 else None]
-        return "allow", normalize_domain(candidate)
 
-    if text.startswith("||"):
-        if "$" in text:
-            return "unsupported", None
-        end = text.find("^", 2)
-        candidate = text[2:end if end != -1 else None]
-        return "block", normalize_domain(candidate)
+def _is_hosts_line(first_token: str) -> bool:
+    try:
+        ipaddress.ip_address(first_token)
+        return True
+    except ValueError:
+        return False
 
-    if text.startswith("@@") or "##" in text or "#@#" in text or "$" in text or "/" in text:
-        return "unsupported", None
 
-    parts = text.split()
-    if len(parts) >= 2 and parts[0] in {"0.0.0.0", "127.0.0.1"}:
-        return "block", normalize_domain(parts[1])
+def parse_source_line(raw: str) -> list[tuple[str, str | None, str]]:
+    """Classifies one already-stripped, non-blank, non-full-line-comment
+    source line into zero or more (kind, domain, reason) results, where
+    kind is one of: skip, block, allow, invalid, unsupported. A hosts-format
+    line with multiple hostnames yields one result per hostname.
 
-    if len(parts) == 1:
-        return "block", normalize_domain(parts[0])
+    Hosts-format lines (`<address> <hostname...>`) are handled directly: for
+    blocklist sources the address is always a sinkhole marker (0.0.0.0,
+    127.0.0.1, ::, ::0, 0:0:0:0:0:0:0:0, ...), never an intentional rewrite
+    target, so every address form blocks the domain -- unlike custom user
+    rules (app/custom_rules.py), which treat a non-zero/non-`::` address as
+    a deliberate local rewrite. Everything else (AdBlock/AdGuard syntax,
+    including $dnsrewrite modifiers) is delegated to
+    custom_rules.parse_rule, the same parser used for user-supplied custom
+    filtering rules, so blocklist sources and custom rules share one
+    AdBlock-syntax implementation instead of two incompatible ones.
+    """
+    first_token = raw.split(None, 1)[0] if raw.split(None, 1) else ""
+    if _is_hosts_line(first_token):
+        body, _, _inline = raw.partition("#")
+        parts = body.split()
+        if len(parts) < 2:
+            return [("invalid", None, "hosts entry has no hostname")]
+        results: list[tuple[str, str | None, str]] = []
+        for host in parts[1:]:
+            # Checked against the raw token first: normalize_domain rejects
+            # single-label names outright (no dot), which would otherwise
+            # misreport "localhost"/"ip6-localhost"/"ip6-loopback" as
+            # invalid instead of the intentional, silent skip these
+            # /etc/hosts-style aliases are supposed to get.
+            if host.strip(".").lower() in LOCALHOST_ALIASES:
+                results.append(("skip", None, ""))
+                continue
+            domain = normalize_domain(host)
+            if domain is None:
+                results.append(("invalid", None, f"'{host}' is not a valid hostname"))
+                continue
+            if domain in LOCALHOST_ALIASES:
+                results.append(("skip", None, ""))
+                continue
+            results.append(("block", domain, ""))
+        return results
 
-    return "invalid", None
+    normalized = _adguard_blockpage_normalize(raw)
+    parsed = custom_rules.parse_rule(normalized, plain_domain_subdomains=True)
+    results = []
+    for rule in parsed:
+        if rule.rule_type == "comment":
+            continue
+        if rule.validation_state == "invalid":
+            results.append(("invalid", None, rule.unsupported_reason))
+        elif rule.validation_state == "unsupported":
+            results.append(("unsupported", None, rule.unsupported_reason))
+        elif rule.rule_type in ("regex_block", "regex_allow"):
+            # Blocklist sources contribute to plain domain sets only; a
+            # POSIX-ERE regex rule has no `domain`, and RPZ regex matching
+            # is a dnsdist-layer, custom-rule-only feature (app/custom_rules.py).
+            results.append(("unsupported", None, "regex rules are not supported for blocklist sources"))
+        elif rule.rule_type == "rewrite":
+            # Only reachable for a non-hosts line carrying an IP-address
+            # $dnsrewrite (e.g. "||host.example^$dnsrewrite=1.2.3.4");
+            # blocklist sources have no rewrite/Local-DNS concept, so this
+            # is reported rather than silently creating an address record.
+            results.append(("unsupported", None, "modifier $dnsrewrite to an IP address is not supported for blocklist sources"))
+        elif rule.domain in LOCALHOST_ALIASES:
+            results.append(("skip", None, ""))
+        else:
+            results.append((rule.action, rule.domain, ""))
+    return results
 
 
 def parse_rules(content: str) -> tuple[set[str], set[str], ParseStats]:
@@ -306,26 +448,45 @@ def parse_rules(content: str) -> tuple[set[str], set[str], ParseStats]:
     allows: set[str] = set()
     stats = ParseStats()
     for line_number, line in enumerate(content.splitlines(), 1):
-        action, domain = parse_line(line)
-        if action == "skip":
+        raw = line.strip()
+        if not raw or raw.startswith("#") or raw.startswith("!") or raw.startswith("//"):
             continue
-        if action == "unsupported":
-            stats.unsupported_rules += 1
+        if raw.startswith("[") and raw.endswith("]"):
             continue
-        if action == "invalid" or domain is None:
-            stats.invalid_rules += 1
-            if len(stats.errors) < 20:
-                stats.errors.append(f"line {line_number}: invalid or unsupported domain")
-            continue
-        stats.parsed_rules += 1
-        target = allows if action == "allow" else blocks
-        if domain in target:
-            stats.duplicate_domains += 1
-            continue
-        target.add(domain)
-        stats.accepted_domains += 1
-        if action == "allow":
-            stats.exceptions += 1
+        stats.downloaded_entries += 1
+        for kind, domain, reason in parse_source_line(raw):
+            if kind == "skip":
+                continue
+            if kind in ("invalid", "unsupported"):
+                if kind == "invalid":
+                    stats.invalid_rules += 1
+                else:
+                    stats.unsupported_rules += 1
+                if len(stats.rejected_samples) < 20:
+                    stats.rejected_samples.append(
+                        {
+                            "line": line_number,
+                            "kind": kind,
+                            "reason": reason or f"{kind} entry",
+                            "excerpt": raw[:120],
+                        }
+                    )
+                continue
+            stats.parsed_rules += 1
+            target = allows if kind == "allow" else blocks
+            if domain in target:
+                continue
+            target.add(domain)
+            stats.accepted_domains += 1
+            if kind == "allow":
+                stats.exceptions += 1
+    # Within-source duplicates only (lines repeated inside this one source).
+    # collect_rules() overwrites this with the fuller, cross-source-aware
+    # figure once every enabled source's domains are known; a bare
+    # parse_rules() call on a single source's content still gets a
+    # meaningful number instead of always reading 0.
+    stats.unique_active_domains = len(blocks)
+    stats.duplicate_domains = stats.parsed_rules - stats.accepted_domains
     return blocks, allows, stats
 
 
@@ -365,27 +526,45 @@ def download_source(source: sqlite3.Row) -> SourceResult:
     return result
 
 
-def record_source_result(conn: sqlite3.Connection, result: SourceResult, stats: ParseStats | None = None) -> None:
+def record_download_result(conn: sqlite3.Connection, result: SourceResult, using_cached_copy: bool) -> None:
+    """Records the outcome of an actual network download attempt only.
+    Never called for a no-download (cache-only) recompute pass, so it can
+    never clobber a real attempt's http_status/downloaded_bytes/last_error
+    with the placeholder values a cache-only pass would otherwise produce."""
     fields = {
         "last_attempt": now(),
         "http_status": result.http_status,
         "downloaded_bytes": result.downloaded_bytes,
         "last_error": result.error,
+        "using_cached_copy": 1 if using_cached_copy else 0,
     }
     if result.success:
         fields["last_success"] = now()
-    if stats:
-        fields.update(
-            {
-                "parsed_rules": stats.parsed_rules,
-                "accepted_domains": stats.accepted_domains,
-                "duplicate_domains": stats.duplicate_domains,
-                "invalid_rules": stats.invalid_rules,
-                "unsupported_rules": stats.unsupported_rules,
-            }
-        )
     assignments = ", ".join(f"{key}=:{key}" for key in fields)
     fields["id"] = result.source_id
+    conn.execute(f"UPDATE sources SET {assignments} WHERE id=:id", fields)
+
+
+def record_parse_stats(conn: sqlite3.Connection, source_id: int, stats: ParseStats) -> None:
+    warning_parts = []
+    if stats.invalid_rules:
+        warning_parts.append(f"{stats.invalid_rules} invalid")
+    if stats.unsupported_rules:
+        warning_parts.append(f"{stats.unsupported_rules} unsupported")
+    last_warning = (", ".join(warning_parts) + " entries") if warning_parts else ""
+    fields = {
+        "downloaded_entries": stats.downloaded_entries,
+        "parsed_rules": stats.parsed_rules,
+        "accepted_domains": stats.accepted_domains,
+        "duplicate_domains": stats.duplicate_domains,
+        "invalid_rules": stats.invalid_rules,
+        "unsupported_rules": stats.unsupported_rules,
+        "unique_active_domains": stats.unique_active_domains,
+        "rejected_samples": json.dumps(stats.rejected_samples[:20]),
+        "last_warning": last_warning,
+    }
+    assignments = ", ".join(f"{key}=:{key}" for key in fields)
+    fields["id"] = source_id
     conn.execute(f"UPDATE sources SET {assignments} WHERE id=:id", fields)
 
 
@@ -397,27 +576,60 @@ def collect_rules(conn: sqlite3.Connection, download: bool) -> tuple[set[str], s
     all_blocks: set[str] = set()
     all_allows: set[str] = set()
     per_source: dict[int, ParseStats] = {}
+    per_source_blocks: dict[int, set[str]] = {}
     errors: list[str] = []
+    pending: list[tuple[sqlite3.Row, SourceResult]] = []
+
     for source in enabled_sources(conn):
-        result: SourceResult
         if download:
             result = download_source(source)
+            using_cached = (not result.success) and bool(result.path and result.path.exists())
+            record_download_result(conn, result, using_cached)
         else:
             current_path, _ = source_paths(source)
             result = SourceResult(source["id"], source["name"], source["url"], current_path.exists(), path=current_path)
-            if not current_path.exists():
-                result.error = "no successful downloaded copy exists"
-        content = ""
+        pending.append((source, result))
+
+    for source, result in pending:
         stats = ParseStats()
         if result.path and result.path.exists():
             content = result.path.read_text(errors="replace")
             blocks, allows, stats = parse_rules(content)
             all_blocks.update(blocks)
             all_allows.update(allows)
+            per_source_blocks[source["id"]] = blocks
+        else:
+            per_source_blocks[source["id"]] = set()
         if result.error:
             errors.append(f"{result.name}: {result.error}")
-        record_source_result(conn, result, stats)
         per_source[source["id"]] = stats
+
+    # A source's "unique active rules contributed" is processed in stable
+    # source-id order (pending preserves enabled_sources' ORDER BY id): a
+    # domain counts toward a source's own unique contribution only if no
+    # earlier-processed enabled source's block list already carried it. The
+    # IPv4 and IPv6 editions of the same upstream list legitimately mirror
+    # each other's domain set -- whichever was added to Alderpoint DNS
+    # first (typically the IPv4 edition) "owns" the domains, and the
+    # second, added-later edition is expected to show zero unique
+    # contribution -- "healthy, redundant" rather than "0 rules".
+    seen_domains: set[str] = set()
+    for source, _result in pending:
+        stats = per_source[source["id"]]
+        blocks = per_source_blocks[source["id"]]
+        new_domains = blocks - seen_domains
+        stats.unique_active_domains = len(new_domains)
+        seen_domains.update(blocks)
+        # "Duplicates" as shown to the operator bundles both kinds of
+        # non-contribution into one number: lines repeated within this same
+        # source (parsed_rules - accepted_domains) plus this source's own
+        # deduped block domains that an earlier-processed source already
+        # contributed (len(blocks) - unique_active_domains). This keeps
+        # parsed == duplicates + unique_active_domains true for the common
+        # (no exceptions) case, matching the "347 parsed / 347 duplicates /
+        # 0 unique rules contributed" healthy-redundant display.
+        stats.duplicate_domains = (stats.parsed_rules - stats.accepted_domains) + (len(blocks) - stats.unique_active_domains)
+        record_parse_stats(conn, source["id"], stats)
 
     # Custom rules no longer merge into the external sets here; the deploy
     # path reads only custom_filter_rules through custom_rules.collect_active
@@ -428,6 +640,44 @@ def collect_rules(conn: sqlite3.Connection, download: bool) -> tuple[set[str], s
         (len(active_blocks),),
     )
     return active_blocks, all_allows, per_source, errors
+
+
+def source_health(source: sqlite3.Row) -> dict[str, str]:
+    """Derives the display health state for one source row from its stored
+    download/parse counters, instead of the old "Healthy unless last_error
+    is set" rule that reported a real download success with an unsupported
+    or entirely-redundant source as plain Healthy alongside 0 rules."""
+    if not source["enabled"]:
+        state = HEALTH_DISABLED
+        return {"state": state, "label": HEALTH_LABELS[state], "tone": HEALTH_TONES[state]}
+    if not source["last_success"]:
+        state = HEALTH_ERROR if source["last_error"] else HEALTH_PENDING
+        return {"state": state, "label": HEALTH_LABELS[state], "tone": HEALTH_TONES[state]}
+
+    downloaded = source["downloaded_entries"] or 0
+    parsed = source["parsed_rules"] or 0
+    invalid = source["invalid_rules"] or 0
+    unsupported = source["unsupported_rules"] or 0
+    unique = source["unique_active_domains"] or 0
+    using_cached = bool(source["using_cached_copy"])
+
+    if source["last_error"]:
+        # A failed download attempt that still has a previously-successful
+        # cached copy on disk keeps contributing that copy's parsed rules
+        # (collect_rules re-parses the cached file regardless of download
+        # outcome) -- distinguish that from a hard failure with nothing to
+        # fall back on.
+        state = HEALTH_USING_CACHED if using_cached else HEALTH_ERROR
+        return {"state": state, "label": HEALTH_LABELS[state], "tone": HEALTH_TONES[state]}
+    if downloaded and parsed == 0:
+        state = HEALTH_UNSUPPORTED_FORMAT
+    elif invalid or unsupported:
+        state = HEALTH_WARNING
+    elif parsed and unique == 0:
+        state = HEALTH_HEALTHY_REDUNDANT
+    else:
+        state = HEALTH_HEALTHY
+    return {"state": state, "label": HEALTH_LABELS[state], "tone": HEALTH_TONES[state]}
 
 
 def rpz_name(domain: str) -> str:
@@ -556,6 +806,15 @@ def deploy(download: bool = True, trigger: str | None = None) -> int:
                 COMPILED_RPZ.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(staged_rpz, COMPILED_RPZ)
                 reload_bind()
+                # Compilation is one atomic RPZ file covering every enabled
+                # source, so "last successful compilation" is the same
+                # timestamp for all of them -- unlike last_success, which is
+                # per-source and reflects that source's own last successful
+                # download.
+                conn.execute(
+                    "UPDATE sources SET last_compile_success=? WHERE enabled=1",
+                    (now(),),
+                )
                 local_dns.deploy_zones(conn)
                 dns_cache.deploy_cache_options(conn)
                 upstream_dns.deploy_upstreams(conn)
@@ -655,8 +914,10 @@ def list_status(_: argparse.Namespace) -> None:
     init_db()
     with connect() as conn:
         print("Sources:")
-        for row in conn.execute("SELECT id, name, enabled, accepted_domains, invalid_rules, unsupported_rules, last_error FROM sources ORDER BY id"):
-            print(dict(row))
+        for row in conn.execute("SELECT * FROM sources ORDER BY id"):
+            fields = dict(row)
+            fields["health"] = source_health(row)["label"]
+            print(fields)
         print("Custom rules:")
         for row in conn.execute(
             "SELECT id, rule_text, rule_type, action, enabled, validation_state, comment FROM custom_filter_rules ORDER BY id"
@@ -726,25 +987,51 @@ def seed_public(args: argparse.Namespace) -> None:
 
 
 def update_one_source(conn: sqlite3.Connection, source: sqlite3.Row) -> tuple[SourceResult, ParseStats]:
+    """Downloads and parses one source, then recomputes every enabled
+    source's cross-source duplicate/unique-contribution stats (and the
+    global final_active_domains total) from their currently cached
+    downloads with no further network access -- so a single "Update now"
+    keeps the whole dashboard's dedup numbers consistent, not just the one
+    source that was refreshed. collect_rules(download=False) never touches
+    http_status/downloaded_bytes/last_error, so this cannot clobber the
+    real download outcome recorded immediately below."""
     result = download_source(source)
-    stats = ParseStats()
-    if result.path and result.path.exists():
-        blocks, _, stats = parse_rules(result.path.read_text(errors="replace"))
-        conn.execute(
-            "UPDATE sources SET final_active_domains=? WHERE id=?",
-            (len(blocks), source["id"]),
-        )
-    record_source_result(conn, result, stats)
+    using_cached = (not result.success) and bool(result.path and result.path.exists())
+    record_download_result(conn, result, using_cached)
+    _active_blocks, _allows, per_source, _errors = collect_rules(conn, download=False)
+    stats = per_source.get(source["id"], ParseStats())
     return result, stats
 
 
 def update_sources(_: argparse.Namespace) -> None:
+    """Result contract for callers (timer, admin CLI, notification checker):
+    0 -- every enabled source updated/validated cleanly; 2 -- at least one
+    source failed, used a cached fallback, or produced warnings/unsupported
+    content, but at least one other source is still fully healthy (partial
+    success); 1 -- every enabled source is in a hard-failure state (or there
+    were no usable results at all). Previously this always exited 0, so a
+    source download failure (an `error=` line) was visible only to someone
+    reading stdout by hand."""
     init_db()
     with connect() as conn:
-        active_blocks, _, _, errors = collect_rules(conn, download=True)
+        active_blocks, _, _per_source, errors = collect_rules(conn, download=True)
         print(f"active_domains={len(active_blocks)}")
+        sources = enabled_sources(conn)
+        hard_failures = 0
+        degraded = 0
+        for source in sources:
+            state = source_health(source)["state"]
+            if state == HEALTH_ERROR:
+                hard_failures += 1
+            elif state in (HEALTH_WARNING, HEALTH_UNSUPPORTED_FORMAT, HEALTH_USING_CACHED):
+                degraded += 1
+                print(f"warning={source['name']}: {HEALTH_LABELS[state]} ({source['last_warning'] or source['last_error'] or ''})")
         for error in errors:
             print(f"error={error}")
+    if sources and hard_failures == len(sources):
+        raise SystemExit(1)
+    if hard_failures or degraded:
+        raise SystemExit(2)
 
 
 def update_source(args: argparse.Namespace) -> None:
@@ -757,6 +1044,7 @@ def update_source(args: argparse.Namespace) -> None:
         print(f"source_id={source['id']}")
         print(f"success={1 if result.success else 0}")
         print(f"accepted_domains={stats.accepted_domains}")
+        print(f"unique_active_domains={stats.unique_active_domains}")
         if result.error:
             print(f"error={result.error}")
 

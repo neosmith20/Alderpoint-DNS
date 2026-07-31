@@ -78,6 +78,7 @@ context = {
         "cert_mode": "self_signed", "cert_path": "/etc/alderpointdns/certs/alderpointdns-lab.crt",
         "key_path": "/etc/alderpointdns/certs/alderpointdns-lab.key",
     },
+    "capabilities": {"doh": True, "dot": True, "doh3": True, "doq": True, "dnscrypt": True},
     "cert": {
         "available": True, "subject": "CN=" + long_domain, "issuer": "CN=" + long_domain,
         "not_before": "Jul 29 00:00:00 2026 GMT", "not_after": "Oct 31 00:00:00 2028 GMT",

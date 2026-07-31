@@ -1,6 +1,41 @@
 #!/bin/sh
 set -e
 
+# Fresh scrypt hash of a secret using dnsdist's own hashPassword(), so the
+# result can go straight into setWebserverConfig()'s password/apiKey fields
+# without dnsdist ever seeing (or warning about) the plaintext. $1 is a path
+# to a file whose first line is the plaintext value to hash.
+alderpointdns_dnsdist_hash() {
+  value_file="$1"
+  hash_script="$(mktemp)"
+  cat > "$hash_script" <<HASHEOF
+local f = io.open("$value_file", "r")
+local v = f:read("l")
+f:close()
+print("ALDERPOINTDNS_HASH_OUTPUT:" .. hashPassword(v))
+HASHEOF
+  dnsdist --check-config -C "$hash_script" 2>/dev/null | sed -n 's/^ALDERPOINTDNS_HASH_OUTPUT://p'
+  rm -f "$hash_script"
+}
+
+# Poll for a service reaching the active state instead of checking once
+# immediately after `systemctl restart`/`enable --now`: on Type=simple
+# units systemctl returns as soon as the restart is *initiated*, before a
+# fast-crashing service (bad config, permissions, AppArmor denial) has
+# necessarily been marked failed yet.
+alderpointdns_wait_active() {
+  svc="$1"
+  i=0
+  while [ "$i" -lt 15 ]; do
+    if systemctl is-active --quiet "$svc"; then
+      return 0
+    fi
+    i=$((i + 1))
+    sleep 1
+  done
+  return 1
+}
+
 case "$1" in
   configure)
     if ! getent group alderpointdns >/dev/null; then
@@ -40,6 +75,7 @@ case "$1" in
     # and crash-loop as soon as an encrypted listener (DoH/DoT/DoQ, enabled
     # by default in packaging/dnsdist.service.d/alderpointdns.conf) starts.
     /opt/alderpointdns/scripts/ensure_tls_cert.sh
+
     if [ ! -e /etc/alderpointdns/secrets.env ]; then
       # Subshell: `umask` is a whole-process setting with no block scope in
       # POSIX sh, and everything alderpointdns_compiler.py's deploy step
@@ -49,8 +85,52 @@ case "$1" in
         umask 077
         printf 'ALDERPOINTDNS_SESSION_SECRET=%s\n' "$(openssl rand -base64 48)" > /etc/alderpointdns/secrets.env
       )
-      chown root:alderpointdns /etc/alderpointdns/secrets.env
     fi
+    if [ ! -e /etc/alderpointdns/dnsdist-api.key ]; then
+      ( umask 077; openssl rand -base64 32 > /etc/alderpointdns/dnsdist-api.key )
+    fi
+    if [ ! -e /etc/alderpointdns/dnsdist-web.creds ]; then
+      ( umask 077; printf 'alderpointdns:%s\n' "$(openssl rand -base64 24)" > /etc/alderpointdns/dnsdist-web.creds )
+    fi
+    # root:alderpointdns 0640 (not the umask-derived 0600 these were created
+    # with above): the alderpointdns service account -- not just root --
+    # legitimately needs to read all three at runtime (session secret,
+    # dnsdist API key, dnsdist web credentials), and 0640 keeps that read
+    # access scoped to root and the alderpointdns group only, nothing wider.
+    chown root:alderpointdns /etc/alderpointdns/secrets.env /etc/alderpointdns/dnsdist-api.key /etc/alderpointdns/dnsdist-web.creds
+    chmod 0640 /etc/alderpointdns/secrets.env /etc/alderpointdns/dnsdist-api.key /etc/alderpointdns/dnsdist-web.creds
+
+    # AppArmor local override for named: without this, BIND's own AppArmor
+    # profile (loaded from the bind9 package, independent of Unix
+    # permissions) denies named read access to the generated RPZ/local-zone
+    # config under /var/lib/alderpointdns/compiled/bind/, even though the
+    # files themselves are perfectly readable by the "bind" user -- named
+    # fails to start with a "permission denied" error that looks identical
+    # to a Unix permissions problem but isn't one. Appended (not
+    # overwritten) and guarded by a marker so repeated installs/upgrades
+    # stay idempotent and never clobber other local customizations already
+    # in this file.
+    apparmor_local=/etc/apparmor.d/local/usr.sbin.named
+    apparmor_marker="# Alderpoint DNS local override -- see /opt/alderpointdns/packaging/apparmor-named.local"
+    if [ -d /etc/apparmor.d/local ]; then
+      if [ ! -e "$apparmor_local" ] || ! grep -qF "$apparmor_marker" "$apparmor_local" 2>/dev/null; then
+        {
+          printf '%s\n' "$apparmor_marker"
+          cat /opt/alderpointdns/packaging/apparmor-named.local
+        } >> "$apparmor_local"
+      fi
+      # Reload the compiled profile so a running named picks up the new
+      # rule immediately, without waiting for a reboot; guarded so this is
+      # a no-op on systems where AppArmor isn't installed/enabled (e.g.
+      # some containers) rather than failing the whole install over it.
+      if command -v apparmor_parser >/dev/null 2>&1 \
+          && [ -e /sys/module/apparmor/parameters/enabled ] \
+          && [ "$(cat /sys/module/apparmor/parameters/enabled)" = "Y" ] \
+          && [ -e /etc/apparmor.d/usr.sbin.named ]; then
+        apparmor_parser -r /etc/apparmor.d/usr.sbin.named || true
+      fi
+    fi
+
     # Base BIND/dnsdist configuration that `include`s the generated files
     # under /var/lib/alderpointdns/compiled -- without these, named and
     # dnsdist run with the upstream bind9/dnsdist packages' stock defaults
@@ -58,33 +138,157 @@ case "$1" in
     # all. Only written on first install (never overwritten on upgrade,
     # matching scripts/install.sh's equivalent one-time template install)
     # so operator edits to these files are never clobbered by a reinstall.
-    if [ ! -e /etc/bind/named.conf.options.alderpointdns-installed ]; then
+    #
+    # The "first install" markers deliberately live under /etc/alderpointdns
+    # (removed by `apt purge`), not next to the files they guard in
+    # /etc/bind or /etc/dnsdist (owned by the separate bind9/dnsdist
+    # packages, untouched by our purge) -- a marker that survived purge
+    # would make a subsequent reinstall skip regenerating dnsdist.conf's
+    # per-install console/web/API secrets entirely, silently reusing
+    # dnsdist config that authenticates against credentials the purge just
+    # deleted from /etc/alderpointdns. Purge is meant to reset everything
+    # this package manages, including these two templates.
+    if [ ! -e /etc/alderpointdns/.named-conf-installed ]; then
       install -D -m 0644 /opt/alderpointdns/packaging/named.conf.options /etc/bind/named.conf.options
       install -D -m 0644 /opt/alderpointdns/packaging/named.conf.local /etc/bind/named.conf.local
-      : > /etc/bind/named.conf.options.alderpointdns-installed
+      : > /etc/alderpointdns/.named-conf-installed
     fi
-    if [ ! -e /etc/dnsdist/dnsdist.conf.alderpointdns-installed ]; then
+    if [ ! -e /etc/alderpointdns/.dnsdist-conf-installed ]; then
       install -D -m 0644 /opt/alderpointdns/packaging/dnsdist.conf /etc/dnsdist/dnsdist.conf
-      : > /etc/dnsdist/dnsdist.conf.alderpointdns-installed
+      # Fresh, per-install random secrets for dnsdist's console encryption
+      # key and web/API credentials -- the shipped template ships literal
+      # ALDERPOINTDNS_*_PLACEHOLDER tokens, not a real secret, so the same
+      # value is never reused across installs. The web password and API key
+      # go into dnsdist.conf as dnsdist's own hashPassword() output
+      # (scrypt), computed once here from the plaintext already generated
+      # above into dnsdist-web.creds/dnsdist-api.key -- that's what actually
+      # silences dnsdist's "passed a plain-text password/API key" warning,
+      # without weakening anything: the plaintext dnsdist itself checks
+      # incoming credentials against is unchanged, it's just no longer
+      # duplicated a second time, in the clear, inside dnsdist.conf. The
+      # console key has no hashed form (it's a symmetric encryption key for
+      # the console protocol, not a password dnsdist verifies), so it's
+      # substituted as-is.
+      console_key="$(openssl rand -base64 32)"
+      web_password_file="$(mktemp)"
+      ( umask 077; cut -d: -f2- /etc/alderpointdns/dnsdist-web.creds > "$web_password_file" )
+      web_password_hash="$(alderpointdns_dnsdist_hash "$web_password_file")"
+      rm -f "$web_password_file"
+      api_key_hash="$(alderpointdns_dnsdist_hash /etc/alderpointdns/dnsdist-api.key)"
+      if [ -z "$web_password_hash" ] || [ -z "$api_key_hash" ]; then
+        echo "alderpointdns: failed to compute dnsdist webserver credential hashes; aborting install." >&2
+        exit 1
+      fi
+      sed -i \
+        -e "s|ALDERPOINTDNS_CONSOLE_KEY_PLACEHOLDER|$console_key|" \
+        -e "s|ALDERPOINTDNS_WEBSERVER_PASSWORD_PLACEHOLDER|$web_password_hash|" \
+        -e "s|ALDERPOINTDNS_WEBSERVER_API_KEY_PLACEHOLDER|$api_key_hash|" \
+        /etc/dnsdist/dnsdist.conf
+      if grep -q 'ALDERPOINTDNS_.*_PLACEHOLDER' /etc/dnsdist/dnsdist.conf; then
+        echo "alderpointdns: dnsdist.conf still contains unresolved secret placeholders after substitution; aborting install." >&2
+        exit 1
+      fi
+      : > /etc/alderpointdns/.dnsdist-conf-installed
     fi
+    # Validated on every configure (not just first install): even when the
+    # template above isn't rewritten on an upgrade, a bad or hand-edited
+    # /etc/dnsdist/dnsdist.conf should never be silently restarted into.
+    if ! dnsdist --check-config -C /etc/dnsdist/dnsdist.conf; then
+      echo "alderpointdns: /etc/dnsdist/dnsdist.conf failed validation; aborting install." >&2
+      exit 1
+    fi
+
     install -d -m 0755 /etc/systemd/system/dnsdist.service.d
     install -m 0644 /opt/alderpointdns/packaging/dnsdist.service.d/alderpointdns.conf /etc/systemd/system/dnsdist.service.d/alderpointdns.conf
-    PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/analytics.py init-db || true
+    PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/analytics.py init-db
     systemctl daemon-reload >/dev/null 2>&1 || true
+    # named.conf.local above unconditionally `include`s the generated
+    # local-zones.conf; alderpointdns_compiler.py deploy (below) bootstraps
+    # that file itself once it runs, but reload_bind() at the end of deploy
+    # needs an *already-running* named to `rndc reload` -- it can't start
+    # named itself. Historically this relied on bind9's own postinst having
+    # already started named earlier in this same dpkg transaction, with its
+    # stock config, before named.conf.local above was overwritten; that's
+    # true on a normal system, but silently breaks deploy (a confusing rndc
+    # "connection refused" rather than a clear error) whenever it isn't --
+    # e.g. bind9 was installed in an earlier, separate step, or something
+    # stopped named in between. Create the same empty bootstrap placeholder
+    # deploy() would and (re)start named explicitly here so this doesn't
+    # depend on another package's maintainer script side effect.
+    install -d -m 0755 /var/lib/alderpointdns/compiled/bind
+    [ -e /var/lib/alderpointdns/compiled/bind/local-zones.conf ] || install -m 0644 /dev/null /var/lib/alderpointdns/compiled/bind/local-zones.conf
+    systemctl restart named
     # Generate the actual RPZ/local-zone/upstream config under
     # /var/lib/alderpointdns/compiled and reload named/dnsdist so they pick
-    # it up -- bind9/dnsdist's own postinst scripts may have already
-    # started them (with stock config, before the files above existed).
-    PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py deploy --no-download >/dev/null 2>&1 || true
-    systemctl restart named dnsdist >/dev/null 2>&1 || true
-    systemctl enable --now alderpointdns alderpointdns-analytics >/dev/null 2>&1 || true
+    # it up. Not swallowed with `|| true`: this is where
+    # alderpointdns_compiler.py itself validates the generated BIND config
+    # (see validate_bind() in app/alderpointdns_compiler.py) and rolls back
+    # on failure; a failure here means the install is genuinely broken and
+    # must be reported as such, not silently treated as a successful
+    # install of four services that don't actually work.
+    PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py deploy --no-download
+    # The database (created above by init-db, running as root in this
+    # postinst) is the one thing under /var/lib/alderpointdns that both
+    # needs fixing up and is safe to hand to alderpointdns: unlike
+    # backups/imports/staging (already alderpointdns-owned from the
+    # directory creation above and never written to as root) or
+    # compiled/bind and compiled/dnsdist (deliberately kept root-owned and
+    # world-readable -- named/dnsdist only ever read them, and the *only*
+    # way to regenerate them is the audited, sudo-gated deploy path;
+    # handing alderpointdns direct ownership would let anything running as
+    # that account rewrite live BIND/dnsdist config without going through
+    # it), the database is the one file the alderpointdns and
+    # alderpointdns-analytics services genuinely need to open read-write
+    # themselves. -wal/-shm may or may not exist yet depending on
+    # checkpoint timing, hence the existence checks.
+    for alderpointdns_db_file in /var/lib/alderpointdns/alderpointdns.db /var/lib/alderpointdns/alderpointdns.db-wal /var/lib/alderpointdns/alderpointdns.db-shm; do
+      if [ -e "$alderpointdns_db_file" ]; then
+        chown alderpointdns:alderpointdns "$alderpointdns_db_file"
+      fi
+    done
+    # Deliberately not recursive: /etc/alderpointdns/certs is owned and
+    # managed entirely by ensure_tls_cert.sh/app/encryption.py (root:_dnsdist
+    # for the TLS-serving cert/key, root:root for the CA key) so that
+    # dnsdist -- a separate system account with no relationship to
+    # alderpointdns -- can read its own TLS material directly. Recursing
+    # into it here would silently reassign that directory back to
+    # alderpointdns and break dnsdist's cert access.
+    chown root:alderpointdns /etc/alderpointdns
+    chown root:alderpointdns /etc/alderpointdns/secrets.env /etc/alderpointdns/dnsdist-api.key /etc/alderpointdns/dnsdist-web.creds
+    chmod 0640 /etc/alderpointdns/secrets.env /etc/alderpointdns/dnsdist-api.key /etc/alderpointdns/dnsdist-web.creds
+
+    # A previous failed install (e.g. of an earlier broken version) may have
+    # left named/dnsdist/alderpointdns/alderpointdns-analytics in systemd's
+    # "failed, start-limit exceeded" state; clear that before restarting so
+    # the checks below reflect this install's actual outcome, not stale
+    # state from a prior one.
+    systemctl reset-failed named dnsdist alderpointdns alderpointdns-analytics >/dev/null 2>&1 || true
+    systemctl restart named dnsdist
+    systemctl enable --now alderpointdns alderpointdns-analytics
     # Scheduled backups and automatic filter updates are both timer-driven.
     # Enabling is idempotent, and filter-schedule-deploy writes the
     # filter-update timer drop-in from the stored Filter Update Interval
-    # (preserved across upgrades; 1 Day on a fresh install).
+    # (preserved across upgrades; 1 Day on a fresh install). Best-effort:
+    # unlike the four core services above, these are periodic background
+    # automation, not required for the appliance to come up correctly.
     systemctl enable alderpointdns-backup.timer >/dev/null 2>&1 || true
     systemctl enable alderpointdns-filter-update.timer >/dev/null 2>&1 || true
+    systemctl enable --now alderpointdns-notify.timer >/dev/null 2>&1 || true
     PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py filter-schedule-deploy >/dev/null 2>&1 || true
+
+    # Final gate: confirm the four services this package ships/depends on
+    # for core function are actually up, not just that systemctl accepted
+    # the restart/enable commands. A permission, ownership, AppArmor, or
+    # dnsdist-config-compatibility problem can make every step above
+    # "succeed" while the service itself immediately crash-loops; without
+    # this, `apt install` reports success regardless.
+    for alderpointdns_svc in named dnsdist alderpointdns alderpointdns-analytics; do
+      if ! alderpointdns_wait_active "$alderpointdns_svc"; then
+        echo "alderpointdns: $alderpointdns_svc did not reach the active state after installation." >&2
+        echo "alderpointdns: check 'systemctl status $alderpointdns_svc' and 'journalctl -u $alderpointdns_svc -n 50' for details." >&2
+        exit 1
+      fi
+    done
     ;;
 esac
 

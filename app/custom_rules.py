@@ -83,8 +83,9 @@ def now() -> str:
 
 def connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -590,11 +591,15 @@ def _insert_rule(
         "validation_state": rule.validation_state,
         "reason": rule.unsupported_reason,
     }
-    if rule.rule_type != "comment" and rule.validation_state == "valid":
-        existing = find_duplicate(db, rule.normalized, rule.action)
-        if existing:
-            result.update(status="duplicate", id=existing["id"])
-            return result
+    # Checked regardless of validation_state -- comments, and invalid/
+    # unsupported rules kept inactive with a reason, are rows in
+    # custom_filter_rules just like active block/allow/rewrite/regex rules;
+    # re-importing the same source a second time must not pile up
+    # duplicates of any of them.
+    existing = find_duplicate(db, rule.normalized, rule.action)
+    if existing:
+        result.update(status="duplicate", id=existing["id"])
+        return result
     if rule.validation_state != "valid":
         stored_enabled = 0
     elif rule.rule_type == "comment":

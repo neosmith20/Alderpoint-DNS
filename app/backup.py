@@ -26,9 +26,11 @@ places:
      ``analytics_aggregate_buckets`` are deleted from the backup copy and it
      is VACUUMed, so a routine backup does not balloon with detailed query
      history.
-   - ``user_auth_data`` (default off): if unset, ``admins`` and
-     ``login_attempts`` are deleted from the backup copy, since admin
-     password hashes are credential material.
+   - ``user_auth_data`` (default off): if unset, ``admins``,
+     ``login_attempts``, ``sessions``, and ``admin_audit_log`` are deleted
+     from the backup copy, since admin password hashes are credential
+     material and session/audit rows are account-security state tied to a
+     specific point in time.
 2. At restore time, ``sqlite_data`` gates whether the database is touched at
    all. Within that, tables that map to one of the other named components
    (``sources`` -> blocklist_source_definitions, ``custom_rules`` ->
@@ -60,6 +62,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 import shutil
 import socket
 import sqlite3
@@ -95,6 +98,7 @@ SYSTEMD_DIR = Path("/etc/systemd/system")
 SUDOERS_FILE = Path("/etc/sudoers.d/alderpointdns")
 
 APP_ROOT = Path("/opt/alderpointdns")
+DPKG_PACKAGE_NAME = "alderpointdns"
 
 BACKUP_FORMAT_VERSION = 1
 FILENAME_PREFIX = "alderpointdns-backup-"
@@ -149,6 +153,8 @@ TABLE_COMPONENT_MAP = {
     "client_aliases": "client_aliases",
     "admins": "user_auth_data",
     "login_attempts": "user_auth_data",
+    "sessions": "user_auth_data",
+    "admin_audit_log": "user_auth_data",
     "query_events": "analytics_history",
     "analytics_aggregate_buckets": "analytics_history",
 }
@@ -184,8 +190,9 @@ def now() -> str:
 
 def connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -323,18 +330,64 @@ def validate_components(values: dict[str, Any] | None) -> dict[str, bool]:
 # Manifest metadata
 # ---------------------------------------------------------------------------
 
+# Debian/semver-ish version strings only: letters, digits, and the small
+# set of separators both schemes use ('.', '+', '~', '_', '-'). Guards
+# against a truncated/binary/garbage VERSION file being echoed verbatim
+# into a backup manifest as if it were a real version.
+_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+~_-]{0,63}$")
+
+
+def _read_version_file() -> str | None:
+    """Packaged installs ship an authoritative VERSION file (see
+    packaging/debian/install); this never requires git or dpkg and is the
+    preferred source."""
+    try:
+        raw = (APP_ROOT / "VERSION").read_text()
+    except OSError:
+        return None
+    version = raw.strip()
+    if version and _VERSION_RE.match(version):
+        return version
+    return None
+
+
+def _read_dpkg_version() -> str | None:
+    """Fallback for the (unexpected) case where VERSION is missing or
+    malformed on a real .deb install: ask dpkg itself. Absent on non-Debian
+    dev checkouts, which is fine -- it's only a fallback."""
+    try:
+        proc = run(["dpkg-query", "-W", "-f=${Version}", DPKG_PACKAGE_NAME], check=False)
+    except (FileNotFoundError, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    version = proc.stdout.strip()
+    return version or None
+
+
+def _git_dev_metadata() -> str | None:
+    """Optional short commit hash, included only for development checkouts.
+    Packaged installs at /opt/alderpointdns are plain files, not a git
+    clone, and must not require a git binary at all -- both checks below
+    (binary present, .git present) must pass before git is ever invoked,
+    and any failure to run it is swallowed rather than surfaced, since a
+    missing dev-metadata suffix must never fail backup creation."""
+    if not shutil.which("git") or not (APP_ROOT / ".git").exists():
+        return None
+    try:
+        proc = run(["git", "-C", str(APP_ROOT), "rev-parse", "--short", "HEAD"], check=False)
+    except (FileNotFoundError, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    commit = proc.stdout.strip()
+    return commit or None
+
+
 def alderpointdns_app_version() -> str:
-    version_file = APP_ROOT / "VERSION"
-    proc = run(["git", "-C", str(APP_ROOT), "rev-parse", "--short", "HEAD"], check=False)
-    commit = proc.stdout.strip() if proc.returncode == 0 and proc.stdout.strip() else "unknown"
-    # VERSION holds the current semver (e.g. "0.4.0-beta.2"); a hyphenated
-    # pre-release suffix means this build has not had a stable release yet.
-    marker = "unreleased"
-    if version_file.exists():
-        version = version_file.read_text().strip()
-        if version and "-" not in version:
-            marker = "released"
-    return f"{marker}+git.{commit}"
+    version = _read_version_file() or _read_dpkg_version() or "unknown"
+    commit = _git_dev_metadata()
+    return f"{version}+git.{commit}" if commit else version
 
 
 def database_schema_version(conn: sqlite3.Connection) -> str:
@@ -359,7 +412,7 @@ def sha256_file(path: Path) -> str:
 # SQLite online backup
 # ---------------------------------------------------------------------------
 
-def sqlite_backup_copy(dest: Path, include_analytics: bool, include_auth: bool) -> None:
+def sqlite_backup_copy(dest: Path, include_analytics: bool, include_auth: bool, include_private_keys: bool = True) -> None:
     """Capture a consistent copy of the live database using SQLite's online
     backup API (not a raw file copy), then optionally strip sensitive/large
     tables from the copy and VACUUM to actually shrink the file."""
@@ -385,10 +438,19 @@ def sqlite_backup_copy(dest: Path, include_analytics: bool, include_auth: bool) 
                     conn.execute(f"DELETE FROM {table}")
                     stripped = True
         if not include_auth:
-            for table in ("admins", "login_attempts"):
+            for table in ("admins", "login_attempts", "sessions", "admin_audit_log"):
                 if table in table_names:
                     conn.execute(f"DELETE FROM {table}")
                     stripped = True
+        if not include_private_keys and "notification_providers" in table_names:
+            # Notification provider secrets (SMTP passwords, webhook URLs --
+            # most webhook URLs embed a bearer-equivalent token) are
+            # credential material, like TLS private keys and dnsdist API
+            # credentials. Only the secret is blanked, not the whole row, so
+            # provider names/config and event subscriptions survive a
+            # restore -- the operator just re-enters the secret.
+            conn.execute("UPDATE notification_providers SET secret=''")
+            stripped = True
         conn.commit()
         if stripped:
             conn.execute("VACUUM")
@@ -504,6 +566,7 @@ def create_backup(components: dict[str, bool] | None = None, password: str | Non
                 staged_db,
                 include_analytics=bool(components.get("analytics_history")),
                 include_auth=bool(components.get("user_auth_data")),
+                include_private_keys=bool(components.get("private_keys")),
             )
             relpath = DB_ARCHIVE_RELPATH
             checksums[relpath] = sha256_file(staged_db)

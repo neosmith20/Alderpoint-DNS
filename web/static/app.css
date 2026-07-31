@@ -328,6 +328,32 @@ button.danger { background: #9f1239; border-color: rgba(251, 113, 133, 0.36); }
 .button.warning,
 button.warning { background: #92400e; border-color: rgba(251, 191, 36, 0.36); }
 
+/* Reusable pending-action state: applied by app.js to whichever button
+   submitted a form, across every page -- a single spinner/label/disabled
+   treatment instead of one-off per-page styling. */
+@keyframes btn-spin { to { transform: rotate(360deg); } }
+
+.btn-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: btn-spin 0.6s linear infinite;
+}
+
+button[aria-busy="true"],
+.button[aria-busy="true"] {
+  cursor: progress;
+  opacity: 0.85;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btn-spinner { animation-duration: 1.5s; }
+}
+
 .panel button,
 .card button,
 .auth-card button {
@@ -349,6 +375,32 @@ button.warning { background: #92400e; border-color: rgba(251, 191, 36, 0.36); }
 .account-menu form,
 .account-menu button {
   width: 100%;
+}
+
+/* Style the logout control like a nav item (transparent, muted, subtle
+   hover highlight) rather than a generic filled button -- it sits right
+   below primary navigation and should read the same way, with a clear
+   hover/focus state so it doesn't look like a stray, unexplained box,
+   especially once the collapsed sidebar hides its text label below and
+   leaves only the icon. */
+.account-menu button {
+  justify-content: flex-start;
+  color: var(--muted);
+  background: transparent;
+  border-color: transparent;
+  font-weight: 650;
+}
+
+.account-menu button:hover,
+.account-menu button:focus-visible {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.075);
+  text-decoration: none;
+}
+
+.account-menu button:hover .nav-icon,
+.account-menu button:focus-visible .nav-icon {
+  color: var(--accent);
 }
 
 button.mobile-nav-toggle { display: none; }
@@ -432,13 +484,38 @@ form.panel {
   padding: 16px;
 }
 
-.panel__head,
-.card__head {
+.panel__head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 14px;
+}
+
+/* Status-tile cards (System Health/Status, Encryption/Replication/Backup/
+   DNS Settings summary tiles): name centered on top, status badge
+   centered directly below it -- never beside the name, where it used to
+   land at an arbitrary offset depending on how long the name was. */
+.card__head {
+  display: flex;
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+  text-align: center;
+}
+
+.card {
+  text-align: center;
+}
+
+/* Cards whose body is a list of items (e.g. DNS Settings' "Allowed
+   Clients") rather than a short status/detail line -- centering
+   variable-length list rows reads worse than left-aligning them, so opt
+   out instead of blindly centering every card body. */
+.card .stack {
+  text-align: left;
 }
 
 .panel h2,
@@ -710,6 +787,31 @@ textarea {
 
 input[type="checkbox"] { width: auto; min-height: auto; }
 
+.password-field {
+  position: relative;
+  display: flex;
+  min-width: 0;
+}
+
+.password-field input { padding-right: 60px; }
+
+.password-toggle {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+
+.password-toggle:hover,
+.password-toggle:focus-visible { text-decoration: underline; }
+
 .form-actions {
   display: flex;
   flex-wrap: wrap;
@@ -755,6 +857,25 @@ th {
   text-overflow: ellipsis;
 }
 
+/* Shared Actions-column treatment for data tables (Local DNS, Blocklists,
+   Custom Rules, DNS Settings upstreams, Backup, Replication, Imports):
+   the header and every cell in the column are centered, whether the cell
+   holds a lone button/status label, a button + overflow menu wrapped in
+   .row/.actions, or .row/.actions applied directly to the <td> itself.
+   Applied via the .actions-col class so every table gets this
+   consistently instead of one-off per-page CSS. */
+th.actions-col,
+td.actions-col {
+  text-align: center;
+}
+
+td.actions-col.row,
+td.actions-col.actions,
+td.actions-col > .row,
+td.actions-col > .actions {
+  justify-content: center;
+}
+
 /*
  * Headings, status badges, and card/panel head rows must never split a
  * whole word mid-character (e.g. "Healthy" -> "Heal"/"thy", "DNSSEC" ->
@@ -769,7 +890,6 @@ th {
   word-break: normal;
 }
 
-.card__head,
 .panel__head,
 .metric-card__head {
   flex-wrap: wrap;
