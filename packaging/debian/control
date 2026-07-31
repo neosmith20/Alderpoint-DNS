@@ -8,7 +8,7 @@ Build-Depends: debhelper-compat (= 13), dh-python, python3
 
 Package: alderpointdns
 Architecture: all
-Depends: bind9, bind9-dnsutils, curl, dnsdist (>= 2.0.0), jq, knot-dnsutils,
+Depends: bind9, bind9-dnsutils, curl, dnsdist (>= 1.9.0), jq, knot-dnsutils,
  openssl, python3-aioquic, python3-argon2, python3-dnspython,
  python3-fastapi, python3-httpx, python3-itsdangerous, python3-jinja2,
  python3-multipart, python3-openpyxl, python3-yaml, sudo, uvicorn,

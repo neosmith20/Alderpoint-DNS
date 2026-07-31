@@ -59,8 +59,49 @@ alderpointdns (0.4.0~beta2-1) unstable; urgency=medium
     THIRD_PARTY_NOTICES.md. The package now installs LICENSE/copyright/
     COMMERCIAL_LICENSING.md/THIRD_PARTY_NOTICES.md under
     /usr/share/doc/alderpointdns/.
+  * Fixed a second clean-install failure introduced by the previous fix:
+    requiring dnsdist (>= 2.0.0) meant the package could not be installed
+    at all on a genuinely fresh Debian 13 system, since that version is
+    only available from the PowerDNS project's own (non-default) apt
+    repository and a .deb cannot configure a third-party repository to
+    satisfy its own dependency before apt resolves it. Depends now reads
+    dnsdist (>= 1.9.0), the lowest bound Debian 13's own archive dnsdist
+    (1.9.x) satisfies, so `apt-get install -y ./alderpointdns_*.deb`
+    resolves and installs cleanly with no third-party repository, key, or
+    pin required. Debian's own dnsdist build supports plain DNS, DoH, DoT,
+    DNSCrypt, and everything the BIND backend integration needs (packet
+    cache, ACLs, analytics logging, authenticated web/API access), but
+    lacks DNS-over-QUIC/DNS-over-HTTP/3; DoQ/DoH3 now ship disabled by
+    default (packaging/dnsdist.service.d/alderpointdns.conf) and
+    app/encryption.py detects the installed dnsdist's actual capabilities
+    (parsing `dnsdist --version`'s feature list) both to keep unsupported
+    protocols out of a deployment -- degrading just that protocol with a
+    clear message instead of failing/rolling back the whole deployment --
+    and to render them as unsupported, not enabled or broken, on the
+    Encryption Settings page. The PowerDNS repository remains available
+    (docs/dnsdist.md) as an optional upgrade path for DoQ/DoH3, detected
+    automatically with no package reinstall required. Rewrote
+    tests/test_clean_install_container.sh to install strictly from stock
+    Debian 13 repositories (`apt-get install -y ./package.deb`, no
+    repo.powerdns.com reference permitted anywhere in the run) and to
+    verify service state, DNS resolution, credential handling, and
+    reboot-equivalent restart behavior against that stock build.
+  * Fixed the Encryption Settings page (and the dashboard's System
+    Health cert card) throwing a 500 on a genuinely fresh install:
+    /etc/alderpointdns/certs was root:_dnsdist mode 0750, so the
+    unprivileged alderpointdns web process -- in neither group -- got
+    PermissionError on a bare stat() of its own certificate, despite the
+    certificate file itself being world-readable (0644). Changed the
+    directory to mode 0751 (traversable, but still no read/write for
+    "other", so the 0640 private key stays unreadable); ensure_tls_cert.sh
+    now applies this unconditionally, including on upgrades where
+    certificate material already exists. Also made unsupported-protocol
+    enforcement symmetric: encryption.enforce_capabilities(), factored
+    out of deploy_encryption(), is now applied when saving Encryption
+    Settings too, so a forged POST cannot persist doq_enabled=1/
+    doh3_enabled=1 on an installation whose dnsdist lacks that capability.
 
- -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Thu, 30 Jul 2026 23:45:00 -0600
+ -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Thu, 30 Jul 2026 23:59:00 -0600
 
 alderpointdns (0.4.0~beta1-1) unstable; urgency=medium
 

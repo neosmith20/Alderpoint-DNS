@@ -113,7 +113,10 @@ copy_tree() {
 
 create_layout() {
   run install -d -m 0755 "$(root_path /etc/alderpointdns)"
-  run install -d -m 0750 "$(root_path /etc/alderpointdns/certs)"
+  # Superseded by ensure_tls_cert.sh below, which fixes owner/group to
+  # root:_dnsdist and mode to 0751 (traversable by the unprivileged
+  # alderpointdns web process) unconditionally, including on upgrades.
+  run install -d -m 0751 "$(root_path /etc/alderpointdns/certs)"
   run install -d -m 0755 "$(root_path /var/lib/alderpointdns)"
   run install -d -m 0750 "$(root_path /var/lib/alderpointdns/backups)"
   # 0755, not 0750: named and dnsdist (separate system accounts, unrelated

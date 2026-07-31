@@ -420,6 +420,7 @@ encryption_html = TEMPLATES.get_template("encryption.html").render(
     deployment={"status": "deployed", "started_at": "2026-07-29T00:00:00Z", "finished_at": "2026-07-29T00:00:00Z", "message": "deployed with protocols: {'plain': 'ok'}", "protocol_tests": "{'plain': 'ok'}"},
     connection_info={"DoH": "https://" + long_domain + "/dns-query", "DoT": "tls://alderpointdns.local:853"},
     dnscrypt_fingerprint=None,
+    capabilities={"doh": True, "dot": True, "doh3": True, "doq": True, "dnscrypt": True},
 )
 for expected in ("Protocols", "Listen IPv4", "Listen IPv6", "0.0.0.0", "Client Connection Information", "Self-signed certificate", "Upload certificate and key", long_domain, "data-async-form"):
     if expected not in encryption_html:

@@ -15,8 +15,12 @@ Supported architectures:
 Required services:
 
 - BIND 9
-- PowerDNS dnsdist with DoH/DoT support; DoQ/DoH3 require a dnsdist build with
-  QUIC support
+- dnsdist (>= 1.9.0); Debian 13's own archive package satisfies this with no
+  third-party repository, and supports plain DNS, DoH, DoT, and DNSCrypt.
+  DoQ/DoH3 additionally require a dnsdist build with QUIC support (for
+  example, the official PowerDNS repository build) — Alderpoint DNS detects
+  this automatically and reports DoQ/DoH3 as unsupported rather than
+  enabling them when it is missing; see `docs/dnsdist.md`.
 - systemd
 - SQLite
 

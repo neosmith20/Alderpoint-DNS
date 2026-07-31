@@ -52,12 +52,17 @@ chowned `root:alderpointdns` and chmod `0640`; the database and
 `/var/log/alderpointdns` ownership recursively fixed after generation
 (including reasserting `bind:bind` on the BIND log subdirectory, not just
 recreating the directory); the AppArmor local override for named installed
-and reloaded; `dnsdist (>= 2.0.0)` required in `Depends` so installing
-against Debian's own older archive `dnsdist` fails cleanly at dependency
-resolution instead of silently pulling an incompatible build; the
+and reloaded; `dnsdist (>= 1.9.0)` required in `Depends` -- the lowest bound
+Debian 13's own archive `dnsdist` (1.9.x) satisfies with no third-party
+repository, so a stock `apt-get install -y ./alderpointdns_*.deb` resolves
+cleanly, while genuinely too-old builds still fail cleanly at dependency
+resolution instead of silently pulling an incompatible one; the
 `newRemoteLogger`/`RemoteLogResponseAction` calls fixed/made version-aware
-for that older build; DoH3/DoQ/DNSCrypt listener setup routed through a
-capability-safe wrapper; the web password/API key hashed with dnsdist's own
+for that build; DoH3/DoQ listener setup routed through a capability-safe
+Lua wrapper *and* kept off by default / reported as unsupported in
+Encryption Settings via `encryption.dnsdist_capabilities()`, since Debian's
+own archive `dnsdist` lacks QUIC support (see `docs/dnsdist.md`); the web
+password/API key hashed with dnsdist's own
 `hashPassword()` before being written into `dnsdist.conf` (never the
 plaintext); the `.dnsdist-conf-installed`/`.named-conf-installed`
 first-install markers scoped under `/etc/alderpointdns` so `apt purge` +
@@ -70,28 +75,42 @@ explicit active-service gate for all four core services. It requires no
 root access and no live system, only `dpkg-deb`.
 
 `tests/test_clean_install_container.sh` builds the `.deb` and installs it in
-a disposable, genuinely clean Debian 13 + systemd container (via `podman` or
-`docker`) that inherits no alderpointdns users, groups, files, database, or
-generated configuration from the development machine it runs on -- unlike
-running the installer or postinst directly against that machine, which
-already has all of those from prior installs. It installs the PowerDNS
-dnsdist apt repository per `docs/dnsdist.md` before installing the package,
-then verifies: `dpkg -i` succeeds; all four core services (`named`,
-`dnsdist`, `alderpointdns`, `alderpointdns-analytics`) reach the active
-state with zero restarts; `secrets.env`/`dnsdist-api.key`/
-`dnsdist-web.creds` are `root:alderpointdns 640` and readable by the
-`alderpointdns` account; the database is `alderpointdns:alderpointdns` and
-actually writable by that account; named's AppArmor local override is
-installed and named actually resolves through both the BIND backend and the
-dnsdist frontend; dnsdist logs no plain-text credential warnings and
-`dnsdist.conf` has no unresolved placeholder; the web app's own credential
-files authenticate successfully against dnsdist's stats API. It then purges
-and reinstalls to prove two independent installations mint different
-console/web/API credentials (every credential line differs, not just the
-file as a whole), and reinstalls once more without purging to prove
-credentials are preserved across an upgrade. Requires outbound network
-access (to pull the base image and the PowerDNS repository) and takes a few
-minutes.
+a disposable, genuinely clean, **stock** Debian 13 + systemd container (via
+`podman` or `docker`) that inherits no alderpointdns users, groups, files,
+database, or generated configuration from the development machine it runs
+on -- unlike running the installer or postinst directly against that
+machine, which already has all of those from prior installs. It adds no
+third-party APT repository, signing key, or pin of any kind: only
+`apt-get update` against Debian's own repositories, then
+`apt-get install -y ./alderpointdns.deb`, exactly like a beta tester on an
+untouched Debian 13 VM, and it fails if `repo.powerdns.com` shows up
+anywhere under `/etc/apt` at any point in the run. It then verifies:
+`apt-get install` succeeds (dependency resolution against stock repos
+alone, no "unmet dependencies"/"not installable" errors) and the installed
+`dnsdist` came from Debian's own archive, not a third-party repository; all
+four core services (`named`, `dnsdist`, `alderpointdns`,
+`alderpointdns-analytics`) reach the active state with zero restarts;
+`secrets.env`/`dnsdist-api.key`/`dnsdist-web.creds` are `root:alderpointdns
+640` and readable by the `alderpointdns` account; the database is
+`alderpointdns:alderpointdns` and actually writable by that account;
+named's AppArmor local override is installed and named actually resolves
+through both the BIND backend and the dnsdist frontend; dnsdist logs no
+plain-text credential warnings and `dnsdist.conf` has no unresolved
+placeholder; the web app's own credential files authenticate successfully
+against dnsdist's stats API; `/setup` responds; DoQ/DoH3 are disabled by
+default (`ALDERPOINTDNS_DNS_DOQ`/`ALDERPOINTDNS_DNS_DOH3=0` in the dnsdist
+systemd override), nothing listens on UDP/853, `encryption.
+dnsdist_capabilities()` reports `doq`/`doh3` as unsupported and `doh`/`dot`
+as supported for this build, and the authenticated Encryption Settings page
+renders the DoQ/DoH3 checkboxes disabled with an "unsupported" explanation
+rather than silently enabled or broken; and stopping and restarting all
+four core services (a reboot-equivalent check) brings every service back
+active with working DNS resolution. It then purges and reinstalls to prove
+two independent installations mint different console/web/API credentials
+(every credential line differs, not just the file as a whole), and
+reinstalls once more without purging to prove credentials are preserved
+across an upgrade. Requires outbound network access (to pull the base image
+and Debian's own package repositories) and takes a few minutes.
 
 `tests/test_backup_restore.sh` (script-based, exercises `scripts/backup.sh`/
 `scripts/restore.sh`) and `tests/test_backup.py` (native `app/backup.py`)

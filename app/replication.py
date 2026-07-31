@@ -420,10 +420,12 @@ def consume_enrollment(raw_token: str, cert_days: int = 825, conn: sqlite3.Conne
             db.close()
 
 
-# /etc/alderpointdns/certs is root:_dnsdist 0750 -- the unprivileged alderpointdns
-# web process (which is what runs the primary's HTTP replication listener,
-# see start_primary_listener/ensure_primary_listener_running) cannot write
-# the CA material consume_enrollment() needs. So, exactly like every other
+# /etc/alderpointdns/certs is root:_dnsdist 0751 -- traversable so the
+# unprivileged alderpointdns web process (which is what runs the primary's
+# HTTP replication listener, see
+# start_primary_listener/ensure_primary_listener_running) can read the
+# public cert material, but it still cannot write the CA material
+# consume_enrollment() needs. So, exactly like every other
 # Alderpoint DNS feature that needs a privileged filesystem write, the listener
 # only validates the token itself (a plain SQLite read, no privilege
 # required) and stages the *hash* for the privileged

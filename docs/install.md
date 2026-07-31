@@ -43,12 +43,17 @@ For isolated validation without changing the host:
 ALDERPOINTDNS_INSTALL_ROOT=/tmp/alderpointdns-install-root ./scripts/install.sh --dry-run --skip-apt
 ```
 
-The PowerDNS dnsdist package is required for DNS-over-QUIC support.
+Alderpoint DNS installs from Debian's normal package repositories, with no
+third-party repository required. It depends on `dnsdist (>= 1.9.0)`, which
+Debian 13 ("trixie") ships in its own archive (`dnsdist 1.9.x`); `apt-get
+install -y ./alderpointdns_<version>_all.deb` (or `scripts/install.sh`)
+resolves and installs it automatically like any other dependency.
 
-Core packages:
+Core packages (the `.deb`'s own `Depends:` installs these automatically;
+listed here for a manual/from-source install):
 
 ```sh
-apt-get install -y bind9 bind9-dnsutils knot-dnsutils curl openssl jq sudo
+apt-get install -y bind9 bind9-dnsutils knot-dnsutils curl openssl jq sudo dnsdist
 apt-get install -y python3-fastapi uvicorn python3-uvicorn python3-jinja2 python3-argon2 python3-itsdangerous python3-multipart python3-yaml
 apt-get install -y python3-dnspython python3-httpx python3-aioquic
 apt-get install -y python3-openpyxl
@@ -61,7 +66,18 @@ functional query testing for Encryption Settings deployments
 (`app/importer.py`); `python3-yaml` (already listed above) parses AdGuard
 Home's `AdGuardHome.yaml`.
 
-PowerDNS dnsdist package on Debian 13:
+Debian's own dnsdist package supports plain DNS, DoH, DoT, DNSCrypt, and
+everything Alderpoint DNS's BIND backend integration needs (packet cache,
+ACLs, analytics logging, authenticated local web/API access). It does not
+include DNS-over-QUIC (DoQ) or DNS-over-HTTP/3 (DoH3) — see
+`docs/dnsdist.md` for how Alderpoint DNS detects this and keeps those two
+transports off (and clearly marked unsupported in Encryption Settings)
+rather than trying to start a listener the binary can't provide.
+
+DoQ/DoH3 are optional. If you specifically need them, install dnsdist from
+the official PowerDNS repository *before* installing the Alderpoint DNS
+package, and Alderpoint DNS will detect and use the extra capability
+automatically:
 
 ```sh
 install -d /etc/apt/keyrings

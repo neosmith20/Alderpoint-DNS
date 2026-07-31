@@ -19,8 +19,11 @@ DEB="$(/opt/alderpointdns/scripts/build-deb.sh --output-dir "$ROOT")"
 test -f "$DEB" || fail "test deb package was not created"
 
 dpkg-deb --info "$DEB" | grep -q "Package: alderpointdns" || fail "deb metadata is invalid"
-dpkg-deb --field "$DEB" Depends | grep -q 'dnsdist (>= 2.0.0)' || \
-  fail "control Depends does not require a dnsdist build new enough to have the Lua API packaging/dnsdist.conf uses (see docs/dnsdist.md's PowerDNS repository requirement) -- installing against Debian's own older archive dnsdist must fail cleanly at dependency resolution, not silently succeed and crash-loop"
+DEPENDS_FIELD="$(dpkg-deb --field "$DEB" Depends)"
+echo "$DEPENDS_FIELD" | grep -q 'dnsdist (>= 1.9.0)' || \
+  fail "control Depends does not require dnsdist (>= 1.9.0), the lowest version bound Debian 13's own archive dnsdist (1.9.x) satisfies with no third-party repository -- a stock 'apt-get install -y ./alderpointdns.deb' must resolve dependencies successfully with no PowerDNS repository configured"
+echo "$DEPENDS_FIELD" | grep -q 'dnsdist (>= 2\.' && \
+  fail "control Depends requires dnsdist >= 2.x again, which is only available from the PowerDNS project's own repository -- this regresses the stock Debian 13 install failure ('none of the choices are installable')"
 
 mkdir -p "$ROOT/ctl" "$ROOT/data"
 dpkg-deb -e "$DEB" "$ROOT/ctl"
@@ -105,6 +108,37 @@ done
 grep -q 'RemoteLogResponseAction' "$DNSDIST_CONF" || fail "dnsdist.conf no longer wires up the analytics RemoteLogResponseAction"
 grep -A3 'pcall(' "$DNSDIST_CONF" | grep -q 'RemoteLogResponseAction' || \
   fail "dnsdist.conf's RemoteLogResponseAction call (also version-incompatible on Debian 13's archive dnsdist -- 'requires at most 5 parameter(s)') is not wrapped in a version-aware pcall fallback"
+
+# The follow-up defect: DoQ/DoH3 need a dnsdist build with QUIC support,
+# which Debian 13's own archive dnsdist package (the default, no
+# third-party repository install path) does not have. They must ship
+# disabled by default so a fresh install never attempts to start a
+# listener the installed binary can't provide.
+DNSDIST_ENV_OVERRIDE="$ROOT/data/opt/alderpointdns/packaging/dnsdist.service.d/alderpointdns.conf"
+test -f "$DNSDIST_ENV_OVERRIDE" || fail "packaging/dnsdist.service.d/alderpointdns.conf missing from built package"
+grep -q '^Environment=ALDERPOINTDNS_DNS_DOQ=0$' "$DNSDIST_ENV_OVERRIDE" || \
+  fail "the dnsdist.service drop-in does not ship ALDERPOINTDNS_DNS_DOQ=0 by default -- DoQ is unsupported by Debian 13's own archive dnsdist and must not be enabled out of the box"
+grep -q '^Environment=ALDERPOINTDNS_DNS_DOH3=0$' "$DNSDIST_ENV_OVERRIDE" || \
+  fail "the dnsdist.service drop-in does not ship ALDERPOINTDNS_DNS_DOH3=0 by default -- DoH3 is unsupported by Debian 13's own archive dnsdist and must not be enabled out of the box"
+
+# app/encryption.py must detect dnsdist's actual capabilities at runtime
+# (dnsdist --version's feature list) and use that both to keep unsupported
+# protocols out of a deployment and to show them as unsupported -- not
+# enabled, broken, or silently active -- in the Encryption Settings page.
+ENCRYPTION_PY="$ROOT/data/opt/alderpointdns/app/encryption.py"
+test -f "$ENCRYPTION_PY" || fail "app/encryption.py missing from built package"
+grep -q 'def dnsdist_capabilities' "$ENCRYPTION_PY" || \
+  fail "app/encryption.py does not define dnsdist_capabilities() to detect DoH/DoT/DoQ/DoH3/DNSCrypt support from the installed dnsdist build"
+grep -q 'dns-over-quic' "$ENCRYPTION_PY" || fail "app/encryption.py does not check dnsdist --version for dns-over-quic support"
+grep -q 'dns-over-http3' "$ENCRYPTION_PY" || fail "app/encryption.py does not check dnsdist --version for dns-over-http3 support"
+grep -q 'doh3_enabled": "0"' "$ENCRYPTION_PY" || fail "app/encryption.py's DEFAULTS enables doh3_enabled by default; must default to 0 since it's unsupported on Debian 13's own archive dnsdist"
+grep -q 'doq_enabled": "0"' "$ENCRYPTION_PY" || fail "app/encryption.py's DEFAULTS enables doq_enabled by default; must default to 0 since it's unsupported on Debian 13's own archive dnsdist"
+ENCRYPTION_HTML="$ROOT/data/opt/alderpointdns/web/templates/encryption.html"
+test -f "$ENCRYPTION_HTML" || fail "web/templates/encryption.html missing from built package"
+grep -q 'capabilities.doq' "$ENCRYPTION_HTML" || \
+  fail "encryption.html does not reflect DoQ capability detection -- unsupported protocols must be shown as unsupported, not enabled or broken"
+grep -q 'capabilities.doh3' "$ENCRYPTION_HTML" || \
+  fail "encryption.html does not reflect DoH3 capability detection"
 
 # The confirmed warning: dnsdist's web password/API key must not be
 # embedded in dnsdist.conf as plaintext; postinst must precompute a

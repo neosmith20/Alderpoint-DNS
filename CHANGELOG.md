@@ -130,3 +130,43 @@ may still change between releases before a stable 1.0.
   installs `LICENSE`/`copyright`/`COMMERCIAL_LICENSING.md`/
   `THIRD_PARTY_NOTICES.md` under `/usr/share/doc/alderpointdns/`. Added a
   permanent licensing-hygiene test.
+- Fixed a second clean-install failure: requiring `dnsdist (>= 2.0.0)` made
+  the package impossible to install on a genuinely fresh Debian 13 system
+  at all, since a `.deb` cannot configure a third-party repository to
+  satisfy its own dependency before apt resolves it, and that version is
+  only available from the PowerDNS project's own repository. `Depends` now
+  reads `dnsdist (>= 1.9.0)`, the lowest bound Debian 13's own archive
+  `dnsdist` (1.9.x) satisfies, so `apt-get install -y ./alderpointdns_*.deb`
+  resolves and installs cleanly from stock repositories alone. Debian's own
+  `dnsdist` build supports plain DNS, DoH, DoT, DNSCrypt, and everything
+  the BIND backend integration needs (packet cache, ACLs, analytics
+  logging, authenticated web/API access), but not DNS-over-QUIC or
+  DNS-over-HTTP/3; those two now ship disabled by default and
+  `app/encryption.py` detects the installed `dnsdist`'s actual capabilities
+  (from `dnsdist --version`'s feature list) to keep unsupported protocols
+  out of a deployment -- degrading just that protocol with a clear message
+  instead of failing or rolling back the whole deployment -- and to show
+  them as unsupported, not enabled or broken, on the Encryption Settings
+  page. The PowerDNS repository remains available as an optional upgrade
+  path for DoQ/DoH3, detected automatically with no reinstall required.
+  Rewrote the clean-install container regression test to install strictly
+  from stock Debian 13 repositories, with no `repo.powerdns.com` reference
+  permitted anywhere in the run.
+- Fixed the Encryption Settings page (and the dashboard's System Health
+  cert card) throwing a 500 on a genuinely fresh install: the TLS
+  certificate directory (`/etc/alderpointdns/certs`) was created
+  `root:_dnsdist` mode `0750`, so the unprivileged `alderpointdns` web
+  process -- in neither group -- got `PermissionError` on a bare `stat()`
+  of its own certificate, even though the certificate file itself is
+  world-readable (`0644`). Changed the directory to mode `0751`: still no
+  read/write for "other" (can't list the directory or open the `0640`
+  private key), but traversable, which is all `os.stat()`/`Path.exists()`
+  on the certificate needs. `scripts/ensure_tls_cert.sh` now applies this
+  unconditionally, including when certificate material already exists, so
+  upgrading an install that predates this fix also picks up the corrected
+  mode. Also made the DoQ/DoH3 disabled-checkbox enforcement symmetric:
+  `encryption.enforce_capabilities()` (factored out of
+  `deploy_encryption()`) is now also applied when saving Encryption
+  Settings, so a forged POST setting `doq_enabled=1`/`doh3_enabled=1`
+  cannot persist an unsupported protocol as enabled, not just fail to
+  render it checked.

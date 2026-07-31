@@ -1290,6 +1290,7 @@ def encryption_context() -> dict[str, Any]:
         "deployment": encryption.last_deployment(),
         "connection_info": encryption.connection_info(cfg),
         "dnscrypt_fingerprint": encryption.dnscrypt_provider_fingerprint(),
+        "capabilities": encryption.dnsdist_capabilities(),
     }
 
 
@@ -1331,27 +1332,31 @@ def encryption_settings_post(
     check_csrf(request, csrf)
     try:
         cfg = encryption.settings()
-        encryption.update_settings(
-            {
-                **cfg,
-                "server_hostname": server_hostname,
-                "bootstrap_ip": bootstrap_ip,
-                "listen_ipv4": listen_ipv4,
-                "listen_ipv6": listen_ipv6,
-                "doh_enabled": doh_enabled,
-                "doh3_enabled": doh3_enabled,
-                "dot_enabled": dot_enabled,
-                "doq_enabled": doq_enabled,
-                "dnscrypt_enabled": dnscrypt_enabled,
-                "doh_path": doh_path,
-                "doh_port": doh_port,
-                "doh3_port": doh3_port,
-                "dot_port": dot_port,
-                "doq_port": doq_port,
-                "dnscrypt_port": dnscrypt_port,
-                "dnscrypt_provider": dnscrypt_provider,
-            }
-        )
+        submitted = {
+            **cfg,
+            "server_hostname": server_hostname,
+            "bootstrap_ip": bootstrap_ip,
+            "listen_ipv4": listen_ipv4,
+            "listen_ipv6": listen_ipv6,
+            "doh_enabled": doh_enabled,
+            "doh3_enabled": doh3_enabled,
+            "dot_enabled": dot_enabled,
+            "doq_enabled": doq_enabled,
+            "dnscrypt_enabled": dnscrypt_enabled,
+            "doh_path": doh_path,
+            "doh_port": doh_port,
+            "doh3_port": doh3_port,
+            "dot_port": dot_port,
+            "doq_port": doq_port,
+            "dnscrypt_port": dnscrypt_port,
+            "dnscrypt_provider": dnscrypt_provider,
+        }
+        # A forged/crafted POST could set doq_enabled=1 even though the
+        # form control is rendered disabled for an unsupported protocol;
+        # enforce the same authoritative capability check here so it can
+        # never be persisted as enabled, not just hidden in the UI.
+        submitted, _capability_warnings = encryption.enforce_capabilities(submitted)
+        encryption.update_settings(submitted)
         encryption_deploy_apply()
     except Exception as exc:
         return encryption_error(request, str(exc))
