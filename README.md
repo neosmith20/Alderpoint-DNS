@@ -7,7 +7,7 @@ application on top. dnsdist is the client-facing DNS frontend; BIND is a
 localhost-only validating cache/forwarder; filtering policy is compiled into
 a BIND RPZ zone and reloaded through a staged, validated deployment path.
 
-> **Status: beta.** This is **v0.4.0-beta.3**, pre-release software. It is
+> **Status: beta.** This is **v0.4.0-beta.4**, pre-release software. It is
 > functional and acceptance-tested in lab conditions, but it has not had
 > production-scale or adversarial-network exposure, and several features are
 > intentionally partial. See [Known limitations](#known-limitations) below

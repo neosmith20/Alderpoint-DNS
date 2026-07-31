@@ -5,14 +5,18 @@ changed in each beta build; they are not a claim of production readiness or
 long-term stability. See `docs/known-limitations.md` and
 `docs/beta-readiness.md` for the current honest state of the project.
 
-## 0.4.0-beta.3 (unreleased beta update)
+## 0.4.0-beta.4 (unreleased beta update)
 
 Not a final release. This build carries forward the administration and
 observability work previously tracked under the `0.4.0~beta2` version
-string, now version-bumped to `0.4.0~beta3`. Since the interface-polish
-build described below, this line has added a full administration and
-observability layer and closed several reliability gaps found during beta
-feedback and internal testing:
+string, now version-bumped to `0.4.0~beta4`. (`0.4.0~beta3` was built and
+tag-created but withdrawn before any GitHub Release was published -- a
+first prerelease publish had to be deleted and its tag name became
+permanently unusable under GitHub's immutable-releases policy; no `beta3`
+package was ever distributed. All of its changes are carried forward
+unchanged here.) Since the interface-polish build described below, this
+line has added a full administration and observability layer and closed
+several reliability gaps found during beta feedback and internal testing:
 
 - **System > Administration**: password change with automatic revocation
   of other sessions, per-session visibility (start time, last seen, IP,

@@ -4,7 +4,13 @@ All notable changes to Alderpoint DNS are documented in this file. Alderpoint
 DNS is currently in **beta**; interfaces, on-disk formats, and configuration
 may still change between releases before a stable 1.0.
 
-## v0.4.0-beta.3 (unreleased)
+## v0.4.0-beta.4 (unreleased)
+
+`v0.4.0-beta.3` was version-bumped, tag-created, and immediately withdrawn
+before any GitHub Release was published (a first prerelease publish had to
+be deleted and its tag name became permanently unusable due to GitHub's
+immutable-releases policy); no `beta.3` artifact was ever distributed. All
+of its changes are carried forward unchanged under `beta.4` below.
 
 - Fixed filtering deployments incorrectly failing when a downloaded allow
   rule returned a valid DNS response without an IPv4 A record. Cache-only

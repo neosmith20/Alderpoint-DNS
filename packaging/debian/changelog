@@ -1,5 +1,10 @@
-alderpointdns (0.4.0~beta3-1) unstable; urgency=medium
+alderpointdns (0.4.0~beta4-1) unstable; urgency=medium
 
+  * 0.4.0~beta3-1 was built and tag-created but withdrawn before any
+    GitHub Release was published (a first prerelease publish had to be
+    deleted and its tag name became permanently unusable under GitHub's
+    immutable-releases policy); no beta3 package was ever distributed. All
+    of its changes are carried forward unchanged in this release.
   * Fixed filtering deployments incorrectly failing when a downloaded allow
     rule returned a valid DNS response without an IPv4 A record. Cache-only
     changes now report and roll back component state accurately.
@@ -28,7 +33,7 @@ alderpointdns (0.4.0~beta3-1) unstable; urgency=medium
     live web requests against the database alongside the analytics
     writer under lock contention.
 
- -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Fri, 31 Jul 2026 10:30:00 -0600
+ -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Fri, 31 Jul 2026 15:45:00 -0600
 
 alderpointdns (0.4.0~beta2-1) unstable; urgency=medium
 

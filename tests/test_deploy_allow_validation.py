@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Regression tests for the beta.3 release-blocker bug: post-deploy
+"""Regression tests for the beta.4 release-blocker bug (originally found
+under the withdrawn beta.3 tag; the fix and this coverage ship unchanged
+in beta.4): post-deploy
 allow-domain validation incorrectly required a live A record, and a later
 filtering-postcheck failure left an already-applied cache-options change
 active while still reporting the deployment as fully rolled back.
