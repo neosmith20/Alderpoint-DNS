@@ -22,7 +22,7 @@ from itsdangerous import BadSignature, URLSafeTimedSerializer
 from app import analytics, auth, backup, custom_rules as custom_rules_model, dns_cache, encryption, filter_schedule, importer, local_dns, notifications, replication, upstream_dns
 from app import blocklist_categories
 from app import service_logs
-from app.alderpointdns_compiler import DB_PATH, add_source, init_db, normalize_domain, source_health
+from app.alderpointdns_compiler import AlderpointDNSConnection, DB_PATH, add_source, init_db, normalize_domain, source_health
 
 
 ROOT = Path("/opt/alderpointdns")
@@ -68,9 +68,14 @@ serializer = URLSafeTimedSerializer(get_secret(), salt="alderpointdns-session")
 
 
 def db() -> sqlite3.Connection:
+    """Returns a connection meant to be used as `with db() as conn: ...`.
+    AlderpointDNSConnection.__exit__ closes the connection in addition to the
+    stdlib's commit/rollback-on-exit -- a bare sqlite3.Connection here would
+    leak an fd per call, since its context manager only commits/rolls back."""
     init_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, factory=AlderpointDNSConnection, timeout=5.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS admins (
@@ -262,6 +267,25 @@ def service_state(name: str) -> str:
     return out.strip() if code == 0 else "inactive"
 
 
+def analytics_collector_state() -> str:
+    """Like service_state("alderpointdns-analytics"), but also catches the
+    "active but dead" case: systemd can report the unit as active while its
+    writer thread has silently stopped making progress (e.g. terminated
+    after a database-lock storm exceeded its retry budget, per
+    analytics.Collector.writer_loop). Falls back to the plain systemd state
+    whenever the heartbeat is missing or fresh, so a normal boot/upgrade
+    window before the first writer cycle never reads as failed."""
+    state = service_state("alderpointdns-analytics")
+    if state != "active":
+        return state
+    health = analytics.writer_health()
+    if health["status"] == "unknown":
+        return state
+    if health["stale"] or health["status"] == "dead":
+        return "failed"
+    return state
+
+
 def status_tone(state: str) -> str:
     normalized = (state or "").lower()
     if normalized in {"active", "listening", "enabled", "present", "healthy", "passed"}:
@@ -288,7 +312,7 @@ def global_service_status() -> dict[str, str]:
         alderpointdns_state = service_state("alderpointdns")
         bind_state = service_state("named")
         dnsdist_state = service_state("dnsdist")
-        collector_state = service_state("alderpointdns-analytics")
+        collector_state = analytics_collector_state()
     except Exception:
         return {"label": "Unknown", "tone": "unavailable", "detail": "service status unavailable"}
     core = {"Alderpoint DNS": alderpointdns_state, "BIND": bind_state, "dnsdist": dnsdist_state}
@@ -324,7 +348,7 @@ def system_health(bind_state: str | None = None, dnsdist_state: str | None = Non
     named = bind_state or service_state("named")
     dnsdist_current = dnsdist_state or service_state("dnsdist")
     alderpointdns_current = alderpointdns_state or service_state("alderpointdns")
-    collector = service_state("alderpointdns-analytics")
+    collector = analytics_collector_state()
     backend = "healthy" if named == "active" and dnsdist_current == "active" else "degraded"
     cert = cert_status()["state"]
     db_state = "healthy" if analytics.db_size() > 0 else "unavailable"
@@ -573,7 +597,7 @@ def dashboard(request: Request, _: sqlite3.Row = Depends(current_admin)):
     bind_state = service_state("named")
     dnsdist_state = service_state("dnsdist")
     alderpointdns_state = service_state("alderpointdns")
-    collector_state = service_state("alderpointdns-analytics")
+    collector_state = analytics_collector_state()
     protection = protection_state(active_rules, bind_state, dnsdist_state, collector_state)
     chart_points = [
         {

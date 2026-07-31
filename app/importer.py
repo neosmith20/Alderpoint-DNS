@@ -32,9 +32,25 @@ import yaml
 
 from app import custom_rules, local_dns, upstream_dns
 
-
 DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
 IMPORT_UPLOAD_DIR = Path("/var/lib/alderpointdns/imports")
+
+
+class AlderpointDNSConnection(sqlite3.Connection):
+    """Closes on exit like a plain connection factory would, but only once
+    the outermost `with` block exits, so a nested `with conn: ...` reused as
+    a transaction boundary doesn't close the connection out from under the
+    rest of the function."""
+
+    def __enter__(self):
+        self._alderpointdns_depth = getattr(self, "_alderpointdns_depth", 0) + 1
+        return super().__enter__()
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        super().__exit__(exc_type, exc_value, traceback)
+        self._alderpointdns_depth = getattr(self, "_alderpointdns_depth", 1) - 1
+        if self._alderpointdns_depth <= 0:
+            self.close()
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 # Text imports are additionally line-capped (the 10 MiB byte cap alone would
 # still admit pathological inputs such as millions of one-character lines).
@@ -70,8 +86,9 @@ def now() -> str:
 
 def connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, factory=AlderpointDNSConnection, timeout=5.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -2215,6 +2232,12 @@ def apply_migration_job(
     backup_path = create_pre_import_backup(strict=True)
     stage = "starting"
     conn = connect()
+    # This connection's lifetime is managed manually via the `finally: conn.close()`
+    # below, not by entering `with connect() as conn:` -- priming the depth counter
+    # here keeps the `with conn:` transaction boundary further down from closing the
+    # connection early (AlderpointDNSConnection only closes once the depth that
+    # opened it reaches zero).
+    conn._alderpointdns_depth = 1
     try:
         # Idempotent schema setup happens before the transaction opens, so no
         # implicit commit can split the apply.

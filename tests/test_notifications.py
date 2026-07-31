@@ -280,6 +280,45 @@ class NotifyCheckTest(unittest.TestCase):
         recovered_calls = [c for c in FakeHTTPClient.calls if c["json"]["recovered"]]
         self.assertEqual(len(recovered_calls), len(notify_check.SERVICE_UNITS))
 
+    def test_analytics_writer_active_but_stale_heartbeat_fires_and_recovers(self) -> None:
+        old_heartbeat = analytics.HEARTBEAT_FILE
+        analytics.HEARTBEAT_FILE = self.tmp / "analytics-writer-heartbeat.json"
+        try:
+            with mock.patch.object(notify_check, "_systemctl", return_value=(0, "active")):
+                with mock.patch.object(notifications.httpx, "Client", FakeHTTPClient):
+                    # No heartbeat yet (fresh install/upgrade): must not fire.
+                    notify_check.check_analytics_writer()
+                    self.assertEqual(FakeHTTPClient.calls, [])
+
+                    analytics._write_heartbeat("dead", "writer thread terminated")
+                    notify_check.check_analytics_writer()
+                    self.assertTrue(any(
+                        c["json"]["event_category"] == "service_unavailable" and not c["json"]["recovered"]
+                        for c in FakeHTTPClient.calls
+                    ))
+
+                    FakeHTTPClient.calls = []
+                    analytics._write_heartbeat("ok")
+                    notify_check.check_analytics_writer()
+                    self.assertTrue(any(
+                        c["json"]["event_category"] == "service_unavailable" and c["json"]["recovered"]
+                        for c in FakeHTTPClient.calls
+                    ))
+        finally:
+            analytics.HEARTBEAT_FILE = old_heartbeat
+
+    def test_analytics_writer_service_down_is_left_to_service_availability_check(self) -> None:
+        old_heartbeat = analytics.HEARTBEAT_FILE
+        analytics.HEARTBEAT_FILE = self.tmp / "analytics-writer-heartbeat.json"
+        try:
+            analytics._write_heartbeat("dead", "writer thread terminated")
+            with mock.patch.object(notify_check, "_systemctl", return_value=(1, "inactive")):
+                with mock.patch.object(notifications.httpx, "Client", FakeHTTPClient):
+                    notify_check.check_analytics_writer()
+            self.assertEqual(FakeHTTPClient.calls, [])
+        finally:
+            analytics.HEARTBEAT_FILE = old_heartbeat
+
     def test_deploy_failure_detected_from_deployments_table(self) -> None:
         alderpointdns_compiler.init_db()
         with alderpointdns_compiler.connect() as conn:

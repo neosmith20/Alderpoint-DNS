@@ -25,9 +25,25 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-
 DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
 BACKUP_DIR = Path("/var/lib/alderpointdns/backups")
+
+
+class AlderpointDNSConnection(sqlite3.Connection):
+    """Closes on exit like a plain connection factory would, but only once
+    the outermost `with` block exits, so a nested `with conn: ...` reused as
+    a transaction boundary doesn't close the connection out from under the
+    rest of the function."""
+
+    def __enter__(self):
+        self._alderpointdns_depth = getattr(self, "_alderpointdns_depth", 0) + 1
+        return super().__enter__()
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        super().__exit__(exc_type, exc_value, traceback)
+        self._alderpointdns_depth = getattr(self, "_alderpointdns_depth", 1) - 1
+        if self._alderpointdns_depth <= 0:
+            self.close()
 STAGING_DIR = Path("/var/lib/alderpointdns/staging")
 CERT_DIR = Path("/etc/alderpointdns/certs")
 CERT_PATH_DEFAULT = CERT_DIR / "alderpointdns-lab.crt"
@@ -89,8 +105,9 @@ def now() -> str:
 
 def connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, factory=AlderpointDNSConnection, timeout=5.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 

@@ -90,9 +90,22 @@ HEALTH_TONES = {
 
 
 class AlderpointDNSConnection(sqlite3.Connection):
+    """Closes on exit like a plain connection factory would, but only once
+    the outermost `with` block exits -- callers that reuse an already-open
+    connection as its own nested `with conn: ...` transaction boundary (a
+    common pattern for grouping a subset of statements into one commit)
+    would otherwise have the connection closed out from under them by the
+    first nested block's __exit__, breaking every statement after it."""
+
+    def __enter__(self):
+        self._alderpointdns_depth = getattr(self, "_alderpointdns_depth", 0) + 1
+        return super().__enter__()
+
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         super().__exit__(exc_type, exc_value, traceback)
-        self.close()
+        self._alderpointdns_depth = getattr(self, "_alderpointdns_depth", 1) - 1
+        if self._alderpointdns_depth <= 0:
+            self.close()
 
 
 @dataclass
@@ -164,8 +177,9 @@ def slug(text: str) -> str:
 
 def connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, factory=AlderpointDNSConnection)
+    conn = sqlite3.connect(DB_PATH, factory=AlderpointDNSConnection, timeout=5.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 

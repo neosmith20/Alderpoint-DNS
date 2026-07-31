@@ -40,6 +40,24 @@ import httpx
 
 DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
 
+
+class AlderpointDNSConnection(sqlite3.Connection):
+    """Closes on exit like a plain connection factory would, but only once
+    the outermost `with` block exits -- dispatch() and others reuse an
+    already-open connection as their own nested `with conn: ...` transaction
+    boundary, which would otherwise have the connection closed out from
+    under them by the first nested block's __exit__."""
+
+    def __enter__(self):
+        self._alderpointdns_depth = getattr(self, "_alderpointdns_depth", 0) + 1
+        return super().__enter__()
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        super().__exit__(exc_type, exc_value, traceback)
+        self._alderpointdns_depth = getattr(self, "_alderpointdns_depth", 1) - 1
+        if self._alderpointdns_depth <= 0:
+            self.close()
+
 SEVERITIES = ("info", "warning", "critical")
 _SEVERITY_RANK = {name: index for index, name in enumerate(SEVERITIES)}
 
@@ -76,9 +94,14 @@ def now() -> str:
 
 
 def connect() -> sqlite3.Connection:
+    """Returns a connection meant to be used as `with connect() as conn: ...`
+    (AlderpointDNSConnection.__exit__ closes it in addition to the stdlib's
+    commit/rollback-on-exit) -- callers holding the connection open across a
+    function body instead use `db.close()` in a `finally` block themselves."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, factory=AlderpointDNSConnection, timeout=5.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 

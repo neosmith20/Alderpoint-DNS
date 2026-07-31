@@ -46,6 +46,23 @@ DEFAULT_DB_LIMIT_BYTES = 256 * 1024 * 1024
 DEFAULT_RECENT_LIMIT = 100
 QUEUE_SIZE = 10000
 MAX_FRAME_BYTES = 1024 * 1024
+
+# Writer-loop resilience: a locked database (a web request or another writer
+# holding the write lock past busy_timeout) is treated as transient and
+# retried with backoff; only after LOCK_RETRY_ATTEMPTS in a row does the
+# cycle give up. WRITER_MAX_CONSECUTIVE_FAILURES bounds how many *whole
+# cycles* (not lock retries) can fail in a row before the writer thread
+# gives up entirely and terminates the process -- a single flaky cycle must
+# never take the collector down, but a writer that can never make forward
+# progress must not spin forever pretending to be healthy either.
+LOCK_RETRY_ATTEMPTS = 5
+LOCK_RETRY_BASE_DELAY = 0.2
+WRITER_MAX_CONSECUTIVE_FAILURES = 10
+HEARTBEAT_FILE = Path("/var/lib/alderpointdns/analytics-writer-heartbeat.json")
+# Generous vs. the ~1s writer_loop cadence and the lock-retry ceiling above
+# (5 attempts x up to ~3.2s backoff) so a heartbeat is only ever considered
+# stale once the writer has demonstrably stopped making progress.
+WRITER_STALE_SECONDS = 60
 # Well above dnsdist's configured 5s TCP / 2s UDP upstream timeouts (with
 # margin for retries), so real slow queries are never dropped, but a
 # corrupted/misparsed protobuf timestamp cannot silently inflate aggregates.
@@ -101,6 +118,72 @@ class QueryEvent:
 
 def utc_now() -> int:
     return int(time.time())
+
+
+def _log(priority: int, message: str) -> None:
+    """Emits a line prefixed with its syslog priority (systemd's default
+    SyslogLevelPrefix=yes strips and honors "<N>" on stdout/stderr), so
+    System Status classifies collector diagnostics by real severity instead
+    of everything landing as Info."""
+    print(f"<{priority}>analytics: {message}", file=sys.stderr, flush=True)
+
+
+def _is_lock_error(exc: BaseException) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and ("locked" in str(exc).lower() or "busy" in str(exc).lower())
+
+
+def _retry_on_lock(func, *, attempts: int = LOCK_RETRY_ATTEMPTS, base_delay: float = LOCK_RETRY_BASE_DELAY):
+    """Runs `func()`, retrying with exponential backoff only for a locked/busy
+    database. Returns (result, retries_used). Any other exception, or a lock
+    that outlasts every retry, propagates to the caller."""
+    last_exc: BaseException | None = None
+    for attempt in range(attempts):
+        try:
+            return func(), attempt
+        except sqlite3.OperationalError as exc:
+            if not _is_lock_error(exc):
+                raise
+            last_exc = exc
+            if attempt < attempts - 1:
+                time.sleep(base_delay * (2 ** attempt))
+    raise last_exc
+
+
+def _write_heartbeat(status: str, detail: str = "") -> None:
+    """Persists writer-thread health to a plain file rather than the
+    database itself -- the whole point of this heartbeat is to stay
+    readable even while the database is locked or the writer is failing to
+    reach it, so webapp/notify_check can tell "active but dead" apart from
+    "genuinely healthy" without depending on the thing that might be broken."""
+    payload = {"ts": utc_now(), "status": status, "detail": detail}
+    try:
+        tmp = HEARTBEAT_FILE.with_suffix(".tmp")
+        HEARTBEAT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(payload))
+        tmp.replace(HEARTBEAT_FILE)
+    except OSError:
+        pass
+
+
+def writer_health() -> dict[str, Any]:
+    """Reads the writer heartbeat file. `status` is one of "ok", "degraded"
+    (a lock was retried but the cycle still completed or was skipped),
+    "dead" (the writer thread terminated), or "unknown" (no heartbeat yet,
+    e.g. right after install/upgrade before the service has completed its
+    first cycle). `stale` is true once a previously-live heartbeat has not
+    been touched for WRITER_STALE_SECONDS, which is how an "active" systemd
+    unit whose writer thread silently died gets caught."""
+    try:
+        payload = json.loads(HEARTBEAT_FILE.read_text())
+    except (OSError, ValueError):
+        return {"status": "unknown", "stale": False, "ts": None, "detail": ""}
+    age = utc_now() - int(payload.get("ts", 0))
+    return {
+        "status": payload.get("status", "unknown"),
+        "stale": age > WRITER_STALE_SECONDS,
+        "ts": payload.get("ts"),
+        "detail": payload.get("detail", ""),
+    }
 
 
 def iso_from_ts(ts: int) -> str:
@@ -881,6 +964,8 @@ class Collector:
         self.policy = load_policy_index()
         self.policy_loaded = time.monotonic()
         self.dropped = 0
+        self.writer_consecutive_failures = 0
+        self.fatal_error = threading.Event()
 
     def current_settings(self) -> dict[str, str]:
         with connect() as conn:
@@ -939,6 +1024,63 @@ class Collector:
                     self.dropped += 1
                     buffer.clear()
 
+    def _write_events(self, batch: list[QueryEvent], cfg: dict[str, str]) -> None:
+        def _do() -> None:
+            with connect() as conn:
+                detailed = cfg.get("detailed_query_logging_enabled", "1") == "1" and cfg.get("privacy_mode") != "aggregate_only"
+                insert_events(conn, batch, detailed)
+                if self.dropped:
+                    upsert_bucket(conn, utc_now(), {"telemetry_dropped": self.dropped})
+                    self.dropped = 0
+
+        _, retries = _retry_on_lock(_do)
+        if retries:
+            _log(4, f"database lock recovered after {retries} retry(s) while writing query events")
+
+    def _run_cleanup(self, cfg: dict[str, str]) -> None:
+        def _do() -> None:
+            with connect() as conn:
+                cleanup(conn, cfg)
+
+        try:
+            _, retries = _retry_on_lock(_do)
+        except sqlite3.OperationalError as exc:
+            # Retention cleanup skips only this cycle -- it never counts
+            # toward writer_loop's consecutive-failure/termination logic,
+            # since losing a cleanup pass is harmless (the next cycle tries
+            # again) while losing query events is not.
+            _log(4, f"retention cleanup skipped this cycle after {LOCK_RETRY_ATTEMPTS} exhausted retries: {exc}")
+            return
+        if retries:
+            _log(4, f"database lock recovered after {retries} retry(s) during retention cleanup")
+
+    def _writer_cycle(self, batch: list[QueryEvent], cfg: dict[str, str]) -> None:
+        """Runs one writer_loop iteration's work and updates
+        writer_consecutive_failures/heartbeat/notifications accordingly.
+        Returns normally on success (including a recoverable, retried
+        success); sets self.fatal_error and stops the collector only once
+        WRITER_MAX_CONSECUTIVE_FAILURES whole cycles have failed in a row."""
+        try:
+            self._write_events(batch, cfg)
+            self._run_cleanup(cfg)
+        except Exception as exc:  # noqa: BLE001
+            self.writer_consecutive_failures += 1
+            if self.writer_consecutive_failures >= WRITER_MAX_CONSECUTIVE_FAILURES:
+                _log(3, f"analytics writer thread terminated after {self.writer_consecutive_failures} consecutive failed cycles: {exc}")
+                _write_heartbeat("dead", str(exc))
+                self._notify_writer("critical", f"Analytics writer thread terminated: {exc}", recovered=False)
+                self.fatal_error.set()
+                self.stop_event.set()
+                return
+            _log(4, f"analytics writer cycle failed ({self.writer_consecutive_failures}/{WRITER_MAX_CONSECUTIVE_FAILURES}), will retry next cycle: {exc}")
+            _write_heartbeat("degraded", str(exc))
+            return
+        if self.writer_consecutive_failures:
+            _log(6, "analytics writer recovered after transient failure")
+            self._notify_writer("critical", "Analytics writer thread recovered", recovered=True)
+        self.writer_consecutive_failures = 0
+        _write_heartbeat("ok")
+
     def writer_loop(self) -> None:
         while not self.stop_event.is_set():
             batch: list[QueryEvent] = []
@@ -949,13 +1091,15 @@ class Collector:
                 except queue.Empty:
                     pass
             cfg = self.current_settings()
-            with connect() as conn:
-                detailed = cfg.get("detailed_query_logging_enabled", "1") == "1" and cfg.get("privacy_mode") != "aggregate_only"
-                insert_events(conn, batch, detailed)
-                if self.dropped:
-                    upsert_bucket(conn, utc_now(), {"telemetry_dropped": self.dropped})
-                    self.dropped = 0
-                cleanup(conn, cfg)
+            self._writer_cycle(batch, cfg)
+
+    def _notify_writer(self, severity: str, summary: str, *, recovered: bool) -> None:
+        try:
+            from app import notifications
+
+            notifications.dispatch("service_unavailable", severity, "Analytics collector (writer thread)", summary, recovered=recovered)
+        except Exception:  # noqa: BLE001
+            pass
 
     def poll_loop(self) -> None:
         while not self.stop_event.is_set():
@@ -981,6 +1125,11 @@ class Collector:
         try:
             while True:
                 time.sleep(1)
+                if self.fatal_error.is_set():
+                    # Restart=on-failure in the systemd unit brings the
+                    # collector back up; a plain `return` here would exit 0
+                    # and leave it down instead.
+                    sys.exit(1)
         except KeyboardInterrupt:
             self.stop_event.set()
             for thread in threads:

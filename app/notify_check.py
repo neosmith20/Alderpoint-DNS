@@ -76,6 +76,32 @@ def check_service_availability() -> None:
         )
 
 
+def check_analytics_writer() -> None:
+    """Catches the "active but dead" case: systemd reports the analytics
+    unit as active, but its writer thread has stopped making progress (a
+    database-lock storm killed it, or it's stuck). analytics.py's own
+    writer_loop already notifies and exits nonzero on a genuinely
+    unrecoverable failure (so systemd restarts it and this clears on its
+    own); this check exists for the gap where the process is still alive
+    -- e.g. wedged rather than dead -- but the heartbeat has gone stale."""
+    if _service_state("alderpointdns-analytics") != "active":
+        # Plain service-down is already covered by check_service_availability.
+        return
+    health = analytics.writer_health()
+    if health["status"] == "unknown":
+        return
+    bad = health["stale"] or health["status"] == "dead"
+    detail = health["detail"] or f"status={health['status']}"
+    _fire_edge(
+        "service_unavailable",
+        "Analytics collector (writer thread)",
+        currently_bad=bad,
+        summary_bad=f"Analytics service is active but its writer thread is unresponsive: {detail}",
+        summary_ok="Analytics writer thread is responsive again",
+        severity="critical",
+    )
+
+
 def check_repeated_restarts(threshold: int = REPEATED_RESTART_THRESHOLD) -> None:
     for unit, label in SERVICE_UNITS.items():
         code, out = _systemctl(["show", unit, "--property=NRestarts", "--value"])
@@ -229,6 +255,7 @@ def check_replication() -> None:
 
 CHECKS = (
     check_service_availability,
+    check_analytics_writer,
     check_repeated_restarts,
     check_deploy_and_blocklist,
     check_blocklist_sources,
