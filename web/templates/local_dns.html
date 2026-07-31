@@ -29,7 +29,7 @@
       </label>
     </div>
     <div class="form-actions">
-      <button>Save and deploy</button>
+      <button data-pending-label="Saving and deploying…">Save and deploy</button>
     </div>
   </form>
 
@@ -68,7 +68,7 @@
     <label class="row"><input type="checkbox" name="auto_ptr" value="1" checked> Automatically create reverse PTR record</label>
     <label class="row"><input type="checkbox" name="override" value="1"> Override warnings when the generated DNS remains valid</label>
     <div class="form-actions">
-      <button>Add host and deploy</button>
+      <button data-pending-label="Adding host and deploying…">Add host and deploy</button>
     </div>
   </form>
 
@@ -100,7 +100,7 @@
     <label class="row"><input type="checkbox" name="enabled" value="1" checked> Enabled</label>
     <label class="row"><input type="checkbox" name="override" value="1"> Override warnings</label>
     <div class="form-actions">
-      <button>Add record and deploy</button>
+      <button data-pending-label="Adding record and deploying…">Add record and deploy</button>
     </div>
   </form>
 </section>
@@ -120,7 +120,7 @@
         <col style="width: 21%"><col style="width: 7%"><col style="width: 20%"><col style="width: 8%">
         <col style="width: 5%"><col style="width: 14%"><col style="width: 8%"><col style="width: 17%">
       </colgroup>
-      <thead><tr><th>Hostname</th><th>Type</th><th>Value / target</th><th>PTR</th><th>TTL</th><th>Comment</th><th>Status</th><th>Actions</th></tr></thead>
+      <thead><tr><th>Hostname</th><th>Type</th><th>Value / target</th><th>PTR</th><th>TTL</th><th>Comment</th><th>Status</th><th class="actions-col">Actions</th></tr></thead>
       <tbody>
         {% for record in records %}
           {% set reverse_target = record.comment[12:] if record.comment and record.comment.startswith("reverse for ") else None %}
@@ -134,7 +134,7 @@
               {% if reverse_target %}<span class="category-badge" title="Automatically generated reverse record for {{ reverse_target }}">&#8617; reverse of <span class="mono">{{ reverse_target }}</span></span>{% else %}{{ record.comment }}{% endif %}
             </td>
             <td>{{ ui.status_badge("Enabled" if record.enabled else "Disabled", "healthy" if record.enabled else "unavailable") }}</td>
-            <td>
+            <td class="actions-col">
               <div class="row">
                 <button type="button" class="secondary" data-row-edit-toggle aria-controls="editRow{{ record.id }}" aria-expanded="false">Edit</button>
                 {% call ui.overflow_menu("recordMenu" ~ record.id) %}
@@ -229,7 +229,7 @@
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="csv_text" value="{{ csv_text|e }}">
       <label class="row"><input type="checkbox" name="override" value="1"> Override warnings</label>
-      <button>Import CSV and deploy</button>
+      <button data-pending-label="Importing and deploying…">Import CSV and deploy</button>
     </form>
   {% endif %}
   {% if hosts_preview %}

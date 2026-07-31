@@ -650,6 +650,81 @@ class ImporterTest(unittest.TestCase):
             self.assertEqual(hosts_alias["comment"], "media box")
             self.assertEqual(local_dns.alias_for_client("192.168.1.77"), "Phone")
 
+    # -- idempotent re-import (against an install that already has the data) -
+
+    def test_reimporting_identical_adguard_data_is_idempotent(self) -> None:
+        # Simulates a beta tester re-running the same AdGuard migration a
+        # second time (e.g. after re-uploading the same AdGuardHome.yaml)
+        # against an Alderpoint DNS install that already has everything from
+        # the first run: as two separate jobs, not a re-apply of the same
+        # job, since that's what create_migration_job/apply_migration_job
+        # look like from a fresh upload each time.
+        translation = importer.parse_adguard_yaml(ADGUARD_FIXTURE, "home.arpa")
+        first_job = importer.create_migration_job("adguard_yaml", "adguard_home.yaml", translation)
+        importer.migration_preview_job(first_job, "home.arpa")
+        importer.apply_migration_job(first_job, default_domain="home.arpa")
+        counts_after_first = self.destination_counts()
+
+        translation_again = importer.parse_adguard_yaml(ADGUARD_FIXTURE, "home.arpa")
+        second_job = importer.create_migration_job("adguard_yaml", "adguard_home.yaml", translation_again)
+        importer.migration_preview_job(second_job, "home.arpa")
+        result = importer.apply_migration_job(second_job, default_domain="home.arpa")
+
+        self.assertEqual(self.destination_counts(), counts_after_first, "re-importing identical AdGuard data must not create duplicate rows")
+        counts = result["counts"]
+        self.assertEqual(counts["blocklists_added"], 0)
+        self.assertEqual(counts["block_rules"], 0)
+        self.assertEqual(counts["allow_rules"], 0)
+        self.assertEqual(counts["rewrite_rules"], 0)
+        self.assertEqual(counts["regex_rules"], 0)
+        self.assertEqual(counts["local_dns_records"], 0)
+        self.assertEqual(counts["upstream_resolvers"], 0)
+        self.assertEqual(counts["invalid_kept_inactive"], 0)
+        self.assertEqual(counts["unsupported_kept_inactive"], 0)
+        self.assertEqual(counts["comments"], 0)
+        # blocklists_updated (matched by name) is expected -- an upsert, not
+        # a duplicate row -- as is client_aliases (also an upsert by CIDR).
+        # Everything else from the first import (every rule form, every
+        # local DNS record, every upstream resolver) is recognized as
+        # already present and skipped instead.
+        self.assertEqual(counts["duplicates_skipped"], 6 + 2 + 6 + 2 + 3 + 1 + 4 + 3 + 2)
+
+    def test_reimporting_identical_pihole_data_is_idempotent(self) -> None:
+        first_job, _summary = self._pihole_job()
+        importer.apply_migration_job(first_job, default_domain="home.arpa")
+        counts_after_first = self.destination_counts()
+
+        second_job, _summary = self._pihole_job()
+        result = importer.apply_migration_job(second_job, default_domain="home.arpa")
+
+        self.assertEqual(self.destination_counts(), counts_after_first, "re-importing identical Pi-hole data must not create duplicate rows")
+        counts = result["counts"]
+        self.assertEqual(counts["blocklists_added"], 0)
+        self.assertEqual(counts["block_rules"], 0)
+        self.assertEqual(counts["allow_rules"], 0)
+        self.assertEqual(counts["regex_rules"], 0)
+        self.assertEqual(counts["local_dns_records"], 0)
+        self.assertGreater(counts["duplicates_skipped"], 0)
+
+    def test_apply_skips_duplicate_blocklist_url_under_different_name(self) -> None:
+        # Same feed, re-imported under a different source name -- must not
+        # create a second subscription to the identical URL.
+        translation = {"blocklist_sources": [{"name": "Original Name", "url": "https://lists.example/ads.txt", "enabled": True}]}
+        job_id = importer.create_migration_job("pihole", "sources.txt", translation)
+        importer.migration_preview_job(job_id, "home.arpa")
+        importer.apply_migration_job(job_id, default_domain="home.arpa")
+
+        translation2 = {"blocklist_sources": [{"name": "Renamed Import", "url": "https://lists.example/ads.txt", "enabled": True}]}
+        job_id2 = importer.create_migration_job("pihole", "sources2.txt", translation2)
+        summary = importer.migration_preview_job(job_id2, "home.arpa")["summary"]
+        self.assertTrue(any("duplicate of Original Name" in e["label"] for e in summary["existing"]))
+        result = importer.apply_migration_job(job_id2, default_domain="home.arpa")
+        self.assertEqual(result["counts"]["blocklists_added"], 0)
+        self.assertEqual(result["counts"]["duplicates_skipped"], 1)
+        with self.connect() as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM sources WHERE url='https://lists.example/ads.txt'").fetchone()[0], 1)
+            self.assertIsNone(conn.execute("SELECT 1 FROM sources WHERE name='Renamed Import'").fetchone())
+
     def test_mark_job_deploy_failed_and_rollback_after_deploy_failure(self) -> None:
         job_id, _summary = self._pihole_job()
         importer.apply_migration_job(job_id, default_domain="home.arpa")

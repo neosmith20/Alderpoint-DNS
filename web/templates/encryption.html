@@ -66,7 +66,7 @@
       {% if dnscrypt_fingerprint %}<p class="muted mono wrap-anywhere">Provider public key: {{ dnscrypt_fingerprint }}</p>{% endif %}
     </details>
     <div class="form-actions">
-      <button>Save and deploy</button>
+      <button data-pending-label="Saving and deploying…">Save and deploy</button>
     </div>
   </form>
 
@@ -100,7 +100,7 @@
       <form method="post" action="/encryption/certificate/local-ca" data-confirm="Issue a certificate from Alderpoint DNS's local CA (creating the CA first if needed) and deploy it?">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <p class="muted">Creates (or reuses) a local Alderpoint DNS CA and issues a leaf certificate signed by it. Trust the CA certificate on clients to avoid browser/OS warnings.</p>
-        <div class="form-actions"><button class="secondary">Issue from local CA</button></div>
+        <div class="form-actions"><button class="secondary" data-pending-label="Issuing…">Issue from local CA</button></div>
       </form>
     </details>
 
@@ -111,7 +111,7 @@
         <label>Certificate file (PEM)<input type="file" name="cert_file" accept=".crt,.pem" required></label>
         <label>Key file (PEM)<input type="file" name="key_file" accept=".key,.pem" required></label>
         <p class="muted">Private key contents are never displayed back in the UI.</p>
-        <div class="form-actions"><button class="secondary">Upload and deploy</button></div>
+        <div class="form-actions"><button class="secondary" data-pending-label="Uploading and deploying…">Upload and deploy</button></div>
       </form>
     </details>
 

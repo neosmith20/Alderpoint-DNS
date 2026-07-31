@@ -811,7 +811,11 @@ def build_migration_plan(translation: dict[str, Any], default_domain: str | None
     for index, entry, rules in parsed_entries:
         if not rules:
             continue
-        valid_rules = [r for r in rules if r.validation_state == "valid" and r.rule_type != "comment"]
+        # Comments are included (not filtered out) so a comment that already
+        # exists verbatim -- either earlier in this same import or from a
+        # previous run against this database -- is recognized as a
+        # duplicate too, the same as block/allow/rewrite/regex rules.
+        valid_rules = [r for r in rules if r.validation_state == "valid"]
         invalid_rules = [r for r in rules if r.validation_state == "invalid"]
         unsupported_rules_ = [r for r in rules if r.validation_state == "unsupported"]
         dupkeys = [(r.normalized, r.action) for r in valid_rules]
@@ -1072,6 +1076,9 @@ def summarize_migration(translation: dict[str, Any], default_domain: str | None 
         existing_source_names = (
             {row["name"] for row in conn.execute("SELECT name FROM sources")} if have_sources else set()
         )
+        existing_source_urls = (
+            {row["url"]: row["name"] for row in conn.execute("SELECT name, url FROM sources")} if have_sources else {}
+        )
         existing_resolvers = (
             {
                 (row["protocol"], row["address"], int(row["port"]), row["doh_path"] or "")
@@ -1088,6 +1095,10 @@ def summarize_migration(translation: dict[str, Any], default_domain: str | None 
             if kind == "source" and item["source"] in existing_source_names:
                 item["conflict"] = "a source with this name already exists; its URL, category, and enabled state will be updated"
                 existing.append({"key": item["key"], "label": f"blocklist source {item['source']}"})
+            elif kind == "source" and item.get("normalized") in existing_source_urls:
+                existing_name = existing_source_urls[item["normalized"]]
+                item["conflict"] = f"a source named {existing_name!r} already subscribes to this exact URL; skipped to avoid a duplicate subscription"
+                existing.append({"key": item["key"], "label": f"blocklist source {item['source']} (duplicate of {existing_name})"})
             elif kind == "rule" and have_rules and item["_dupkeys"]:
                 for normalized, action in item["_dupkeys"]:
                     if custom_rules.find_duplicate(conn, normalized, action):
@@ -1870,7 +1881,10 @@ _SOURCE_SYSTEM_BY_TYPE = {
 
 def _apply_source_item(conn: sqlite3.Connection, source: dict[str, Any], rollback_info: dict[str, Any]) -> str:
     """Insert or update one blocklist source inside the caller's transaction.
-    Returns 'added' or 'updated' and records rollback data."""
+    Returns 'added', 'updated', or 'duplicate' (an existing source under a
+    different name already subscribes to this exact URL -- skipped rather
+    than creating a second subscription to the same feed) and records
+    rollback data."""
     name = str(source.get("name", "")).strip()[:120]
     url = str(source.get("url", "")).strip()
     category = str(source.get("category", "ads_trackers")).strip() or "ads_trackers"
@@ -1880,6 +1894,8 @@ def _apply_source_item(conn: sqlite3.Connection, source: dict[str, Any], rollbac
         rollback_info["sources_updated"].append(dict(existing))
         conn.execute("UPDATE sources SET url=?, enabled=?, category=? WHERE name=?", (url, enabled, category, name))
         return "updated"
+    if conn.execute("SELECT 1 FROM sources WHERE url=?", (url,)).fetchone():
+        return "duplicate"
     conn.execute("INSERT INTO sources(name, url, enabled, category) VALUES (?, ?, ?, ?)", (name, url, enabled, category))
     rollback_info["sources_added"].append(name)
     return "added"
@@ -2014,7 +2030,12 @@ def apply_migration_job(
                     if kind == "source":
                         stage = f"blocklist source {item['source']}"
                         outcome = _apply_source_item(conn, sources_list[index], rollback_info)
-                        counts["blocklists_added" if outcome == "added" else "blocklists_updated"] += 1
+                        if outcome == "added":
+                            counts["blocklists_added"] += 1
+                        elif outcome == "updated":
+                            counts["blocklists_updated"] += 1
+                        else:
+                            counts["duplicates_skipped"] += 1
                     elif kind == "rule":
                         entry = entries[index]
                         stage = f"custom rule {entry['text']}"

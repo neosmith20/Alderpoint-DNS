@@ -37,6 +37,8 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4h10v3h3v10h-3v3H7v-3H4V7h3V4Zm2 3v10h6V7H9Z"/></svg>
       {% elif name == "system" %}
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v10H4V5Zm2 2v6h12V7H6Zm2 10h8v2H8v-2Z"/></svg>
+      {% elif name == "logout" %}
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5-5-5ZM4 5h8V3H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h8v-2H4V5Z"/></svg>
       {% endif %}
     {%- endmacro %}
     {% macro nav_section(id, label, active, icon_name) -%}
@@ -117,7 +119,12 @@
           <span id="globalServiceStatus" class="status-badge status-badge--{{ service_status.tone }} js-global-service-status" data-status-url="/status/summary" title="{{ service_status.detail }}">
             <span data-status-label>{{ service_status.label }}</span>
           </span>
-          <form method="post" action="/logout"><button class="secondary" aria-label="Logout" title="Logout"><span class="nav-link__label">Logout</span></button></form>
+          <form method="post" action="/logout">
+            <button class="nav-link" type="submit" aria-label="Log out" title="Log out">
+              <span class="nav-icon">{{ nav_icon("logout") }}</span>
+              <span class="nav-link__label">Log out</span>
+            </button>
+          </form>
         </div>
       </aside>
       <main class="app-main">{% block content %}{% endblock %}</main>

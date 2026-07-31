@@ -100,6 +100,33 @@ alderpointdns (0.4.0~beta2-1) unstable; urgency=medium
     out of deploy_encryption(), is now applied when saving Encryption
     Settings too, so a forged POST cannot persist doq_enabled=1/
     doh3_enabled=1 on an installation whose dnsdist lacks that capability.
+  * Web interface usability pass from beta feedback: a reusable
+    pending-action button state (disables, swaps to an in-progress label
+    with a spinner, sets aria-busy, restores on failure) applied to every
+    form site-wide instead of per-page handlers; restructured status-tile
+    cards (name centered on top, status badge centered below it, not
+    beside the name) across System Health, System Status, Encryption,
+    Replication, Backup, and DNS Settings; a shared centered Actions-column
+    table utility applied to Local DNS, Blocklists, Custom Rules, DNS
+    Settings upstreams, Backup, and Replication; a recognizable icon,
+    accessible name, and tooltip for the collapsed-sidebar Logout control;
+    and sidebar nav sections that collapse again after opening (including
+    a section containing the active page) with expand/collapse state now
+    persisted across navigation.
+  * Added a first-class Pi-hole Migration panel to Import and Migration,
+    alongside AdGuard Home's, explaining the supported Pi-hole export
+    format and warning that group assignments have no Alderpoint DNS
+    equivalent. The Pi-hole importer backend and preview/apply/rollback
+    pipeline already existed; only the dedicated UI panel and end-to-end
+    route tests against the synthetic Pi-hole fixture were added.
+  * Closed import-idempotency gaps: blocklist sources are now also matched
+    by URL (not just name) so the same feed re-added under a different
+    name is skipped instead of duplicated, and comment/invalid/unsupported
+    custom-rule entries are now deduplicated the same way active rules
+    already were. Local DNS records, client aliases, and upstream
+    resolvers were already correctly deduplicated. Added tests proving
+    repeated AdGuard/Pi-hole imports (as separate jobs) do not increase
+    any destination table's row count.
 
  -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Thu, 30 Jul 2026 23:59:00 -0600
 

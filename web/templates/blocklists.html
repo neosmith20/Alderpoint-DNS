@@ -77,13 +77,13 @@
   {% call ui.table_wrap("table-compact") %}
     <table>
       <colgroup><col style="width: 26%"><col style="width: 14%"><col></colgroup>
-      <thead><tr><th>Category</th><th>Sources</th><th>Actions</th></tr></thead>
+      <thead><tr><th>Category</th><th>Sources</th><th class="actions-col">Actions</th></tr></thead>
       <tbody>
         {% for cat in categories %}
           <tr>
             <td>{{ ui.category_badge(cat.name) }}</td>
             <td class="mono">{{ cat.source_count }}</td>
-            <td>
+            <td class="actions-col">
               {% if cat.key == "uncategorized" %}
                 <span class="muted secondary">Built-in</span>
               {% else %}
@@ -146,7 +146,7 @@
         <col style="width: 19%"><col style="width: 19%"><col style="width: 11%"><col style="width: 8%">
         <col style="width: 8%"><col style="width: 12%"><col style="width: 9%"><col style="width: 14%">
       </colgroup>
-      <thead><tr><th>Name</th><th>Source URL</th><th>Category</th><th>Status</th><th>Rules</th><th>Last update</th><th>Health</th><th>Actions</th></tr></thead>
+      <thead><tr><th>Name</th><th>Source URL</th><th>Category</th><th>Status</th><th>Rules</th><th>Last update</th><th>Health</th><th class="actions-col">Actions</th></tr></thead>
       <tbody>
         {% for s in sources %}
           <tr>
@@ -157,7 +157,7 @@
             <td class="mono" title="{{ s.accepted_domains }} accepted, {{ s.invalid_rules }} invalid, {{ s.unsupported_rules }} unsupported">{{ s.accepted_domains }}</td>
             <td class="mono truncate">{{ s.last_success or "Never" }}</td>
             <td>{% if s.last_error %}{{ ui.status_badge("Error", "down") }}{% elif not s.last_success %}{{ ui.status_badge("Pending", "unavailable") }}{% else %}{{ ui.status_badge("Healthy", "healthy") }}{% endif %}</td>
-            <td>
+            <td class="actions-col">
               <div class="row">
                 <button type="button" class="secondary" data-row-edit-toggle aria-controls="blocklistEdit{{ s.id }}" aria-expanded="false">Edit</button>
                 {% call ui.overflow_menu("blocklistMenu" ~ s.id) %}

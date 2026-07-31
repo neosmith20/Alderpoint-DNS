@@ -170,3 +170,48 @@ may still change between releases before a stable 1.0.
   Settings, so a forged POST setting `doq_enabled=1`/`doh3_enabled=1`
   cannot persist an unsupported protocol as enabled, not just fail to
   render it checked.
+- Web interface usability pass from beta feedback:
+  - Added a reusable pending-action button state (`app.js`): the submitted
+    button disables immediately, its label swaps to an in-progress gerund
+    with a spinner, `aria-busy` is set, and it's restored automatically if
+    an async action fails without navigating away -- applied globally to
+    every form submit (DNS settings, Local DNS, blocklists, imports,
+    custom rules, cache, backups, encryption) instead of one-off handlers.
+  - Restructured status-tile cards (`.card`/`.card__head`): component name
+    centered on top, status badge centered directly below it instead of
+    beside the name at an arbitrary offset, applied consistently across
+    System Health, System Status, Encryption, Replication, Backup, and DNS
+    Settings summary cards; list-content cards (e.g. Allowed Clients) are
+    explicitly excluded, not blindly centered.
+  - Added a shared `.actions-col` table utility (centered header, buttons,
+    status labels, and overflow menus) applied to Local DNS, Blocklists
+    (both tables), Custom Rules, DNS Settings upstreams, Backup, and
+    Replication, replacing inconsistent per-page alignment.
+  - Gave the collapsed-sidebar Logout control a recognizable icon, an
+    accessible name and tooltip ("Log out"), and a hover/focus state
+    matching other collapsed nav buttons -- it no longer collapses down to
+    an unlabeled, easy-to-misclick box.
+  - Made sidebar nav sections (DNS/Security/Operations/System) collapsible
+    again after opening, including a section containing the active page
+    (which stays visually identifiable via its own styling regardless of
+    expanded state); expand/collapse state now persists across ordinary
+    navigation via `localStorage`.
+- Added a first-class Pi-hole Migration panel to Import and Migration,
+  alongside AdGuard Home's, explaining the supported Pi-hole text-export
+  format (adlists.list, whitelist/blacklist, regex.list including the
+  wildcard-block idiom, custom.list, dnsmasq `cname=` lines) and warning
+  that group assignments have no Alderpoint DNS equivalent. The Pi-hole
+  importer backend and preview/apply/rollback pipeline already existed and
+  needed no changes; only the dedicated UI panel (previously just a
+  dropdown option with no format explanation) and end-to-end route tests
+  against the synthetic Pi-hole fixture were added.
+- Closed import-idempotency gaps found by re-importing the same AdGuard/
+  Pi-hole data against an install that already has it: blocklist sources
+  are now also matched by URL (not just name), so the same feed re-added
+  under a different name is recognized and skipped instead of creating a
+  second subscription; comment and invalid/unsupported custom-rule entries
+  (previously exempt from duplicate detection) are now deduplicated the
+  same way active rules already were. Local DNS records, client aliases,
+  and upstream resolvers were already correctly deduplicated. Added tests
+  proving that applying the same AdGuard or Pi-hole import twice, as two
+  separate jobs, does not increase any destination table's row count.

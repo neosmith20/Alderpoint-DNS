@@ -3,7 +3,7 @@
 {% block content %}
 {{ ui.page_header("System", "Service state, deployment state, and recent Alderpoint DNS logs.") }}
 
-<section class="grid">
+<section class="grid health">
   {% for item in health %}
     <article class="card">
       <div class="card__head"><h2>{{ item.name }}</h2>{{ ui.status_badge(item.state, item.tone) }}</div>
