@@ -1,113 +1,102 @@
-# Contributor Covenant Code of Conduct
+# Alderpoint DNS Community Conduct Policy
 
 ## Our Pledge
 
-We as members, contributors, and leaders pledge to make participation in our
-community a harassment-free experience for everyone, regardless of age, body
-size, visible or invisible disability, ethnicity, sex characteristics, gender
-identity and expression, level of experience, education, socio-economic
-status, nationality, personal appearance, race, religion, or sexual identity
-and orientation.
+We pledge to make participation in the Alderpoint DNS community a professional, respectful, and harassment-free experience for everyone.
 
-We pledge to act and interact in ways that contribute to an open, welcoming,
-diverse, inclusive, and healthy community.
+Participation in this project does not require any person to endorse, affirm, or adopt another person's religious, moral, political, philosophical, or personal beliefs. Contributors may hold and respectfully express differing viewpoints. Disagreement with an idea, belief, or viewpoint is not, by itself, harassment.
+
+All participants are expected to treat one another with basic dignity and professional respect. Harassment, threats, intimidation, sexualized conduct, targeted abuse, doxxing, and personal attacks are not permitted.
+
+We aim to maintain a community where technical work can be discussed honestly, disagreements can be handled civilly, and contributors are evaluated by their conduct and contributions to the project.
 
 ## Our Standards
 
 Examples of behavior that contributes to a positive environment include:
 
-- Demonstrating empathy and kindness toward other people.
-- Being respectful of differing opinions, viewpoints, and experiences.
-- Giving and gracefully accepting constructive feedback.
-- Accepting responsibility and apologizing to those affected by our
-  mistakes, and learning from the experience.
-- Focusing on what is best not just for us as individuals, but for the
-  overall community.
+* Demonstrating patience, courtesy, and kindness toward other people.
+* Being respectful of differing opinions, viewpoints, beliefs, and experiences.
+* Giving and gracefully accepting constructive technical feedback.
+* Accepting responsibility for mistakes and making reasonable efforts to correct them.
+* Keeping discussions relevant to the project and its technical goals.
+* Focusing on what is best for the project and its community.
 
 Examples of unacceptable behavior include:
 
-- The use of sexualized language or imagery, and sexual attention or
-  advances of any kind.
-- Trolling, insulting or derogatory comments, and personal or political
-  attacks.
-- Public or private harassment.
-- Publishing others' private information, such as a physical or email
-  address, without their explicit permission.
-- Other conduct which could reasonably be considered inappropriate in a
-  professional setting.
+* Sexualized language or imagery, sexual attention, or unwanted advances.
+* Trolling, insults, derogatory comments, or personal attacks.
+* Threats, intimidation, or sustained targeted harassment.
+* Deliberately disrupting project discussions or development work.
+* Publishing another person's private information without explicit permission.
+* Using project spaces primarily to provoke political, religious, ideological, or personal conflict unrelated to the project.
+* Other conduct that could reasonably be considered abusive or seriously unprofessional in a technical project.
+
+Respectful disagreement, including disagreement involving religious, moral, political, philosophical, or personal beliefs, is not prohibited. Enforcement is based on conduct, not on requiring ideological agreement.
 
 ## Enforcement Responsibilities
 
-Project maintainers are responsible for clarifying and enforcing our
-standards of acceptable behavior and will take appropriate and fair
-corrective action in response to any behavior that they deem inappropriate,
-threatening, offensive, or harmful.
+Project maintainers are responsible for interpreting and enforcing these standards.
+
+Maintainers may take reasonable and proportionate corrective action in response to conduct they determine to be threatening, abusive, harassing, deliberately disruptive, or otherwise harmful to the project or its participants.
+
+Enforcement decisions should consider context, severity, repetition, intent, impact, and whether the participant made a good-faith effort to correct the behavior.
 
 ## Scope
 
-This Code of Conduct applies within all project spaces (issues, pull
-requests, discussions, and any other project-run communication channels),
-and also applies when an individual is officially representing the project
-in public spaces.
+This policy applies within Alderpoint DNS project spaces, including issues, pull requests, discussions, documentation contributions, and other project-operated communication channels.
 
-## Enforcement
+It also applies when an individual is officially representing the Alderpoint DNS project in a public space.
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported by opening a GitHub issue on this repository, or, for reports that
-should not be public, through a private GitHub Security Advisory as
-described in `SECURITY.md`. All complaints will be reviewed and investigated
-promptly and fairly.
+This policy does not govern a participant's private beliefs, lawful private conduct, or unrelated activity where the person is not representing the project.
 
-Project maintainers are obligated to respect the privacy and security of the
-reporter of any incident.
+## Reporting and Enforcement
+
+Abusive, harassing, threatening, or otherwise unacceptable conduct may be reported through the project's designated private reporting method described in `SECURITY.md`.
+
+Reports involving sensitive personal or security information should not be submitted through a public issue.
+
+All reports will be reviewed as promptly and fairly as practical. Maintainers will make reasonable efforts to protect the privacy and security of reporters and affected participants.
+
+Knowingly false, malicious, or retaliatory reports may themselves be treated as a violation of this policy.
 
 ## Enforcement Guidelines
 
-Project maintainers will follow these Community Impact Guidelines in
-determining the consequences for any action they deem in violation of this
-Code of Conduct:
+Maintainers may use the following guidelines when determining an appropriate response.
 
 ### 1. Correction
 
-**Community Impact**: Use of inappropriate language or other behavior deemed
-unprofessional or unwelcome in the community.
+**Community Impact:** Minor inappropriate, disruptive, or unprofessional behavior.
 
-**Consequence**: A private, written warning from project maintainers,
-providing clarity around the nature of the violation and an explanation of
-why the behavior was inappropriate. A public apology may be requested.
+**Consequence:** A private or public request to stop or correct the behavior, along with an explanation of the applicable standard.
 
 ### 2. Warning
 
-**Community Impact**: A violation through a single incident or series of
-actions.
+**Community Impact:** A meaningful violation or a repeated pattern of behavior after correction.
 
-**Consequence**: A warning with consequences for continued behavior. No
-interaction with the people involved for a specified period of time. This
-includes avoiding interactions in community spaces as well as external
-channels. Violating these terms may lead to a temporary or permanent ban.
+**Consequence:** A formal warning describing the violation and the consequences of continued behavior. Temporary interaction restrictions may be imposed.
 
-### 3. Temporary Ban
+### 3. Temporary Restriction or Ban
 
-**Community Impact**: A serious violation of community standards, including
-sustained inappropriate behavior.
+**Community Impact:** Serious misconduct, sustained disruption, harassment, intimidation, or continued violations after a warning.
 
-**Consequence**: A temporary ban from any sort of interaction or public
-communication with the community for a specified period of time.
+**Consequence:** A temporary restriction or ban from project interaction for a specified period.
 
 ### 4. Permanent Ban
 
-**Community Impact**: Demonstrating a pattern of violation of community
-standards, including sustained inappropriate behavior, harassment of an
-individual, or aggression toward or disparagement of classes of individuals.
+**Community Impact:** A severe incident or sustained pattern involving credible threats, targeted harassment, intimidation, deliberate abuse, malicious disruption, or repeated refusal to follow project standards.
 
-**Consequence**: A permanent ban from any sort of public interaction within
-the community.
+**Consequence:** Permanent removal from project-operated community spaces.
+
+## Appeals
+
+A participant subject to an enforcement action may request reconsideration by providing relevant context or evidence.
+
+Maintainers are not required to reverse an action, but should review good-faith appeals fairly and document the final decision where appropriate.
 
 ## Attribution
 
-This Code of Conduct is adapted from the [Contributor Covenant][homepage],
-version 2.1, available at
-[https://www.contributor-covenant.org/version/2/1/code_of_conduct.html][v2.1].
+This policy incorporates portions of the structure and enforcement guidance of the Contributor Covenant, version 2.1, and has been substantially adapted for the Alderpoint DNS project.
 
-[homepage]: https://www.contributor-covenant.org
-[v2.1]: https://www.contributor-covenant.org/version/2/1/code_of_conduct.html
+The Contributor Covenant is available at:
+
+https://www.contributor-covenant.org/version/2/1/code_of_conduct.html
