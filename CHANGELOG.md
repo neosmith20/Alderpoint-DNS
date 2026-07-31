@@ -268,3 +268,37 @@ may still change between releases before a stable 1.0.
   public IP. Import previews and job results now distinguish Conflicts,
   Warnings, and Unsupported as separate counts/sections instead of folding
   warnings into conflicts.
+- Fixed a blocklist-source ambiguity where a subscription that legitimately
+  compiles to zero active rules (e.g. an AdGuard-style source consisting
+  entirely of `$dnsrewrite` rules Alderpoint DNS cannot express as RPZ
+  block rules, or an IPv6-only hosts-format source) was indistinguishable
+  from a fetch/parse failure. Health/status reporting for each source now
+  reflects its actual state (real zero-rule vs. failed) instead of always
+  reading as a generic failure, and IPv6 sinkhole-style hosts entries are
+  recognized and compiled correctly rather than silently skipped.
+- Fixed a production incident where the analytics writer thread could
+  silently die (e.g. after a transient SQLite `database is locked` error)
+  while the parent `alderpointdns-analytics` process kept running, so
+  systemd and System Status both reported "active" with no query events
+  actually being recorded. Root cause was a database-connection-handling
+  defect shared across most of the web app's SQLite call sites: Python's
+  `sqlite3.Connection` context manager only commits or rolls back on exit,
+  it never closes the connection, so long-lived request handlers were
+  quietly accumulating open file descriptors against the same database
+  file. Every affected `connect()`/`db()` helper (web app, notifications,
+  encryption, DNS cache, importer, upstream resolvers, blocklist
+  categories, local DNS) now closes deterministically on exit, with an
+  explicit `busy_timeout` and short-lived transactions. The analytics
+  writer now retries transient lock errors with backoff, isolates
+  retention-cleanup failures to a single cycle instead of ever giving up
+  entirely, publishes an independent file-based heartbeat so its health can
+  be read even when the database itself is unavailable, terminates and
+  lets systemd restart it only after sustained, unrecoverable failure, and
+  fires a notification and a correctly severity-tagged System Status entry
+  (Warning for a recovered transient lock, Error for a terminated writer,
+  Info for recovery) instead of misreporting a real failure as routine
+  informational logging. Added deterministic connection-lifecycle tests,
+  an end-to-end web-traffic file-descriptor regression test, and a
+  concurrency test exercising real web requests against the live database
+  while the analytics writer is simultaneously writing events and running
+  retention cleanup under lock contention.

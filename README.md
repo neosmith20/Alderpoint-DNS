@@ -43,16 +43,28 @@ requires a separate license — see `LICENSE` and
   AdGuard Home (YAML or read-only API), Pi-hole text/list exports, BIND
   zones, hosts files, CSV/XLSX, and Alderpoint DNS's own JSON export, with
   unsupported source features reported explicitly rather than silently
-  dropped or fabricated. See `docs/migration.md`.
+  dropped or fabricated. AdGuard DNS Rewrites always map to Local DNS
+  (Alderpoint DNS's own local-authority feature), imports are idempotent
+  on re-run, and intentional public-IP Local DNS records (e.g. a VPN host)
+  are reported as warnings rather than blocking conflicts. See
+  `docs/migration.md`.
 - **Backup and restore.** Previewable, checksummed backups using SQLite's
   online-backup API (safe under concurrent writes), optional password
   encryption for off-host archives, and a restore path that takes its own
   safety backup and rolls back automatically on a failed health check. See
   `docs/backup-recovery.md`.
-- **Web admin UI.** A single-administrator, CSRF-protected, session-based
-  admin interface covering DNS settings, filtering, local DNS, analytics,
-  backup/restore, migration, replication, and system status. See
-  `docs/web.md`.
+- **Administration.** Server-side sessions (revocable individually or all
+  at once), a recent admin audit log, in-app password change, and a
+  root-only local `alderpointdns admin reset-password` recovery command
+  with no web-reachable route. See `docs/web.md`.
+- **Notifications.** A provider-neutral SMTP email and generic HTTP webhook
+  framework (with Discord/Slack/Microsoft Teams/ntfy/Gotify/Pushover
+  presets), per-event-category subscriptions and severity thresholds,
+  cooldown/dedup, recovery notices, and a local delivery history.
+- **Web admin UI.** A CSRF-protected, session-based admin interface
+  covering DNS settings, filtering, local DNS, analytics, backup/restore,
+  migration, replication, administration, notifications, and system
+  status. See `docs/web.md`.
 
 ## Supported systems
 

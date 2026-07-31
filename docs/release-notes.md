@@ -5,7 +5,52 @@ changed in each beta build; they are not a claim of production readiness or
 long-term stability. See `docs/known-limitations.md` and
 `docs/beta-readiness.md` for the current honest state of the project.
 
-## 0.4.0-beta.2
+## 0.4.0-beta.2 (unreleased beta update)
+
+Not a final release; version `0.4.0~beta2` continues to cover several
+materially different internal builds pending an explicit `beta3` version
+bump. Since the interface-polish build described below, this line has
+added a full administration and observability layer and closed several
+reliability gaps found during beta feedback and internal testing:
+
+- **System > Administration**: password change with automatic revocation
+  of other sessions, per-session visibility (start time, last seen, IP,
+  client) and revocation, a recent audit log, and a root-only local
+  `alderpointdns admin reset-password` recovery command with no
+  web-reachable route.
+- **System > Notifications**: a provider-neutral SMTP/webhook notification
+  framework (Discord/Slack/Microsoft Teams/ntfy/Gotify/Pushover presets)
+  with per-category subscriptions, severity thresholds, cooldown/dedup,
+  recovery notices, and a delivery history, driven by a new
+  `alderpointdns-notify.timer`.
+- Expanded AdGuard Home and Pi-hole migration: AdGuard DNS Rewrites now
+  always map to Local DNS (previously some rewrites could be misclassified
+  as Custom Filtering Rules); import idempotency gaps closed (URL-based
+  blocklist-source matching, comment/invalid custom-rule dedup); a
+  dedicated Pi-hole import panel; setup and import severity/reporting
+  fixes so intentional public-IP Local DNS records (e.g. a VPN host) are
+  reported as warnings, not conflicts.
+- Fixed a blocklist zero-rule ambiguity (a source that legitimately
+  compiles to zero rules is now distinguished from a fetch/parse failure)
+  and IPv6-only hosts-format sinkhole entries are now compiled correctly.
+- Fixed a production incident in which the analytics writer thread could
+  die silently while its parent process kept reporting healthy: closed a
+  SQLite connection-descriptor leak present across most of the web app's
+  database call sites, added retry-with-backoff and an independent
+  heartbeat to the analytics writer, and corrected System Status severity
+  reporting (Warning/Error/Info) for these conditions. See `CHANGELOG.md`
+  for the full technical account.
+- Added the accompanying automated test coverage: deterministic connection-
+  lifecycle tests, a web-traffic file-descriptor regression test, and a
+  concurrency test exercising live web requests against the database
+  alongside the analytics writer under lock contention. As of this update
+  the project's test suite (`pytest tests/`) totals 466 automated tests,
+  passing locally alongside the shell-based acceptance, package-content,
+  licensing-hygiene, and clean Debian 13 install suites; this reflects the
+  tests that exist today, not a guarantee of production readiness beyond
+  what `docs/known-limitations.md` already states.
+
+## 0.4.0-beta.2 (interface-polish build)
 
 Usability and interface-polish beta build. No DNS, filtering, backup, or
 replication behavior changed; this release focuses on the admin UI.
