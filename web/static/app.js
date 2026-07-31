@@ -521,4 +521,43 @@
     window.addEventListener('resize', () => drawSparkline(canvas));
   });
   document.querySelectorAll('canvas[data-chart="traffic"]').forEach(setupChart);
+
+  // Accessible show/hide toggle for password fields (setup, administration
+  // password change). Each toggle button lives inside a .password-field
+  // wrapper alongside the input it controls.
+  document.querySelectorAll('[data-password-toggle]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const wrapper = button.closest('.password-field');
+      const input = wrapper && wrapper.querySelector('[data-password-input]');
+      if (!input) return;
+      const showing = input.type === 'text';
+      input.type = showing ? 'password' : 'text';
+      button.textContent = showing ? 'Show' : 'Hide';
+      button.setAttribute('aria-pressed', String(!showing));
+      button.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
+    });
+  });
+
+  // Client-side password-confirmation check for forms carrying
+  // data-password-match (setup, administration change-password): mirrors
+  // the server-side check so a mismatch is caught before submission, using
+  // the browser's native validation UI. The server always re-validates
+  // regardless -- this is a usability improvement, not the source of truth.
+  document.querySelectorAll('form[data-password-match]').forEach((form) => {
+    const password = form.querySelector('[name="password"], [name="new_password"]');
+    const confirm = form.querySelector('[name="confirm_password"], [name="confirm_new_password"]');
+    if (!password || !confirm) return;
+    const check = () => {
+      confirm.setCustomValidity(confirm.value !== password.value ? 'Passwords do not match.' : '');
+    };
+    password.addEventListener('input', check);
+    confirm.addEventListener('input', check);
+    form.addEventListener('submit', (event) => {
+      check();
+      if (!confirm.checkValidity()) {
+        event.preventDefault();
+        confirm.reportValidity();
+      }
+    });
+  });
 }());

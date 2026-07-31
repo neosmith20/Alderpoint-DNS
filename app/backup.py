@@ -26,9 +26,11 @@ places:
      ``analytics_aggregate_buckets`` are deleted from the backup copy and it
      is VACUUMed, so a routine backup does not balloon with detailed query
      history.
-   - ``user_auth_data`` (default off): if unset, ``admins`` and
-     ``login_attempts`` are deleted from the backup copy, since admin
-     password hashes are credential material.
+   - ``user_auth_data`` (default off): if unset, ``admins``,
+     ``login_attempts``, ``sessions``, and ``admin_audit_log`` are deleted
+     from the backup copy, since admin password hashes are credential
+     material and session/audit rows are account-security state tied to a
+     specific point in time.
 2. At restore time, ``sqlite_data`` gates whether the database is touched at
    all. Within that, tables that map to one of the other named components
    (``sources`` -> blocklist_source_definitions, ``custom_rules`` ->
@@ -151,6 +153,8 @@ TABLE_COMPONENT_MAP = {
     "client_aliases": "client_aliases",
     "admins": "user_auth_data",
     "login_attempts": "user_auth_data",
+    "sessions": "user_auth_data",
+    "admin_audit_log": "user_auth_data",
     "query_events": "analytics_history",
     "analytics_aggregate_buckets": "analytics_history",
 }
@@ -407,7 +411,7 @@ def sha256_file(path: Path) -> str:
 # SQLite online backup
 # ---------------------------------------------------------------------------
 
-def sqlite_backup_copy(dest: Path, include_analytics: bool, include_auth: bool) -> None:
+def sqlite_backup_copy(dest: Path, include_analytics: bool, include_auth: bool, include_private_keys: bool = True) -> None:
     """Capture a consistent copy of the live database using SQLite's online
     backup API (not a raw file copy), then optionally strip sensitive/large
     tables from the copy and VACUUM to actually shrink the file."""
@@ -433,10 +437,19 @@ def sqlite_backup_copy(dest: Path, include_analytics: bool, include_auth: bool) 
                     conn.execute(f"DELETE FROM {table}")
                     stripped = True
         if not include_auth:
-            for table in ("admins", "login_attempts"):
+            for table in ("admins", "login_attempts", "sessions", "admin_audit_log"):
                 if table in table_names:
                     conn.execute(f"DELETE FROM {table}")
                     stripped = True
+        if not include_private_keys and "notification_providers" in table_names:
+            # Notification provider secrets (SMTP passwords, webhook URLs --
+            # most webhook URLs embed a bearer-equivalent token) are
+            # credential material, like TLS private keys and dnsdist API
+            # credentials. Only the secret is blanked, not the whole row, so
+            # provider names/config and event subscriptions survive a
+            # restore -- the operator just re-enters the secret.
+            conn.execute("UPDATE notification_providers SET secret=''")
+            stripped = True
         conn.commit()
         if stripped:
             conn.execute("VACUUM")
@@ -552,6 +565,7 @@ def create_backup(components: dict[str, bool] | None = None, password: str | Non
                 staged_db,
                 include_analytics=bool(components.get("analytics_history")),
                 include_auth=bool(components.get("user_auth_data")),
+                include_private_keys=bool(components.get("private_keys")),
             )
             relpath = DB_ARCHIVE_RELPATH
             checksums[relpath] = sha256_file(staged_db)

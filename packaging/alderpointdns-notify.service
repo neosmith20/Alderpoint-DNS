@@ -1,0 +1,16 @@
+[Unit]
+Description=Alderpoint DNS Notification Checker
+After=alderpointdns.service
+
+[Service]
+Type=oneshot
+User=alderpointdns
+Group=alderpointdns
+WorkingDirectory=/opt/alderpointdns
+Environment=PYTHONPATH=/opt/alderpointdns
+ExecStart=/opt/alderpointdns/app/notify_check.py
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/alderpointdns

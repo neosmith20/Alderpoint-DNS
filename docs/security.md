@@ -27,11 +27,40 @@ to report a vulnerability.
   a one-time-use, 0600, deleted-after-read password file, never a live path
   or password as a sudo argument.
 - No default administrator exists.
-- Passwords are hashed with Argon2.
+- Passwords are hashed with Argon2, through a single shared implementation
+  (`app/auth.py`) used by both the web app and the root-only local recovery
+  CLI, so a CLI-issued reset verifies exactly like a web-issued one.
+- First-run setup requires a matching password confirmation, both
+  client-side and server-side; the entered username is preserved and neither
+  password value is ever echoed back after a failed submission.
+- Sessions are server-side rows (`sessions` table), not just signed cookie
+  contents: the cookie carries only an opaque session id, so a session can be
+  individually revoked (logout, a password change revoking every other
+  session, or an explicit "revoke all other sessions" action) without
+  waiting for cookie expiry.
 - Session cookies are signed, `HttpOnly`, and `SameSite=Strict`. Set
   `ALDERPOINTDNS_COOKIE_SECURE=1` in the web service environment when the admin UI
   is served over HTTPS.
-- CSRF tokens are required for mutating forms.
+- CSRF tokens are required for mutating forms, including first-run setup: an
+  anonymous, pre-login session (holding only a CSRF token, never
+  authentication state) is established on first page visit so the token
+  embedded in the setup/login forms is bound to something persisted
+  server-side rather than only ever shown to the browser.
+- System > Administration records successful and failed administrative
+  security actions (password changes, session revocations, local CLI
+  recovery) in an audit log (`admin_audit_log`); passwords and password
+  hashes are never written to it.
+- A forgotten administrator password can be recovered locally, without any
+  network route, via `sudo alderpointdns admin reset-password` (requires
+  local root; see `scripts/alderpointdns-admin`). It revokes the
+  administrator's existing web sessions and never requires email.
+- System > Notifications provider secrets (SMTP passwords, webhook URLs --
+  most webhook URLs embed a bearer-equivalent token) are masked, write-only
+  fields, never rendered back to the browser after saving. They are
+  excluded from backup archives by default, like other credential material,
+  and only included when the backup's `private_keys` component is selected.
+  Notifications never include raw configuration, passwords, API keys, or DNS
+  query contents in their message content.
 - dnsdist ACLs allow RFC1918 private networks by default, with an explicit
   environment switch for allow-all mode.
 - Encryption Settings can restrict client DNS listeners to a specific IPv4

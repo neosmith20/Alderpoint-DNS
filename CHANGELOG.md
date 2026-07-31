@@ -215,3 +215,56 @@ may still change between releases before a stable 1.0.
   and upstream resolvers were already correctly deduplicated. Added tests
   proving that applying the same AdGuard or Pi-hole import twice, as two
   separate jobs, does not increase any destination table's row count.
+- Added password confirmation to first-run setup: a typo is now caught
+  before the administrator account is created instead of only being
+  discoverable at the next login. Validated both client-side (native form
+  validation) and server-side; the entered username is preserved and
+  neither password value is echoed back on a failed submission; added a
+  CSRF token to `/setup` (previously unenforced, since no session existed
+  yet to bind one to -- `render()` now mints and persists an anonymous
+  pre-login session on first visit specifically so this token is real);
+  added an accessible show/hide toggle for password fields.
+- Added System > Administration: change the administrator password
+  (requires the current password, revokes every other active session
+  automatically), an explicit "revoke all other sessions" action that
+  doesn't touch the password, and a session list (start time, last seen,
+  IP, client) and recent audit log, without ever exposing a raw session
+  token. Sessions are now server-side rows (`sessions` table) referenced by
+  an opaque id in the signed cookie, not cookie-embedded state, so they can
+  actually be revoked individually. Added a root-only local recovery
+  command, `alderpointdns admin reset-password` (`scripts/alderpointdns-
+  admin`, installed to `/usr/sbin/alderpointdns`), for a forgotten
+  password with no web-reachable route and no email dependency; it shares
+  the exact same Argon2 implementation (`app/auth.py`) as the web app and
+  revokes the account's existing sessions. `admins`/`login_attempts`/
+  `sessions`/`admin_audit_log` remain excluded from backup archives by
+  default, gated behind the existing `user_auth_data` component.
+- Added System > Notifications: a provider-neutral framework (SMTP email
+  and generic HTTP webhook, with Discord/Slack/Microsoft Teams/ntfy/
+  Gotify/Pushover as webhook presets sharing the same delivery path) with
+  per-event-category subscriptions and severity thresholds, cooldown and
+  duplicate suppression, recovery notices, a local delivery history, and a
+  test-send action. Provider secrets (SMTP passwords, webhook URLs -- most
+  of these presets embed a bearer-equivalent token directly in the URL)
+  are masked, write-only, and never rendered back, and are excluded from
+  backup archives by default like other credential material. A new
+  `alderpointdns-notify.timer` polls every 5 minutes and fires real,
+  edge-detected notifications for service up/down/recovered, repeated
+  restarts, blocklist/deploy failure, backup failure, upstream resolver
+  degraded/all-unavailable, and replication delayed/failed; TLS
+  expiry/low disk space/abnormal SERVFAIL rate are defined as subscribable
+  categories but not yet evaluated (see `docs/known-limitations.md`).
+- Fixed the AdGuard/Pi-hole importer reporting intentional public-IP Local
+  DNS records (e.g. a VPN/WireGuard host record) under `Conflicts`, with
+  the misleading final result `Applied with conflicts`, even though the
+  record imported successfully and nothing actually conflicted. Local DNS
+  data-quality findings are now severity-tagged (`local_dns.
+  record_findings()`): genuine incompatibilities (duplicate hostname,
+  CNAME clash, conflicting PTR, missing PTR target) remain conflicts and
+  still require an explicit override; a public IP outside common private
+  ranges is now a warning, shown separately, imported as requested, and
+  never blocks creation -- including through the plain manual Local DNS
+  "add record" form, which previously also wrongly required overriding a
+  public IP. Import previews and job results now distinguish Conflicts,
+  Warnings, and Unsupported as separate counts/sections instead of folding
+  warnings into conflicts.

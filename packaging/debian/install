@@ -13,5 +13,8 @@ packaging/alderpointdns-backup.service lib/systemd/system/
 packaging/alderpointdns-backup.timer lib/systemd/system/
 packaging/alderpointdns-filter-update.service lib/systemd/system/
 packaging/alderpointdns-filter-update.timer lib/systemd/system/
+packaging/alderpointdns-notify.service lib/systemd/system/
+packaging/alderpointdns-notify.timer lib/systemd/system/
 packaging/sudoers-alderpointdns etc/sudoers.d/alderpointdns
 scripts/alderpointdns-diagnostics usr/sbin/alderpointdns-diagnostics
+scripts/alderpointdns-admin usr/sbin/alderpointdns

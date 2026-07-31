@@ -500,6 +500,15 @@ class EncryptionWebRouteTests(unittest.TestCase):
             "CREATE TABLE IF NOT EXISTS admins (id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at TEXT NOT NULL)"
         )
         conn.execute("INSERT INTO admins(username, password_hash, created_at) VALUES ('admin', 'x', 'now')")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, admin_id INTEGER, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, ip TEXT, user_agent TEXT, csrf TEXT NOT NULL)"
+        )
+        self.csrf = "test-csrf-token"
+        session_id = "test-session-id"
+        conn.execute(
+            "INSERT INTO sessions(id, admin_id, created_at, last_seen_at, ip, user_agent, csrf) VALUES (?, 1, 'now', 'now', '', '', ?)",
+            (session_id, self.csrf),
+        )
         conn.commit()
         conn.close()
 
@@ -514,10 +523,9 @@ class EncryptionWebRouteTests(unittest.TestCase):
         for patcher in self.patches:
             patcher.start()
         self.client = TestClient(webapp.app)
-        self.csrf = "test-csrf-token"
         self.client.cookies.set(
             "alderpointdns_session",
-            webapp.serializer.dumps({"admin_id": 1, "admin": "admin", "csrf": self.csrf}),
+            webapp.serializer.dumps({"sid": session_id}),
         )
 
     def tearDown(self) -> None:

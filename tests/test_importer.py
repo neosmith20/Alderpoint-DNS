@@ -447,6 +447,46 @@ class ImporterTest(unittest.TestCase):
         job = importer.get_job(job_id)
         self.assertIn("conflicting", job["message"])
 
+    def test_public_ip_local_dns_rewrite_is_warning_not_conflict(self) -> None:
+        # Intentional public-IP Local DNS records (e.g. a VPN/WireGuard host)
+        # are valid, deliberate data -- not conflicts -- and must import
+        # successfully without the job being reported as "Applied with
+        # conflicts".
+        translation = {
+            "rewrites_as_local_dns": [
+                {"fqdn": "wg2.mylan.network", "record_type": "A", "value": "104.223.98.238", "enabled": True},
+                {"fqdn": "dallas.mylan.network", "record_type": "A", "value": "207.231.107.77", "enabled": True},
+            ]
+        }
+        job_id = importer.create_migration_job("adguard_yaml", "public_ip.yaml", translation)
+        preview = importer.migration_preview_job(job_id, "home.arpa")
+        summary = preview["summary"]
+        items = self.summary_items(summary, "local_dns")
+        for item in items:
+            self.assertEqual(item["outcome"], "warning")
+            self.assertIn("Public IP address", item["warning"])
+            self.assertEqual(item["conflict"], "")
+        self.assertEqual(summary["counts"]["conflicts"], 0)
+        self.assertEqual(summary["counts"]["warnings"], 2)
+        self.assertFalse(summary["conflicts"])
+        self.assertTrue(any("wg2.mylan.network" in w["label"] for w in summary["warnings"]))
+
+        result = importer.apply_migration_job(job_id, default_domain="home.arpa")
+        self.assertEqual(result["counts"]["local_dns_records"], 2)
+        self.assertEqual(result["counts"]["local_dns_conflicts"], 0)
+        self.assertEqual(result["counts"]["local_dns_warnings"], 2)
+        job = importer.get_job(job_id)
+        self.assertNotIn("conflicts", job["result_label"])
+        self.assertNotEqual(job["result_label"], "Applied with conflicts")
+        self.assertIn("warnings", job["result_label"])
+        with self.connect() as conn:
+            rows = {
+                row["fqdn"]: row["value"]
+                for row in conn.execute("SELECT fqdn, value FROM local_dns_records WHERE record_type='A'")
+            }
+        self.assertEqual(rows["wg2.mylan.network"], "104.223.98.238")
+        self.assertEqual(rows["dallas.mylan.network"], "207.231.107.77")
+
     def test_deselecting_local_dns_category_reports_explicit_note(self) -> None:
         translation = importer.parse_adguard_yaml(ADGUARD_REWRITES_FIXTURE, "home.arpa")
         job_id = importer.create_migration_job("adguard_yaml", "adguard_rewrites.yaml", translation)

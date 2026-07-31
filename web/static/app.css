@@ -787,6 +787,31 @@ textarea {
 
 input[type="checkbox"] { width: auto; min-height: auto; }
 
+.password-field {
+  position: relative;
+  display: flex;
+  min-width: 0;
+}
+
+.password-field input { padding-right: 60px; }
+
+.password-toggle {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+
+.password-toggle:hover,
+.password-toggle:focus-visible { text-decoration: underline; }
+
 .form-actions {
   display: flex;
   flex-wrap: wrap;

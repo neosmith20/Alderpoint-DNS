@@ -12,8 +12,6 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Path as PathParam, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
@@ -21,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
-from app import analytics, backup, custom_rules as custom_rules_model, dns_cache, encryption, filter_schedule, importer, local_dns, replication, upstream_dns
+from app import analytics, auth, backup, custom_rules as custom_rules_model, dns_cache, encryption, filter_schedule, importer, local_dns, notifications, replication, upstream_dns
 from app import blocklist_categories
 from app import service_logs
 from app.alderpointdns_compiler import DB_PATH, add_source, init_db, normalize_domain
@@ -32,7 +30,6 @@ TEMPLATES = Jinja2Templates(directory=str(ROOT / "web" / "templates"))
 STATIC_DIR = ROOT / "web" / "static"
 SESSION_MAX_AGE = 8 * 60 * 60
 SECRET_FILE = Path("/etc/alderpointdns/secrets.env")
-ph = PasswordHasher()
 app = FastAPI(title="Alderpoint DNS")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
@@ -94,23 +91,111 @@ def db() -> sqlite3.Connection:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            admin_id INTEGER,
+            created_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            ip TEXT,
+            user_agent TEXT,
+            csrf TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS admin_audit_log (
+            id INTEGER PRIMARY KEY,
+            at TEXT NOT NULL,
+            admin_id INTEGER,
+            username TEXT NOT NULL DEFAULT '',
+            action TEXT NOT NULL,
+            success INTEGER NOT NULL,
+            ip TEXT,
+            detail TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
     return conn
 
 
-def signed_session(request: Request) -> dict[str, Any]:
+def audit_log(conn: sqlite3.Connection, admin_id: int | None, username: str, action: str, success: bool, ip: str | None, detail: str = "") -> None:
+    """Records an administrative security action. Never pass password or
+    hash content in `detail` -- only short, non-secret context."""
+    conn.execute(
+        "INSERT INTO admin_audit_log(at, admin_id, username, action, success, ip, detail) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (utc_now(), admin_id, username, action, 1 if success else 0, ip, detail),
+    )
+
+
+def _session_id_from_cookie(request: Request) -> str | None:
     raw = request.cookies.get("alderpointdns_session")
     if not raw:
-        return {}
+        return None
     try:
-        return serializer.loads(raw, max_age=SESSION_MAX_AGE)
+        return serializer.loads(raw, max_age=SESSION_MAX_AGE).get("sid")
     except BadSignature:
+        return None
+
+
+def signed_session(request: Request) -> dict[str, Any]:
+    """The current server-side session row (joined with the admin username
+    when authenticated), keyed only by an opaque id carried in the signed
+    cookie -- never the session's mutable state itself. Returns {} for a
+    missing, invalid, or expired session."""
+    session_id = _session_id_from_cookie(request)
+    if not session_id:
         return {}
+    with db() as conn:
+        row = conn.execute(
+            """
+            SELECT sessions.id AS id, sessions.admin_id AS admin_id, sessions.csrf AS csrf,
+                   sessions.created_at AS created_at, sessions.last_seen_at AS last_seen_at,
+                   sessions.ip AS ip, sessions.user_agent AS user_agent, admins.username AS admin
+            FROM sessions LEFT JOIN admins ON admins.id = sessions.admin_id
+            WHERE sessions.id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+    return dict(row) if row else {}
 
 
-def set_session(response: Response, data: dict[str, Any]) -> None:
+_ANON_SESSION_MAX_AGE_SECONDS = 6 * 60 * 60
+
+
+def _create_session_row(request: Request, admin_id: int | None) -> dict[str, Any]:
+    """Creates and persists a new session row (authenticated when `admin_id`
+    is given, otherwise an anonymous pre-login session that exists solely to
+    hold a stable CSRF token for the setup/login forms). Does not touch the
+    response; call _set_session_cookie() separately."""
+    session_id = secrets.token_urlsafe(32)
+    csrf = secrets.token_urlsafe(24)
+    ts = utc_now()
+    ip = request.client.host if request.client else None
+    user_agent = (request.headers.get("user-agent") or "")[:300]
+    anon_cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=_ANON_SESSION_MAX_AGE_SECONDS)).isoformat()
+    auth_cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=SESSION_MAX_AGE)).isoformat()
+    with db() as conn:
+        # Anonymous (pre-login) session rows are created on every first
+        # visit to an unauthenticated page; authenticated rows outlive their
+        # cookie's own itsdangerous max_age once a browser stops using them.
+        # Both are pruned opportunistically here so the table never
+        # accumulates unbounded stale rows.
+        conn.execute("DELETE FROM sessions WHERE admin_id IS NULL AND created_at < ?", (anon_cutoff,))
+        conn.execute("DELETE FROM sessions WHERE admin_id IS NOT NULL AND last_seen_at < ?", (auth_cutoff,))
+        conn.execute(
+            "INSERT INTO sessions(id, admin_id, created_at, last_seen_at, ip, user_agent, csrf) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (session_id, admin_id, ts, ts, ip, user_agent, csrf),
+        )
+    return {"id": session_id, "admin_id": admin_id, "csrf": csrf, "created_at": ts, "last_seen_at": ts, "ip": ip, "user_agent": user_agent}
+
+
+def _set_session_cookie(response: Response, session_id: str) -> None:
     response.set_cookie(
         "alderpointdns_session",
-        serializer.dumps(data),
+        serializer.dumps({"sid": session_id}),
         httponly=True,
         samesite="strict",
         secure=secure_session_cookie_enabled(),
@@ -118,8 +203,26 @@ def set_session(response: Response, data: dict[str, Any]) -> None:
     )
 
 
-def clear_session(response: Response) -> None:
+def set_session(request: Request, response: Response, admin_id: int) -> str:
+    """Starts a fresh authenticated session (a new row, never reusing a
+    pre-login anonymous one) and returns its CSRF token."""
+    session = _create_session_row(request, admin_id)
+    _set_session_cookie(response, session["id"])
+    return session["csrf"]
+
+
+def clear_session(request: Request, response: Response) -> None:
+    session_id = _session_id_from_cookie(request)
+    if session_id:
+        with db() as conn:
+            conn.execute("DELETE FROM sessions WHERE id=?", (session_id,))
     response.delete_cookie("alderpointdns_session")
+
+
+def revoke_other_sessions(admin_id: int, keep_session_id: str) -> int:
+    with db() as conn:
+        cursor = conn.execute("DELETE FROM sessions WHERE admin_id=? AND id<>?", (admin_id, keep_session_id))
+        return cursor.rowcount
 
 
 def admin_count() -> int:
@@ -134,21 +237,14 @@ def current_admin(request: Request) -> sqlite3.Row:
         raise HTTPException(status_code=303, headers={"Location": "/login"})
     with db() as conn:
         row = conn.execute("SELECT * FROM admins WHERE id=?", (admin_id,)).fetchone()
-    if not row:
-        raise HTTPException(status_code=303, headers={"Location": "/login"})
+        if not row:
+            raise HTTPException(status_code=303, headers={"Location": "/login"})
+        conn.execute("UPDATE sessions SET last_seen_at=? WHERE id=?", (utc_now(), session["id"]))
     return row
 
 
-def csrf_token(request: Request) -> str:
-    session = signed_session(request)
-    token = session.get("csrf")
-    if not token:
-        token = secrets.token_urlsafe(24)
-    return token
-
-
 def check_csrf(request: Request, token: str) -> None:
-    if signed_session(request).get("csrf") != token:
+    if not token or signed_session(request).get("csrf") != token:
         raise HTTPException(status_code=403, detail="invalid csrf token")
 
 
@@ -423,16 +519,28 @@ def protocol_statuses() -> list[dict[str, str]]:
 
 def render(request: Request, template: str, status_code: int = 200, **context: Any) -> HTMLResponse:
     session = signed_session(request)
+    new_anonymous_session = not session
+    if new_anonymous_session:
+        # No valid session cookie yet (first visit, or an authenticated
+        # session that expired/was revoked): mint an anonymous session now so
+        # the CSRF token embedded in this page's forms (setup, login) is
+        # bound to something persisted server-side and will actually
+        # validate on submit, rather than a value that was only ever shown
+        # to the browser.
+        session = _create_session_row(request, None)
     context.update(
         {
             "request": request,
             "admin": session.get("admin"),
-            "csrf": session.get("csrf") or csrf_token(request),
+            "csrf": session.get("csrf"),
             "setup_required": admin_count() == 0,
             "global_status": global_service_status() if session.get("admin") else {"label": "Unknown", "tone": "unavailable", "detail": "not authenticated"},
         }
     )
-    return TEMPLATES.TemplateResponse(template, context, status_code=status_code)
+    response = TEMPLATES.TemplateResponse(template, context, status_code=status_code)
+    if new_anonymous_session:
+        _set_session_cookie(response, session["id"])
+    return response
 
 
 @app.exception_handler(RequestValidationError)
@@ -543,25 +651,34 @@ def setup_get(request: Request):
     if admin_count() > 0:
         return redirect("/login")
     local_dns.init_db()
-    return render(request, "setup.html", error=None, local_dns=local_dns.settings())
+    return render(request, "setup.html", error=None, username="admin", local_dns=local_dns.settings())
 
 
 @app.post("/setup")
 def setup_post(
+    request: Request,
+    csrf: str = Form(...),
     username: str = Form("admin"),
     password: str = Form(...),
+    confirm_password: str = Form(...),
     create_local_dns: str = Form("0"),
     server_hostname: str = Form("alderpointdns"),
     server_ip: str = Form(""),
 ):
     if admin_count() > 0:
         return redirect("/login")
-    if len(password) < 12:
-        return HTMLResponse("Password must be at least 12 characters.", status_code=400)
+    check_csrf(request, csrf)
+    clean_username = username.strip() or "admin"
+    error = auth.validate_password_length(password)
+    if not error and password != confirm_password:
+        error = "Passwords do not match."
+    if error:
+        local_dns.init_db()
+        return render(request, "setup.html", error=error, username=clean_username, local_dns=local_dns.settings(), status_code=400)
     with db() as conn:
         conn.execute(
             "INSERT INTO admins(username, password_hash, created_at) VALUES (?, ?, ?)",
-            (username.strip() or "admin", ph.hash(password), utc_now()),
+            (clean_username, auth.hash_password(password), utc_now()),
         )
     if create_local_dns == "1":
         cfg = local_dns.settings()
@@ -592,25 +709,19 @@ def login_post(request: Request, username: str = Form(...), password: str = Form
         if failures >= 8:
             return render(request, "login.html", error="Too many failed attempts. Try later.")
         row = conn.execute("SELECT * FROM admins WHERE username=?", (username,)).fetchone()
-        ok = False
-        if row:
-            try:
-                ok = ph.verify(row["password_hash"], password)
-            except VerifyMismatchError:
-                ok = False
+        ok = bool(row) and auth.verify_password(row["password_hash"], password)
         conn.execute("INSERT INTO login_attempts(ip, attempted_at, success) VALUES (?, ?, ?)", (ip, utc_now(), 1 if ok else 0))
     if not ok:
         return render(request, "login.html", error="Invalid username or password.")
-    token = secrets.token_urlsafe(24)
     response = redirect("/")
-    set_session(response, {"admin_id": row["id"], "admin": row["username"], "csrf": token})
+    set_session(request, response, row["id"])
     return response
 
 
 @app.post("/logout")
-def logout():
+def logout(request: Request):
     response = redirect("/login")
-    clear_session(response)
+    clear_session(request, response)
     return response
 
 
@@ -2196,6 +2307,257 @@ def system_page(request: Request, _: sqlite3.Row = Depends(current_admin)):
 @app.get("/system/logs", response_class=HTMLResponse)
 def system_logs_partial(request: Request, _: sqlite3.Row = Depends(current_admin)):
     return render(request, "system_logs_results.html", logs=system_logs_context(request))
+
+
+def administration_context(admin: sqlite3.Row, session: dict[str, Any]) -> dict[str, Any]:
+    with db() as conn:
+        session_rows = conn.execute(
+            "SELECT id, created_at, last_seen_at, ip, user_agent FROM sessions WHERE admin_id=? ORDER BY last_seen_at DESC",
+            (admin["id"],),
+        ).fetchall()
+        audit_rows = conn.execute(
+            "SELECT at, action, success, ip, detail FROM admin_audit_log WHERE admin_id=? ORDER BY id DESC LIMIT 25",
+            (admin["id"],),
+        ).fetchall()
+    return {
+        "admin_username": admin["username"],
+        "sessions": [
+            {
+                "created_at": row["created_at"],
+                "last_seen_at": row["last_seen_at"],
+                "ip": row["ip"] or "unknown",
+                "user_agent": row["user_agent"] or "unknown",
+                "is_current": row["id"] == session.get("id"),
+            }
+            for row in session_rows
+        ],
+        "audit_entries": audit_rows,
+    }
+
+
+def administration_error(request: Request, admin: sqlite3.Row, session: dict[str, Any], message: str, status_code: int = 400) -> HTMLResponse:
+    context = administration_context(admin, session)
+    context["error"] = message
+    return render(request, "administration.html", **context, status_code=status_code)
+
+
+@app.get("/system/administration", response_class=HTMLResponse)
+def administration_page(request: Request, admin: sqlite3.Row = Depends(current_admin)):
+    session = signed_session(request)
+    context = administration_context(admin, session)
+    context["error"] = None
+    return render(request, "administration.html", **context)
+
+
+@app.post("/system/administration/password")
+def administration_change_password(
+    request: Request,
+    csrf: str = Form(...),
+    current_password: str = Form(...),
+    new_password: str = Form(...),
+    confirm_new_password: str = Form(...),
+    admin: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    session = signed_session(request)
+    ip = request.client.host if request.client else None
+    if not auth.verify_password(admin["password_hash"], current_password):
+        with db() as conn:
+            audit_log(conn, admin["id"], admin["username"], "password_change", False, ip, "current password incorrect")
+        return administration_error(request, admin, session, "Current password is incorrect.")
+    length_error = auth.validate_password_length(new_password)
+    if length_error:
+        with db() as conn:
+            audit_log(conn, admin["id"], admin["username"], "password_change", False, ip, "new password too short")
+        return administration_error(request, admin, session, length_error)
+    if new_password != confirm_new_password:
+        with db() as conn:
+            audit_log(conn, admin["id"], admin["username"], "password_change", False, ip, "new passwords did not match")
+        return administration_error(request, admin, session, "New passwords do not match.")
+    with db() as conn:
+        conn.execute("UPDATE admins SET password_hash=? WHERE id=?", (auth.hash_password(new_password), admin["id"]))
+        revoked = conn.execute("DELETE FROM sessions WHERE admin_id=? AND id<>?", (admin["id"], session.get("id"))).rowcount
+        audit_log(conn, admin["id"], admin["username"], "password_change", True, ip, f"{revoked} other session(s) revoked")
+    return redirect("/system/administration")
+
+
+@app.post("/system/administration/revoke-sessions")
+def administration_revoke_sessions(request: Request, csrf: str = Form(...), admin: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    session = signed_session(request)
+    ip = request.client.host if request.client else None
+    revoked = revoke_other_sessions(admin["id"], session.get("id"))
+    with db() as conn:
+        audit_log(conn, admin["id"], admin["username"], "sessions_revoked", True, ip, f"{revoked} other session(s) revoked")
+    return redirect("/system/administration")
+
+
+def notifications_context() -> dict[str, Any]:
+    return {
+        "providers": notifications.list_providers(),
+        "subscriptions": notifications.list_subscriptions(),
+        "event_categories": [
+            {"key": key, "label": info["label"], "wired": info["wired"], "default_severity": info["default_severity"]}
+            for key, info in notifications.EVENT_CATEGORIES.items()
+        ],
+        "severities": notifications.SEVERITIES,
+        "webhook_presets": notifications.WEBHOOK_PRESETS,
+        "notification_settings": notifications.settings(),
+        "delivery_history": notifications.history(limit=50),
+    }
+
+
+def notifications_error(request: Request, message: str, status_code: int = 400) -> HTMLResponse:
+    context = notifications_context()
+    context["error"] = message
+    return render(request, "notifications.html", **context, status_code=status_code)
+
+
+@app.get("/system/notifications", response_class=HTMLResponse)
+def notifications_page(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    context = notifications_context()
+    context["error"] = None
+    return render(request, "notifications.html", **context)
+
+
+@app.post("/system/notifications/providers/smtp")
+def notifications_add_smtp_provider(
+    request: Request,
+    csrf: str = Form(...),
+    name: str = Form(...),
+    smtp_host: str = Form(...),
+    smtp_port: int = Form(587),
+    smtp_use_tls: str = Form("0"),
+    smtp_from: str = Form(...),
+    smtp_to: str = Form(...),
+    smtp_username: str = Form(""),
+    secret: str = Form(""),
+    _: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    config = {"host": smtp_host, "port": smtp_port, "use_tls": smtp_use_tls == "1", "from_addr": smtp_from, "to_addrs": smtp_to, "username": smtp_username}
+    try:
+        notifications.add_provider("smtp", name, config, secret)
+    except Exception as exc:
+        return notifications_error(request, str(exc))
+    return redirect("/system/notifications")
+
+
+@app.post("/system/notifications/providers/webhook")
+def notifications_add_webhook_provider(
+    request: Request,
+    csrf: str = Form(...),
+    name: str = Form(...),
+    webhook_preset: str = Form("generic"),
+    secret: str = Form(...),
+    _: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    try:
+        notifications.add_provider("webhook", name, {"preset": webhook_preset}, secret)
+    except Exception as exc:
+        return notifications_error(request, str(exc))
+    return redirect("/system/notifications")
+
+
+@app.post("/system/notifications/providers/{provider_id}/edit")
+def notifications_edit_provider(
+    request: Request,
+    provider_id: int = PathParam(..., gt=0),
+    csrf: str = Form(...),
+    name: str = Form(...),
+    secret: str = Form(""),
+    enabled: str = Form("0"),
+    smtp_host: str = Form(""),
+    smtp_port: int = Form(587),
+    smtp_use_tls: str = Form("0"),
+    smtp_from: str = Form(""),
+    smtp_to: str = Form(""),
+    smtp_username: str = Form(""),
+    webhook_preset: str = Form("generic"),
+    _: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    try:
+        row = notifications.get_provider_row(provider_id)
+        if not row:
+            raise notifications.NotificationError("notification provider not found")
+        if row["kind"] == "smtp":
+            config = {"host": smtp_host, "port": smtp_port, "use_tls": smtp_use_tls == "1", "from_addr": smtp_from, "to_addrs": smtp_to, "username": smtp_username}
+        else:
+            config = {"preset": webhook_preset}
+        notifications.update_provider(provider_id, name=name, config=config, secret=secret, enabled=enabled == "1")
+    except Exception as exc:
+        return notifications_error(request, str(exc))
+    return redirect("/system/notifications")
+
+
+@app.post("/system/notifications/providers/{provider_id}/toggle")
+def notifications_toggle_provider(request: Request, provider_id: int = PathParam(..., gt=0), csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    notifications.toggle_provider(provider_id)
+    return redirect("/system/notifications")
+
+
+@app.post("/system/notifications/providers/{provider_id}/delete")
+def notifications_delete_provider(request: Request, provider_id: int = PathParam(..., gt=0), csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    notifications.delete_provider(provider_id)
+    return redirect("/system/notifications")
+
+
+@app.post("/system/notifications/providers/{provider_id}/test")
+def notifications_test_provider(request: Request, provider_id: int = PathParam(..., gt=0), csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    try:
+        ok, error = notifications.send_test(provider_id)
+    except Exception as exc:
+        return notifications_error(request, str(exc))
+    if not ok:
+        return notifications_error(request, f"Test notification failed: {error}")
+    return redirect("/system/notifications")
+
+
+@app.post("/system/notifications/providers/{provider_id}/clear-failure")
+def notifications_clear_failure(request: Request, provider_id: int = PathParam(..., gt=0), csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    notifications.clear_provider_failure(provider_id)
+    return redirect("/system/notifications")
+
+
+@app.post("/system/notifications/subscriptions")
+def notifications_add_subscription(
+    request: Request,
+    csrf: str = Form(...),
+    provider_id: int = Form(...),
+    event_category: str = Form(...),
+    min_severity: str = Form("warning"),
+    enabled: str = Form("1"),
+    _: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    try:
+        notifications.set_subscription(provider_id, event_category, min_severity, enabled == "1")
+    except Exception as exc:
+        return notifications_error(request, str(exc))
+    return redirect("/system/notifications")
+
+
+@app.post("/system/notifications/subscriptions/{subscription_id}/delete")
+def notifications_delete_subscription(request: Request, subscription_id: int = PathParam(..., gt=0), csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    notifications.delete_subscription(subscription_id)
+    return redirect("/system/notifications")
+
+
+@app.post("/system/notifications/settings")
+def notifications_settings_post(request: Request, csrf: str = Form(...), cooldown_minutes: int = Form(30), _: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    try:
+        notifications.update_settings({"cooldown_minutes": cooldown_minutes})
+    except Exception as exc:
+        return notifications_error(request, str(exc))
+    return redirect("/system/notifications")
 
 
 def query_log_context(request: Request) -> dict[str, Any]:

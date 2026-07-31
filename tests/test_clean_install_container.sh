@@ -449,10 +449,12 @@ install_and_check() {
 setup_admin_and_login() {
   label="$1"
   COOKIE_JAR="/tmp/alderpointdns-cookies-$label.txt"
-  # Neither /setup (no session/CSRF token exists yet -- there is no admin)
-  # nor /login (authenticates the session, doesn't yet have one) requires a
-  # CSRF token in app/webapp.py; both are plain form posts.
-  run "curl -s -c $COOKIE_JAR -o /dev/null -d 'username=admin' -d 'password=ClnInst4llTest!2026' http://127.0.0.1:3000/setup" || true
+  # /setup requires a CSRF token, bound to the anonymous pre-login session
+  # established on first visit (app/webapp.py's render()), plus a matching
+  # password confirmation. /login still takes plain form posts.
+  setup_page="$(run "curl -s -c $COOKIE_JAR http://127.0.0.1:3000/setup")"
+  setup_csrf="$(printf '%s\n' "$setup_page" | sed -n 's/.*name="csrf" value="\([^"]*\)".*/\1/p' | head -1)"
+  run "curl -s -c $COOKIE_JAR -b $COOKIE_JAR -o /dev/null -d 'username=admin' -d 'password=ClnInst4llTest!2026' -d 'confirm_password=ClnInst4llTest!2026' -d 'csrf=$setup_csrf' http://127.0.0.1:3000/setup" || true
   run "curl -s -c $COOKIE_JAR -b $COOKIE_JAR -o /dev/null -d 'username=admin' -d 'password=ClnInst4llTest!2026' http://127.0.0.1:3000/login" || true
 }
 

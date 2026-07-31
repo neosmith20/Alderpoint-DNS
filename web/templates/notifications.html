@@ -1,0 +1,226 @@
+{% extends "base.html" %}
+{% import "components.html" as ui %}
+{% block title %}Notifications - Alderpoint DNS{% endblock %}
+{% block content %}
+{{ ui.page_header("Notifications", "Provider-neutral alerting: SMTP email, generic webhooks, and webhook presets for chat/paging services.") }}
+
+{% if error %}
+  <div class="alert error" role="alert">{{ error }}</div>
+{% endif %}
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Providers</h2></div>
+  {% if providers %}
+  {% call ui.table_wrap() %}
+  <table>
+    <thead><tr><th>Name</th><th>Kind</th><th>Status</th><th>Last test</th><th>Failure</th><th class="actions-col">Actions</th></tr></thead>
+    <tbody>
+      {% for p in providers %}
+        <tr>
+          <td class="wrap-anywhere">{{ p.name }}</td>
+          <td>{{ p.kind }}{% if p.kind == "webhook" %} ({{ p.config.preset }}){% endif %}</td>
+          <td>{{ ui.status_badge("Enabled", "healthy") if p.enabled else ui.status_badge("Disabled", "neutral") }}</td>
+          <td>
+            {% if p.last_test_at %}
+              {{ ui.status_badge("OK", "healthy") if p.last_test_ok else ui.status_badge("Failed", "down") }}
+              <span class="muted mono">{{ p.last_test_at }}</span>
+            {% else %}<span class="muted">Never tested</span>{% endif %}
+          </td>
+          <td>
+            {% if p.last_failure_at %}
+              <span class="bad wrap-anywhere" title="{{ p.last_failure_error }}">{{ p.last_failure_at }}</span>
+            {% else %}<span class="muted">None</span>{% endif %}
+          </td>
+          <td class="actions-col">
+            <div class="row">
+              <form method="post" action="/system/notifications/providers/{{ p.id }}/test" data-async-form data-success-message="Test notification sent.">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <button class="secondary" type="submit" data-pending-label="Sending…">Test</button>
+              </form>
+              <form method="post" action="/system/notifications/providers/{{ p.id }}/toggle" data-async-form data-success-message="Provider state changed.">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <button class="secondary" type="submit">{{ "Disable" if p.enabled else "Enable" }}</button>
+              </form>
+              {% if p.last_failure_at %}
+              <form method="post" action="/system/notifications/providers/{{ p.id }}/clear-failure" data-async-form data-success-message="Failure state cleared.">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <button class="secondary" type="submit">Clear failure</button>
+              </form>
+              {% endif %}
+              <form method="post" action="/system/notifications/providers/{{ p.id }}/delete" data-confirm="Delete provider &quot;{{ p.name }}&quot;? Its subscriptions are removed too.">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <button class="danger" type="submit">Delete</button>
+              </form>
+            </div>
+            <details class="row-edit">
+              <summary class="muted secondary">Edit</summary>
+              <form method="post" action="/system/notifications/providers/{{ p.id }}/edit" class="grid compact" data-async-form data-success-message="Provider saved.">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <label>Name <input name="name" value="{{ p.name }}" required></label>
+                {% if p.kind == "smtp" %}
+                  <label>SMTP host <input name="smtp_host" value="{{ p.config.host }}" required></label>
+                  <label>SMTP port <input name="smtp_port" type="number" min="1" max="65535" value="{{ p.config.port }}"></label>
+                  <label class="row"><input type="checkbox" name="smtp_use_tls" value="1" {{ "checked" if p.config.use_tls else "" }}> Use STARTTLS</label>
+                  <label>From address <input name="smtp_from" value="{{ p.config.from_addr }}" required></label>
+                  <label>To address(es), comma-separated <input name="smtp_to" value="{{ p.config.to_addrs }}" required></label>
+                  <label>SMTP username (optional) <input name="smtp_username" value="{{ p.config.username }}"></label>
+                  <label>New SMTP password <span class="password-field"><input name="secret" type="password" placeholder="leave blank to keep current" data-password-input><button type="button" class="password-toggle" data-password-toggle aria-pressed="false" aria-label="Show password">Show</button></span></label>
+                {% else %}
+                  <label>Webhook preset
+                    <select name="webhook_preset">
+                      {% for preset in webhook_presets %}
+                        <option value="{{ preset }}" {{ "selected" if preset == p.config.preset else "" }}>{{ preset|title }}</option>
+                      {% endfor %}
+                    </select>
+                  </label>
+                  <label>New webhook URL <span class="password-field"><input name="secret" type="password" placeholder="leave blank to keep current" data-password-input><button type="button" class="password-toggle" data-password-toggle aria-pressed="false" aria-label="Show URL">Show</button></span></label>
+                {% endif %}
+                <label class="row"><input type="checkbox" name="enabled" value="1" {{ "checked" if p.enabled else "" }}> Enabled</label>
+                <div class="form-actions"><button data-pending-label="Saving…">Save</button></div>
+              </form>
+            </details>
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endcall %}
+  {% else %}
+    {{ ui.empty_state("No notification providers configured yet") }}
+  {% endif %}
+</section>
+
+<section class="grid align-start">
+  <form class="panel stack" method="post" action="/system/notifications/providers/smtp" data-async-form data-success-message="SMTP provider added.">
+    <div class="panel__head"><h2>Add SMTP Provider</h2></div>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Name <input name="name" placeholder="e.g. Ops email" required></label>
+    <label>SMTP host <input name="smtp_host" required></label>
+    <label>SMTP port <input name="smtp_port" type="number" min="1" max="65535" value="587"></label>
+    <label class="row"><input type="checkbox" name="smtp_use_tls" value="1" checked> Use STARTTLS</label>
+    <label>From address <input name="smtp_from" required></label>
+    <label>To address(es), comma-separated <input name="smtp_to" required></label>
+    <label>SMTP username (optional) <input name="smtp_username"></label>
+    <label>SMTP password (optional)
+      <span class="password-field">
+        <input name="secret" type="password" autocomplete="new-password" data-password-input>
+        <button type="button" class="password-toggle" data-password-toggle aria-pressed="false" aria-label="Show password">Show</button>
+      </span>
+    </label>
+    <div class="form-actions"><button data-pending-label="Adding…">Add SMTP Provider</button></div>
+  </form>
+
+  <form class="panel stack" method="post" action="/system/notifications/providers/webhook" data-async-form data-success-message="Webhook provider added.">
+    <div class="panel__head"><h2>Add Webhook Provider</h2></div>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Name <input name="name" placeholder="e.g. On-call Discord" required></label>
+    <label>Preset
+      <select name="webhook_preset">
+        {% for preset in webhook_presets %}<option value="{{ preset }}">{{ preset|title }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Webhook URL
+      <span class="password-field">
+        <input name="secret" type="password" autocomplete="new-password" required data-password-input>
+        <button type="button" class="password-toggle" data-password-toggle aria-pressed="false" aria-label="Show URL">Show</button>
+      </span>
+    </label>
+    <p class="muted">Discord/Slack/Teams/ntfy/Gotify webhook URLs typically embed their own access token, and Pushover uses <span class="mono">user_key:app_token</span> here -- so the URL/token field itself is treated as a secret and never shown again after saving.</p>
+    <div class="form-actions"><button data-pending-label="Adding…">Add Webhook Provider</button></div>
+  </form>
+</section>
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Event Subscriptions</h2></div>
+  <p class="muted">Categories marked "not yet wired" are shown so they can be pre-configured, but nothing currently triggers them -- see Known Limitations.</p>
+  {% if subscriptions %}
+  {% call ui.table_wrap() %}
+  <table>
+    <thead><tr><th>Provider</th><th>Event</th><th>Min severity</th><th>Status</th><th class="actions-col">Actions</th></tr></thead>
+    <tbody>
+      {% for sub in subscriptions %}
+        <tr>
+          <td class="wrap-anywhere">{{ sub.provider_name }}</td>
+          <td class="wrap-anywhere">{{ event_categories|selectattr("key", "equalto", sub.event_category)|map(attribute="label")|first or sub.event_category }}</td>
+          <td>{{ sub.min_severity }}</td>
+          <td>{{ ui.status_badge("Enabled", "healthy") if sub.enabled else ui.status_badge("Disabled", "neutral") }}</td>
+          <td class="actions-col">
+            <form method="post" action="/system/notifications/subscriptions/{{ sub.id }}/delete" data-confirm="Remove this subscription?">
+              <input type="hidden" name="csrf" value="{{ csrf }}">
+              <button class="danger" type="submit">Remove</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endcall %}
+  {% else %}
+    {{ ui.empty_state("No event subscriptions yet", "Add a provider above, then subscribe it to event categories below.") }}
+  {% endif %}
+  <form method="post" action="/system/notifications/subscriptions" class="grid compact" data-async-form data-success-message="Subscription saved.">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Provider
+      <select name="provider_id" required>
+        {% for p in providers %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Event category
+      <select name="event_category" required>
+        {% for cat in event_categories %}
+          <option value="{{ cat.key }}">{{ cat.label }}{% if not cat.wired %} (not yet wired){% endif %}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Minimum severity
+      <select name="min_severity">
+        {% for sev in severities %}<option value="{{ sev }}">{{ sev|title }}</option>{% endfor %}
+      </select>
+    </label>
+    <label class="row"><input type="checkbox" name="enabled" value="1" checked> Enabled</label>
+    <div class="form-actions"><button {% if not providers %}disabled{% endif %} data-pending-label="Saving…">Add Subscription</button></div>
+  </form>
+</section>
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Cooldown &amp; Deduplication</h2></div>
+  <form method="post" action="/system/notifications/settings" data-async-form data-success-message="Notification settings saved.">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Default cooldown between repeated notifications for the same problem (minutes)
+      <input name="cooldown_minutes" type="number" min="0" max="1440" value="{{ notification_settings.cooldown_minutes }}">
+    </label>
+    <p class="muted">Recovery notifications always bypass the cooldown. A subscription's own cooldown can be overridden individually via the API if needed; this is the default used otherwise.</p>
+    <div class="form-actions"><button data-pending-label="Saving…">Save</button></div>
+  </form>
+</section>
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Delivery History</h2></div>
+  {% if delivery_history %}
+  {% call ui.table_wrap() %}
+  <table>
+    <thead><tr><th>When</th><th>Event</th><th>Severity</th><th>Component</th><th>Provider</th><th>Status</th><th>Detail</th></tr></thead>
+    <tbody>
+      {% for entry in delivery_history %}
+        <tr>
+          <td class="mono wrap-anywhere">{{ entry.at }}</td>
+          <td class="wrap-anywhere">{{ entry.event_category }}</td>
+          <td>{{ "recovered" if entry.recovered else entry.severity }}</td>
+          <td class="wrap-anywhere">{{ entry.component }}</td>
+          <td class="wrap-anywhere">{{ entry.provider_name }}</td>
+          <td>
+            {% if entry.status == "sent" %}{{ ui.status_badge("Sent", "healthy") }}
+            {% elif entry.status == "suppressed" %}{{ ui.status_badge("Suppressed", "neutral") }}
+            {% else %}{{ ui.status_badge("Failed", "down") }}{% endif %}
+          </td>
+          <td class="wrap-anywhere">{{ entry.error or entry.message }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endcall %}
+  {% else %}
+    {{ ui.empty_state("No notifications sent yet") }}
+  {% endif %}
+</section>
+{% endblock %}

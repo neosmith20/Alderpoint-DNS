@@ -15,6 +15,10 @@ Run individual suites:
 /opt/alderpointdns/tests/test_custom_rules.py
 /opt/alderpointdns/tests/test_importer.py
 /opt/alderpointdns/tests/test_backup.py
+/opt/alderpointdns/tests/test_admin_setup.py
+/opt/alderpointdns/tests/test_administration.py
+/opt/alderpointdns/tests/test_admin_cli.sh
+/opt/alderpointdns/tests/test_notifications.py
 /opt/alderpointdns/tests/test_web_smoke.sh
 /opt/alderpointdns/tests/test_encryption_layout.sh
 /opt/alderpointdns/tests/test_backup_restore.sh
@@ -36,6 +40,36 @@ Apache ICLA) claims Alderpoint DNS is MIT/GPL/AGPL/Apache/BSD-licensed,
 `CONTRIBUTING.md` reference the finalized documents; and the built `.deb`
 actually installs `LICENSE`/`copyright`/`COMMERCIAL_LICENSING.md`/
 `THIRD_PARTY_NOTICES.md` under `/usr/share/doc/alderpointdns/`.
+
+The first-run setup suite (`tests/test_admin_setup.py`) covers matching and
+mismatched password confirmation, empty confirmation, username preservation
+across a failed submission, forged/CSRF-mismatched direct POSTs (with and
+without a prior page visit), and that neither password value ever appears in
+response HTML on failure.
+
+The Administration suite (`tests/test_administration.py`) covers password
+change success (verifying the new hash, and that exactly the other sessions
+-- never the acting one -- are revoked), wrong-current-password and
+mismatched-new-password rejection (password left unchanged), the standalone
+revoke-other-sessions action, successful and failed actions landing in the
+audit log without credential content, and that the session list never
+renders a raw session token.
+
+The root-only recovery CLI suite (`tests/test_admin_cli.sh`) covers rejection
+when run by a non-root account (via `runuser -u nobody`, regardless of the
+test runner's own privilege level), `admin list`, `admin reset-password` via
+both piped stdin and its own hashing round-tripping through `app.auth`
+(the same implementation `app/webapp.py` uses), session revocation on reset,
+the standalone `admin revoke-sessions` action, the ambiguous-multiple-admins
+`--username`-required error, and that the plaintext password never appears
+in CLI output or the audit log.
+
+The Notifications suite (`tests/test_notifications.py`) covers provider
+validation, secret masking (never rendered back), test-notification delivery
+against mocked SMTP/HTTP, cooldown suppression, duplicate-fingerprint
+suppression, recovery notices, delivery history accuracy, and each wired
+event-category checker firing against fixture database state without real
+systemd or network access.
 
 Two more suites require tooling most CI environments won't have by default,
 so they aren't run implicitly by the above and are called out separately:

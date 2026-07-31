@@ -112,6 +112,7 @@ def init_db(conn: sqlite3.Connection | None = None) -> None:
         _ensure_column(db, "import_jobs", "source_path", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(db, "import_jobs", "rollback_json", "TEXT NOT NULL DEFAULT '{}'")
         _ensure_column(db, "import_jobs", "result_label", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(db, "import_jobs", "warning_rows", "INTEGER NOT NULL DEFAULT 0")
         if close:
             db.commit()
     finally:
@@ -1072,6 +1073,7 @@ def summarize_migration(translation: dict[str, Any], default_domain: str | None 
     plan = build_migration_plan(translation, default_domain)
     categories = plan["categories"]
     conflicts: list[dict[str, str]] = []
+    finding_warnings: list[dict[str, str]] = []
     existing: list[dict[str, str]] = []
     with connect() as conn:
         have_sources = _table_exists(conn, "sources")
@@ -1123,12 +1125,19 @@ def summarize_migration(translation: dict[str, Any], default_domain: str | None 
                         item["outcome"] = "existing"
                     existing.append({"key": item["key"], "label": f"Local DNS {fqdn} {rtype} {value}"})
                 else:
-                    warnings = local_dns.record_warnings(conn, fqdn, rtype, value)
-                    if warnings:
-                        item["warning"] = (item["warning"] + "; " if item["warning"] else "") + "; ".join(warnings)
+                    findings = local_dns.record_findings(conn, fqdn, rtype, value)
+                    conflict_messages = [message for severity, message in findings if severity == "conflict"]
+                    warning_messages = [message for severity, message in findings if severity == "warning"]
+                    if conflict_messages:
+                        item["conflict"] = (item["conflict"] + "; " if item["conflict"] else "") + "; ".join(conflict_messages)
                         if item["outcome"] == "new":
                             item["outcome"] = "conflicting"
-                        conflicts.append({"key": item["key"], "label": f"{fqdn} {rtype}: {'; '.join(warnings)}"})
+                        conflicts.append({"key": item["key"], "label": f"{fqdn} {rtype}: {'; '.join(conflict_messages)}"})
+                    if warning_messages:
+                        item["warning"] = (item["warning"] + "; " if item["warning"] else "") + "; ".join(warning_messages)
+                        if item["outcome"] == "new":
+                            item["outcome"] = "warning"
+                        finding_warnings.append({"key": item["key"], "label": f"{fqdn} {rtype}: {'; '.join(warning_messages)}"})
             elif kind == "upstream" and item.get("_upstream_key"):
                 if tuple(item["_upstream_key"]) in existing_resolvers:
                     item["conflict"] = "an identical upstream resolver already exists and will be skipped"
@@ -1151,6 +1160,7 @@ def summarize_migration(translation: dict[str, Any], default_domain: str | None 
         "invalid": len(categories["invalid"]),
         "unsupported": len(categories["unsupported"]),
         "conflicts": len(conflicts),
+        "warnings": len(finding_warnings),
         "existing": len(existing),
     }
     for item in _plan_items(plan):
@@ -1174,6 +1184,7 @@ def summarize_migration(translation: dict[str, Any], default_domain: str | None 
         "domain": plan["domain"],
         "categories": ordered,
         "conflicts": conflicts,
+        "warnings": finding_warnings,
         "existing": existing,
         "counts": counts,
     }
@@ -1394,6 +1405,7 @@ def preview_job(job_id: int, column_map: dict[str, str], default_domain: str | N
         valid: list[dict[str, Any]] = []
         invalid: list[dict[str, Any]] = []
         conflicts: list[dict[str, Any]] = []
+        warnings_list: list[dict[str, Any]] = []
         duplicates: list[dict[str, Any]] = []
         seen: set[tuple[str, str, str]] = set()
         for index, row in enumerate(normalized):
@@ -1408,10 +1420,20 @@ def preview_job(job_id: int, column_map: dict[str, str], default_domain: str | N
                     duplicates.append(item)
                     continue
                 seen.add(key)
-                warnings = local_dns.record_warnings(conn, fqdn, rtype, value)
-                if warnings:
-                    item["warnings"] = warnings
+                findings = local_dns.record_findings(conn, fqdn, rtype, value)
+                conflict_messages = [message for severity, message in findings if severity == "conflict"]
+                warning_messages = [message for severity, message in findings if severity == "warning"]
+                if conflict_messages:
+                    item["warnings"] = conflict_messages
                     conflicts.append(item)
+                elif warning_messages:
+                    # Unusual but valid data (e.g. a public IP address): shown
+                    # separately for visibility, but imported like any other
+                    # valid row -- never blocked and never counted as a
+                    # conflict requiring an override/merge/replace policy.
+                    item["warnings"] = warning_messages
+                    warnings_list.append(item)
+                    valid.append(item)
                 else:
                     valid.append(item)
             except Exception as exc:
@@ -1420,12 +1442,20 @@ def preview_job(job_id: int, column_map: dict[str, str], default_domain: str | N
         conn.execute(
             """
             UPDATE import_jobs SET status='previewed', column_map_json=?, valid_rows=?, invalid_rows=?,
-                duplicate_rows=?, conflict_rows=? WHERE id=?
+                duplicate_rows=?, conflict_rows=?, warning_rows=? WHERE id=?
             """,
-            (json.dumps(column_map), len(valid), len(invalid), len(duplicates), len(conflicts), job_id),
+            (json.dumps(column_map), len(valid), len(invalid), len(duplicates), len(conflicts), len(warnings_list), job_id),
         )
         conn.commit()
-    return {"job_id": job_id, "valid": valid, "invalid": invalid, "duplicates": duplicates, "conflicts": conflicts, "domain": domain}
+    return {
+        "job_id": job_id,
+        "valid": valid,
+        "invalid": invalid,
+        "duplicates": duplicates,
+        "conflicts": conflicts,
+        "warnings": warnings_list,
+        "domain": domain,
+    }
 
 
 PRE_IMPORT_BACKUP_COMMAND = ["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "backup-create"]
@@ -1968,16 +1998,20 @@ def _apply_source_item(conn: sqlite3.Connection, source: dict[str, Any], rollbac
 
 def _apply_local_dns_record(conn: sqlite3.Connection, record: dict[str, Any], domain: str, source_label: str, rollback_info: dict[str, Any]) -> str:
     """Insert one Local DNS record inside the caller's transaction. Returns
-    'added' (clean insert), 'added_conflicting' (inserted, but another record
-    already exists for this hostname -- e.g. a different address or a CNAME
-    exclusivity clash -- reported, never overwritten), or 'duplicate' (an
-    identical record -- same FQDN, type, and value -- is already present)."""
+    'added' (clean insert), 'added_conflicting' (inserted, but a genuinely
+    incompatible existing record was found -- e.g. a different address or a
+    CNAME exclusivity clash -- reported, never overwritten), 'added_with_warning'
+    (inserted; merely unusual but valid data, such as a public IP address,
+    imported as requested), or 'duplicate' (an identical record -- same FQDN,
+    type, and value -- is already present)."""
     fqdn = local_dns.normalize_fqdn(str(record.get("fqdn", "")), domain)
     rtype, fqdn, value, ttl = local_dns.validate_record(
         str(record.get("record_type", "")), fqdn, str(record.get("value", "")), record.get("ttl", 300) or 300
     )
     enabled = 1 if record.get("enabled", True) else 0
-    conflicting = bool(local_dns.record_warnings(conn, fqdn, rtype, value))
+    findings = local_dns.record_findings(conn, fqdn, rtype, value)
+    has_conflict = any(severity == "conflict" for severity, _ in findings)
+    has_warning = any(severity == "warning" for severity, _ in findings)
     ts = now()
     cursor = conn.execute(
         """
@@ -1988,7 +2022,11 @@ def _apply_local_dns_record(conn: sqlite3.Connection, record: dict[str, Any], do
     )
     if cursor.rowcount:
         rollback_info["local_dns_ids"].append(cursor.lastrowid)
-        return "added_conflicting" if conflicting else "added"
+        if has_conflict:
+            return "added_conflicting"
+        if has_warning:
+            return "added_with_warning"
+        return "added"
     return "duplicate"
 
 
@@ -2055,6 +2093,8 @@ def _migration_result_label(counts: dict[str, Any]) -> str:
         reasons.append("skipped duplicates")
     if counts.get("local_dns_conflicts"):
         reasons.append("conflicts")
+    if counts.get("local_dns_warnings"):
+        reasons.append("warnings")
     if counts.get("invalid_kept_inactive") or counts.get("unsupported_kept_inactive"):
         reasons.append("unsupported items")
     if counts.get("user_deselected"):
@@ -2089,6 +2129,8 @@ def _component_breakdown(counts: dict[str, Any], deselection_notes: list[str]) -
     local_dns_bits = [f"{counts.get('local_dns_records', 0)} created"]
     if counts.get("local_dns_conflicts"):
         local_dns_bits.append(f"{counts['local_dns_conflicts']} conflicting (kept, not overwritten)")
+    if counts.get("local_dns_warnings"):
+        local_dns_bits.append(f"{counts['local_dns_warnings']} imported with warnings (unusual but valid)")
     lines.append("Local DNS: " + ", ".join(local_dns_bits))
     if counts.get("upstream_resolvers"):
         lines.append(f"Upstream resolvers: {counts['upstream_resolvers']} created")
@@ -2152,6 +2194,7 @@ def apply_migration_job(
         "comments": 0,
         "local_dns_records": 0,
         "local_dns_conflicts": 0,
+        "local_dns_warnings": 0,
         "upstream_resolvers": 0,
         "client_aliases": 0,
         "duplicates_skipped": 0,
@@ -2234,6 +2277,9 @@ def apply_migration_job(
                         elif outcome == "added_conflicting":
                             counts["local_dns_records"] += 1
                             counts["local_dns_conflicts"] += 1
+                        elif outcome == "added_with_warning":
+                            counts["local_dns_records"] += 1
+                            counts["local_dns_warnings"] += 1
                         else:
                             counts["duplicates_skipped"] += 1
                     elif kind == "upstream":

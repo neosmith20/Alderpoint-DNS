@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
-<form class="auth-card stack" method="post" action="/setup">
+<form class="auth-card stack" method="post" action="/setup" data-password-match>
   <div class="brand">
     <span class="brand-mark" aria-hidden="true">
       <svg width="19" height="21" viewBox="0 0 19 21" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -12,8 +12,21 @@
   </div>
   <h1>Initial administrator setup</h1>
   <p class="muted">Create the first local administrator. No default password exists.</p>
-  <label>Username <input name="username" value="admin"></label>
-  <label>Password <input name="password" type="password" minlength="12" required></label>
+  {% if error %}<p class="alert error" role="alert">{{ error }}</p>{% endif %}
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Username <input name="username" value="{{ username if username is defined else 'admin' }}" autocomplete="username"></label>
+  <label>Password
+    <span class="password-field">
+      <input name="password" type="password" minlength="12" required autocomplete="new-password" data-password-input>
+      <button type="button" class="password-toggle" data-password-toggle aria-pressed="false" aria-label="Show password">Show</button>
+    </span>
+  </label>
+  <label>Confirm password
+    <span class="password-field">
+      <input name="confirm_password" type="password" minlength="12" required autocomplete="new-password" data-password-input>
+      <button type="button" class="password-toggle" data-password-toggle aria-pressed="false" aria-label="Show password">Show</button>
+    </span>
+  </label>
   <div class="stack">
     <label class="row"><input type="checkbox" name="create_local_dns" value="1" checked> Create Alderpoint DNS local DNS records</label>
     <label>Alderpoint DNS hostname
