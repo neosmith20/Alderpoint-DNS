@@ -84,20 +84,17 @@ Per `docs/supported-systems.md` and `docs/hardware-requirements.md`:
 
 ## Quick start
 
-Alderpoint DNS installs from a reviewed local source/release tree, not a
-piped remote script. See `docs/install.md` for full details, package lists,
-and layout. In short:
+Alderpoint DNS is distributed as a Debian package for Debian 13. Download the current release package and its checksum directly from GitHub:
 
-```sh
-cd /path/to/alderpointdns-release
-sudo ./scripts/install.sh
-```
+```bash
+curl -fL \
+  -o alderpointdns_0.4.0-beta4-1_all.deb \
+  https://github.com/neosmith20/Alderpoint-DNS/releases/download/v0.4.0-beta.4/alderpointdns_0.4.0-beta4-1_all.deb
 
-This creates a dedicated `alderpointdns` service account, installs BIND and
-dnsdist, generates local secrets, initializes the database, deploys generated
-DNS configuration, and enables services. No default administrator account
-exists — create the first one through the web UI's `/setup` page. See
-`docs/upgrade.md` for upgrading an existing installation.
+curl -fL \
+  -o SHA256SUMS \
+  https://github.com/neosmith20/Alderpoint-DNS/releases/download/v0.4.0-beta.4/SHA256SUMS
+  ```
 
 ## Known limitations
 
