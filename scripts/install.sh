@@ -152,6 +152,7 @@ install_config() {
   run install -D -m 0644 "$SOURCE_DIR/packaging/alderpointdns-filter-update.service" "$(root_path /etc/systemd/system/alderpointdns-filter-update.service)"
   run install -D -m 0644 "$SOURCE_DIR/packaging/alderpointdns-filter-update.timer" "$(root_path /etc/systemd/system/alderpointdns-filter-update.timer)"
   run install -D -m 0440 "$SOURCE_DIR/packaging/sudoers-alderpointdns" "$(root_path /etc/sudoers.d/alderpointdns)"
+  run install -D -m 0644 "$SOURCE_DIR/packaging/logrotate-alderpointdns" "$(root_path /etc/logrotate.d/alderpointdns)"
   run install -D -m 0644 "$SOURCE_DIR/packaging/named.conf.options" "$(root_path /etc/bind/named.conf.options)"
   run install -D -m 0644 "$SOURCE_DIR/packaging/named.conf.local" "$(root_path /etc/bind/named.conf.local)"
   run install -D -m 0644 "$SOURCE_DIR/packaging/dnsdist.conf" "$(root_path /etc/dnsdist/dnsdist.conf)"

@@ -38,12 +38,12 @@ Local test package build:
 
 ```sh
 ./scripts/build-deb.sh --output-dir /tmp
-dpkg-deb --info /tmp/alderpointdns_0.4.0~beta2-1_all.deb
+dpkg-deb --info /tmp/alderpointdns_0.4.0~beta3-1_all.deb
 ```
 
 The `.deb` filename and package `Version:` field use the Debian pre-release
 convention (`~betaN-1`), derived from the semver-style `VERSION` file
-(`0.4.0-beta.2`) by `build-deb.sh` -- not the raw `VERSION` contents.
+(`0.4.0-beta.3`) by `build-deb.sh` -- not the raw `VERSION` contents.
 
 This lightweight `dpkg-deb` path validates package contents without requiring
 `debhelper` on the active appliance VM.

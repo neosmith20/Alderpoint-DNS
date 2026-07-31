@@ -5,13 +5,14 @@ changed in each beta build; they are not a claim of production readiness or
 long-term stability. See `docs/known-limitations.md` and
 `docs/beta-readiness.md` for the current honest state of the project.
 
-## 0.4.0-beta.2 (unreleased beta update)
+## 0.4.0-beta.3 (unreleased beta update)
 
-Not a final release; version `0.4.0~beta2` continues to cover several
-materially different internal builds pending an explicit `beta3` version
-bump. Since the interface-polish build described below, this line has
-added a full administration and observability layer and closed several
-reliability gaps found during beta feedback and internal testing:
+Not a final release. This build carries forward the administration and
+observability work previously tracked under the `0.4.0~beta2` version
+string, now version-bumped to `0.4.0~beta3`. Since the interface-polish
+build described below, this line has added a full administration and
+observability layer and closed several reliability gaps found during beta
+feedback and internal testing:
 
 - **System > Administration**: password change with automatic revocation
   of other sessions, per-session visibility (start time, last seen, IP,
@@ -30,6 +31,9 @@ reliability gaps found during beta feedback and internal testing:
   dedicated Pi-hole import panel; setup and import severity/reporting
   fixes so intentional public-IP Local DNS records (e.g. a VPN host) are
   reported as warnings, not conflicts.
+- Fixed filtering deployments incorrectly failing when a downloaded allow
+  rule returned a valid DNS response without an IPv4 A record. Cache-only
+  changes now report and roll back component state accurately.
 - Fixed a blocklist zero-rule ambiguity (a source that legitimately
   compiles to zero rules is now distinguished from a fetch/parse failure)
   and IPv6-only hosts-format sinkhole entries are now compiled correctly.
@@ -43,9 +47,13 @@ reliability gaps found during beta feedback and internal testing:
 - Added the accompanying automated test coverage: deterministic connection-
   lifecycle tests, a web-traffic file-descriptor regression test, and a
   concurrency test exercising live web requests against the database
-  alongside the analytics writer under lock contention. As of this update
-  the project's test suite (`pytest tests/`) totals 466 automated tests,
-  passing locally alongside the shell-based acceptance, package-content,
+  alongside the analytics writer under lock contention, plus deterministic
+  regression coverage for the allow-domain/cache-rollback fix above
+  (structured DNS-result classification, downloaded-allowlist NODATA/AAAA-
+  only/CNAME-only/NXDOMAIN/SERVFAIL/timeout handling, and cache-options
+  rollback on a later postcheck failure). As of this update the project's
+  test suite (`pytest tests/`) totals 493 automated tests, passing locally
+  alongside the shell-based acceptance, package-content,
   licensing-hygiene, and clean Debian 13 install suites; this reflects the
   tests that exist today, not a guarantee of production readiness beyond
   what `docs/known-limitations.md` already states.

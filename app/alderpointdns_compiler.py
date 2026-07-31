@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -35,6 +36,7 @@ COMPILED_RPZ = Path("/var/lib/alderpointdns/compiled/bind/alderpointdns.rpz")
 STAGING_DIR = Path("/var/lib/alderpointdns/staging")
 BACKUP_DIR = Path("/var/lib/alderpointdns/backups")
 DEPLOY_LOCK = Path("/var/lib/alderpointdns/staging/deploy.lock")
+CLI_ERROR_LOG = Path("/var/log/alderpointdns/compiler-errors.log")
 MAX_SOURCE_BYTES = 25 * 1024 * 1024
 CONNECT_TIMEOUT = 10
 TOTAL_TIMEOUT = 60
@@ -743,6 +745,155 @@ def resolves_to(domain: str, rtype: str, address: str) -> bool:
     return result.returncode == 0 and "status: NOERROR" in result.stdout and address in result.stdout
 
 
+@dataclass
+class DNSResult:
+    """A structured view of one dig lookup, so post-deploy checks reason
+    about DNS status/record-type/transport outcome explicitly instead of via
+    fragile substring tests on raw dig text scattered through the compiler."""
+
+    domain: str
+    status: str | None = None
+    answer_count: int = 0
+    a_records: list[str] = field(default_factory=list)
+    aaaa_records: list[str] = field(default_factory=list)
+    cname_records: list[str] = field(default_factory=list)
+    timed_out: bool = False
+    transport_ok: bool = True
+
+    @property
+    def resolved(self) -> bool:
+        """True only when the name definitively answered with data (A, AAAA,
+        or CNAME) -- positive proof that no blocking policy rewrote it away."""
+        return bool(self.a_records or self.aaaa_records or self.cname_records)
+
+    @property
+    def is_nodata(self) -> bool:
+        return self.status == "NOERROR" and self.answer_count == 0
+
+    @property
+    def is_nxdomain(self) -> bool:
+        return self.status == "NXDOMAIN"
+
+    @property
+    def is_servfail(self) -> bool:
+        return self.status == "SERVFAIL"
+
+    @property
+    def usable(self) -> bool:
+        """A candidate worth drawing a conclusion from at all -- excludes
+        transport failures, which say nothing about DNS/policy behavior."""
+        return self.transport_ok and not self.timed_out
+
+
+_DIG_ANSWER_LINE_RE = re.compile(r"^\S+\.\s+\d+\s+\S+\s+(A|AAAA|CNAME)\s+(\S+)\s*$")
+
+
+def classify_dns(domain: str, rtype: str = "A") -> DNSResult:
+    """Runs dig for `domain` and returns a structured DNSResult instead of
+    raw text, so callers can distinguish a real block from ordinary DNS
+    variance (NODATA, AAAA/CNAME-only, NXDOMAIN, SERVFAIL, timeout)."""
+    result = run(["dig", "@127.0.0.1", "-p", "5353", domain, rtype, "+time=3", "+tries=1"], check=False)
+    stdout = result.stdout or ""
+    if result.returncode != 0:
+        timed_out = "timed out" in stdout.lower() or "no servers could be reached" in stdout.lower()
+        return DNSResult(domain=domain, timed_out=timed_out, transport_ok=not timed_out)
+    status_match = re.search(r"status:\s*(\w+)", stdout)
+    answer_match = re.search(r"ANSWER:\s*(\d+)", stdout)
+    parsed = DNSResult(
+        domain=domain,
+        status=status_match.group(1) if status_match else None,
+        answer_count=int(answer_match.group(1)) if answer_match else 0,
+    )
+    in_answer_section = False
+    for line in stdout.splitlines():
+        if line.startswith(";; ANSWER SECTION"):
+            in_answer_section = True
+            continue
+        if in_answer_section and (not line.strip() or line.startswith(";;")):
+            in_answer_section = False
+            continue
+        if not in_answer_section:
+            continue
+        match = _DIG_ANSWER_LINE_RE.match(line)
+        if not match:
+            continue
+        record_type, value = match.groups()
+        if record_type == "A":
+            parsed.a_records.append(value)
+        elif record_type == "AAAA":
+            parsed.aaaa_records.append(value)
+        elif record_type == "CNAME":
+            parsed.cname_records.append(value)
+    return parsed
+
+
+@dataclass
+class AllowValidationResult:
+    ok: bool
+    tested_domain: str | None
+    message: str
+
+
+def _custom_allow_represented(domain: str, rpz_text: str, custom_active: "custom_rules.ActiveRuleSet") -> bool:
+    """Structural check: a custom allow rule must produce the rpz-passthru
+    record its type promises in the compiled zone. Downloaded/list-inherited
+    allow domains have no rpz-passthru representation of their own -- they
+    are simply absent from active_blocks, which subtract_allowed already
+    guarantees -- so this only applies to rows present in custom_active."""
+    allow = custom_active.allows.get(domain)
+    if not allow:
+        return True
+    name = rpz_name(domain)
+    if (allow["exact"] or allow["subdomains"]) and f"{name} CNAME rpz-passthru." not in rpz_text:
+        return False
+    if allow["subdomains"] and f"*.{name} CNAME rpz-passthru." not in rpz_text:
+        return False
+    return True
+
+
+def validate_allow_domains(
+    allowed_domains: set[str],
+    active_blocks: set[str],
+    custom_active: "custom_rules.ActiveRuleSet",
+    rpz_text: str,
+    max_live_checks: int = 5,
+) -> AllowValidationResult:
+    """Verifies allow rules against the compiled policy itself rather than
+    external domain availability. An allow rule promises Alderpoint will not
+    apply its blocking policy to a name -- it is not a guarantee that name
+    currently has a live IPv4 address, so a NODATA/AAAA-only/CNAME-only/
+    NXDOMAIN/SERVFAIL/timeout response from a real-world allow-listed domain
+    (e.g. a downloaded AdGuard `@@||...^` exception rule) must never fail a
+    deployment on its own. The only fatal condition is a structural mismatch
+    between the allow rule and the compiled policy."""
+    for domain in sorted(allowed_domains):
+        if domain in active_blocks:
+            return AllowValidationResult(
+                ok=False,
+                tested_domain=domain,
+                message=f"post-deploy allow-policy check failed: {domain} is allow-listed but still present in the active block set",
+            )
+        if not _custom_allow_represented(domain, rpz_text, custom_active):
+            return AllowValidationResult(
+                ok=False,
+                tested_domain=domain,
+                message=f"post-deploy allow-policy check failed: custom allow rule for {domain} is missing its rpz-passthru representation in the compiled policy",
+            )
+    tested: str | None = None
+    for domain in sorted(allowed_domains)[:max_live_checks]:
+        result = classify_dns(domain)
+        if result.usable and result.resolved:
+            tested = domain
+            break
+    if tested:
+        return AllowValidationResult(ok=True, tested_domain=tested, message=f"allow-domain policy verified; {tested} resolves normally")
+    return AllowValidationResult(
+        ok=True,
+        tested_domain=None,
+        message="allow-domain policy verified structurally; no live allow-domain candidate could be confirmed resolving (non-fatal)",
+    )
+
+
 def wait_until(predicate, timeout: int = 50) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -779,6 +930,8 @@ def deploy(download: bool = True, trigger: str | None = None) -> int:
             allowed_test = None
             failure: Exception | None = None
             dnsdist_layer: dict | None = None
+            cache_options_snapshot: str | None = None
+            cache_deployed_this_run = False
             try:
                 active_blocks, allowed_domains, _, errors = collect_rules(conn, download)
                 custom_active = custom_rules.collect_active(conn)
@@ -816,7 +969,9 @@ def deploy(download: bool = True, trigger: str | None = None) -> int:
                     (now(),),
                 )
                 local_dns.deploy_zones(conn)
+                cache_options_snapshot = dns_cache.CACHE_OPTIONS_CONF.read_text() if dns_cache.CACHE_OPTIONS_CONF.exists() else None
                 dns_cache.deploy_cache_options(conn)
+                cache_deployed_this_run = True
                 upstream_dns.deploy_upstreams(conn)
                 # Restarts dnsdist only when the custom-rule dnsdist-layer
                 # files actually changed; rolls its own files back and
@@ -836,9 +991,12 @@ def deploy(download: bool = True, trigger: str | None = None) -> int:
                         raise RuntimeError(f"post-deploy blocked-domain test failed for {blocked_test}")
                 allowed_domains = allowed_domains | set(custom_active.allows)
                 if allowed_domains:
-                    allowed_test = "cloudflare.com" if "cloudflare.com" in allowed_domains else sorted(allowed_domains)[0]
-                    if not resolves(allowed_test):
-                        raise RuntimeError(f"post-deploy allowed-domain test failed for {allowed_test}")
+                    allow_result = validate_allow_domains(allowed_domains, active_blocks, custom_active, rpz_text)
+                    if not allow_result.ok:
+                        raise RuntimeError(allow_result.message)
+                    allowed_test = allow_result.tested_domain
+                    if allow_result.tested_domain is None:
+                        errors.append(allow_result.message)
                 if custom_active.rewrites:
                     rewrite_name = sorted(custom_active.rewrites)[0]
                     rewrite_entry = custom_active.rewrites[rewrite_name]
@@ -852,16 +1010,29 @@ def deploy(download: bool = True, trigger: str | None = None) -> int:
             except Exception as exc:
                 failure = exc
                 message = str(exc)
+                rollback_errors: list[str] = []
                 if dnsdist_layer:
                     custom_rules.rollback_dnsdist_layer(dnsdist_layer)
                 if backup_path.exists():
                     os.replace(backup_path, COMPILED_RPZ)
                     try:
                         reload_bind()
-                        status = "rolled_back"
                     except Exception as rollback_exc:
-                        status = "rollback_failed"
-                        message = f"{message}; rollback failed: {rollback_exc}"
+                        rollback_errors.append(f"RPZ rollback failed: {rollback_exc}")
+                if cache_deployed_this_run:
+                    try:
+                        if cache_options_snapshot is not None:
+                            dns_cache.CACHE_OPTIONS_CONF.write_text(cache_options_snapshot)
+                        elif dns_cache.CACHE_OPTIONS_CONF.exists():
+                            dns_cache.CACHE_OPTIONS_CONF.unlink()
+                        run(["rndc", "reconfig"], check=False)
+                    except Exception as rollback_exc:
+                        rollback_errors.append(f"cache-options rollback failed: {rollback_exc}")
+                if rollback_errors:
+                    status = "rollback_failed"
+                    message = f"{message}; " + "; ".join(rollback_errors)
+                else:
+                    status = "rolled_back"
             finally:
                 conn.execute(
                     """
@@ -1155,6 +1326,30 @@ def local_dns_add_alias(args: argparse.Namespace) -> None:
     print(f"client_alias={args.cidr}")
 
 
+def _log_unexpected_failure(exc: Exception) -> None:
+    """Writes the full traceback to a dedicated log file rather than letting
+    it reach stdout/stderr, which webapp.py's subprocess runners capture
+    verbatim and can otherwise surface directly on an admin-facing error
+    page. main()'s caller only ever sees the concise str(exc).
+
+    Tracebacks can embed exception arguments (paths, domain names, DB rows),
+    so the file is created and kept at 0600 -- root-only, never relying on
+    umask -- rather than inheriting /var/log/alderpointdns's normal 0755
+    directory permissions. This CLI always runs as root (invoked directly
+    or via the alderpointdns sudoers drop-in), so root ownership here always
+    matches the process's real uid."""
+    try:
+        CLI_ERROR_LOG.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(CLI_ERROR_LOG, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+        os.chmod(CLI_ERROR_LOG, 0o600)
+        with os.fdopen(fd, "a") as handle:
+            handle.write(f"---- {now()} ----\n")
+            handle.write(traceback.format_exc())
+            handle.write("\n")
+    except OSError:
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Alderpoint DNS blocklist compiler")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1229,7 +1424,12 @@ def main(argv: list[str] | None = None) -> int:
     logs_parser.add_argument("unit", choices=service_logs.ALLOWED_UNITS)
     logs_parser.set_defaults(func=logs_command)
     args = parser.parse_args(argv)
-    args.func(args)
+    try:
+        args.func(args)
+    except Exception as exc:
+        _log_unexpected_failure(exc)
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 

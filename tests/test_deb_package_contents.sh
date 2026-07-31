@@ -206,4 +206,18 @@ grep -q '^User=alderpointdns$' "$ROOT/data/lib/systemd/system/alderpointdns-noti
 grep -q 'systemctl enable --now alderpointdns-notify.timer' "$POSTINST" || \
   fail "postinst does not enable alderpointdns-notify.timer"
 
+# --- logrotate config for the CLI's dedicated error-traceback log ---
+# The confirmed defect: alderpointdns_compiler.py's CLI dispatch logs full
+# Python tracebacks (which can embed exception arguments -- paths, domain
+# names, DB rows) to /var/log/alderpointdns/compiler-errors.log, but
+# nothing rotated or bounded that file's growth, and build-deb.sh copies
+# packaged files individually rather than reading packaging/debian/install
+# -- so it's easy to add a new packaging file without ever wiring it into
+# a built package. This is the check that would have caught that.
+test -f "$ROOT/data/etc/logrotate.d/alderpointdns" || fail "etc/logrotate.d/alderpointdns missing from built package"
+grep -q '/var/log/alderpointdns/compiler-errors.log' "$ROOT/data/etc/logrotate.d/alderpointdns" || \
+  fail "logrotate config does not cover /var/log/alderpointdns/compiler-errors.log"
+grep -q 'create 0600 root root' "$ROOT/data/etc/logrotate.d/alderpointdns" || \
+  fail "logrotate config does not recreate the CLI error log at a root-only 0600 -- a rotation cycle must never widen it to group/world-readable"
+
 echo "deb package content tests passed"
