@@ -1,0 +1,13 @@
+/var/log/alderpointdns/compiler-errors.log {
+	weekly
+	rotate 8
+	compress
+	delaycompress
+	missingok
+	notifempty
+	# Root-only: the CLI writes full Python tracebacks here, which can
+	# embed exception arguments (paths, domain names, DB rows). Never
+	# let a rotation cycle widen this back to a world/group-readable
+	# file even if the running create mask would otherwise allow it.
+	create 0600 root root
+}

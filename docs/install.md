@@ -1,6 +1,6 @@
 # Install
 
-Alderpoint DNS is currently beta software (v0.4.0-beta.2); see
+Alderpoint DNS is currently beta software (v0.4.0-beta.3); see
 `docs/known-limitations.md` and `docs/beta-readiness.md` before deploying it
 anywhere you rely on. Alderpoint DNS supports installation from a reviewed
 local source tree on a fresh Debian-based server. Do not pipe an unreviewed

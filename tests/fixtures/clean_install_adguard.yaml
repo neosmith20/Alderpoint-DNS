@@ -9,7 +9,7 @@
 # The filtering.rewrites block uses the current AdGuard Home schema
 # (filtering.rewrites_enabled + a boolean enabled per rewrite) and covers an
 # A record, an AAAA record, a CNAME-style alias, one rewrite disabled at the
-# source, and one rewrite whose domain (mylan.test) is deliberately NOT
+# source, and one rewrite whose domain (otherlan.test) is deliberately NOT
 # Alderpoint DNS's internal domain (home.arpa) -- this is the real-world
 # shape that a beta tester's actual AdGuardHome.yaml has (their own LAN
 # domain, not Alderpoint DNS's), and reproduces a second real regression
@@ -38,6 +38,6 @@ filtering:
     - domain: clean-install-disabled.home.arpa
       answer: 192.168.50.11
       enabled: false
-    - domain: clean-install-router.mylan.test
+    - domain: clean-install-router.otherlan.test
       answer: 192.168.50.12
       enabled: true

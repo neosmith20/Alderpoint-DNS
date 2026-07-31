@@ -4,6 +4,31 @@ All notable changes to Alderpoint DNS are documented in this file. Alderpoint
 DNS is currently in **beta**; interfaces, on-disk formats, and configuration
 may still change between releases before a stable 1.0.
 
+## v0.4.0-beta.3 (unreleased)
+
+- Fixed filtering deployments incorrectly failing when a downloaded allow
+  rule returned a valid DNS response without an IPv4 A record. Cache-only
+  changes now report and roll back component state accurately.
+- Fixed a production incident in which the analytics writer thread could
+  die silently while its parent process kept reporting healthy: closed a
+  SQLite connection-descriptor leak present across most of the web app's
+  database call sites, added retry-with-backoff and an independent
+  heartbeat to the analytics writer, and corrected System Status severity
+  reporting (Warning/Error/Info) for these conditions.
+- Fixed a blocklist zero-rule ambiguity: a source that legitimately
+  compiles to zero rules is now distinguished from a fetch/parse failure,
+  IPv6-only hosts-format sinkhole entries now compile correctly, AdGuard
+  `$dnsrewrite` handling was corrected, and System Status now reports
+  real, distinct blocklist health states instead of collapsing them
+  together.
+- Fixed the local test-deb builder silently omitting the new admin CLI
+  entry point and the `alderpointdns-notify.timer` unit from built
+  packages.
+- Scrubbed a real home-LAN domain and IP addresses that had been
+  reintroduced into test fixtures.
+- Documented the recent Administration, Notifications, migration, and
+  reliability work.
+
 ## v0.4.0-beta.2 (unreleased)
 
 - Configured the BIND recursive backend on loopback with DNSSEC validation,

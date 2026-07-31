@@ -38,7 +38,7 @@ command -v dpkg-deb >/dev/null 2>&1 || {
 WORK="$(mktemp -d /tmp/alderpointdns-deb-build.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 PKG="$WORK/alderpointdns"
-mkdir -p "$PKG/DEBIAN" "$PKG/opt/alderpointdns" "$PKG/usr/sbin" "$PKG/lib/systemd/system" "$PKG/etc/sudoers.d" "$PKG/usr/share/doc/alderpointdns"
+mkdir -p "$PKG/DEBIAN" "$PKG/opt/alderpointdns" "$PKG/usr/sbin" "$PKG/lib/systemd/system" "$PKG/etc/sudoers.d" "$PKG/etc/logrotate.d" "$PKG/usr/share/doc/alderpointdns"
 
 cat > "$PKG/DEBIAN/control" <<EOF
 Package: alderpointdns
@@ -77,6 +77,8 @@ cp "$SOURCE_DIR/packaging/alderpointdns-notify.service" "$PKG/lib/systemd/system
 cp "$SOURCE_DIR/packaging/alderpointdns-notify.timer" "$PKG/lib/systemd/system/alderpointdns-notify.timer"
 cp "$SOURCE_DIR/packaging/sudoers-alderpointdns" "$PKG/etc/sudoers.d/alderpointdns"
 chmod 0440 "$PKG/etc/sudoers.d/alderpointdns"
+cp "$SOURCE_DIR/packaging/logrotate-alderpointdns" "$PKG/etc/logrotate.d/alderpointdns"
+chmod 0644 "$PKG/etc/logrotate.d/alderpointdns"
 
 # License/copyright/legal docs, installed under the standard Debian
 # documentation path. "copyright" (lowercase, no extension) is the

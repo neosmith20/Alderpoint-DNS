@@ -584,7 +584,7 @@ class ImporterTest(unittest.TestCase):
             zones = local_dns.build_zone_files(conn, self.tmp / "schema34-stage", 2026073001)
         by_name = {zone.zone: zone.text for zone in zones}
         self.assertIn("internal.example", by_name)
-        self.assertIn("host01 300 IN A 172.16.40.1", by_name["internal.example"])
+        self.assertIn("host01 300 IN A 192.0.2.1", by_name["internal.example"])
         # None of the rewrite hostnames were instead emitted only as an RPZ
         # / custom-rule artifact -- Local DNS zone data is the only place
         # they appear.
@@ -615,7 +615,7 @@ class ImporterTest(unittest.TestCase):
         importer.migration_preview_job(job_id, "home.arpa")
         importer.apply_migration_job(job_id, default_domain="home.arpa")
 
-        changed = ADGUARD_SCHEMA34_FIXTURE.replace("answer: 172.16.40.1\n", "answer: 172.16.40.99\n")
+        changed = ADGUARD_SCHEMA34_FIXTURE.replace("answer: 192.0.2.1\n", "answer: 192.0.2.99\n")
         self.assertNotEqual(changed, ADGUARD_SCHEMA34_FIXTURE)
         translation2 = importer.parse_adguard_yaml(changed, "home.arpa")
         job_id2 = importer.create_migration_job("adguard_yaml", "adguard_schema34.yaml", translation2)
@@ -627,8 +627,8 @@ class ImporterTest(unittest.TestCase):
         self.assertNotEqual(job["result_label"], "Applied")
         with self.connect() as conn:
             rows = {row["value"] for row in conn.execute("SELECT value FROM local_dns_records WHERE fqdn='host01.internal.example'")}
-            self.assertIn("172.16.40.1", rows, "the original record must not be silently overwritten")
-            self.assertIn("172.16.40.99", rows, "the conflicting answer is added, not dropped")
+            self.assertIn("192.0.2.1", rows, "the original record must not be silently overwritten")
+            self.assertIn("192.0.2.99", rows, "the conflicting answer is added, not dropped")
 
     def test_translate_adguard_sources_carry_enabled_state_and_category(self) -> None:
         translation = importer.parse_adguard_yaml(ADGUARD_FIXTURE, "home.arpa")

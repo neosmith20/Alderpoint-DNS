@@ -401,7 +401,7 @@ class EvaluationTests(CustomRulesTestBase):
         self.assertEqual(self.evaluate("anything.example")["final_action"], "resolve")
 
     def test_local_zone_wins_over_custom_block(self) -> None:
-        local_dns.add_record("A", "printer.home.arpa", "172.16.40.9")
+        local_dns.add_record("A", "printer.home.arpa", "192.0.2.9")
         custom_rules.add_rule("||printer.home.arpa^")
         verdict = self.evaluate("printer.home.arpa")
         self.assertEqual(verdict["final_action"], "local")

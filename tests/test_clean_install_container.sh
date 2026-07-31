@@ -332,7 +332,7 @@ install_and_check() {
   # classified as Custom Filtering Rules. The clean_install_adguard.yaml
   # fixture carries real rewrites (an A record, an AAAA record, a
   # CNAME-style alias, one rewrite disabled at the source, and one rewrite
-  # under a domain -- mylan.test -- that is NOT home.arpa) so neither can
+  # under a domain -- otherlan.test -- that is NOT home.arpa) so neither can
   # regress silently again.
   echo "+ verifying the AdGuard import's job page reports Local DNS counts explicitly, not just a bare 'Applied' ($label)"
   adguard_job_html="$(run "curl -s -b $COOKIE_JAR http://127.0.0.1:3000/import/jobs/$adguard_job_id")"
@@ -349,21 +349,21 @@ install_and_check() {
     fail "$label: the imported CNAME record clean-install-alias.home.arpa was not found (enabled) in local_dns_records (got: $local_dns_rows)"
   echo "$local_dns_rows" | grep -q "'fqdn': 'clean-install-disabled.home.arpa'.*'enabled': 0" || \
     fail "$label: the source-disabled rewrite clean-install-disabled.home.arpa was not imported as a disabled (enabled=0) record (got: $local_dns_rows)"
-  echo "$local_dns_rows" | grep -q "'fqdn': 'clean-install-router.mylan.test'.*'record_type': 'A'.*'value': '192.168.50.12'.*'enabled': 1" || \
-    fail "$label: the imported A record clean-install-router.mylan.test (outside the internal domain) was not found (enabled) in local_dns_records (got: $local_dns_rows)"
+  echo "$local_dns_rows" | grep -q "'fqdn': 'clean-install-router.otherlan.test'.*'record_type': 'A'.*'value': '192.168.50.12'.*'enabled': 1" || \
+    fail "$label: the imported A record clean-install-router.otherlan.test (outside the internal domain) was not found (enabled) in local_dns_records (got: $local_dns_rows)"
 
   echo "+ verifying the external-domain rewrite did NOT land in Custom Filtering Rules ($label)"
-  custom_rule_leak="$(run "runuser -u alderpointdns -- python3 -c \"import sqlite3; c = sqlite3.connect('/var/lib/alderpointdns/alderpointdns.db'); print(c.execute(\\\"SELECT count(*) FROM custom_filter_rules WHERE domain LIKE '%mylan.test%' OR domain LIKE 'clean-install-router%'\\\").fetchone()[0])\"")"
+  custom_rule_leak="$(run "runuser -u alderpointdns -- python3 -c \"import sqlite3; c = sqlite3.connect('/var/lib/alderpointdns/alderpointdns.db'); print(c.execute(\\\"SELECT count(*) FROM custom_filter_rules WHERE domain LIKE '%otherlan.test%' OR domain LIKE 'clean-install-router%'\\\").fetchone()[0])\"")"
   [ "$custom_rule_leak" = "0" ] || \
-    fail "$label: the AdGuard rewrite clean-install-router.mylan.test leaked into custom_filter_rules instead of staying in Local DNS only (count: $custom_rule_leak)"
+    fail "$label: the AdGuard rewrite clean-install-router.otherlan.test leaked into custom_filter_rules instead of staying in Local DNS only (count: $custom_rule_leak)"
 
   echo "+ verifying the Local DNS and Custom Filtering Rules web pages show each import in the correct place ($label)"
   local_dns_page_html="$(run "curl -s -b $COOKIE_JAR http://127.0.0.1:3000/local-dns")"
-  echo "$local_dns_page_html" | grep -q 'clean-install-router.mylan.test' || \
-    fail "$label: clean-install-router.mylan.test does not appear on the /local-dns page"
+  echo "$local_dns_page_html" | grep -q 'clean-install-router.otherlan.test' || \
+    fail "$label: clean-install-router.otherlan.test does not appear on the /local-dns page"
   custom_rules_page_html="$(run "curl -s -b $COOKIE_JAR http://127.0.0.1:3000/custom-rules")"
-  echo "$custom_rules_page_html" | grep -q 'clean-install-router.mylan.test' && \
-    fail "$label: clean-install-router.mylan.test incorrectly appears on the /custom-rules page"
+  echo "$custom_rules_page_html" | grep -q 'clean-install-router.otherlan.test' && \
+    fail "$label: clean-install-router.otherlan.test incorrectly appears on the /custom-rules page"
   echo "$custom_rules_page_html" | grep -q 'clean-install-block.invalid' || \
     fail "$label: the genuine custom rule clean-install-block.invalid does not appear on the /custom-rules page"
 
@@ -374,8 +374,8 @@ install_and_check() {
     fail "$label: the generated home.arpa.zone does not contain clean-install-printer"
   run "grep -q 'clean-install-alias' /var/lib/alderpointdns/compiled/bind/local/home.arpa.zone" || \
     fail "$label: the generated home.arpa.zone does not contain clean-install-alias"
-  run "grep -q 'clean-install-router' /var/lib/alderpointdns/compiled/bind/local/mylan.test.zone" || \
-    fail "$label: the auto-created mylan.test.zone does not contain clean-install-router"
+  run "grep -q 'clean-install-router' /var/lib/alderpointdns/compiled/bind/local/otherlan.test.zone" || \
+    fail "$label: the auto-created otherlan.test.zone does not contain clean-install-router"
 
   echo "+ verifying the imported Local DNS records resolve through dnsdist ($label)"
   run "dig @127.0.0.1 -p 53 clean-install-nas.home.arpa A +time=3 +tries=2 +short | grep -qx '192.168.50.10'" || \
@@ -386,8 +386,8 @@ install_and_check() {
     fail "$label: clean-install-alias.home.arpa (CNAME to clean-install-nas.home.arpa) did not resolve to 192.168.50.10 through dnsdist"
   run "dig @127.0.0.1 -p 53 clean-install-disabled.home.arpa A +time=3 +tries=2 +short | grep -q ." && \
     fail "$label: clean-install-disabled.home.arpa resolved despite being imported disabled (source-disabled AdGuard rewrites must not be served)"
-  run "dig @127.0.0.1 -p 53 clean-install-router.mylan.test A +time=3 +tries=2 +short | grep -qx '192.168.50.12'" || \
-    fail "$label: clean-install-router.mylan.test (outside the internal domain) did not resolve to 192.168.50.12 through dnsdist"
+  run "dig @127.0.0.1 -p 53 clean-install-router.otherlan.test A +time=3 +tries=2 +short | grep -qx '192.168.50.12'" || \
+    fail "$label: clean-install-router.otherlan.test (outside the internal domain) did not resolve to 192.168.50.12 through dnsdist"
 
   echo "+ re-uploading and re-applying the same AdGuard Home migration to confirm Local DNS records are skipped as duplicates, not re-created ($label)"
   local_dns_count_before_reimport="$(run "runuser -u alderpointdns -- python3 -c \"import sqlite3; c = sqlite3.connect('/var/lib/alderpointdns/alderpointdns.db'); print(c.execute('SELECT count(*) FROM local_dns_records').fetchone()[0])\"")"

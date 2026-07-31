@@ -1,6 +1,6 @@
 # Security Policy
 
-Alderpoint DNS is currently in **public beta** (v0.4.0-beta.2). It handles
+Alderpoint DNS is currently in **public beta** (v0.4.0-beta.3). It handles
 DNS resolution, filtering policy, local credentials, and TLS material for
 your network, so we take security reports seriously even at this stage —
 but please read the "Current state" section below before assuming
@@ -13,7 +13,7 @@ support branch yet.
 
 | Version         | Supported          |
 | --------------- | ------------------- |
-| 0.4.0-beta.2     | Yes                |
+| 0.4.0-beta.3     | Yes                |
 | Earlier betas    | No, please upgrade |
 
 ## Reporting a vulnerability

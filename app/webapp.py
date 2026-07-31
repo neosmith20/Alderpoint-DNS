@@ -392,6 +392,22 @@ def cache_flush_apply_or_raise() -> None:
         raise RuntimeError(out.strip() or "cache flush failed")
 
 
+def cache_options_deploy() -> tuple[int, str]:
+    return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "cache-deploy"])
+
+
+def cache_options_deploy_or_raise() -> None:
+    """Deploys only the BIND cache-tuning options (dns_cache.deploy_cache_options),
+    not the full blocklist/RPZ/dnsdist filtering pipeline. Cache tuning has no
+    dependency on blocklist content, so a cache-only settings change should
+    never redownload, recompile, and re-validate the entire filtering policy --
+    doing so wasted time and made a transient live-domain hiccup in the
+    filtering postcheck falsely block an unrelated cache setting change."""
+    code, out = cache_options_deploy()
+    if code != 0:
+        raise RuntimeError(out.strip() or "cache deployment failed")
+
+
 def encryption_deploy_apply() -> tuple[int, str]:
     return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "encryption-deploy"])
 
@@ -1394,7 +1410,7 @@ def dns_cache_settings_post(
                 "recursive_clients": recursive_clients,
             }
         )
-        deploy_no_download_or_raise()
+        cache_options_deploy_or_raise()
     except Exception as exc:
         return dns_cache_error(request, str(exc))
     return redirect("/dns-cache")
