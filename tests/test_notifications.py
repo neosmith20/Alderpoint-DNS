@@ -306,6 +306,88 @@ class NotifyCheckTest(unittest.TestCase):
             notify_check.check_backup()
         self.assertEqual(FakeHTTPClient.calls, [])
 
+    def test_blocklist_source_hard_failure_identifies_source_and_reason(self) -> None:
+        alderpointdns_compiler.init_db()
+        with alderpointdns_compiler.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO sources(name, url, enabled, category, last_success, last_error, using_cached_copy)
+                VALUES ('Windows Spy Blocker', 'https://example.invalid/spy.txt', 1, 'ads_trackers', NULL, 'Temporary DNS resolution failure', 0)
+                """
+            )
+        with mock.patch.object(notifications.httpx, "Client", FakeHTTPClient):
+            notify_check.check_blocklist_sources()
+        calls = [c for c in FakeHTTPClient.calls if c["json"]["event_category"] == "blocklist_update_failure"]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["json"]["component"], "Windows Spy Blocker")
+        self.assertIn("Temporary DNS resolution failure", calls[0]["json"]["summary"])
+        self.assertFalse(calls[0]["json"]["recovered"])
+
+    def test_blocklist_source_using_cached_copy_reports_cached_note(self) -> None:
+        alderpointdns_compiler.init_db()
+        with alderpointdns_compiler.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO sources(name, url, enabled, category, last_success, last_error, using_cached_copy, parsed_rules, unique_active_domains)
+                VALUES ('Windows Spy Blocker', 'https://example.invalid/spy.txt', 1, 'ads_trackers', 'now', 'Temporary DNS resolution failure', 1, 347, 347)
+                """
+            )
+        with mock.patch.object(notifications.httpx, "Client", FakeHTTPClient):
+            notify_check.check_blocklist_sources()
+        calls = [c for c in FakeHTTPClient.calls if c["json"]["event_category"] == "blocklist_update_failure"]
+        self.assertEqual(len(calls), 1)
+        self.assertIn("Previous compiled copy remains active", calls[0]["json"]["summary"])
+
+    def test_blocklist_source_unsupported_format_fires_warning(self) -> None:
+        alderpointdns_compiler.init_db()
+        with alderpointdns_compiler.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO sources(
+                    name, url, enabled, category, last_success, last_error,
+                    downloaded_entries, parsed_rules, unsupported_rules)
+                VALUES ('AdGuard DNS Popup Hosts filter', 'https://example.invalid/popup.txt', 1, 'ads_trackers', 'now', NULL, 1083, 0, 1083)
+                """
+            )
+        with mock.patch.object(notifications.httpx, "Client", FakeHTTPClient):
+            notify_check.check_blocklist_sources()
+        calls = [c for c in FakeHTTPClient.calls if c["json"]["event_category"] == "blocklist_update_failure"]
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(calls[0]["json"]["recovered"])
+
+    def test_blocklist_source_healthy_never_fires(self) -> None:
+        alderpointdns_compiler.init_db()
+        with alderpointdns_compiler.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO sources(name, url, enabled, category, last_success, parsed_rules, unique_active_domains)
+                VALUES ('AdGuard DNS filter', 'https://example.invalid/filter.txt', 1, 'ads_trackers', 'now', 100, 100)
+                """
+            )
+        with mock.patch.object(notifications.httpx, "Client", FakeHTTPClient):
+            notify_check.check_blocklist_sources()
+        self.assertEqual(FakeHTTPClient.calls, [])
+
+    def test_blocklist_source_recovered_fires_once(self) -> None:
+        alderpointdns_compiler.init_db()
+        with alderpointdns_compiler.connect() as conn:
+            source_id = conn.execute(
+                """
+                INSERT INTO sources(name, url, enabled, category, last_success, last_error)
+                VALUES ('Windows Spy Blocker', 'https://example.invalid/spy.txt', 1, 'ads_trackers', NULL, 'Connection refused')
+                """
+            ).lastrowid
+        with mock.patch.object(notifications.httpx, "Client", FakeHTTPClient):
+            notify_check.check_blocklist_sources()
+            with alderpointdns_compiler.connect() as conn:
+                conn.execute(
+                    "UPDATE sources SET last_success='now', last_error=NULL, parsed_rules=1, unique_active_domains=1 WHERE id=?",
+                    (source_id,),
+                )
+            notify_check.check_blocklist_sources()
+        recovered = [c for c in FakeHTTPClient.calls if c["json"]["event_category"] == "blocklist_update_failure" and c["json"]["recovered"]]
+        self.assertEqual(len(recovered), 1)
+
     def test_resolver_degraded_and_all_unavailable(self) -> None:
         upstream_dns.init_db()
         r1 = upstream_dns.add_resolver({"name": "R1", "protocol": "plain", "address": "1.1.1.1", "port": 53, "enabled": True})

@@ -115,6 +115,38 @@ def check_deploy_and_blocklist() -> None:
     )
 
 
+def check_blocklist_sources() -> None:
+    """Fires per-source, not just the single deploy-wide check above: an
+    individual source can fail to download or stop contributing usable
+    rules while the overall deployment still succeeds (the last-known-good
+    rules from every other source, and this source's own previous cached
+    copy where one exists, are still deployed), so operators need to know
+    *which* source is unhealthy and why -- not just that "the deployment"
+    is fine."""
+    alderpointdns_compiler.init_db()
+    with alderpointdns_compiler.connect() as conn:
+        sources = alderpointdns_compiler.enabled_sources(conn)
+    for source in sources:
+        health = alderpointdns_compiler.source_health(source)
+        bad = health["state"] in (
+            alderpointdns_compiler.HEALTH_ERROR,
+            alderpointdns_compiler.HEALTH_USING_CACHED,
+            alderpointdns_compiler.HEALTH_UNSUPPORTED_FORMAT,
+        )
+        reason = source["last_error"] or source["last_warning"] or health["label"]
+        detail = reason
+        if health["state"] == alderpointdns_compiler.HEALTH_USING_CACHED:
+            detail = f"{reason}. Previous compiled copy remains active."
+        _fire_edge(
+            "blocklist_update_failure",
+            source["name"],
+            currently_bad=bad,
+            summary_bad=detail,
+            summary_ok="Source updates and parses cleanly again",
+            severity="warning",
+        )
+
+
 def check_backup() -> None:
     with backup.connect() as conn:
         backup.init_db(conn)
@@ -199,6 +231,7 @@ CHECKS = (
     check_service_availability,
     check_repeated_restarts,
     check_deploy_and_blocklist,
+    check_blocklist_sources,
     check_backup,
     check_upstream_resolvers,
     check_replication,

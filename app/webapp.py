@@ -22,7 +22,7 @@ from itsdangerous import BadSignature, URLSafeTimedSerializer
 from app import analytics, auth, backup, custom_rules as custom_rules_model, dns_cache, encryption, filter_schedule, importer, local_dns, notifications, replication, upstream_dns
 from app import blocklist_categories
 from app import service_logs
-from app.alderpointdns_compiler import DB_PATH, add_source, init_db, normalize_domain
+from app.alderpointdns_compiler import DB_PATH, add_source, init_db, normalize_domain, source_health
 
 
 ROOT = Path("/opt/alderpointdns")
@@ -753,11 +753,28 @@ def filter_schedule_context() -> dict[str, Any]:
     }
 
 
+def enrich_sources(sources: list[sqlite3.Row]) -> list[dict[str, Any]]:
+    """Attaches the derived health state and a safely-parsed rejected-sample
+    list to each source row for template rendering. Templates need the
+    computed label/tone (source_health), not just the raw last_error column
+    the old "Healthy unless last_error" badge logic relied on."""
+    enriched = []
+    for row in sources:
+        item = dict(row)
+        item["health"] = source_health(row)
+        try:
+            item["rejected_samples_parsed"] = json.loads(item.get("rejected_samples") or "[]")
+        except (TypeError, ValueError):
+            item["rejected_samples_parsed"] = []
+        enriched.append(item)
+    return enriched
+
+
 def blocklists_error(request: Request, message: str) -> HTMLResponse:
     return render(
         request,
         "blocklists.html",
-        sources=compiler_status()["sources"],
+        sources=enrich_sources(compiler_status()["sources"]),
         categories=blocklist_categories.list_categories(),
         category_error=message,
         category_filter="",
@@ -778,7 +795,7 @@ def resolve_category_key(requested: str) -> str:
 @app.get("/blocklists", response_class=HTMLResponse)
 def blocklists(request: Request, _: sqlite3.Row = Depends(current_admin)):
     blocklist_categories.migrate_existing_categories()
-    sources = compiler_status()["sources"]
+    sources = enrich_sources(compiler_status()["sources"])
     category_filter = request.query_params.get("category", "")
     status_filter = request.query_params.get("status", "")
     search = request.query_params.get("search", "").strip().lower()
@@ -797,7 +814,7 @@ def blocklists(request: Request, _: sqlite3.Row = Depends(current_admin)):
         "name": lambda s: s["name"].lower(),
         "category": lambda s: s["category"] or "",
         "updated": lambda s: s["last_success"] or "",
-        "rules": lambda s: s["final_active_domains"] or 0,
+        "rules": lambda s: s["unique_active_domains"] or 0,
     }
     sources = sorted(sources, key=sort_keys.get(sort, sort_keys["name"]), reverse=sort == "updated" or sort == "rules")
     return render(
