@@ -97,6 +97,43 @@ for js_hook in ("data-sidebar-collapse", "sidebar-collapsed", "alderpointdnsSide
         raise SystemExit(f"compact UI interaction behavior missing: {js_hook}")
 if "localStorage.getItem('alderpointdnsSidebarCollapsed')" not in template:
     raise SystemExit("sidebar collapse anti-flash inline script is missing from base.html")
+
+# -- reusable pending-action button state (disable, spinner, aria-busy,
+# restore-on-failure, applied to every form submit) -------------------------
+for js_hook in ("startPending", "stopPending", "pendingGerund", "submitterFor", "aria-busy", "data-pending-active", "pageshow"):
+    if js_hook not in js:
+        raise SystemExit(f"pending-action button behavior missing: {js_hook}")
+if "button.disabled = true" not in js:
+    raise SystemExit("pending-action button does not disable itself to prevent duplicate submission")
+if ".btn-spinner" not in css or "@keyframes btn-spin" not in css:
+    raise SystemExit("pending-action spinner CSS is missing")
+
+# -- status-tile card layout (name centered on top, status badge centered
+# below it, list-content cards excluded rather than blindly centered) -------
+if ".card__head" not in css or "flex-direction: column" not in css:
+    raise SystemExit("status-tile card (.card__head) centered layout is missing")
+if ".card .stack" not in css:
+    raise SystemExit("card list-content exclusion (.card .stack left-aligned) is missing")
+
+# -- shared centered Actions-column table utility ----------------------------
+if "actions-col" not in css:
+    raise SystemExit("shared .actions-col table utility CSS is missing")
+for tpl_file in ("local_dns.html", "blocklists.html", "custom_rules.html", "dns_settings.html", "backup.html", "replication.html"):
+    text = (Path("/opt/alderpointdns/web/templates") / tpl_file).read_text()
+    if "actions-col" not in text:
+        raise SystemExit(f"{tpl_file} does not use the shared actions-col table utility")
+
+# -- collapsed-sidebar logout: icon, accessible name, tooltip ---------------
+if 'aria-label="Log out"' not in template or 'title="Log out"' not in template:
+    raise SystemExit("collapsed-sidebar logout is missing an accessible name/tooltip")
+if 'name == "logout"' not in template:
+    raise SystemExit("logout nav icon is missing")
+
+# -- collapsible nav sections with persisted expand/collapse state ----------
+for js_hook in ("NAV_SECTION_KEY_PREFIX", "alderpointdnsNavSectionOpen", "window.localStorage.setItem(storageKey", "window.localStorage.getItem(storageKey"):
+    if js_hook not in js:
+        raise SystemExit(f"nav-section collapse persistence missing: {js_hook}")
+
 if "queryChart" not in template or 'data-chart="traffic"' not in template:
     raise SystemExit("dashboard chart hooks are missing")
 if "analytics/chart-data" not in Path("/opt/alderpointdns/app/webapp.py").read_text():
@@ -138,6 +175,9 @@ for route in ("/import", "/import/migration", "import_upload", "/import/jobs/{jo
         raise SystemExit(f"import route missing: {route}")
 if 'href="/import"' not in template:
     raise SystemExit("import nav link is missing")
+import_migration_template = Path("/opt/alderpointdns/web/templates/import_migration.html").read_text()
+if "Pi-hole Migration" not in import_migration_template or 'value="pihole"' not in import_migration_template:
+    raise SystemExit("dedicated Pi-hole Migration panel is missing from Import and Migration")
 for route in ('"/backup"', '"/backup/create"', '"/backup/import"', '"/backup/preview"', '"/backup/restore"', '"/backup/{identifier}/download"', '"/backup/{identifier}/delete"', '"/backup/schedule"'):
     if route not in webapp_text:
         raise SystemExit(f"backup route missing: {route}")
