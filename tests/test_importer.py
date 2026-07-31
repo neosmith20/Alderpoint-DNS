@@ -303,7 +303,7 @@ class ImporterTest(unittest.TestCase):
         # feature: every non-wildcard rewrite maps to Local DNS regardless
         # of whether the name falls under the configured internal domain
         # (matching a real migration where every rewrite named a LAN host
-        # under the operator's own domain, e.g. mylan.network, not the
+        # under the operator's own domain, e.g. internal.example, not the
         # Alderpoint DNS internal domain, and all of them belong in Local
         # DNS, not Custom Filtering Rules).
         translation = importer.parse_adguard_yaml(ADGUARD_FIXTURE, "home.arpa")
@@ -454,8 +454,8 @@ class ImporterTest(unittest.TestCase):
         # conflicts".
         translation = {
             "rewrites_as_local_dns": [
-                {"fqdn": "wg2.mylan.network", "record_type": "A", "value": "104.223.98.238", "enabled": True},
-                {"fqdn": "dallas.mylan.network", "record_type": "A", "value": "207.231.107.77", "enabled": True},
+                {"fqdn": "wg2.internal.example", "record_type": "A", "value": "9.9.9.10", "enabled": True},
+                {"fqdn": "dallas.internal.example", "record_type": "A", "value": "1.1.1.2", "enabled": True},
             ]
         }
         job_id = importer.create_migration_job("adguard_yaml", "public_ip.yaml", translation)
@@ -469,7 +469,7 @@ class ImporterTest(unittest.TestCase):
         self.assertEqual(summary["counts"]["conflicts"], 0)
         self.assertEqual(summary["counts"]["warnings"], 2)
         self.assertFalse(summary["conflicts"])
-        self.assertTrue(any("wg2.mylan.network" in w["label"] for w in summary["warnings"]))
+        self.assertTrue(any("wg2.internal.example" in w["label"] for w in summary["warnings"]))
 
         result = importer.apply_migration_job(job_id, default_domain="home.arpa")
         self.assertEqual(result["counts"]["local_dns_records"], 2)
@@ -484,8 +484,8 @@ class ImporterTest(unittest.TestCase):
                 row["fqdn"]: row["value"]
                 for row in conn.execute("SELECT fqdn, value FROM local_dns_records WHERE record_type='A'")
             }
-        self.assertEqual(rows["wg2.mylan.network"], "104.223.98.238")
-        self.assertEqual(rows["dallas.mylan.network"], "207.231.107.77")
+        self.assertEqual(rows["wg2.internal.example"], "9.9.9.10")
+        self.assertEqual(rows["dallas.internal.example"], "1.1.1.2")
 
     def test_deselecting_local_dns_category_reports_explicit_note(self) -> None:
         translation = importer.parse_adguard_yaml(ADGUARD_REWRITES_FIXTURE, "home.arpa")
@@ -564,7 +564,7 @@ class ImporterTest(unittest.TestCase):
             # No AdGuard rewrite leaked into Custom Filtering Rules, and no
             # AdGuard custom/allow rule leaked into Local DNS.
             rewrite_domains = conn.execute(
-                "SELECT count(*) FROM custom_filter_rules WHERE domain LIKE '%.mylan.network'"
+                "SELECT count(*) FROM custom_filter_rules WHERE domain LIKE '%.internal.example'"
             ).fetchone()[0]
             self.assertEqual(rewrite_domains, 0)
             allow_rule_hosts = conn.execute(
@@ -572,8 +572,8 @@ class ImporterTest(unittest.TestCase):
             ).fetchone()[0]
             self.assertEqual(allow_rule_hosts, 0)
             local_dns_hosts = {row["fqdn"] for row in conn.execute("SELECT fqdn FROM local_dns_records")}
-            self.assertIn("host01.mylan.network", local_dns_hosts)
-            self.assertIn("host44.mylan.network", local_dns_hosts)
+            self.assertIn("host01.internal.example", local_dns_hosts)
+            self.assertIn("host44.internal.example", local_dns_hosts)
 
     def test_apply_schema34_fixture_generates_bind_zone_for_rewrite_domain(self) -> None:
         translation = importer.parse_adguard_yaml(ADGUARD_SCHEMA34_FIXTURE, "home.arpa")
@@ -583,12 +583,12 @@ class ImporterTest(unittest.TestCase):
         with local_dns.connect() as conn:
             zones = local_dns.build_zone_files(conn, self.tmp / "schema34-stage", 2026073001)
         by_name = {zone.zone: zone.text for zone in zones}
-        self.assertIn("mylan.network", by_name)
-        self.assertIn("host01 300 IN A 172.16.40.1", by_name["mylan.network"])
+        self.assertIn("internal.example", by_name)
+        self.assertIn("host01 300 IN A 172.16.40.1", by_name["internal.example"])
         # None of the rewrite hostnames were instead emitted only as an RPZ
         # / custom-rule artifact -- Local DNS zone data is the only place
         # they appear.
-        self.assertNotIn("home.arpa", "".join(by_name.get("mylan.network", "")))
+        self.assertNotIn("home.arpa", "".join(by_name.get("internal.example", "")))
 
     def test_reimporting_schema34_fixture_is_idempotent_across_all_components(self) -> None:
         translation = importer.parse_adguard_yaml(ADGUARD_SCHEMA34_FIXTURE, "home.arpa")
@@ -626,7 +626,7 @@ class ImporterTest(unittest.TestCase):
         self.assertIn("conflicts", job["result_label"])
         self.assertNotEqual(job["result_label"], "Applied")
         with self.connect() as conn:
-            rows = {row["value"] for row in conn.execute("SELECT value FROM local_dns_records WHERE fqdn='host01.mylan.network'")}
+            rows = {row["value"] for row in conn.execute("SELECT value FROM local_dns_records WHERE fqdn='host01.internal.example'")}
             self.assertIn("172.16.40.1", rows, "the original record must not be silently overwritten")
             self.assertIn("172.16.40.99", rows, "the conflicting answer is added, not dropped")
 

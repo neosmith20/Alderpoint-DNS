@@ -118,11 +118,11 @@ class LocalDNSTest(unittest.TestCase):
         # A Local DNS record intentionally pointing at a public IP (e.g. a
         # VPN endpoint) is unusual but valid data, not a conflict -- it must
         # never require the override flag to create.
-        warnings = local_dns.add_record("A", "wg2.mylan.network", "104.223.98.238")
+        warnings = local_dns.add_record("A", "wg2.internal.example", "9.9.9.10")
         self.assertTrue(any("Public IP address" in message for message in warnings))
         with local_dns.connect() as conn:
-            row = conn.execute("SELECT value FROM local_dns_records WHERE fqdn='wg2.mylan.network'").fetchone()
-        self.assertEqual(row["value"], "104.223.98.238")
+            row = conn.execute("SELECT value FROM local_dns_records WHERE fqdn='wg2.internal.example'").fetchone()
+        self.assertEqual(row["value"], "9.9.9.10")
 
     def test_record_findings_severity_split(self) -> None:
         local_dns.add_host("alex-pc", "home.arpa", "192.168.1.50", auto_ptr=False)

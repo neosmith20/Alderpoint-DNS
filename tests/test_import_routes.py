@@ -580,13 +580,13 @@ class ImportUploadHttpTest(unittest.TestCase):
 
         local_dns_page = self.client.get("/local-dns")
         self.assertEqual(local_dns_page.status_code, 200)
-        self.assertIn("host01.mylan.network", local_dns_page.text)
-        self.assertIn("host44.mylan.network", local_dns_page.text)
+        self.assertIn("host01.internal.example", local_dns_page.text)
+        self.assertIn("host44.internal.example", local_dns_page.text)
 
         custom_rules_page = self.client.get("/custom-rules")
         self.assertEqual(custom_rules_page.status_code, 200)
         self.assertIn("login.live.com", custom_rules_page.text)
-        self.assertNotIn("mylan.network", custom_rules_page.text)
+        self.assertNotIn("internal.example", custom_rules_page.text)
         self.assertNotIn("host01", custom_rules_page.text)
 
     def test_pihole_import_panel_present_on_import_page(self) -> None:
