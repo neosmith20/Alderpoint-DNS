@@ -1,0 +1,14 @@
+# Minimal synthetic AdGuardHome.yaml used only by
+# tests/test_clean_install_container.sh. Deliberately not the richer
+# adguard_home.yaml fixture the Python unit tests use: that fixture's
+# allow-rule domains are all fake and would fail alderpointdns_compiler.py
+# deploy()'s live post-deploy allowed-domain health check, which resolves
+# the allow-listed domain for real. cloudflare.com is used here because
+# deploy() special-cases it as the preferred allow-domain test target.
+filters:
+  - name: Clean Install Test Blocklist
+    url: https://filters.example/clean-install-test.txt
+    enabled: true
+user_rules:
+  - '||clean-install-block.invalid^'
+  - '@@||cloudflare.com^'

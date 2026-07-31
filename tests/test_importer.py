@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -16,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 warnings.simplefilter("ignore", ResourceWarning)
 
-from app import alderpointdns_compiler, custom_rules, importer, local_dns, upstream_dns  # noqa: E402
+from app import alderpointdns_compiler, backup, custom_rules, importer, local_dns, upstream_dns  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 ADGUARD_FIXTURE = (FIXTURES / "adguard_home.yaml").read_text()
@@ -810,6 +811,132 @@ class ImporterTest(unittest.TestCase):
         self.assertTrue(any(row["fqdn"] == "native.home.arpa" for row in parsed["rewrites_as_local_dns"]))
         self.assertIn("native-block.example", parsed["custom_block"])
         self.assertTrue(any(entry["rule"] == "||typed-rule.example^" for entry in parsed["custom_rules"]))
+
+
+class RealPreImportBackupTest(unittest.TestCase):
+    """ImporterTest.setUp() stubs out create_pre_import_backup()'s
+    subprocess call entirely (see the comment there), which is right for
+    every test in that class -- they're about migration semantics, not
+    backup/version-detection plumbing, and none of them can invoke real
+    `sudo`. (Deliberately not a subclass of ImporterTest: unittest would
+    then collect and re-run every inherited test_* method a second time
+    under this class too.)
+
+    These tests instead let the pre-import backup run for real: the fake
+    subprocess.run below calls straight through to backup.create_backup(),
+    the exact function `sudo alderpointdns_compiler.py backup-create`
+    invokes in production. That's the regression surface for the clean-VM
+    bug where alderpointdns_app_version() shelled out to a `git` binary
+    that a stock Debian 13 package install doesn't have: with git faked as
+    absent here too, an AdGuard or Pi-hole import apply must still create a
+    real, valid backup archive and go on to complete successfully."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="alderpointdns-real-backup-test-"))
+        self.old_importer_db_path = importer.DB_PATH
+        self.old_local_dns_db_path = local_dns.DB_PATH
+        self.old_upstream_dns_db_path = upstream_dns.DB_PATH
+        self.old_compiler_db_path = alderpointdns_compiler.DB_PATH
+        self.old_custom_rules_db_path = custom_rules.DB_PATH
+        self.old_upload_dir = importer.IMPORT_UPLOAD_DIR
+        importer.DB_PATH = self.tmp / "alderpointdns.db"
+        local_dns.DB_PATH = importer.DB_PATH
+        upstream_dns.DB_PATH = importer.DB_PATH
+        alderpointdns_compiler.DB_PATH = importer.DB_PATH
+        custom_rules.DB_PATH = importer.DB_PATH
+        importer.IMPORT_UPLOAD_DIR = self.tmp / "imports"
+        local_dns.STAGING_DIR = self.tmp / "staging"
+        local_dns.BACKUP_DIR = self.tmp / "backups"
+        local_dns.COMPILED_DIR = self.tmp / "compiled" / "bind"
+        local_dns.LOCAL_ZONE_DIR = local_dns.COMPILED_DIR / "local"
+        local_dns.LOCAL_ZONES_CONF = local_dns.COMPILED_DIR / "local-zones.conf"
+        local_dns.NAMED_LOCAL_CONF = self.tmp / "named.conf.local"
+        local_dns.STAGING_DIR.mkdir(parents=True)
+        local_dns.NAMED_LOCAL_CONF.write_text(
+            'acl "alderpointdns_clients" { localhost; };\nzone "alderpointdns.rpz" { type primary; file "alderpointdns.rpz"; };\n'
+        )
+        local_dns.init_db()
+        upstream_dns.init_db()
+        alderpointdns_compiler.init_db()
+        importer.init_db()
+        custom_rules.init_db()
+
+        self.real_backup_dir = self.tmp / "real-backups"
+        self.real_staging_dir = self.tmp / "real-staging"
+        self._old_backup_attrs = {name: getattr(backup, name) for name in ("DB_PATH", "BACKUP_DIR", "STAGING_DIR", "IMPORTS_DIR")}
+        backup.DB_PATH = importer.DB_PATH
+        backup.BACKUP_DIR = self.real_backup_dir
+        backup.STAGING_DIR = self.real_staging_dir
+        backup.IMPORTS_DIR = self.real_staging_dir / "backup-imports"
+
+        self._no_git_patcher = mock.patch.object(backup.shutil, "which", return_value=None)
+        self._no_git_patcher.start()
+
+        created_paths: list[Path] = []
+        # importer.subprocess and backup.subprocess are the same module
+        # object, so patching subprocess.run here also intercepts the tar
+        # invocations backup.create_backup() makes internally -- capture
+        # the real implementation first and fall through to it for every
+        # command that isn't the sudo backup-create call itself.
+        real_subprocess_run = subprocess.run
+
+        def real_backup_run(command, *args, **kwargs):
+            if command != importer.PRE_IMPORT_BACKUP_COMMAND:
+                return real_subprocess_run(command, *args, **kwargs)
+            path = backup.create_backup(backup.validate_components(None))
+            created_paths.append(path)
+            return subprocess.CompletedProcess(command, 0, f"backup_path={path}\n", "")
+
+        self.created_backup_paths = created_paths
+        self._backup_patcher = mock.patch.object(importer.subprocess, "run", side_effect=real_backup_run)
+        self._backup_patcher.start()
+
+    def tearDown(self) -> None:
+        self._backup_patcher.stop()
+        self._no_git_patcher.stop()
+        for name, value in self._old_backup_attrs.items():
+            setattr(backup, name, value)
+        importer.DB_PATH = self.old_importer_db_path
+        local_dns.DB_PATH = self.old_local_dns_db_path
+        upstream_dns.DB_PATH = self.old_upstream_dns_db_path
+        alderpointdns_compiler.DB_PATH = self.old_compiler_db_path
+        custom_rules.DB_PATH = self.old_custom_rules_db_path
+        importer.IMPORT_UPLOAD_DIR = self.old_upload_dir
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _pihole_job(self) -> tuple[int, dict]:
+        translation = importer.parse_pihole_text(PIHOLE_FIXTURE, "home.arpa")
+        job_id = importer.create_migration_job("pihole", "pihole_export.txt", translation)
+        preview = importer.migration_preview_job(job_id, "home.arpa")
+        return job_id, preview["summary"]
+
+    def _assert_one_real_backup_was_created(self) -> None:
+        self.assertEqual(len(self.created_backup_paths), 1)
+        path = self.created_backup_paths[0]
+        self.assertTrue(path.exists())
+        with tempfile.TemporaryDirectory(dir=str(self.real_staging_dir)) as tmp:
+            extract = Path(tmp) / "x"
+            extract.mkdir()
+            subprocess.run(["tar", "-xzf", str(path), "-C", str(extract)], check=True)
+            manifest = json.loads((extract / "manifest.json").read_text())
+            self.assertEqual(manifest["backup_format_version"], backup.BACKUP_FORMAT_VERSION)
+            version = manifest["alderpointdns_app_version"]
+            self.assertTrue(version)
+            self.assertNotIn("git.", version, "no git binary was available; a commit id must not have been fabricated")
+
+    def test_adguard_apply_succeeds_with_real_pre_import_backup_and_no_git(self) -> None:
+        translation = importer.parse_adguard_yaml(ADGUARD_FIXTURE, "home.arpa")
+        job_id = importer.create_migration_job("adguard_yaml", "adguard_home.yaml", translation)
+        importer.migration_preview_job(job_id, "home.arpa")
+        result = importer.apply_migration_job(job_id, default_domain="home.arpa")
+        self.assertGreater(result["counts"]["block_rules"], 0)
+        self._assert_one_real_backup_was_created()
+
+    def test_pihole_apply_succeeds_with_real_pre_import_backup_and_no_git(self) -> None:
+        job_id, _summary = self._pihole_job()
+        result = importer.apply_migration_job(job_id, default_domain="home.arpa")
+        self.assertGreater(result["counts"]["block_rules"], 0)
+        self._assert_one_real_backup_was_created()
 
 
 if __name__ == "__main__":

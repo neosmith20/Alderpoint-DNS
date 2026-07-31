@@ -110,6 +110,19 @@ echo "+ apt-get update against Debian's own repositories only"
 run "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq" || fail "apt-get update failed against stock Debian 13 repositories"
 
 "$CONTAINER_ENGINE" cp "$DEB" "$NAME:/tmp/alderpointdns.deb"
+"$CONTAINER_ENGINE" cp /opt/alderpointdns/tests/fixtures/clean_install_adguard.yaml "$NAME:/tmp/adguard_home.yaml"
+"$CONTAINER_ENGINE" cp /opt/alderpointdns/tests/fixtures/clean_install_pihole.txt "$NAME:/tmp/pihole_export.txt"
+
+# Extracts a form's CSRF token from a rendered, authenticated HTML page --
+# every mutating route in app/webapp.py checks it against the session
+# cookie (see check_csrf()), so POSTs below need a real one, not a guess.
+extract_csrf() {
+  printf '%s' "$1" | grep -o 'name="csrf" value="[^"]*"' | head -1 | sed -E 's/.*value="([^"]*)".*/\1/'
+}
+
+backup_archive_count() {
+  run "ls -1 /var/lib/alderpointdns/backups/alderpointdns-backup-*.tar.gz 2>/dev/null | wc -l" | tr -d '[:space:]'
+}
 
 install_and_check() {
   label="$1"
@@ -230,6 +243,98 @@ install_and_check() {
     fail "$label: the Encryption Settings page does not render the DoH3 checkbox as disabled on stock Debian 13's dnsdist"
   echo "$encryption_html" | grep -qi 'Unsupported by installed dnsdist' || \
     fail "$label: the Encryption Settings page does not explain that DoQ/DoH3 are unsupported by the installed dnsdist build"
+
+  # Regression coverage for a real clean-VM failure: AdGuard/Pi-hole import
+  # apply requires a mandatory pre-import backup (app/importer.py's
+  # create_pre_import_backup(), run via `sudo alderpointdns_compiler.py
+  # backup-create`), and that backup's manifest calls into
+  # backup.alderpointdns_app_version(). A stock Debian 13 package install
+  # has no `git` binary and /opt/alderpointdns is plain files, not a git
+  # checkout -- version detection shelling out to git unconditionally
+  # crashed backup creation, which in turn crashed every import apply.
+  echo "+ confirming git is not installed and not required on this stock Debian 13 install ($label)"
+  run "command -v git" >/dev/null 2>&1 && \
+    fail "$label: git is installed in this 'stock Debian 13' test container -- it must not be, since this test exists to prove alderpointdns works without it" || true
+  run "dpkg -s git" >/dev/null 2>&1 && \
+    fail "$label: the git package is installed -- alderpointdns's own Depends: must never pull it in" || true
+
+  echo "+ creating a backup through the same sudo/service-account path the web UI uses ($label)"
+  backup_html="$(run "curl -s -b $COOKIE_JAR http://127.0.0.1:3000/backup")"
+  backup_csrf="$(extract_csrf "$backup_html")"
+  [ -n "$backup_csrf" ] || fail "$label: could not extract a CSRF token from the /backup page"
+  create_code="$(run "curl -s -o /tmp/backup-create-body.$label.html -w '%{http_code}' -b $COOKIE_JAR -c $COOKIE_JAR \
+    -d csrf=$backup_csrf -d app_config=on -d sqlite_data=on -d blocklist_source_definitions=on \
+    -d last_downloaded_lists=on -d custom_rules=on -d local_dns_zones=on -d client_aliases=on \
+    -d dnsdist_source_config=on -d bind_source_config=on -d certificates=on \
+    http://127.0.0.1:3000/backup/create")"
+  if [ "$create_code" != "303" ]; then
+    run "cat /tmp/backup-create-body.$label.html" >&2 || true
+    fail "$label: POST /backup/create (the web UI's manual-backup button) did not succeed (HTTP $create_code) -- this is the exact clean-VM pre-import-backup failure mode"
+  fi
+
+  echo "+ confirming the backup archive and manifest are valid ($label)"
+  [ "$(backup_archive_count)" -ge 1 ] || fail "$label: no backup archive found in /var/lib/alderpointdns/backups after a successful /backup/create"
+  latest_backup="$(run "ls -1t /var/lib/alderpointdns/backups/alderpointdns-backup-*.tar.gz | head -1")"
+  run "rm -rf /tmp/backup-verify.$label && mkdir -p /tmp/backup-verify.$label && tar -xzf $latest_backup -C /tmp/backup-verify.$label" || \
+    fail "$label: backup archive $latest_backup is not a valid tar.gz"
+  run "test -s /tmp/backup-verify.$label/manifest.json" || fail "$label: backup archive $latest_backup has no manifest.json"
+  manifest_version="$(run "jq -r .alderpointdns_app_version /tmp/backup-verify.$label/manifest.json")"
+  [ -n "$manifest_version" ] && [ "$manifest_version" != "null" ] || fail "$label: manifest.json's alderpointdns_app_version is empty/null ($label)"
+  case "$manifest_version" in
+    *"git."*) fail "$label: manifest reports git dev metadata ($manifest_version) despite git not being installed -- a commit id must never be fabricated" ;;
+  esac
+  installed_version="$(run "cat /opt/alderpointdns/VERSION" | tr -d '[:space:]')"
+  [ "$manifest_version" = "$installed_version" ] || \
+    fail "$label: manifest alderpointdns_app_version ($manifest_version) does not match the packaged VERSION file ($installed_version)"
+
+  echo "+ uploading, previewing, and applying a synthetic AdGuard Home migration ($label)"
+  import_html="$(run "curl -s -b $COOKIE_JAR http://127.0.0.1:3000/import")"
+  import_csrf="$(extract_csrf "$import_html")"
+  [ -n "$import_csrf" ] || fail "$label: could not extract a CSRF token from the /import page"
+  count_before_adguard="$(backup_archive_count)"
+  adguard_headers="$(run "curl -s -D - -o /tmp/adguard-upload-body.$label.html -b $COOKIE_JAR -c $COOKIE_JAR \
+    -F csrf=$import_csrf -F upload=@/tmp/adguard_home.yaml \
+    http://127.0.0.1:3000/import/migration/adguard/yaml")"
+  adguard_job_id="$(printf '%s' "$adguard_headers" | tr -d '\r' | sed -nE 's#.*[Ll]ocation: */import/jobs/([0-9]+)/preview.*#\1#p' | head -1)"
+  if [ -z "$adguard_job_id" ]; then
+    run "cat /tmp/adguard-upload-body.$label.html" >&2 || true
+    fail "$label: uploading the synthetic AdGuard Home migration did not reach a preview page"
+  fi
+  apply_code="$(run "curl -s -o /tmp/adguard-apply-body.$label.html -w '%{http_code}' -b $COOKIE_JAR -c $COOKIE_JAR \
+    -d csrf=$import_csrf http://127.0.0.1:3000/import/jobs/$adguard_job_id/apply")"
+  if [ "$apply_code" != "303" ]; then
+    run "cat /tmp/adguard-apply-body.$label.html" >&2 || true
+    fail "$label: applying the synthetic AdGuard Home migration failed (HTTP $apply_code) -- this reproduces the pre-import backup failure"
+  fi
+  adguard_status="$(run "curl -s -b $COOKIE_JAR http://127.0.0.1:3000/import/jobs/$adguard_job_id/status")"
+  echo "$adguard_status" | grep -q '"status":"applied"' || \
+    fail "$label: AdGuard migration job $adguard_job_id did not reach status=applied (got: $adguard_status)"
+  echo "+ confirming the AdGuard import's mandatory pre-import backup actually succeeded ($label)"
+  [ "$(backup_archive_count)" -gt "$count_before_adguard" ] || \
+    fail "$label: applying the AdGuard migration did not create a new pre-import backup archive"
+
+  echo "+ uploading, previewing, and applying a synthetic Pi-hole migration ($label)"
+  count_before_pihole="$(backup_archive_count)"
+  pihole_headers="$(run "curl -s -D - -o /tmp/pihole-upload-body.$label.html -b $COOKIE_JAR -c $COOKIE_JAR \
+    -F csrf=$import_csrf -F source_type=pihole -F default_domain=home.arpa -F upload=@/tmp/pihole_export.txt \
+    http://127.0.0.1:3000/import/upload")"
+  pihole_job_id="$(printf '%s' "$pihole_headers" | tr -d '\r' | sed -nE 's#.*[Ll]ocation: */import/jobs/([0-9]+)/preview.*#\1#p' | head -1)"
+  if [ -z "$pihole_job_id" ]; then
+    run "cat /tmp/pihole-upload-body.$label.html" >&2 || true
+    fail "$label: uploading the synthetic Pi-hole migration did not reach a preview page"
+  fi
+  pihole_apply_code="$(run "curl -s -o /tmp/pihole-apply-body.$label.html -w '%{http_code}' -b $COOKIE_JAR -c $COOKIE_JAR \
+    -d csrf=$import_csrf http://127.0.0.1:3000/import/jobs/$pihole_job_id/apply")"
+  if [ "$pihole_apply_code" != "303" ]; then
+    run "cat /tmp/pihole-apply-body.$label.html" >&2 || true
+    fail "$label: applying the synthetic Pi-hole migration failed (HTTP $pihole_apply_code) -- this reproduces the pre-import backup failure"
+  fi
+  pihole_status="$(run "curl -s -b $COOKIE_JAR http://127.0.0.1:3000/import/jobs/$pihole_job_id/status")"
+  echo "$pihole_status" | grep -q '"status":"applied"' || \
+    fail "$label: Pi-hole migration job $pihole_job_id did not reach status=applied (got: $pihole_status)"
+  echo "+ confirming the Pi-hole import's mandatory pre-import backup actually succeeded ($label)"
+  [ "$(backup_archive_count)" -gt "$count_before_pihole" ] || \
+    fail "$label: applying the Pi-hole migration did not create a new pre-import backup archive"
 
   echo "+ verifying reboot-equivalent restart behavior: stopping and restarting all four core services ($label)"
   run "systemctl stop named dnsdist alderpointdns-analytics alderpointdns"

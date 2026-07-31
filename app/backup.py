@@ -60,6 +60,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 import shutil
 import socket
 import sqlite3
@@ -95,6 +96,7 @@ SYSTEMD_DIR = Path("/etc/systemd/system")
 SUDOERS_FILE = Path("/etc/sudoers.d/alderpointdns")
 
 APP_ROOT = Path("/opt/alderpointdns")
+DPKG_PACKAGE_NAME = "alderpointdns"
 
 BACKUP_FORMAT_VERSION = 1
 FILENAME_PREFIX = "alderpointdns-backup-"
@@ -323,18 +325,64 @@ def validate_components(values: dict[str, Any] | None) -> dict[str, bool]:
 # Manifest metadata
 # ---------------------------------------------------------------------------
 
+# Debian/semver-ish version strings only: letters, digits, and the small
+# set of separators both schemes use ('.', '+', '~', '_', '-'). Guards
+# against a truncated/binary/garbage VERSION file being echoed verbatim
+# into a backup manifest as if it were a real version.
+_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+~_-]{0,63}$")
+
+
+def _read_version_file() -> str | None:
+    """Packaged installs ship an authoritative VERSION file (see
+    packaging/debian/install); this never requires git or dpkg and is the
+    preferred source."""
+    try:
+        raw = (APP_ROOT / "VERSION").read_text()
+    except OSError:
+        return None
+    version = raw.strip()
+    if version and _VERSION_RE.match(version):
+        return version
+    return None
+
+
+def _read_dpkg_version() -> str | None:
+    """Fallback for the (unexpected) case where VERSION is missing or
+    malformed on a real .deb install: ask dpkg itself. Absent on non-Debian
+    dev checkouts, which is fine -- it's only a fallback."""
+    try:
+        proc = run(["dpkg-query", "-W", "-f=${Version}", DPKG_PACKAGE_NAME], check=False)
+    except (FileNotFoundError, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    version = proc.stdout.strip()
+    return version or None
+
+
+def _git_dev_metadata() -> str | None:
+    """Optional short commit hash, included only for development checkouts.
+    Packaged installs at /opt/alderpointdns are plain files, not a git
+    clone, and must not require a git binary at all -- both checks below
+    (binary present, .git present) must pass before git is ever invoked,
+    and any failure to run it is swallowed rather than surfaced, since a
+    missing dev-metadata suffix must never fail backup creation."""
+    if not shutil.which("git") or not (APP_ROOT / ".git").exists():
+        return None
+    try:
+        proc = run(["git", "-C", str(APP_ROOT), "rev-parse", "--short", "HEAD"], check=False)
+    except (FileNotFoundError, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    commit = proc.stdout.strip()
+    return commit or None
+
+
 def alderpointdns_app_version() -> str:
-    version_file = APP_ROOT / "VERSION"
-    proc = run(["git", "-C", str(APP_ROOT), "rev-parse", "--short", "HEAD"], check=False)
-    commit = proc.stdout.strip() if proc.returncode == 0 and proc.stdout.strip() else "unknown"
-    # VERSION holds the current semver (e.g. "0.4.0-beta.2"); a hyphenated
-    # pre-release suffix means this build has not had a stable release yet.
-    marker = "unreleased"
-    if version_file.exists():
-        version = version_file.read_text().strip()
-        if version and "-" not in version:
-            marker = "released"
-    return f"{marker}+git.{commit}"
+    version = _read_version_file() or _read_dpkg_version() or "unknown"
+    commit = _git_dev_metadata()
+    return f"{version}+git.{commit}" if commit else version
 
 
 def database_schema_version(conn: sqlite3.Connection) -> str:
