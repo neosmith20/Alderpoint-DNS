@@ -8,7 +8,7 @@ assignees: ''
 
 <!--
 Thanks for the suggestion. Alderpoint DNS is beta software
-(v0.4.0-beta.3) with an evolving feature set — see docs/known-limitations.md
+(v0.4.0-beta.4) with an evolving feature set — see docs/known-limitations.md
 and docs/architecture.md for what's currently implemented vs. intentionally
 partial, which may help frame the request.
 -->

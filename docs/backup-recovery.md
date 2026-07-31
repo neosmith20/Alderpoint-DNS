@@ -1,6 +1,6 @@
 # Backup and Recovery Guide
 
-Alderpoint DNS is currently beta software (v0.4.0-beta.3). The backup/restore
+Alderpoint DNS is currently beta software (v0.4.0-beta.4). The backup/restore
 paths described here are acceptance-tested, but keep independent copies of
 anything important — see `docs/known-limitations.md`.
 
