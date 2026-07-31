@@ -65,12 +65,16 @@ tar -C "$SOURCE_DIR" \
 
 cp "$SOURCE_DIR/scripts/alderpointdns-diagnostics" "$PKG/usr/sbin/alderpointdns-diagnostics"
 chmod 0755 "$PKG/usr/sbin/alderpointdns-diagnostics"
+cp "$SOURCE_DIR/scripts/alderpointdns-admin" "$PKG/usr/sbin/alderpointdns"
+chmod 0755 "$PKG/usr/sbin/alderpointdns"
 cp "$SOURCE_DIR/packaging/alderpointdns.service" "$PKG/lib/systemd/system/alderpointdns.service"
 cp "$SOURCE_DIR/packaging/alderpointdns-analytics.service" "$PKG/lib/systemd/system/alderpointdns-analytics.service"
 cp "$SOURCE_DIR/packaging/alderpointdns-backup.service" "$PKG/lib/systemd/system/alderpointdns-backup.service"
 cp "$SOURCE_DIR/packaging/alderpointdns-backup.timer" "$PKG/lib/systemd/system/alderpointdns-backup.timer"
 cp "$SOURCE_DIR/packaging/alderpointdns-filter-update.service" "$PKG/lib/systemd/system/alderpointdns-filter-update.service"
 cp "$SOURCE_DIR/packaging/alderpointdns-filter-update.timer" "$PKG/lib/systemd/system/alderpointdns-filter-update.timer"
+cp "$SOURCE_DIR/packaging/alderpointdns-notify.service" "$PKG/lib/systemd/system/alderpointdns-notify.service"
+cp "$SOURCE_DIR/packaging/alderpointdns-notify.timer" "$PKG/lib/systemd/system/alderpointdns-notify.timer"
 cp "$SOURCE_DIR/packaging/sudoers-alderpointdns" "$PKG/etc/sudoers.d/alderpointdns"
 chmod 0440 "$PKG/etc/sudoers.d/alderpointdns"
 

@@ -191,4 +191,19 @@ for svc in named dnsdist alderpointdns alderpointdns-analytics; do
     fail "postinst's final active-service gate does not cover $svc"
 done
 
+# --- root-only local admin recovery CLI and notification checker timer ---
+# Both were added alongside the local-only test build script
+# (scripts/build-deb.sh), which copies packaged files individually rather
+# than reading packaging/debian/install -- so it's easy to add a new
+# packaging file without ever actually wiring it into a built package.
+# This is the check that would have caught that.
+test -f "$ROOT/data/usr/sbin/alderpointdns" || fail "usr/sbin/alderpointdns (root-only admin recovery CLI) missing from built package"
+test -x "$ROOT/data/usr/sbin/alderpointdns" || fail "usr/sbin/alderpointdns is not executable"
+test -f "$ROOT/data/lib/systemd/system/alderpointdns-notify.service" || fail "alderpointdns-notify.service missing from built package"
+test -f "$ROOT/data/lib/systemd/system/alderpointdns-notify.timer" || fail "alderpointdns-notify.timer missing from built package"
+grep -q '^User=alderpointdns$' "$ROOT/data/lib/systemd/system/alderpointdns-notify.service" || \
+  fail "alderpointdns-notify.service does not run as the unprivileged alderpointdns account"
+grep -q 'systemctl enable --now alderpointdns-notify.timer' "$POSTINST" || \
+  fail "postinst does not enable alderpointdns-notify.timer"
+
 echo "deb package content tests passed"

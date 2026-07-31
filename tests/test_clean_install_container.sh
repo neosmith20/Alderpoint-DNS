@@ -244,6 +244,16 @@ install_and_check() {
   echo "$encryption_html" | grep -qi 'Unsupported by installed dnsdist' || \
     fail "$label: the Encryption Settings page does not explain that DoQ/DoH3 are unsupported by the installed dnsdist build"
 
+  echo "+ verifying the notification checker timer and root-only admin recovery CLI installed ($label)"
+  run "systemctl is-enabled alderpointdns-notify.timer" | grep -q enabled || \
+    fail "$label: alderpointdns-notify.timer is not enabled after install"
+  run "systemctl is-active alderpointdns-notify.timer" | grep -q active || \
+    fail "$label: alderpointdns-notify.timer is not active after install"
+  run "test -x /usr/sbin/alderpointdns" || fail "$label: /usr/sbin/alderpointdns (root-only admin recovery CLI) is not installed/executable"
+  run "/usr/sbin/alderpointdns admin list" | grep -q admin || fail "$label: 'alderpointdns admin list' did not show the setup-created administrator"
+  run "sudo -u alderpointdns /usr/sbin/alderpointdns admin list" >/dev/null 2>&1 && \
+    fail "$label: alderpointdns admin list must refuse to run as the unprivileged alderpointdns account" || true
+
   # Regression coverage for a real clean-VM failure: AdGuard/Pi-hole import
   # apply requires a mandatory pre-import backup (app/importer.py's
   # create_pre_import_backup(), run via `sudo alderpointdns_compiler.py
