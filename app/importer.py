@@ -1702,9 +1702,13 @@ def _translate_adguard_config(data: dict[str, Any], internal_domain: str | None 
     - user_rules -> typed custom-rule entries; every line is preserved and
       classified later by custom_rules.parse_rule with AdGuard plain-domain
       semantics (domain + subdomains).
-    - filtering.rewrites -> Local DNS records for names under the internal
-      domain and for CNAME-style answers; exact/subdomain rewrite custom
-      rules for IP answers outside the internal domain.
+    - filtering.rewrites -> AdGuard's DNS Rewrites are AdGuard's own
+      Local-DNS-equivalent feature, so every non-wildcard rewrite (A/AAAA or
+      CNAME-style) maps to Alderpoint DNS's Local DNS model regardless of
+      whether the name falls under the configured internal domain; only
+      wildcard (`*.name`) rewrites, which Local DNS cannot represent, fall
+      back to a subdomain rewrite custom rule (IP answers) or an explicit
+      unsupported finding (CNAME-style answers).
     - whitelist_filters, domain-routed upstreams, per-client settings ->
       explicit findings, never silently dropped."""
     filtering = data.get("filtering") if isinstance(data.get("filtering"), dict) else {}
@@ -1715,7 +1719,6 @@ def _translate_adguard_config(data: dict[str, Any], internal_domain: str | None 
     clients_block = data.get("clients") if isinstance(data.get("clients"), dict) else {}
     persistent_clients = clients_block.get("persistent") or []
     dns_block = data.get("dns") if isinstance(data.get("dns"), dict) else {}
-    local_zone = _internal_domain(internal_domain)
     bootstrap_ips = []
     for raw in dns_block.get("bootstrap_dns", []) or []:
         try:
@@ -1804,8 +1807,32 @@ def _translate_adguard_config(data: dict[str, Any], internal_domain: str | None 
         except ValueError:
             ip = None
         if ip is not None:
-            under_local = not wildcard and (base.lower() == local_zone or base.lower().endswith("." + local_zone))
-            if under_local:
+            if wildcard:
+                if not effective_enabled:
+                    # Local DNS has no wildcard record type, so a disabled
+                    # wildcard rewrite would otherwise map to a custom
+                    # $dnsrewrite rule; Alderpoint DNS's custom rule apply
+                    # path has no "disabled dnsrewrite" state, so this is
+                    # reported explicitly instead of silently activating it.
+                    unsupported_rules.append(
+                        f"DNS rewrite {domain} -> {answer}: disabled in AdGuard Home ({disabled_reason}); "
+                        "disabled wildcard rewrites are reported rather than imported as an active custom rule"
+                    )
+                else:
+                    rule_entries.append({
+                        "text": f"{domain} -> {answer}",
+                        "rule": f"||{base}^$dnsrewrite={ip}",
+                        "plain_domain_subdomains": True,
+                        "origin": "dns_rewrites",
+                        "comment": f"AdGuard DNS rewrite {domain} -> {answer}",
+                    })
+            else:
+                # Every non-wildcard AdGuard DNS rewrite is AdGuard's own
+                # Local-DNS-equivalent feature and always maps to Alderpoint
+                # DNS's Local DNS model, regardless of whether the name falls
+                # under the configured internal domain -- Local DNS already
+                # supports arbitrary external names via an auto-created
+                # managed forward zone, the same as CNAME-style answers.
                 rewrites_as_local_dns.append({
                     "fqdn": base,
                     "record_type": "A" if isinstance(ip, ipaddress.IPv4Address) else "AAAA",
@@ -1814,24 +1841,6 @@ def _translate_adguard_config(data: dict[str, Any], internal_domain: str | None 
                     "origin": "dns_rewrites",
                     "enabled": effective_enabled,
                     "disabled_reason": disabled_reason,
-                })
-            elif not effective_enabled:
-                # A disabled rewrite outside the internal domain would map to
-                # a custom $dnsrewrite rule; Alderpoint DNS's custom rule
-                # apply path has no "disabled dnsrewrite" state, so this is
-                # reported explicitly instead of silently activating it.
-                unsupported_rules.append(
-                    f"DNS rewrite {domain} -> {answer}: disabled in AdGuard Home ({disabled_reason}); "
-                    "disabled rewrites outside the internal domain are reported rather than imported as an active custom rule"
-                )
-            else:
-                anchor = "||" if wildcard else "|"
-                rule_entries.append({
-                    "text": f"{domain} -> {answer}",
-                    "rule": f"{anchor}{base}^$dnsrewrite={ip}",
-                    "plain_domain_subdomains": True,
-                    "origin": "dns_rewrites",
-                    "comment": f"AdGuard DNS rewrite {domain} -> {answer}",
                 })
         elif wildcard:
             unsupported_rules.append(f"DNS rewrite {domain} -> {answer}: wildcard CNAME-style rewrites are not supported")

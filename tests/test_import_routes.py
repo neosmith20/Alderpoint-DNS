@@ -543,6 +543,41 @@ class ImportUploadHttpTest(unittest.TestCase):
             record_count = conn.execute("SELECT count(*) FROM local_dns_records").fetchone()[0]
         self.assertEqual(record_count, 5, "re-importing the identical AdGuard rewrites through the real route must not duplicate Local DNS rows")
 
+    def test_adguard_schema34_apply_keeps_rewrites_off_the_custom_rules_page(self) -> None:
+        # Regression coverage for a real schema_version: 34 AdGuardHome.yaml
+        # where every DNS rewrite named a host under the operator's own LAN
+        # domain (not Alderpoint DNS's internal domain) -- these must land
+        # on the Local DNS page, never the Custom Filtering Rules page, no
+        # matter which domain they use.
+        schema34_yaml = (FIXTURES / "adguard_schema34.yaml").read_text()
+        response = self.client.post(
+            "/import/migration/adguard/yaml",
+            data={"csrf": self.csrf},
+            files={"upload": ("adguard_schema34.yaml", schema34_yaml, "application/x-yaml")},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        with sqlite3.connect(importer.DB_PATH) as conn:
+            job = conn.execute("SELECT id FROM import_jobs ORDER BY id DESC LIMIT 1").fetchone()
+        job_id = job[0]
+
+        apply_response = self.client.post(f"/import/jobs/{job_id}/apply", data={"csrf": self.csrf}, follow_redirects=True)
+        self.assertEqual(apply_response.status_code, 200)
+        self.assertIn("Blocklists: 18 created", apply_response.text)
+        self.assertIn("Custom rules: 28 created", apply_response.text)
+        self.assertIn("Local DNS: 44 created", apply_response.text)
+
+        local_dns_page = self.client.get("/local-dns")
+        self.assertEqual(local_dns_page.status_code, 200)
+        self.assertIn("host01.mylan.network", local_dns_page.text)
+        self.assertIn("host44.mylan.network", local_dns_page.text)
+
+        custom_rules_page = self.client.get("/custom-rules")
+        self.assertEqual(custom_rules_page.status_code, 200)
+        self.assertIn("login.live.com", custom_rules_page.text)
+        self.assertNotIn("mylan.network", custom_rules_page.text)
+        self.assertNotIn("host01", custom_rules_page.text)
+
     def test_pihole_import_panel_present_on_import_page(self) -> None:
         response = self.client.get("/import")
         self.assertEqual(response.status_code, 200)

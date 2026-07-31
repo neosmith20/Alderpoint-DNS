@@ -313,17 +313,21 @@ install_and_check() {
   [ "$(backup_archive_count)" -gt "$count_before_adguard" ] || \
     fail "$label: applying the AdGuard migration did not create a new pre-import backup archive"
 
-  # Regression coverage for a real beta-tester failure: the migration job
-  # reported "Applied" with the correct object count, but none of the
-  # AdGuardHome.yaml's filtering.rewrites DNS rewrites actually showed up
-  # anywhere in Alderpoint DNS. The clean_install_adguard.yaml fixture now
-  # carries real rewrites (an A record, an AAAA record, a CNAME-style
-  # alias, and one rewrite disabled at the source) so this can't regress
-  # silently again.
+  # Regression coverage for two real beta-tester failures with the same
+  # root cause class: (1) the migration job reported "Applied" with the
+  # correct object count, but none of the AdGuardHome.yaml's
+  # filtering.rewrites DNS rewrites actually showed up anywhere in
+  # Alderpoint DNS; (2) a later regression where rewrites whose domain did
+  # not fall under Alderpoint DNS's configured internal domain were instead
+  # classified as Custom Filtering Rules. The clean_install_adguard.yaml
+  # fixture carries real rewrites (an A record, an AAAA record, a
+  # CNAME-style alias, one rewrite disabled at the source, and one rewrite
+  # under a domain -- mylan.test -- that is NOT home.arpa) so neither can
+  # regress silently again.
   echo "+ verifying the AdGuard import's job page reports Local DNS counts explicitly, not just a bare 'Applied' ($label)"
   adguard_job_html="$(run "curl -s -b $COOKIE_JAR http://127.0.0.1:3000/import/jobs/$adguard_job_id")"
-  echo "$adguard_job_html" | grep -q 'Local DNS: 4 created' || \
-    fail "$label: the AdGuard import job page does not report 'Local DNS: 4 created' in its result breakdown (got: $(echo "$adguard_job_html" | grep -o 'Local DNS:[^<]*' | head -1))"
+  echo "$adguard_job_html" | grep -q 'Local DNS: 5 created' || \
+    fail "$label: the AdGuard import job page does not report 'Local DNS: 5 created' in its result breakdown (got: $(echo "$adguard_job_html" | grep -o 'Local DNS:[^<]*' | head -1))"
 
   echo "+ verifying the imported Local DNS records actually landed in Alderpoint DNS's database ($label)"
   local_dns_rows="$(run "runuser -u alderpointdns -- python3 -c \"import sqlite3; c = sqlite3.connect('/var/lib/alderpointdns/alderpointdns.db'); c.row_factory = sqlite3.Row; [print(dict(r)) for r in c.execute(\\\"SELECT fqdn, record_type, value, enabled FROM local_dns_records WHERE fqdn LIKE 'clean-install-%' ORDER BY fqdn\\\")]\"")"
@@ -335,14 +339,33 @@ install_and_check() {
     fail "$label: the imported CNAME record clean-install-alias.home.arpa was not found (enabled) in local_dns_records (got: $local_dns_rows)"
   echo "$local_dns_rows" | grep -q "'fqdn': 'clean-install-disabled.home.arpa'.*'enabled': 0" || \
     fail "$label: the source-disabled rewrite clean-install-disabled.home.arpa was not imported as a disabled (enabled=0) record (got: $local_dns_rows)"
+  echo "$local_dns_rows" | grep -q "'fqdn': 'clean-install-router.mylan.test'.*'record_type': 'A'.*'value': '192.168.50.12'.*'enabled': 1" || \
+    fail "$label: the imported A record clean-install-router.mylan.test (outside the internal domain) was not found (enabled) in local_dns_records (got: $local_dns_rows)"
 
-  echo "+ verifying the generated BIND zone file contains the imported Local DNS records ($label)"
+  echo "+ verifying the external-domain rewrite did NOT land in Custom Filtering Rules ($label)"
+  custom_rule_leak="$(run "runuser -u alderpointdns -- python3 -c \"import sqlite3; c = sqlite3.connect('/var/lib/alderpointdns/alderpointdns.db'); print(c.execute(\\\"SELECT count(*) FROM custom_filter_rules WHERE domain LIKE '%mylan.test%' OR domain LIKE 'clean-install-router%'\\\").fetchone()[0])\"")"
+  [ "$custom_rule_leak" = "0" ] || \
+    fail "$label: the AdGuard rewrite clean-install-router.mylan.test leaked into custom_filter_rules instead of staying in Local DNS only (count: $custom_rule_leak)"
+
+  echo "+ verifying the Local DNS and Custom Filtering Rules web pages show each import in the correct place ($label)"
+  local_dns_page_html="$(run "curl -s -b $COOKIE_JAR http://127.0.0.1:3000/local-dns")"
+  echo "$local_dns_page_html" | grep -q 'clean-install-router.mylan.test' || \
+    fail "$label: clean-install-router.mylan.test does not appear on the /local-dns page"
+  custom_rules_page_html="$(run "curl -s -b $COOKIE_JAR http://127.0.0.1:3000/custom-rules")"
+  echo "$custom_rules_page_html" | grep -q 'clean-install-router.mylan.test' && \
+    fail "$label: clean-install-router.mylan.test incorrectly appears on the /custom-rules page"
+  echo "$custom_rules_page_html" | grep -q 'clean-install-block.invalid' || \
+    fail "$label: the genuine custom rule clean-install-block.invalid does not appear on the /custom-rules page"
+
+  echo "+ verifying the generated BIND zone files contain the imported Local DNS records ($label)"
   run "grep -q 'clean-install-nas' /var/lib/alderpointdns/compiled/bind/local/home.arpa.zone" || \
     fail "$label: the generated home.arpa.zone does not contain clean-install-nas"
   run "grep -q 'clean-install-printer' /var/lib/alderpointdns/compiled/bind/local/home.arpa.zone" || \
     fail "$label: the generated home.arpa.zone does not contain clean-install-printer"
   run "grep -q 'clean-install-alias' /var/lib/alderpointdns/compiled/bind/local/home.arpa.zone" || \
     fail "$label: the generated home.arpa.zone does not contain clean-install-alias"
+  run "grep -q 'clean-install-router' /var/lib/alderpointdns/compiled/bind/local/mylan.test.zone" || \
+    fail "$label: the auto-created mylan.test.zone does not contain clean-install-router"
 
   echo "+ verifying the imported Local DNS records resolve through dnsdist ($label)"
   run "dig @127.0.0.1 -p 53 clean-install-nas.home.arpa A +time=3 +tries=2 +short | grep -qx '192.168.50.10'" || \
@@ -353,6 +376,8 @@ install_and_check() {
     fail "$label: clean-install-alias.home.arpa (CNAME to clean-install-nas.home.arpa) did not resolve to 192.168.50.10 through dnsdist"
   run "dig @127.0.0.1 -p 53 clean-install-disabled.home.arpa A +time=3 +tries=2 +short | grep -q ." && \
     fail "$label: clean-install-disabled.home.arpa resolved despite being imported disabled (source-disabled AdGuard rewrites must not be served)"
+  run "dig @127.0.0.1 -p 53 clean-install-router.mylan.test A +time=3 +tries=2 +short | grep -qx '192.168.50.12'" || \
+    fail "$label: clean-install-router.mylan.test (outside the internal domain) did not resolve to 192.168.50.12 through dnsdist"
 
   echo "+ re-uploading and re-applying the same AdGuard Home migration to confirm Local DNS records are skipped as duplicates, not re-created ($label)"
   local_dns_count_before_reimport="$(run "runuser -u alderpointdns -- python3 -c \"import sqlite3; c = sqlite3.connect('/var/lib/alderpointdns/alderpointdns.db'); print(c.execute('SELECT count(*) FROM local_dns_records').fetchone()[0])\"")"
