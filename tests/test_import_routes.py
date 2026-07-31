@@ -492,6 +492,57 @@ class ImportUploadHttpTest(unittest.TestCase):
             job = conn.execute("SELECT source_type, status FROM import_jobs ORDER BY id DESC LIMIT 1").fetchone()
         self.assertEqual(job, ("adguard_yaml", "previewed"))
 
+    def test_adguard_rewrites_apply_through_real_route_reports_local_dns_breakdown(self) -> None:
+        # End-to-end regression coverage for a real-world failure: a
+        # migration job reported plain "Applied" with the correct total
+        # object count, but none of the uploaded AdGuardHome.yaml's DNS
+        # rewrites actually showed up in Alderpoint DNS. This drives the
+        # exact same upload -> preview -> apply HTTP round trip the web UI
+        # uses and asserts the Local DNS records exist afterward, and that
+        # the job page explicitly reports a Local DNS count rather than a
+        # bare "Applied" status.
+        rewrites_yaml = (FIXTURES / "adguard_rewrites.yaml").read_text()
+        response = self.client.post(
+            "/import/migration/adguard/yaml",
+            data={"csrf": self.csrf},
+            files={"upload": ("adguard_rewrites.yaml", rewrites_yaml, "application/x-yaml")},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("AdGuard Home Migration Preview", response.text)
+        self.assertIn("disabled at source", response.text)
+        with sqlite3.connect(importer.DB_PATH) as conn:
+            job = conn.execute("SELECT id FROM import_jobs ORDER BY id DESC LIMIT 1").fetchone()
+        job_id = job[0]
+
+        apply_response = self.client.post(f"/import/jobs/{job_id}/apply", data={"csrf": self.csrf}, follow_redirects=True)
+        self.assertEqual(apply_response.status_code, 200)
+        self.assertIn("Local DNS: 5 created", apply_response.text)
+        self.assertIn("Applied with conflicts", apply_response.text)
+
+        with sqlite3.connect(importer.DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = {(r["fqdn"], r["record_type"], r["value"]): r["enabled"] for r in conn.execute("SELECT fqdn, record_type, value, enabled FROM local_dns_records")}
+        self.assertEqual(rows[("nas.home.arpa", "A", "192.168.1.50")], 1)
+        self.assertEqual(rows[("retired.home.arpa", "A", "192.168.1.60")], 0)
+
+        # Re-uploading and re-applying the identical file through the real
+        # route must not duplicate any Local DNS record.
+        response2 = self.client.post(
+            "/import/migration/adguard/yaml",
+            data={"csrf": self.csrf},
+            files={"upload": ("adguard_rewrites.yaml", rewrites_yaml, "application/x-yaml")},
+            follow_redirects=True,
+        )
+        with sqlite3.connect(importer.DB_PATH) as conn:
+            job2 = conn.execute("SELECT id FROM import_jobs ORDER BY id DESC LIMIT 1").fetchone()
+        job2_id = job2[0]
+        apply_response2 = self.client.post(f"/import/jobs/{job2_id}/apply", data={"csrf": self.csrf}, follow_redirects=True)
+        self.assertIn("Local DNS: 0 created", apply_response2.text)
+        with sqlite3.connect(importer.DB_PATH) as conn:
+            record_count = conn.execute("SELECT count(*) FROM local_dns_records").fetchone()[0]
+        self.assertEqual(record_count, 5, "re-importing the identical AdGuard rewrites through the real route must not duplicate Local DNS rows")
+
     def test_pihole_import_panel_present_on_import_page(self) -> None:
         response = self.client.get("/import")
         self.assertEqual(response.status_code, 200)

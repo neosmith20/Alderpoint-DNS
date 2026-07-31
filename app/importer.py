@@ -111,6 +111,7 @@ def init_db(conn: sqlite3.Connection | None = None) -> None:
         )
         _ensure_column(db, "import_jobs", "source_path", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(db, "import_jobs", "rollback_json", "TEXT NOT NULL DEFAULT '{}'")
+        _ensure_column(db, "import_jobs", "result_label", "TEXT NOT NULL DEFAULT ''")
         if close:
             db.commit()
     finally:
@@ -934,15 +935,20 @@ def build_migration_plan(translation: dict[str, Any], default_domain: str | None
             )
             continue
         seen_records.add(key)
+        enabled = bool(record.get("enabled", True))
+        disabled_reason = str(record.get("disabled_reason", ""))
         item = add(
             "local_dns",
             source=label,
             detected=f"{rtype} record",
             destination="Local DNS",
             normalized=normalized,
+            outcome="disabled at source" if not enabled else "new",
+            warning=disabled_reason,
             apply=("local_dns", index),
         )
         item["_record"] = [fqdn, rtype, value]
+        item["_enabled"] = enabled
 
     # Upstream resolvers.
     seen_resolvers: set[tuple[str, str, int, str]] = set()
@@ -1107,10 +1113,22 @@ def summarize_migration(translation: dict[str, Any], default_domain: str | None 
                         break
             elif kind == "local_dns" and have_records and item.get("_record"):
                 fqdn, rtype, value = item["_record"]
-                warnings = local_dns.record_warnings(conn, fqdn, rtype, value)
-                if warnings:
-                    item["warning"] = (item["warning"] + "; " if item["warning"] else "") + "; ".join(warnings)
-                    conflicts.append({"key": item["key"], "label": f"{fqdn} {rtype}: {'; '.join(warnings)}"})
+                exact = conn.execute(
+                    "SELECT 1 FROM local_dns_records WHERE fqdn=? AND record_type=? AND value=?",
+                    (fqdn, rtype, value),
+                ).fetchone()
+                if exact:
+                    item["conflict"] = "an identical Local DNS record already exists and will be skipped"
+                    if item["outcome"] == "new":
+                        item["outcome"] = "existing"
+                    existing.append({"key": item["key"], "label": f"Local DNS {fqdn} {rtype} {value}"})
+                else:
+                    warnings = local_dns.record_warnings(conn, fqdn, rtype, value)
+                    if warnings:
+                        item["warning"] = (item["warning"] + "; " if item["warning"] else "") + "; ".join(warnings)
+                        if item["outcome"] == "new":
+                            item["outcome"] = "conflicting"
+                        conflicts.append({"key": item["key"], "label": f"{fqdn} {rtype}: {'; '.join(warnings)}"})
             elif kind == "upstream" and item.get("_upstream_key"):
                 if tuple(item["_upstream_key"]) in existing_resolvers:
                     item["conflict"] = "an identical upstream resolver already exists and will be skipped"
@@ -1143,7 +1161,7 @@ def summarize_migration(translation: dict[str, Any], default_domain: str | None 
             counts["selected_default"] += 1
         if item["outcome"] == "informational":
             counts["informational"] += 1
-        elif item["outcome"] == "inactive":
+        elif item["outcome"] in ("inactive", "disabled at source"):
             counts["inactive"] += 1
         else:
             counts["active"] += 1
@@ -1745,6 +1763,11 @@ def _translate_adguard_config(data: dict[str, Any], internal_domain: str | None 
             "comment": "",
         })
 
+    # The global rewrites toggle: `filtering.rewrites_enabled`. Absent in API
+    # responses and in schema versions predating the toggle -- both default
+    # to AdGuard's own default of enabled, matching AdGuard's behavior when
+    # the key is not present.
+    rewrites_enabled_globally = bool(filtering.get("rewrites_enabled", True))
     rewrites_as_local_dns = []
     for entry in rewrites:
         if not isinstance(entry, dict):
@@ -1754,6 +1777,26 @@ def _translate_adguard_config(data: dict[str, Any], internal_domain: str | None 
         if not domain or not answer:
             unsupported_rules.append(f"DNS rewrite is missing a domain or answer: {entry}")
             continue
+        # AdGuard's own pass-through/exclusion sentinel: an `answer` of the
+        # literal string "A" or "AAAA" tells AdGuard to stop matching a
+        # broader rewrite for that query type rather than naming an address
+        # or alias. Alderpoint DNS has no equivalent selective-exclusion
+        # mechanism, so this is reported rather than misread as an address
+        # or a (nonsensical) single-label CNAME target.
+        if answer.upper() in {"A", "AAAA"}:
+            unsupported_rules.append(
+                f"DNS rewrite {domain} -> {answer}: AdGuard's '{answer.upper()}' pass-through/exclusion "
+                "value has no Alderpoint DNS equivalent and was not imported"
+            )
+            continue
+        per_item_enabled = bool(entry.get("enabled", True))
+        effective_enabled = rewrites_enabled_globally and per_item_enabled
+        if not rewrites_enabled_globally:
+            disabled_reason = "AdGuard Home's global DNS rewrites feature (filtering.rewrites_enabled) was turned off"
+        elif not per_item_enabled:
+            disabled_reason = "this rewrite was disabled in AdGuard Home"
+        else:
+            disabled_reason = ""
         wildcard = domain.startswith("*.")
         base = domain[2:] if wildcard else domain
         try:
@@ -1769,7 +1812,18 @@ def _translate_adguard_config(data: dict[str, Any], internal_domain: str | None 
                     "value": str(ip),
                     "ttl": 300,
                     "origin": "dns_rewrites",
+                    "enabled": effective_enabled,
+                    "disabled_reason": disabled_reason,
                 })
+            elif not effective_enabled:
+                # A disabled rewrite outside the internal domain would map to
+                # a custom $dnsrewrite rule; Alderpoint DNS's custom rule
+                # apply path has no "disabled dnsrewrite" state, so this is
+                # reported explicitly instead of silently activating it.
+                unsupported_rules.append(
+                    f"DNS rewrite {domain} -> {answer}: disabled in AdGuard Home ({disabled_reason}); "
+                    "disabled rewrites outside the internal domain are reported rather than imported as an active custom rule"
+                )
             else:
                 anchor = "||" if wildcard else "|"
                 rule_entries.append({
@@ -1794,6 +1848,8 @@ def _translate_adguard_config(data: dict[str, Any], internal_domain: str | None 
                 "value": target,
                 "ttl": 300,
                 "origin": "dns_rewrites",
+                "enabled": effective_enabled,
+                "disabled_reason": disabled_reason,
             })
 
     clients_as_aliases = []
@@ -1903,22 +1959,27 @@ def _apply_source_item(conn: sqlite3.Connection, source: dict[str, Any], rollbac
 
 def _apply_local_dns_record(conn: sqlite3.Connection, record: dict[str, Any], domain: str, source_label: str, rollback_info: dict[str, Any]) -> str:
     """Insert one Local DNS record inside the caller's transaction. Returns
-    'added' or 'duplicate' (identical record already present)."""
+    'added' (clean insert), 'added_conflicting' (inserted, but another record
+    already exists for this hostname -- e.g. a different address or a CNAME
+    exclusivity clash -- reported, never overwritten), or 'duplicate' (an
+    identical record -- same FQDN, type, and value -- is already present)."""
     fqdn = local_dns.normalize_fqdn(str(record.get("fqdn", "")), domain)
     rtype, fqdn, value, ttl = local_dns.validate_record(
         str(record.get("record_type", "")), fqdn, str(record.get("value", "")), record.get("ttl", 300) or 300
     )
+    enabled = 1 if record.get("enabled", True) else 0
+    conflicting = bool(local_dns.record_warnings(conn, fqdn, rtype, value))
     ts = now()
     cursor = conn.execute(
         """
         INSERT OR IGNORE INTO local_dns_records(name, fqdn, record_type, value, ttl, comment, enabled, auto_ptr, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, 1, 0, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
         """,
-        (fqdn.split(".", 1)[0], fqdn, rtype, value, ttl, f"imported from {source_label}", ts, ts),
+        (fqdn.split(".", 1)[0], fqdn, rtype, value, ttl, f"imported from {source_label}", enabled, ts, ts),
     )
     if cursor.rowcount:
         rollback_info["local_dns_ids"].append(cursor.lastrowid)
-        return "added"
+        return "added_conflicting" if conflicting else "added"
     return "duplicate"
 
 
@@ -1942,6 +2003,95 @@ def _apply_alias_item(conn: sqlite3.Connection, client: dict[str, Any], source_l
         return "updated"
     rollback_info["aliases_added"].append(network)
     return "added"
+
+
+_DESELECTION_SHORT_NAMES: dict[str, str] = {
+    "blocklists": "Blocklist",
+    "custom_blocks": "Custom block rule",
+    "custom_allows": "Custom allow rule",
+    "rewrites": "Rewrite rule",
+    "regex_rules": "Regex rule",
+    "local_dns": "Local DNS",
+    "upstreams": "Upstream resolver",
+    "client_scoped": "Client-scoped item",
+    "comments": "Comment",
+}
+
+
+def _deselection_notes(plan: dict[str, Any], deselected_keys: list[str]) -> list[str]:
+    """Explicit, itemized notes for the final result: for every category
+    where the operator deselected one or more selectable items, a sentence
+    naming the exact count and category -- never folded into a single
+    opaque 'N deselected' total. e.g. "2 Local DNS records were not
+    imported because Local DNS was deselected"."""
+    deselected_set = set(deselected_keys)
+    notes: list[str] = []
+    for name, items in plan["categories"].items():
+        count = sum(1 for item in items if item["key"] in deselected_set)
+        if not count:
+            continue
+        short = _DESELECTION_SHORT_NAMES.get(name, MIGRATION_CATEGORIES.get(name, name))
+        noun = "record" if name == "local_dns" else "item"
+        plural = "s" if count != 1 else ""
+        notes.append(f"{count} {short} {noun}{plural} were not imported because {short} was deselected")
+    return notes
+
+
+def _migration_result_label(counts: dict[str, Any]) -> str:
+    """A result label that never claims a plain 'Applied' when supported,
+    selected data was skipped as a duplicate, flagged as conflicting, kept
+    inactive as unsupported, or left out by the operator."""
+    reasons = []
+    if counts.get("duplicates_skipped"):
+        reasons.append("skipped duplicates")
+    if counts.get("local_dns_conflicts"):
+        reasons.append("conflicts")
+    if counts.get("invalid_kept_inactive") or counts.get("unsupported_kept_inactive"):
+        reasons.append("unsupported items")
+    if counts.get("user_deselected"):
+        reasons.append("user-deselected items")
+    if not reasons:
+        return "Applied"
+    if len(reasons) == 1:
+        return f"Applied with {reasons[0]}"
+    return "Applied with " + ", ".join(reasons[:-1]) + " and " + reasons[-1]
+
+
+def _component_breakdown(counts: dict[str, Any], deselection_notes: list[str]) -> str:
+    """A per-component breakdown of what an apply actually did, so a plain
+    'Applied' status is never the only signal available for what happened to
+    selected data -- Local DNS is always itemized explicitly, even at zero,
+    since a silent zero there is exactly the failure mode this guards
+    against."""
+    lines: list[str] = []
+    blocklist_bits = []
+    if counts.get("blocklists_added"):
+        blocklist_bits.append(f"{counts['blocklists_added']} created")
+    if counts.get("blocklists_updated"):
+        blocklist_bits.append(f"{counts['blocklists_updated']} updated")
+    if blocklist_bits:
+        lines.append("Blocklists: " + ", ".join(blocklist_bits))
+    rule_total = (
+        counts.get("block_rules", 0) + counts.get("allow_rules", 0) + counts.get("rewrite_rules", 0)
+        + counts.get("regex_rules", 0) + counts.get("comments", 0)
+    )
+    if rule_total:
+        lines.append(f"Custom rules: {rule_total} created")
+    local_dns_bits = [f"{counts.get('local_dns_records', 0)} created"]
+    if counts.get("local_dns_conflicts"):
+        local_dns_bits.append(f"{counts['local_dns_conflicts']} conflicting (kept, not overwritten)")
+    lines.append("Local DNS: " + ", ".join(local_dns_bits))
+    if counts.get("upstream_resolvers"):
+        lines.append(f"Upstream resolvers: {counts['upstream_resolvers']} created")
+    if counts.get("client_aliases"):
+        lines.append(f"Client aliases: {counts['client_aliases']} created")
+    unsupported_total = counts.get("invalid_kept_inactive", 0) + counts.get("unsupported_kept_inactive", 0)
+    lines.append(f"Unsupported: {unsupported_total}")
+    lines.append(f"Deselected: {counts.get('user_deselected', 0)}")
+    if counts.get("duplicates_skipped"):
+        lines.append(f"Duplicates skipped: {counts['duplicates_skipped']}")
+    lines.extend(deselection_notes)
+    return "\n".join(lines)
 
 
 def apply_migration_job(
@@ -1992,6 +2142,7 @@ def apply_migration_job(
         "regex_rules": 0,
         "comments": 0,
         "local_dns_records": 0,
+        "local_dns_conflicts": 0,
         "upstream_resolvers": 0,
         "client_aliases": 0,
         "duplicates_skipped": 0,
@@ -2071,6 +2222,9 @@ def apply_migration_job(
                         outcome = _apply_local_dns_record(conn, record, plan["domain"], source_label, rollback_info)
                         if outcome == "added":
                             counts["local_dns_records"] += 1
+                        elif outcome == "added_conflicting":
+                            counts["local_dns_records"] += 1
+                            counts["local_dns_conflicts"] += 1
                         else:
                             counts["duplicates_skipped"] += 1
                     elif kind == "upstream":
@@ -2092,7 +2246,7 @@ def apply_migration_job(
             failures.append({"stage": stage, "error": str(exc)})
             message = f"apply failed during stage: {stage}: {exc}"
             conn.execute(
-                "UPDATE import_jobs SET finished_at=?, status='failed', failed_rows=1, message=?, report_json=? WHERE id=?",
+                "UPDATE import_jobs SET finished_at=?, status='failed', result_label='Failed', failed_rows=1, message=?, report_json=? WHERE id=?",
                 (
                     now(),
                     message,
@@ -2108,28 +2262,34 @@ def apply_migration_job(
             + counts["unsupported_kept_inactive"] + counts["local_dns_records"] + counts["upstream_resolvers"]
             + counts["client_aliases"]
         )
+        notes = _deselection_notes(plan, deselected)
+        result_label = _migration_result_label(counts)
+        breakdown = _component_breakdown(counts, notes)
         report = {
             "applied": True,
             "backup": backup_path,
             "counts": counts,
             "deselected_keys": deselected,
+            "deselection_notes": notes,
+            "result_label": result_label,
             "failures": failures,
         }
         conn.execute(
             """
             UPDATE import_jobs
-            SET finished_at=?, status='applied', applied_rows=?, skipped_rows=?, failed_rows=0,
+            SET finished_at=?, status='applied', result_label=?, applied_rows=?, skipped_rows=?, failed_rows=0,
                 inserted_record_ids_json=?, rollback_json=?, report_json=?, message=?
             WHERE id=?
             """,
             (
                 now(),
+                result_label,
                 applied_total,
                 counts["duplicates_skipped"] + counts["user_deselected"],
                 json.dumps(rollback_info["local_dns_ids"]),
                 json.dumps(rollback_info),
                 json.dumps(redact_sensitive(report), default=str),
-                f"migration applied: {applied_total} object(s); {counts['duplicates_skipped']} duplicate(s) skipped; {counts['user_deselected']} deselected",
+                f"{result_label}\n\n{breakdown}",
                 job_id,
             ),
         )

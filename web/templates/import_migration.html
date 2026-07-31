@@ -108,7 +108,7 @@
 
 {% if job %}
 <section class="panel stack">
-  <div class="panel__head"><h2>Import Job #{{ job.id }}</h2>{{ ui.status_badge(job.status|title, "healthy" if job.status == "applied" else "down" if job.status == "failed" else "neutral") }}</div>
+  <div class="panel__head"><h2>Import Job #{{ job.id }}</h2>{{ ui.status_badge(job.result_label if job.status == "applied" and job.result_label else job.status|title, "healthy" if job.status == "applied" and not job.result_label.startswith("Applied with") else "warning" if job.status == "applied" else "down" if job.status == "failed" else "neutral") }}</div>
   <p class="muted">{{ job.source_type }}: <span class="wrap-anywhere">{{ job.source_name }}</span></p>
 
   {% if headers and job.status in ("uploaded", "previewed") %}
@@ -183,7 +183,7 @@
     {% elif job.status == "failed" %}
       <div class="alert error" role="alert">{{ job.message }} No changes were kept: the transaction was rolled back.</div>
     {% else %}
-      <p>{{ job.message }}</p>
+      <pre class="mono">{{ job.message }}</pre>
     {% endif %}
     <div class="form-actions">
       <a class="button secondary" href="/import/jobs/{{ job.id }}/report">Download report</a>

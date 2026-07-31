@@ -313,6 +313,64 @@ install_and_check() {
   [ "$(backup_archive_count)" -gt "$count_before_adguard" ] || \
     fail "$label: applying the AdGuard migration did not create a new pre-import backup archive"
 
+  # Regression coverage for a real beta-tester failure: the migration job
+  # reported "Applied" with the correct object count, but none of the
+  # AdGuardHome.yaml's filtering.rewrites DNS rewrites actually showed up
+  # anywhere in Alderpoint DNS. The clean_install_adguard.yaml fixture now
+  # carries real rewrites (an A record, an AAAA record, a CNAME-style
+  # alias, and one rewrite disabled at the source) so this can't regress
+  # silently again.
+  echo "+ verifying the AdGuard import's job page reports Local DNS counts explicitly, not just a bare 'Applied' ($label)"
+  adguard_job_html="$(run "curl -s -b $COOKIE_JAR http://127.0.0.1:3000/import/jobs/$adguard_job_id")"
+  echo "$adguard_job_html" | grep -q 'Local DNS: 4 created' || \
+    fail "$label: the AdGuard import job page does not report 'Local DNS: 4 created' in its result breakdown (got: $(echo "$adguard_job_html" | grep -o 'Local DNS:[^<]*' | head -1))"
+
+  echo "+ verifying the imported Local DNS records actually landed in Alderpoint DNS's database ($label)"
+  local_dns_rows="$(run "runuser -u alderpointdns -- python3 -c \"import sqlite3; c = sqlite3.connect('/var/lib/alderpointdns/alderpointdns.db'); c.row_factory = sqlite3.Row; [print(dict(r)) for r in c.execute(\\\"SELECT fqdn, record_type, value, enabled FROM local_dns_records WHERE fqdn LIKE 'clean-install-%' ORDER BY fqdn\\\")]\"")"
+  echo "$local_dns_rows" | grep -q "'fqdn': 'clean-install-nas.home.arpa'.*'record_type': 'A'.*'value': '192.168.50.10'.*'enabled': 1" || \
+    fail "$label: the imported A record clean-install-nas.home.arpa was not found (enabled) in local_dns_records (got: $local_dns_rows)"
+  echo "$local_dns_rows" | grep -q "'fqdn': 'clean-install-printer.home.arpa'.*'record_type': 'AAAA'.*'enabled': 1" || \
+    fail "$label: the imported AAAA record clean-install-printer.home.arpa was not found (enabled) in local_dns_records (got: $local_dns_rows)"
+  echo "$local_dns_rows" | grep -q "'fqdn': 'clean-install-alias.home.arpa'.*'record_type': 'CNAME'.*'enabled': 1" || \
+    fail "$label: the imported CNAME record clean-install-alias.home.arpa was not found (enabled) in local_dns_records (got: $local_dns_rows)"
+  echo "$local_dns_rows" | grep -q "'fqdn': 'clean-install-disabled.home.arpa'.*'enabled': 0" || \
+    fail "$label: the source-disabled rewrite clean-install-disabled.home.arpa was not imported as a disabled (enabled=0) record (got: $local_dns_rows)"
+
+  echo "+ verifying the generated BIND zone file contains the imported Local DNS records ($label)"
+  run "grep -q 'clean-install-nas' /var/lib/alderpointdns/compiled/bind/local/home.arpa.zone" || \
+    fail "$label: the generated home.arpa.zone does not contain clean-install-nas"
+  run "grep -q 'clean-install-printer' /var/lib/alderpointdns/compiled/bind/local/home.arpa.zone" || \
+    fail "$label: the generated home.arpa.zone does not contain clean-install-printer"
+  run "grep -q 'clean-install-alias' /var/lib/alderpointdns/compiled/bind/local/home.arpa.zone" || \
+    fail "$label: the generated home.arpa.zone does not contain clean-install-alias"
+
+  echo "+ verifying the imported Local DNS records resolve through dnsdist ($label)"
+  run "dig @127.0.0.1 -p 53 clean-install-nas.home.arpa A +time=3 +tries=2 +short | grep -qx '192.168.50.10'" || \
+    fail "$label: clean-install-nas.home.arpa did not resolve to 192.168.50.10 through dnsdist"
+  run "dig @127.0.0.1 -p 53 clean-install-printer.home.arpa AAAA +time=3 +tries=2 +short | grep -qi 'fd00:beef::50'" || \
+    fail "$label: clean-install-printer.home.arpa did not resolve to fd00:beef::50 through dnsdist"
+  run "dig @127.0.0.1 -p 53 clean-install-alias.home.arpa A +time=3 +tries=2 +short | grep -qx '192.168.50.10'" || \
+    fail "$label: clean-install-alias.home.arpa (CNAME to clean-install-nas.home.arpa) did not resolve to 192.168.50.10 through dnsdist"
+  run "dig @127.0.0.1 -p 53 clean-install-disabled.home.arpa A +time=3 +tries=2 +short | grep -q ." && \
+    fail "$label: clean-install-disabled.home.arpa resolved despite being imported disabled (source-disabled AdGuard rewrites must not be served)"
+
+  echo "+ re-uploading and re-applying the same AdGuard Home migration to confirm Local DNS records are skipped as duplicates, not re-created ($label)"
+  local_dns_count_before_reimport="$(run "runuser -u alderpointdns -- python3 -c \"import sqlite3; c = sqlite3.connect('/var/lib/alderpointdns/alderpointdns.db'); print(c.execute('SELECT count(*) FROM local_dns_records').fetchone()[0])\"")"
+  adguard_headers2="$(run "curl -s -D - -o /tmp/adguard-upload-body2.$label.html -b $COOKIE_JAR -c $COOKIE_JAR \
+    -F csrf=$import_csrf -F upload=@/tmp/adguard_home.yaml \
+    http://127.0.0.1:3000/import/migration/adguard/yaml")"
+  adguard_job_id2="$(printf '%s' "$adguard_headers2" | tr -d '\r' | sed -nE 's#.*[Ll]ocation: */import/jobs/([0-9]+)/preview.*#\1#p' | head -1)"
+  [ -n "$adguard_job_id2" ] || fail "$label: re-uploading the AdGuard Home migration did not reach a preview page"
+  apply_code2="$(run "curl -s -o /tmp/adguard-apply-body2.$label.html -w '%{http_code}' -b $COOKIE_JAR -c $COOKIE_JAR \
+    -d csrf=$import_csrf http://127.0.0.1:3000/import/jobs/$adguard_job_id2/apply")"
+  [ "$apply_code2" = "303" ] || fail "$label: re-applying the AdGuard Home migration failed (HTTP $apply_code2)"
+  adguard_job_html2="$(run "curl -s -b $COOKIE_JAR http://127.0.0.1:3000/import/jobs/$adguard_job_id2")"
+  echo "$adguard_job_html2" | grep -q 'Local DNS: 0 created' || \
+    fail "$label: re-importing the identical AdGuard Home migration did not report 'Local DNS: 0 created' (got: $(echo "$adguard_job_html2" | grep -o 'Local DNS:[^<]*' | head -1))"
+  local_dns_count_after_reimport="$(run "runuser -u alderpointdns -- python3 -c \"import sqlite3; c = sqlite3.connect('/var/lib/alderpointdns/alderpointdns.db'); print(c.execute('SELECT count(*) FROM local_dns_records').fetchone()[0])\"")"
+  [ "$local_dns_count_before_reimport" = "$local_dns_count_after_reimport" ] || \
+    fail "$label: re-importing the identical AdGuard Home migration changed the local_dns_records row count ($local_dns_count_before_reimport -> $local_dns_count_after_reimport) -- duplicates were created"
+
   echo "+ uploading, previewing, and applying a synthetic Pi-hole migration ($label)"
   count_before_pihole="$(backup_archive_count)"
   pihole_headers="$(run "curl -s -D - -o /tmp/pihole-upload-body.$label.html -b $COOKIE_JAR -c $COOKIE_JAR \

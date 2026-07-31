@@ -21,6 +21,7 @@ from app import alderpointdns_compiler, backup, custom_rules, importer, local_dn
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 ADGUARD_FIXTURE = (FIXTURES / "adguard_home.yaml").read_text()
+ADGUARD_REWRITES_FIXTURE = (FIXTURES / "adguard_rewrites.yaml").read_text()
 PIHOLE_FIXTURE = (FIXTURES / "pihole_export.txt").read_text()
 
 
@@ -306,6 +307,149 @@ class ImporterTest(unittest.TestCase):
         self.assertEqual(rules["external.example.com -> 192.168.1.51"], "|external.example.com^$dnsrewrite=192.168.1.51")
         self.assertEqual(rules["*.wildcard.example -> 192.168.1.52"], "||wildcard.example^$dnsrewrite=192.168.1.52")
         self.assertTrue(any("badalias.home.arpa" in note for note in translation["unsupported_rules"]))
+
+    # -- AdGuard DNS rewrite support (current schema, legacy schema, and
+    #    the failure mode where a real migration reported "Applied" with
+    #    every Local DNS record silently omitted) -----------------------
+
+    def test_translate_adguard_rewrites_current_schema_multi_answer_and_disabled(self) -> None:
+        translation = importer.parse_adguard_yaml(ADGUARD_REWRITES_FIXTURE, "home.arpa")
+        local = {(r["fqdn"], r["record_type"], r["value"]): r for r in translation["rewrites_as_local_dns"]}
+        self.assertIn(("nas.home.arpa", "A", "192.168.1.50"), local)
+        self.assertIn(("nas.home.arpa", "A", "192.168.1.51"), local)
+        self.assertIn(("printer.home.arpa", "AAAA", "fd00::50"), local)
+        self.assertIn(("alias.home.arpa", "CNAME", "nas.home.arpa"), local)
+        self.assertIn(("retired.home.arpa", "A", "192.168.1.60"), local)
+        self.assertTrue(local[("nas.home.arpa", "A", "192.168.1.50")]["enabled"])
+        self.assertTrue(local[("nas.home.arpa", "A", "192.168.1.51")]["enabled"])
+        self.assertFalse(local[("retired.home.arpa", "A", "192.168.1.60")]["enabled"])
+        self.assertIn("disabled", local[("retired.home.arpa", "A", "192.168.1.60")]["disabled_reason"])
+        # AdGuard's "A"/"AAAA" pass-through/exclusion sentinel must never be
+        # read as a literal address or as a (nonsensical) single-label
+        # CNAME target -- it is reported, not silently dropped or misread.
+        self.assertTrue(any("excluded.home.arpa" in note and "'A'" in note for note in translation["unsupported_rules"]))
+        self.assertTrue(any("excluded6.home.arpa" in note and "'AAAA'" in note for note in translation["unsupported_rules"]))
+        self.assertFalse(any("excluded.home.arpa" in str(r) for r in translation["rewrites_as_local_dns"]))
+        self.assertFalse(any("excluded6.home.arpa" in str(r) for r in translation["rewrites_as_local_dns"]))
+
+    def test_build_migration_plan_local_dns_outcomes_new_and_disabled_at_source(self) -> None:
+        translation = importer.parse_adguard_yaml(ADGUARD_REWRITES_FIXTURE, "home.arpa")
+        plan = importer.build_migration_plan(translation, "home.arpa")
+        # Multiple valid answers for one hostname are distinct, selectable
+        # items -- not folded together or treated as duplicates of each
+        # other.
+        self.assertEqual(len(plan["categories"]["local_dns"]), 5)
+        by_record = {tuple(item["_record"]): item for item in plan["categories"]["local_dns"]}
+        self.assertEqual(by_record[("nas.home.arpa", "A", "192.168.1.50")]["outcome"], "new")
+        self.assertEqual(by_record[("nas.home.arpa", "A", "192.168.1.51")]["outcome"], "new")
+        self.assertEqual(by_record[("retired.home.arpa", "A", "192.168.1.60")]["outcome"], "disabled at source")
+        self.assertIn("disabled in AdGuard Home", by_record[("retired.home.arpa", "A", "192.168.1.60")]["warning"])
+        # Disabled-at-source items stay selected by default -- they are
+        # imported as an inactive record, never silently dropped from the
+        # import entirely.
+        self.assertTrue(by_record[("retired.home.arpa", "A", "192.168.1.60")]["selected"])
+
+    def test_translate_adguard_rewrites_legacy_top_level_location(self) -> None:
+        # Some AdGuard Home schema versions store the rewrite list at the
+        # top level instead of nested under `filtering:`.
+        text = "rewrites:\n  - domain: legacy.home.arpa\n    answer: 192.168.9.9\n"
+        translation = importer.parse_adguard_yaml(text, "home.arpa")
+        local = {(r["fqdn"], r["record_type"], r["value"]) for r in translation["rewrites_as_local_dns"]}
+        self.assertIn(("legacy.home.arpa", "A", "192.168.9.9"), local)
+
+    def test_translate_adguard_rewrites_global_toggle_disables_all(self) -> None:
+        text = (
+            "filtering:\n  rewrites_enabled: false\n  rewrites:\n"
+            "    - domain: a.home.arpa\n      answer: 192.168.1.1\n"
+            "    - domain: b.home.arpa\n      answer: 192.168.1.2\n"
+        )
+        translation = importer.parse_adguard_yaml(text, "home.arpa")
+        self.assertEqual(len(translation["rewrites_as_local_dns"]), 2)
+        for record in translation["rewrites_as_local_dns"]:
+            self.assertFalse(record["enabled"])
+            self.assertIn("rewrites_enabled", record["disabled_reason"])
+
+    def test_adguard_dnsrewrite_cname_form_reported_unsupported_not_dropped(self) -> None:
+        translation = importer.parse_adguard_yaml(
+            "user_rules:\n  - '||cname.example^$dnsrewrite=NOERROR;CNAME;target.example'\n", "home.arpa",
+        )
+        summary = importer.summarize_migration(translation, "home.arpa")
+        unsupported = self.summary_items(summary, "unsupported")
+        self.assertTrue(any("dnsrewrite" in item["warning"] for item in unsupported))
+        self.assertTrue(any(item["selectable"] and item["outcome"] == "inactive" for item in unsupported))
+
+    def test_apply_adguard_rewrites_fixture_respects_enabled_state_and_multi_answer(self) -> None:
+        translation = importer.parse_adguard_yaml(ADGUARD_REWRITES_FIXTURE, "home.arpa")
+        job_id = importer.create_migration_job("adguard_yaml", "adguard_rewrites.yaml", translation)
+        importer.migration_preview_job(job_id, "home.arpa")
+        result = importer.apply_migration_job(job_id, default_domain="home.arpa")
+        self.assertEqual(result["counts"]["local_dns_records"], 5)
+        # The second A answer for nas.home.arpa is flagged as conflicting
+        # (the hostname already has a record) but is still added alongside
+        # the first, never overwriting it -- this is Alderpoint DNS's
+        # supported multi-answer model, just reported rather than silent.
+        self.assertEqual(result["counts"]["local_dns_conflicts"], 1)
+        with self.connect() as conn:
+            rows = {
+                (row["fqdn"], row["record_type"], row["value"]): row["enabled"]
+                for row in conn.execute("SELECT fqdn, record_type, value, enabled FROM local_dns_records")
+            }
+        self.assertEqual(rows[("nas.home.arpa", "A", "192.168.1.50")], 1)
+        self.assertEqual(rows[("nas.home.arpa", "A", "192.168.1.51")], 1)
+        self.assertEqual(rows[("retired.home.arpa", "A", "192.168.1.60")], 0, "a rewrite disabled at the source must be imported disabled, not silently activated")
+        job = importer.get_job(job_id)
+        self.assertEqual(job["result_label"], "Applied with conflicts")
+        self.assertIn("Local DNS: 5 created, 1 conflicting", job["message"])
+
+    def test_reimporting_adguard_rewrites_fixture_is_idempotent(self) -> None:
+        translation = importer.parse_adguard_yaml(ADGUARD_REWRITES_FIXTURE, "home.arpa")
+        first_job = importer.create_migration_job("adguard_yaml", "adguard_rewrites.yaml", translation)
+        importer.migration_preview_job(first_job, "home.arpa")
+        importer.apply_migration_job(first_job, default_domain="home.arpa")
+        counts_after_first = self.destination_counts()
+
+        translation_again = importer.parse_adguard_yaml(ADGUARD_REWRITES_FIXTURE, "home.arpa")
+        second_job = importer.create_migration_job("adguard_yaml", "adguard_rewrites.yaml", translation_again)
+        importer.migration_preview_job(second_job, "home.arpa")
+        result = importer.apply_migration_job(second_job, default_domain="home.arpa")
+
+        self.assertEqual(self.destination_counts(), counts_after_first, "re-importing identical AdGuard rewrite data must not create duplicate Local DNS rows")
+        self.assertEqual(result["counts"]["local_dns_records"], 0)
+        self.assertEqual(result["counts"]["duplicates_skipped"], 5)
+        job = importer.get_job(second_job)
+        self.assertIn("Local DNS: 0 created", job["message"])
+
+    def test_local_dns_conflicting_record_is_reported_and_not_overwritten(self) -> None:
+        local_dns.add_record("A", "conflict.home.arpa", "192.168.1.10", 300, "original", True)
+        translation = {"rewrites_as_local_dns": [{"fqdn": "conflict.home.arpa", "record_type": "A", "value": "192.168.1.11", "enabled": True}]}
+        job_id = importer.create_migration_job("adguard_yaml", "conflict.yaml", translation)
+        preview = importer.migration_preview_job(job_id, "home.arpa")
+        item = self.summary_items(preview["summary"], "local_dns")[0]
+        self.assertEqual(item["outcome"], "conflicting")
+        result = importer.apply_migration_job(job_id, default_domain="home.arpa")
+        self.assertEqual(result["counts"]["local_dns_records"], 1)
+        self.assertEqual(result["counts"]["local_dns_conflicts"], 1)
+        with self.connect() as conn:
+            rows = conn.execute("SELECT value FROM local_dns_records WHERE fqdn='conflict.home.arpa' AND record_type='A' ORDER BY value").fetchall()
+        self.assertEqual([r["value"] for r in rows], ["192.168.1.10", "192.168.1.11"], "the existing record must not be overwritten; the conflicting one is added alongside it")
+        job = importer.get_job(job_id)
+        self.assertIn("conflicting", job["message"])
+
+    def test_deselecting_local_dns_category_reports_explicit_note(self) -> None:
+        translation = importer.parse_adguard_yaml(ADGUARD_REWRITES_FIXTURE, "home.arpa")
+        job_id = importer.create_migration_job("adguard_yaml", "adguard_rewrites.yaml", translation)
+        preview = importer.migration_preview_job(job_id, "home.arpa")
+        summary = preview["summary"]
+        all_selected = {item["key"] for section in summary["categories"] for item in section["items"] if item["selected"]}
+        local_keys = {item["key"] for item in self.summary_items(summary, "local_dns")}
+        selected = all_selected - local_keys
+        result = importer.apply_migration_job(job_id, selected=selected, default_domain="home.arpa")
+        self.assertEqual(result["counts"]["local_dns_records"], 0)
+        self.assertEqual(result["counts"]["user_deselected"], 5)
+        job = importer.get_job(job_id)
+        self.assertIn("Applied with user-deselected items", job["result_label"])
+        self.assertIn("5 Local DNS records were not imported because Local DNS was deselected", job["message"])
+        self.assertIn("Local DNS: 0 created", job["message"])
 
     def test_translate_adguard_sources_carry_enabled_state_and_category(self) -> None:
         translation = importer.parse_adguard_yaml(ADGUARD_FIXTURE, "home.arpa")
