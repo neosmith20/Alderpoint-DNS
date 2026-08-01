@@ -626,6 +626,134 @@ def ensure_dnsdist_conf_parameterized(template_path: Path) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# dnsdist.conf managed-block migrations (repeatable, idempotent)
+#
+# ensure_dnsdist_conf_parameterized() above only ever runs once per install
+# (it checks for its own marker and is a no-op forever after that), so a
+# pre-existing install never automatically picks up later template changes
+# even after an Alderpoint DNS package upgrade -- confirmed in practice: a
+# beta.4 install's live dnsdist.conf did not gain the doh-altsvc block added
+# after beta.4 shipped, and had to be resynced by hand to test it.
+#
+# A full re-template on every upgrade isn't safe either: it would silently
+# discard anything an administrator hand-edited into dnsdist.conf outside
+# Alderpoint's own managed sections. Instead, each individually-shipped
+# behavior change gets its own narrowly-scoped, marker-delimited migration
+# function like this one: it touches only the exact span between its own
+# BEGIN/END markers (or, pre-marker, the exact known old text that span
+# replaced), leaves everything else in the file untouched, and is safe to
+# run on every upgrade/deploy forever -- already-migrated content is
+# recognized by its markers and left alone.
+# ---------------------------------------------------------------------------
+
+DOH_ALTSVC_MARKER_BEGIN = "-- ALDERPOINT-DNS-MANAGED-BLOCK: doh-altsvc BEGIN"
+DOH_ALTSVC_MARKER_END = "-- ALDERPOINT-DNS-MANAGED-BLOCK: doh-altsvc END"
+
+# The exact dohEnabled block shipped through v0.4.0-beta.4, before the
+# doh-altsvc managed block existed: two addDOHLocal calls, each with its own
+# literal 3-key options table (no shared variable, no DoH3/Alt-Svc
+# awareness). Matched verbatim -- including whitespace -- so this migration
+# only ever fires against dnsdist.conf content it can prove is exactly this
+# known shape; anything else (an admin's own edits to this block) is left
+# alone rather than guessed at.
+_DOH_BETA4_BLOCK_RE = re.compile(
+    r'if dohEnabled then\n'
+    r'  if listenIPv4 ~= "" then\n'
+    r'    addDOHLocal\(listenIPv4 \.\. ":" \.\. dohPort, \{tlsCert\}, \{tlsKey\}, \{\n'
+    r'      dohPath\n'
+    r'    \}, \{\n'
+    r'      reusePort=true,\n'
+    r'      minTLSVersion="tls1\.2",\n'
+    r'      ciphers="HIGH:!aNULL:!MD5:!RC4"\n'
+    r'    \}\)\n'
+    r'  end\n'
+    r'  if listenIPv6 ~= "" then\n'
+    r'    addDOHLocal\("\[" \.\. listenIPv6 \.\. "\]:" \.\. dohPort, \{tlsCert\}, \{tlsKey\}, \{\n'
+    r'      dohPath\n'
+    r'    \}, \{\n'
+    r'      reusePort=true,\n'
+    r'      minTLSVersion="tls1\.2",\n'
+    r'      ciphers="HIGH:!aNULL:!MD5:!RC4"\n'
+    r'    \}\)\n'
+    r'  end\n'
+    r'end\n'
+)
+
+_MANAGED_BLOCK_RE_TEMPLATE = r'{begin}\n.*?\n{end}\n'
+
+
+def _extract_managed_block(text: str, begin_marker: str, end_marker: str) -> str:
+    match = re.search(
+        _MANAGED_BLOCK_RE_TEMPLATE.format(begin=re.escape(begin_marker), end=re.escape(end_marker)),
+        text,
+        re.S,
+    )
+    if not match:
+        raise EncryptionError(f"template does not contain a {begin_marker!r}...{end_marker!r} managed block")
+    return match.group(0)
+
+
+def ensure_doh_altsvc_migration(template_path: Path) -> tuple[bool, str]:
+    """Idempotently bring an existing dnsdist.conf's DoH listener options up
+    to the current doh-altsvc managed block (Alt-Svc header advertised only
+    while DoH3 is enabled), without re-templating the rest of the file.
+
+    Returns (changed, message). Never raises for "nothing to do" or "can't
+    safely migrate this file" cases -- those are reported in the message so
+    deploy_encryption() can surface them without failing the deployment;
+    only backup/write/validate I/O failures raise.
+    """
+    if not DNSDIST_CONF.exists():
+        return False, ""
+    current = DNSDIST_CONF.read_text()
+    if MIGRATION_MARKER not in current:
+        # Base parameterization (ensure_dnsdist_conf_parameterized) hasn't
+        # run yet on this file; that migration owns getting the file into a
+        # state this one can reason about, so this one waits its turn.
+        return False, ""
+    if DOH_ALTSVC_MARKER_BEGIN in current:
+        # Already migrated (either by this function previously, or it's a
+        # fresh install whose dnsdist.conf already came from the current
+        # template). Nothing to do -- and nothing to touch, so a second run
+        # is guaranteed byte-for-byte identical to the first.
+        return False, ""
+    template = template_path.read_text()
+    if DOH_ALTSVC_MARKER_BEGIN not in template:
+        # The template this deploy is using doesn't define the doh-altsvc
+        # managed block at all (an older template, or a minimal one in
+        # tests that doesn't model the DoH listener) -- nothing to migrate
+        # to yet.
+        return False, ""
+    managed_block = _extract_managed_block(template, DOH_ALTSVC_MARKER_BEGIN, DOH_ALTSVC_MARKER_END)
+    matches = list(_DOH_BETA4_BLOCK_RE.finditer(current))
+    if len(matches) != 1:
+        return False, (
+            "doh-altsvc migration skipped: the dohEnabled block in the deployed dnsdist.conf "
+            "does not match the known pre-migration shape (found "
+            f"{len(matches)} match(es); expected exactly 1), which usually means it was "
+            "hand-edited. Reconcile it manually against packaging/dnsdist.conf's "
+            f"{DOH_ALTSVC_MARKER_BEGIN} block, or restore a stock copy and reapply local "
+            "changes, to pick up Alt-Svc support."
+        )
+    match = matches[0]
+    new_content = current[: match.start()] + managed_block + current[match.end() :]
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    backup = BACKUP_DIR / f"dnsdist.conf.pre-doh-altsvc-migration.{int(time.time())}"
+    shutil.copy2(DNSDIST_CONF, backup)
+    DNSDIST_CONF.write_text(new_content)
+    env_text = DNSDIST_ENV_OVERRIDE.read_text() if DNSDIST_ENV_OVERRIDE.exists() else ""
+    check_env = {**os.environ, **_env_from_override(env_text)}
+    result = run(["dnsdist", "--check-config", "-C", str(DNSDIST_CONF)], check=False, env=check_env)
+    if result.returncode != 0:
+        shutil.copy2(backup, DNSDIST_CONF)
+        raise EncryptionError(
+            f"doh-altsvc migration produced an invalid dnsdist.conf and was rolled back from {backup}: "
+            f"{result.stdout}"
+        )
+    return True, f"applied doh-altsvc migration to dnsdist.conf (backup: {backup})"
+
+
+# ---------------------------------------------------------------------------
 # Deploy
 # ---------------------------------------------------------------------------
 
@@ -804,7 +932,13 @@ def deploy_encryption(conn: sqlite3.Connection | None = None, template_path: Pat
                 # actually exist.
                 cfg["dnscrypt_enabled"] = "0"
                 warnings.append(f"DNSCrypt certificate generation failed, DNSCrypt was disabled for this deployment: {exc}")
-        conf_changed = ensure_dnsdist_conf_parameterized(template_path or Path("/opt/alderpointdns/packaging/dnsdist.conf"))
+        resolved_template_path = template_path or Path("/opt/alderpointdns/packaging/dnsdist.conf")
+        conf_changed = ensure_dnsdist_conf_parameterized(resolved_template_path)
+        altsvc_migrated, altsvc_message = ensure_doh_altsvc_migration(resolved_template_path)
+        if altsvc_migrated:
+            conf_changed = True
+        if altsvc_message:
+            warnings.append(altsvc_message)
         new_env_text = render_env_override(cfg)
         current_env_text = DNSDIST_ENV_OVERRIDE.read_text() if DNSDIST_ENV_OVERRIDE.exists() else ""
         if new_env_text == current_env_text and not conf_changed and not cert_material_changed:

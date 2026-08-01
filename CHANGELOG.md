@@ -28,6 +28,29 @@ may still change between releases before a stable 1.0.
   -- once a host's socket table was long enough, which could report Plain
   DNS/DoQ/DoH3 as not listening when they genuinely were. Listener
   detection now reads the full, untruncated `ss` output.
+- Added an idempotent, marker-delimited `dnsdist.conf` migration
+  (`ensure_doh_altsvc_migration()`) so an already-migrated v0.4.0-beta.4
+  install picks up the Alt-Svc managed block on upgrade -- the one-time
+  base parameterization migration never re-templates the file again, so
+  the Alt-Svc change above would otherwise never reach an existing
+  install. Runs automatically from both the `.deb` postinst and
+  `scripts/upgrade.sh` (new `alderpointdns_compiler.py dnsdist-conf-migrate`
+  subcommand), validates with `dnsdist --check-config` and backs up/rolls
+  back before ever touching the live file, only touches the exact known
+  pre-migration DoH listener block (leaving any hand-edited block alone
+  and reporting that it was skipped), and is a byte-stable no-op on every
+  run after the first. Verified end-to-end on a disposable Debian 13
+  clone: a real upgrade from the published `v0.4.0-beta.4` `.deb` to this
+  build applied the migration automatically, and the live DoH response's
+  `alt-svc` header was confirmed present/absent as DoH3 was enabled/disabled
+  after installing DoQ/DoH3 capability via `install-enhanced-dnsdist`.
+- Fixed the documented/embedded dnsdist rollback instructions
+  (`docs/dnsdist.md`, `app/dnsdist_upgrade.py`'s failure-path message):
+  `apt-get install --reinstall dnsdist` cannot reinstall a version that's
+  no longer available once the PowerDNS repository is removed ("cannot be
+  downloaded"), so it never actually rolled back to Debian's stock
+  package. Both now use `apt-get install -y --allow-downgrades dnsdist`,
+  confirmed to actually downgrade and restart cleanly.
 
 ## v0.4.0-beta.4
 

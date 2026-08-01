@@ -172,6 +172,14 @@ validate() {
 migrate() {
   if [ "$ROOT" = "/" ]; then
     run /opt/alderpointdns/app/analytics.py init-db
+    # Idempotently apply any dnsdist.conf managed-block migrations (e.g. the
+    # doh-altsvc Alt-Svc header block) an upgraded install's on-disk
+    # dnsdist.conf predates, without a full re-template that would discard
+    # local hand-edits. Safe/cheap to run on every upgrade -- each migration
+    # checks its own marker and does nothing once already applied. Must run
+    # before restart_services() restarts dnsdist, so the restart actually
+    # picks up the migrated config.
+    run /opt/alderpointdns/app/alderpointdns_compiler.py dnsdist-conf-migrate
     run /opt/alderpointdns/app/alderpointdns_compiler.py deploy --no-download
     # Applies the stored Filter Update Interval (a pre-existing setting is
     # preserved by the migration above; new installations default to 1 Day) to

@@ -190,6 +190,22 @@ case "$1" in
       fi
       : > /etc/alderpointdns/.dnsdist-conf-installed
     fi
+    # On an upgrade, the block above is skipped (the marker file already
+    # exists) and /etc/dnsdist/dnsdist.conf keeps whatever an earlier
+    # version of this package -- or the administrator -- last wrote, which
+    # can predate later per-feature changes to the managed sections of the
+    # template (e.g. the doh-altsvc Alt-Svc header block). Applying those
+    # narrowly-scoped migrations here means an upgraded install picks up
+    # the new managed behavior automatically, without a full re-template
+    # that would discard any local hand-edits elsewhere in the file. Each
+    # migration validates and backs up before touching anything and is a
+    # no-op once already applied, so this is safe and cheap on every
+    # install/upgrade, not just when there's actually something to migrate.
+    if ! dnsdist_conf_migrate_output="$(PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py dnsdist-conf-migrate)"; then
+      echo "alderpointdns: dnsdist.conf managed-block migration failed; aborting install." >&2
+      exit 1
+    fi
+    echo "alderpointdns: dnsdist.conf migration: $dnsdist_conf_migrate_output"
     # Validated on every configure (not just first install): even when the
     # template above isn't rewritten on an upgrade, a bad or hand-edited
     # /etc/dnsdist/dnsdist.conf should never be silently restarted into.

@@ -451,7 +451,7 @@ def install_enhanced_dnsdist(expected_fingerprint: str = EXPECTED_KEY_FINGERPRIN
                 f"Rollback: {rollback_note}. To fully roll back the APT source itself, run:\n"
                 f"  sudo rm -f {SOURCES_LIST_PATH} {PREFERENCES_PATH} {KEYRING_PATH}\n"
                 "  sudo apt-get update\n"
-                "  sudo apt-get install --reinstall dnsdist\n"
+                "  sudo apt-get install -y --allow-downgrades dnsdist\n"
                 "  sudo systemctl restart dnsdist\n"
                 f"Backup archive of prior state: {backup_path}"
             ) from exc

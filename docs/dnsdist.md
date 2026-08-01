@@ -116,6 +116,34 @@ test client is installed (`python3-dnspython`/`python3-aioquic`); on a build
 or environment without one, the result is reported as configuration-checked
 or socket-verified, distinctly from an end-to-end verified query.
 
+### Managed-block migrations for existing installs
+
+`ensure_dnsdist_conf_parameterized()` (`app/encryption.py`) only ever
+re-templates `/etc/dnsdist/dnsdist.conf` once per install -- after that it's
+a permanent no-op, by design, so it never discards anything an administrator
+hand-edits into the file. That means a later template change (like the
+Alt-Svc header) doesn't reach an already-migrated install on its own.
+
+Instead, each such change ships its own narrowly-scoped, marker-delimited
+migration -- `ensure_doh_altsvc_migration()` for the Alt-Svc header is the
+first one. It runs on every `deploy_encryption()` call (so every upgrade and
+every Encryption Settings save), and:
+
+- is a no-op if the file already contains its `-- ALDERPOINT-DNS-MANAGED-BLOCK:
+  doh-altsvc` markers (already migrated, including a fresh install whose
+  conf came from the current template directly);
+- only replaces that block if the existing DoH listener section matches the
+  exact known pre-migration (v0.4.0-beta.4) shape byte-for-byte -- anything
+  else (an administrator's own edits to that block) is left untouched, and
+  reported as skipped in the deployment message rather than guessed at;
+- backs up `dnsdist.conf` first, runs `dnsdist --check-config` against the
+  migrated result, and restores the backup if that check fails;
+- records what happened in the deployment's message (visible in Encryption
+  Settings' deployment history and `encryption.last_deployment()`).
+
+Running it twice makes no further changes -- the second run sees its own
+markers and returns immediately.
+
 ### Opt-in PowerDNS repository install (`alderpointdns install-enhanced-dnsdist`)
 
 `sudo alderpointdns install-enhanced-dnsdist` (`app/dnsdist_upgrade.py`) is the
@@ -175,7 +203,7 @@ Debian's own archive. To roll back to Debian's stock package:
 ```sh
 sudo rm -f /etc/apt/sources.list.d/pdns.list /etc/apt/preferences.d/dnsdist-21 /etc/apt/keyrings/dnsdist-21-pub.asc
 sudo apt-get update
-sudo apt-get install --reinstall dnsdist
+sudo apt-get install -y --allow-downgrades dnsdist
 sudo systemctl restart dnsdist
 ```
 
