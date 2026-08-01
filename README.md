@@ -7,7 +7,7 @@ application on top. dnsdist is the client-facing DNS frontend; BIND is a
 localhost-only validating cache/forwarder; filtering policy is compiled into
 a BIND RPZ zone and reloaded through a staged, validated deployment path.
 
-> **Status: beta.** This is **v0.4.0-beta.4**, pre-release software. It is
+> **Status: beta.** This is **v0.4.0-beta.5**, pre-release software. It is
 > functional and acceptance-tested in lab conditions, but it has not had
 > production-scale or adversarial-network exposure, and several features are
 > intentionally partial. See [Known limitations](#known-limitations) below
@@ -33,8 +33,11 @@ requires a separate license — see `LICENSE` and
   (default `home.arpa`), with automatic PTR records, served directly by BIND
   and never forwarded upstream. See `docs/architecture.md`.
 - **Encrypted resolvers.** Client-facing DoH, DoT, and DoQ/DoH3 (when the
-  installed dnsdist build supports QUIC), plus managed upstream resolvers over
-  plain DNS, DoT, and DoH. See `docs/dnsdist.md` and `docs/configuration.md`.
+  installed dnsdist build supports QUIC/HTTP-3 — Debian's own stock dnsdist
+  package does not; `sudo alderpointdns install-enhanced-dnsdist` opts in to
+  the official PowerDNS repository build that does), plus managed upstream
+  resolvers over plain DNS, DoT, and DoH. See `docs/dnsdist.md` and
+  `docs/configuration.md`.
 - **Replication.** One-way primary-to-replica configuration sync with hashed,
   one-time, revocable enrollment tokens and mTLS client authentication.
   Promotion is manual by design; automatic failover and bidirectional conflict
@@ -88,12 +91,12 @@ Alderpoint DNS is distributed as a Debian package for Debian 13. Download the cu
 
 ```bash
 curl -fL \
-  -o alderpointdns_0.4.0-beta4-1_all.deb \
-  https://github.com/neosmith20/Alderpoint-DNS/releases/download/v0.4.0-beta.4/alderpointdns_0.4.0-beta4-1_all.deb
+  -o alderpointdns_0.4.0-beta5-1_all.deb \
+  https://github.com/neosmith20/Alderpoint-DNS/releases/download/v0.4.0-beta.5/alderpointdns_0.4.0-beta5-1_all.deb
 
 curl -fL \
   -o SHA256SUMS \
-  https://github.com/neosmith20/Alderpoint-DNS/releases/download/v0.4.0-beta.4/SHA256SUMS
+  https://github.com/neosmith20/Alderpoint-DNS/releases/download/v0.4.0-beta.5/SHA256SUMS
   ```
 
 ## Known limitations

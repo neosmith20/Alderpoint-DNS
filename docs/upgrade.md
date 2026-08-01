@@ -1,6 +1,6 @@
 # Upgrade
 
-Alderpoint DNS is currently beta software (v0.4.0-beta.4); upgrade paths are
+Alderpoint DNS is currently beta software (v0.4.0-beta.5); upgrade paths are
 tested in dry-run and lab conditions but have not seen production-scale
 exposure. Use `scripts/upgrade.sh` from a reviewed release artifact to
 upgrade an existing Alderpoint DNS installation.
@@ -37,3 +37,21 @@ ALDERPOINTDNS_INSTALL_ROOT=/tmp/alderpointdns-upgrade-root ./scripts/upgrade.sh 
 Persistent user data is not deleted during an upgrade. If an upgrade fails
 after a database migration has run, use the pre-upgrade backup from
 `/var/lib/alderpointdns/backups` for data-level recovery.
+
+## Adding DoQ/DoH3 support to an existing install
+
+`scripts/upgrade.sh` upgrades the Alderpoint DNS application itself; it does
+not touch which dnsdist package is installed. If you're already running
+Alderpoint DNS on Debian's stock dnsdist (no `dns-over-quic`/
+`dns-over-http3` in `dnsdist --version`) and want DoQ/DoH3, run the opt-in
+installer separately, any time after the application upgrade:
+
+```sh
+sudo alderpointdns install-enhanced-dnsdist
+```
+
+This is a distinct, explicit action from an Alderpoint DNS upgrade — it adds
+the official PowerDNS third-party APT repository and installs a different
+dnsdist build. It never runs automatically as part of `scripts/upgrade.sh`
+or a `.deb` upgrade. See `docs/dnsdist.md` for exactly what it changes,
+the signing key fingerprint it verifies, and rollback instructions.

@@ -163,42 +163,26 @@ if plainEnabled then
     addLocal("[" .. listenIPv6 .. "]:53", {reusePort=true})
   end
 end
--- ALDERPOINT-DNS-MANAGED-BLOCK: doh-altsvc BEGIN
--- When DoH3 is enabled, advertise it to DoH (HTTP/1.1 or 2) clients via the
--- standard Alt-Svc response header (RFC 7838) so they can discover and
--- upgrade to HTTP/3 on doh3Port. This must disappear the moment DoH3 is
--- disabled -- it would otherwise point clients at a UDP port nothing is
--- listening on.
---
--- This whole block, start to end marker, is owned by
--- app/encryption.py's ensure_doh_altsvc_migration(): on an install that
--- predates it, that function replaces exactly this span (and nothing else
--- in the file) so pre-existing installs pick up Alt-Svc support without a
--- full dnsdist.conf re-template. Keep the markers and this block's shape
--- stable, or update that function's matching pattern to match.
-local alderpointdnsDohOptions = {
-  reusePort=true,
-  minTLSVersion="tls1.2",
-  ciphers="HIGH:!aNULL:!MD5:!RC4"
-}
-if doh3Enabled then
-  alderpointdnsDohOptions.customResponseHeaders = {
-    ["alt-svc"] = 'h3=":' .. doh3Port .. '"; ma=86400'
-  }
-end
 if dohEnabled then
   if listenIPv4 ~= "" then
     addDOHLocal(listenIPv4 .. ":" .. dohPort, {tlsCert}, {tlsKey}, {
       dohPath
-    }, alderpointdnsDohOptions)
+    }, {
+      reusePort=true,
+      minTLSVersion="tls1.2",
+      ciphers="HIGH:!aNULL:!MD5:!RC4"
+    })
   end
   if listenIPv6 ~= "" then
     addDOHLocal("[" .. listenIPv6 .. "]:" .. dohPort, {tlsCert}, {tlsKey}, {
       dohPath
-    }, alderpointdnsDohOptions)
+    }, {
+      reusePort=true,
+      minTLSVersion="tls1.2",
+      ciphers="HIGH:!aNULL:!MD5:!RC4"
+    })
   end
 end
--- ALDERPOINT-DNS-MANAGED-BLOCK: doh-altsvc END
 -- DoH3/DoQ/DNSCrypt require a dnsdist build with QUIC/DNSCrypt support
 -- compiled in (see docs/supported-systems.md); not every dnsdist build
 -- across the supported OS/repository matrix has these. On builds that lack

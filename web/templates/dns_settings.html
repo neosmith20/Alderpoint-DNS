@@ -141,24 +141,35 @@
   <div class="panel__head"><h2>Protocol Status</h2></div>
   <div class="table-wrap">
     <table>
-      <thead><tr><th>Protocol</th><th>Port</th><th>Status</th><th>Test</th></tr></thead>
+      <thead><tr><th>Protocol</th><th>Endpoint</th><th>Build Support</th><th>Runtime Status</th><th>Verification</th></tr></thead>
       <tbody>
         {% for protocol in protocols %}
           <tr>
             <td>{{ protocol.name }}</td>
-            <td class="mono">{{ protocol.port }}</td>
-            <td>{{ ui.status_badge(protocol.state|title, "healthy" if protocol.state == "listening" else "unavailable" if "unavailable" in protocol.state else "degraded") }}</td>
-            <td class="mono">{{ protocol.tested }}</td>
+            <td class="mono">{{ protocol.endpoint }}</td>
+            <td>{{ ui.status_badge(protocol.build_support, "healthy" if protocol.available else "unavailable") }}</td>
+            <td>{{ ui.status_badge(protocol.runtime_status, protocol.tone) }}</td>
+            <td class="mono">{{ protocol.verification }}</td>
           </tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
+  <p class="muted">DoQ and DoH3 require a dnsdist build with QUIC/HTTP-3 support, which Debian's own default dnsdist package does not include. Run <span class="mono">sudo alderpointdns install-enhanced-dnsdist</span> to opt in to the official PowerDNS dnsdist 2.1 repository and install a build with both; see <span class="mono">docs/dnsdist.md</span>.</p>
 </section>
 
 <section class="panel stack">
   <div class="panel__head"><h2>Build Features</h2></div>
+  <p><span class="mono">{{ dnsdist_version }}</span></p>
   <p class="muted mono">{{ dnsdist_features }}</p>
+  <table>
+    <thead><tr><th>Capability</th><th>Status</th></tr></thead>
+    <tbody>
+      {% for cap, label in [("doh", "DoH"), ("dot", "DoT"), ("doq", "DoQ"), ("doh3", "DoH3"), ("dnscrypt", "DNSCrypt")] %}
+        <tr><td>{{ label }}</td><td>{{ ui.status_badge("Supported" if dnsdist_capabilities.get(cap) else "Not supported", "healthy" if dnsdist_capabilities.get(cap) else "unavailable") }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
   <p class="muted">Replace certificate material by staging both <span class="mono">/etc/alderpointdns/certs/alderpointdns-lab.crt</span> and <span class="mono">/etc/alderpointdns/certs/alderpointdns-lab.key</span>, validating the pair, then restarting dnsdist. The bootstrap helper refuses partial replacement.</p>
 </section>
 {% endblock %}

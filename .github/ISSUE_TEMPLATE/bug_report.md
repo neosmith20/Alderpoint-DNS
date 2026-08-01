@@ -8,7 +8,7 @@ assignees: ''
 
 <!--
 Thanks for filing a bug report. Alderpoint DNS is beta software
-(v0.4.0-beta.4), so please include as much detail as you can — it helps a
+(v0.4.0-beta.5), so please include as much detail as you can — it helps a
 lot with reproducing and triaging issues quickly.
 
 Security vulnerabilities should NOT be reported here — see SECURITY.md for

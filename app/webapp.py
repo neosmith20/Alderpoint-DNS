@@ -440,16 +440,93 @@ def dnsdist_version_info() -> dict[str, Any]:
     }
 
 
-def listener_addresses() -> set[str]:
-    code, out = run(["ss", "-H", "-ltnup"])
+def _ss_listener_dump() -> tuple[int, str]:
+    """Runs `ss -H -ltnup` and returns its full, untruncated output.
+
+    Deliberately does not go through the shared run() helper: run() keeps
+    only the last 4000 characters of output, which is fine for short status
+    commands but silently drops early lines -- including the plain UDP 53
+    listener, which `ss` tends to print near the top -- once the socket
+    table is long enough (observed in practice on a host with a normal
+    number of other listening services). A dropped line here means a real
+    listener is invisible to every check below it, not just truncated
+    display text. A dedicated function (rather than inlining this in
+    listener_addresses()) keeps that one difference from run() isolated and
+    lets tests substitute canned `ss` output without needing a real socket
+    table on the test host.
+    """
+    try:
+        proc = subprocess.run(["ss", "-H", "-ltnup"], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except (OSError, FileNotFoundError):
+        return 1, ""
+    return proc.returncode, proc.stdout
+
+
+def listener_addresses() -> set[tuple[str, str]]:
+    """Return the set of (transport, local-address:port) pairs dnsdist (and
+    everything else) is actually listening on, e.g. ("tcp", "0.0.0.0:443") or
+    ("udp", "[::]:853").
+
+    `ss -H -ltnup` reports both TCP and UDP listeners in its Netid column
+    (tcp/tcp6/udp/udp6); a caller that only keeps the local address (as this
+    function previously did) can't tell a TCP listener on 443 from a UDP one
+    on the same port, which caused DoH's TCP socket to be reported as
+    satisfying the DoH3 UDP check, and DoT's TCP socket to satisfy DoQ.
+    """
+    code, out = _ss_listener_dump()
     if code != 0:
         return set()
-    addresses: set[str] = set()
+    listeners: set[tuple[str, str]] = set()
     for line in out.splitlines():
         parts = line.split()
         if len(parts) >= 5:
-            addresses.add(parts[4])
-    return addresses
+            netid = parts[0].lower()
+            if netid.startswith("tcp"):
+                transport = "tcp"
+            elif netid.startswith("udp"):
+                transport = "udp"
+            else:
+                continue
+            listeners.add((transport, parts[4]))
+    return listeners
+
+
+def _expected_sockets(transport: str, port: str, cfg: dict[str, str]) -> list[tuple[str, str]]:
+    expected: list[tuple[str, str]] = []
+    listen_ipv4 = cfg.get("listen_ipv4", "0.0.0.0")
+    listen_ipv6 = cfg.get("listen_ipv6", "::")
+    if listen_ipv4:
+        expected.append((transport, f"{listen_ipv4}:{port}"))
+    if listen_ipv6:
+        expected.append((transport, f"[{listen_ipv6}]:{port}"))
+    return expected
+
+
+def _socket_coverage(listeners: set[tuple[str, str]], expected: list[tuple[str, str]]) -> str:
+    """"full" if every expected (transport, address) socket is listening,
+    "none" if none are, "partial" otherwise (e.g. IPv4 up, IPv6 down)."""
+    if not expected:
+        return "none"
+    present = [e for e in expected if e in listeners]
+    if len(present) == len(expected):
+        return "full"
+    if not present:
+        return "none"
+    return "partial"
+
+
+def _last_protocol_test_results() -> dict[str, str]:
+    deployment = encryption.last_deployment()
+    if not deployment:
+        return {}
+    raw = deployment.get("protocol_tests") or ""
+    try:
+        import ast
+
+        parsed = ast.literal_eval(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except (ValueError, SyntaxError):
+        return {}
 
 
 def file_contains(path: Path, needle: str) -> bool:
@@ -495,65 +572,96 @@ def proxy_backend_enabled() -> bool:
     return False
 
 
+# (name, capability key in encryption.dnsdist_capabilities(), enabled-flag
+# key in encryption.settings(), port-setting key, transport, endpoint label,
+# protocol_tests key from encryption.test_protocols())
+PROTOCOL_SPECS: tuple[tuple[str, str | None, str | None, str | None, str, str, str], ...] = (
+    ("Plain DNS", None, None, None, "both", "53/udp, 53/tcp", "plain"),
+    ("DoH", "doh", "doh_enabled", "doh_port", "tcp", "443/tcp", "doh"),
+    ("DoT", "dot", "dot_enabled", "dot_port", "tcp", "853/tcp", "dot"),
+    ("DoQ", "doq", "doq_enabled", "doq_port", "udp", "853/udp", "doq"),
+    ("DoH3", "doh3", "doh3_enabled", "doh3_port", "udp", "443/udp", "doh3"),
+)
+
+# Internal runtime state -> user-facing label and status-badge tone. Never
+# render the internal state key itself to a user.
+RUNTIME_STATUS_LABELS: dict[str, tuple[str, str]] = {
+    "unsupported": ("Unavailable", "unavailable"),
+    "disabled": ("Disabled", "neutral"),
+    "configured": ("Configured but not listening", "degraded"),
+    "listening": ("Listening", "healthy"),
+    "degraded": ("Degraded", "down"),
+}
+
+
 def protocol_statuses() -> list[dict[str, str]]:
+    """Authoritative encrypted-DNS protocol status for the UI.
+
+    "Available"/"enabled" is decided from Alderpoint's own configured state
+    (encryption.settings(), the database Encryption Settings writes and
+    deploy_encryption() reads -- never from grepping the generated dnsdist.conf
+    for a variable name, which only proves the name exists in a template, not
+    that dnsdist actually enabled anything). "Listening" is decided from a
+    transport-and-port-specific socket check (listener_addresses()) so a TCP
+    listener on a shared port (DoH/443, DoT/853) can never satisfy a UDP
+    protocol's (DoH3/443, DoQ/853) listening check or vice versa.
+    """
     version = dnsdist_version_info()
-    features = version["feature_set"]
+    caps = encryption.dnsdist_capabilities()
+    cfg = encryption.settings()
     listeners = listener_addresses()
-    config = Path("/etc/dnsdist/dnsdist.conf")
-    has_doh3 = "dns-over-http3" in features
-    protocols = [
-        {
-            "name": "Plain DNS",
-            "available": True,
-            "enabled": file_contains(config, "plainEnabled"),
-            "listening": "0.0.0.0:53" in listeners or "[::]:53" in listeners,
-            "tested": "acceptance-covered",
-            "port": "53/udp,tcp",
-        },
-        {
-            "name": "DoH",
-            "available": "dns-over-https(nghttp2)" in features,
-            "enabled": file_contains(config, "dohEnabled"),
-            "listening": "0.0.0.0:443" in listeners or "[::]:443" in listeners,
-            "tested": "acceptance-covered",
-            "port": "443/tcp /dns-query",
-        },
-        {
-            "name": "DoT",
-            "available": any(feature.startswith("dns-over-tls") for feature in features),
-            "enabled": file_contains(config, "dotEnabled"),
-            "listening": "0.0.0.0:853" in listeners or "[::]:853" in listeners,
-            "tested": "acceptance-covered",
-            "port": "853/tcp",
-        },
-        {
-            "name": "DoQ",
-            "available": "dns-over-quic" in features,
-            "enabled": file_contains(config, "doqEnabled"),
-            "listening": "0.0.0.0:853" in listeners or "[::]:853" in listeners,
-            "tested": "acceptance-covered",
-            "port": "853/udp",
-        },
-    ]
-    protocols.append(
-        {
-            "name": "DoH3",
-            "available": has_doh3,
-            "enabled": file_contains(config, "doh3Enabled") if has_doh3 else False,
-            "listening": ("0.0.0.0:443" in listeners or "[::]:443" in listeners) if has_doh3 else False,
-            "tested": "config-validated" if has_doh3 else "unavailable in build",
-            "port": "443/udp",
-        }
-    )
-    for protocol in protocols:
-        if not protocol["available"]:
-            protocol["state"] = "unavailable in build"
-        elif protocol["enabled"] and protocol["listening"]:
-            protocol["state"] = "listening"
-        elif protocol["enabled"]:
-            protocol["state"] = "enabled"
+    last_tests = _last_protocol_test_results()
+    protocols = []
+    for name, cap_key, enabled_key, port_key, transport, endpoint, test_key in PROTOCOL_SPECS:
+        available = True if cap_key is None else bool(caps.get(cap_key))
+        enabled = True if enabled_key is None else cfg.get(enabled_key) == "1"
+        if transport == "both":
+            expected = _expected_sockets("udp", "53", cfg) + _expected_sockets("tcp", "53", cfg)
         else:
-            protocol["state"] = "available"
+            port = cfg.get(port_key, "") if port_key else ""
+            expected = _expected_sockets(transport, port, cfg)
+        coverage = _socket_coverage(listeners, expected)
+        if not available:
+            state = "unsupported"
+        elif not enabled:
+            state = "degraded" if coverage != "none" else "disabled"
+        elif coverage == "full":
+            state = "listening"
+        elif coverage == "none":
+            state = "configured"
+        else:
+            state = "degraded"
+        runtime_label, tone = RUNTIME_STATUS_LABELS[state]
+        if not available:
+            verification = "Capability detection tested"
+        elif not enabled or state != "listening":
+            verification = "Not run"
+        else:
+            result = last_tests.get(test_key)
+            if result == "ok":
+                # DoH/DoT/Plain DNS are additionally exercised end-to-end by
+                # the shell acceptance suite (tests/test_dnsdist_frontend.sh)
+                # on every run; DoQ/DoH3 only get a live query when a
+                # capable test client is installed (encryption.test_protocols),
+                # so their "ok" is reported distinctly as a real network
+                # verification rather than folded into the same generic label.
+                verification = "Automated checks included" if name in ("Plain DNS", "DoH", "DoT") else "Live query verified"
+            else:
+                verification = "Configuration validated"
+        protocols.append(
+            {
+                "name": name,
+                "endpoint": endpoint,
+                "port": endpoint,
+                "build_support": "Available" if available else "Not supported by installed dnsdist",
+                "runtime_status": runtime_label,
+                "verification": verification,
+                "state": state,
+                "tone": tone,
+                "available": available,
+                "enabled": enabled,
+            }
+        )
     return protocols
 
 
@@ -1640,6 +1748,7 @@ def dns_settings(request: Request, _: sqlite3.Row = Depends(current_admin)):
         doh_path="/dns-query",
         dnsdist_version=version["version"],
         dnsdist_features=version["features"],
+        dnsdist_capabilities=encryption.dnsdist_capabilities(),
         protocols=protocol_statuses(),
         cert=cert_status(),
         proxy_backend="enabled" if proxy_backend else "not enabled",

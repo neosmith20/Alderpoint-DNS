@@ -4,7 +4,69 @@ All notable changes to Alderpoint DNS are documented in this file. Alderpoint
 DNS is currently in **beta**; interfaces, on-disk formats, and configuration
 may still change between releases before a stable 1.0.
 
-## v0.4.0-beta.4 (unreleased)
+## v0.4.0-beta.5 (2026-07-31)
+
+- Fixed a false-positive in DoQ/DoH3 runtime status reporting: the DNS
+  Settings protocol table could report DoQ/DoH3 as "listening" merely
+  because a TCP DoH/DoT listener shared the same numeric port (443/853) as
+  the UDP-only DoQ/DoH3 listener. Listener detection now checks transport
+  and address together, "enabled" is read from Alderpoint's own encryption
+  settings rather than grepping the generated dnsdist configuration, and
+  the Protocol Status table now shows readable Build Support/Runtime
+  Status/Verification columns instead of internal strings. Added an
+  explicit, root-only, opt-in `alderpointdns install-enhanced-dnsdist` CLI
+  command (and a read-only `alderpointdns dnsdist-capabilities` command)
+  to install the official PowerDNS dnsdist 2.1 repository build with
+  DoQ/DoH3 support; this only installs the capability -- DoQ/DoH3 remain
+  disabled until turned on in Encryption Settings -- and is never done
+  automatically by the package or the web process. DoH now advertises an
+  active DoH3 endpoint via an Alt-Svc response header when DoH3 is enabled.
+- Fixed a second, related false-negative discovered during live-system
+  validation of the above: the shared `run()` helper used by
+  `listener_addresses()` kept only the last 4000 characters of `ss -H
+  -ltnup` output, silently dropping earlier lines -- including plain UDP 53
+  -- once a host's socket table was long enough, which could report Plain
+  DNS/DoQ/DoH3 as not listening when they genuinely were. Listener
+  detection now reads the full, untruncated `ss` output.
+- Added an idempotent, marker-delimited `dnsdist.conf` migration
+  (`ensure_doh_altsvc_migration()`) so an already-migrated v0.4.0-beta.4
+  install picks up the Alt-Svc managed block on upgrade -- the one-time
+  base parameterization migration never re-templates the file again, so
+  the Alt-Svc change above would otherwise never reach an existing
+  install. Runs automatically from both the `.deb` postinst and
+  `scripts/upgrade.sh` (new `alderpointdns_compiler.py dnsdist-conf-migrate`
+  subcommand), validates with `dnsdist --check-config` and backs up/rolls
+  back before ever touching the live file, only touches the exact known
+  pre-migration DoH listener block (leaving any hand-edited block alone
+  and reporting that it was skipped), and is a byte-stable no-op on every
+  run after the first. Verified end-to-end on a disposable Debian 13
+  clone: a real upgrade from the published `v0.4.0-beta.4` `.deb` to this
+  build applied the migration automatically, and the live DoH response's
+  `alt-svc` header was confirmed present/absent as DoH3 was enabled/disabled
+  after installing DoQ/DoH3 capability via `install-enhanced-dnsdist`.
+- Fixed the documented/embedded dnsdist rollback instructions
+  (`docs/dnsdist.md`, `app/dnsdist_upgrade.py`'s failure-path message):
+  `apt-get install --reinstall dnsdist` cannot reinstall a version that's
+  no longer available once the PowerDNS repository is removed ("cannot be
+  downloaded"), so it never actually rolled back to Debian's stock
+  package. Both now use `apt-get install -y --allow-downgrades dnsdist`,
+  confirmed to actually downgrade and restart cleanly.
+- Fixed `scripts/build-deb.sh` (the script that actually builds the
+  distributed `.deb`) writing its own hardcoded `Depends:` line that never
+  received the `gnupg` dependency added to `packaging/debian/control` --
+  found while verifying the final beta.5 package, since `gnupg` is
+  required by `install-enhanced-dnsdist`'s signing-key verification.
+- Fixed `scripts/backup.sh` hard-failing on any `.deb`-installed system:
+  it unconditionally tarred `etc/systemd/system/alderpointdns.service` and
+  `etc/systemd/system/alderpointdns-analytics.service`, which only exist
+  at that path on a from-source `install.sh`/`upgrade.sh` install -- the
+  `.deb` ships the base unit files under the Debian-standard
+  `/usr/lib/systemd/system` instead, which dpkg already owns and restores
+  on its own. `backup.sh` now includes each unit file only if present at
+  the from-source path, found while running the full acceptance suite
+  against the packaged beta.5 build.
+
+## v0.4.0-beta.4
 
 `v0.4.0-beta.3` was version-bumped, tag-created, and immediately withdrawn
 before any GitHub Release was published (a first prerelease publish had to

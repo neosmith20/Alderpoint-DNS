@@ -23,6 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, "/opt/alderpointdns")
 from app.auth import hash_password, validate_password_length  # noqa: E402
+from app import dnsdist_upgrade  # noqa: E402
 
 # ALDERPOINTDNS_DB_PATH overrides the database location for isolated tests
 # only (mirrors ALDERPOINTDNS_INSTALL_ROOT in scripts/install.sh); a real
@@ -171,9 +172,59 @@ def cmd_revoke_sessions(args: argparse.Namespace) -> int:
         conn.close()
 
 
+def cmd_install_enhanced_dnsdist(args: argparse.Namespace) -> int:
+    _require_root()
+    try:
+        report = dnsdist_upgrade.install_enhanced_dnsdist()
+    except dnsdist_upgrade.UpgradeError as exc:
+        print(f"alderpointdns install-enhanced-dnsdist: FAILED\n{exc}", file=sys.stderr)
+        return 1
+    for step in report.steps:
+        print(f"- {step}")
+    print()
+    if report.already_satisfied:
+        print(f"Already satisfied: dnsdist {report.version_before} already has dns-over-quic and dns-over-http3 capability. Nothing changed.")
+    else:
+        print(f"dnsdist version: {report.version_before} -> {report.version_after}")
+        print(f"dns-over-quic capability:  {report.capabilities_before.get('doq')} -> {report.capabilities_after.get('doq')}")
+        print(f"dns-over-http3 capability: {report.capabilities_before.get('doh3')} -> {report.capabilities_after.get('doh3')}")
+        print(f"backup of prior /etc/dnsdist, dnsdist.service.d, and certs: {report.backup_path}")
+    print()
+    print("This installed dnsdist CAPABILITY only. DoQ and DoH3 are still disabled and no")
+    print("new listeners are running yet -- turn them on in Encryption Settings in the web")
+    print("UI (or via the /encryption/settings form) and deploy to start the UDP 853/443")
+    print("listeners.")
+    return 0
+
+
+def cmd_dnsdist_capabilities(args: argparse.Namespace) -> int:
+    report = dnsdist_upgrade.capabilities_report()
+    print(f"dnsdist version: {report['version']}")
+    print(f"source/origin:   {report['origin']}")
+    for label, key in (("DoH", "doh"), ("DoT", "dot"), ("DoQ", "doq"), ("DoH3", "doh3"), ("DNSCrypt", "dnscrypt")):
+        print(f"{label:9s}: {'supported' if report[key] else 'not supported'}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="alderpointdns", description="Alderpoint DNS local administration")
     sub = parser.add_subparsers(dest="section", required=True)
+
+    install_enhanced_dnsdist_parser = sub.add_parser(
+        "install-enhanced-dnsdist",
+        help=(
+            "opt in to the official PowerDNS dnsdist 2.1 repository to install DoQ/DoH3 "
+            "CAPABILITY (requires local root); does not itself enable DoQ/DoH3 -- turn "
+            "them on afterward in Encryption Settings"
+        ),
+    )
+    install_enhanced_dnsdist_parser.set_defaults(func=cmd_install_enhanced_dnsdist)
+
+    capabilities_parser = sub.add_parser(
+        "dnsdist-capabilities",
+        help="report the installed dnsdist version and which encrypted-DNS transports it supports",
+    )
+    capabilities_parser.set_defaults(func=cmd_dnsdist_capabilities)
 
     admin_parser = sub.add_parser("admin", help="administrator account recovery (requires local root)")
     admin_sub = admin_parser.add_subparsers(dest="command", required=True)

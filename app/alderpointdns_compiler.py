@@ -903,6 +903,32 @@ def wait_until(predicate, timeout: int = 50) -> bool:
     return predicate()
 
 
+def dnsdist_conf_migrate() -> str:
+    """Run every currently-defined dnsdist.conf managed-block migration
+    (base parameterization, then doh-altsvc) idempotently, without
+    restarting dnsdist itself -- callers that need the new config live
+    (the package postinst, scripts/upgrade.sh) already restart dnsdist as
+    a normal part of their own flow immediately after this runs, so this
+    only ever rewrites and validates the file, never both that and a
+    live reload, to avoid restarting dnsdist twice in the same upgrade.
+
+    Safe and cheap to call on every install/upgrade: each migration checks
+    its own marker and does nothing once already applied.
+    """
+    template = Path("/opt/alderpointdns/packaging/dnsdist.conf")
+    parts: list[str] = []
+    if encryption.ensure_dnsdist_conf_parameterized(template):
+        parts.append("base dnsdist.conf parameterization applied")
+    altsvc_changed, altsvc_message = encryption.ensure_doh_altsvc_migration(template)
+    if altsvc_changed:
+        parts.append(altsvc_message)
+    elif altsvc_message:
+        parts.append(altsvc_message)
+    if not parts:
+        parts.append("no dnsdist.conf migrations were needed; already up to date")
+    return "; ".join(parts)
+
+
 def deploy(download: bool = True, trigger: str | None = None) -> int:
     init_db()
     DEPLOY_LOCK.parent.mkdir(parents=True, exist_ok=True)
@@ -1383,6 +1409,11 @@ def main(argv: list[str] | None = None) -> int:
     upstream_dep.set_defaults(func=lambda args: print(upstream_dns.deploy_upstreams()))
     encryption_dep = sub.add_parser("encryption-deploy")
     encryption_dep.set_defaults(func=lambda args: print(encryption.deploy_encryption()))
+    dnsdist_conf_migrate_parser = sub.add_parser(
+        "dnsdist-conf-migrate",
+        help="idempotently apply dnsdist.conf managed-block migrations (e.g. doh-altsvc) without restarting dnsdist",
+    )
+    dnsdist_conf_migrate_parser.set_defaults(func=lambda args: print(dnsdist_conf_migrate()))
     backup_create_parser = sub.add_parser("backup-create")
     backup_create_parser.set_defaults(func=backup_create)
     backup_restore_parser = sub.add_parser("backup-restore")

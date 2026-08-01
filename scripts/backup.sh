@@ -64,14 +64,26 @@ if [ "${ALDERPOINTDNS_BACKUP_TEST_PAUSE_AFTER_TMP_CREATE:-}" ]; then
   sleep "$ALDERPOINTDNS_BACKUP_TEST_PAUSE_AFTER_TMP_CREATE"
 fi
 
+# alderpointdns.service and alderpointdns-analytics.service only live under
+# /etc/systemd/system on a from-source install.sh/upgrade.sh install, which
+# writes them there directly; a .deb install ships the base unit files under
+# the Debian-standard /usr/lib/systemd/system instead (dpkg owns and restores
+# those on its own, so there is nothing app-specific to back up there).
+# Include each conditionally so backup.sh does not hard-fail on a package
+# install where they are absent by design.
+systemd_unit_members=""
+for unit in etc/systemd/system/alderpointdns.service etc/systemd/system/alderpointdns-analytics.service; do
+  [ -e "/$unit" ] && systemd_unit_members="$systemd_unit_members $unit"
+done
+
+# shellcheck disable=SC2086
 tar -C / -czf "$tmp" \
   etc/alderpointdns \
   etc/bind/named.conf \
   etc/bind/named.conf.options \
   etc/bind/named.conf.local \
   etc/dnsdist/dnsdist.conf \
-  etc/systemd/system/alderpointdns.service \
-  etc/systemd/system/alderpointdns-analytics.service \
+  $systemd_unit_members \
   etc/systemd/system/dnsdist.service.d \
   etc/sudoers.d/alderpointdns \
   var/lib/alderpointdns/downloads \

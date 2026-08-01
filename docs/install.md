@@ -1,6 +1,6 @@
 # Install
 
-Alderpoint DNS is currently beta software (v0.4.0-beta.4); see
+Alderpoint DNS is currently beta software (v0.4.0-beta.5); see
 `docs/known-limitations.md` and `docs/beta-readiness.md` before deploying it
 anywhere you rely on. Alderpoint DNS supports installation from a reviewed
 local source tree on a fresh Debian-based server. Do not pipe an unreviewed
@@ -74,26 +74,32 @@ include DNS-over-QUIC (DoQ) or DNS-over-HTTP/3 (DoH3) — see
 transports off (and clearly marked unsupported in Encryption Settings)
 rather than trying to start a listener the binary can't provide.
 
-DoQ/DoH3 are optional. If you specifically need them, install dnsdist from
-the official PowerDNS repository *before* installing the Alderpoint DNS
-package, and Alderpoint DNS will detect and use the extra capability
-automatically:
+DoQ/DoH3 are optional. Alderpoint DNS never adds a third-party APT
+repository on its own — not from the `.deb` package's post-install script,
+and not from the unprivileged web process, which has no APT/sudo access at
+all. Opting in is always an explicit, root-only action.
+
+**Recommended (after installing the Alderpoint DNS package):** run the
+built-in installer, which resolves the repository host, downloads and
+fingerprint-verifies the PowerDNS signing key, backs up your existing
+`/etc/dnsdist`, `dnsdist.service.d`, and certificates, simulates the package
+change before applying it, and refuses to proceed (rolling back what it can)
+if anything looks wrong:
 
 ```sh
-install -d /etc/apt/keyrings
-curl https://repo.powerdns.com/FD380FBB-pub.asc > /etc/apt/keyrings/dnsdist-21-pub.asc
-cat >/etc/apt/sources.list.d/pdns.list <<'EOF'
-deb [signed-by=/etc/apt/keyrings/dnsdist-21-pub.asc] http://repo.powerdns.com/debian trixie-dnsdist-21 main
-EOF
-cat >/etc/apt/preferences.d/dnsdist-21 <<'EOF'
-Package: dnsdist*
-Pin: origin repo.powerdns.com
-Pin-Priority: 600
-EOF
-apt-get update
-apt-get install -y dnsdist
-dnsdist --version | grep dns-over-quic
+sudo alderpointdns install-enhanced-dnsdist
 ```
+
+This is idempotent — running it again after DoQ/DoH3 support is already
+present does nothing. Check what's currently supported at any time with:
+
+```sh
+alderpointdns dnsdist-capabilities
+```
+
+See `docs/dnsdist.md` for exactly what this command does and does not
+change, and the manual equivalent if you'd rather configure the repository
+by hand *before* installing the Alderpoint DNS package.
 
 TLS bootstrap:
 
