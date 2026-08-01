@@ -198,12 +198,25 @@ SCHEMA_VERSION = 1
 
 @contextlib.contextmanager
 def migration_lock():
-    """Interprocess lock (flock) so two processes -- e.g. the webapp's startup
-    hook and a concurrent CLI invocation, or two systemd units racing on
-    boot -- can never run schema migrations against the same database file
-    at the same time."""
+    """Interprocess lock (flock) so two processes -- e.g. the webapp's
+    startup hook (running as the unprivileged alderpointdns user) and a
+    concurrent root-context CLI invocation (package install/upgrade, or a
+    sudo'd deploy) -- can never run schema migrations against the same
+    database file at the same time.
+
+    Opened read-only and never written to: flock() only needs an open file
+    descriptor, not write access, so this works no matter which privilege
+    level happens to create the lock file first (root creates it 0644 by
+    default, which the unprivileged service user can still open O_RDONLY
+    -- opening "w" here previously failed with PermissionError once root
+    had created it first, crash-looping the web service on every startup)."""
     MIGRATION_LOCK.parent.mkdir(parents=True, exist_ok=True)
-    with MIGRATION_LOCK.open("w") as lock_handle:
+    if not MIGRATION_LOCK.exists():
+        try:
+            MIGRATION_LOCK.touch()
+        except OSError:
+            pass  # another process (of either privilege level) won the race to create it; we only need to read it
+    with MIGRATION_LOCK.open("rb") as lock_handle:
         fcntl.flock(lock_handle, fcntl.LOCK_EX)
         yield
 
