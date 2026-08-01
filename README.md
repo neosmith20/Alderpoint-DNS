@@ -33,8 +33,11 @@ requires a separate license — see `LICENSE` and
   (default `home.arpa`), with automatic PTR records, served directly by BIND
   and never forwarded upstream. See `docs/architecture.md`.
 - **Encrypted resolvers.** Client-facing DoH, DoT, and DoQ/DoH3 (when the
-  installed dnsdist build supports QUIC), plus managed upstream resolvers over
-  plain DNS, DoT, and DoH. See `docs/dnsdist.md` and `docs/configuration.md`.
+  installed dnsdist build supports QUIC/HTTP-3 — Debian's own stock dnsdist
+  package does not; `sudo alderpointdns enable-quic-transports` opts in to
+  the official PowerDNS repository build that does), plus managed upstream
+  resolvers over plain DNS, DoT, and DoH. See `docs/dnsdist.md` and
+  `docs/configuration.md`.
 - **Replication.** One-way primary-to-replica configuration sync with hashed,
   one-time, revocable enrollment tokens and mTLS client authentication.
   Promotion is manual by design; automatic failover and bidirectional conflict

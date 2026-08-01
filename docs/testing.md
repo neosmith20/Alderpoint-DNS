@@ -12,6 +12,9 @@ Run individual suites:
 /opt/alderpointdns/tests/test_dns_cache.py
 /opt/alderpointdns/tests/test_dns_cache_benchmark.sh
 /opt/alderpointdns/tests/test_encryption.py
+/opt/alderpointdns/tests/test_dnsdist_protocol_status.py
+/opt/alderpointdns/tests/test_dnsdist_upgrade.py
+/opt/alderpointdns/tests/test_dnsdist_altsvc.sh
 /opt/alderpointdns/tests/test_custom_rules.py
 /opt/alderpointdns/tests/test_importer.py
 /opt/alderpointdns/tests/test_backup.py
