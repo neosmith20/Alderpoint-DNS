@@ -8,7 +8,12 @@ source that changes where dnsdist security updates come from. Alderpoint DNS
 never adds this repository automatically -- not from the .deb package's
 post-install script, and not from the unprivileged web process, which has no
 APT/sudo access at all. This module is only reachable through the explicit,
-root-only `alderpointdns enable-quic-transports` CLI command.
+root-only `alderpointdns install-enhanced-dnsdist` CLI command.
+
+This installs dnsdist *capability* only. It never touches Alderpoint's own
+DoQ/DoH3 enabled/disabled settings -- those stay exactly as they were
+before the command ran, and both protocols remain off until an
+administrator explicitly turns them on in Encryption Settings and deploys.
 
 Every step here is written to fail closed: a network failure, an
 unexpected/wrong signing key, an APT candidate that doesn't look like the
@@ -362,7 +367,7 @@ def restore_config_from_backup(backup_path: Path) -> None:
 # Orchestration
 # ---------------------------------------------------------------------------
 
-def enable_quic_transports(expected_fingerprint: str = EXPECTED_KEY_FINGERPRINT) -> UpgradeReport:
+def install_enhanced_dnsdist(expected_fingerprint: str = EXPECTED_KEY_FINGERPRINT) -> UpgradeReport:
     report = UpgradeReport()
     report.capabilities_before = dnsdist_capabilities()
     report.version_before = dnsdist_version()

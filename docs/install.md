@@ -87,7 +87,7 @@ change before applying it, and refuses to proceed (rolling back what it can)
 if anything looks wrong:
 
 ```sh
-sudo alderpointdns enable-quic-transports
+sudo alderpointdns install-enhanced-dnsdist
 ```
 
 This is idempotent — running it again after DoQ/DoH3 support is already

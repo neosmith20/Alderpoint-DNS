@@ -47,7 +47,7 @@ Alderpoint DNS on Debian's stock dnsdist (no `dns-over-quic`/
 installer separately, any time after the application upgrade:
 
 ```sh
-sudo alderpointdns enable-quic-transports
+sudo alderpointdns install-enhanced-dnsdist
 ```
 
 This is a distinct, explicit action from an Alderpoint DNS upgrade — it adds

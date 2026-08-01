@@ -64,7 +64,7 @@ PowerDNS `trixie-dnsdist-21` repository — either before installing
 Alderpoint DNS (see `docs/install.md`) or after, with:
 
 ```sh
-sudo alderpointdns enable-quic-transports
+sudo alderpointdns install-enhanced-dnsdist
 ```
 
 and verify `dnsdist --version` reports `dns-over-quic`; Alderpoint DNS then
@@ -116,12 +116,17 @@ test client is installed (`python3-dnspython`/`python3-aioquic`); on a build
 or environment without one, the result is reported as configuration-checked
 or socket-verified, distinctly from an end-to-end verified query.
 
-### Opt-in PowerDNS repository install (`alderpointdns enable-quic-transports`)
+### Opt-in PowerDNS repository install (`alderpointdns install-enhanced-dnsdist`)
 
-`sudo alderpointdns enable-quic-transports` (`app/dnsdist_upgrade.py`) is the
+`sudo alderpointdns install-enhanced-dnsdist` (`app/dnsdist_upgrade.py`) is the
 only way Alderpoint DNS will ever add the PowerDNS repository. It is never
 invoked automatically — not from the `.deb` postinst, and not from the
-unprivileged web process, which has no APT or `sudo` access. Running it:
+unprivileged web process, which has no APT or `sudo` access.
+
+**This command installs DoQ/DoH3 *capability* only.** It does not enable
+either protocol — Alderpoint's own `doq_enabled`/`doh3_enabled` settings are
+untouched, and no new listener starts until an administrator turns them on
+in Encryption Settings and deploys. Running it:
 
 1. Confirms the OS is Debian 13 (Trixie) and detects the architecture.
 2. Exits immediately, unchanged, if `dnsdist --version` already reports both

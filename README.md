@@ -34,7 +34,7 @@ requires a separate license — see `LICENSE` and
   and never forwarded upstream. See `docs/architecture.md`.
 - **Encrypted resolvers.** Client-facing DoH, DoT, and DoQ/DoH3 (when the
   installed dnsdist build supports QUIC/HTTP-3 — Debian's own stock dnsdist
-  package does not; `sudo alderpointdns enable-quic-transports` opts in to
+  package does not; `sudo alderpointdns install-enhanced-dnsdist` opts in to
   the official PowerDNS repository build that does), plus managed upstream
   resolvers over plain DNS, DoT, and DoH. See `docs/dnsdist.md` and
   `docs/configuration.md`.

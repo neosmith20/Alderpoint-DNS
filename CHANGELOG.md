@@ -4,7 +4,32 @@ All notable changes to Alderpoint DNS are documented in this file. Alderpoint
 DNS is currently in **beta**; interfaces, on-disk formats, and configuration
 may still change between releases before a stable 1.0.
 
-## v0.4.0-beta.4 (unreleased)
+## Unreleased
+
+- Fixed a false-positive in DoQ/DoH3 runtime status reporting: the DNS
+  Settings protocol table could report DoQ/DoH3 as "listening" merely
+  because a TCP DoH/DoT listener shared the same numeric port (443/853) as
+  the UDP-only DoQ/DoH3 listener. Listener detection now checks transport
+  and address together, "enabled" is read from Alderpoint's own encryption
+  settings rather than grepping the generated dnsdist configuration, and
+  the Protocol Status table now shows readable Build Support/Runtime
+  Status/Verification columns instead of internal strings. Added an
+  explicit, root-only, opt-in `alderpointdns install-enhanced-dnsdist` CLI
+  command (and a read-only `alderpointdns dnsdist-capabilities` command)
+  to install the official PowerDNS dnsdist 2.1 repository build with
+  DoQ/DoH3 support; this only installs the capability -- DoQ/DoH3 remain
+  disabled until turned on in Encryption Settings -- and is never done
+  automatically by the package or the web process. DoH now advertises an
+  active DoH3 endpoint via an Alt-Svc response header when DoH3 is enabled.
+- Fixed a second, related false-negative discovered during live-system
+  validation of the above: the shared `run()` helper used by
+  `listener_addresses()` kept only the last 4000 characters of `ss -H
+  -ltnup` output, silently dropping earlier lines -- including plain UDP 53
+  -- once a host's socket table was long enough, which could report Plain
+  DNS/DoQ/DoH3 as not listening when they genuinely were. Listener
+  detection now reads the full, untruncated `ss` output.
+
+## v0.4.0-beta.4
 
 `v0.4.0-beta.3` was version-bumped, tag-created, and immediately withdrawn
 before any GitHub Release was published (a first prerelease publish had to
@@ -34,20 +59,6 @@ of its changes are carried forward unchanged under `beta.4` below.
   reintroduced into test fixtures.
 - Documented the recent Administration, Notifications, migration, and
   reliability work.
-- Fixed a false-positive in DoQ/DoH3 runtime status reporting: the DNS
-  Settings protocol table could report DoQ/DoH3 as "listening" merely
-  because a TCP DoH/DoT listener shared the same numeric port (443/853) as
-  the UDP-only DoQ/DoH3 listener. Listener detection now checks transport
-  and address together, "enabled" is read from Alderpoint's own encryption
-  settings rather than grepping the generated dnsdist configuration, and
-  the Protocol Status table now shows readable Build Support/Runtime
-  Status/Verification columns instead of internal strings. Added an
-  explicit, root-only, opt-in `alderpointdns enable-quic-transports` CLI
-  command (and a read-only `alderpointdns dnsdist-capabilities` command)
-  to install the official PowerDNS dnsdist 2.1 repository build with
-  DoQ/DoH3 support; this is never done automatically by the package or the
-  web process. DoH now advertises an active DoH3 endpoint via an Alt-Svc
-  response header when DoH3 is enabled.
 
 ## v0.4.0-beta.2 (unreleased)
 

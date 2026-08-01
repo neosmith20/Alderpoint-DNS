@@ -102,7 +102,8 @@ class ProtocolStatusTest(unittest.TestCase):
     def _protocols(self, ss_output: str, version_output: str, settings: dict | None = None) -> list[dict]:
         if settings:
             encryption.update_settings({**encryption.settings(), **settings})
-        with mock.patch.object(webapp, "run", side_effect=_run_side_effect(ss_output, version_output)), \
+        with mock.patch.object(webapp, "_ss_listener_dump", return_value=(0, ss_output)), \
+             mock.patch.object(webapp, "run", side_effect=_run_side_effect(ss_output, version_output)), \
              mock.patch.object(encryption, "run", side_effect=_caps_run_side_effect(version_output)):
             return webapp.protocol_statuses()
 
@@ -203,11 +204,26 @@ class ProtocolStatusTest(unittest.TestCase):
     # -- listener_addresses transport parsing --------------------------------
 
     def test_listener_addresses_preserves_transport(self) -> None:
-        with mock.patch.object(webapp, "run", return_value=(0, SS_WITH_QUIC_UDP)):
+        with mock.patch.object(webapp, "_ss_listener_dump", return_value=(0, SS_WITH_QUIC_UDP)):
             listeners = webapp.listener_addresses()
         self.assertIn(("tcp", "0.0.0.0:443"), listeners)
         self.assertIn(("udp", "0.0.0.0:443"), listeners)
         self.assertNotIn(("udp", "0.0.0.0:443"), {("tcp", "0.0.0.0:443")})
+
+    def test_listener_addresses_not_truncated_by_shared_run_helper(self) -> None:
+        # Regression: webapp.run() keeps only the last 4000 characters of
+        # subprocess output. A real `ss -H -ltnup` on a host with a normal
+        # number of other listening services can exceed that, silently
+        # dropping early lines -- including a real UDP 53/443/853 listener
+        # -- if listener_addresses() ever routed through run() again.
+        padding = "\n".join(f"tcp   LISTEN 0 128 127.0.0.1:{20000 + i} 0.0.0.0:*  users:((\"pad\",pid=1,fd={i}))" for i in range(200))
+        big_output = padding + "\n" + SS_WITH_QUIC_UDP
+        self.assertGreater(len(big_output), 4000)
+        with mock.patch.object(webapp, "_ss_listener_dump", return_value=(0, big_output)):
+            listeners = webapp.listener_addresses()
+        self.assertIn(("udp", "0.0.0.0:443"), listeners)
+        self.assertIn(("udp", "0.0.0.0:853"), listeners)
+        self.assertIn(("tcp", "0.0.0.0:53"), listeners)
 
 
 if __name__ == "__main__":

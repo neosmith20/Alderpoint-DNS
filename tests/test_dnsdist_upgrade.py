@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for the opt-in `alderpointdns enable-quic-transports` installer
+"""Tests for the opt-in `alderpointdns install-enhanced-dnsdist` installer
 (app/dnsdist_upgrade.py). This never touches a real system: every
 subprocess/network-facing function is mocked, and every step is verified to
 fail closed -- an abort at any point must leave the report reflecting no
@@ -162,7 +162,7 @@ class SimulateInstallTest(unittest.TestCase):
 
 
 class EnableQuicTransportsOrchestrationTest(unittest.TestCase):
-    """Exercises the full enable_quic_transports() control flow with every
+    """Exercises the full install_enhanced_dnsdist() control flow with every
     OS-touching step mocked, to prove idempotency and fail-closed behavior
     without ever touching a real system."""
 
@@ -193,18 +193,18 @@ class EnableQuicTransportsOrchestrationTest(unittest.TestCase):
         self.caps_mock.return_value = QUIC_CAPS
         self.version_mock.return_value = "dnsdist 2.1.0"
         apt_update = mock.patch.object(dnsdist_upgrade, "apt_update").start()
-        report = dnsdist_upgrade.enable_quic_transports()
+        report = dnsdist_upgrade.install_enhanced_dnsdist()
         self.assertTrue(report.already_satisfied)
         self.assertFalse(report.changed)
         apt_update.assert_not_called()
         # Running it again must behave identically -- no accumulated state.
-        report2 = dnsdist_upgrade.enable_quic_transports()
+        report2 = dnsdist_upgrade.install_enhanced_dnsdist()
         self.assertTrue(report2.already_satisfied)
 
     def test_successful_upgrade_reports_changed(self) -> None:
         self.caps_mock.side_effect = [STOCK_CAPS, QUIC_CAPS]
         self.version_mock.side_effect = ["dnsdist 1.9.15", "dnsdist 2.1.0"]
-        report = dnsdist_upgrade.enable_quic_transports()
+        report = dnsdist_upgrade.install_enhanced_dnsdist()
         self.assertTrue(report.changed)
         self.assertFalse(report.already_satisfied)
         self.assertEqual(report.version_after, "dnsdist 2.1.0")
@@ -212,7 +212,7 @@ class EnableQuicTransportsOrchestrationTest(unittest.TestCase):
 
     def _assert_fails_closed_and_rolls_back(self) -> None:
         with self.assertRaises(dnsdist_upgrade.UpgradeError) as ctx:
-            dnsdist_upgrade.enable_quic_transports()
+            dnsdist_upgrade.install_enhanced_dnsdist()
         self.restore_mock.assert_called_once()
         self.assertIn("Rollback", str(ctx.exception))
         return ctx.exception
@@ -222,7 +222,7 @@ class EnableQuicTransportsOrchestrationTest(unittest.TestCase):
         self.version_mock.return_value = "dnsdist 1.9.15"
         mock.patch.object(dnsdist_upgrade, "resolve_repo_host", side_effect=dnsdist_upgrade.UpgradeError("could not resolve repo.powerdns.com")).start()
         with self.assertRaises(dnsdist_upgrade.UpgradeError):
-            dnsdist_upgrade.enable_quic_transports()
+            dnsdist_upgrade.install_enhanced_dnsdist()
         # DNS failure happens before the backup step, so no rollback is attempted.
         self.restore_mock.assert_not_called()
 

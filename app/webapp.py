@@ -440,6 +440,28 @@ def dnsdist_version_info() -> dict[str, Any]:
     }
 
 
+def _ss_listener_dump() -> tuple[int, str]:
+    """Runs `ss -H -ltnup` and returns its full, untruncated output.
+
+    Deliberately does not go through the shared run() helper: run() keeps
+    only the last 4000 characters of output, which is fine for short status
+    commands but silently drops early lines -- including the plain UDP 53
+    listener, which `ss` tends to print near the top -- once the socket
+    table is long enough (observed in practice on a host with a normal
+    number of other listening services). A dropped line here means a real
+    listener is invisible to every check below it, not just truncated
+    display text. A dedicated function (rather than inlining this in
+    listener_addresses()) keeps that one difference from run() isolated and
+    lets tests substitute canned `ss` output without needing a real socket
+    table on the test host.
+    """
+    try:
+        proc = subprocess.run(["ss", "-H", "-ltnup"], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except (OSError, FileNotFoundError):
+        return 1, ""
+    return proc.returncode, proc.stdout
+
+
 def listener_addresses() -> set[tuple[str, str]]:
     """Return the set of (transport, local-address:port) pairs dnsdist (and
     everything else) is actually listening on, e.g. ("tcp", "0.0.0.0:443") or
@@ -451,7 +473,7 @@ def listener_addresses() -> set[tuple[str, str]]:
     on the same port, which caused DoH's TCP socket to be reported as
     satisfying the DoH3 UDP check, and DoT's TCP socket to satisfy DoQ.
     """
-    code, out = run(["ss", "-H", "-ltnup"])
+    code, out = _ss_listener_dump()
     if code != 0:
         return set()
     listeners: set[tuple[str, str]] = set()

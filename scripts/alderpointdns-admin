@@ -172,24 +172,28 @@ def cmd_revoke_sessions(args: argparse.Namespace) -> int:
         conn.close()
 
 
-def cmd_enable_quic_transports(args: argparse.Namespace) -> int:
+def cmd_install_enhanced_dnsdist(args: argparse.Namespace) -> int:
     _require_root()
     try:
-        report = dnsdist_upgrade.enable_quic_transports()
+        report = dnsdist_upgrade.install_enhanced_dnsdist()
     except dnsdist_upgrade.UpgradeError as exc:
-        print(f"alderpointdns enable-quic-transports: FAILED\n{exc}", file=sys.stderr)
+        print(f"alderpointdns install-enhanced-dnsdist: FAILED\n{exc}", file=sys.stderr)
         return 1
     for step in report.steps:
         print(f"- {step}")
     print()
     if report.already_satisfied:
-        print(f"Already satisfied: dnsdist {report.version_before} already supports dns-over-quic and dns-over-http3. Nothing changed.")
-        return 0
-    print(f"dnsdist version: {report.version_before} -> {report.version_after}")
-    print(f"dns-over-quic:  {report.capabilities_before.get('doq')} -> {report.capabilities_after.get('doq')}")
-    print(f"dns-over-http3: {report.capabilities_before.get('doh3')} -> {report.capabilities_after.get('doh3')}")
-    print(f"backup of prior /etc/dnsdist, dnsdist.service.d, and certs: {report.backup_path}")
-    print("Enable DoQ/DoH3 in Encryption Settings in the web UI to deploy the new listeners.")
+        print(f"Already satisfied: dnsdist {report.version_before} already has dns-over-quic and dns-over-http3 capability. Nothing changed.")
+    else:
+        print(f"dnsdist version: {report.version_before} -> {report.version_after}")
+        print(f"dns-over-quic capability:  {report.capabilities_before.get('doq')} -> {report.capabilities_after.get('doq')}")
+        print(f"dns-over-http3 capability: {report.capabilities_before.get('doh3')} -> {report.capabilities_after.get('doh3')}")
+        print(f"backup of prior /etc/dnsdist, dnsdist.service.d, and certs: {report.backup_path}")
+    print()
+    print("This installed dnsdist CAPABILITY only. DoQ and DoH3 are still disabled and no")
+    print("new listeners are running yet -- turn them on in Encryption Settings in the web")
+    print("UI (or via the /encryption/settings form) and deploy to start the UDP 853/443")
+    print("listeners.")
     return 0
 
 
@@ -206,11 +210,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="alderpointdns", description="Alderpoint DNS local administration")
     sub = parser.add_subparsers(dest="section", required=True)
 
-    enable_quic_parser = sub.add_parser(
-        "enable-quic-transports",
-        help="opt in to the official PowerDNS dnsdist 2.1 repository to add DoQ/DoH3 support (requires local root)",
+    install_enhanced_dnsdist_parser = sub.add_parser(
+        "install-enhanced-dnsdist",
+        help=(
+            "opt in to the official PowerDNS dnsdist 2.1 repository to install DoQ/DoH3 "
+            "CAPABILITY (requires local root); does not itself enable DoQ/DoH3 -- turn "
+            "them on afterward in Encryption Settings"
+        ),
     )
-    enable_quic_parser.set_defaults(func=cmd_enable_quic_transports)
+    install_enhanced_dnsdist_parser.set_defaults(func=cmd_install_enhanced_dnsdist)
 
     capabilities_parser = sub.add_parser(
         "dnsdist-capabilities",
