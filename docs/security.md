@@ -1,6 +1,6 @@
 # Security
 
-Alderpoint DNS is currently beta software (v0.4.0-beta.4). This page
+Alderpoint DNS is currently beta software (v0.4.0-beta.5). This page
 describes the security controls actually implemented today; see
 `docs/hardening-review.md` for accepted beta risks and `SECURITY.md` for how
 to report a vulnerability.

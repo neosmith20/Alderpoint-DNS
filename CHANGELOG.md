@@ -4,7 +4,7 @@ All notable changes to Alderpoint DNS are documented in this file. Alderpoint
 DNS is currently in **beta**; interfaces, on-disk formats, and configuration
 may still change between releases before a stable 1.0.
 
-## Unreleased
+## v0.4.0-beta.5 (2026-07-31)
 
 - Fixed a false-positive in DoQ/DoH3 runtime status reporting: the DNS
   Settings protocol table could report DoQ/DoH3 as "listening" merely
@@ -51,6 +51,20 @@ may still change between releases before a stable 1.0.
   downloaded"), so it never actually rolled back to Debian's stock
   package. Both now use `apt-get install -y --allow-downgrades dnsdist`,
   confirmed to actually downgrade and restart cleanly.
+- Fixed `scripts/build-deb.sh` (the script that actually builds the
+  distributed `.deb`) writing its own hardcoded `Depends:` line that never
+  received the `gnupg` dependency added to `packaging/debian/control` --
+  found while verifying the final beta.5 package, since `gnupg` is
+  required by `install-enhanced-dnsdist`'s signing-key verification.
+- Fixed `scripts/backup.sh` hard-failing on any `.deb`-installed system:
+  it unconditionally tarred `etc/systemd/system/alderpointdns.service` and
+  `etc/systemd/system/alderpointdns-analytics.service`, which only exist
+  at that path on a from-source `install.sh`/`upgrade.sh` install -- the
+  `.deb` ships the base unit files under the Debian-standard
+  `/usr/lib/systemd/system` instead, which dpkg already owns and restores
+  on its own. `backup.sh` now includes each unit file only if present at
+  the from-source path, found while running the full acceptance suite
+  against the packaged beta.5 build.
 
 ## v0.4.0-beta.4
 

@@ -1,3 +1,41 @@
+alderpointdns (0.4.0~beta5-1) unstable; urgency=medium
+
+  * Fixed a false-positive in DoQ/DoH3 runtime status reporting: the DNS
+    Settings protocol table could report DoQ/DoH3 as "listening" merely
+    because a TCP DoH/DoT listener shared the same numeric port (443/853)
+    as the UDP-only DoQ/DoH3 listener. Listener detection now checks
+    transport and address together, and the Protocol Status table shows
+    readable Build Support/Runtime Status/Verification columns instead of
+    internal strings.
+  * Added an explicit, root-only, opt-in `alderpointdns
+    install-enhanced-dnsdist` CLI command (and a read-only `alderpointdns
+    dnsdist-capabilities` command) to install the official PowerDNS
+    dnsdist 2.1 repository build with DoQ/DoH3 support. This only installs
+    the capability -- DoQ/DoH3 remain disabled until turned on in
+    Encryption Settings -- and is never done automatically by the package
+    or the web process. DoH now advertises an active DoH3 endpoint via an
+    Alt-Svc response header when DoH3 is enabled.
+  * Fixed a listener-detection false-negative: the shared `run()` helper
+    used for `ss -H -ltnup` output kept only the last 4000 characters,
+    silently dropping earlier lines (including plain UDP 53) on hosts with
+    enough listening sockets.
+  * Added an idempotent, marker-delimited `dnsdist.conf` migration so an
+    already-migrated v0.4.0-beta.4 install automatically picks up the
+    Alt-Svc managed block on upgrade, with backup and `dnsdist
+    --check-config` validation/rollback.
+  * Fixed the documented/embedded dnsdist rollback instructions: `apt-get
+    install --reinstall dnsdist` cannot reinstall a version no longer
+    available once the PowerDNS repository is removed. Rollback now uses
+    `apt-get install -y --allow-downgrades dnsdist`.
+  * Fixed scripts/build-deb.sh's hardcoded Depends: line missing the
+    gnupg dependency required by install-enhanced-dnsdist.
+  * Fixed scripts/backup.sh hard-failing on .deb-installed systems by
+    unconditionally tarring systemd unit files that only exist at that
+    path on a from-source install; dpkg-installed units live under
+    /usr/lib/systemd/system and are already restored by dpkg itself.
+
+ -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Fri, 31 Jul 2026 20:58:12 -0600
+
 alderpointdns (0.4.0~beta4-1) unstable; urgency=medium
 
   * 0.4.0~beta3-1 was built and tag-created but withdrawn before any
