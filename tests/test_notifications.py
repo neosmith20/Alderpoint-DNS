@@ -471,12 +471,14 @@ class NotificationsWebRouteTest(unittest.TestCase):
             "local_dns_db": local_dns.DB_PATH,
             "compiler_db": alderpointdns_compiler.DB_PATH,
             "notifications_db": notifications.DB_PATH,
+            "compiler_migration_lock": alderpointdns_compiler.MIGRATION_LOCK,
         }
         db_path = self.tmp / "alderpointdns.db"
         webapp.DB_PATH = db_path
         local_dns.DB_PATH = db_path
         alderpointdns_compiler.DB_PATH = db_path
         notifications.DB_PATH = db_path
+        alderpointdns_compiler.MIGRATION_LOCK = self.tmp / "staging" / "schema-migration.lock"
         local_dns.STAGING_DIR = self.tmp / "staging"
         local_dns.BACKUP_DIR = self.tmp / "backups"
         local_dns.COMPILED_DIR = self.tmp / "compiled" / "bind"
@@ -493,10 +495,10 @@ class NotificationsWebRouteTest(unittest.TestCase):
 
         from fastapi.testclient import TestClient
 
+        # webapp.db() no longer creates schema/seeds on demand; trigger the
+        # one-time migration explicitly, same as app-startup does.
+        alderpointdns_compiler.init_db()
         conn = sqlite3.connect(db_path)
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS admins (id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at TEXT NOT NULL)"
-        )
         conn.execute("INSERT INTO admins(username, password_hash, created_at) VALUES (?, ?, ?)", ("admin", auth.hash_password("initial-password-123"), "now"))
         conn.commit()
         conn.close()
@@ -510,6 +512,7 @@ class NotificationsWebRouteTest(unittest.TestCase):
         local_dns.DB_PATH = self.old_paths["local_dns_db"]
         alderpointdns_compiler.DB_PATH = self.old_paths["compiler_db"]
         notifications.DB_PATH = self.old_paths["notifications_db"]
+        alderpointdns_compiler.MIGRATION_LOCK = self.old_paths["compiler_migration_lock"]
         import shutil
 
         shutil.rmtree(self.tmp, ignore_errors=True)

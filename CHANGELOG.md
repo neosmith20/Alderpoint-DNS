@@ -4,6 +4,50 @@ All notable changes to Alderpoint DNS are documented in this file. Alderpoint
 DNS is currently in **beta**; interfaces, on-disk formats, and configuration
 may still change between releases before a stable 1.0.
 
+## Unreleased
+
+- Fixed a SQLite concurrency bug where a routine authenticated web request
+  could fail with `sqlite3.OperationalError: database is locked` / HTTP 500.
+  Root cause: `webapp.db()` ran `alderpointdns_compiler.init_db()` -- a
+  `PRAGMA journal_mode=WAL`, several `CREATE TABLE`/`ALTER TABLE`-if-missing
+  checks, and `INSERT OR IGNORE` category/policy-profile seeds -- on every
+  single database connection request, including the session/CSRF lookups
+  and the `last_seen_at` bookkeeping write that run on essentially every
+  authenticated page load. If a concurrent long-running writer (a compiler
+  deploy, backup/restore, or blocklist update) held SQLite's single writer
+  lock past the 5s busy timeout, an ordinary request raised uncaught into a
+  bare HTTP 500.
+  - `webapp.db()` is now a pure connection factory: it opens a connection,
+    sets `row_factory` and `busy_timeout`, and does nothing else. Schema
+    creation and migration run exactly once per process, from a FastAPI
+    startup hook, via `alderpointdns_compiler.init_db()`.
+  - `init_db()` is now gated by a `PRAGMA user_version` schema-version check
+    and an interprocess `flock`-based migration lock, so it is a cheap,
+    idempotent no-op once already migrated and safe to call concurrently
+    from multiple processes (CLI subcommands, package install/upgrade, and
+    the webapp's own startup hook all still call it, unchanged).
+  - The webapp's own auth tables (`admins`, `sessions`, `login_attempts`,
+    `admin_audit_log`), previously recreated inline on every `db()` call,
+    now migrate under the same schema-version gate and lock.
+  - Added `app/db_retry.py`, a shared bounded-retry-with-jitter helper for
+    `SQLITE_BUSY`/`SQLITE_LOCKED`. Session `last_seen_at` updates use it and
+    are skipped (with a logged warning) rather than failing the request if
+    the database is still busy after a few short retries -- authentication
+    and CSRF enforcement are unaffected. Any other write that exhausts its
+    retry budget now returns a controlled HTTP 503 instead of an unhandled
+    traceback.
+  - The compiler's `collect_rules()` no longer writes each source's
+    download/parse result inside the per-source download loop; all writes
+    for a compile run are now deferred to a single short transaction after
+    every source has finished downloading and parsing, so a blocklist
+    update no longer holds the database-wide writer lock across a sequence
+    of network downloads (and, transitively, across `deploy()`'s later RPZ/
+    BIND validation and service-reload subprocess calls).
+  - No data reset, destructive migration, or table recreation; WAL mode and
+    all existing data are preserved. Existing installations upgrading from
+    beta.5 (which never set `PRAGMA user_version`) are migrated forward
+    exactly once on the next `init_db()` call.
+
 ## v0.4.0-beta.5 (2026-07-31)
 
 - Fixed a false-positive in DoQ/DoH3 runtime status reporting: the DNS
