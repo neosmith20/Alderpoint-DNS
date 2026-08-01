@@ -100,10 +100,12 @@ class ConnectionLeakRegressionTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="alderpointdns-fd-leak-test-"))
         self.old_db_paths = {mod: mod.DB_PATH for mod in DB_PATH_MODULES}
+        self.old_migration_lock = alderpointdns_compiler.MIGRATION_LOCK
         db_path = self.tmp / "alderpointdns.db"
         self.db_path = db_path
         for mod in DB_PATH_MODULES:
             mod.DB_PATH = db_path
+        alderpointdns_compiler.MIGRATION_LOCK = self.tmp / "staging" / "schema-migration.lock"
         local_dns.STAGING_DIR = self.tmp / "staging"
         local_dns.BACKUP_DIR = self.tmp / "backups"
         local_dns.COMPILED_DIR = self.tmp / "compiled" / "bind"
@@ -130,10 +132,10 @@ class ConnectionLeakRegressionTest(unittest.TestCase):
         for patcher in self.patches:
             patcher.start()
 
+        # webapp.db() no longer creates schema/seeds on demand; trigger the
+        # one-time migration explicitly, same as app-startup does.
+        alderpointdns_compiler.init_db()
         conn = sqlite3.connect(db_path)
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS admins (id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at TEXT NOT NULL)"
-        )
         conn.execute(
             "INSERT INTO admins(username, password_hash, created_at) VALUES (?, ?, ?)",
             ("admin", auth.hash_password(INITIAL_PASSWORD), "now"),
@@ -151,6 +153,7 @@ class ConnectionLeakRegressionTest(unittest.TestCase):
             patcher.stop()
         for mod, path in self.old_db_paths.items():
             mod.DB_PATH = path
+        alderpointdns_compiler.MIGRATION_LOCK = self.old_migration_lock
         import shutil
 
         shutil.rmtree(self.tmp, ignore_errors=True)

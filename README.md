@@ -7,7 +7,7 @@ application on top. dnsdist is the client-facing DNS frontend; BIND is a
 localhost-only validating cache/forwarder; filtering policy is compiled into
 a BIND RPZ zone and reloaded through a staged, validated deployment path.
 
-> **Status: beta.** This is **v0.4.0-beta.5**, pre-release software. It is
+> **Status: beta.** This is **v0.4.0-beta.6**, pre-release software. It is
 > functional and acceptance-tested in lab conditions, but it has not had
 > production-scale or adversarial-network exposure, and several features are
 > intentionally partial. See [Known limitations](#known-limitations) below
@@ -91,12 +91,12 @@ Alderpoint DNS is distributed as a Debian package for Debian 13. Download the cu
 
 ```bash
 curl -fL \
-  -o alderpointdns_0.4.0-beta5-1_all.deb \
-  https://github.com/neosmith20/Alderpoint-DNS/releases/download/v0.4.0-beta.5/alderpointdns_0.4.0-beta5-1_all.deb
+  -o alderpointdns_0.4.0-beta6-1_all.deb \
+  https://github.com/neosmith20/Alderpoint-DNS/releases/download/v0.4.0-beta.6/alderpointdns_0.4.0-beta6-1_all.deb
 
 curl -fL \
   -o SHA256SUMS \
-  https://github.com/neosmith20/Alderpoint-DNS/releases/download/v0.4.0-beta.5/SHA256SUMS
+  https://github.com/neosmith20/Alderpoint-DNS/releases/download/v0.4.0-beta.6/SHA256SUMS
   ```
 
 ## Known limitations

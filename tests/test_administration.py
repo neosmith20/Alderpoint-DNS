@@ -29,12 +29,14 @@ class AdministrationTest(unittest.TestCase):
             "webapp_db": webapp.DB_PATH,
             "local_dns_db": local_dns.DB_PATH,
             "compiler_db": alderpointdns_compiler.DB_PATH,
+            "compiler_migration_lock": alderpointdns_compiler.MIGRATION_LOCK,
         }
         db_path = self.tmp / "alderpointdns.db"
         self.db_path = db_path
         webapp.DB_PATH = db_path
         local_dns.DB_PATH = db_path
         alderpointdns_compiler.DB_PATH = db_path
+        alderpointdns_compiler.MIGRATION_LOCK = self.tmp / "staging" / "schema-migration.lock"
         local_dns.STAGING_DIR = self.tmp / "staging"
         local_dns.BACKUP_DIR = self.tmp / "backups"
         local_dns.COMPILED_DIR = self.tmp / "compiled" / "bind"
@@ -51,10 +53,11 @@ class AdministrationTest(unittest.TestCase):
         for patcher in self.patches:
             patcher.start()
 
+        # webapp.db() no longer creates schema/seeds on demand (that would
+        # repeat init_db()'s work on every request); tests must trigger the
+        # one-time migration explicitly, same as app-startup does.
+        alderpointdns_compiler.init_db()
         conn = sqlite3.connect(db_path)
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS admins (id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at TEXT NOT NULL)"
-        )
         conn.execute(
             "INSERT INTO admins(username, password_hash, created_at) VALUES (?, ?, ?)",
             ("admin", auth.hash_password(INITIAL_PASSWORD), "now"),
@@ -72,6 +75,7 @@ class AdministrationTest(unittest.TestCase):
         webapp.DB_PATH = self.old_paths["webapp_db"]
         local_dns.DB_PATH = self.old_paths["local_dns_db"]
         alderpointdns_compiler.DB_PATH = self.old_paths["compiler_db"]
+        alderpointdns_compiler.MIGRATION_LOCK = self.old_paths["compiler_migration_lock"]
         import shutil
 
         shutil.rmtree(self.tmp, ignore_errors=True)

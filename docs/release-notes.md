@@ -5,6 +5,35 @@ changed in each beta build; they are not a claim of production readiness or
 long-term stability. See `docs/known-limitations.md` and
 `docs/beta-readiness.md` for the current honest state of the project.
 
+## 0.4.0-beta.6
+
+Reliability beta focused on SQLite contention, replication enrollment
+correctness, migration-lock compatibility, and deterministic encrypted-DNS
+release validation.
+
+- Ordinary authenticated web requests no longer run schema initialization,
+  migrations, or seed writes on each database connection. Initialization is
+  handled by the serialized startup/package path instead.
+- SQLite busy/locked handling is bounded and explicit: noncritical session
+  `last_seen_at` updates retry briefly or skip safely, while exhausted
+  required writes return controlled HTTP 503 responses without raw lock
+  tracebacks reaching clients.
+- Compiler deployments now keep SQLite write transactions shorter by
+  deferring source status writes until after download and parse work has
+  completed.
+- Replication enrollment now reserves tokens atomically, consumes successful
+  enrollments once, rejects replay, releases reservations after failed
+  privileged execution, recovers orphaned reservations after TTL, and avoids
+  holding a SQLite write transaction open across the privileged subprocess.
+- Schema migration locking now works whether root package hooks or the
+  unprivileged service create/use the lock first; repeated initialization
+  remains serialized and idempotent.
+- DoQ/DoH3 acceptance validation now deploys the requested Alderpoint
+  encrypted-DNS settings before testing and verifies real UDP 853/443
+  listeners before live DoQ/DoH3 queries. The final DoQ investigation was
+  stale undeployed test state plus sandbox socket restrictions, not a
+  dnsdist, UDP, certificate, or kdig product defect.
+
 ## 0.4.0-beta.4 (unreleased beta update)
 
 Not a final release. This build carries forward the administration and

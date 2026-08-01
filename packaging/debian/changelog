@@ -1,3 +1,28 @@
+alderpointdns (0.4.0~beta6-1) unstable; urgency=medium
+
+  * Removed database initialization and seed writes from ordinary web
+    request database connections. Schema setup now runs through the
+    serialized startup/package initialization path instead of on every
+    session, CSRF, and page-load query.
+  * Added bounded retry handling for SQLITE_BUSY/SQLITE_LOCKED and made
+    noncritical session last-seen updates retry briefly or skip safely
+    without failing authenticated requests.
+  * Converted exhausted required web writes into controlled HTTP 503
+    responses, avoiding uncaught database-lock tracebacks reaching clients.
+  * Shortened compiler write transactions by deferring source status writes
+    until after download and parse work has completed.
+  * Added replication enrollment token reservation, replay-safe consumption,
+    failed privileged-execution release, orphaned reservation recovery, and
+    subprocess handoff without holding a SQLite write transaction open.
+  * Made the migration lock compatible with root package operations followed
+    by unprivileged service startup; repeated initialization remains
+    serialized and idempotent.
+  * Made DoQ/DoH3 acceptance deterministic by deploying the requested
+    encrypted-DNS settings before validation and verifying real UDP 853/443
+    listeners before live DoQ/DoH3 queries and certificate-negative checks.
+
+ -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Sat, 01 Aug 2026 00:19:52 -0600
+
 alderpointdns (0.4.0~beta5-1) unstable; urgency=medium
 
   * Fixed a false-positive in DoQ/DoH3 runtime status reporting: the DNS

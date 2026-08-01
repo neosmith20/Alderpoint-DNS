@@ -1,6 +1,6 @@
 # Configuration
 
-Alderpoint DNS is currently beta software (v0.4.0-beta.5); some defaults
+Alderpoint DNS is currently beta software (v0.4.0-beta.6); some defaults
 below describe a lab-oriented starting configuration and should be reviewed
 before production use (see `docs/known-limitations.md`).
 

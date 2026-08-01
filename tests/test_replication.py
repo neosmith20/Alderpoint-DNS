@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import datetime as dt
+import json
 import shutil
 import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import warnings
 from contextlib import closing
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,7 +33,6 @@ class ReplicationTest(unittest.TestCase):
             "REPL_DIR": replication.REPL_DIR,
             "SERVER_CERT_PATH": replication.SERVER_CERT_PATH,
             "SERVER_KEY_PATH": replication.SERVER_KEY_PATH,
-            "PENDING_ENROLLMENT_TOKEN_HASH": replication.PENDING_ENROLLMENT_TOKEN_HASH,
             "CA_CERT_PATH": encryption.CA_CERT_PATH,
             "CA_KEY_PATH": encryption.CA_KEY_PATH,
             "CA_SERIAL_PATH": encryption.CA_SERIAL_PATH,
@@ -40,7 +43,6 @@ class ReplicationTest(unittest.TestCase):
         replication.REPL_DIR = self.tmp / "replication"
         replication.SERVER_CERT_PATH = replication.REPL_DIR / "replication-server.crt"
         replication.SERVER_KEY_PATH = replication.REPL_DIR / "replication-server.key"
-        replication.PENDING_ENROLLMENT_TOKEN_HASH = replication.STAGING_DIR / "pending-enrollment-token-hash"
         encryption.CA_CERT_PATH = self.tmp / "certs" / "ca.crt"
         encryption.CA_KEY_PATH = self.tmp / "certs" / "ca.key"
         encryption.CA_SERIAL_PATH = self.tmp / "certs" / "ca.srl"
@@ -188,14 +190,237 @@ class ReplicationTest(unittest.TestCase):
             with self.assertRaisesRegex(PermissionError, "revoked"):
                 handler._authenticated_replica(conn)
 
-    def test_enrollment_request_stages_only_valid_pending_token_hash(self) -> None:
+    def test_enrollment_request_reserves_only_valid_pending_token(self) -> None:
         token = replication.generate_enrollment_token("replica-1")
         result = replication.request_enrollment_consumption(token["token"])
         self.assertEqual(result["node_name"], "replica-1")
-        self.assertTrue(replication.PENDING_ENROLLMENT_TOKEN_HASH.exists())
-        self.assertEqual(replication.PENDING_ENROLLMENT_TOKEN_HASH.read_text(), replication._hash_token(token["token"]))
+        self.assertEqual(result["token_hash"], replication._hash_token(token["token"]))
+        with closing(replication.connect()) as conn:
+            row = conn.execute(
+                "SELECT status, reserved_at FROM replication_enrollments WHERE node_name='replica-1'"
+            ).fetchone()
+        self.assertEqual(row["status"], "pending")
+        self.assertIsNotNone(row["reserved_at"])
         with self.assertRaises(replication.ReplicationError):
             replication.request_enrollment_consumption("wrong-token")
+
+
+class EnrollmentReservationTest(unittest.TestCase):
+    """Covers the reserve / run-privileged-step / consume-or-release
+    lifecycle used by replication.py's _handle_enroll(): a token-consumption
+    write must never remain open across the privileged sudo subprocess, one
+    winner only when two requests race the same token, a failed privileged
+    step must not strand a token, and an orphaned reservation must recover."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="alderpointdns-enrollment-reservation-test-"))
+        self.old = {
+            "DB_PATH": replication.DB_PATH,
+            "STAGING_DIR": replication.STAGING_DIR,
+            "REPL_DIR": replication.REPL_DIR,
+            "SERVER_CERT_PATH": replication.SERVER_CERT_PATH,
+            "SERVER_KEY_PATH": replication.SERVER_KEY_PATH,
+            "CA_CERT_PATH": encryption.CA_CERT_PATH,
+            "CA_KEY_PATH": encryption.CA_KEY_PATH,
+            "CA_SERIAL_PATH": encryption.CA_SERIAL_PATH,
+        }
+        replication.DB_PATH = self.tmp / "alderpointdns.db"
+        replication.STAGING_DIR = self.tmp / "staging"
+        replication.REPL_DIR = self.tmp / "replication"
+        replication.SERVER_CERT_PATH = replication.REPL_DIR / "replication-server.crt"
+        replication.SERVER_KEY_PATH = replication.REPL_DIR / "replication-server.key"
+        encryption.CA_CERT_PATH = self.tmp / "certs" / "ca.crt"
+        encryption.CA_KEY_PATH = self.tmp / "certs" / "ca.key"
+        encryption.CA_SERIAL_PATH = self.tmp / "certs" / "ca.srl"
+        replication.STAGING_DIR.mkdir(parents=True)
+        replication.REPL_DIR.mkdir(parents=True)
+        encryption.CA_CERT_PATH.parent.mkdir(parents=True)
+        replication.init_db()
+
+    def tearDown(self) -> None:
+        for key, value in self.old.items():
+            if key.startswith("CA_"):
+                setattr(encryption, key, value)
+            else:
+                setattr(replication, key, value)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def connect(self) -> sqlite3.Connection:
+        return replication.connect()
+
+    def _make_handler(self, body: dict) -> Any:
+        handler_cls = replication._make_handler(
+            replication.ServerContext(
+                replication.DB_PATH,
+                self.tmp / "ca.crt",
+                self.tmp / "server.crt",
+                self.tmp / "server.key",
+            )
+        )
+        handler = handler_cls.__new__(handler_cls)
+        handler._body = lambda: body  # type: ignore[method-assign]
+        handler.replies: list[tuple[int, dict]] = []
+        handler._reply = lambda status, payload: handler.replies.append((status, payload))  # type: ignore[method-assign]
+        return handler
+
+    def _consumed_result(self, node_id: str, node_name: str) -> dict:
+        return {
+            "node_id": node_id,
+            "node_name": node_name,
+            "ca_cert_pem": "-----BEGIN FAKE CA-----\n",
+            "client_cert_pem": "-----BEGIN FAKE CERT-----\n",
+            "client_key_pem": "-----BEGIN FAKE KEY-----\n",
+        }
+
+    def test_no_open_transaction_during_privileged_subprocess(self) -> None:
+        token = replication.generate_enrollment_token("replica-a")
+        observed_in_transaction: list[bool] = []
+        conn = self.connect()
+
+        def fake_run(command, check=False, input=None):
+            observed_in_transaction.append(conn.in_transaction)
+            result = self._consumed_result(token["node_id"], "replica-a")
+            return subprocess.CompletedProcess(command, 0, json.dumps(result))
+
+        handler = self._make_handler({"token": token["token"]})
+        with mock.patch.object(replication, "run", side_effect=fake_run):
+            handler._handle_enroll(conn)
+
+        self.assertEqual(len(observed_in_transaction), 1)
+        self.assertFalse(observed_in_transaction[0], "a write transaction was open while the privileged subprocess ran")
+        self.assertEqual(handler.replies[0][0], 200)
+
+    def test_successful_enrollment_consumes_token_exactly_once(self) -> None:
+        token = replication.generate_enrollment_token("replica-b")
+        reservation = replication.request_enrollment_consumption(token["token"])
+        result = replication.process_pending_enrollment_consumption(reservation["token_hash"])
+        self.assertEqual(result["node_name"], "replica-b")
+        with closing(self.connect()) as conn:
+            row = conn.execute(
+                "SELECT status, reserved_at FROM replication_enrollments WHERE node_name='replica-b'"
+            ).fetchone()
+        self.assertEqual(row["status"], "consumed")
+        # Replay: the same raw token must never be usable again.
+        with self.assertRaises(replication.ReplicationError):
+            replication.request_enrollment_consumption(token["token"])
+
+    def test_replay_of_already_consumed_token_is_rejected_end_to_end(self) -> None:
+        token = replication.generate_enrollment_token("replica-c")
+        handler = self._make_handler({"token": token["token"]})
+        with mock.patch.object(
+            replication,
+            "run",
+            side_effect=lambda command, check=False, input=None: subprocess.CompletedProcess(
+                command, 0, json.dumps(self._consumed_result(token["node_id"], "replica-c"))
+            ),
+        ):
+            handler._handle_enroll(self.connect())
+        self.assertEqual(handler.replies[0][0], 200)
+
+        replay_handler = self._make_handler({"token": token["token"]})
+        with self.assertRaises(replication.ReplicationError):
+            replay_handler._handle_enroll(self.connect())
+
+    def test_failed_privileged_step_releases_reservation_for_retry(self) -> None:
+        token = replication.generate_enrollment_token("replica-d")
+        handler = self._make_handler({"token": token["token"]})
+
+        with mock.patch.object(
+            replication, "run", return_value=subprocess.CompletedProcess(["sudo"], 1, "boom: privileged step failed")
+        ):
+            with self.assertRaises(replication.ReplicationError):
+                handler._handle_enroll(self.connect())
+
+        with closing(self.connect()) as conn:
+            row = conn.execute(
+                "SELECT status, reserved_at FROM replication_enrollments WHERE node_name='replica-d'"
+            ).fetchone()
+        self.assertEqual(row["status"], "pending")
+        self.assertIsNone(row["reserved_at"], "a failed privileged step must release its reservation")
+
+        # The token is not stuck: the same raw token can be reserved again.
+        retry = replication.request_enrollment_consumption(token["token"])
+        self.assertEqual(retry["node_name"], "replica-d")
+
+    def test_concurrent_enrollment_attempts_allow_only_one_winner(self) -> None:
+        token = replication.generate_enrollment_token("replica-e")
+        results: list[dict] = []
+        errors: list[Exception] = []
+        lock = threading.Lock()
+
+        def attempt() -> None:
+            try:
+                result = replication.request_enrollment_consumption(token["token"])
+                with lock:
+                    results.append(result)
+            except replication.ReplicationError as exc:
+                with lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=attempt) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        self.assertEqual(len(results), 1, "exactly one concurrent request should win the reservation")
+        self.assertEqual(len(errors), 7)
+
+    def test_orphaned_reservation_expires_and_recovers(self) -> None:
+        token = replication.generate_enrollment_token("replica-f")
+        replication.request_enrollment_consumption(token["token"])
+        # Simulate a request that reserved the token and then crashed
+        # before it could consume or release it -- backdate reserved_at
+        # past RESERVATION_TTL_SECONDS.
+        stale = (
+            dt.datetime.now(dt.timezone.utc)
+            - dt.timedelta(seconds=replication.RESERVATION_TTL_SECONDS + 5)
+        ).replace(microsecond=0).isoformat()
+        with closing(self.connect()) as conn:
+            conn.execute(
+                "UPDATE replication_enrollments SET reserved_at=? WHERE node_name='replica-f'", (stale,)
+            )
+            conn.commit()
+
+        # Any call that runs the sweep (here, a second unrelated token's
+        # request) recovers the orphaned reservation.
+        other = replication.generate_enrollment_token("replica-g")
+        replication.request_enrollment_consumption(other["token"])
+
+        with closing(self.connect()) as conn:
+            row = conn.execute(
+                "SELECT status, reserved_at FROM replication_enrollments WHERE node_name='replica-f'"
+            ).fetchone()
+        self.assertEqual(row["status"], "pending")
+        self.assertIsNone(row["reserved_at"], "an orphaned reservation past its TTL must be released")
+
+        # The original token is usable again.
+        recovered = replication.request_enrollment_consumption(token["token"])
+        self.assertEqual(recovered["node_name"], "replica-f")
+
+    def test_database_busy_exhaustion_returns_controlled_response_without_traceback(self) -> None:
+        token = replication.generate_enrollment_token("replica-h")
+        handler = self._make_handler({"token": token["token"]})
+
+        with mock.patch.object(
+            replication, "retry_on_locked", side_effect=replication.DatabaseBusyError("simulated exhausted retries")
+        ):
+            handler.server = mock.Mock()
+            conn = self.connect()
+            db_wrapper = conn
+            # Exercise the same do_POST() dispatch _handle_enroll runs
+            # under, so the assertion covers the real error-to-response path.
+            handler.path = "/replication/enroll"
+            with mock.patch.object(replication, "connect", return_value=db_wrapper):
+                handler.do_POST()
+
+        self.assertEqual(len(handler.replies), 1)
+        status, payload = handler.replies[0]
+        self.assertEqual(status, 503)
+        body_text = json.dumps(payload)
+        self.assertNotIn("Traceback", body_text)
+        self.assertNotIn("OperationalError", body_text)
+        self.assertIn("busy", body_text.lower())
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import fcntl
 import hashlib
@@ -36,6 +37,7 @@ COMPILED_RPZ = Path("/var/lib/alderpointdns/compiled/bind/alderpointdns.rpz")
 STAGING_DIR = Path("/var/lib/alderpointdns/staging")
 BACKUP_DIR = Path("/var/lib/alderpointdns/backups")
 DEPLOY_LOCK = Path("/var/lib/alderpointdns/staging/deploy.lock")
+MIGRATION_LOCK = Path("/var/lib/alderpointdns/staging/schema-migration.lock")
 CLI_ERROR_LOG = Path("/var/log/alderpointdns/compiler-errors.log")
 MAX_SOURCE_BYTES = 25 * 1024 * 1024
 CONNECT_TIMEOUT = 10
@@ -191,140 +193,227 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition
         conn.execute(f'ALTER TABLE {table} ADD COLUMN "{column}" {definition}')
 
 
+SCHEMA_VERSION = 1
+
+
+@contextlib.contextmanager
+def migration_lock():
+    """Interprocess lock (flock) so two processes -- e.g. the webapp's
+    startup hook (running as the unprivileged alderpointdns user) and a
+    concurrent root-context CLI invocation (package install/upgrade, or a
+    sudo'd deploy) -- can never run schema migrations against the same
+    database file at the same time.
+
+    Opened read-only and never written to: flock() only needs an open file
+    descriptor, not write access, so this works no matter which privilege
+    level happens to create the lock file first (root creates it 0644 by
+    default, which the unprivileged service user can still open O_RDONLY
+    -- opening "w" here previously failed with PermissionError once root
+    had created it first, crash-looping the web service on every startup)."""
+    MIGRATION_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    if not MIGRATION_LOCK.exists():
+        try:
+            MIGRATION_LOCK.touch()
+        except OSError:
+            pass  # another process (of either privilege level) won the race to create it; we only need to read it
+    with MIGRATION_LOCK.open("rb") as lock_handle:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX)
+        yield
+
+
+def _apply_schema(conn: sqlite3.Connection) -> None:
+    """The full idempotent DDL/seed/migration script. Every statement here is
+    safe to run against an already-up-to-date database (CREATE TABLE IF NOT
+    EXISTS, INSERT OR IGNORE, or an ALTER-if-missing probe via
+    _ensure_column), which is what makes init_db() safe to call repeatedly.
+    Only called from init_db() while migration_lock() and SCHEMA_VERSION
+    gating are held, so it never runs concurrently or unnecessarily.
+
+    Includes the webapp's own auth tables (admins/sessions/login_attempts/
+    admin_audit_log) alongside the compiler's schema: both live in the same
+    database file, so they migrate under the same lock and version gate
+    rather than webapp.py racing its own ad hoc DDL on every request."""
+    conn.executescript(
+        """
+        PRAGMA journal_mode=WAL;
+        CREATE TABLE IF NOT EXISTS sources (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            url TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            category TEXT NOT NULL DEFAULT 'ads_trackers',
+            last_attempt TEXT,
+            last_success TEXT,
+            http_status INTEGER,
+            downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+            parsed_rules INTEGER NOT NULL DEFAULT 0,
+            accepted_domains INTEGER NOT NULL DEFAULT 0,
+            duplicate_domains INTEGER NOT NULL DEFAULT 0,
+            invalid_rules INTEGER NOT NULL DEFAULT 0,
+            unsupported_rules INTEGER NOT NULL DEFAULT 0,
+            final_active_domains INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT
+        );
+        CREATE TABLE IF NOT EXISTS custom_rules (
+            id INTEGER PRIMARY KEY,
+            domain TEXT NOT NULL,
+            action TEXT NOT NULL CHECK(action IN ('allow', 'block')),
+            enabled INTEGER NOT NULL DEFAULT 1,
+            comment TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            UNIQUE(domain, action)
+        );
+        CREATE TABLE IF NOT EXISTS deployments (
+            id INTEGER PRIMARY KEY,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            status TEXT NOT NULL,
+            active_domains INTEGER NOT NULL DEFAULT 0,
+            blocked_test_domain TEXT,
+            allowed_test_domain TEXT,
+            message TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS categories (
+            key TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS policy_profiles (
+            key TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            is_custom INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS network_policies (
+            id INTEGER PRIMARY KEY,
+            cidr TEXT NOT NULL UNIQUE,
+            profile_key TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            FOREIGN KEY(profile_key) REFERENCES policy_profiles(key)
+        );
+        CREATE TABLE IF NOT EXISTS profile_categories (
+            profile_key TEXT NOT NULL,
+            category_key TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY(profile_key, category_key),
+            FOREIGN KEY(profile_key) REFERENCES policy_profiles(key),
+            FOREIGN KEY(category_key) REFERENCES categories(key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_custom_rules_domain ON custom_rules(domain);
+        CREATE TABLE IF NOT EXISTS admins (
+            id INTEGER PRIMARY KEY,
+            username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS login_attempts (
+            id INTEGER PRIMARY KEY,
+            ip TEXT NOT NULL,
+            attempted_at TEXT NOT NULL,
+            success INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            admin_id INTEGER,
+            created_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            ip TEXT,
+            user_agent TEXT,
+            csrf TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS admin_audit_log (
+            id INTEGER PRIMARY KEY,
+            at TEXT NOT NULL,
+            admin_id INTEGER,
+            username TEXT NOT NULL DEFAULT '',
+            action TEXT NOT NULL,
+            success INTEGER NOT NULL,
+            ip TEXT,
+            detail TEXT NOT NULL DEFAULT ''
+        );
+        """
+    )
+    conn.executemany(
+        """
+        INSERT OR IGNORE INTO categories(key, name, description)
+        VALUES (?, ?, ?)
+        """,
+        (
+            ("malware", "Malware", "Malware, phishing, scam, and threat-intelligence lists"),
+            ("ads_trackers", "Ads and trackers", "Advertising, affiliate, analytics, and tracking lists"),
+            ("adult_content", "Adult content", "Adult and explicit-content filtering lists"),
+            ("iot_telemetry", "IoT telemetry", "Device telemetry and vendor tracking lists"),
+            ("safesearch", "SafeSearch", "Search and video safety-enforcement policy"),
+            ("custom", "Custom categories", "Operator-defined categories and local rules"),
+        ),
+    )
+    conn.executemany(
+        """
+        INSERT OR IGNORE INTO policy_profiles(key, name, description, is_custom)
+        VALUES (?, ?, ?, 0)
+        """,
+        (
+            ("trusted", "Trusted", "Minimal policy for trusted administrator devices"),
+            ("standard", "Standard", "Default balanced malware, ads, and tracker protection"),
+            ("iot", "IoT", "Stricter telemetry-aware policy for appliance networks"),
+            ("restricted", "Restricted", "Most restrictive built-in profile for sensitive networks"),
+        ),
+    )
+    profile_defaults = {
+        "trusted": ("malware",),
+        "standard": ("malware", "ads_trackers"),
+        "iot": ("malware", "ads_trackers", "iot_telemetry"),
+        "restricted": ("malware", "ads_trackers", "adult_content", "iot_telemetry", "safesearch"),
+    }
+    conn.executemany(
+        """
+        INSERT OR IGNORE INTO profile_categories(profile_key, category_key, enabled)
+        VALUES (?, ?, 1)
+        """,
+        [
+            (profile, category)
+            for profile, categories in profile_defaults.items()
+            for category in categories
+        ],
+    )
+    # Distinguishes automatic (timer-driven) deployments from manual ones.
+    # Added as an idempotent ALTER-if-missing migration so existing
+    # installations pick it up on upgrade without a schema rewrite; older
+    # rows keep NULL, which reads as "manual".
+    _ensure_column(conn, "deployments", "trigger", "TEXT")
+    # Per-source download/parse breakdown and health-state fields, added
+    # as idempotent ALTER-if-missing migrations. "duplicate_domains"
+    # already existed (within-source only); its meaning is widened
+    # below to "did not contribute a new unique active rule" (within- or
+    # cross-source), matching what the UI displays.
+    _ensure_column(conn, "sources", "downloaded_entries", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "sources", "unique_active_domains", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "sources", "using_cached_copy", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "sources", "last_compile_success", "TEXT")
+    _ensure_column(conn, "sources", "last_warning", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "sources", "rejected_samples", "TEXT NOT NULL DEFAULT '[]'")
+    local_dns.init_db(conn)
+    filter_schedule.init_db(conn)
+    custom_rules.init_db(conn)
+
+
 def init_db() -> None:
-    with connect() as conn:
-        conn.executescript(
-            """
-            PRAGMA journal_mode=WAL;
-            CREATE TABLE IF NOT EXISTS sources (
-                id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL UNIQUE,
-                url TEXT NOT NULL,
-                enabled INTEGER NOT NULL DEFAULT 1,
-                category TEXT NOT NULL DEFAULT 'ads_trackers',
-                last_attempt TEXT,
-                last_success TEXT,
-                http_status INTEGER,
-                downloaded_bytes INTEGER NOT NULL DEFAULT 0,
-                parsed_rules INTEGER NOT NULL DEFAULT 0,
-                accepted_domains INTEGER NOT NULL DEFAULT 0,
-                duplicate_domains INTEGER NOT NULL DEFAULT 0,
-                invalid_rules INTEGER NOT NULL DEFAULT 0,
-                unsupported_rules INTEGER NOT NULL DEFAULT 0,
-                final_active_domains INTEGER NOT NULL DEFAULT 0,
-                last_error TEXT
-            );
-            CREATE TABLE IF NOT EXISTS custom_rules (
-                id INTEGER PRIMARY KEY,
-                domain TEXT NOT NULL,
-                action TEXT NOT NULL CHECK(action IN ('allow', 'block')),
-                enabled INTEGER NOT NULL DEFAULT 1,
-                comment TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL,
-                UNIQUE(domain, action)
-            );
-            CREATE TABLE IF NOT EXISTS deployments (
-                id INTEGER PRIMARY KEY,
-                started_at TEXT NOT NULL,
-                finished_at TEXT,
-                status TEXT NOT NULL,
-                active_domains INTEGER NOT NULL DEFAULT 0,
-                blocked_test_domain TEXT,
-                allowed_test_domain TEXT,
-                message TEXT NOT NULL DEFAULT ''
-            );
-            CREATE TABLE IF NOT EXISTS categories (
-                key TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                description TEXT NOT NULL DEFAULT ''
-            );
-            CREATE TABLE IF NOT EXISTS policy_profiles (
-                key TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                description TEXT NOT NULL DEFAULT '',
-                is_custom INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS network_policies (
-                id INTEGER PRIMARY KEY,
-                cidr TEXT NOT NULL UNIQUE,
-                profile_key TEXT NOT NULL,
-                description TEXT NOT NULL DEFAULT '',
-                enabled INTEGER NOT NULL DEFAULT 1,
-                FOREIGN KEY(profile_key) REFERENCES policy_profiles(key)
-            );
-            CREATE TABLE IF NOT EXISTS profile_categories (
-                profile_key TEXT NOT NULL,
-                category_key TEXT NOT NULL,
-                enabled INTEGER NOT NULL DEFAULT 1,
-                PRIMARY KEY(profile_key, category_key),
-                FOREIGN KEY(profile_key) REFERENCES policy_profiles(key),
-                FOREIGN KEY(category_key) REFERENCES categories(key)
-            );
-            CREATE INDEX IF NOT EXISTS idx_custom_rules_domain ON custom_rules(domain);
-            """
-        )
-        conn.executemany(
-            """
-            INSERT OR IGNORE INTO categories(key, name, description)
-            VALUES (?, ?, ?)
-            """,
-            (
-                ("malware", "Malware", "Malware, phishing, scam, and threat-intelligence lists"),
-                ("ads_trackers", "Ads and trackers", "Advertising, affiliate, analytics, and tracking lists"),
-                ("adult_content", "Adult content", "Adult and explicit-content filtering lists"),
-                ("iot_telemetry", "IoT telemetry", "Device telemetry and vendor tracking lists"),
-                ("safesearch", "SafeSearch", "Search and video safety-enforcement policy"),
-                ("custom", "Custom categories", "Operator-defined categories and local rules"),
-            ),
-        )
-        conn.executemany(
-            """
-            INSERT OR IGNORE INTO policy_profiles(key, name, description, is_custom)
-            VALUES (?, ?, ?, 0)
-            """,
-            (
-                ("trusted", "Trusted", "Minimal policy for trusted administrator devices"),
-                ("standard", "Standard", "Default balanced malware, ads, and tracker protection"),
-                ("iot", "IoT", "Stricter telemetry-aware policy for appliance networks"),
-                ("restricted", "Restricted", "Most restrictive built-in profile for sensitive networks"),
-            ),
-        )
-        profile_defaults = {
-            "trusted": ("malware",),
-            "standard": ("malware", "ads_trackers"),
-            "iot": ("malware", "ads_trackers", "iot_telemetry"),
-            "restricted": ("malware", "ads_trackers", "adult_content", "iot_telemetry", "safesearch"),
-        }
-        conn.executemany(
-            """
-            INSERT OR IGNORE INTO profile_categories(profile_key, category_key, enabled)
-            VALUES (?, ?, 1)
-            """,
-            [
-                (profile, category)
-                for profile, categories in profile_defaults.items()
-                for category in categories
-            ],
-        )
-        # Distinguishes automatic (timer-driven) deployments from manual ones.
-        # Added as an idempotent ALTER-if-missing migration so existing
-        # installations pick it up on upgrade without a schema rewrite; older
-        # rows keep NULL, which reads as "manual".
-        _ensure_column(conn, "deployments", "trigger", "TEXT")
-        # Per-source download/parse breakdown and health-state fields, added
-        # as idempotent ALTER-if-missing migrations. "duplicate_domains"
-        # already existed (within-source only); its meaning is widened
-        # below to "did not contribute a new unique active rule" (within- or
-        # cross-source), matching what the UI displays.
-        _ensure_column(conn, "sources", "downloaded_entries", "INTEGER NOT NULL DEFAULT 0")
-        _ensure_column(conn, "sources", "unique_active_domains", "INTEGER NOT NULL DEFAULT 0")
-        _ensure_column(conn, "sources", "using_cached_copy", "INTEGER NOT NULL DEFAULT 0")
-        _ensure_column(conn, "sources", "last_compile_success", "TEXT")
-        _ensure_column(conn, "sources", "last_warning", "TEXT NOT NULL DEFAULT ''")
-        _ensure_column(conn, "sources", "rejected_samples", "TEXT NOT NULL DEFAULT '[]'")
-        local_dns.init_db(conn)
-        filter_schedule.init_db(conn)
-        custom_rules.init_db(conn)
+    """Idempotent, interprocess-lock-protected schema migration entrypoint.
+
+    Cheap no-op once the database is already at SCHEMA_VERSION (a single
+    connection open + one PRAGMA read), so it is safe to call from every CLI
+    subcommand, package install/upgrade, and the webapp's startup hook alike
+    -- but it must never be called from the ordinary per-request database
+    path, since that would repeat the (comparatively expensive) migration
+    work on every request instead of once per process lifetime."""
+    with migration_lock():
+        with connect() as conn:
+            current_version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if current_version >= SCHEMA_VERSION:
+                return
+            _apply_schema(conn)
+            conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
 def normalize_domain(raw: str) -> str | None:
@@ -575,18 +664,27 @@ def enabled_sources(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
 
 def collect_rules(conn: sqlite3.Connection, download: bool) -> tuple[set[str], set[str], dict[int, ParseStats], list[str]]:
+    """Downloads and parses every enabled source, then writes the run's
+    outcome in a single short transaction at the very end. Downloading and
+    parsing N sources can take much longer than SQLite's busy_timeout, so no
+    write transaction is opened on `conn` until all of that slow I/O has
+    already finished -- record_download_result()/record_parse_stats() below
+    are deferred rather than interleaved into the download loop, so a
+    blocklist update never holds the database-wide writer lock across a
+    sequence of network downloads."""
     all_blocks: set[str] = set()
     all_allows: set[str] = set()
     per_source: dict[int, ParseStats] = {}
     per_source_blocks: dict[int, set[str]] = {}
     errors: list[str] = []
     pending: list[tuple[sqlite3.Row, SourceResult]] = []
+    download_results: list[tuple[SourceResult, bool]] = []
 
     for source in enabled_sources(conn):
         if download:
             result = download_source(source)
             using_cached = (not result.success) and bool(result.path and result.path.exists())
-            record_download_result(conn, result, using_cached)
+            download_results.append((result, using_cached))
         else:
             current_path, _ = source_paths(source)
             result = SourceResult(source["id"], source["name"], source["url"], current_path.exists(), path=current_path)
@@ -631,16 +729,26 @@ def collect_rules(conn: sqlite3.Connection, download: bool) -> tuple[set[str], s
         # (no exceptions) case, matching the "347 parsed / 347 duplicates /
         # 0 unique rules contributed" healthy-redundant display.
         stats.duplicate_domains = (stats.parsed_rules - stats.accepted_domains) + (len(blocks) - stats.unique_active_domains)
-        record_parse_stats(conn, source["id"], stats)
 
     # Custom rules no longer merge into the external sets here; the deploy
     # path reads only custom_filter_rules through custom_rules.collect_active
     # and applies subdomain-aware allow subtraction on top of this result.
     active_blocks = all_blocks - all_allows
+
+    # Everything above this point is pure computation and I/O against the
+    # filesystem/network, not the database. This is the one short write
+    # transaction for the whole run, committed immediately so it does not
+    # remain open into whatever the caller does next (RPZ validation,
+    # subprocess calls, service restarts, DNS test queries).
+    for result, using_cached in download_results:
+        record_download_result(conn, result, using_cached)
+    for source, _result in pending:
+        record_parse_stats(conn, source["id"], per_source[source["id"]])
     conn.execute(
         "UPDATE sources SET final_active_domains=? WHERE enabled=1",
         (len(active_blocks),),
     )
+    conn.commit()
     return active_blocks, all_allows, per_source, errors
 
 
@@ -994,6 +1102,10 @@ def deploy(download: bool = True, trigger: str | None = None) -> int:
                     "UPDATE sources SET last_compile_success=? WHERE enabled=1",
                     (now(),),
                 )
+                # Short, explicit commit: this update must not stay open
+                # across local_dns.deploy_zones()'s own subprocess/DNS
+                # validation work below.
+                conn.commit()
                 local_dns.deploy_zones(conn)
                 cache_options_snapshot = dns_cache.CACHE_OPTIONS_CONF.read_text() if dns_cache.CACHE_OPTIONS_CONF.exists() else None
                 dns_cache.deploy_cache_options(conn)
@@ -1331,10 +1443,16 @@ def replication_primary_init(_: argparse.Namespace) -> None:
 
 
 def replication_consume_enrollment(_: argparse.Namespace) -> None:
-    result = replication.process_pending_enrollment_consumption()
-    if result is None:
-        print(json.dumps({"error": "no pending enrollment request found"}))
+    # The reservation's token_hash arrives over stdin -- never argv, so it
+    # never appears in `ps` -- identifying exactly which concurrently
+    # in-flight enrollment reservation this particular sudo invocation must
+    # finish. See replication.request_enrollment_consumption()'s docstring
+    # for why a shared file (the old design) is not safe here.
+    token_hash = sys.stdin.read().strip()
+    if not token_hash:
+        print(json.dumps({"error": "no enrollment reservation token provided on stdin"}))
         raise SystemExit(1)
+    result = replication.process_pending_enrollment_consumption(token_hash)
     print(json.dumps(result))
 
 

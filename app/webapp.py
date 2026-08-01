@@ -8,6 +8,7 @@ import os
 import secrets
 import sqlite3
 import subprocess
+import sys
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ from app import analytics, auth, backup, custom_rules as custom_rules_model, dns
 from app import blocklist_categories
 from app import service_logs
 from app.alderpointdns_compiler import AlderpointDNSConnection, DB_PATH, add_source, init_db, normalize_domain, source_health
+from app.db_retry import DatabaseBusyError, is_lock_error, retry_on_locked
 
 
 ROOT = Path("/opt/alderpointdns")
@@ -36,6 +38,23 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 def secure_session_cookie_enabled() -> bool:
     return os.getenv("ALDERPOINTDNS_COOKIE_SECURE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _log(priority: int, message: str) -> None:
+    """Emits a line prefixed with its syslog priority (systemd's default
+    SyslogLevelPrefix=yes strips and honors "<N>" on stdout/stderr), matching
+    the convention used by app/analytics.py's collector diagnostics."""
+    print(f"<{priority}>webapp: {message}", file=sys.stderr, flush=True)
+
+
+@app.on_event("startup")
+def _ensure_schema() -> None:
+    # Schema creation/migration happens exactly once per process lifetime,
+    # here -- never inside db(), which is called on essentially every
+    # request. init_db() is itself cheap and interprocess-lock-protected
+    # once the database is already at its current schema version, so this
+    # is safe even when multiple alderpointdns processes start concurrently.
+    init_db()
 
 
 @app.on_event("startup")
@@ -71,58 +90,17 @@ def db() -> sqlite3.Connection:
     """Returns a connection meant to be used as `with db() as conn: ...`.
     AlderpointDNSConnection.__exit__ closes the connection in addition to the
     stdlib's commit/rollback-on-exit -- a bare sqlite3.Connection here would
-    leak an fd per call, since its context manager only commits/rolls back."""
-    init_db()
+    leak an fd per call, since its context manager only commits/rolls back.
+
+    This is a pure connection factory: it must not create tables, run
+    migrations, or change the journal mode. Schema is guaranteed to already
+    exist by the app-startup `_ensure_schema()` hook (see above) and by
+    package install/upgrade (which already invoke init_db()); repeating that
+    work on every request is what caused a routine authenticated request to
+    contend with a long-running writer for SQLite's single writer lock."""
     conn = sqlite3.connect(DB_PATH, factory=AlderpointDNSConnection, timeout=5.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=5000")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS admins (
-            id INTEGER PRIMARY KEY,
-            username TEXT NOT NULL UNIQUE,
-            password_hash TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS login_attempts (
-            id INTEGER PRIMARY KEY,
-            ip TEXT NOT NULL,
-            attempted_at TEXT NOT NULL,
-            success INTEGER NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS sessions (
-            id TEXT PRIMARY KEY,
-            admin_id INTEGER,
-            created_at TEXT NOT NULL,
-            last_seen_at TEXT NOT NULL,
-            ip TEXT,
-            user_agent TEXT,
-            csrf TEXT NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS admin_audit_log (
-            id INTEGER PRIMARY KEY,
-            at TEXT NOT NULL,
-            admin_id INTEGER,
-            username TEXT NOT NULL DEFAULT '',
-            action TEXT NOT NULL,
-            success INTEGER NOT NULL,
-            ip TEXT,
-            detail TEXT NOT NULL DEFAULT ''
-        )
-        """
-    )
     return conn
 
 
@@ -244,7 +222,20 @@ def current_admin(request: Request) -> sqlite3.Row:
         row = conn.execute("SELECT * FROM admins WHERE id=?", (admin_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=303, headers={"Location": "/login"})
-        conn.execute("UPDATE sessions SET last_seen_at=? WHERE id=?", (utc_now(), session["id"]))
+        # last_seen_at is noncritical bookkeeping: a page load must still
+        # succeed and authentication must still hold even if a concurrent
+        # long-running writer (a deploy, backup, or blocklist update) is
+        # holding SQLite's writer lock. Retry briefly, then skip this one
+        # update and log a warning rather than failing the request.
+        try:
+            retry_on_locked(
+                lambda: conn.execute("UPDATE sessions SET last_seen_at=? WHERE id=?", (utc_now(), session["id"])),
+                attempts=3,
+                base_delay=0.02,
+                max_delay=0.2,
+            )
+        except DatabaseBusyError:
+            _log(4, f"skipped last_seen_at update for session {session['id']}: database busy")
     return row
 
 
@@ -703,6 +694,34 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
             status_code=404,
         )
     return render(request, "import_migration.html", error="The requested page is not valid.", jobs=[], job=None, preview=None, adguard=None, migration_summary=None, status_code=404)
+
+
+@app.exception_handler(DatabaseBusyError)
+async def database_busy_exception_handler(request: Request, exc: DatabaseBusyError):
+    """A write exhausted its bounded busy-retry budget. Return a controlled,
+    specific response rather than letting the exception propagate into a
+    generic 500 with a raw traceback."""
+    _log(3, f"database busy handling {request.method} {request.url.path}: {exc}")
+    accepts = request.headers.get("accept", "")
+    if "text/html" not in accepts:
+        return JSONResponse({"detail": "The database is temporarily busy. Please try again in a moment."}, status_code=503)
+    return PlainTextResponse("The database is temporarily busy. Please try again in a moment.", status_code=503)
+
+
+@app.exception_handler(sqlite3.OperationalError)
+async def sqlite_operational_error_handler(request: Request, exc: sqlite3.OperationalError):
+    """Catches any sqlite3.OperationalError that reaches a route handler
+    without having gone through retry_on_locked() -- never render the raw
+    exception/traceback to the browser. A locked/busy database gets the same
+    controlled 503 as DatabaseBusyError; anything else still gets a plain,
+    traceback-free error rather than Starlette's default page."""
+    if is_lock_error(exc):
+        return await database_busy_exception_handler(request, DatabaseBusyError(str(exc)))
+    _log(3, f"unhandled sqlite error handling {request.method} {request.url.path}: {exc}")
+    accepts = request.headers.get("accept", "")
+    if "text/html" not in accepts:
+        return JSONResponse({"detail": "An internal error occurred."}, status_code=500)
+    return PlainTextResponse("An internal error occurred.", status_code=500)
 
 
 @app.get("/status/summary")

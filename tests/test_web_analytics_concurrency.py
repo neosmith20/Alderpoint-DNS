@@ -79,6 +79,8 @@ class WebAnalyticsConcurrencyTest(unittest.TestCase):
         }
         for mod in self.old_db_paths:
             mod.DB_PATH = db_path
+        self.old_migration_lock = alderpointdns_compiler.MIGRATION_LOCK
+        alderpointdns_compiler.MIGRATION_LOCK = self.tmp / "staging" / "schema-migration.lock"
         analytics.SECRET_FILE = self.tmp / "analytics.secret"
         analytics.HEARTBEAT_FILE = self.tmp / "analytics-writer-heartbeat.json"
         local_dns.STAGING_DIR = self.tmp / "staging"
@@ -102,9 +104,6 @@ class WebAnalyticsConcurrencyTest(unittest.TestCase):
 
         conn = sqlite3.connect(db_path)
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS admins (id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at TEXT NOT NULL)"
-        )
-        conn.execute(
             "INSERT INTO admins(username, password_hash, created_at) VALUES (?, ?, ?)",
             ("admin", auth.hash_password(INITIAL_PASSWORD), "now"),
         )
@@ -119,6 +118,7 @@ class WebAnalyticsConcurrencyTest(unittest.TestCase):
             patcher.stop()
         for mod, path in self.old_db_paths.items():
             mod.DB_PATH = path
+        alderpointdns_compiler.MIGRATION_LOCK = self.old_migration_lock
         import shutil
 
         shutil.rmtree(self.tmp, ignore_errors=True)
