@@ -1430,10 +1430,16 @@ def replication_primary_init(_: argparse.Namespace) -> None:
 
 
 def replication_consume_enrollment(_: argparse.Namespace) -> None:
-    result = replication.process_pending_enrollment_consumption()
-    if result is None:
-        print(json.dumps({"error": "no pending enrollment request found"}))
+    # The reservation's token_hash arrives over stdin -- never argv, so it
+    # never appears in `ps` -- identifying exactly which concurrently
+    # in-flight enrollment reservation this particular sudo invocation must
+    # finish. See replication.request_enrollment_consumption()'s docstring
+    # for why a shared file (the old design) is not safe here.
+    token_hash = sys.stdin.read().strip()
+    if not token_hash:
+        print(json.dumps({"error": "no enrollment reservation token provided on stdin"}))
         raise SystemExit(1)
+    result = replication.process_pending_enrollment_consumption(token_hash)
     print(json.dumps(result))
 
 

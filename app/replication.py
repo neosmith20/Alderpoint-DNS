@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app import encryption
+from app.db_retry import DatabaseBusyError, retry_on_locked
 
 
 DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
@@ -55,6 +56,14 @@ SERVER_KEY_PATH = REPL_DIR / "replication-server.key"
 SCHEMA_VERSION = 1
 
 ENROLLMENT_TTL_MINUTES = 15
+# How long an enrollment may sit "reserved" (staged for the privileged
+# sudo step) before it's treated as orphaned and released back to a plain
+# unreserved pending token. Generous versus real cert-issuance latency
+# (well under a second), tiny versus ENROLLMENT_TTL_MINUTES -- long enough
+# that a normal in-flight request is never released out from under it,
+# short enough that a crashed/killed request never locks out a retry for
+# more than a few tens of seconds.
+RESERVATION_TTL_SECONDS = 45
 DEFAULT_LISTEN_PORT = 8843
 DEFAULT_POLL_INTERVAL_SECONDS = 60
 MAX_BACKOFF_SECONDS = 300
@@ -79,13 +88,19 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
     return conn
 
 
-def run(command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=check)
+def run(command: list[str], check: bool = True, input: str | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, text=True, input=input, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=check)
 
 
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        conn.execute(f'ALTER TABLE {table} ADD COLUMN "{column}" {definition}')
+
 
 def init_db(conn: sqlite3.Connection | None = None) -> None:
     close = conn is None
@@ -141,6 +156,12 @@ def init_db(conn: sqlite3.Connection | None = None) -> None:
             );
             """
         )
+        # A NULL-able marker rather than a new 'reserved' status value, so
+        # this migrates additively without touching the existing status
+        # CHECK constraint (which SQLite cannot ALTER in place without a
+        # full table rebuild): a row is "reserved" precisely when
+        # status='pending' AND reserved_at IS NOT NULL.
+        _ensure_column(db, "replication_enrollments", "reserved_at", "TEXT")
         if close:
             db.commit()
     finally:
@@ -394,6 +415,16 @@ def list_enrollments(conn: sqlite3.Connection | None = None) -> list[dict[str, A
 
 def _expire_stale_enrollments(db: sqlite3.Connection) -> None:
     db.execute("UPDATE replication_enrollments SET status='expired' WHERE status='pending' AND expires_at < ?", (now(),))
+    # Recovers an orphaned reservation -- one whose unprivileged requester
+    # crashed, was killed, or otherwise never reached its own release path
+    # -- so a single interrupted request can never make a token permanently
+    # unusable. Real requests finish (consume or release) in well under a
+    # second; only a genuinely abandoned reservation is ever this old.
+    stale_before = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=RESERVATION_TTL_SECONDS)).replace(microsecond=0).isoformat()
+    db.execute(
+        "UPDATE replication_enrollments SET reserved_at=NULL WHERE status='pending' AND reserved_at IS NOT NULL AND reserved_at < ?",
+        (stale_before,),
+    )
 
 
 def consume_enrollment(raw_token: str, cert_days: int = 825, conn: sqlite3.Connection | None = None) -> dict[str, Any]:
@@ -426,73 +457,133 @@ def consume_enrollment(raw_token: str, cert_days: int = 825, conn: sqlite3.Conne
 # HTTP replication listener, see
 # start_primary_listener/ensure_primary_listener_running) can read the
 # public cert material, but it still cannot write the CA material
-# consume_enrollment() needs. So, exactly like every other
-# Alderpoint DNS feature that needs a privileged filesystem write, the listener
-# only validates the token itself (a plain SQLite read, no privilege
-# required) and stages the *hash* for the privileged
-# alderpointdns_compiler.py replication-consume-enrollment sudo entry to
-# actually read and process -- mirroring dns_cache's
-# request_flush/process_pending_flush and backup's
-# request_backup/process_pending_request handoff pattern.
-PENDING_ENROLLMENT_TOKEN_HASH = STAGING_DIR / "pending-enrollment-token-hash"
+# consume_enrollment() needs. So, exactly like every other Alderpoint DNS
+# feature that needs a privileged filesystem write, the listener only
+# validates the token itself (a plain SQLite write, no privilege required)
+# and hands the *hash* of the now-reserved token to the privileged
+# alderpointdns_compiler.py replication-consume-enrollment sudo entry over
+# its stdin (never argv, so it never appears in `ps`) to actually read and
+# process. Unlike dns_cache's request_flush/process_pending_flush or
+# backup's request_backup/process_pending_request -- where a periodic
+# consumer processes whatever is queued and doesn't need to trace a result
+# back to one specific caller -- this HTTP handler must reply to the exact
+# replica that asked with the exact certificate material for the exact
+# token it presented. Passing the reservation's own token_hash directly
+# into the subprocess is what makes that correct: an id-less shared file
+# would let two concurrent /replication/enroll requests race on which
+# subprocess consumes which reservation and each replica could be handed
+# back the wrong certificate. See request_enrollment_consumption(),
+# release_enrollment_reservation(), and process_pending_enrollment_consumption()
+# for the three-step reserve / run-privileged-step / consume-or-release
+# lifecycle this implements.
 
 
 def request_enrollment_consumption(raw_token: str, conn: sqlite3.Connection | None = None) -> dict[str, Any]:
-    """Unprivileged-safe: validates the token and, only if valid, stages it
-    for the privileged step. Never touches certificate material."""
+    """Unprivileged-safe: atomically reserves the token (a short write
+    transaction, committed before returning) and hands back its hash for
+    the caller to pass to the privileged step over stdin. Never touches
+    certificate material.
+
+    The reservation UPDATE's WHERE clause (status='pending' AND
+    reserved_at IS NULL) is the sole source of concurrency safety here:
+    SQLite serializes writers, so if two requests present the same token
+    at once, at most one UPDATE can match a row still eligible for
+    reservation -- the other necessarily affects zero rows and raises,
+    rather than both proceeding to spend a real privileged cert-issuance
+    step on the same token. Replays of an already-consumed token or a
+    token some other reservation is currently holding fail exactly the
+    same way, with exactly the same error message, deliberately not
+    distinguishing "which" invalid state applies -- a rejected caller
+    learns only that this token cannot be used right now."""
     close = conn is None
     db = conn or connect()
     try:
         init_db(db)
         _expire_stale_enrollments(db)
-        token_hash = _hash_token(raw_token)
-        row = db.execute(
-            "SELECT node_id, node_name FROM replication_enrollments WHERE token_hash=? AND status='pending' AND expires_at >= ?",
-            (token_hash, now()),
-        ).fetchone()
-        if row is None:
-            raise ReplicationError("enrollment token is invalid, expired, or already used")
-        STAGING_DIR.mkdir(parents=True, exist_ok=True)
-        PENDING_ENROLLMENT_TOKEN_HASH.write_text(token_hash)
-        PENDING_ENROLLMENT_TOKEN_HASH.chmod(0o600)
-        # Commit explicitly (rather than leaving it to the caller) so any
-        # implicit write transaction from _expire_stale_enrollments() above
-        # releases SQLite's write lock now, not whenever the caller
-        # eventually closes/commits -- this connection is about to be held
-        # open across a blocking sudo subprocess call in the HTTP handler,
-        # and the privileged process needs to write to the same database
-        # while that call is in flight.
+        # Committed on its own, independent of whatever happens below: this
+        # sweep's effect (expiring dead tokens, releasing orphaned
+        # reservations) is beneficial regardless of whether *this* caller's
+        # own token turns out to be valid, and must not be undone by a
+        # rollback triggered by this request's own rejection.
         db.commit()
-        return {"node_id": row["node_id"], "node_name": row["node_name"]}
+        token_hash = _hash_token(raw_token)
+        reserved_at = now()
+        cursor = retry_on_locked(
+            lambda: db.execute(
+                """
+                UPDATE replication_enrollments
+                SET reserved_at=?
+                WHERE token_hash=? AND status='pending' AND reserved_at IS NULL AND expires_at >= ?
+                """,
+                (reserved_at, token_hash, now()),
+            )
+        )
+        if cursor.rowcount != 1:
+            raise ReplicationError("enrollment token is invalid, expired, or already used")
+        row = db.execute(
+            "SELECT node_id, node_name FROM replication_enrollments WHERE token_hash=?",
+            (token_hash,),
+        ).fetchone()
+        # Committed immediately (not left to the caller) so this short
+        # reservation transaction's writer lock is released right away --
+        # the caller is about to invoke a blocking sudo subprocess with no
+        # database transaction of its own open at all.
+        db.commit()
+        return {"node_id": row["node_id"], "node_name": row["node_name"], "token_hash": token_hash}
     finally:
         if close:
             db.close()
 
 
-def process_pending_enrollment_consumption(cert_days: int = 825, conn: sqlite3.Connection | None = None) -> dict[str, Any] | None:
-    """Executed by the privileged compiler process: consumes the token
-    staged by request_enrollment_consumption(), if any, and does the real
-    CA-signing work. Re-validates the token from scratch (does not trust
-    that staging happened recently) since the file may be stale."""
-    if not PENDING_ENROLLMENT_TOKEN_HASH.exists():
-        return None
-    try:
-        token_hash = PENDING_ENROLLMENT_TOKEN_HASH.read_text().strip()
-    finally:
-        PENDING_ENROLLMENT_TOKEN_HASH.unlink(missing_ok=True)
-    if not token_hash:
-        return None
+def release_enrollment_reservation(token_hash: str, conn: sqlite3.Connection | None = None) -> None:
+    """Reverts a reservation made by request_enrollment_consumption() back
+    to a plain, unreserved pending token. Call this whenever the privileged
+    step did not demonstrably succeed (it raised, exited nonzero, or its
+    output could not be parsed) so a single failed attempt never leaves an
+    otherwise-valid token stuck and unusable -- the replica can simply
+    retry with the same token. A no-op if the token was already consumed
+    (status is no longer 'pending') or already released."""
     close = conn is None
     db = conn or connect()
     try:
         init_db(db)
-        _expire_stale_enrollments(db)
+        retry_on_locked(
+            lambda: db.execute(
+                "UPDATE replication_enrollments SET reserved_at=NULL WHERE token_hash=? AND status='pending'",
+                (token_hash,),
+            )
+        )
+        # Committed immediately for the same reason as the reservation
+        # itself: this may run on a long-lived per-request connection, and
+        # the release must take effect (and drop the writer lock) right
+        # away rather than whenever that connection eventually closes.
+        db.commit()
+    finally:
+        if close:
+            db.close()
+
+
+def process_pending_enrollment_consumption(token_hash: str, cert_days: int = 825, conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+    """Executed by the privileged compiler process, given the reservation's
+    token_hash (read from stdin by the CLI entry point -- never an argv
+    value, and never a shared file another concurrent invocation could
+    clobber or race on). Finishes the specific reservation identified by
+    that hash: issues the client certificate, then completes the state
+    transition to 'consumed' in one short transaction. Raises rather than
+    silently doing nothing if the reservation can't be found, since a
+    caller always has a specific token_hash it expects to be reservable."""
+    if not token_hash:
+        raise ReplicationError("no enrollment reservation token provided")
+    close = conn is None
+    db = conn or connect()
+    try:
+        init_db(db)
         row = db.execute(
-            "SELECT * FROM replication_enrollments WHERE token_hash=? AND status='pending' AND expires_at >= ?",
-            (token_hash, now()),
+            "SELECT * FROM replication_enrollments WHERE token_hash=? AND status='pending' AND reserved_at IS NOT NULL",
+            (token_hash,),
         ).fetchone()
         if row is None:
-            raise ReplicationError("enrollment token is invalid, expired, or already used")
+            raise ReplicationError("enrollment reservation is invalid, expired, or already completed")
         return _finish_enrollment(db, row, cert_days)
     except Exception:
         db.rollback()
@@ -846,6 +937,8 @@ def _make_handler(ctx: ServerContext) -> type[http.server.BaseHTTPRequestHandler
                 self._reply(403, {"error": str(exc)})
             except ReplicationError as exc:
                 self._reply(400, {"error": str(exc)})
+            except DatabaseBusyError:
+                self._reply(503, {"error": "the database is temporarily busy, please try again"})
             except Exception as exc:  # pragma: no cover - defensive
                 self._reply(500, {"error": str(exc)})
             finally:
@@ -871,14 +964,26 @@ def _make_handler(ctx: ServerContext) -> type[http.server.BaseHTTPRequestHandler
                 raise ReplicationError("token is required")
             # This listener runs as the unprivileged alderpointdns user and
             # cannot write /etc/alderpointdns/certs itself. request_enrollment_
-            # consumption() validates the token (read-only) and stages it;
-            # the privileged sudo call does the actual CA-signing work and
-            # returns the cert material to relay back to the replica.
-            request_enrollment_consumption(token, conn=db)
-            proc = run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "replication-consume-enrollment"], check=False)
-            if proc.returncode != 0:
-                raise ReplicationError(f"enrollment could not be completed: {proc.stdout[-500:]}")
-            result = json.loads(proc.stdout)
+            # consumption() atomically reserves the token in a short,
+            # already-committed transaction -- no database write transaction
+            # is open here, or anywhere else in this method, while the
+            # blocking privileged sudo call below does the real CA-signing
+            # work. If that privileged step doesn't demonstrably succeed,
+            # the reservation is released so the token remains usable for a
+            # retry rather than being stuck forever.
+            reservation = request_enrollment_consumption(token, conn=db)
+            try:
+                proc = run(
+                    ["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "replication-consume-enrollment"],
+                    check=False,
+                    input=reservation["token_hash"],
+                )
+                if proc.returncode != 0:
+                    raise ReplicationError(f"enrollment could not be completed: {proc.stdout[-500:]}")
+                result = json.loads(proc.stdout)
+            except Exception:
+                release_enrollment_reservation(reservation["token_hash"], conn=db)
+                raise
             self._reply(200, result)
 
         def _handle_latest(self, db: sqlite3.Connection) -> None:

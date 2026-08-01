@@ -6,6 +6,29 @@ may still change between releases before a stable 1.0.
 
 ## Unreleased
 
+- Fixed the replication enrollment handoff (`replication.py::_handle_enroll`)
+  holding no reservation across its privileged sudo subprocess: a token was
+  only ever checked for validity (still 'pending'), never atomically
+  reserved, before a single shared staging file handed its hash to the
+  privileged `alderpointdns_compiler.py replication-consume-enrollment`
+  step -- two concurrent `/replication/enroll` requests (even for two
+  different tokens) could race on that shared file, and a failed privileged
+  step never released anything back. Enrollment now goes through an
+  explicit reserve / run-privileged-step / consume-or-release lifecycle:
+  `request_enrollment_consumption()` atomically flips a token from
+  unreserved-pending to reserved-pending in one short, already-committed
+  transaction (a `reserved_at` column, additive so no destructive migration
+  is needed); the reservation's hash is handed to the privileged subprocess
+  over stdin (never argv, never a shared file) so concurrent requests for
+  different tokens can never cross paths; a failing privileged step now
+  explicitly releases the reservation (`release_enrollment_reservation()`)
+  so the token remains retryable instead of stuck; and an orphaned
+  reservation (the requester crashed before it could release or consume)
+  recovers automatically after a short TTL. The reservation writes use the
+  same shared bounded-retry helper as the web app fix, and a busy-exhausted
+  write now returns a controlled HTTP 503 instead of leaking an internal
+  error string built from a raw exception.
+
 - Fixed a SQLite concurrency bug where a routine authenticated web request
   could fail with `sqlite3.OperationalError: database is locked` / HTTP 500.
   Root cause: `webapp.db()` ran `alderpointdns_compiler.init_db()` -- a
