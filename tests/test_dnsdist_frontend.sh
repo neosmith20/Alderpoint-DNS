@@ -20,8 +20,42 @@ need systemctl
 need ss
 need dnsdist
 need rndc
+need python3
 
 dnsdist --version | grep -q 'dns-over-quic' || fail "official dnsdist build with dns-over-quic support is required"
+
+python3 - <<'PY'
+import sqlite3
+
+db = sqlite3.connect("/var/lib/alderpointdns/alderpointdns.db")
+try:
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS encryption_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        """
+    )
+    for key, value in {
+        "doh3_enabled": "1",
+        "doq_enabled": "1",
+        "doh3_port": "443",
+        "doq_port": "853",
+        "server_hostname": "alderpointdns.local",
+        "listen_ipv4": "0.0.0.0",
+        "listen_ipv6": "::",
+    }.items():
+        db.execute(
+            "INSERT INTO encryption_settings(key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+    db.commit()
+finally:
+    db.close()
+PY
+/opt/alderpointdns/app/alderpointdns_compiler.py encryption-deploy >/dev/null
 
 dig @127.0.0.1 -p 5353 cloudflare.com A +time=3 +tries=1 >/dev/null || fail "BIND backend UDP resolution failed"
 dig @127.0.0.1 -p 53 cloudflare.com A +time=3 +tries=1 >/dev/null || fail "dnsdist UDP resolution failed"
@@ -57,6 +91,8 @@ ss -ltnp | grep -Eq '(^|[[:space:]])(0[.]0[.]0[.]0|\*):53' || fail "dnsdist is n
 ss -ltnp | grep -Eq '(^|[[:space:]])(\[::\]|\*):53' || fail "dnsdist is not listening on TCP [::]:53"
 ss -ltnp | grep -Eq '(^|[[:space:]])(0[.]0[.]0[.]0|\*):443' || fail "dnsdist is not listening on TCP 0.0.0.0:443"
 ss -ltnp | grep -Eq '(^|[[:space:]])(0[.]0[.]0[.]0|\*):853' || fail "dnsdist is not listening on TCP 0.0.0.0:853"
+ss -lunp | grep -Eq '(^|[[:space:]])(0[.]0[.]0[.]0|\*):853' || fail "dnsdist is not listening on UDP 0.0.0.0:853 for DoQ"
+ss -lunp | grep -Eq '(^|[[:space:]])(\[::\]|\*):853' || fail "dnsdist is not listening on UDP [::]:853 for DoQ"
 ss -ltnp | grep -q '127.0.0.1:8083' || fail "dnsdist web statistics interface is not loopback-only"
 ss -ltnp | grep -q '127.0.0.1:5199' || fail "dnsdist control console is not loopback-only"
 
