@@ -87,7 +87,9 @@ Per `docs/supported-systems.md` and `docs/hardware-requirements.md`:
 
 ## Quick start
 
-Alderpoint DNS is distributed as a Debian package for Debian 13. Download the current release package and its checksum directly from GitHub:
+Alderpoint DNS is distributed as a Debian package for Debian 13.
+
+### 1. Download the current release
 
 ```bash
 curl -fL \
@@ -97,7 +99,28 @@ curl -fL \
 curl -fL \
   -o SHA256SUMS \
   https://github.com/neosmith20/Alderpoint-DNS/releases/download/v0.4.0-beta.6/SHA256SUMS
-  ```
+```
+
+### 2. Verify the package
+
+```bash
+sha256sum -c SHA256SUMS
+```
+
+Expected result:
+
+```text
+alderpointdns_0.4.0-beta6-1_all.deb: OK
+```
+
+### 3. Install Alderpoint DNS
+
+```bash
+sudo apt update
+sudo apt install ./alderpointdns_0.4.0-beta6-1_all.deb
+```
+
+Using `apt install ./package.deb` instead of `dpkg -i` allows APT to install any required dependencies automatically.
 
 ## Known limitations
 
