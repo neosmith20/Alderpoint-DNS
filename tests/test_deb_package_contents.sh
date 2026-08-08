@@ -182,8 +182,16 @@ grep -q 'PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_comp
   fail "postinst still swallows failures from alderpointdns_compiler.py deploy with || true (or a trailing redirect) instead of failing the install"
 grep -q '^    systemctl restart named dnsdist$' "$POSTINST" || \
   fail "postinst still swallows failures from 'systemctl restart named dnsdist' with || true instead of failing the install"
-grep -q '^    systemctl enable --now alderpointdns alderpointdns-analytics$' "$POSTINST" || \
+# enable + an unconditional restart, not `enable --now`: on an
+# already-active unit (the normal upgrade case) `--now` is a no-op
+# restart-wise, silently leaving the *previous* version's process (and,
+# critically, its previous ProtectSystem=full ReadWritePaths=) running --
+# a real bug found and fixed via this project's own disposable-VM upgrade
+# testing (see CHANGELOG.md). Both lines must still be un-`|| true`d.
+grep -q '^    systemctl enable alderpointdns alderpointdns-analytics$' "$POSTINST" || \
   fail "postinst still swallows failures from enabling the web/analytics services with || true instead of failing the install"
+grep -q '^    systemctl restart alderpointdns alderpointdns-analytics$' "$POSTINST" || \
+  fail "postinst does not unconditionally restart alderpointdns/alderpointdns-analytics on every install/upgrade (enable --now alone does not restart an already-active unit)"
 grep -q 'alderpointdns_wait_active' "$POSTINST" || \
   fail "postinst does not verify named/dnsdist/alderpointdns/alderpointdns-analytics actually reached the active state before reporting success"
 for svc in named dnsdist alderpointdns alderpointdns-analytics; do

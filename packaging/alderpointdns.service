@@ -28,7 +28,34 @@ RestartSec=3
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=full
-ReadWritePaths=/var/lib/alderpointdns /var/log/alderpointdns /etc/alderpointdns
+# ProtectSystem=full read-only-bind-mounts /usr, /boot, and /etc for this
+# unit's private mount namespace -- and, since `sudo` execs the privileged
+# alderpointdns_compiler.py subcommands as a child of *this* process
+# without creating a new mount namespace of its own, that read-only bind
+# applies to those privileged children too, even running as root. Most
+# privileged writes land under /var/lib/alderpointdns or /etc/alderpointdns
+# (already listed below) with named/dnsdist's own managed `include`d files
+# bootstrapped once, unsandboxed, by packaging/debian/postinst -- but
+# app/network_config.py's per-backend persistent config (netplan YAML,
+# systemd-networkd .network drop-ins, ifupdown /etc/network/interfaces[.d])
+# has no such postinst bootstrap and is written directly by the live,
+# sandboxed request path, so those directories must be explicitly
+# writable or every backend's Apply fails with EROFS.
+# app/backup.py's restore path (bind_source_config, dnsdist_source_config,
+# and app_config components) directly replaces live files under
+# /etc/bind, /etc/dnsdist, /etc/systemd/system/{alderpointdns,
+# alderpointdns-analytics,dnsdist}.service[.d], and /etc/sudoers.d --
+# same ProtectSystem=full read-only-/etc problem as the network backends
+# above, this time surfaced by a real ~296 MiB restore on a disposable VM
+# (see the completion report) rather than a mocked one. This does not
+# widen what the *untrusted* web process itself can write (it has no
+# write access to any of these paths at the filesystem-permission level
+# either way, running unprivileged) -- it only lifts the mount-level
+# read-only restriction for the sudo-escalated, sudoers-allowlisted
+# alderpointdns_compiler.py restore path, which already only ever writes
+# validated archive content from a backup that itself went through
+# app/backup.py's extraction/traversal/size validation.
+ReadWritePaths=/var/lib/alderpointdns /var/log/alderpointdns /etc/alderpointdns /etc/netplan /etc/systemd/network /etc/network /etc/bind /etc/dnsdist /etc/systemd/system /etc/sudoers.d
 
 [Install]
 WantedBy=multi-user.target

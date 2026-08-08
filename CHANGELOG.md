@@ -6,6 +6,78 @@ may still change between releases before a stable 1.0.
 
 ## Unreleased
 
+- Fixed dnsdist failing to bind port 53 (`Fatal error: binding socket to
+  0.0.0.0:53: Address already in use`) on an otherwise completely
+  unmodified, default fresh install of Debian 12/13 or Ubuntu. Root cause:
+  systemd-resolved's stub DNS listener is enabled by default and binds
+  specific loopback aliases (127.0.0.53:53, sometimes also 127.0.0.54:53)
+  without `SO_REUSEPORT`; Linux refuses a subsequent *wildcard* bind
+  (0.0.0.0:53, what dnsdist needs) on a port already claimed by any
+  non-`SO_REUSEPORT` socket, even one bound to a different, more specific
+  address. `packaging/debian/postinst` now disables only
+  systemd-resolved's stub *listener* (`DNSStubListener=no`, via a drop-in)
+  when systemd-resolved is active, and repoints `/etc/resolv.conf` (only
+  when it's still the default symlink -- a real administrator-owned file
+  is left untouched) at this host's own Alderpoint DNS listener, since
+  that's the intended end state for a host running Alderpoint DNS as its
+  resolver anyway. Discovered during this pass's clean-VM install
+  validation (see the completion report) -- this affected every fresh
+  install on a stock Debian/Ubuntu host, not anything specific to this
+  branch's other changes.
+- Fixed `alderpointdns`/`alderpointdns-analytics` not actually restarting
+  on upgrade. `packaging/debian/postinst` used `systemctl enable --now`
+  for these two services, which -- unlike named/dnsdist, which already
+  get an explicit `systemctl restart` -- only ensures an *already-active*
+  unit stays enabled/running; it does not restart it. Every upgrade of
+  this package was silently leaving the *previous* version's web
+  app/analytics-collector process running (with the previous version's
+  code, and, for the systemd sandboxing fix above, the previous version's
+  `ReadWritePaths=`) until something else happened to restart it. Now
+  `enable` (idempotent) is followed by an unconditional `restart`, the
+  same pattern named/dnsdist already used. Discovered while verifying the
+  `ReadWritePaths=` fix above actually took effect after a `dpkg -i`
+  upgrade in this pass's real testing -- it silently didn't, for exactly
+  this reason.
+- Fixed native backup restore failing (`[Errno 30] Read-only file system:
+  '/etc/systemd/system/dnsdist.service.d'`) for the `app_config`,
+  `dnsdist_source_config`, and `bind_source_config` restore components --
+  the same `ProtectSystem=full` root cause as the network Apply fix
+  below, this time affecting `app/backup.py`'s restore path, which
+  directly replaces live files under `/etc/bind`, `/etc/dnsdist`,
+  `/etc/systemd/system/*.service[.d]`, and `/etc/sudoers.d`. Discovered
+  restoring a real ~296 MiB backup (2.8M Analytics History rows) through
+  the actual streamed restore path on a disposable Debian 13 VM.
+  `packaging/alderpointdns.service`'s `ReadWritePaths=` now covers all of
+  these.
+- Fixed Network Configuration's Apply always failing (`[Errno 30]
+  Read-only file system`) for every backend that writes its own
+  persistent config file (netplan, systemd-networkd, ifupdown -- not
+  NetworkManager, which goes through `nmcli`/D-Bus instead). Root cause:
+  `alderpointdns.service` runs with `ProtectSystem=full`, which
+  read-only-bind-mounts `/etc` for the unit's private mount namespace;
+  since the privileged `alderpointdns_compiler.py network-apply` helper
+  runs as a `sudo`-escalated *child* of that same process (without its
+  own new mount namespace), it inherited the same read-only `/etc`, even
+  running as root. `packaging/alderpointdns.service` now explicitly lists
+  `/etc/netplan`, `/etc/systemd/network`, and `/etc/network` in
+  `ReadWritePaths=`. Discovered via this pass's real Netplan-backend
+  apply/rollback test on a disposable Debian 13 VM (see the completion
+  report) -- every previous test of this feature had mocked the actual
+  backend file writes, which is exactly the class of bug real-network
+  testing was added to catch.
+- Fixed `named` failing to start (`/etc/bind/named.conf.options:N: parsing
+  failed: file not found` for `cache-options.conf`) whenever
+  `/var/lib/alderpointdns` is missing at postinst time but
+  `/etc/bind/named.conf.options` already has the `include` line a prior
+  successful install's DNS Cache Settings deploy added (that line is
+  permanent once added; the template itself is only installed on first
+  install and never rewritten). Reproduced by `apt purge alderpointdns`
+  followed by reinstall without also resetting bind9's own
+  `/etc/bind/named.conf.options`. `packaging/debian/postinst` now
+  pre-creates an empty `cache-options.conf` bootstrap placeholder the same
+  way it already did for `local-zones.conf`, so `named` can always start
+  regardless of ordering; the real generated content replaces it in the
+  same postinst run once `alderpointdns_compiler.py deploy` runs.
 - Fixed native Alderpoint DNS backup restore rejecting large backups with
   "uploaded file exceeds 10 MiB limit". Root cause: the only 10 MiB cap in
   the codebase is `MAX_UPLOAD_BYTES` in `app/importer.py`, which exists for

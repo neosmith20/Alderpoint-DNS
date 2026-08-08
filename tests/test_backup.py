@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -255,6 +257,8 @@ class AppVersionTest(BackupTestBase):
         (self.approot / ".git").mkdir()
 
         def fake_run(command, check=True, **kwargs):
+            if command[0] == "dpkg-query":
+                return subprocess.CompletedProcess(command, 1, "")
             self.assertEqual(command, ["git", "-C", str(self.approot), "rev-parse", "--short", "HEAD"])
             return subprocess.CompletedProcess(command, 0, "abc1234\n")
 
@@ -292,6 +296,90 @@ class AppVersionTest(BackupTestBase):
             subprocess.run(["tar", "-xzf", str(path), "-C", str(extract)], check=True)
             manifest = json.loads((extract / "manifest.json").read_text())
             self.assertEqual(manifest["alderpointdns_app_version"], "0.4.0-beta.2")
+
+
+class VersionConsistencyTest(BackupTestBase):
+    """Regression coverage for the single-source-of-truth model documented
+    in docs/versioning.md: the VERSION file is primary (it's what
+    scripts/build-deb.sh itself derives the .deb Version from at build
+    time, so on a normally-built-and-installed package the two already
+    agree), dpkg is the fallback when VERSION is missing/unreadable, and a
+    disagreement between the two -- which should never happen on a package
+    built through the normal pipeline -- is detected and logged rather
+    than silently ignored, since an undetected mismatch is exactly what
+    would make a future Software Updates version comparison unreliable."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.approot = self.tmp / "approot"
+        self.approot.mkdir()
+        self.old_app_root = backup.APP_ROOT
+        backup.APP_ROOT = self.approot
+
+    def tearDown(self) -> None:
+        backup.APP_ROOT = self.old_app_root
+        super().tearDown()
+
+    def test_dpkg_version_to_source_form_reverses_build_deb_substitution(self) -> None:
+        # Must exactly invert scripts/build-deb.sh's
+        # sed -E 's/-beta\.([0-9]+)/~beta\1/' plus the appended "-1".
+        self.assertEqual(backup._dpkg_version_to_source_form("0.4.0~beta6-1"), "0.4.0-beta.6")
+        self.assertEqual(backup._dpkg_version_to_source_form("0.4.0-1"), "0.4.0")
+        self.assertEqual(backup._dpkg_version_to_source_form("1.2.3~beta10-2"), "1.2.3-beta.10")
+
+    def test_status_agrees_when_file_and_dpkg_match(self) -> None:
+        (self.approot / "VERSION").write_text("0.4.0-beta.6\n")
+        with mock.patch.object(backup, "run", return_value=subprocess.CompletedProcess(["dpkg-query"], 0, "0.4.0~beta6-1\n")):
+            status = backup.version_source_status()
+        self.assertEqual(status["resolved"], "0.4.0-beta.6")
+        self.assertEqual(status["source"], "version_file")
+        self.assertFalse(status["mismatch"])
+
+    def test_status_flags_mismatch_when_file_is_stale_relative_to_dpkg(self) -> None:
+        # Reproduces this exact repo's real anomaly: a dev checkout with an
+        # older VERSION file overlaid on a path where dpkg has a newer
+        # package already installed.
+        (self.approot / "VERSION").write_text("0.4.0-beta.5\n")
+        with mock.patch.object(backup, "run", return_value=subprocess.CompletedProcess(["dpkg-query"], 0, "0.4.0~beta6-1\n")):
+            status = backup.version_source_status()
+        self.assertTrue(status["mismatch"])
+        self.assertEqual(status["file_version"], "0.4.0-beta.5")
+        self.assertEqual(status["dpkg_version_normalized"], "0.4.0-beta.6")
+        # The VERSION file still wins for the resolved/reported version --
+        # see the module docstring -- but the drift is not silently lost.
+        self.assertEqual(status["resolved"], "0.4.0-beta.5")
+
+    def test_mismatch_is_logged_to_stderr(self) -> None:
+        (self.approot / "VERSION").write_text("0.4.0-beta.5\n")
+        with mock.patch.object(backup, "run", return_value=subprocess.CompletedProcess(["dpkg-query"], 0, "0.4.0~beta6-1\n")), \
+             mock.patch.object(backup.shutil, "which", return_value=None):
+            with contextlib.redirect_stderr(io.StringIO()) as captured:
+                backup.alderpointdns_app_version()
+        self.assertIn("does not match", captured.getvalue())
+        self.assertIn("0.4.0-beta.5", captured.getvalue())
+        self.assertIn("0.4.0-beta.6", captured.getvalue())
+
+    def test_no_mismatch_log_when_file_and_dpkg_agree(self) -> None:
+        (self.approot / "VERSION").write_text("0.4.0-beta.6\n")
+        with mock.patch.object(backup, "run", return_value=subprocess.CompletedProcess(["dpkg-query"], 0, "0.4.0~beta6-1\n")), \
+             mock.patch.object(backup.shutil, "which", return_value=None):
+            with contextlib.redirect_stderr(io.StringIO()) as captured:
+                backup.alderpointdns_app_version()
+        self.assertEqual(captured.getvalue(), "")
+
+    def test_status_falls_back_to_dpkg_when_no_version_file(self) -> None:
+        with mock.patch.object(backup, "run", return_value=subprocess.CompletedProcess(["dpkg-query"], 0, "0.4.0~beta6-1\n")):
+            status = backup.version_source_status()
+        self.assertEqual(status["resolved"], "0.4.0-beta.6")
+        self.assertEqual(status["source"], "dpkg")
+        self.assertFalse(status["mismatch"])
+
+    def test_status_unknown_when_neither_source_available(self) -> None:
+        with mock.patch.object(backup, "run", side_effect=FileNotFoundError("dpkg-query")):
+            status = backup.version_source_status()
+        self.assertEqual(status["resolved"], "unknown")
+        self.assertEqual(status["source"], "none")
+        self.assertFalse(status["mismatch"])
 
 
 class SqliteOnlineBackupTest(BackupTestBase):

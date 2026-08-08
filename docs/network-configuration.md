@@ -108,23 +108,31 @@ a shell fragment built from request input.
 
 ## Limitations
 
-- **Real interface reconfiguration and rollback (task section 16's TEST A
-  and TEST B) have not been exercised against a real NIC in this
-  development pass.** Backend detection, validation, config rendering per
-  backend, and the apply/rollback/confirm state machine are covered by
-  unit tests with every backend command (`networkctl`, `netplan`,
-  `nmcli`, `ifup`/`ifdown`, `systemd-run`) mocked -- proving the logic and
-  state machine are correct, not that a real NIC actually comes back up
-  the way a given kernel/driver/backend combination will in practice.
-  Before relying on this in production, run TEST A (successful change,
-  confirm, deadline passes with the new IP still active) and TEST B
-  (apply, do not confirm, verify automatic rollback, no reboot) on a
-  disposable VM or network namespace where losing the interface cannot
-  affect anything else.
+- **Real interface reconfiguration and rollback have been exercised
+  against a real NIC on a disposable Debian 13 VM (Netplan backend,
+  rendering to systemd-networkd)**, in addition to the unit tests with
+  every backend command mocked: a successful static IP change, confirm,
+  survival past the 120s deadline, and persistence across a real reboot
+  (TEST A); and an unconfirmed apply automatically rolled back by the
+  independent `systemd-run` watchdog -- proven via journal logs showing
+  the watchdog firing on its own schedule, not tied to the browser/HTTP
+  request -- with the original address, gateway, and persistent config
+  all restored, no reboot required (TEST B). This surfaced and fixed a
+  real bug: `alderpointdns.service`'s `ProtectSystem=full` sandboxing
+  didn't list the backend config directories (`/etc/netplan`,
+  `/etc/systemd/network`, `/etc/network`) in `ReadWritePaths=`, so every
+  backend's Apply failed with `EROFS` until this pass's fix (see
+  CHANGELOG.md). NetworkManager and ifupdown's live-apply mechanisms
+  remain covered only by mocked tests; the *persistent-config write
+  path* for both is covered by the same `ReadWritePaths=` fix (their
+  config directories are also listed), but their `nmcli`/`ifup`/`ifdown`
+  invocations have not been exercised against a real NIC. Exercise those
+  on a disposable VM before relying on them in production.
 - IPv6 support (static/DHCPv6/SLAAC) is implemented for systemd-networkd
   and Netplan; NetworkManager and ifupdown IPv6 staging is more limited
   and should be verified against your specific distribution/version
-  before relying on it.
+  before relying on it. IPv6 itself was not exercised in the real-NIC
+  test above (IPv4-only change).
 - The DNS-service-awareness audit after a confirmed change reports IP
   literals found in `named.conf*`/`dnsdist.conf`; it does not currently
   attempt to detect every possible indirect dependency (e.g. an IP

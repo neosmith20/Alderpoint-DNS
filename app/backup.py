@@ -67,6 +67,7 @@ import shutil
 import socket
 import sqlite3
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -443,9 +444,10 @@ def _read_version_file() -> str | None:
 
 
 def _read_dpkg_version() -> str | None:
-    """Fallback for the (unexpected) case where VERSION is missing or
-    malformed on a real .deb install: ask dpkg itself. Absent on non-Debian
-    dev checkouts, which is fine -- it's only a fallback."""
+    """Ask dpkg for the actually-installed package version. Returns None on
+    non-Debian/source checkouts where the package was never dpkg-installed
+    -- that's the normal, expected case for a dev checkout, not a fallback
+    failure."""
     try:
         proc = run(["dpkg-query", "-W", "-f=${Version}", DPKG_PACKAGE_NAME], check=False)
     except (FileNotFoundError, OSError):
@@ -454,6 +456,19 @@ def _read_dpkg_version() -> str | None:
         return None
     version = proc.stdout.strip()
     return version or None
+
+
+# scripts/build-deb.sh derives the Debian package Version deterministically
+# from the VERSION file's semver-style pre-release tag:
+#   0.4.0-beta.6  ->  0.4.0~beta6-1   (sed 's/-beta\.([0-9]+)/~beta\1/'; "-1"
+#   appended as the Debian revision). Reversed here so a dpkg-reported
+#   version can be compared against a VERSION-file-style string.
+_DPKG_BETA_RE = re.compile(r"~beta(\d+)")
+
+
+def _dpkg_version_to_source_form(dpkg_version: str) -> str:
+    upstream = dpkg_version.rsplit("-", 1)[0] if "-" in dpkg_version else dpkg_version
+    return _DPKG_BETA_RE.sub(r"-beta.\1", upstream)
 
 
 def _git_dev_metadata() -> str | None:
@@ -475,8 +490,69 @@ def _git_dev_metadata() -> str | None:
     return commit or None
 
 
+def version_source_status() -> dict[str, Any]:
+    """Resolve the canonical application version and report both
+    contributing sources. See docs/versioning.md for the full model;
+    summary:
+
+    - The VERSION file (see packaging/debian/install) is the primary
+      source: it's what scripts/build-deb.sh itself derives the Debian
+      package Version from at build time, so on any package built and
+      installed through the normal pipeline the two already agree by
+      construction -- this call doesn't need to (and, to stay a fast,
+      dependency-free read on every backup, does not) prefer one over the
+      other in that normal case.
+    - dpkg's own record is consulted as a fallback when VERSION is
+      missing/unreadable/malformed (e.g. a stripped-down or corrupted
+      package tree) and, regardless of fallback use, is *compared* against
+      the file so unexpected drift between "what the files say" and "what
+      dpkg thinks is installed" -- e.g. a dpkg-managed path that got
+      hand-edited or overlaid outside of dpkg after install -- is detected
+      and logged rather than silently ignored. That drift is exactly the
+      failure mode that would make a future Software Updates version
+      comparison unreliable if left unnoticed.
+    """
+    file_version = _read_version_file()
+    dpkg_version = _read_dpkg_version()
+    normalized_dpkg = _dpkg_version_to_source_form(dpkg_version) if dpkg_version else None
+
+    mismatch = bool(file_version and normalized_dpkg and file_version != normalized_dpkg)
+    if file_version:
+        resolved, source = file_version, "version_file"
+    elif normalized_dpkg:
+        resolved, source = normalized_dpkg, "dpkg"
+    else:
+        resolved, source = "unknown", "none"
+
+    return {
+        "resolved": resolved,
+        "source": source,
+        "file_version": file_version,
+        "dpkg_version": dpkg_version,
+        "dpkg_version_normalized": normalized_dpkg,
+        "mismatch": mismatch,
+    }
+
+
 def alderpointdns_app_version() -> str:
-    version = _read_version_file() or _read_dpkg_version() or "unknown"
+    file_version = _read_version_file()
+    version = file_version or _read_dpkg_version() or "unknown"
+    if file_version:
+        # Only worth the extra dpkg-query (and the drift check) when we
+        # actually have something to compare the file against; skip it
+        # entirely on hosts with no VERSION file at all, where dpkg was
+        # already consulted above as the sole source.
+        dpkg_version = _read_dpkg_version()
+        if dpkg_version and _dpkg_version_to_source_form(dpkg_version) != file_version:
+            print(
+                f"<4>alderpointdns: VERSION file ({file_version!r}) does not match the "
+                f"dpkg-installed package version ({dpkg_version!r}, normalized "
+                f"{_dpkg_version_to_source_form(dpkg_version)!r}); using the VERSION file. "
+                "This is expected on a dev checkout overlaid on a dpkg-managed install path; "
+                "otherwise it indicates drift a future version-update check should not ignore.",
+                file=sys.stderr,
+                flush=True,
+            )
     commit = _git_dev_metadata()
     return f"{version}+git.{commit}" if commit else version
 
