@@ -67,10 +67,11 @@ import shutil
 import socket
 import sqlite3
 import subprocess
+import tarfile
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO, Callable
 
 
 DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
@@ -102,6 +103,53 @@ DPKG_PACKAGE_NAME = "alderpointdns"
 
 BACKUP_FORMAT_VERSION = 1
 FILENAME_PREFIX = "alderpointdns-backup-"
+
+# ---------------------------------------------------------------------------
+# Native backup upload/extraction size policy
+#
+# This is a *separate* policy from app/importer.py's MAX_UPLOAD_BYTES (10
+# MiB), which exists for CSV/spreadsheet/text/AdGuard-YAML imports through
+# the Import & Migration page. Those uploads are always small, hand-edited,
+# or paginated text; a native Alderpoint DNS backup is a full, versioned
+# archive of this server's configuration and (optionally) its SQLite
+# database, and Analytics History naturally makes that archive grow as a
+# server ages -- a long-running production install's backup can legitimately
+# be hundreds of MiB. Sharing importer.py's 10 MiB cap with backup restore
+# is the exact bug this module works around: a backup upload must never be
+# rejected at that limit.
+#
+# Defaults chosen for real Alderpoint DNS backup growth: routine backups
+# (no analytics_history) are typically a few MiB; a year of Analytics
+# History on a busy resolver is realistically in the tens-to-low-hundreds
+# of MiB range. 4 GiB gives multiple years of headroom without allowing an
+# unbounded upload. Both values are administrator-configurable (within a
+# hard ceiling) via backup_settings, in case a particular deployment's
+# analytics retention grows unusually large.
+DEFAULT_MAX_UPLOAD_MIB = 4096  # 4 GiB
+HARD_CEILING_MAX_UPLOAD_MIB = 51200  # 50 GiB -- never allow "unlimited"
+DEFAULT_MAX_EXTRACTED_MIB = 16384  # 16 GiB -- extracted/uncompressed ceiling
+HARD_CEILING_MAX_EXTRACTED_MIB = 204800  # 200 GiB
+
+# Bounded chunk size used when streaming an upload to disk. This is the
+# entire memory footprint of a backup upload, independent of archive size:
+# a 20 MiB backup and a 4 GiB backup both ever hold at most this many bytes
+# in the FastAPI/web process's memory at once.
+UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024  # 4 MiB
+
+# Multiplier applied to the declared/streamed archive size when checking
+# free disk space before accepting an upload: staging needs room for the
+# compressed archive itself, its extracted contents, and (during restore)
+# a fresh pre-restore safety backup, all of which can transiently coexist.
+FREE_SPACE_UPLOAD_MULTIPLIER = 2
+FREE_SPACE_EXTRACT_MULTIPLIER = 1.2
+# Conservative up-front floor used when a client didn't supply a usable
+# Content-Length hint: catches "this disk has essentially no space left"
+# without demanding room for a full max-size upload that may never
+# materialize. The per-chunk counter in the upload loop enforces the real
+# max_upload_bytes() limit regardless of this floor, and the free-space
+# check re-runs (with the real archive size) before extraction.
+FREE_SPACE_NO_HINT_CHECK_BYTES = 512 * 1024 * 1024
+FREE_SPACE_RECHECK_INTERVAL_BYTES = 256 * 1024 * 1024
 
 # Archive-relative path the SQLite database is stored under. Derived from
 # DB_PATH so the two can never drift apart.
@@ -175,6 +223,8 @@ SETTINGS_DEFAULTS = {
     "schedule_interval_hours": "24",
     "retention_count": "7",
     "default_components": json.dumps(COMPONENT_DEFAULTS),
+    "max_upload_mib": str(DEFAULT_MAX_UPLOAD_MIB),
+    "max_extracted_mib": str(DEFAULT_MAX_EXTRACTED_MIB),
 }
 
 BACKUP_TIMER_OVERRIDE = SYSTEMD_DIR / "alderpointdns-backup.timer.d" / "alderpointdns.conf"
@@ -298,7 +348,48 @@ def validate_settings(values: dict[str, Any]) -> dict[str, str]:
     if not (1 <= retention <= 1000):
         raise BackupError("retention_count must be between 1 and 1000")
     out["retention_count"] = str(retention)
+    if "max_upload_mib" in values:
+        try:
+            max_upload = int(values.get("max_upload_mib", DEFAULT_MAX_UPLOAD_MIB))
+        except (TypeError, ValueError):
+            raise BackupError("max_upload_mib must be an integer") from None
+        if not (64 <= max_upload <= HARD_CEILING_MAX_UPLOAD_MIB):
+            raise BackupError(f"max_upload_mib must be between 64 and {HARD_CEILING_MAX_UPLOAD_MIB}")
+        out["max_upload_mib"] = str(max_upload)
+    if "max_extracted_mib" in values:
+        try:
+            max_extracted = int(values.get("max_extracted_mib", DEFAULT_MAX_EXTRACTED_MIB))
+        except (TypeError, ValueError):
+            raise BackupError("max_extracted_mib must be an integer") from None
+        if not (64 <= max_extracted <= HARD_CEILING_MAX_EXTRACTED_MIB):
+            raise BackupError(f"max_extracted_mib must be between 64 and {HARD_CEILING_MAX_EXTRACTED_MIB}")
+        out["max_extracted_mib"] = str(max_extracted)
     return out
+
+
+def max_upload_bytes(conn: sqlite3.Connection | None = None) -> int:
+    try:
+        return int(settings(conn).get("max_upload_mib", DEFAULT_MAX_UPLOAD_MIB)) * 1024 * 1024
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_UPLOAD_MIB * 1024 * 1024
+
+
+def max_extracted_bytes_setting(conn: sqlite3.Connection | None = None) -> int:
+    try:
+        return int(settings(conn).get("max_extracted_mib", DEFAULT_MAX_EXTRACTED_MIB)) * 1024 * 1024
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_EXTRACTED_MIB * 1024 * 1024
+
+
+def _check_free_space(required_bytes: int, target_dir: Path) -> None:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    usage = shutil.disk_usage(target_dir)
+    if usage.free < required_bytes:
+        raise BackupError(
+            f"insufficient free disk space in {target_dir}: "
+            f"{usage.free // (1024 * 1024)} MiB available, "
+            f"at least {required_bytes // (1024 * 1024)} MiB required"
+        )
 
 
 def update_settings(values: dict[str, Any]) -> None:
@@ -734,15 +825,90 @@ def find_backup_path(identifier: str) -> Path:
     return resolved
 
 
-def stage_import(filename: str, data: bytes) -> Path:
-    IMPORTS_DIR.mkdir(parents=True, exist_ok=True)
+def _validate_upload_filename(filename: str) -> str:
     safe_name = Path(filename).name or "uploaded-backup.tar.gz"
     if not (safe_name.endswith(".tar.gz") or safe_name.endswith(".tar.gz.enc")):
         raise BackupError("uploaded backup must be a .tar.gz or .tar.gz.enc file")
+    return safe_name
+
+
+def stage_import(filename: str, data: bytes, conn: sqlite3.Connection | None = None) -> Path:
+    """Synchronous, buffer-based staging path kept for tests and any
+    non-streaming/CLI caller that already holds the archive in memory.
+    Production web uploads use begin_streamed_upload()/
+    finalize_streamed_upload() instead, which never buffer the whole
+    archive in the web process. Both paths enforce the same size policy
+    (max_upload_bytes(), separate from app/importer.py's 10 MiB text/
+    spreadsheet import cap) and write with restrictive permissions from the
+    first byte, never a world/group-readable temp file."""
+    if not data:
+        raise BackupError("uploaded file is empty")
+    safe_name = _validate_upload_filename(filename)
+    max_bytes = max_upload_bytes(conn)
+    if len(data) > max_bytes:
+        raise BackupError(f"uploaded backup exceeds the {max_bytes // (1024 * 1024)} MiB backup upload limit")
+    IMPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    _check_free_space(int(len(data) * FREE_SPACE_UPLOAD_MULTIPLIER), IMPORTS_DIR)
     dest = IMPORTS_DIR / f"{int(time.time())}-{safe_name}"
-    dest.write_bytes(data)
+    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+    except Exception:
+        dest.unlink(missing_ok=True)
+        raise
     os.chmod(dest, 0o640)
     return dest
+
+
+def begin_streamed_upload(filename: str, content_length_hint: int | None = None, conn: sqlite3.Connection | None = None) -> tuple[Path, int, str]:
+    """Start a bounded-memory, chunked upload: creates an empty 0600 temp
+    file confined to IMPORTS_DIR and returns (tmp_path, max_bytes,
+    safe_name) for the caller (an async web route) to stream chunks into.
+    No filesystem destination is ever derived from user input beyond the
+    basename used for the final, timestamp-prefixed filename -- the
+    directory is always IMPORTS_DIR, never a user-supplied path.
+
+    content_length_hint, when the client supplied a Content-Length header,
+    lets an oversized upload be rejected before any bytes are written; the
+    per-chunk counter in finalize enforces the real limit regardless of
+    whether a (possibly absent or inaccurate, e.g. for chunked/multipart
+    bodies) hint was available."""
+    safe_name = _validate_upload_filename(filename)
+    max_bytes = max_upload_bytes(conn)
+    if content_length_hint is not None and content_length_hint > max_bytes:
+        raise BackupError(f"uploaded backup exceeds the {max_bytes // (1024 * 1024)} MiB backup upload limit")
+    IMPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    required = int(content_length_hint * FREE_SPACE_UPLOAD_MULTIPLIER) if content_length_hint else FREE_SPACE_NO_HINT_CHECK_BYTES
+    _check_free_space(required, IMPORTS_DIR)
+    fd, tmp_name = tempfile.mkstemp(prefix=".alderpointdns-upload-", dir=str(IMPORTS_DIR))
+    os.close(fd)
+    os.chmod(tmp_name, 0o600)
+    return Path(tmp_name), max_bytes, safe_name
+
+
+def finalize_streamed_upload(tmp_path: Path, safe_name: str) -> Path:
+    """Atomically install a completed streamed upload under its final,
+    collision-resistant name and harden its permissions. Called only after
+    every chunk has been written and the size limit has been enforced."""
+    dest = IMPORTS_DIR / f"{int(time.time())}-{safe_name}"
+    os.replace(tmp_path, dest)
+    os.chmod(dest, 0o640)
+    return dest
+
+
+def check_upload_free_space(target_dir: Path, remaining_hint: int) -> None:
+    """Called periodically (every FREE_SPACE_RECHECK_INTERVAL_BYTES) by the
+    web route's chunked-write loop for uploads large enough, or without an
+    accurate enough Content-Length, that disk space could still run out
+    mid-stream after the initial check in begin_streamed_upload()."""
+    _check_free_space(min(remaining_hint, FREE_SPACE_NO_HINT_CHECK_BYTES), target_dir)
+
+
+def abort_streamed_upload(tmp_path: Path) -> None:
+    """Best-effort cleanup for a failed or interrupted streamed upload
+    (size exceeded, client disconnect, decode error, etc.)."""
+    tmp_path.unlink(missing_ok=True)
 
 
 def delete_backup(identifier: str) -> None:
@@ -761,8 +927,51 @@ def delete_backup(identifier: str) -> None:
 # Extract (shared by preview and restore)
 # ---------------------------------------------------------------------------
 
-def extract_backup(path: Path, password: str | None, dest_dir: Path) -> dict[str, Any]:
+_REQUIRED_MANIFEST_KEYS = ("backup_format_version", "alderpointdns_app_version", "created_at", "included_components", "sha256_checksums")
+
+
+def _reject_unsafe_member(member: tarfile.TarInfo, dest_dir: Path) -> None:
+    """Members our own create_backup() never produces (symlinks, hardlinks,
+    device/fifo/character-special files) and any path that would escape
+    dest_dir (absolute paths, ../ traversal, or a traversal hidden behind a
+    symlinked intermediate directory) are rejected outright. Every backup
+    this code has ever produced contains only plain files and directories,
+    so this is not a compatibility risk for legitimate archives -- only for
+    a maliciously or corruptly crafted one."""
+    name = member.name
+    if name.startswith("/") or name.startswith("..") or "/../" in f"/{name}/":
+        raise BackupError(f"backup archive contains an unsafe path: {name}")
+    resolved = os.path.normpath(os.path.join(str(dest_dir), name))
+    if resolved != str(dest_dir) and not resolved.startswith(str(dest_dir) + os.sep):
+        raise BackupError(f"backup archive contains a path outside the staging directory: {name}")
+    if member.issym() or member.islnk():
+        raise BackupError(f"backup archive contains a symlink/hardlink, which is not permitted: {name}")
+    if not (member.isfile() or member.isdir()):
+        raise BackupError(f"backup archive contains an unsupported member type (device/fifo/special file): {name}")
+
+
+def _scan_and_extract(tar: tarfile.TarFile, dest_dir: Path, max_extracted_bytes: int) -> None:
+    members = tar.getmembers()
+    total = 0
+    for member in members:
+        _reject_unsafe_member(member, dest_dir)
+        if member.isfile():
+            total += member.size
+        if total > max_extracted_bytes:
+            raise BackupError(
+                f"backup archive's extracted size exceeds the {max_extracted_bytes // (1024 * 1024)} MiB "
+                "limit (possible archive bomb); rejecting before writing further data"
+            )
+    _check_free_space(int(total * FREE_SPACE_EXTRACT_MULTIPLIER), dest_dir)
+    # Every member has already been individually validated above; Python's
+    # own "data" extraction filter (PEP 706) is applied as defense in depth
+    # on top of that explicit allow-list check.
+    tar.extractall(dest_dir, members=members, filter="data")
+
+
+def extract_backup(path: Path, password: str | None, dest_dir: Path, max_extracted_bytes: int | None = None) -> dict[str, Any]:
     dest_dir.mkdir(parents=True, exist_ok=True)
+    max_extracted_bytes = max_extracted_bytes if max_extracted_bytes is not None else max_extracted_bytes_setting()
     source = path
     if is_encrypted_name(path.name):
         if not password:
@@ -773,9 +982,35 @@ def extract_backup(path: Path, password: str | None, dest_dir: Path) -> dict[str
     elif password:
         raise BackupError("a password was provided but this backup is not encrypted")
     try:
-        run(["tar", "-xzf", str(source), "-C", str(dest_dir)])
-    except subprocess.CalledProcessError as exc:
-        raise BackupError(f"backup archive is corrupt or password is wrong: {exc.stdout}") from None
+        with tarfile.open(source, "r:gz") as tar:
+            # Fail fast on anything that isn't recognizably an Alderpoint DNS
+            # native backup before extracting a single byte of file content.
+            manifest_member = None
+            for candidate in ("manifest.json", "./manifest.json"):
+                try:
+                    manifest_member = tar.getmember(candidate)
+                    break
+                except KeyError:
+                    continue
+            if manifest_member is None:
+                raise BackupError("not an Alderpoint DNS native backup archive (missing manifest.json)")
+            manifest_fh = tar.extractfile(manifest_member)
+            if manifest_fh is None:
+                raise BackupError("not an Alderpoint DNS native backup archive (manifest.json is not a regular file)")
+            try:
+                manifest = json.loads(manifest_fh.read().decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise BackupError(f"backup manifest is not valid JSON: {exc}") from None
+            missing_keys = [key for key in _REQUIRED_MANIFEST_KEYS if key not in manifest]
+            if missing_keys:
+                raise BackupError(f"backup manifest is missing required field(s): {', '.join(missing_keys)}")
+            _scan_and_extract(tar, dest_dir, max_extracted_bytes)
+    except tarfile.ReadError as exc:
+        raise BackupError(f"backup archive is corrupt, truncated, or the password is wrong: {exc}") from None
+    except (tarfile.ExtractError, tarfile.FilterError) as exc:
+        raise BackupError(f"backup archive rejected by safe-extraction checks: {exc}") from None
+    except EOFError as exc:
+        raise BackupError(f"backup archive is truncated: {exc}") from None
     manifest_path = dest_dir / "manifest.json"
     if not manifest_path.exists():
         raise BackupError("backup archive is missing manifest.json")
@@ -794,7 +1029,7 @@ def extract_backup(path: Path, password: str | None, dest_dir: Path) -> dict[str
         if actual != expected:
             mismatches.append(f"{relpath}: checksum mismatch")
     if mismatches:
-        raise BackupError("backup integrity check failed: " + "; ".join(mismatches[:10]))
+        raise BackupError("backup integrity check failed (truncated/corrupt/tampered archive): " + "; ".join(mismatches[:10]))
     return manifest
 
 
@@ -839,6 +1074,10 @@ def preview_restore(path: Path, password: str | None) -> dict[str, Any]:
             compat_warnings.append(f"backup was created by {manifest_app_version}, this install is {alderpointdns_app_version()}")
 
         included = set(manifest.get("included_components", []))
+        component_status = [
+            {"key": key, "label": key.replace("_", " ").title(), "included": key in included}
+            for key in COMPONENT_KEYS
+        ]
 
         table_diffs: list[dict[str, Any]] = []
         staged_db = extract_dir / DB_ARCHIVE_RELPATH
@@ -884,6 +1123,8 @@ def preview_restore(path: Path, password: str | None) -> dict[str, Any]:
             "compatible": compatible,
             "warnings": compat_warnings,
             "included_components": sorted(included),
+            "component_status": component_status,
+            "archive_size_bytes": path.stat().st_size,
             "table_diffs": table_diffs,
             "file_diffs": file_diffs,
             "file_diff_count": len(file_diffs),
@@ -1047,6 +1288,13 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
         extract_dir = Path(tmp) / "extract"
         try:
             manifest = extract_backup(path, password, extract_dir)
+            fmt_version = manifest.get("backup_format_version")
+            if fmt_version != BACKUP_FORMAT_VERSION:
+                raise BackupError(
+                    f"backup_format_version {fmt_version!r} is not compatible with this install's "
+                    f"format version {BACKUP_FORMAT_VERSION}; preview the backup for full compatibility "
+                    "details before restoring"
+                )
             available = set(manifest.get("included_components", []))
             effective = {key: bool(components.get(key)) and key in available for key in COMPONENT_KEYS}
 

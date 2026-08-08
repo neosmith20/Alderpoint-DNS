@@ -21,8 +21,8 @@
     {% set path = request.url.path %}
     {% set dns_active = path in ["/query-log", "/local-dns", "/dns-settings", "/dns-cache"] %}
     {% set security_active = path in ["/custom-rules", "/blocklists"] or path.startswith("/encryption") %}
-    {% set operations_active = path.startswith("/import") or path.startswith("/backup") or path == "/replication" %}
-    {% set system_active = path.startswith("/statistics-settings") or path.startswith("/system") %}
+    {% set operations_active = path.startswith("/import") or path == "/replication" %}
+    {% set system_active = path.startswith("/statistics-settings") or path.startswith("/system") or path.startswith("/backup") %}
     {% macro nav_chevron() -%}
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.7 5.3 15.4 12l-6.7 6.7 1.9 1.8 8.5-8.5-8.5-8.5-1.9 1.8Z"/></svg>
     {%- endmacro %}
@@ -107,13 +107,14 @@
           {% endcall %}
           {% call nav_section("operations", "Operations", operations_active, "operations") %}
             <a class="nav-subitem{% if path.startswith('/import') %} is-active{% endif %}" href="/import" {% if path.startswith("/import") %}aria-current="page"{% endif %}>Import</a>
-            <a class="nav-subitem{% if path.startswith('/backup') %} is-active{% endif %}" href="/backup" {% if path.startswith("/backup") %}aria-current="page"{% endif %}>Backup</a>
             <a class="nav-subitem{% if path == '/replication' %} is-active{% endif %}" href="/replication" {% if path == "/replication" %}aria-current="page"{% endif %}>Replication</a>
           {% endcall %}
           {% call nav_section("system", "System", system_active, "system") %}
             <a class="nav-subitem{% if path.startswith('/statistics-settings') %} is-active{% endif %}" href="/statistics-settings" {% if path.startswith("/statistics-settings") %}aria-current="page"{% endif %}>Statistics</a>
             <a class="nav-subitem{% if path == '/system' %} is-active{% endif %}" href="/system" {% if path == "/system" %}aria-current="page"{% endif %}>System Status</a>
             <a class="nav-subitem{% if path == '/system/administration' %} is-active{% endif %}" href="/system/administration" {% if path == "/system/administration" %}aria-current="page"{% endif %}>Administration</a>
+            <a class="nav-subitem{% if path.startswith('/backup') %} is-active{% endif %}" href="/backup" {% if path.startswith("/backup") %}aria-current="page"{% endif %}>Backup &amp; Restore</a>
+            <a class="nav-subitem{% if path.startswith('/system/network') %} is-active{% endif %}" href="/system/network" {% if path.startswith("/system/network") %}aria-current="page"{% endif %}>Network Configuration</a>
             <a class="nav-subitem{% if path == '/system/notifications' %} is-active{% endif %}" href="/system/notifications" {% if path == "/system/notifications" %}aria-current="page"{% endif %}>Notifications</a>
           {% endcall %}
         </nav>

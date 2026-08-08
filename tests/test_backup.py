@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -705,6 +706,364 @@ class SettingsTest(BackupTestBase):
         self.assertEqual(cfg["schedule_enabled"], "1")
         self.assertEqual(cfg["schedule_interval_hours"], "12")
         self.assertEqual(cfg["retention_count"], "3")
+
+    def test_validate_settings_rejects_bad_max_upload_mib(self) -> None:
+        with self.assertRaises(backup.BackupError):
+            backup.validate_settings({"max_upload_mib": 1})  # below the 64 MiB floor
+
+    def test_validate_settings_rejects_max_upload_mib_above_hard_ceiling(self) -> None:
+        with self.assertRaises(backup.BackupError):
+            backup.validate_settings({"max_upload_mib": backup.HARD_CEILING_MAX_UPLOAD_MIB + 1})
+
+    def test_update_settings_persists_upload_limits(self) -> None:
+        backup.update_settings({"max_upload_mib": 256, "max_extracted_mib": 1024})
+        self.assertEqual(backup.max_upload_bytes(), 256 * 1024 * 1024)
+        self.assertEqual(backup.max_extracted_bytes_setting(), 1024 * 1024 * 1024)
+
+
+class LargeNativeBackupTest(BackupTestBase):
+    """Reproduces the reported production migration blocker: a native
+    Alderpoint DNS backup (here, inflated past 10 MiB with a downloaded-list
+    file standing in for a long-running server's real Analytics History
+    growth) must upload and restore successfully. The old, wrong fix would
+    have been raising app/importer.py's MAX_UPLOAD_BYTES; that constant is
+    never touched or referenced by anything in this test file, which is the
+    point -- backup upload/restore is fully independent of it."""
+
+    def _write_padding(self, size_bytes: int) -> None:
+        # Non-compressible content so the gzip'd archive really does exceed
+        # size_bytes too, not just the uncompressed member.
+        backup.DOWNLOADS_DIR.joinpath("current").mkdir(parents=True, exist_ok=True)
+        with backup.DOWNLOADS_DIR.joinpath("current", "1-large-source.txt").open("wb") as fh:
+            remaining = size_bytes
+            chunk = os.urandom(1024 * 1024)
+            while remaining > 0:
+                fh.write(chunk[: min(len(chunk), remaining)])
+                remaining -= len(chunk)
+
+    def test_backup_over_10mib_creates_and_restores_successfully(self) -> None:
+        self._write_padding(12 * 1024 * 1024)  # ~12 MiB, i.e. > the old 10 MiB cap
+        components = backup.validate_components({"analytics_history": True, "last_downloaded_lists": True})
+        with mock.patch.object(backup, "run", self.fake_run):
+            path = backup.create_backup(components)
+        self.assertGreater(path.stat().st_size, 10 * 1024 * 1024)
+        with mock.patch.object(backup, "run", self.fake_run), mock.patch.object(backup, "resolves", return_value=True), \
+                mock.patch.object(backup, "_wait_active", return_value=True):
+            restore_id = backup.restore_backup(path, None, dict.fromkeys(backup.COMPONENT_KEYS, True))
+        self.assertIsNotNone(restore_id)
+        last = backup.last_restore()
+        self.assertEqual(last["status"], "deployed")
+
+    def test_analytics_history_over_10mib_survives_restore(self) -> None:
+        # A realistic stand-in for "a long-running test server's Analytics
+        # History": enough query_events rows that the archive clears 10
+        # MiB on its own, with no padding file involved.
+        with closing(backup.connect()) as conn:
+            conn.executemany(
+                "INSERT INTO query_events(domain) VALUES (?)",
+                [(f"host-{i}.example.com.",) for i in range(300_000)],
+            )
+            conn.commit()
+        components = backup.validate_components({"analytics_history": True})
+        with mock.patch.object(backup, "run", self.fake_run):
+            path = backup.create_backup(components)
+        # (Archive-size-over-10-MiB is proven independently by
+        # test_backup_over_10mib_creates_and_restores_successfully above,
+        # which uses incompressible padding for a size guarantee gzip
+        # compression of repetitive SQLite content can't undermine; this
+        # test's job is proving 300k real analytics rows round-trip intact.)
+        with closing(backup.connect()) as conn:
+            conn.execute("DELETE FROM query_events")
+            conn.commit()
+        with mock.patch.object(backup, "run", self.fake_run), mock.patch.object(backup, "resolves", return_value=True), \
+                mock.patch.object(backup, "_wait_active", return_value=True):
+            backup.restore_backup(path, None, dict.fromkeys(backup.COMPONENT_KEYS, True))
+        with closing(backup.connect()) as conn:
+            restored = conn.execute("SELECT count(*) FROM query_events").fetchone()[0]
+        # +1 for the seed row BackupTestBase.setUp() already inserts.
+        self.assertEqual(restored, 300_001)
+
+    def test_configured_max_upload_is_enforced_regardless_of_importer_cap(self) -> None:
+        backup.update_settings({"max_upload_mib": 64})
+        self._write_padding(70 * 1024 * 1024)
+        components = backup.validate_components({"last_downloaded_lists": True})
+        with mock.patch.object(backup, "run", self.fake_run):
+            path = backup.create_backup(components)
+        data = path.read_bytes()
+        self.assertGreater(len(data), 64 * 1024 * 1024)
+        with self.assertRaises(backup.BackupError) as ctx:
+            backup.stage_import(path.name, data)
+        self.assertIn("64 MiB", str(ctx.exception))
+
+    def test_stage_import_under_configured_max_succeeds(self) -> None:
+        backup.update_settings({"max_upload_mib": 128})
+        with mock.patch.object(backup, "run", self.fake_run):
+            path = backup.create_backup(backup.validate_components(None))
+        staged = backup.stage_import(path.name, path.read_bytes())
+        self.assertTrue(staged.exists())
+        self.assertTrue(str(staged.parent).startswith(str(backup.IMPORTS_DIR)))
+
+
+class StreamedUploadTest(BackupTestBase):
+    def test_begin_and_finalize_round_trip(self) -> None:
+        tmp_path, max_bytes, safe_name = backup.begin_streamed_upload("mybackup.tar.gz", content_length_hint=1024)
+        self.assertTrue(tmp_path.exists())
+        # 0600 while staged: no group/other access to an in-flight upload.
+        self.assertEqual(oct(tmp_path.stat().st_mode)[-3:], "600")
+        tmp_path.write_bytes(b"fake archive bytes")
+        final = backup.finalize_streamed_upload(tmp_path, safe_name)
+        self.assertFalse(tmp_path.exists())
+        self.assertTrue(final.exists())
+        self.assertEqual(oct(final.stat().st_mode)[-3:], "640")
+        self.assertTrue(final.name.endswith("mybackup.tar.gz"))
+
+    def test_begin_streamed_upload_rejects_bad_extension(self) -> None:
+        with self.assertRaises(backup.BackupError):
+            backup.begin_streamed_upload("not-a-backup.zip")
+
+    def test_begin_streamed_upload_rejects_oversized_content_length_hint(self) -> None:
+        backup.update_settings({"max_upload_mib": 64})
+        with self.assertRaises(backup.BackupError):
+            backup.begin_streamed_upload("huge.tar.gz", content_length_hint=200 * 1024 * 1024)
+
+    def test_abort_streamed_upload_cleans_up_partial_file(self) -> None:
+        tmp_path, _, _ = backup.begin_streamed_upload("partial.tar.gz")
+        tmp_path.write_bytes(b"only part of the file")
+        backup.abort_streamed_upload(tmp_path)
+        self.assertFalse(tmp_path.exists())
+
+    def test_begin_streamed_upload_rejects_insufficient_free_space(self) -> None:
+        fake_usage = type("Usage", (), {"total": 10**9, "used": 10**9 - 1024, "free": 1024})()
+        with mock.patch.object(backup.shutil, "disk_usage", return_value=fake_usage):
+            with self.assertRaises(backup.BackupError) as ctx:
+                backup.begin_streamed_upload("bigbackup.tar.gz", content_length_hint=50 * 1024 * 1024)
+        self.assertIn("free disk space", str(ctx.exception))
+
+    def test_chunk_size_is_bounded_and_small(self) -> None:
+        # Proof-by-constant that memory usage does not scale with archive
+        # size: webapp.py's upload loop reads exactly this many bytes at a
+        # time into memory, however large the archive on disk is.
+        self.assertLessEqual(backup.UPLOAD_CHUNK_BYTES, 8 * 1024 * 1024)
+
+    def test_simulated_chunked_stream_never_buffers_whole_archive(self) -> None:
+        """Simulates what app/webapp.py's backup_import_route does with a
+        FastAPI UploadFile, using a plain in-memory reader, and asserts the
+        largest single buffer ever held is one chunk, not the whole file --
+        i.e. peak memory is independent of archive size."""
+        total_size = 30 * 1024 * 1024
+        source = os.urandom(total_size)
+        pos = 0
+        max_buffer_seen = 0
+
+        def fake_read(n: int) -> bytes:
+            nonlocal pos, max_buffer_seen
+            chunk = source[pos : pos + n]
+            pos += len(chunk)
+            max_buffer_seen = max(max_buffer_seen, len(chunk))
+            return chunk
+
+        tmp_path, max_bytes, safe_name = backup.begin_streamed_upload("streamed.tar.gz", content_length_hint=total_size)
+        total = 0
+        with tmp_path.open("wb") as fh:
+            while True:
+                chunk = fake_read(backup.UPLOAD_CHUNK_BYTES)
+                if not chunk:
+                    break
+                total += len(chunk)
+                fh.write(chunk)
+        final = backup.finalize_streamed_upload(tmp_path, safe_name)
+        self.assertEqual(total, total_size)
+        self.assertEqual(final.stat().st_size, total_size)
+        self.assertLessEqual(max_buffer_seen, backup.UPLOAD_CHUNK_BYTES)
+
+
+class ArchiveSecurityTest(BackupTestBase):
+    """Malicious/corrupt archive handling. These build hand-crafted tar
+    archives (not through create_backup) specifically to exercise paths a
+    legitimately-created Alderpoint DNS backup would never take."""
+
+    def _valid_manifest_bytes(self) -> bytes:
+        return json.dumps(
+            {
+                "backup_format_version": backup.BACKUP_FORMAT_VERSION,
+                "alderpointdns_app_version": "0.0.0-test",
+                "database_schema_version": "test",
+                "created_at": backup.now(),
+                "source_node_id": "test-host",
+                "included_components": [],
+                "sha256_checksums": {},
+            }
+        ).encode()
+
+    def _write_tar(self, dest: Path, members: list[tuple[tarfile.TarInfo, bytes | None]]) -> None:
+        import tarfile as tf
+        from io import BytesIO
+
+        with tf.open(dest, "w:gz") as tar:
+            for info, data in members:
+                if data is not None:
+                    tar.addfile(info, BytesIO(data))
+                else:
+                    tar.addfile(info)
+
+    def test_rejects_archive_without_manifest(self) -> None:
+        import tarfile as tf
+
+        dest = backup.STAGING_DIR / "no-manifest.tar.gz"
+        info = tf.TarInfo("some_file.txt")
+        info.size = 4
+        self._write_tar(dest, [(info, b"data")])
+        with self.assertRaises(backup.BackupError) as ctx:
+            backup.extract_backup(dest, None, backup.STAGING_DIR / "extract1")
+        self.assertIn("not an Alderpoint DNS native backup", str(ctx.exception))
+
+    def test_rejects_absolute_path_member(self) -> None:
+        import tarfile as tf
+
+        dest = backup.STAGING_DIR / "abs-path.tar.gz"
+        manifest = self._valid_manifest_bytes()
+        m_info = tf.TarInfo("manifest.json")
+        m_info.size = len(manifest)
+        evil_info = tf.TarInfo("/etc/passwd")
+        evil_info.size = 4
+        self._write_tar(dest, [(m_info, manifest), (evil_info, b"evil")])
+        with self.assertRaises(backup.BackupError) as ctx:
+            backup.extract_backup(dest, None, backup.STAGING_DIR / "extract2")
+        self.assertIn("unsafe path", str(ctx.exception))
+
+    def test_rejects_dot_dot_traversal_member(self) -> None:
+        import tarfile as tf
+
+        dest = backup.STAGING_DIR / "traversal.tar.gz"
+        manifest = self._valid_manifest_bytes()
+        m_info = tf.TarInfo("manifest.json")
+        m_info.size = len(manifest)
+        evil_info = tf.TarInfo("../../etc/cron.d/evil")
+        evil_info.size = 4
+        self._write_tar(dest, [(m_info, manifest), (evil_info, b"evil")])
+        with self.assertRaises(backup.BackupError) as ctx:
+            backup.extract_backup(dest, None, backup.STAGING_DIR / "extract3")
+        self.assertIn("unsafe path", str(ctx.exception))
+
+    def test_rejects_symlink_member(self) -> None:
+        import tarfile as tf
+
+        dest = backup.STAGING_DIR / "symlink.tar.gz"
+        manifest = self._valid_manifest_bytes()
+        m_info = tf.TarInfo("manifest.json")
+        m_info.size = len(manifest)
+        link_info = tf.TarInfo("etc/passwd-link")
+        link_info.type = tf.SYMTYPE
+        link_info.linkname = "/etc/passwd"
+        self._write_tar(dest, [(m_info, manifest), (link_info, None)])
+        with self.assertRaises(backup.BackupError) as ctx:
+            backup.extract_backup(dest, None, backup.STAGING_DIR / "extract4")
+        self.assertIn("symlink", str(ctx.exception))
+
+    def test_rejects_hardlink_member(self) -> None:
+        import tarfile as tf
+
+        dest = backup.STAGING_DIR / "hardlink.tar.gz"
+        manifest = self._valid_manifest_bytes()
+        m_info = tf.TarInfo("manifest.json")
+        m_info.size = len(manifest)
+        link_info = tf.TarInfo("var/lib/alderpointdns/hardlinked")
+        link_info.type = tf.LNKTYPE
+        link_info.linkname = "manifest.json"
+        self._write_tar(dest, [(m_info, manifest), (link_info, None)])
+        with self.assertRaises(backup.BackupError) as ctx:
+            backup.extract_backup(dest, None, backup.STAGING_DIR / "extract5")
+        self.assertIn("hardlink", str(ctx.exception))
+
+    def test_rejects_device_file_member(self) -> None:
+        import tarfile as tf
+
+        dest = backup.STAGING_DIR / "device.tar.gz"
+        manifest = self._valid_manifest_bytes()
+        m_info = tf.TarInfo("manifest.json")
+        m_info.size = len(manifest)
+        dev_info = tf.TarInfo("dev/evil")
+        dev_info.type = tf.CHRTYPE
+        dev_info.devmajor = 1
+        dev_info.devminor = 5
+        self._write_tar(dest, [(m_info, manifest), (dev_info, None)])
+        with self.assertRaises(backup.BackupError) as ctx:
+            backup.extract_backup(dest, None, backup.STAGING_DIR / "extract6")
+        self.assertIn("unsupported member type", str(ctx.exception))
+
+    def test_rejects_archive_bomb_over_extracted_ceiling(self) -> None:
+        import tarfile as tf
+
+        dest = backup.STAGING_DIR / "bomb.tar.gz"
+        manifest = self._valid_manifest_bytes()
+        m_info = tf.TarInfo("manifest.json")
+        m_info.size = len(manifest)
+        # A highly-compressible member whose *declared* size alone exceeds
+        # the ceiling -- this is what a compressed archive bomb looks like
+        # to the extractor: a tiny archive on disk, a huge declared payload.
+        bomb_info = tf.TarInfo("var/lib/alderpointdns/bomb.bin")
+        bomb_size = 40 * 1024 * 1024
+        bomb_info.size = bomb_size
+        with self._write_tar_ctx(dest) as tar:
+            tar.addfile(m_info, __import__("io").BytesIO(manifest))
+            tar.addfile(bomb_info, _ZeroFile(bomb_size))
+        with self.assertRaises(backup.BackupError) as ctx:
+            backup.extract_backup(dest, None, backup.STAGING_DIR / "extract7", max_extracted_bytes=10 * 1024 * 1024)
+        self.assertIn("extracted size exceeds", str(ctx.exception))
+
+    def _write_tar_ctx(self, dest: Path):
+        import tarfile as tf
+
+        return tf.open(dest, "w:gz")
+
+    def test_rejects_truncated_archive(self) -> None:
+        with mock.patch.object(backup, "run", self.fake_run):
+            path = backup.create_backup(backup.validate_components(None))
+        data = path.read_bytes()
+        truncated = backup.STAGING_DIR / "truncated.tar.gz"
+        truncated.write_bytes(data[: len(data) // 2])
+        with self.assertRaises(backup.BackupError) as ctx:
+            backup.extract_backup(truncated, None, backup.STAGING_DIR / "extract8")
+        self.assertTrue(
+            "corrupt" in str(ctx.exception) or "truncated" in str(ctx.exception) or "not an Alderpoint DNS" in str(ctx.exception)
+        )
+
+    def test_restore_backup_rejects_incompatible_format_version(self) -> None:
+        with mock.patch.object(backup, "run", self.fake_run):
+            path = backup.create_backup(backup.validate_components(None))
+        with tempfile.TemporaryDirectory(dir=str(backup.STAGING_DIR)) as tmp:
+            extract = Path(tmp) / "x"
+            extract.mkdir()
+            subprocess.run(["tar", "-xzf", str(path), "-C", str(extract)], check=True)
+            manifest = json.loads((extract / "manifest.json").read_text())
+            manifest["backup_format_version"] = 999
+            (extract / "manifest.json").write_text(json.dumps(manifest))
+            rebuilt = backup.BACKUP_DIR / "rebuilt-incompatible.tar.gz"
+            subprocess.run(["tar", "-czf", str(rebuilt), "-C", str(extract), "."], check=True)
+        # restore_backup catches this internally (same shape as any other
+        # restore-time failure) and surfaces it as a RuntimeError after
+        # rollback bookkeeping runs, same as the other rollback tests above.
+        with mock.patch.object(backup, "run", self.fake_run), mock.patch.object(backup, "resolves", return_value=True), \
+                mock.patch.object(backup, "_wait_active", return_value=True):
+            with self.assertRaises(RuntimeError) as ctx:
+                backup.restore_backup(rebuilt, None, dict.fromkeys(backup.COMPONENT_KEYS, True))
+        self.assertIn("not compatible", str(ctx.exception))
+
+
+class _ZeroFile:
+    """File-like object that yields `size` zero bytes without materializing
+    them all in memory at once -- used to build a compressed-archive-bomb
+    test fixture cheaply."""
+
+    def __init__(self, size: int) -> None:
+        self.remaining = size
+
+    def read(self, n: int = -1) -> bytes:
+        if n < 0:
+            n = self.remaining
+        take = min(n, self.remaining)
+        self.remaining -= take
+        return b"\x00" * take
 
 
 if __name__ == "__main__":

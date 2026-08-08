@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
-from app import analytics, auth, backup, custom_rules as custom_rules_model, dns_cache, encryption, filter_schedule, importer, local_dns, notifications, replication, upstream_dns
+from app import analytics, auth, backup, custom_rules as custom_rules_model, dns_cache, encryption, filter_schedule, importer, local_dns, network_config, notifications, replication, upstream_dns
 from app import blocklist_categories
 from app import service_logs
 from app.alderpointdns_compiler import AlderpointDNSConnection, DB_PATH, add_source, init_db, normalize_domain, source_health
@@ -2170,12 +2170,46 @@ async def backup_create_route(request: Request, _: sqlite3.Row = Depends(current
 @app.post("/backup/import")
 async def backup_import_route(request: Request, csrf: str = Form(...), upload: UploadFile = File(...), _: sqlite3.Row = Depends(current_admin)):
     check_csrf(request, csrf)
+    # Streamed in bounded chunks straight to a restrictive-permission
+    # staging file -- never buffered whole in this process's memory,
+    # regardless of archive size. See backup.begin_streamed_upload's
+    # docstring. A native backup upload is governed by its own size policy
+    # (backup.max_upload_bytes()), separate from app/importer.py's 10 MiB
+    # spreadsheet/text-import cap: Analytics History legitimately makes a
+    # long-running server's backup large, and that must never be rejected
+    # at the import-page's limit.
+    content_length_hint: int | None = None
+    raw_length = request.headers.get("content-length")
+    if raw_length and raw_length.isdigit():
+        content_length_hint = int(raw_length)
+    tmp_path: Path | None = None
     try:
-        data = await upload.read()
-        if not data:
+        tmp_path, max_bytes, safe_name = backup.begin_streamed_upload(upload.filename or "uploaded-backup.tar.gz", content_length_hint)
+        total = 0
+        since_last_space_check = 0
+        with tmp_path.open("wb") as fh:
+            while True:
+                chunk = await upload.read(backup.UPLOAD_CHUNK_BYTES)
+                if not chunk:
+                    break
+                total += len(chunk)
+                since_last_space_check += len(chunk)
+                if total > max_bytes:
+                    raise backup.BackupError(f"uploaded backup exceeds the {max_bytes // (1024 * 1024)} MiB backup upload limit")
+                fh.write(chunk)
+                # Re-check free space periodically (not just up front) for
+                # uploads large enough, or without a Content-Length hint
+                # accurate enough, that the disk could fill up mid-stream.
+                if since_last_space_check >= backup.FREE_SPACE_RECHECK_INTERVAL_BYTES:
+                    since_last_space_check = 0
+                    backup.check_upload_free_space(tmp_path.parent, remaining_hint=max_bytes - total)
+        if total == 0:
             raise backup.BackupError("uploaded file is empty")
-        path = backup.stage_import(upload.filename or "uploaded-backup.tar.gz", data)
+        path = backup.finalize_streamed_upload(tmp_path, safe_name)
+        tmp_path = None
     except Exception as exc:
+        if tmp_path is not None:
+            backup.abort_streamed_upload(tmp_path)
         return backup_error(request, str(exc))
     return redirect(f"/backup?imported={path.name}")
 
@@ -2250,17 +2284,22 @@ def backup_schedule_route(
     schedule_enabled: str = Form("0"),
     schedule_interval_hours: int = Form(24),
     retention_count: int = Form(7),
+    max_upload_mib: int | None = Form(None),
+    max_extracted_mib: int | None = Form(None),
     _: sqlite3.Row = Depends(current_admin),
 ):
     check_csrf(request, csrf)
     try:
-        backup.update_settings(
-            {
-                "schedule_enabled": schedule_enabled,
-                "schedule_interval_hours": schedule_interval_hours,
-                "retention_count": retention_count,
-            }
-        )
+        values: dict[str, Any] = {
+            "schedule_enabled": schedule_enabled,
+            "schedule_interval_hours": schedule_interval_hours,
+            "retention_count": retention_count,
+        }
+        if max_upload_mib is not None:
+            values["max_upload_mib"] = max_upload_mib
+        if max_extracted_mib is not None:
+            values["max_extracted_mib"] = max_extracted_mib
+        backup.update_settings(values)
         backup_schedule_apply()
     except Exception as exc:
         return backup_error(request, str(exc))
@@ -2575,6 +2614,90 @@ def administration_revoke_sessions(request: Request, csrf: str = Form(...), admi
     with db() as conn:
         audit_log(conn, admin["id"], admin["username"], "sessions_revoked", True, ip, f"{revoked} other session(s) revoked")
     return redirect("/system/administration")
+
+
+def network_apply_apply() -> tuple[int, str]:
+    return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "network-apply"])
+
+
+def network_confirm_apply() -> tuple[int, str]:
+    return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "network-confirm"])
+
+
+def network_context() -> dict[str, Any]:
+    current = network_config.read_current_config()
+    pending = network_config.read_rollback_state()
+    return {
+        "current": current,
+        "pending": pending,
+    }
+
+
+@app.get("/system/network", response_class=HTMLResponse)
+def network_page(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    context = network_context()
+    context.update({"error": None})
+    return render(request, "system_network.html", **context)
+
+
+@app.post("/system/network/apply")
+async def network_apply_route(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    form = await request.form()
+    check_csrf(request, str(form.get("csrf", "")))
+    try:
+        interface = str(form.get("interface", "")).strip()
+        ipv4_mode = str(form.get("ipv4_mode", "unchanged")).strip()
+        ipv6_mode = str(form.get("ipv6_mode", "unchanged")).strip()
+        payload = {
+            "interface": interface,
+            "ipv4_mode": ipv4_mode,
+            "ipv4_address": str(form.get("ipv4_address", "")).strip() or None,
+            "ipv4_prefix": int(form["ipv4_prefix"]) if str(form.get("ipv4_prefix", "")).strip() else None,
+            "ipv4_gateway": str(form.get("ipv4_gateway", "")).strip() or None,
+            "ipv6_mode": ipv6_mode,
+            "ipv6_address": str(form.get("ipv6_address", "")).strip() or None,
+            "ipv6_prefix": int(form["ipv6_prefix"]) if str(form.get("ipv6_prefix", "")).strip() else None,
+            "ipv6_gateway": str(form.get("ipv6_gateway", "")).strip() or None,
+        }
+        # Defense-in-depth: the same validation the privileged helper runs,
+        # so an obviously-bad submission gets a friendly error immediately
+        # rather than a round trip through sudo. The privileged side (which
+        # is the one that actually matters for security) always re-validates
+        # independently before touching anything.
+        network_config.validate_proposed(
+            payload["interface"], payload["ipv4_mode"], payload["ipv4_address"], payload["ipv4_prefix"], payload["ipv4_gateway"],
+            payload["ipv6_mode"], payload["ipv6_address"], payload["ipv6_prefix"], payload["ipv6_gateway"],
+        )
+        network_config.request_change(payload)
+        network_apply_apply()
+        result = network_config.latest_request_result("apply")
+        if not result or result.get("status") != "done":
+            raise network_config.NetworkConfigError("network configuration change did not complete; check the privileged helper's logs")
+        payload_result = json.loads(result["result_json"] or "{}")
+        if "error" in payload_result:
+            raise network_config.NetworkConfigError(payload_result["error"])
+    except Exception as exc:
+        context = network_context()
+        context.update({"error": str(exc)})
+        return render(request, "system_network.html", status_code=400, **context)
+    return redirect("/system/network")
+
+
+@app.post("/system/network/confirm")
+async def network_confirm_route(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    form = await request.form()
+    check_csrf(request, str(form.get("csrf", "")))
+    try:
+        network_config.request_confirm()
+        network_confirm_apply()
+        result = network_config.latest_request_result("confirm")
+        if not result or result.get("status") != "done":
+            raise network_config.NetworkConfigError("confirmation did not complete; check the privileged helper's logs")
+    except Exception as exc:
+        context = network_context()
+        context.update({"error": str(exc)})
+        return render(request, "system_network.html", status_code=400, **context)
+    return redirect("/system/network")
 
 
 def notifications_context() -> dict[str, Any]:

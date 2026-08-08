@@ -25,10 +25,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 try:
-    from app import backup, custom_rules, dns_cache, encryption, filter_schedule, local_dns, replication, service_logs, upstream_dns
+    from app import backup, custom_rules, dns_cache, encryption, filter_schedule, local_dns, network_config, replication, service_logs, upstream_dns
 except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from app import backup, custom_rules, dns_cache, encryption, filter_schedule, local_dns, replication, service_logs, upstream_dns
+    from app import backup, custom_rules, dns_cache, encryption, filter_schedule, local_dns, network_config, replication, service_logs, upstream_dns
 
 
 DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
@@ -1395,6 +1395,26 @@ def backup_schedule_deploy(_: argparse.Namespace) -> None:
     print(backup.deploy_backup_schedule())
 
 
+def network_apply(_: argparse.Namespace) -> None:
+    processed = network_config.process_pending_request("apply")
+    if processed is None:
+        raise SystemExit("no pending network configuration request found")
+    print(processed)
+
+
+def network_confirm(_: argparse.Namespace) -> None:
+    processed = network_config.process_pending_request("confirm")
+    if processed is None:
+        raise SystemExit("no pending network configuration confirmation found")
+    print(processed)
+
+
+def network_rollback_check(_: argparse.Namespace) -> None:
+    # Invoked by the independent systemd-run watchdog timer, not by the web
+    # process -- this must work even if alderpointdns.service is down.
+    print(network_config.rollback_check())
+
+
 def filter_schedule_deploy(_: argparse.Namespace) -> None:
     print(filter_schedule.deploy_filter_schedule())
 
@@ -1540,6 +1560,12 @@ def main(argv: list[str] | None = None) -> int:
     backup_preview_parser.set_defaults(func=backup_preview)
     backup_schedule_parser = sub.add_parser("backup-schedule-deploy")
     backup_schedule_parser.set_defaults(func=backup_schedule_deploy)
+    network_apply_parser = sub.add_parser("network-apply")
+    network_apply_parser.set_defaults(func=network_apply)
+    network_confirm_parser = sub.add_parser("network-confirm")
+    network_confirm_parser.set_defaults(func=network_confirm)
+    network_rollback_check_parser = sub.add_parser("network-rollback-check")
+    network_rollback_check_parser.set_defaults(func=network_rollback_check)
     filter_schedule_parser = sub.add_parser("filter-schedule-deploy")
     filter_schedule_parser.set_defaults(func=filter_schedule_deploy)
     filter_update_parser = sub.add_parser("filter-update-run")

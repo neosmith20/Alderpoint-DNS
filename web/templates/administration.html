@@ -9,6 +9,23 @@
 {% endif %}
 
 <section class="grid align-start">
+  <article class="panel stack">
+    <div class="panel__head"><h2>Backup &amp; Restore</h2></div>
+    <p class="muted">Create native Alderpoint DNS backups and restore them on this or another install. Large, long-running Analytics History backups are fully supported -- native backup restore has its own streamed, bounded-memory upload path, separate from the Spreadsheet/Text Import limits.</p>
+    <div class="form-actions">
+      <a class="button" href="/backup#create-backup">Create Backup</a>
+      <a class="button secondary" href="/backup#restore-backup">Restore Alderpoint Backup</a>
+    </div>
+  </article>
+
+  <article class="panel stack">
+    <div class="panel__head"><h2>Network Configuration</h2></div>
+    <p class="muted">View and change this server's own network interface (DHCP/static IP, gateway) -- separate from DNS upstream/resolver settings.</p>
+    <div class="form-actions">
+      <a class="button secondary" href="/system/network">Open Network Configuration</a>
+    </div>
+  </article>
+
   <form class="panel stack" method="post" action="/system/administration/password" data-async-form data-password-match data-success-message="Password changed. Other sessions were signed out.">
     <div class="panel__head"><h2>Change Password</h2></div>
     <p class="muted">Signed in as <span class="mono">{{ admin_username }}</span>. Changing the password signs out every other active session automatically.</p>

@@ -6,6 +6,94 @@ may still change between releases before a stable 1.0.
 
 ## Unreleased
 
+- Fixed native Alderpoint DNS backup restore rejecting large backups with
+  "uploaded file exceeds 10 MiB limit". Root cause: the only 10 MiB cap in
+  the codebase is `MAX_UPLOAD_BYTES` in `app/importer.py`, which exists for
+  the Spreadsheet/Text Import page (CSV/XLSX/hosts/zone/Pi-hole/AdGuard
+  YAML/"Alderpoint DNS native JSON" record exports -- all genuinely small,
+  hand-editable data). Native `.tar.gz`/`.tar.gz.enc` backup archives were
+  not clearly and separately surfaced as their own workflow, so a large,
+  Analytics-History-inclusive backup could end up uploaded through that
+  page and hit its limit; and the existing `/backup/import` route itself
+  read the whole upload into memory (`await upload.read()`) with no
+  independent size policy, free-space check, or archive-bomb protection of
+  its own. Both are fixed:
+  - System > Administration now has a dedicated **Backup & Restore**
+    section (moved out of the Operations nav group) with explicit
+    **Create Backup** and **Restore Alderpoint Backup** actions, entirely
+    separate from Spreadsheet/Text Import.
+  - `/backup/import` now streams the upload to a restrictive-permission
+    (0600, IMPORTS_DIR-confined) staging file in bounded ~4 MiB chunks
+    (`backup.begin_streamed_upload`/`finalize_streamed_upload`/
+    `abort_streamed_upload`), so memory use is independent of archive
+    size. A native backup upload is governed by its own, separately
+    configurable `max_upload_mib`/`max_extracted_mib` policy
+    (`backup.max_upload_bytes()`/`max_extracted_bytes_setting()`, default
+    4 GiB upload / 16 GiB extracted, admin-adjustable up to a 50 GiB / 200
+    GiB hard ceiling -- never unlimited), fully independent of
+    `importer.MAX_UPLOAD_BYTES`.
+  - Free disk space is checked before accepting an upload and again before
+    extraction (using the archive's real scanned size), and periodically
+    during a large streamed upload.
+  - `backup.extract_backup()` now validates the archive is recognizably an
+    Alderpoint DNS native backup (manifest.json present with required
+    fields) before extracting anything, rejects absolute paths, `../`
+    traversal, symlinks, hardlinks, and device/fifo members, enforces a
+    total extracted-size ceiling (compressed-archive-bomb protection) via
+    a pre-extraction member scan, and uses Python's `tarfile` `"data"`
+    extraction filter as defense in depth instead of shelling out to
+    `tar -xzf` directly. `restore_backup()` now also refuses a
+    `backup_format_version` mismatch outright rather than only warning
+    about it in the preview.
+  - The restore preview now shows archive size and an explicit
+    Included/Not Included status per component, matching the shape
+    administrators need to confirm before restoring (configuration,
+    blocklists/custom rules, DNS cache settings, analytics history,
+    certificates, admin/auth data).
+
+- Added a **Network Configuration** section under System > Administration
+  for the Alderpoint server's own network interface (DHCP vs static IPv4/
+  IPv6, gateway) -- separate from DNS upstream/resolver settings. New
+  `app/network_config.py`:
+  - Detects the actual networking backend in use (systemd-networkd,
+    NetworkManager, Netplan, or classic ifupdown/`/etc/network/
+    interfaces`) rather than assuming one; an unsupported or ambiguous
+    setup (e.g. more than one backend simultaneously active) is shown
+    read-only and every write path refuses outright.
+  - Validates a proposed change (interface exists, IPv4/IPv6 syntax,
+    prefix length, gateway syntax and subnet membership, rejects loopback/
+    multicast/unspecified addresses and collisions with another local
+    interface) before anything is written.
+  - On Apply: snapshots the current persistent config (and, for
+    NetworkManager, the connection profile via `nmcli`) to a root-only,
+    group-readable rollback state file; stages the new persistent config
+    in backend-isolated functions; arms an *independent* rollback watchdog
+    via `systemd-run --on-active=120s ... network-rollback-check` (owned
+    by PID 1, not this web process, request, or the administrator's
+    browser); then actively reconfigures the live interface through the
+    backend's own mechanism (`networkctl reload`+`reconfigure`, `netplan
+    generate`+`apply`, `nmcli con mod`+`up`, or a controlled `ifdown`/
+    `ifup` -- never a bare `ip link set ... up/down`, which does not
+    itself apply a backend's persistent config).
+  - If the administrator doesn't confirm within the countdown, the
+    watchdog restores both the persistent config files and the live
+    interface state -- no reboot required -- and logs the automatic
+    rollback. Confirming cancels the watchdog and deletes the rollback
+    state.
+  - All privileged operations go through the same narrow, argument-free
+    sudoers/`alderpointdns_compiler.py` pattern backup/replication already
+    use (`network-apply`, `network-confirm`, `network-rollback-check`):
+    the web process never gains general root, and no interface name, path,
+    or shell fragment from a request ever reaches argv or a shell.
+  - `audit_ip_references()`/`cert_covers_address()` support reporting
+    (never silently rewriting) whether generated BIND/dnsdist config or
+    the current TLS certificate still reference the old address after a
+    confirmed change.
+  - See `docs/network-configuration.md` for what has and has not yet been
+    verified against a real interface (unit-tested with every backend
+    command mocked; live reconfigure/rollback on real hardware/VM is
+    outstanding -- see that doc's Limitations section).
+
 - Fixed the replication enrollment handoff (`replication.py::_handle_enroll`)
   holding no reservation across its privileged sudo subprocess: a token was
   only ever checked for validity (still 'pending'), never atomically

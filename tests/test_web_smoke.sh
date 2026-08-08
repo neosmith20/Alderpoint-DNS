@@ -538,18 +538,20 @@ backup_html = TEMPLATES.get_template("backup.html").render(
     component_defaults={"app_config": True, "sqlite_data": True, "custom_rules": True, "private_keys": False},
     last_backup={"created_at": "2026-07-29T00:00:00Z", "size_bytes": 1048576, "status": "deployed"},
     last_restore={"started_at": "2026-07-29T00:00:00Z", "finished_at": "2026-07-29T00:00:00Z", "status": "deployed"},
-    backup_settings={"schedule_enabled": "1", "schedule_interval_hours": "24", "retention_count": "7"},
+    backup_settings={"schedule_enabled": "1", "schedule_interval_hours": "24", "retention_count": "7", "max_upload_mib": "4096", "max_extracted_mib": "16384"},
     backups=[{"id": 1, "created_at": "2026-07-29T00:00:00Z", "size_bytes": 2097152, "components_summary": long_upstream, "status": "deployed", "path": "alderpointdns-backup-x.tar.gz"}],
     preview={
         "compatible": True, "warnings": [],
         "manifest": {"source_node_id": "alderpointdns-1", "created_at": "2026-07-29T00:00:00Z", "alderpointdns_app_version": "unreleased+git.abc", "database_schema_version": "abc123"},
         "included_components": ["app_config", "sqlite_data"],
+        "component_status": [{"key": "app_config", "label": "App Config", "included": True}, {"key": "analytics_history", "label": "Analytics History", "included": False}],
+        "archive_size_bytes": 2097152,
         "table_diffs": [{"table": "custom_rules", "component": "custom_rules", "live_rows": 3, "backup_rows": 2}],
         "file_diffs": [{"path": long_domain, "diff": "modified"}],
         "unchanged_file_count": 5,
     },
 )
-for expected in ("Create Backup", "Preview a Restore", "Restore Preview", "Scheduled Backups", "private_keys", long_upstream, long_domain, "data-async-form"):
+for expected in ("Create Backup", "Restore Alderpoint Backup", "Preview a Restore", "Restore Preview", "Scheduled Backups", "Restore Upload Limits", "private_keys", long_upstream, long_domain, "data-async-form"):
     if expected not in backup_html:
         raise SystemExit(f"backup page missing {expected}")
 
