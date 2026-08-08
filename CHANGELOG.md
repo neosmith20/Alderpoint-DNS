@@ -165,6 +165,27 @@ may still change between releases before a stable 1.0.
     verified against a real interface (unit-tested with every backend
     command mocked; live reconfigure/rollback on real hardware/VM is
     outstanding -- see that doc's Limitations section).
+- Fresh installations now seed three ordinary recommended blocklist sources
+  (AdGuard DNS filter, StevenBlack Unified Hosts, and HaGeZi Multi Normal),
+  then attempt the normal initial download, validation, compile, staged RPZ
+  deployment, and health checks automatically. The seeded lists are normal
+  editable/removable blocklist entries. Protection becomes active only after
+  that initial deployment succeeds; download/deploy failures are reported
+  without marking filtering active, and the administrator can retry through
+  the existing update/deploy paths. Upgrades and reinstalls no longer alter
+  existing blocklists, enabled states, or Protection state, and do not run
+  the fresh-install seeding path.
+  - AdGuard DNS filter:
+    `https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt`;
+    upstream `AdGuardTeam/AdGuardSDNSFilter`; EasyList/EasyPrivacy-derived
+    DNS-compatible advertising and tracking coverage.
+  - StevenBlack Unified Hosts:
+    `https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts`;
+    upstream `StevenBlack/hosts`; unified adware and malware hosts coverage.
+  - HaGeZi Multi Normal:
+    `https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/multi.txt`;
+    upstream `hagezi/dns-blocklists`; balanced ads, tracking, telemetry,
+    device, mobile tracker, phishing, and malware coverage.
 
 - Fixed the replication enrollment handoff (`replication.py::_handle_enroll`)
   holding no reservation across its privileged sudo subprocess: a token was

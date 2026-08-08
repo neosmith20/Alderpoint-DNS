@@ -17,6 +17,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 import urllib.error
@@ -32,6 +33,7 @@ except ModuleNotFoundError:
 
 
 DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
+DEFAULT_DB_PATH = DB_PATH
 DOWNLOAD_DIR = Path("/var/lib/alderpointdns/downloads")
 COMPILED_RPZ = Path("/var/lib/alderpointdns/compiled/bind/alderpointdns.rpz")
 STAGING_DIR = Path("/var/lib/alderpointdns/staging")
@@ -39,6 +41,7 @@ BACKUP_DIR = Path("/var/lib/alderpointdns/backups")
 DEPLOY_LOCK = Path("/var/lib/alderpointdns/staging/deploy.lock")
 MIGRATION_LOCK = Path("/var/lib/alderpointdns/staging/schema-migration.lock")
 CLI_ERROR_LOG = Path("/var/log/alderpointdns/compiler-errors.log")
+MIGRATION_THREAD_LOCK = threading.Lock()
 MAX_SOURCE_BYTES = 25 * 1024 * 1024
 CONNECT_TIMEOUT = 10
 TOTAL_TIMEOUT = 60
@@ -147,6 +150,37 @@ class PublicSource:
     category: str
 
 
+@dataclass(frozen=True)
+class DefaultSource(PublicSource):
+    upstream_project: str
+    purpose: str
+
+
+DEFAULT_FRESH_INSTALL_SOURCES = (
+    DefaultSource(
+        "AdGuard DNS filter",
+        "https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt",
+        "ads_trackers",
+        "AdGuardTeam/AdGuardSDNSFilter",
+        "EasyList/EasyPrivacy-derived DNS-compatible advertising and tracking coverage",
+    ),
+    DefaultSource(
+        "StevenBlack Unified Hosts",
+        "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
+        "ads_trackers",
+        "StevenBlack/hosts",
+        "Unified adware and malware hosts coverage",
+    ),
+    DefaultSource(
+        "HaGeZi Multi Normal",
+        "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/multi.txt",
+        "ads_trackers",
+        "hagezi/dns-blocklists",
+        "Balanced ads, tracking, telemetry, device, mobile tracker, phishing, and malware coverage",
+    ),
+)
+
+
 PUBLIC_SOURCES = (
     PublicSource("AdGuard DNS filter", "https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt", "ads_trackers"),
     PublicSource("OISD Blocklist Big", "https://adguardteam.github.io/HostlistsRegistry/assets/filter_27.txt", "ads_trackers"),
@@ -210,18 +244,31 @@ def migration_lock():
     default, which the unprivileged service user can still open O_RDONLY
     -- opening "w" here previously failed with PermissionError once root
     had created it first, crash-looping the web service on every startup)."""
-    MIGRATION_LOCK.parent.mkdir(parents=True, exist_ok=True)
-    if not MIGRATION_LOCK.exists():
+    lock_path = MIGRATION_LOCK if DB_PATH == DEFAULT_DB_PATH else DB_PATH.parent / "schema-migration.lock"
+    lock_exists = lock_path.exists()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    if not lock_exists:
         try:
-            MIGRATION_LOCK.touch()
+            lock_path.touch()
         except OSError:
             pass  # another process (of either privilege level) won the race to create it; we only need to read it
-    with MIGRATION_LOCK.open("rb") as lock_handle:
-        fcntl.flock(lock_handle, fcntl.LOCK_EX)
-        yield
+    with MIGRATION_THREAD_LOCK:
+        with lock_path.open("rb") as lock_handle:
+            fcntl.flock(lock_handle, fcntl.LOCK_EX)
+            yield
 
 
-def _apply_schema(conn: sqlite3.Connection) -> None:
+def seed_fresh_install_defaults(conn: sqlite3.Connection) -> None:
+    conn.executemany(
+        """
+        INSERT OR IGNORE INTO sources(name, url, enabled, category)
+        VALUES (?, ?, 1, ?)
+        """,
+        [(source.name, source.url, source.category) for source in DEFAULT_FRESH_INSTALL_SOURCES],
+    )
+
+
+def _apply_schema(conn: sqlite3.Connection, *, seed_defaults: bool = False) -> None:
     """The full idempotent DDL/seed/migration script. Every statement here is
     safe to run against an already-up-to-date database (CREATE TABLE IF NOT
     EXISTS, INSERT OR IGNORE, or an ALTER-if-missing probe via
@@ -393,12 +440,14 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "sources", "last_compile_success", "TEXT")
     _ensure_column(conn, "sources", "last_warning", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "sources", "rejected_samples", "TEXT NOT NULL DEFAULT '[]'")
+    if seed_defaults:
+        seed_fresh_install_defaults(conn)
     local_dns.init_db(conn)
     filter_schedule.init_db(conn)
     custom_rules.init_db(conn)
 
 
-def init_db() -> None:
+def init_db(*, seed_defaults: bool = False) -> bool:
     """Idempotent, interprocess-lock-protected schema migration entrypoint.
 
     Cheap no-op once the database is already at SCHEMA_VERSION (a single
@@ -411,9 +460,13 @@ def init_db() -> None:
         with connect() as conn:
             current_version = conn.execute("PRAGMA user_version").fetchone()[0]
             if current_version >= SCHEMA_VERSION:
-                return
-            _apply_schema(conn)
+                return False
+            if seed_defaults:
+                _apply_schema(conn, seed_defaults=True)
+            else:
+                _apply_schema(conn)
             conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            return True
 
 
 def normalize_domain(raw: str) -> str | None:
@@ -1037,7 +1090,7 @@ def dnsdist_conf_migrate() -> str:
     return "; ".join(parts)
 
 
-def deploy(download: bool = True, trigger: str | None = None) -> int:
+def deploy(download: bool = True, trigger: str | None = None, fail_on_source_errors: bool = False) -> int:
     init_db()
     DEPLOY_LOCK.parent.mkdir(parents=True, exist_ok=True)
     with DEPLOY_LOCK.open("w") as lock_handle:
@@ -1068,6 +1121,8 @@ def deploy(download: bool = True, trigger: str | None = None) -> int:
             cache_deployed_this_run = False
             try:
                 active_blocks, allowed_domains, _, errors = collect_rules(conn, download)
+                if fail_on_source_errors and errors:
+                    raise RuntimeError("initial default blocklist download failed: " + "; ".join(errors))
                 custom_active = custom_rules.collect_active(conn)
                 active_blocks = custom_rules.subtract_allowed(active_blocks, custom_active)
                 active_domains = len(active_blocks) + len(custom_active.blocks)
@@ -1188,6 +1243,35 @@ def deploy(download: bool = True, trigger: str | None = None) -> int:
         finally:
             conn.close()
     return deployment_id
+
+
+def fresh_install_init(_: argparse.Namespace | None = None) -> None:
+    """First-install bootstrap only.
+
+    Existing installs already have PRAGMA user_version at SCHEMA_VERSION, so
+    init_db() returns False and this command deliberately does not seed,
+    enable, disable, update, or deploy anything. On a genuinely fresh DB it
+    seeds ordinary source rows, then runs the normal download/compile/deploy
+    path. Download failures are reported but do not abort package configure;
+    the seeded rows remain ordinary editable sources for an administrator to
+    update or deploy again.
+    """
+    created = init_db(seed_defaults=True)
+    if not created:
+        print("fresh_install=0")
+        return
+    print(f"fresh_install=1 seeded_defaults={len(DEFAULT_FRESH_INSTALL_SOURCES)}")
+    try:
+        deployment_id = deploy(download=True, trigger="fresh-install", fail_on_source_errors=True)
+    except Exception as exc:
+        print(f"initial_deploy=failed error={exc}")
+        return
+    row = deployment_row(deployment_id)
+    active_domains = row["active_domains"] if row else 0
+    if not row or row["status"] != "deployed" or active_domains <= 0:
+        print(f"initial_deploy=failed status={row['status'] if row else 'missing'} active_domains={active_domains}")
+        return
+    print(f"initial_deploy=deployed deployment_id={deployment_id} active_domains={active_domains}")
 
 
 def add_source(args: argparse.Namespace) -> None:
@@ -1518,6 +1602,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Alderpoint DNS blocklist compiler")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init-db").set_defaults(func=lambda args: init_db())
+    sub.add_parser("fresh-install-init").set_defaults(func=fresh_install_init)
     seed = sub.add_parser("seed-lab")
     seed.set_defaults(func=seed_lab)
     seed_public_parser = sub.add_parser("seed-public")

@@ -201,8 +201,8 @@ initialize() {
   if [ "$DRY_RUN" -eq 0 ]; then
     /opt/alderpointdns/scripts/ensure_tls_cert.sh
     PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/analytics.py init-db
-    PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py deploy --no-download
-    # Narrowly the database (created above by init-db, running as root),
+    PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py fresh-install-init
+    # Narrowly the database (created above by fresh-install-init, running as root),
     # not a blanket recursive chown of /var/lib/alderpointdns: backups/
     # imports/staging are already alderpointdns-owned from create_layout()
     # and never written to as root, and compiled/bind + compiled/dnsdist

@@ -320,16 +320,14 @@ RESOLVCONFEOF
         > /var/lib/alderpointdns/compiled/bind/upstream-forwarders.conf
     fi
     systemctl restart named
-    # Generate the actual RPZ/local-zone/upstream config under
-    # /var/lib/alderpointdns/compiled and reload named/dnsdist so they pick
-    # it up. Not swallowed with `|| true`: this is where
-    # alderpointdns_compiler.py itself validates the generated BIND config
-    # (see validate_bind() in app/alderpointdns_compiler.py) and rolls back
-    # on failure; a failure here means the install is genuinely broken and
-    # must be reported as such, not silently treated as a successful
-    # install of four services that don't actually work.
-    PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py deploy --no-download
-    # The database (created above by init-db, running as root in this
+    # On a genuinely fresh database, seed the ordinary recommended
+    # blocklist rows and run the normal download/compile/deploy path. On
+    # upgrades/reinstalls this command is a strict no-op, keyed by the
+    # schema user_version established during the first initialization; it
+    # must not reseed sources or replace an existing compiled policy.
+    PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py fresh-install-init
+    # The database (created above by fresh-install-init on a new install,
+    # or migrated there on an existing install, running as root in this
     # postinst) is the one thing under /var/lib/alderpointdns that both
     # needs fixing up and is safe to hand to alderpointdns: unlike
     # backups/imports/staging (already alderpointdns-owned from the

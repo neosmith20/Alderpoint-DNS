@@ -178,8 +178,11 @@ grep -q 'StartLimitIntervalSec' /opt/alderpointdns/packaging/dnsdist.service.d/a
 # The confirmed defect: every mandatory postinst step (database init,
 # config deploy, service restart/enable) was suffixed with `|| true`,
 # so a completely broken install still reported dpkg/apt success.
-grep -q 'PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py deploy --no-download$' "$POSTINST" || \
-  fail "postinst still swallows failures from alderpointdns_compiler.py deploy with || true (or a trailing redirect) instead of failing the install"
+grep -q 'PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py fresh-install-init$' "$POSTINST" || \
+  fail "postinst does not run the fresh-install initializer for first-use blocklist setup"
+if grep -q 'alderpointdns_compiler.py deploy --no-download$' "$POSTINST"; then
+  fail "postinst still runs an unconditional no-download deploy, which would replace existing compiled policy during upgrade"
+fi
 grep -q '^    systemctl restart named dnsdist$' "$POSTINST" || \
   fail "postinst still swallows failures from 'systemctl restart named dnsdist' with || true instead of failing the install"
 # enable + an unconditional restart, not `enable --now`: on an
