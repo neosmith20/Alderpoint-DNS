@@ -1,10 +1,13 @@
 # Changelog
 
-All notable changes to Alderpoint DNS are documented in this file. Alderpoint
-DNS is currently in **beta**; interfaces, on-disk formats, and configuration
-may still change between releases before a stable 1.0.
+All notable changes to Alderpoint DNS are documented in this file.
 
-## Unreleased
+## v1.0.0 (2026-08-09)
+
+The first stable release. Everything below this line, back through
+`v0.4.0-beta.1`, was beta-cycle work; interfaces, on-disk formats, and
+configuration from this release forward follow normal stable-release
+compatibility expectations instead of beta-era churn.
 
 - Fixed Dashboard **Top Clients** navigation: clicking it used to open the
   generic, unfiltered Query Log, which misrepresented the destination as
@@ -334,6 +337,57 @@ may still change between releases before a stable 1.0.
     all existing data are preserved. Existing installations upgrading from
     beta.5 (which never set `PRAGMA user_version`) are migrated forward
     exactly once on the next `init_db()` call.
+- Backup & Restore lifecycle hardening: a restore's `restore_history` row now
+  records worker identity (PID, process-start-ticks, boot ID) and a periodic
+  heartbeat/phase/progress instead of relying on elapsed time, so a restore
+  whose worker actually died (killed process, OOM, host reboot) is reliably
+  told apart from one that is simply still running a large, slow restore --
+  the former is reaped and reported as interrupted, the latter is never
+  killed just for taking a long time. Fixed a real large-analytics-restore
+  slowdown found via profiling (chunked commits instead of one giant
+  transaction, coordinated pausing of the analytics collector during the
+  merge) and added a real multi-million-row restore validation.
+- Native database restore is now staged and atomically promoted: the
+  expensive merge work happens against a private working copy of the
+  database (via SQLite's own online backup API), never directly against the
+  live database, and is only ever swapped into place with a brief
+  exclusive-lock-guarded atomic file replace once fully validated. A restore
+  interrupted before that swap leaves the previously working live database
+  completely untouched; one interrupted after it is reported honestly as
+  requiring administrator verification rather than silently claimed as
+  rolled back. Verified with real interruption testing (process kills at
+  each stage) in addition to unit tests.
+- Software Updates: an update job whose privileged runner
+  (`alderpointdns-software-update.service`) died mid-install no longer gets
+  stuck "in progress" forever -- the same worker-identity-based staleness
+  detection used for Backup & Restore now applies to
+  `software_update_jobs`, so a dead runner's job is reaped and future
+  install attempts are not permanently blocked behind it.
+- Software Updates: automatic **checking** now actually honors the
+  configurable check interval (`check_interval_hours`, System >
+  Administration > Software Updates) via a runtime systemd timer drop-in,
+  the same mechanism already used for scheduled blocklist updates and
+  backups; turning automatic checking off now actually stops the scheduled
+  timer rather than only making a triggered check a no-op. Automatic
+  **installation** remains off by default with no execution path.
+- Filtering/deploy performance: added fast paths for the overwhelmingly
+  common blocklist source-line shapes (`||domain^`, `@@||domain^`, plain
+  hostnames), cheap IP-literal prechecks, and an ASCII-normalization
+  shortcut that skips IDNA encoding for ordinary domains, plus a
+  source-parse cache (keyed by content hash and parser version) so an
+  unchanged blocklist source is never re-parsed. Turning **Protection**
+  back on after it was off can now reuse a previously compiled policy
+  (validated against a canonical hash of every input that could have
+  changed it) instead of always rebuilding from scratch, refreshing the
+  RPZ zone's SOA serial correctly either way; falls back to a full rebuild
+  automatically whenever reuse cannot be proven safe.
+- Navigation cleanup: **Backup & Restore** moved from System to
+  **Operations** (Import, Backup & Restore, Replication), keeping its
+  existing `/backup` route. **Administration** no longer carries launcher
+  cards that only pointed at Network Configuration, Software Updates, or
+  Backup & Restore -- each already has its own direct System/Operations
+  submenu entry one level away -- while keeping its actual purpose
+  (administrator password change, session management) unchanged.
 
 ## v0.4.0-beta.5 (2026-07-31)
 

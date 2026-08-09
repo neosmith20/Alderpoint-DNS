@@ -1,9 +1,58 @@
 # Release Notes
 
-Alderpoint DNS is pre-release beta software. These notes describe what
-changed in each beta build; they are not a claim of production readiness or
-long-term stability. See `docs/known-limitations.md` and
-`docs/beta-readiness.md` for the current honest state of the project.
+These notes describe what changed in each release. See
+`docs/known-limitations.md` for the current honest state of the project.
+Everything below `v1.0.0` was a beta-cycle build.
+
+## v1.0.0
+
+Alderpoint DNS's first stable release. Highlights since the beta.4/beta.5
+line, by area (see `CHANGELOG.md` for the full detailed log):
+
+- **DNS/filtering**: fast paths for the overwhelmingly common blocklist
+  rule shapes, cheap IP-literal prechecks, an ASCII-normalization
+  shortcut, and a source-parse cache keyed by content hash and parser
+  version make blocklist updates and deploys substantially faster on
+  large lists. Turning **Protection** back on can now reuse a previously
+  compiled policy (validated against a canonical hash of everything that
+  could have changed it) instead of always rebuilding from scratch.
+- **Fresh-install behavior**: a new install now seeds a curated,
+  recommended set of default blocklists automatically instead of
+  starting with an empty policy.
+- **Backup & Restore**: native database restore is now staged and
+  atomically promoted -- the expensive merge work happens against a
+  private working copy, never directly against the live database, and is
+  only swapped in via a brief, validated atomic operation. A restore
+  interrupted before that point leaves the live database completely
+  untouched. Abandoned restores (a worker that died mid-run) are now
+  reliably detected and reported instead of appearing stuck forever.
+- **Network Configuration**: change this server's own network interface
+  (DHCP/static IPv4/IPv6, gateway) with an explicit confirm-within-timeout
+  safety window and automatic rollback if a change leaves the server
+  unreachable.
+- **Replication and Import**: one-way primary-to-replica sync with hashed,
+  one-time, revocable enrollment tokens and mTLS; preview-first import
+  from AdGuard Home, Pi-hole, BIND zones, hosts files, and CSV/XLSX.
+- **Software Updates**: check for and install newer Alderpoint DNS
+  releases from GitHub, or upload a `.deb` manually, with SHA-256 +
+  package-metadata validation, an `apt` install simulation, and a
+  mandatory pre-upgrade backup before every install. Automatic checking
+  is on by default and its interval is configurable; automatic
+  installation is intentionally not implemented -- every install is an
+  explicit administrator action.
+- **Security/hardening**: every privileged operation (deployment, Backup &
+  Restore, Network Configuration, Software Updates, Replication) runs
+  through fixed, argument-free sudoers entries; see `docs/security.md` and
+  `docs/hardening-review.md` for the full reviewed control list.
+- **UI/QoL/navigation**: Backup & Restore moved to a reorganized
+  **Operations** menu (Import, Backup & Restore, Replication);
+  Administration was decluttered of launcher cards that only pointed at
+  neighboring System menu items; Dashboard's Top Clients now opens a
+  proper client-focused view instead of the unfiltered Query Log.
+- **Upgrade/persistence**: upgrading an existing installation (via
+  `scripts/upgrade.sh` or in-app Software Updates) preserves all
+  configuration and data; schema migrations are idempotent and
+  interprocess-lock-protected.
 
 ## 0.4.0-beta.4 (unreleased beta update)
 

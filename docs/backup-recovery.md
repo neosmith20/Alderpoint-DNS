@@ -1,8 +1,7 @@
 # Backup and Recovery Guide
 
-Alderpoint DNS is currently beta software (v0.4.0-beta.5). The backup/restore
-paths described here are acceptance-tested, but keep independent copies of
-anything important — see `docs/known-limitations.md`.
+The backup/restore paths described here are acceptance-tested, but keep
+independent copies of anything important — see `docs/known-limitations.md`.
 
 Routine backups:
 

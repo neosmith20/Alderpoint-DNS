@@ -1,9 +1,8 @@
 # Contributing to Alderpoint DNS
 
-Thanks for your interest in contributing. Alderpoint DNS is beta software
-(currently v0.4.0-beta.5), so expect some rough edges in process as well as
-in the product — please be patient and open an issue if something here is
-unclear or out of date.
+Thanks for your interest in contributing. Alderpoint DNS just reached its
+first stable (v1.0.0) release, so please be patient and open an issue if
+something here is unclear or out of date.
 
 ## Licensing and contribution policy
 

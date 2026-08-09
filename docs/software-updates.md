@@ -1,6 +1,6 @@
 # Software Updates
 
-**System > Administration > Software Updates** (`/system/administration/software-updates`)
+**System > Software Updates** (`/system/administration/software-updates`)
 discovers, validates, and installs newer Alderpoint DNS Debian packages, either
 from GitHub Releases or a manually uploaded `.deb`. This document describes
 the architecture; see `docs/versioning.md` for the version model it depends on.

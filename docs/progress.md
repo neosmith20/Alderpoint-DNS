@@ -9,9 +9,9 @@ collector aggregates query statistics from dnsdist and BIND without adding
 any per-query overhead in the resolution path.
 
 This document summarizes what is implemented, what is tested, and the
-current state of the project. Alderpoint DNS is **beta software**; see
-`docs/beta-readiness.md` for the external beta checklist and
-`docs/known-limitations.md` for things that are not yet supported.
+current state of the project. See `docs/known-limitations.md` for things
+that are not yet supported, and `docs/beta-readiness.md` for the pre-1.0
+readiness checklist this release satisfied.
 
 ## Implemented areas
 
@@ -326,7 +326,7 @@ that existing cache rather than adding a second one.
   private-key PEM blocks, and resolver URL query strings; private DNS
   records and query contents are excluded by default.
 - `VERSION`, `requirements.txt`, and `requirements-debian.txt` define the
-  current beta version and dependency manifests.
+  current version and dependency manifests.
 - Debian packaging metadata and maintainer scripts preserve persistent data
   on a normal package removal; purge removes it only when explicitly
   requested.
@@ -350,12 +350,10 @@ that existing cache rather than adding a second one.
 
 ## Current status
 
-Alderpoint DNS is in **beta**. Core DNS resolution, filtering, Local DNS,
-the web interface, analytics, backup/restore, upstream resolver
-management, encryption settings, import/migration, and replication are all
-implemented and covered by automated tests, and have been exercised through
-full-reboot verification. It is not yet a 1.0/production-readiness release:
-expect continued hardening, expanded platform support, and possible
-breaking changes to configuration or on-disk formats before a stable
-release. See `docs/known-limitations.md` and `docs/beta-readiness.md` for
-specifics.
+Alderpoint DNS 1.0.0 is a stable release. Core DNS resolution, filtering,
+Local DNS, the web interface, analytics, backup/restore, upstream resolver
+management, encryption settings, import/migration, Software Updates,
+Network Configuration, and replication are all implemented and covered by
+automated tests, and have been exercised through full-reboot and real
+in-place upgrade verification. See `docs/known-limitations.md` for
+specifics on what remains genuinely unsupported.

@@ -1,6 +1,6 @@
 # Supported Systems
 
-Supported for beta testing:
+Supported platforms:
 
 - Debian 12
 - Debian 13

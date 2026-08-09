@@ -119,8 +119,8 @@ on -- unlike running the installer or postinst directly against that
 machine, which already has all of those from prior installs. It adds no
 third-party APT repository, signing key, or pin of any kind: only
 `apt-get update` against Debian's own repositories, then
-`apt-get install -y ./alderpointdns.deb`, exactly like a beta tester on an
-untouched Debian 13 VM, and it fails if `repo.powerdns.com` shows up
+`apt-get install -y ./alderpointdns.deb`, exactly like a real administrator
+on an untouched Debian 13 VM, and it fails if `repo.powerdns.com` shows up
 anywhere under `/etc/apt` at any point in the run. It then verifies:
 `apt-get install` succeeds (dependency resolution against stock repos
 alone, no "unmet dependencies"/"not installable" errors) and the installed

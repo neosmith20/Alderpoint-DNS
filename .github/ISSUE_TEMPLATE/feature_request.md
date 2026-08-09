@@ -7,9 +7,8 @@ assignees: ''
 ---
 
 <!--
-Thanks for the suggestion. Alderpoint DNS is beta software
-(v0.4.0-beta.5) with an evolving feature set — see docs/known-limitations.md
-and docs/architecture.md for what's currently implemented vs. intentionally
+Thanks for the suggestion. See docs/known-limitations.md and
+docs/architecture.md for what's currently implemented vs. intentionally
 partial, which may help frame the request.
 -->
 
@@ -51,6 +50,7 @@ applicable. -->
 
 <!-- Other approaches you considered and why you prefer this one. -->
 
-## Priority for beta/v1.0
+## Priority
 
-<!-- Is this a beta blocker, nice-to-have for beta, or a v1.0+ idea? -->
+<!-- Is this a small nice-to-have, or something more significant? Would it
+need to land in a specific upcoming release? -->

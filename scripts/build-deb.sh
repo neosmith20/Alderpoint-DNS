@@ -68,6 +68,7 @@ chmod 0755 "$PKG/DEBIAN/postinst" "$PKG/DEBIAN/prerm" "$PKG/DEBIAN/postrm"
 
 tar -C "$SOURCE_DIR" \
   --exclude .git --exclude __pycache__ --exclude '*.pyc' --exclude venv \
+  --exclude scripts/benchmark_filtering.py --exclude docs/performance-baseline.md \
   -cf - app docs packaging scripts tests web VERSION requirements.txt requirements-debian.txt | \
   tar -C "$PKG/opt/alderpointdns" -xf -
 

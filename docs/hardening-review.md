@@ -30,12 +30,32 @@ Reviewed areas:
   off-host archives.
 - Replication: enrollment tokens are hashed, one-time, and revocable; runtime
   sync uses mTLS client authentication.
+- Network Configuration: the privileged apply/rollback path runs through
+  fixed sudoers entries; a network change that leaves the server
+  unreachable is automatically rolled back by a watchdog if not explicitly
+  confirmed within the timeout window.
+- Software Updates: installing is separated from checking -- checking runs
+  synchronously and only ever reads GitHub/writes settings; installing
+  always requires an explicit administrator action, verifies the
+  package's SHA-256 checksum (against the release's `SHA256SUMS`, or an
+  administrator-supplied checksum for a manual upload) and `dpkg-deb`
+  metadata (package name, architecture, version) before running an `apt`
+  simulation and a mandatory pre-upgrade backup, and never installs
+  unattended by default. The optional private-repository GitHub
+  credential is root-owned/mode-0600 and never readable by, or rendered
+  to, the unprivileged web process.
 
-Accepted beta risks:
+Accepted risks:
 
 - Admin UI HTTPS is not implemented natively yet. Use private access or a
   trusted reverse proxy and set `ALDERPOINTDNS_COOKIE_SECURE=1`.
-- Signed apt repository publishing is not implemented; beta packages are local
-  test artifacts.
+- Signed apt repository publishing is not implemented; release packages are
+  downloaded directly from GitHub Releases (checksum-verified via
+  `SHA256SUMS`, not GPG-signed) or built as local test artifacts -- not
+  served from a trusted apt repository.
 - `--include-private-dns` diagnostics remains a placeholder; private DNS data
   should be shared through encrypted backups only.
+- Automatic package rollback on a failed Software Updates install is not
+  implemented; a failed update past the install step requires
+  administrator recovery (the mandatory pre-upgrade backup is always
+  retained for this).

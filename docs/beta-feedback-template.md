@@ -1,4 +1,4 @@
-# Beta Feedback Template
+# User Feedback Template
 
 - Tester name/contact:
 - Date:

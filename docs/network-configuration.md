@@ -1,6 +1,6 @@
 # Network Configuration Guide
 
-**System > Administration > Network Configuration** (`/system/network`)
+**System > Network Configuration** (`/system/network`)
 manages the Alderpoint DNS server's **own** network interface -- its active
 interface, DHCP vs static IPv4/IPv6, address, prefix length, and gateway.
 This is entirely separate from **DNS Settings** (`/dns-settings`), which

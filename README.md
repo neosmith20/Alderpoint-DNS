@@ -7,13 +7,12 @@ application on top. dnsdist is the client-facing DNS frontend; BIND is a
 localhost-only validating cache/forwarder; filtering policy is compiled into
 a BIND RPZ zone and reloaded through a staged, validated deployment path.
 
-> **Status: beta.** This is **v0.4.0-beta.5**, pre-release software. It is
-> functional and acceptance-tested in lab conditions, but it has not had
-> production-scale or adversarial-network exposure, and several features are
-> intentionally partial. See [Known limitations](#known-limitations) below
-> and `docs/known-limitations.md`, `docs/beta-readiness.md`, and
-> `docs/hardening-review.md` for the honest current state before you rely on
-> it for anything important.
+> **Status: stable.** This is **v1.0.0**, Alderpoint DNS's first stable
+> release. It is functional and acceptance-tested, but several features are
+> intentionally partial or narrowly scoped by design. See
+> [Known limitations](#known-limitations) below and
+> `docs/known-limitations.md` and `docs/hardening-review.md` for the honest
+> current state before you rely on it for anything important.
 
 **Source-available under the [PolyForm Noncommercial License
 1.0.0](LICENSE).** Alderpoint DNS is not open source; commercial use
@@ -87,20 +86,41 @@ Per `docs/supported-systems.md` and `docs/hardware-requirements.md`:
 
 ## Quick start
 
-Alderpoint DNS installs from a reviewed local source/release tree, not a
-piped remote script. See `docs/install.md` for full details, package lists,
-and layout. In short:
+Install the latest stable release directly from GitHub Releases:
 
 ```sh
-cd /path/to/alderpointdns-release
-sudo ./scripts/install.sh
+curl -fL -o alderpointdns.deb https://github.com/neosmith20/Alderpoint-DNS/releases/latest/download/alderpointdns_latest_all.deb && sudo apt update && sudo apt install ./alderpointdns.deb
 ```
 
-This creates a dedicated `alderpointdns` service account, installs BIND and
-dnsdist, generates local secrets, initializes the database, deploys generated
-DNS configuration, and enables services. No default administrator account
-exists — create the first one through the web UI's `/setup` page. See
-`docs/upgrade.md` for upgrading an existing installation.
+This one command always installs the current latest stable release — the
+`alderpointdns_latest_all.deb` asset is byte-identical to that release's
+versioned package (e.g. `alderpointdns_1.0.0-1_all.deb`), just without a
+version number in the filename, so the command never needs updating.
+`apt install` resolves and installs BIND, dnsdist, and every other
+dependency from Debian's own repositories; nothing is piped from the
+network into a root shell unreviewed.
+
+Every release also publishes a `SHA256SUMS` file alongside the `.deb`
+assets. To verify the download before installing (optional, but
+recommended if you're not fetching it interactively):
+
+```sh
+curl -fLO https://github.com/neosmith20/Alderpoint-DNS/releases/latest/download/SHA256SUMS
+sha256sum --ignore-missing -c SHA256SUMS
+```
+
+Installing creates a dedicated `alderpointdns` service account, generates
+local secrets, initializes the database, deploys generated DNS
+configuration, and enables services. No default administrator account
+exists — create the first one through the web UI's `/setup` page.
+
+To install from a reviewed local source tree instead (e.g. for
+development), see `docs/install.md`. Once installed, use **System >
+Software Updates** in the admin UI to check for and install future
+releases — it performs its own checksum, package-metadata, version, and
+mandatory pre-upgrade-backup validation automatically (see
+`docs/software-updates.md`); `docs/upgrade.md` also documents the
+`scripts/upgrade.sh` path for upgrading a source-tree install.
 
 ## Known limitations
 
@@ -120,24 +140,37 @@ Honestly stated, from `docs/known-limitations.md`:
   never silently approximated.
 - System Status's Recent Logs is scoped to Alderpoint DNS's own four service
   units, not a general journal viewer.
-- A signed apt repository is not published yet; beta packages are local
-  `dpkg-deb` test artifacts.
+- A signed apt repository is not published; releases are distributed as
+  checksummed `.deb` assets on GitHub Releases, not through a trusted apt
+  repository.
+- Unattended (automatic) software installation is intentionally not
+  implemented — Software Updates checks for new releases automatically but
+  always requires an explicit administrator action to install one.
+- Automatic package rollback on a failed software update is not
+  implemented; the mandatory pre-upgrade backup it always takes first is
+  retained for manual recovery.
 
-See `docs/beta-readiness.md` and `docs/hardening-review.md` for the fuller
-pre-release checklist and accepted beta risks.
+See `docs/known-limitations.md` and `docs/hardening-review.md` for the
+fuller list of genuine limitations and accepted risks, and
+`docs/beta-readiness.md` for the pre-1.0 readiness checklist this release
+satisfied.
 
 ## Documentation
 
 - Install: `docs/install.md`
-- Upgrade: `docs/upgrade.md`
+- Upgrade and Software Updates (in-app): `docs/upgrade.md` and
+  `docs/software-updates.md`
 - Configuration: `docs/configuration.md`
 - Architecture: `docs/architecture.md`
 - Filtering and custom rules: `docs/filtering.md`
 - Migration from AdGuard Home / Pi-hole: `docs/migration.md`
 - Backup and recovery: `docs/backup-recovery.md`
+- Network Configuration: `docs/network-configuration.md`
+- Replication: `docs/replication-promotion.md`
 - Security posture: `docs/security.md` and `docs/hardening-review.md`
+- Known limitations: `docs/known-limitations.md`
 - Troubleshooting: `docs/troubleshooting.md`
-- Release notes: `docs/release-notes.md`
+- Release notes: `docs/release-notes.md` and `CHANGELOG.md`
 
 ## Contributing and security
 
