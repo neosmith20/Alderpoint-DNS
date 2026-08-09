@@ -441,6 +441,10 @@ def deploy_no_download() -> tuple[int, str]:
     return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "deploy", "--no-download"])
 
 
+def protection_enable_reuse() -> tuple[int, str]:
+    return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "protection-enable-reuse"])
+
+
 def deploy_no_download_or_raise() -> None:
     code, out = deploy_no_download()
     if code != 0:
@@ -906,6 +910,10 @@ def protection_toggle(request: Request, csrf: str = Form(...), _: sqlite3.Row = 
             conn.execute("UPDATE custom_filter_rules SET enabled=1 WHERE validation_state='valid'")
         else:
             conn.execute("UPDATE custom_filter_rules SET enabled=0")
+    if enable:
+        code, _out = protection_enable_reuse()
+        if code == 0:
+            return redirect("/")
     deploy_no_download()
     return redirect("/")
 

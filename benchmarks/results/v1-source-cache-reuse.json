@@ -1,0 +1,40 @@
+{
+  "results": [
+    {
+      "dataset": "small",
+      "target_domains": 100000,
+      "input_rules": 104349,
+      "first_collect_s": 0.740683516007266,
+      "second_collect_s": 0.05981104499369394,
+      "unique_domains": 77101,
+      "allows": 9999,
+      "equivalent": true,
+      "parse_cache_rows": 3,
+      "peak_rss_mb": 66.82421875
+    },
+    {
+      "dataset": "medium",
+      "target_domains": 500000,
+      "input_rules": 521739,
+      "first_collect_s": 3.741922818997409,
+      "second_collect_s": 0.29495700099505484,
+      "unique_domains": 385507,
+      "allows": 49998,
+      "equivalent": true,
+      "parse_cache_rows": 3,
+      "peak_rss_mb": 188.265625
+    },
+    {
+      "dataset": "large",
+      "target_domains": 1000000,
+      "input_rules": 1043478,
+      "first_collect_s": 8.076849510005559,
+      "second_collect_s": 0.6389564970013453,
+      "unique_domains": 771013,
+      "allows": 99999,
+      "equivalent": true,
+      "parse_cache_rows": 3,
+      "peak_rss_mb": 361.21875
+    }
+  ]
+}
