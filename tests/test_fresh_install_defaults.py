@@ -76,6 +76,11 @@ class FreshInstallDefaultTests(unittest.TestCase):
 
         return _download
 
+    def _simulate_established_legacy_db(self) -> None:
+        compiler.init_db()
+        with compiler.connect() as conn:
+            conn.execute("PRAGMA user_version=0")
+
     def test_default_catalog_is_small_and_canonical(self):
         defaults = compiler.DEFAULT_FRESH_INSTALL_SOURCES
         self.assertEqual(3, len(defaults))
@@ -162,6 +167,16 @@ class FreshInstallDefaultTests(unittest.TestCase):
             self.assertEqual(0, conn.execute("SELECT count(*) FROM sources").fetchone()[0])
         self.assertIn("fresh_install=0", out.getvalue())
 
+    def test_existing_older_schema_zero_sources_remains_zero_and_no_deploy_runs(self):
+        self._simulate_established_legacy_db()
+        with mock.patch.object(compiler, "deploy", side_effect=AssertionError("deploy should not run")):
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                compiler.fresh_install_init()
+        with compiler.connect() as conn:
+            self.assertEqual(compiler.SCHEMA_VERSION, conn.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(0, conn.execute("SELECT count(*) FROM sources").fetchone()[0])
+        self.assertIn("fresh_install=0", out.getvalue())
+
     def test_existing_sources_and_protection_state_remain_unchanged(self):
         compiler.init_db()
         with compiler.connect() as conn:
@@ -180,6 +195,46 @@ class FreshInstallDefaultTests(unittest.TestCase):
             deployment = conn.execute("SELECT active_domains, message FROM deployments").fetchone()
         self.assertEqual(("Custom disabled", "https://example.invalid/list.txt", 0), tuple(source))
         self.assertEqual((42, "existing"), tuple(deployment))
+
+    def test_existing_older_schema_custom_sources_and_protection_off_remain_unchanged(self):
+        self._simulate_established_legacy_db()
+        with compiler.connect() as conn:
+            conn.execute(
+                "INSERT INTO sources(name, url, enabled, category) VALUES (?, ?, 1, 'ads_trackers')",
+                ("Custom enabled", "https://example.test/custom.txt"),
+            )
+            conn.execute(
+                "INSERT INTO deployments(started_at, finished_at, status, active_domains, message) VALUES (?, ?, 'deployed', 0, 'protection off')",
+                (compiler.now(), compiler.now()),
+            )
+            conn.execute("PRAGMA user_version=0")
+        with mock.patch.object(compiler, "deploy", side_effect=AssertionError("deploy should not run")):
+            compiler.fresh_install_init()
+        with compiler.connect() as conn:
+            rows = conn.execute("SELECT name, url, enabled FROM sources ORDER BY id").fetchall()
+            deployment = conn.execute("SELECT active_domains, message FROM deployments").fetchone()
+        self.assertEqual([("Custom enabled", "https://example.test/custom.txt", 1)], [tuple(row) for row in rows])
+        self.assertEqual((0, "protection off"), tuple(deployment))
+
+    def test_existing_older_schema_custom_sources_and_protection_on_remain_unchanged(self):
+        self._simulate_established_legacy_db()
+        with compiler.connect() as conn:
+            conn.execute(
+                "INSERT INTO sources(name, url, enabled, category) VALUES (?, ?, 0, 'ads_trackers')",
+                ("Custom disabled", "https://example.test/disabled.txt"),
+            )
+            conn.execute(
+                "INSERT INTO deployments(started_at, finished_at, status, active_domains, message) VALUES (?, ?, 'deployed', 17, 'protection on')",
+                (compiler.now(), compiler.now()),
+            )
+            conn.execute("PRAGMA user_version=0")
+        with mock.patch.object(compiler, "deploy", side_effect=AssertionError("deploy should not run")):
+            compiler.fresh_install_init()
+        with compiler.connect() as conn:
+            rows = conn.execute("SELECT name, url, enabled FROM sources ORDER BY id").fetchall()
+            deployment = conn.execute("SELECT active_domains, message FROM deployments").fetchone()
+        self.assertEqual([("Custom disabled", "https://example.test/disabled.txt", 0)], [tuple(row) for row in rows])
+        self.assertEqual((17, "protection on"), tuple(deployment))
 
     def test_compiler_deduplication_handles_overlap_between_defaults(self):
         compiler.init_db(seed_defaults=True)

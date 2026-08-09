@@ -268,6 +268,27 @@ def seed_fresh_install_defaults(conn: sqlite3.Connection) -> None:
     )
 
 
+def has_established_database_state(conn: sqlite3.Connection) -> bool:
+    """True when this DB already contains any Alderpoint-managed table.
+
+    `PRAGMA user_version` alone cannot distinguish a genuinely new database
+    from an older existing install that predates schema version stamping. A
+    fresh SQLite file has no user tables before _apply_schema() runs; any
+    existing user table means an install, restore, or prior failed setup has
+    already established state and must not receive fresh-install defaults.
+    """
+    return bool(
+        conn.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type='table' AND name NOT LIKE 'sqlite_%'
+            LIMIT 1
+            """
+        ).fetchone()
+    )
+
+
 def _apply_schema(conn: sqlite3.Connection, *, seed_defaults: bool = False) -> None:
     """The full idempotent DDL/seed/migration script. Every statement here is
     safe to run against an already-up-to-date database (CREATE TABLE IF NOT
@@ -459,14 +480,16 @@ def init_db(*, seed_defaults: bool = False) -> bool:
     with migration_lock():
         with connect() as conn:
             current_version = conn.execute("PRAGMA user_version").fetchone()[0]
+            established_state = has_established_database_state(conn)
             if current_version >= SCHEMA_VERSION:
                 return False
-            if seed_defaults:
+            genuinely_fresh = seed_defaults and current_version == 0 and not established_state
+            if genuinely_fresh:
                 _apply_schema(conn, seed_defaults=True)
             else:
                 _apply_schema(conn)
             conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-            return True
+            return genuinely_fresh if seed_defaults else True
 
 
 def normalize_domain(raw: str) -> str | None:
@@ -1248,16 +1271,17 @@ def deploy(download: bool = True, trigger: str | None = None, fail_on_source_err
 def fresh_install_init(_: argparse.Namespace | None = None) -> None:
     """First-install bootstrap only.
 
-    Existing installs already have PRAGMA user_version at SCHEMA_VERSION, so
-    init_db() returns False and this command deliberately does not seed,
-    enable, disable, update, or deploy anything. On a genuinely fresh DB it
-    seeds ordinary source rows, then runs the normal download/compile/deploy
-    path. Download failures are reported but do not abort package configure;
-    the seeded rows remain ordinary editable sources for an administrator to
-    update or deploy again.
+    A database is considered genuinely fresh only when, before schema
+    creation, it has PRAGMA user_version=0 and no user tables in
+    sqlite_master. Existing installs that merely need migration may also have
+    user_version=0, so the no-user-tables condition is the critical guard.
+    Only that fresh case seeds ordinary source rows and runs the normal
+    download/compile/deploy path. Download failures are reported but do not
+    abort package configure; the seeded rows remain ordinary editable sources
+    for an administrator to update or deploy again.
     """
-    created = init_db(seed_defaults=True)
-    if not created:
+    seeded = init_db(seed_defaults=True)
+    if not seeded:
         print("fresh_install=0")
         return
     print(f"fresh_install=1 seeded_defaults={len(DEFAULT_FRESH_INSTALL_SOURCES)}")
