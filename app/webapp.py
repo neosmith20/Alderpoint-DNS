@@ -641,6 +641,46 @@ def proxy_backend_enabled() -> bool:
     return False
 
 
+# The PROXYv2 backend hop that lets BIND log/see the real client address
+# instead of dnsdist's own loopback address: dnsdist.conf forwards to this
+# socket with useProxyProtocol=true (proxy_backend_enabled(), above), and
+# packaging/named.conf.options has BIND listen on it with
+# `listen-on port 5354 proxy plain`.
+PROXY_BACKEND_SOCKET = "127.0.0.1:5354"
+
+
+def client_address_preservation_status() -> dict[str, str]:
+    """Whether real client addresses are preserved end-to-end through the
+    dnsdist -> BIND PROXYv2 backend hop.
+
+    This used to be inferred from the presence-on-disk of the shell
+    acceptance test tests/test_dnsdist_frontend.sh -- a development/test
+    artifact the production package should not need to ship or depend on,
+    and one that was never actually *run* by this check to begin with (only
+    checked for existing). The replacement uses the same two production-
+    owned signals protocol_statuses() already relies on for every other
+    listener:
+
+    - proxy_backend_enabled() proves dnsdist.conf is *configured* to forward
+      through the PROXYv2 backend.
+    - a live socket check (listener_addresses(), the same ss-backed helper
+      used elsewhere in this module) proves BIND's PROXYv2 listener is
+      *actually up* right now, not just present in a config file on disk.
+
+    This does not replace the full live query exercised by the shell
+    acceptance suite (tests/test_dnsdist_frontend.sh, still run in CI/
+    pre-release testing) -- it is the always-available, dependency-free
+    runtime signal the production UI can show on every page load.
+    """
+    detail = f"PROXYv2 backend {PROXY_BACKEND_SOCKET} (BIND, tcp+udp)"
+    if not proxy_backend_enabled():
+        return {"state": "Not configured", "detail": detail}
+    listeners = listener_addresses()
+    expected = [("tcp", PROXY_BACKEND_SOCKET), ("udp", PROXY_BACKEND_SOCKET)]
+    state = "Passed" if _socket_coverage(listeners, expected) == "full" else "Failed"
+    return {"state": state, "detail": detail}
+
+
 # (name, capability key in encryption.dnsdist_capabilities(), enabled-flag
 # key in encryption.settings(), port-setting key, transport, endpoint label,
 # protocol_tests key from encryption.test_protocols())
@@ -1850,13 +1890,7 @@ def encryption_apple_profile(protocol: str, _: sqlite3.Row = Depends(current_adm
 def dns_settings(request: Request, _: sqlite3.Row = Depends(current_admin)):
     version = dnsdist_version_info()
     proxy_backend = proxy_backend_enabled()
-    client_address_test_path = Path("/opt/alderpointdns/tests/test_dnsdist_frontend.sh")
-    if proxy_backend and client_address_test_path.exists():
-        client_address_test = {"state": "Passed", "filename": client_address_test_path.name}
-    elif client_address_test_path.exists():
-        client_address_test = {"state": "Failed", "filename": client_address_test_path.name}
-    else:
-        client_address_test = {"state": "Not tested", "filename": "test_dnsdist_frontend.sh"}
+    client_address_test = client_address_preservation_status()
     return render(
         request,
         "dns_settings.html",

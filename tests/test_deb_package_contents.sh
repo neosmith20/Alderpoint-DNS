@@ -258,19 +258,19 @@ grep -q 'create 0600 root root' "$ROOT/data/etc/logrotate.d/alderpointdns" || \
 # were both landing in the built package because build-deb.sh's tar file
 # list simply named whole top-level directories (tests, scripts, docs)
 # without excluding their development-only contents.
-SHIPPED_TESTS_DIR="$ROOT/data/opt/alderpointdns/tests"
-test -d "$SHIPPED_TESTS_DIR" || fail "opt/alderpointdns/tests directory missing entirely from built package"
-SHIPPED_TEST_FILES="$(find "$SHIPPED_TESTS_DIR" -mindepth 1 | sed "s|^$SHIPPED_TESTS_DIR/||" | sort)"
-EXPECTED_TEST_FILES="test_dnsdist_frontend.sh"
-[ "$SHIPPED_TEST_FILES" = "$EXPECTED_TEST_FILES" ] || \
-  fail "built package ships more than the one required file under opt/alderpointdns/tests -- the full test suite must not be shipped; found: $SHIPPED_TEST_FILES"
-# The one file that IS shipped there is a real runtime dependency, not an
-# oversight -- app/webapp.py's DNS Settings page checks for its presence
-# (never its content, never executes it) to render a "client address
-# preservation verified" indicator; confirm it's actually there rather
-# than silently regressing that indicator on every real install.
-test -f "$SHIPPED_TESTS_DIR/test_dnsdist_frontend.sh" || \
-  fail "built package is missing opt/alderpointdns/tests/test_dnsdist_frontend.sh, which app/webapp.py's DNS Settings page checks for at runtime"
+#
+# opt/alderpointdns/tests used to ship exactly one file
+# (test_dnsdist_frontend.sh) as a deliberate exception, because
+# app/webapp.py's DNS Settings page checked for that file's on-disk
+# presence to render its "client address preservation" indicator -- a
+# test/dev artifact standing in as a production runtime marker. That
+# indicator now derives its state from client_address_preservation_status()
+# (a live socket check against BIND's PROXYv2 listener, the same
+# production-owned pattern protocol_statuses() already uses), so the
+# package no longer needs anything under tests/ at runtime and the whole
+# directory must be absent.
+test -d "$ROOT/data/opt/alderpointdns/tests" && \
+  fail "built package ships opt/alderpointdns/tests -- no file under tests/ is a runtime dependency any more; the full test suite must not be shipped"
 test -f "$ROOT/data/opt/alderpointdns/scripts/benchmark_filtering.py" && \
   fail "built package ships the development-only benchmark_filtering.py script"
 test -f "$ROOT/data/opt/alderpointdns/docs/performance-baseline.md" && \

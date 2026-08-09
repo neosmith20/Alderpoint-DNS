@@ -72,20 +72,17 @@ chmod 0755 "$PKG/DEBIAN/postinst" "$PKG/DEBIAN/prerm" "$PKG/DEBIAN/postrm"
 # (tests/test_deb_package_contents.sh) that enforce this. `tests` is
 # therefore deliberately absent from this file list, and
 # benchmark_filtering.py/performance-baseline.md are excluded from `scripts`
-# and `docs` respectively. The one narrow exception
-# (tests/test_dnsdist_frontend.sh) is copied back in individually below
-# because app/webapp.py's DNS Settings page checks for its *presence* (not
-# its content, and never executes it) to render a "client address
-# preservation verified" indicator -- excluding it entirely would silently
-# regress that indicator on every real install.
+# and `docs` respectively. There is no longer any exception carved out of
+# that exclusion: app/webapp.py's DNS Settings "client address preservation"
+# indicator used to check tests/test_dnsdist_frontend.sh for presence-on-
+# disk as a production runtime marker, but now derives its state from a
+# live socket check (client_address_preservation_status() in app/webapp.py),
+# so nothing under tests/ is a runtime dependency of the installed product.
 tar -C "$SOURCE_DIR" \
   --exclude .git --exclude __pycache__ --exclude '*.pyc' --exclude venv \
   --exclude scripts/benchmark_filtering.py --exclude docs/performance-baseline.md \
   -cf - app docs packaging scripts web VERSION requirements.txt requirements-debian.txt | \
   tar -C "$PKG/opt/alderpointdns" -xf -
-
-mkdir -p "$PKG/opt/alderpointdns/tests"
-cp "$SOURCE_DIR/tests/test_dnsdist_frontend.sh" "$PKG/opt/alderpointdns/tests/test_dnsdist_frontend.sh"
 
 cp "$SOURCE_DIR/scripts/alderpointdns-diagnostics" "$PKG/usr/sbin/alderpointdns-diagnostics"
 chmod 0755 "$PKG/usr/sbin/alderpointdns-diagnostics"

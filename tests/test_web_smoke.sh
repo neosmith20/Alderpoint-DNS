@@ -263,7 +263,7 @@ context = {
     ],
     "cert": {"state": "present", "detail": "/etc/alderpointdns/certs/alderpointdns-lab.crt"},
     "proxy_backend": "enabled",
-    "client_address_test": {"state": "Passed", "filename": "test_dnsdist_frontend.sh"},
+    "client_address_test": {"state": "Passed", "detail": "PROXYv2 backend 127.0.0.1:5354 (BIND, tcp+udp)"},
     "upstream_resolvers": [{"id": 1, "name": "Cloudflare DoH", "protocol": "doh", "address": long_domain, "port": 443, "doh_path": "/dns-query", "tls_hostname": long_domain, "bootstrap_ips": "1.1.1.1, 1.0.0.1", "enabled": 1, "last_status": "healthy", "last_latency_ms": 4.2, "last_message": "resolved through active upstream set"}],
     "upstream_deployment": {"status": "deployed", "message": "deployed 1 enabled upstream resolver(s)"},
     "upstream_error": None,
@@ -275,7 +275,7 @@ for expected in (
     "fc00::/7",
     "Allow all: Disabled",
     "Passed",
-    "test_dnsdist_frontend.sh",
+    "PROXYv2 backend 127.0.0.1:5354 (BIND, tcp+udp)",
     "Upstream Resolvers",
     "Cloudflare DoH",
     "DNS-over-HTTPS",
@@ -291,8 +291,8 @@ for expected in (
 ):
     if expected not in html:
         raise SystemExit(f"missing rendered content: {expected}")
-if "/opt/alderpointdns/tests/test_dnsdist_frontend.sh" in html:
-    raise SystemExit("client address test renders a raw path")
+if "/opt/alderpointdns/tests/test_dnsdist_frontend.sh" in html or "/opt/alderpointdns/tests" in html:
+    raise SystemExit("client address test renders a filesystem path instead of a runtime socket check")
 if 'class="mono">/dns-query<' not in html or 'class="mono">dnsdist 2.0.0-alpha' not in html:
     raise SystemExit("monospace styling missing from path/version values")
 
