@@ -92,7 +92,7 @@
 </section>
 
 <section class="grid wide" aria-label="Ranked analytics panels">
-  {{ ui.ranked_list("Top Clients", analytics.top_clients, total, "/query-log") }}
+  {{ ui.ranked_list("Top Clients", analytics.top_clients, total, "/clients?range=" ~ analytics.range) }}
   {{ ui.ranked_list("Top Queried Domains", analytics.top_domains, total, "/query-log") }}
   {{ ui.ranked_list("Top Blocked Domains", analytics.top_blocked, blocked, "/query-log?blocked=1") }}
   {{ ui.ranked_list("Query Types", analytics.qtypes, total, "/query-log") }}

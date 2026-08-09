@@ -828,6 +828,12 @@ def dashboard(request: Request, _: sqlite3.Row = Depends(current_admin)):
     )
 
 
+@app.get("/clients", response_class=HTMLResponse)
+def clients(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    range_key = request.query_params.get("range", "24h")
+    return render(request, "clients.html", clients=analytics.clients_data(range_key))
+
+
 @app.get("/analytics/chart-data")
 def analytics_chart_data(request: Request, _: sqlite3.Row = Depends(current_admin)):
     data = analytics.dashboard_data(request.query_params.get("range", "24h"))

@@ -6,6 +6,13 @@ may still change between releases before a stable 1.0.
 
 ## Unreleased
 
+- Fixed Dashboard **Top Clients** navigation: clicking it used to open the
+  generic, unfiltered Query Log, which misrepresented the destination as
+  client-specific. It now opens a new lightweight **Clients** view (`/clients`,
+  also linked from the DNS nav section) showing every client seen in the
+  selected time range, ranked by query volume, with alias display names where
+  configured; each client row links to the Query Log pre-filtered to that
+  client (`/query-log?client=...`), which the Query Log already supported.
 - Added **System > Administration > Software Updates**: check for and
   install newer Alderpoint DNS releases from GitHub, or upload a `.deb`
   manually. Stable/prerelease channel filtering, SHA-256 + `dpkg-deb`

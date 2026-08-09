@@ -1229,6 +1229,40 @@ def dashboard_data(range_key: str = "24h") -> dict[str, Any]:
     }
 
 
+def clients_data(range_key: str = "24h", limit: int = 200) -> dict[str, Any]:
+    """Full ranked client list for the given range -- the drill-down target
+    for the Dashboard's "Top Clients" panel. Unlike dashboard_data()'s
+    top_clients (capped at 10 for the summary panel), this returns every
+    client seen in the range up to `limit`, so administrators can find a
+    client that isn't in the dashboard's top-10 slice."""
+    init_analytics_db()
+    since = utc_now() - range_seconds(range_key)
+    with connect() as conn:
+        rows_raw = conn.execute(
+            """
+            SELECT
+                client AS raw_client,
+                count(*) AS value,
+                sum(CASE WHEN blocked THEN 1 ELSE 0 END) AS blocked,
+                max(ts) AS last_seen
+            FROM query_events
+            WHERE ts >= ?
+            GROUP BY client
+            ORDER BY value DESC
+            LIMIT ?
+            """,
+            (since, limit),
+        ).fetchall()
+    clients = []
+    for row in rows_raw:
+        item = dict(row)
+        item["label"] = local_dns.alias_for_client(item["raw_client"]) or item["raw_client"]
+        item["blocked_percent"] = (item["blocked"] / item["value"] * 100) if item["value"] else 0
+        clients.append(item)
+    total = sum(item["value"] for item in clients)
+    return {"range": range_key, "clients": clients, "total": total}
+
+
 def query_log(filters: dict[str, str], page: int = 1, limit: int = 50) -> dict[str, Any]:
     init_analytics_db()
     clauses = []

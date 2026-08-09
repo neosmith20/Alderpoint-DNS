@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% import "components.html" as ui %}
+{% block content %}
+{% set range_labels = {"1h": "Last hour", "24h": "Last 24 hours", "7d": "Last 7 days", "30d": "Last 30 days"} %}
+{{ ui.page_header(
+  "Clients",
+  "Every client seen in " ~ range_labels.get(clients.range, "the selected range") ~ ", ranked by query volume.",
+  '<a class="button secondary" href="/">Back to Dashboard</a>'
+) }}
+
+<section class="panel stack">
+  <div class="toolbar">
+    <nav class="segment-control" aria-label="Clients time range">
+      {% for key, label in range_labels.items() %}
+        <a data-range-link="{{ key }}" href="/clients?range={{ key }}" aria-current="{{ 'true' if clients.range == key else 'false' }}">{{ label }}</a>
+      {% endfor %}
+    </nav>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel__head">
+    <h2>Top Clients</h2>
+  </div>
+  {% if clients.clients %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Client</th><th>Queries</th><th>Share</th><th>Blocked</th><th>Last seen</th><th></th></tr></thead>
+        <tbody>
+          {% for row in clients.clients %}
+            <tr>
+              <td class="mono" title="{{ row.raw_client }}">{{ row.label }}</td>
+              <td>{{ row.value }}</td>
+              <td>{{ "%.1f"|format((row.value / clients.total * 100) if clients.total else 0) }}%</td>
+              <td>{{ row.blocked }} ({{ "%.1f"|format(row.blocked_percent) }}%)</td>
+              <td class="mono">{{ row.last_seen }}</td>
+              <td><a href="/query-log?client={{ row.raw_client|urlencode }}">Query Log</a></td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    {{ ui.empty_state("No client activity yet", "Detailed query rows will appear here once telemetry is collected for this range.") }}
+  {% endif %}
+</section>
+{% endblock %}
