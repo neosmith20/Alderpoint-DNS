@@ -13,13 +13,21 @@ EOF
 OUTPUT_DIR="/tmp"
 SOURCE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 VERSION="$(cat "$SOURCE_DIR/VERSION")"
-# The VERSION file uses semver-style pre-release tags (e.g. 0.4.0-beta.2) for
-# release notes/UI display, but Debian's version syntax treats the *last*
-# hyphen as the start of the debian_revision, so passing that string through
-# unchanged would make dpkg parse "0.4.0-beta.2" as upstream "0.4.0-beta"
-# revision "2". Derive the conventional Debian pre-release form instead
-# (0.4.0~beta2-1), matching packaging/debian/changelog.
-DEB_VERSION="$(printf '%s' "$VERSION" | sed -E 's/-beta\.([0-9]+)/~beta\1/')-1"
+# The VERSION file uses semver-style pre-release tags (e.g. 0.4.0-beta.2,
+# 0.5.0-dev.1) for release notes/UI display, but Debian's version syntax
+# treats the *last* hyphen as the start of the debian_revision, so passing
+# that string through unchanged would make dpkg parse "0.4.0-beta.2" as
+# upstream "0.4.0-beta" revision "2". Derive the conventional Debian
+# pre-release form instead: any "-<tag>.<N>" pre-release suffix (beta.2,
+# dev.1, rc.1, ...) becomes "~<tag><N>" (0.4.0~beta2-1, 0.5.0~dev1-1),
+# matching packaging/debian/changelog. The leading "~" is significant, not
+# cosmetic: dpkg orders "~" before everything (including the empty string),
+# so a pre-release always compares as older than the final release it is a
+# pre-release *of* (0.5.0~dev1-1 < 0.5.0-1) -- app/backup.py's
+# _dpkg_version_to_source_form() reverses this exact substitution, and
+# app/software_updates.py's update-safety comparisons depend on both
+# directions staying in sync. See docs/versioning.md.
+DEB_VERSION="$(printf '%s' "$VERSION" | sed -E 's/-([A-Za-z]+)\.([0-9]+)/~\1\2/')-1"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -75,6 +83,9 @@ cp "$SOURCE_DIR/packaging/alderpointdns-filter-update.service" "$PKG/lib/systemd
 cp "$SOURCE_DIR/packaging/alderpointdns-filter-update.timer" "$PKG/lib/systemd/system/alderpointdns-filter-update.timer"
 cp "$SOURCE_DIR/packaging/alderpointdns-notify.service" "$PKG/lib/systemd/system/alderpointdns-notify.service"
 cp "$SOURCE_DIR/packaging/alderpointdns-notify.timer" "$PKG/lib/systemd/system/alderpointdns-notify.timer"
+cp "$SOURCE_DIR/packaging/alderpointdns-software-update-check.service" "$PKG/lib/systemd/system/alderpointdns-software-update-check.service"
+cp "$SOURCE_DIR/packaging/alderpointdns-software-update-check.timer" "$PKG/lib/systemd/system/alderpointdns-software-update-check.timer"
+cp "$SOURCE_DIR/packaging/alderpointdns-software-update.service" "$PKG/lib/systemd/system/alderpointdns-software-update.service"
 cp "$SOURCE_DIR/packaging/sudoers-alderpointdns" "$PKG/etc/sudoers.d/alderpointdns"
 chmod 0440 "$PKG/etc/sudoers.d/alderpointdns"
 cp "$SOURCE_DIR/packaging/logrotate-alderpointdns" "$PKG/etc/logrotate.d/alderpointdns"

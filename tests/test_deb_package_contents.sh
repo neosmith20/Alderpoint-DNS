@@ -217,6 +217,22 @@ grep -q '^User=alderpointdns$' "$ROOT/data/lib/systemd/system/alderpointdns-noti
 grep -q 'systemctl enable --now alderpointdns-notify.timer' "$POSTINST" || \
   fail "postinst does not enable alderpointdns-notify.timer"
 
+# --- Software Updates: check timer (auto-check on by default), independent
+# install runner unit (never enabled/started automatically -- installs only
+# ever happen because an administrator explicitly requested one) ---
+test -f "$ROOT/data/lib/systemd/system/alderpointdns-software-update-check.service" || \
+  fail "alderpointdns-software-update-check.service missing from built package"
+test -f "$ROOT/data/lib/systemd/system/alderpointdns-software-update-check.timer" || \
+  fail "alderpointdns-software-update-check.timer missing from built package"
+test -f "$ROOT/data/lib/systemd/system/alderpointdns-software-update.service" || \
+  fail "alderpointdns-software-update.service missing from built package"
+grep -q 'systemctl enable --now alderpointdns-software-update-check.timer' "$POSTINST" || \
+  fail "postinst does not enable alderpointdns-software-update-check.timer"
+grep -q 'enable.*alderpointdns-software-update\.service\|start.*alderpointdns-software-update\.service' "$POSTINST" && \
+  fail "postinst must never enable/start the install runner unit automatically -- unattended installation must be off by default"
+grep -q 'update-run' "$ROOT/data/lib/systemd/system/alderpointdns-software-update.service" || \
+  fail "alderpointdns-software-update.service does not exec the update-run subcommand"
+
 # --- logrotate config for the CLI's dedicated error-traceback log ---
 # The confirmed defect: alderpointdns_compiler.py's CLI dispatch logs full
 # Python tracebacks (which can embed exception arguments -- paths, domain

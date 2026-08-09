@@ -460,15 +460,17 @@ def _read_dpkg_version() -> str | None:
 
 # scripts/build-deb.sh derives the Debian package Version deterministically
 # from the VERSION file's semver-style pre-release tag:
-#   0.4.0-beta.6  ->  0.4.0~beta6-1   (sed 's/-beta\.([0-9]+)/~beta\1/'; "-1"
-#   appended as the Debian revision). Reversed here so a dpkg-reported
-#   version can be compared against a VERSION-file-style string.
-_DPKG_BETA_RE = re.compile(r"~beta(\d+)")
+#   0.4.0-beta.6  ->  0.4.0~beta6-1   (sed 's/-([A-Za-z]+)\.([0-9]+)/~\1\2/';
+#   "-1" appended as the Debian revision). Reversed here so a dpkg-reported
+#   version can be compared against a VERSION-file-style string. Handles any
+#   pre-release tag (beta, dev, rc, ...), not just "beta" -- see
+#   docs/versioning.md.
+_DPKG_PRERELEASE_RE = re.compile(r"~([A-Za-z]+)(\d+)")
 
 
 def _dpkg_version_to_source_form(dpkg_version: str) -> str:
     upstream = dpkg_version.rsplit("-", 1)[0] if "-" in dpkg_version else dpkg_version
-    return _DPKG_BETA_RE.sub(r"-beta.\1", upstream)
+    return _DPKG_PRERELEASE_RE.sub(r"-\1.\2", upstream)
 
 
 def _git_dev_metadata() -> str | None:
@@ -704,7 +706,13 @@ def _record_backup_history(db: sqlite3.Connection, created_at: str, path: str | 
     return cursor.lastrowid
 
 
-def create_backup(components: dict[str, bool] | None = None, password: str | None = None, conn: sqlite3.Connection | None = None) -> Path:
+def create_backup(
+    components: dict[str, bool] | None = None,
+    password: str | None = None,
+    conn: sqlite3.Connection | None = None,
+    purpose: str | None = None,
+    purpose_metadata: dict[str, Any] | None = None,
+) -> Path:
     close = conn is None
     db = conn or connect()
     init_db(db)
@@ -749,6 +757,15 @@ def create_backup(components: dict[str, bool] | None = None, password: str | Non
             "source_node_id": socket.gethostname(),
             "included_components": included_components,
             "sha256_checksums": checksums,
+            # "manual" (the default) covers both the interactive web Create
+            # Backup action and a bare CLI `backup-create` invocation;
+            # "scheduled" and "pre_upgrade" are set by their respective
+            # callers (deploy_backup_schedule()'s timer, and
+            # app/software_updates.py's mandatory pre-upgrade backup step)
+            # so a backup can be identified by why it exists, purely as
+            # metadata -- restore never branches on this field.
+            "purpose": purpose or "manual",
+            "purpose_metadata": purpose_metadata or {},
         }
         manifest_path = stage / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
@@ -779,6 +796,8 @@ def create_backup(components: dict[str, bool] | None = None, password: str | Non
         size_bytes = final_path.stat().st_size
         status = "deployed"
         message = f"backup created with components: {', '.join(included_components)}"
+        if purpose and purpose != "manual":
+            message = f"[{purpose}] {message}"
         _record_backup_history(db, created_at, str(final_path), size_bytes, components, manifest, status, message)
         _fix_backup_dir_permissions()
         return final_path

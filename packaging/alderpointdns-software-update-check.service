@@ -1,0 +1,14 @@
+[Unit]
+Description=Alderpoint DNS Software Update Check
+
+[Service]
+Type=oneshot
+# Deliberately root, unlike alderpointdns-notify.service/alderpointdns.service:
+# a private GitHub repository credential (see /etc/alderpointdns/software-
+# updates.env) is root-owned/mode 0600 and must never be readable by the
+# unprivileged alderpointdns user the web app itself runs as. This only ever
+# reads GitHub release metadata and writes to software_update_settings --
+# it never installs anything and never restarts any service, so it needs no
+# independent-of-alderpointdns.service treatment the way the actual install
+# runner (alderpointdns-software-update.service) does.
+ExecStart=/opt/alderpointdns/app/alderpointdns_compiler.py update-check

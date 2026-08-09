@@ -1,0 +1,15 @@
+[Unit]
+Description=Alderpoint DNS Software Update Check Timer
+
+[Timer]
+# update-check itself no-ops (without contacting GitHub or touching
+# settings beyond leaving them unchanged) whenever
+# software_update_settings.auto_check_enabled is "0", so this timer stays
+# enabled unconditionally; the administrator's "Automatically check for
+# updates" toggle governs behavior, not the timer's own enabled state.
+OnBootSec=10m
+OnUnitActiveSec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

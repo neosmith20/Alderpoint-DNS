@@ -26,6 +26,14 @@
     </div>
   </article>
 
+  <article class="panel stack">
+    <div class="panel__head"><h2>Software Updates</h2></div>
+    <p class="muted">Check for and install newer Alderpoint DNS releases, or upload a .deb manually. A mandatory pre-upgrade backup is taken before every install.</p>
+    <div class="form-actions">
+      <a class="button secondary" href="/system/administration/software-updates">Open Software Updates</a>
+    </div>
+  </article>
+
   <form class="panel stack" method="post" action="/system/administration/password" data-async-form data-password-match data-success-message="Password changed. Other sessions were signed out.">
     <div class="panel__head"><h2>Change Password</h2></div>
     <p class="muted">Signed in as <span class="mono">{{ admin_username }}</span>. Changing the password signs out every other active session automatically.</p>

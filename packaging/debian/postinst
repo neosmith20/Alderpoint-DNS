@@ -403,6 +403,13 @@ RESOLVCONFEOF
     systemctl enable alderpointdns-backup.timer >/dev/null 2>&1 || true
     systemctl enable alderpointdns-filter-update.timer >/dev/null 2>&1 || true
     systemctl enable --now alderpointdns-notify.timer >/dev/null 2>&1 || true
+    # Automatic update *checking* is on by default (never automatic
+    # *installation* -- see software_update_settings.unattended_install_enabled,
+    # which defaults off and has no timer of its own in this release).
+    # update-check itself no-ops without contacting GitHub whenever the
+    # administrator has turned "Automatically check for updates" off, so
+    # this timer stays enabled unconditionally; see the .timer unit.
+    systemctl enable --now alderpointdns-software-update-check.timer >/dev/null 2>&1 || true
     PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py filter-schedule-deploy >/dev/null 2>&1 || true
 
     # Final gate: confirm the four services this package ships/depends on

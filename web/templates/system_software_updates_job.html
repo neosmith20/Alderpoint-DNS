@@ -1,0 +1,39 @@
+{% import "components.html" as ui %}
+{% if job %}
+<section class="panel stack" data-phase-active="{{ '1' if job.phase not in ('completed', 'failed') else '0' }}">
+  <div class="panel__head">
+    <h2>Update Job #{{ job.id }}</h2>
+    {% if job.phase == 'completed' %}
+      {{ ui.status_badge("Update successful", "healthy") }}
+    {% elif job.phase == 'failed' %}
+      {{ ui.status_badge("Update failed", "down") }}
+    {% else %}
+      {{ ui.status_badge(job.phase, "neutral") }}
+    {% endif %}
+  </div>
+  <p class="muted">{{ job.operation | capitalize }} update requested by <span class="mono">{{ job.requested_by or "unknown" }}</span> at {{ job.requested_at | local_time }}.</p>
+  <p>Current version: <span class="mono">{{ job.current_version }}</span> &rarr; Candidate: <span class="mono">{{ job.candidate_version or "pending" }}</span></p>
+  {% if job.backup_path %}<p>Pre-upgrade backup: <span class="mono">{{ job.backup_path }}</span> (retained regardless of update outcome)</p>{% endif %}
+  {% if job.phase == 'failed' and job.error %}
+    <div class="alert error" role="alert">{{ job.error }}</div>
+  {% endif %}
+  {% if job.phase == 'completed' %}
+    <div class="alert" role="status">Update successful. The pre-upgrade backup above was retained for recovery.</div>
+  {% endif %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Time</th><th>Phase</th><th>Message</th></tr></thead>
+      <tbody>
+        {% for event in job_events %}
+        <tr><td class="mono">{{ event.ts | local_time }}</td><td class="mono">{{ event.phase }}</td><td>{{ event.message }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% else %}
+<section class="panel stack">
+  <div class="panel__head"><h2>Update Job</h2></div>
+  <p class="muted">No update has been started yet.</p>
+</section>
+{% endif %}

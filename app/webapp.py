@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
-from app import analytics, auth, backup, custom_rules as custom_rules_model, dns_cache, encryption, filter_schedule, importer, local_dns, network_config, notifications, replication, upstream_dns
+from app import analytics, auth, backup, custom_rules as custom_rules_model, dns_cache, encryption, filter_schedule, importer, local_dns, network_config, notifications, replication, software_updates, upstream_dns
 from app import blocklist_categories
 from app import service_logs
 from app.alderpointdns_compiler import AlderpointDNSConnection, DB_PATH, add_source, init_db, normalize_domain, source_health
@@ -769,6 +769,18 @@ async def sqlite_operational_error_handler(request: Request, exc: sqlite3.Operat
 @app.get("/status/summary")
 def status_summary(_: sqlite3.Row = Depends(current_admin)):
     return JSONResponse(global_service_status())
+
+
+@app.get("/healthz")
+def healthz() -> JSONResponse:
+    # Deliberately unauthenticated (a liveness probe must work before any
+    # session exists) and deliberately minimal: no admin/session/analytics
+    # data, nothing an unauthenticated caller couldn't already infer from
+    # `systemctl is-active alderpointdns`. Used by
+    # app/software_updates.py's post-upgrade health check to confirm the
+    # web process itself is actually accepting local connections again
+    # after a restart, not just that systemd reports the unit active.
+    return JSONResponse({"status": "ok", "version": backup.alderpointdns_app_version()})
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -2770,6 +2782,170 @@ async def network_confirm_route(request: Request, _: sqlite3.Row = Depends(curre
         context.update({"error": str(exc)})
         return render(request, "system_network.html", status_code=400, **context)
     return redirect("/system/network")
+
+
+# ---------------------------------------------------------------------------
+# Software Updates
+# ---------------------------------------------------------------------------
+
+def software_updates_check_apply(force: bool) -> tuple[int, str]:
+    args = ["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "update-check"]
+    if force:
+        args.append("--force")
+    return run(args)
+
+
+def software_updates_start_install_runner() -> tuple[int, str]:
+    # Deliberately NOT `sudo alderpointdns_compiler.py update-run` directly:
+    # installing restarts alderpointdns.service (this process's own
+    # service) partway through, which would kill a direct sudo child of
+    # this request. `systemctl start` hands the work to an independent
+    # unit (its own cgroup, owned by PID 1) that survives that restart --
+    # see app/software_updates.py's module docstring and
+    # packaging/alderpointdns-software-update.service.
+    return run(["sudo", "systemctl", "start", "alderpointdns-software-update.service"])
+
+
+def software_updates_context(request: Request) -> dict[str, Any]:
+    status = software_updates.update_status()
+    context = dict(status)
+    context["csrf"] = signed_session(request)["csrf"]
+    return context
+
+
+@app.get("/system/administration/software-updates", response_class=HTMLResponse)
+def software_updates_page(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    context = software_updates_context(request)
+    context["error"] = None
+    return render(request, "system_software_updates.html", **context)
+
+
+@app.get("/system/administration/software-updates/job", response_class=HTMLResponse)
+def software_updates_job_partial(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    context = software_updates_context(request)
+    return render(request, "system_software_updates_job.html", **context)
+
+
+def software_updates_error(request: Request, message: str) -> HTMLResponse:
+    context = software_updates_context(request)
+    context["error"] = message
+    return render(request, "system_software_updates.html", status_code=400, **context)
+
+
+@app.post("/system/administration/software-updates/settings")
+async def software_updates_settings_route(request: Request, admin: sqlite3.Row = Depends(current_admin)):
+    form = await request.form()
+    check_csrf(request, str(form.get("csrf", "")))
+    ip = request.client.host if request.client else None
+    try:
+        software_updates.update_settings(
+            {
+                "auto_check_enabled": form.get("auto_check_enabled", "0"),
+                "channel": str(form.get("channel", "stable")),
+            }
+        )
+    except software_updates.SoftwareUpdateError as exc:
+        with db() as conn:
+            audit_log(conn, admin["id"], admin["username"], "software_update_settings_change", False, ip, str(exc))
+        return software_updates_error(request, str(exc))
+    with db() as conn:
+        audit_log(conn, admin["id"], admin["username"], "software_update_settings_change", True, ip, "")
+    return redirect("/system/administration/software-updates")
+
+
+@app.post("/system/administration/software-updates/check")
+async def software_updates_check_route(request: Request, admin: sqlite3.Row = Depends(current_admin)):
+    form = await request.form()
+    check_csrf(request, str(form.get("csrf", "")))
+    ip = request.client.host if request.client else None
+    code, output = software_updates_check_apply(force=True)
+    with db() as conn:
+        audit_log(conn, admin["id"], admin["username"], "software_update_check", code == 0, ip, output[-500:])
+    if code != 0:
+        return software_updates_error(request, f"update check failed: {output}")
+    return redirect("/system/administration/software-updates")
+
+
+@app.post("/system/administration/software-updates/install")
+async def software_updates_install_route(request: Request, admin: sqlite3.Row = Depends(current_admin)):
+    form = await request.form()
+    check_csrf(request, str(form.get("csrf", "")))
+    ip = request.client.host if request.client else None
+    try:
+        status = software_updates.update_status()
+        release = status.get("latest_release")
+        if not release:
+            raise software_updates.SoftwareUpdateError("no update is currently available -- check for updates first")
+        if not status["version_status"].get("dpkg_managed"):
+            raise software_updates.SoftwareUpdateError("Software Updates: unmanaged source installation -- cannot install a package here")
+        if status["version_status"].get("mismatch"):
+            raise software_updates.SoftwareUpdateError("installed VERSION/dpkg version drift detected -- resolve this before installing an update")
+        existing_job = status.get("job")
+        if existing_job and existing_job.get("phase") not in ("completed", "failed"):
+            raise software_updates.SoftwareUpdateError("an update is already in progress")
+        job_id = software_updates.create_github_job(release, requested_by=admin["username"])
+        code, output = software_updates_start_install_runner()
+        with db() as conn:
+            audit_log(conn, admin["id"], admin["username"], "software_update_install", code == 0, ip, f"job_id={job_id} release={release.get('tag_name')}")
+        if code != 0:
+            raise software_updates.SoftwareUpdateError(f"failed to start the update runner: {output}")
+    except software_updates.SoftwareUpdateError as exc:
+        with db() as conn:
+            audit_log(conn, admin["id"], admin["username"], "software_update_install", False, ip, str(exc))
+        return software_updates_error(request, str(exc))
+    return redirect("/system/administration/software-updates")
+
+
+@app.post("/system/administration/software-updates/upload")
+async def software_updates_upload_route(
+    request: Request,
+    csrf: str = Form(...),
+    expected_sha256: str = Form(""),
+    upload: UploadFile = File(...),
+    admin: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    ip = request.client.host if request.client else None
+    tmp_path: Path | None = None
+    try:
+        status = software_updates.update_status()
+        if not status["version_status"].get("dpkg_managed"):
+            raise software_updates.SoftwareUpdateError("Software Updates: unmanaged source installation -- cannot install a package here")
+        existing_job = status.get("job")
+        if existing_job and existing_job.get("phase") not in ("completed", "failed"):
+            raise software_updates.SoftwareUpdateError("an update is already in progress")
+        # Streamed in bounded chunks to a restrictive-permission staging
+        # file -- never buffered whole in this process's memory,
+        # regardless of package size. Mirrors app/backup.py's
+        # begin_streamed_upload/finalize_streamed_upload pattern.
+        tmp_path, max_bytes = software_updates.begin_manual_upload(upload.filename or "upload.deb")
+        total = 0
+        with tmp_path.open("wb") as fh:
+            while True:
+                chunk = await upload.read(software_updates.UPLOAD_CHUNK_BYTES)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise software_updates.SoftwareUpdateError(f"uploaded package exceeds the {max_bytes // (1024 * 1024)} MiB limit")
+                fh.write(chunk)
+        if total == 0:
+            raise software_updates.SoftwareUpdateError("uploaded file is empty")
+        uploaded_path = software_updates.finalize_manual_upload(tmp_path, upload.filename or "upload.deb")
+        tmp_path = None
+        job_id = software_updates.create_manual_job(uploaded_path, expected_sha256.strip() or None, requested_by=admin["username"])
+        code, output = software_updates_start_install_runner()
+        with db() as conn:
+            audit_log(conn, admin["id"], admin["username"], "software_update_manual_upload", code == 0, ip, f"job_id={job_id} filename={uploaded_path.name}")
+        if code != 0:
+            raise software_updates.SoftwareUpdateError(f"failed to start the update runner: {output}")
+    except Exception as exc:
+        if tmp_path is not None:
+            software_updates.abort_manual_upload(tmp_path)
+        with db() as conn:
+            audit_log(conn, admin["id"], admin["username"], "software_update_manual_upload", False, ip, str(exc))
+        return software_updates_error(request, str(exc))
+    return redirect("/system/administration/software-updates")
 
 
 def notifications_context() -> dict[str, Any]:

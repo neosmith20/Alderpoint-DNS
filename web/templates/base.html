@@ -116,6 +116,7 @@
             <a class="nav-subitem{% if path.startswith('/backup') %} is-active{% endif %}" href="/backup" {% if path.startswith("/backup") %}aria-current="page"{% endif %}>Backup &amp; Restore</a>
             <a class="nav-subitem{% if path.startswith('/system/network') %} is-active{% endif %}" href="/system/network" {% if path.startswith("/system/network") %}aria-current="page"{% endif %}>Network Configuration</a>
             <a class="nav-subitem{% if path == '/system/notifications' %} is-active{% endif %}" href="/system/notifications" {% if path == "/system/notifications" %}aria-current="page"{% endif %}>Notifications</a>
+            <a class="nav-subitem{% if path.startswith('/system/administration/software-updates') %} is-active{% endif %}" href="/system/administration/software-updates" {% if path.startswith("/system/administration/software-updates") %}aria-current="page"{% endif %}>Software Updates</a>
           {% endcall %}
         </nav>
         <div class="account-menu">

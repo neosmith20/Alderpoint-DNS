@@ -15,6 +15,9 @@ packaging/alderpointdns-filter-update.service lib/systemd/system/
 packaging/alderpointdns-filter-update.timer lib/systemd/system/
 packaging/alderpointdns-notify.service lib/systemd/system/
 packaging/alderpointdns-notify.timer lib/systemd/system/
+packaging/alderpointdns-software-update-check.service lib/systemd/system/
+packaging/alderpointdns-software-update-check.timer lib/systemd/system/
+packaging/alderpointdns-software-update.service lib/systemd/system/
 packaging/sudoers-alderpointdns etc/sudoers.d/alderpointdns
 packaging/logrotate-alderpointdns etc/logrotate.d/alderpointdns
 scripts/alderpointdns-diagnostics usr/sbin/alderpointdns-diagnostics

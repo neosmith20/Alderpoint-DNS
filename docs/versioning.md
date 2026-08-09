@@ -103,54 +103,98 @@ is running right now," and only the file can attest to that. dpkg remains
 a legitimate fallback for corrupted/missing `VERSION`, and the drift
 detection above ensures a real mismatch is never silently invisible.
 
-## Why this repo's `VERSION` currently reads `0.4.0-beta.5` while a
-## `0.4.0~beta6-1` package is dpkg-installed on this engineering host
+## History: why this repo's `VERSION` briefly read `0.4.0-beta.5` while a
+## `0.4.0~beta6-1` package was dpkg-installed on the engineering host
 
-`/opt/alderpointdns` on this particular engineering host is unusual: it is
-simultaneously (a) the private development git repository being edited
-in this session, checked out with `VERSION = 0.4.0-beta.5` as the base
-for *next-release* development, and (b) the literal `WorkingDirectory` of
-the already dpkg-installed `alderpointdns` package, which was built from
-a *separately released* source tree (the public export) with
-`VERSION = 0.4.0-beta.6` and installed via `dpkg`. dpkg's package
-database was never told about the subsequent git checkout -- dpkg has no
-way to know files under a path it manages were changed outside of `dpkg
--i`/`apt` -- so its recorded `Version:` (`0.4.0~beta6-1`) is now stale
-relative to the actual files on disk, and the two genuinely disagree.
-This is a property of how this specific engineering sandbox is laid out
-(a git working tree and a package's live install directory happen to be
-the same path), not a defect in the versioning model itself: a normal
-production host never has its dpkg-managed files hand-edited outside of a
-package operation, so this situation cannot arise there. It's exactly the
-scenario `version_source_status()`'s drift detection above is designed to
-surface rather than silently misreport, and this document is that
-surfacing.
+Earlier in this development cycle, `/opt/alderpointdns` on the engineering
+host was unusual: it was simultaneously (a) the private development git
+repository, checked out with `VERSION = 0.4.0-beta.5` as the base for
+*next-release* development, and (b) the literal `WorkingDirectory` of the
+already dpkg-installed `alderpointdns` package, built from a *separately
+released* source tree (the public export) with `VERSION = 0.4.0-beta.6`
+and installed via `dpkg`. dpkg's package database was never told about
+the subsequent git checkout, so its recorded `Version:` (`0.4.0~beta6-1`)
+was stale relative to the files on disk, and the two genuinely
+disagreed -- exactly the scenario `version_source_status()`'s drift
+detection is designed to surface rather than silently misreport, which is
+why it was left alone (not bumped to "look right" against dpkg) while
+that detection/logging behavior was added.
 
-Per this task's explicit instruction, `VERSION` was **not** bumped to
-"look right" against dpkg -- only the detection/logging behavior above was
-added, and `VERSION` remains an accurate description of what commit this
-checkout's next-release development is built on top of.
+That mismatch is also *why* the Software Updates feature (below) needed a
+real fix rather than another silent workaround: a `beta.6 -> beta.5`
+install genuinely looks like a downgrade under plain string/date
+comparison, which is precisely the ambiguity an automatic updater must
+never paper over. See the next section for the resolution.
 
-## Recommendation for the future Software Updates feature
+## The development version for the Software Updates work: `0.5.0-dev.1`
+
+`VERSION` is now `0.5.0-dev.1` (Debian package form: `0.5.0~dev1-1`),
+chosen when the Software Updates feature was built, for these reasons:
+
+- **Strictly newer than the latest published release** (`0.4.0-beta.6`)
+  by ordinary SemVer precedence on the `MAJOR.MINOR.PATCH` core alone
+  (`0.5.0 > 0.4.0`) -- it does not depend on any pre-release-tag string
+  ordering (`dev` vs `beta`) to be "newer", so the comparison is
+  unambiguous by construction, which is exactly the property an update
+  engine's own test suite needs to assert against.
+- **Not `1.0.0`** -- 1.0.0 is reserved for the actual stable release that
+  follows this development cycle's remaining performance, documentation,
+  and release-readiness passes; this branch is not that.
+- **Not tagged or published anywhere** -- it exists only in this
+  development branch/checkout and any disposable-VM development `.deb`
+  built from it.
+- **A pre-release, not a final `0.5.0`** -- `-dev.1` reuses the exact
+  `-<tag>.<N>` pre-release convention `-beta.N` already established
+  (see below), so if `0.5.0` is ever later released for real, dpkg
+  correctly orders this development build as *older* than that release
+  (`0.5.0~dev1-1 < 0.5.0-1`), not newer -- see "Generalizing the
+  `-beta.N` &harr; `~betaN` substitution" below for why this matters.
+
+## Generalizing the `-beta.N` &harr; `~betaN` substitution
+
+`scripts/build-deb.sh` and `app/backup.py`'s `_dpkg_version_to_source_form()`
+originally only rewrote the literal `-beta.N` pre-release tag. Both were
+generalized to `-<tag>.<N>` &harr; `~<tag><N>` for any alphabetic tag
+(`beta`, `dev`, `rc`, ...), since the Software Updates feature needed a
+genuine development pre-release tag (`dev`) distinct from `beta` (which is
+reserved for actual published beta releases), and any future release
+process (release candidates, etc.) should not need a third bespoke
+substitution added later. The leading `~` is load-bearing, not cosmetic:
+Debian's version-ordering algorithm sorts `~` before everything, including
+the empty string, so any `~<tag>N` form always sorts before the bare final
+version it is a pre-release of -- exactly the safety property
+`software_updates.py`'s "never downgrade" and "reject same version" rules
+rely on when a package-install decision compares an installed pre-release
+against a candidate release via `dpkg --compare-versions`.
+
+## Recommendation for (now: use by) the Software Updates feature
 
 - Compare using `backup.alderpointdns_app_version()` (or
   `version_source_status()["resolved"]`), not a fresh ad hoc version read
   -- it already encodes the file-primary/dpkg-fallback/git-suffix model
-  above.
+  above. `app/software_updates.py` does exactly this.
 - Treat `version_source_status()["mismatch"] is True` as a hard stop for
   any *automatic* update decision (do not silently upgrade/compare against
   either value when they disagree) -- surface it to the administrator
   instead, exactly as the drift-detection warning already does for logs.
-- When normal semantic versions (`1.0.0`, `1.0.1`, `1.1.0`, ...) are
-  adopted after this development cycle, `scripts/build-deb.sh`'s
-  `-beta.N` &harr; `~betaN` substitution becomes a no-op (no `-beta.N`
-  suffix to rewrite) and `_dpkg_version_to_source_form()` continues to
-  work unchanged -- ordinary semver strings round-trip through the
-  existing Debian-revision-stripping step with no further changes needed.
+  `software_updates.py`'s `installed_version_status()` wraps this check
+  and every update-path entry point refuses to proceed while it is true.
+- Two independent comparisons are used, deliberately never conflated:
+  **release/channel SemVer comparison** (`software_updates.compare_semver()`,
+  used to rank GitHub releases against each other and against the
+  resolved application version for channel/"is there an update"
+  decisions) and **`dpkg --compare-versions`** (used only for the actual
+  package-install safety gate, since that is the comparison dpkg/APT
+  itself will make, and it is the one that must agree with what `apt`
+  is about to do). See `docs/software-updates.md`.
 
 ## Regression tests
 
 See `tests/test_backup.py::VersionConsistencyTest` for coverage of
 `_dpkg_version_to_source_form()`, `version_source_status()`'s agree/
-mismatch/no-file/no-dpkg cases, and the mismatch stderr logging (and its
-absence when the sources agree).
+mismatch/no-file/no-dpkg cases (including a `-dev.N` case), and the
+mismatch stderr logging (and its absence when the sources agree). See
+`tests/test_software_updates.py::VersionComparisonTest` for SemVer
+comparison and the explicit `0.4.0-beta.6 -> 0.5.0-dev.1`,
+`0.5.0-dev.1 -> 1.0.0`, `1.0.0 -> 1.0.1`, `1.0.1 -> 1.1.0`, and
+`1.1.0 -> 1.0.1` (rejected) transition tests.

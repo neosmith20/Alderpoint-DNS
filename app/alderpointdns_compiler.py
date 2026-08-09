@@ -26,10 +26,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 try:
-    from app import backup, custom_rules, dns_cache, encryption, filter_schedule, local_dns, network_config, replication, service_logs, upstream_dns
+    from app import backup, custom_rules, dns_cache, encryption, filter_schedule, local_dns, network_config, replication, service_logs, software_updates, upstream_dns
 except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from app import backup, custom_rules, dns_cache, encryption, filter_schedule, local_dns, network_config, replication, service_logs, upstream_dns
+    from app import backup, custom_rules, dns_cache, encryption, filter_schedule, local_dns, network_config, replication, service_logs, software_updates, upstream_dns
 
 
 DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
@@ -1523,6 +1523,31 @@ def network_rollback_check(_: argparse.Namespace) -> None:
     print(network_config.rollback_check())
 
 
+def update_check(args: argparse.Namespace) -> None:
+    # Safe to invoke directly via `sudo` from an HTTP request (the "Check
+    # for Updates" button) as well as from the unattended timer's own
+    # service unit: it never restarts anything, so it never needs the
+    # independent-of-the-request-lifecycle treatment update-run does.
+    result = software_updates.run_check(force=bool(args.force))
+    print(json.dumps(result, default=str))
+
+
+def update_run(_: argparse.Namespace) -> None:
+    # Invoked only by `systemctl start alderpointdns-software-update.service`
+    # (see packaging/*.service), never as a `sudo` child of the web
+    # request: this call may restart alderpointdns.service partway
+    # through, and this process must survive that. Reads its instructions
+    # from the most recent 'pending' software_update_jobs row rather than
+    # argv -- see app/software_updates.py's module docstring.
+    result = software_updates.run_pending_job()
+    if result is None:
+        print("no pending update job")
+        return
+    print(json.dumps(result, default=str))
+    if result.get("result") == "failed":
+        raise SystemExit(1)
+
+
 def filter_schedule_deploy(_: argparse.Namespace) -> None:
     print(filter_schedule.deploy_filter_schedule())
 
@@ -1673,6 +1698,11 @@ def main(argv: list[str] | None = None) -> int:
     network_apply_parser.set_defaults(func=network_apply)
     network_confirm_parser = sub.add_parser("network-confirm")
     network_confirm_parser.set_defaults(func=network_confirm)
+    update_check_parser = sub.add_parser("update-check")
+    update_check_parser.add_argument("--force", action="store_true", help="check even if automatic checking is disabled")
+    update_check_parser.set_defaults(func=update_check)
+    update_run_parser = sub.add_parser("update-run")
+    update_run_parser.set_defaults(func=update_run)
     network_rollback_check_parser = sub.add_parser("network-rollback-check")
     network_rollback_check_parser.set_defaults(func=network_rollback_check)
     filter_schedule_parser = sub.add_parser("filter-schedule-deploy")

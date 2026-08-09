@@ -38,3 +38,14 @@
   restarts, blocklist/deploy failure, backup failure, upstream resolver
   degraded/all-unavailable, and replication delayed/failed are actually
   wired to fire. Real detectors for the remaining three are follow-up work.
+- Software Updates supports automatic *checking* only. Unattended
+  automatic *installation* is off by default and has no execution path
+  in this release; every install requires an explicit administrator
+  action (Download & Install Update, or a manual `.deb` upload). The
+  check interval (`software_update_settings.check_interval_hours`) is
+  stored but not yet wired to dynamically reconfigure the check timer's
+  own cadence, which runs fixed at 6 hours today. Automatic package
+  rollback on a failed install is not implemented -- recovery after a
+  failed install (past the install step) is via the mandatory
+  pre-upgrade backup, which is always retained. See
+  `docs/software-updates.md`.

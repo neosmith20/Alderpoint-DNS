@@ -321,11 +321,14 @@ class VersionConsistencyTest(BackupTestBase):
         super().tearDown()
 
     def test_dpkg_version_to_source_form_reverses_build_deb_substitution(self) -> None:
-        # Must exactly invert scripts/build-deb.sh's
-        # sed -E 's/-beta\.([0-9]+)/~beta\1/' plus the appended "-1".
+        # Must exactly invert scripts/build-deb.sh's generalized
+        # sed -E 's/-([A-Za-z]+)\.([0-9]+)/~\1\2/' plus the appended "-1",
+        # for any pre-release tag (beta, dev, rc, ...), not just "beta".
         self.assertEqual(backup._dpkg_version_to_source_form("0.4.0~beta6-1"), "0.4.0-beta.6")
         self.assertEqual(backup._dpkg_version_to_source_form("0.4.0-1"), "0.4.0")
         self.assertEqual(backup._dpkg_version_to_source_form("1.2.3~beta10-2"), "1.2.3-beta.10")
+        self.assertEqual(backup._dpkg_version_to_source_form("0.5.0~dev1-1"), "0.5.0-dev.1")
+        self.assertEqual(backup._dpkg_version_to_source_form("1.0.0-1"), "1.0.0")
 
     def test_status_agrees_when_file_and_dpkg_match(self) -> None:
         (self.approot / "VERSION").write_text("0.4.0-beta.6\n")

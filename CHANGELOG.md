@@ -6,6 +6,36 @@ may still change between releases before a stable 1.0.
 
 ## Unreleased
 
+- Added **System > Administration > Software Updates**: check for and
+  install newer Alderpoint DNS releases from GitHub, or upload a `.deb`
+  manually. Stable/prerelease channel filtering, SHA-256 + `dpkg-deb`
+  package validation, `apt-get install -s` simulation, a mandatory
+  pre-upgrade backup (install aborts if it fails -- no "install anyway"
+  override), and a post-upgrade health check (services, `PRAGMA
+  quick_check`, DNS resolution, a new local `/healthz` endpoint, and
+  installed-version verification) all happen before/around the actual
+  `apt` install. Installing runs as an independent systemd unit
+  (`alderpointdns-software-update.service`, started via `systemctl start`
+  through a fixed sudoers entry) rather than as a child of the web
+  request, since the install restarts `alderpointdns.service` itself
+  partway through; the browser polls durable job state
+  (`software_update_jobs`/`software_update_events`) and survives that
+  restart. Automatic **checking** is on by default
+  (`alderpointdns-software-update-check.timer`, every 6h); automatic
+  **installation** is off by default and has no execution path yet. A
+  private-repo GitHub credential, if configured, lives at
+  `/etc/alderpointdns/software-updates.env` (root-owned, mode 0600) and
+  is never readable by the web process, rendered in templates, or
+  written to diagnostics/logs. See `docs/software-updates.md`.
+- Established a canonical version model for update safety
+  (`docs/versioning.md`): the development `VERSION` for this cycle is
+  now `0.5.0-dev.1` (Debian form `0.5.0~dev1-1`), strictly newer than
+  the published `0.4.0-beta.6` by SemVer core-version comparison alone
+  and correctly ordered *older* than a future final `0.5.0` release via
+  Debian's `~` pre-release convention. `scripts/build-deb.sh`'s and
+  `app/backup.py`'s `-beta.N` &harr; `~betaN` substitution was
+  generalized to any `-<tag>.<N>` pre-release tag (`beta`, `dev`, `rc`,
+  ...), not just `beta`.
 - Backup & Restore quality-of-life: backup creation/restore timestamps
   shown to administrators (Backup & Restore listing, restore preview,
   Last Backup/Last Restore cards) now display in the server's configured
