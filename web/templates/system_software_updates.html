@@ -38,6 +38,11 @@
   <article class="card">
     <div class="card__head"><h2>Last Checked</h2></div>
     <p class="mono">{{ settings.last_checked_at | local_time if settings.last_checked_at else "never" }}</p>
+    {% if settings.auto_check_enabled == "1" %}
+      <p class="muted">Next automatic check: <span class="mono">{{ next_check_at | local_time if next_check_at else "not yet scheduled" }}</span></p>
+    {% else %}
+      <p class="muted">Automatic checking is off.</p>
+    {% endif %}
   </article>
   <article class="card">
     <div class="card__head"><h2>Update Status</h2></div>
@@ -102,6 +107,13 @@
     <label class="row">
       <input type="checkbox" name="auto_check_enabled" value="1" {% if settings.auto_check_enabled == "1" %}checked{% endif %}>
       Automatically check for updates
+    </label>
+    <label>Check Interval
+      <select name="check_interval_hours">
+        {% for value, label in check_interval_choices %}
+        <option value="{{ value }}" {% if check_interval_hours|string == value %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
     </label>
     <label>Channel
       <select name="channel">

@@ -12,6 +12,7 @@ what was verified there.
 from __future__ import annotations
 
 import datetime as dt
+import fcntl
 import hashlib
 import json
 import os
@@ -38,11 +39,13 @@ class SoftwareUpdatesTestBase(unittest.TestCase):
             "STAGED_DIR": su.STAGED_DIR,
             "UPLOAD_STAGING_DIR": su.UPLOAD_STAGING_DIR,
             "CREDENTIAL_FILE": su.CREDENTIAL_FILE,
+            "CHECK_LOCK": su.CHECK_LOCK,
         }
         su.DB_PATH = self.tmp / "alderpointdns.db"
         su.STAGED_DIR = self.tmp / "staged"
         su.UPLOAD_STAGING_DIR = self.tmp / "uploads"
         su.CREDENTIAL_FILE = self.tmp / "software-updates.env"
+        su.CHECK_LOCK = self.tmp / "check.lock"
         su.init_db()
 
     def tearDown(self) -> None:
@@ -715,6 +718,197 @@ class RunCheckTest(SoftwareUpdatesTestBase):
         cfg = su.settings()
         self.assertIn("unavailable", cfg["last_check_error"])
 
+    def test_failed_check_retries_normally_on_the_next_call(self) -> None:
+        """A failed scheduled check (GitHub unreachable, etc.) must not
+        wedge anything -- the very next check (the following scheduled
+        firing, or a manual retry) runs normally."""
+        with mock.patch.object(su, "list_releases", side_effect=su.SoftwareUpdateError("GitHub is unavailable: timed out")):
+            first = su.run_check(force=True)
+        self.assertIn("error", first)
+        with mock.patch.object(su, "_read_github_token", return_value=None), \
+             mock.patch.object(su, "installed_version_status", return_value={"resolved": "0.4.0-beta.6", "mismatch": False, "dpkg_managed": True}), \
+             mock.patch.object(su, "list_releases", return_value=[_release("0.5.0")]):
+            second = su.run_check(force=True)
+        self.assertTrue(second["update_available"])
+        self.assertEqual(su.settings()["last_check_error"], "")
+
+
+# ---------------------------------------------------------------------------
+# Automatic-check scheduling (check_interval_hours actually drives the
+# systemd timer cadence; auto_check_enabled actually stops/starts it)
+# ---------------------------------------------------------------------------
+
+class CheckSchedulingTest(SoftwareUpdatesTestBase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.tmp_systemd = self.tmp / "systemd"
+        self.override_dir = self.tmp_systemd / f"{su.CHECK_TIMER_UNIT}.d"
+        self.old_override_dir = su.CHECK_TIMER_OVERRIDE_DIR
+        self.old_override = su.CHECK_TIMER_OVERRIDE
+        su.CHECK_TIMER_OVERRIDE_DIR = self.override_dir
+        su.CHECK_TIMER_OVERRIDE = self.override_dir / "alderpointdns.conf"
+        self.systemctl_calls: list[list[str]] = []
+
+    def tearDown(self) -> None:
+        su.CHECK_TIMER_OVERRIDE_DIR = self.old_override_dir
+        su.CHECK_TIMER_OVERRIDE = self.old_override
+        super().tearDown()
+
+    def _fake_run(self, cmd, check=True, timeout=None, input_text=None):
+        import subprocess
+        self.systemctl_calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "")
+
+    def test_default_automatic_checking_is_enabled(self) -> None:
+        cfg = su.settings()
+        self.assertEqual(cfg["auto_check_enabled"], "1")
+        self.assertEqual(cfg["check_interval_hours"], "6")
+
+    def test_configured_interval_is_written_into_the_timer_drop_in(self) -> None:
+        su.update_settings({"check_interval_hours": "12"})
+        with mock.patch.object(su, "run", side_effect=self._fake_run):
+            su.deploy_check_schedule()
+        content = su.CHECK_TIMER_OVERRIDE.read_text()
+        self.assertIn("OnUnitActiveSec=12h", content)
+
+    def test_changing_the_interval_redeploys_the_new_cadence(self) -> None:
+        su.update_settings({"check_interval_hours": "1"})
+        with mock.patch.object(su, "run", side_effect=self._fake_run):
+            su.deploy_check_schedule()
+        self.assertIn("OnUnitActiveSec=1h", su.CHECK_TIMER_OVERRIDE.read_text())
+        su.update_settings({"check_interval_hours": "168"})
+        with mock.patch.object(su, "run", side_effect=self._fake_run):
+            su.deploy_check_schedule()
+        self.assertIn("OnUnitActiveSec=168h", su.CHECK_TIMER_OVERRIDE.read_text())
+
+    def test_out_of_range_interval_is_clamped_not_written_verbatim(self) -> None:
+        conn = su.connect()
+        conn.execute(
+            "INSERT INTO software_update_settings(key, value) VALUES ('check_interval_hours', '99999') "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+        )
+        conn.commit()
+        conn.close()
+        with mock.patch.object(su, "run", side_effect=self._fake_run):
+            su.deploy_check_schedule()
+        content = su.CHECK_TIMER_OVERRIDE.read_text()
+        self.assertIn(f"OnUnitActiveSec={su.MAX_CHECK_INTERVAL_HOURS}h", content)
+
+    def test_disabling_automatic_checking_removes_the_drop_in_and_stops_the_timer(self) -> None:
+        su.update_settings({"check_interval_hours": "12"})
+        with mock.patch.object(su, "run", side_effect=self._fake_run):
+            su.deploy_check_schedule()
+        self.assertTrue(su.CHECK_TIMER_OVERRIDE.exists())
+        self.systemctl_calls.clear()
+        su.update_settings({"auto_check_enabled": "0"})
+        with mock.patch.object(su, "run", side_effect=self._fake_run):
+            result = su.deploy_check_schedule()
+        self.assertFalse(su.CHECK_TIMER_OVERRIDE.exists())
+        self.assertEqual(json.loads(result)["state"], "disabled")
+        self.assertTrue(any("disable" in call and "--now" in call for call in self.systemctl_calls))
+
+    def test_reenabling_recreates_the_drop_in_and_starts_the_timer(self) -> None:
+        su.update_settings({"auto_check_enabled": "0"})
+        with mock.patch.object(su, "run", side_effect=self._fake_run):
+            su.deploy_check_schedule()
+        self.assertFalse(su.CHECK_TIMER_OVERRIDE.exists())
+        su.update_settings({"auto_check_enabled": "1", "check_interval_hours": "24"})
+        with mock.patch.object(su, "run", side_effect=self._fake_run):
+            result = su.deploy_check_schedule()
+        self.assertTrue(su.CHECK_TIMER_OVERRIDE.exists())
+        self.assertEqual(json.loads(result)["state"], "enabled")
+        self.assertTrue(any("enable" in call and "--now" in call for call in self.systemctl_calls))
+
+    def test_scheduling_never_touches_the_install_runner_unit(self) -> None:
+        """The check timer must only ever be able to trigger update-check
+        -- deploy_check_schedule() must never enable/start/reference
+        alderpointdns-software-update.service (the privileged install
+        runner), directly or indirectly."""
+        su.update_settings({"check_interval_hours": "12"})
+        with mock.patch.object(su, "run", side_effect=self._fake_run):
+            su.deploy_check_schedule()
+        for call in self.systemctl_calls:
+            self.assertNotIn("alderpointdns-software-update.service", call)
+        self.assertNotIn("update-run", su.CHECK_TIMER_OVERRIDE.read_text())
+
+    def test_packaged_check_service_only_ever_runs_update_check(self) -> None:
+        """The unit the timer actually triggers (packaging/*-check.service)
+        execs update-check, never update-run -- a scheduled firing can
+        physically never install anything."""
+        service_file = ROOT / "packaging" / "alderpointdns-software-update-check.service"
+        content = service_file.read_text()
+        self.assertIn("update-check", content)
+        self.assertNotIn("update-run", content)
+
+    def test_sudoers_entry_for_schedule_deploy_is_argument_free(self) -> None:
+        sudoers = (ROOT / "packaging" / "sudoers-alderpointdns").read_text()
+        self.assertIn("alderpointdns_compiler.py update-check-schedule-deploy", sudoers)
+        # No trailing arguments after the subcommand for this entry, unlike
+        # e.g. "update-check --force" which is its own separate, explicit
+        # allowlisted entry -- nothing about the schedule-deploy entry
+        # takes operator-controlled text.
+        for line in sudoers.splitlines():
+            if "update-check-schedule-deploy" in line:
+                idx = line.index("update-check-schedule-deploy") + len("update-check-schedule-deploy")
+                self.assertTrue(line[idx:idx + 1] in (",", "", "\n"))
+
+    def test_concurrent_check_is_skipped_not_duplicated(self) -> None:
+        """Two overlapping invocations (a scheduled firing landing on top
+        of a manual click, or vice versa) must not both hit GitHub and
+        interleave writes -- the second must simply report a check is
+        already in flight."""
+        su.CHECK_LOCK.parent.mkdir(parents=True, exist_ok=True)
+        held = su.CHECK_LOCK.open("w")
+        try:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with mock.patch.object(su, "list_releases") as mock_list_releases:
+                result = su.run_check(force=True)
+                self.assertTrue(result.get("skipped"))
+                self.assertIn("already in progress", result["reason"])
+                mock_list_releases.assert_not_called()
+        finally:
+            fcntl.flock(held, fcntl.LOCK_UN)
+            held.close()
+
+    def test_lock_is_released_after_a_check_so_the_next_one_is_not_blocked(self) -> None:
+        with mock.patch.object(su, "_read_github_token", return_value=None), \
+             mock.patch.object(su, "installed_version_status", return_value={"resolved": "0.4.0-beta.6", "mismatch": False, "dpkg_managed": True}), \
+             mock.patch.object(su, "list_releases", return_value=[_release("0.5.0")]):
+            first = su.run_check(force=True)
+            second = su.run_check(force=True)
+        self.assertFalse(first.get("skipped"))
+        self.assertFalse(second.get("skipped"))
+
+    def test_scheduled_style_invocation_via_cli_never_installs(self) -> None:
+        """update_check() (what the timer's .service unit execs) only ever
+        calls run_check() -- it has no code path that can start the install
+        runner or write a software_update_jobs row."""
+        from app import alderpointdns_compiler
+
+        with mock.patch.object(su, "list_releases", return_value=[_release("9.9.9")]), \
+             mock.patch.object(su, "_read_github_token", return_value=None), \
+             mock.patch.object(su, "installed_version_status", return_value={"resolved": "0.4.0-beta.6", "mismatch": False, "dpkg_managed": True}), \
+             mock.patch.object(su, "run_pending_job") as mock_run_pending, \
+             mock.patch("builtins.print"):
+            alderpointdns_compiler.update_check(mock.Mock(force=True))
+        mock_run_pending.assert_not_called()
+        self.assertIsNone(su.latest_job())
+
+    def test_credential_never_reaches_the_timer_drop_in_or_systemctl_argv(self) -> None:
+        su.CREDENTIAL_FILE.write_text("GITHUB_TOKEN=leaked-schedule-token-xyz\n")
+        su.CREDENTIAL_FILE.chmod(0o600)
+        try:
+            shutil.chown(su.CREDENTIAL_FILE, user=0, group=0)
+        except (LookupError, PermissionError, OSError):
+            self.skipTest("cannot chown to root in this sandbox; permission-gated credential read path not exercisable here")
+        su.update_settings({"check_interval_hours": "12"})
+        with mock.patch.object(su, "run", side_effect=self._fake_run):
+            su.deploy_check_schedule()
+        content = su.CHECK_TIMER_OVERRIDE.read_text()
+        self.assertNotIn("leaked-schedule-token-xyz", content)
+        for call in self.systemctl_calls:
+            self.assertNotIn("leaked-schedule-token-xyz", " ".join(call))
+
 
 # ---------------------------------------------------------------------------
 # HTTP route level: auth, CSRF, path/injection rejection, streamed upload
@@ -738,12 +932,14 @@ class SoftwareUpdatesHttpTest(unittest.TestCase):
             "upstream_dns_db": upstream_dns.DB_PATH,
             "compiler_db": alderpointdns_compiler.DB_PATH,
             "custom_rules_db": custom_rules.DB_PATH,
+            "su_check_lock": su.CHECK_LOCK,
         }
         db_path = self.tmp / "alderpointdns.db"
         for module in (webapp, su, local_dns, upstream_dns, alderpointdns_compiler, custom_rules):
             module.DB_PATH = db_path
         su.STAGED_DIR = self.tmp / "staged"
         su.UPLOAD_STAGING_DIR = self.tmp / "uploads"
+        su.CHECK_LOCK = self.tmp / "check.lock"
 
         local_dns.init_db()
         upstream_dns.init_db()
@@ -765,6 +961,7 @@ class SoftwareUpdatesHttpTest(unittest.TestCase):
         self.patches = [
             mock.patch.object(webapp, "software_updates_check_apply", lambda force=True: (0, json.dumps(su.run_check(force=force), default=str))),
             mock.patch.object(webapp, "software_updates_start_install_runner", lambda: (0, str(su.run_pending_job()))),
+            mock.patch.object(webapp, "software_updates_check_schedule_apply", lambda: (0, "ok")),
             mock.patch.object(webapp, "global_service_status", lambda: {"label": "Active", "tone": "healthy", "detail": "test"}),
             mock.patch.object(replication, "autostart", lambda: None),
             mock.patch.object(webapp, "TEMPLATES", Jinja2Templates(directory=str(ROOT / "web" / "templates"))),
@@ -791,6 +988,7 @@ class SoftwareUpdatesHttpTest(unittest.TestCase):
         su.DB_PATH = self.old_paths["su_db"]
         su.STAGED_DIR = self.old_paths["su_staged"]
         su.UPLOAD_STAGING_DIR = self.old_paths["su_uploads"]
+        su.CHECK_LOCK = self.old_paths["su_check_lock"]
         local_dns.DB_PATH = self.old_paths["local_dns_db"]
         upstream_dns.DB_PATH = self.old_paths["upstream_dns_db"]
         alderpointdns_compiler.DB_PATH = self.old_paths["compiler_db"]
@@ -939,6 +1137,22 @@ class SoftwareUpdatesHttpTest(unittest.TestCase):
         self.assertEqual(response.status_code, 303)
         self.assertEqual(su.settings()["channel"], "prerelease")
         self.assertEqual(su.settings()["auto_check_enabled"], "0")  # unchecked checkbox omits the field
+
+    def test_settings_route_persists_check_interval_and_redeploys_schedule(self) -> None:
+        response = self._authed_client().post(
+            "/system/administration/software-updates/settings",
+            data={"csrf": self.csrf, "channel": "stable", "auto_check_enabled": "1", "check_interval_hours": "12"},
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(su.settings()["check_interval_hours"], "12")
+
+    def test_settings_route_rejects_out_of_range_interval(self) -> None:
+        response = self._authed_client().post(
+            "/system/administration/software-updates/settings",
+            data={"csrf": self.csrf, "check_interval_hours": "999999"},
+        )
+        self.assertEqual(response.status_code, 400)
 
 
 if __name__ == "__main__":

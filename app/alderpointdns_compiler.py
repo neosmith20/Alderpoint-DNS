@@ -1552,6 +1552,10 @@ def filter_schedule_deploy(_: argparse.Namespace) -> None:
     print(filter_schedule.deploy_filter_schedule())
 
 
+def update_check_schedule_deploy(_: argparse.Namespace) -> None:
+    print(software_updates.deploy_check_schedule())
+
+
 def deployment_row(deployment_id: int) -> sqlite3.Row | None:
     with connect() as conn:
         return conn.execute("SELECT * FROM deployments WHERE id=?", (deployment_id,)).fetchone()
@@ -1703,6 +1707,8 @@ def main(argv: list[str] | None = None) -> int:
     update_check_parser.set_defaults(func=update_check)
     update_run_parser = sub.add_parser("update-run")
     update_run_parser.set_defaults(func=update_run)
+    update_check_schedule_parser = sub.add_parser("update-check-schedule-deploy")
+    update_check_schedule_parser.set_defaults(func=update_check_schedule_deploy)
     network_rollback_check_parser = sub.add_parser("network-rollback-check")
     network_rollback_check_parser.set_defaults(func=network_rollback_check)
     filter_schedule_parser = sub.add_parser("filter-schedule-deploy")

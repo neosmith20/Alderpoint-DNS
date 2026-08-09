@@ -2838,6 +2838,22 @@ def software_updates_check_apply(force: bool) -> tuple[int, str]:
     return run(args)
 
 
+def software_updates_check_schedule_apply() -> tuple[int, str]:
+    # Mirrors filter_schedule_apply() exactly: redeploys the automatic-check
+    # timer drop-in from whatever was just saved to
+    # auto_check_enabled/check_interval_hours. Safe to call directly via
+    # sudo from the request handler (like update-check itself) -- this
+    # only ever writes a timer drop-in and calls systemctl
+    # enable/disable/daemon-reload, never restarts alderpointdns.service.
+    return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "update-check-schedule-deploy"])
+
+
+def software_updates_check_schedule_apply_or_raise() -> None:
+    code, out = software_updates_check_schedule_apply()
+    if code != 0:
+        raise software_updates.SoftwareUpdateError(out.strip() or "automatic-check schedule deployment failed")
+
+
 def software_updates_start_install_runner() -> tuple[int, str]:
     # Deliberately NOT `sudo alderpointdns_compiler.py update-run` directly:
     # installing restarts alderpointdns.service (this process's own
@@ -2865,6 +2881,7 @@ def software_updates_context(request: Request) -> dict[str, Any]:
     status = software_updates.update_status()
     context = dict(status)
     context["csrf"] = signed_session(request)["csrf"]
+    context["check_interval_choices"] = software_updates.CHECK_INTERVAL_CHOICES
     return context
 
 
@@ -2897,8 +2914,15 @@ async def software_updates_settings_route(request: Request, admin: sqlite3.Row =
             {
                 "auto_check_enabled": form.get("auto_check_enabled", "0"),
                 "channel": str(form.get("channel", "stable")),
+                "check_interval_hours": form.get("check_interval_hours", software_updates.DEFAULT_SETTINGS["check_interval_hours"]),
             }
         )
+        # Redeploys the automatic-check timer drop-in from what was just
+        # saved -- without this, changing the interval or toggling
+        # automatic checking off would update the database but never
+        # actually change the running schedule. See
+        # software_updates.deploy_check_schedule().
+        software_updates_check_schedule_apply_or_raise()
     except software_updates.SoftwareUpdateError as exc:
         with db() as conn:
             audit_log(conn, admin["id"], admin["username"], "software_update_settings_change", False, ip, str(exc))

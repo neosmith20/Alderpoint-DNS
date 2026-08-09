@@ -226,8 +226,13 @@ test -f "$ROOT/data/lib/systemd/system/alderpointdns-software-update-check.timer
   fail "alderpointdns-software-update-check.timer missing from built package"
 test -f "$ROOT/data/lib/systemd/system/alderpointdns-software-update.service" || \
   fail "alderpointdns-software-update.service missing from built package"
-grep -q 'systemctl enable --now alderpointdns-software-update-check.timer' "$POSTINST" || \
-  fail "postinst does not enable alderpointdns-software-update-check.timer"
+# Enabling the check timer is no longer a bare `systemctl enable --now`
+# line: postinst calls update-check-schedule-deploy, which renders the
+# timer's cadence from software_update_settings (auto-check on,
+# check_interval_hours honored) and enables/starts it accordingly -- see
+# app/software_updates.py's deploy_check_schedule().
+grep -q 'update-check-schedule-deploy' "$POSTINST" || \
+  fail "postinst does not deploy the software update check schedule"
 grep -q 'enable.*alderpointdns-software-update\.service\|start.*alderpointdns-software-update\.service' "$POSTINST" && \
   fail "postinst must never enable/start the install runner unit automatically -- unattended installation must be off by default"
 grep -q 'update-run' "$ROOT/data/lib/systemd/system/alderpointdns-software-update.service" || \

@@ -406,10 +406,12 @@ RESOLVCONFEOF
     # Automatic update *checking* is on by default (never automatic
     # *installation* -- see software_update_settings.unattended_install_enabled,
     # which defaults off and has no timer of its own in this release).
-    # update-check itself no-ops without contacting GitHub whenever the
-    # administrator has turned "Automatically check for updates" off, so
-    # this timer stays enabled unconditionally; see the .timer unit.
-    systemctl enable --now alderpointdns-software-update-check.timer >/dev/null 2>&1 || true
+    # update-check-schedule-deploy writes the automatic-check timer
+    # drop-in from the stored auto_check_enabled/check_interval_hours
+    # settings (preserved across upgrades; enabled/6h on a fresh install),
+    # exactly mirroring filter-schedule-deploy below -- see
+    # app/software_updates.py's deploy_check_schedule().
+    PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py update-check-schedule-deploy >/dev/null 2>&1 || true
     PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py filter-schedule-deploy >/dev/null 2>&1 || true
 
     # Final gate: confirm the four services this package ships/depends on

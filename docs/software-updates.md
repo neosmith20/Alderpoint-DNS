@@ -162,11 +162,42 @@ pipeline above via `software_update_jobs.operation = 'manual'`.
 
 - **Automatic checking** is on by default
   (`software_update_settings.auto_check_enabled`), driven by
-  `alderpointdns-software-update-check.timer` (every 6 hours, root,
-  reads the optional credential). `update-check` itself no-ops without
-  contacting GitHub whenever checking is disabled, so the timer stays
-  enabled unconditionally -- the setting governs behavior, not the
-  timer's enabled state.
+  `alderpointdns-software-update-check.timer` (root, reads the optional
+  credential). The timer only ever execs `update-check` -- never
+  `update-run` -- so a scheduled firing can physically never install
+  anything, only record whether an update is available.
+- **The cadence is operator-controlled**
+  (`software_update_settings.check_interval_hours`, 1-168, default 6) and
+  actually drives the timer: saving Software Updates' settings calls
+  `software_updates.deploy_check_schedule()` (root, via the fixed,
+  argument-free `update-check-schedule-deploy` sudoers entry), which
+  renders a systemd drop-in
+  (`/etc/systemd/system/alderpointdns-software-update-check.timer.d/alderpointdns.conf`)
+  from the stored interval and reloads/re-enables the timer -- exactly
+  `app/filter_schedule.py`'s drop-in mechanism, reused rather than
+  reinvented. The stored value is always range-clamped
+  (`MIN_CHECK_INTERVAL_HOURS`..`MAX_CHECK_INTERVAL_HOURS`) before it ever
+  reaches the drop-in or a systemctl argument, so no operator-supplied
+  text can reach a unit file or shell.
+- **Turning "Automatically check for updates" off actually stops the
+  timer**, not just makes `update-check` a no-op at runtime:
+  `deploy_check_schedule()` removes the drop-in and
+  `systemctl disable --now`s the timer. (`update-check` itself *also*
+  still no-ops when checking is disabled and invoked without `--force` --
+  belt and suspenders against a stale enabled timer surviving a failed
+  deploy, not the primary enforcement mechanism.)
+- **Concurrent checks are deduplicated, not queued or interleaved**:
+  `run_check()` takes a non-blocking `flock` (`CHECK_LOCK`) before doing
+  any work; a check that lands while another is already in flight (a
+  scheduled firing overlapping a manual "Check for Updates" click, or
+  vice versa) immediately returns `{"skipped": True, "reason": "a check
+  is already in progress"}` rather than making a second, redundant
+  GitHub request and racing the first to write
+  `software_update_settings`.
+- **A failed check (GitHub unreachable, malformed response, etc.)
+  records `last_check_error` and otherwise changes nothing** -- the next
+  scheduled or manual check runs completely normally; there is no
+  backoff, lockout, or persistent failure state to clear.
 - **Unattended automatic installation is off by default** and has no
   execution path in this release (`unattended_install_enabled` exists as
   a setting for a future opt-in mechanism but nothing consumes it yet;
@@ -189,8 +220,4 @@ retained pre-upgrade backup, or reinstall the previous `.deb`).
 
 - No unattended-install execution path yet (see above) -- only checking
   is ever automatic.
-- `check_interval_hours` is stored as a setting but not yet wired to
-  dynamically rewrite the check timer's own interval (mirroring
-  `filter_schedule.py`'s drop-in mechanism); the timer runs on a fixed
-  6-hour cadence today.
 - Automatic package rollback on a failed install is not implemented.

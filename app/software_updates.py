@@ -43,6 +43,7 @@ being stored or logged.
 from __future__ import annotations
 
 import datetime as dt
+import fcntl
 import hashlib
 import json
 import os
@@ -63,6 +64,21 @@ from app import backup
 DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
 APP_ROOT = Path("/opt/alderpointdns")
 DPKG_PACKAGE_NAME = "alderpointdns"
+
+# Automatic-check scheduling (root, via alderpointdns_compiler.py
+# update-check-schedule-deploy): same shape as app/filter_schedule.py's
+# timer drop-in mechanism -- a packaged unit with a safe fixed default,
+# overridden at runtime by a drop-in rendered from the stored setting.
+# Deliberately never a raw f-string of untrusted operator text: the only
+# things that ever reach the drop-in are auto_check_enabled (a bool) and
+# check_interval_hours (an int already range-clamped by update_settings()),
+# so no unit name, path, or shell metacharacter can reach systemd this way.
+SYSTEMD_DIR = Path("/etc/systemd/system")
+CHECK_TIMER_UNIT = "alderpointdns-software-update-check.timer"
+CHECK_TIMER_OVERRIDE_DIR = SYSTEMD_DIR / f"{CHECK_TIMER_UNIT}.d"
+CHECK_TIMER_OVERRIDE = CHECK_TIMER_OVERRIDE_DIR / "alderpointdns.conf"
+MIN_CHECK_INTERVAL_HOURS = 1
+MAX_CHECK_INTERVAL_HOURS = 168
 
 # Root-only staging for verified, ready-to-install packages -- distinct
 # from UPLOAD_STAGING_DIR below, which the unprivileged web process itself
@@ -129,6 +145,20 @@ DEFAULT_SETTINGS = {
     "latest_release_json": "{}",
     "check_interval_hours": "6",
 }
+
+# A friendly fixed set for the Check Interval selector -- matches
+# app/filter_schedule.py's INTERVAL_CHOICES presentation. Any value in
+# [MIN_CHECK_INTERVAL_HOURS, MAX_CHECK_INTERVAL_HOURS] is still accepted and
+# safely clamped (a hand-crafted request bypassing the <select> is never
+# trusted beyond that range either), so this list is a UI convenience, not
+# the sole validation.
+CHECK_INTERVAL_CHOICES: tuple[tuple[str, str], ...] = (
+    ("1", "1 Hour"),
+    ("6", "6 Hours"),
+    ("12", "12 Hours"),
+    ("24", "1 Day"),
+    ("168", "1 Week"),
+)
 
 
 class SoftwareUpdateError(ValueError):
@@ -279,6 +309,116 @@ def update_settings(values: dict[str, Any], conn: sqlite3.Connection | None = No
     finally:
         if close:
             db.close()
+
+
+def check_timer_drop_in_content(hours: int) -> str:
+    return f"[Timer]\nOnBootSec=10m\nOnUnitActiveSec={hours}h\n"
+
+
+def deploy_check_schedule(conn: sqlite3.Connection | None = None) -> str:
+    """Renders/removes the automatic-check timer drop-in from the stored
+    settings and (re)applies it via systemctl -- the privileged half of
+    "check_interval_hours actually controls the cadence" and "disabling
+    automatic checking actually stops scheduled checks". Called by
+    update-check-schedule-deploy (root, via a fixed sudoers entry) after
+    every settings save, and once at package install/upgrade (postinst),
+    exactly mirroring filter_schedule.deploy_filter_schedule()'s shape.
+
+    Only ever installs the update-run job -- never runs one itself, and
+    the timer it manages (CHECK_TIMER_UNIT) only ever points at
+    `update-check`, never `update-run`; see packaging/*-check.service.
+    """
+    close = conn is None
+    db = conn or connect()
+    init_db(db)
+    try:
+        cfg = settings(db)
+        enabled = _truthy(cfg.get("auto_check_enabled", "1"))
+        hours = _clamped_check_interval_hours(cfg)
+        if not enabled:
+            # Removed entirely (not merely left stopped) so nothing stale
+            # lingers if the package is later reinstalled/upgraded without
+            # this settings row surviving -- mirrors
+            # deploy_filter_schedule()'s DISABLED handling exactly.
+            CHECK_TIMER_OVERRIDE.unlink(missing_ok=True)
+            run(["systemctl", "daemon-reload"])
+            # check=False: disabling a timer that was never enabled (a
+            # fresh install with checking off from the start) must not
+            # fail the request.
+            run(["systemctl", "disable", "--now", CHECK_TIMER_UNIT], check=False)
+            state = "disabled"
+        else:
+            CHECK_TIMER_OVERRIDE_DIR.mkdir(parents=True, exist_ok=True)
+            CHECK_TIMER_OVERRIDE.write_text(check_timer_drop_in_content(hours))
+            run(["systemctl", "daemon-reload"])
+            run(["systemctl", "enable", "--now", CHECK_TIMER_UNIT])
+            state = "enabled"
+        return json.dumps({"state": state, "interval_hours": hours, "timer": CHECK_TIMER_UNIT})
+    finally:
+        if close:
+            db.close()
+
+
+def _clamped_check_interval_hours(cfg: dict[str, str]) -> int:
+    try:
+        hours = int(cfg.get("check_interval_hours", DEFAULT_SETTINGS["check_interval_hours"]))
+    except (TypeError, ValueError):
+        hours = int(DEFAULT_SETTINGS["check_interval_hours"])
+    return max(MIN_CHECK_INTERVAL_HOURS, min(MAX_CHECK_INTERVAL_HOURS, hours))
+
+
+def next_check_at() -> str | None:
+    """Best-effort next scheduled automatic-check time, or None when it
+    can't be determined (systemd unavailable, timer not deployed/inactive)
+    -- mirrors filter_schedule.next_run_at() exactly, including preferring
+    `systemctl list-timers` JSON (which projects a monotonic
+    OnUnitActiveSec timer onto the wall clock) over the raw
+    NextElapseUSecRealtime property. Unprivileged: `systemctl
+    list-timers`/`show` need no special permissions to read."""
+    try:
+        result = run(["systemctl", "list-timers", CHECK_TIMER_UNIT, "--all", "-o", "json"], check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode == 0:
+        parsed = _parse_next_from_timers_json(result.stdout or "")
+        if parsed:
+            return parsed
+    try:
+        result = run(["systemctl", "show", CHECK_TIMER_UNIT, "--property=NextElapseUSecRealtime"], check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return _parse_next_elapse(result.stdout or "")
+
+
+def _parse_next_elapse(output: str) -> str | None:
+    for line in (output or "").splitlines():
+        key, sep, value = line.partition("=")
+        if not sep or key.strip() != "NextElapseUSecRealtime":
+            continue
+        value = value.strip()
+        if not value or value in {"n/a", "0"}:
+            return None
+        return value
+    return None
+
+
+def _parse_next_from_timers_json(output: str) -> str | None:
+    try:
+        entries = json.loads(output or "[]")
+    except ValueError:
+        return None
+    if not isinstance(entries, list):
+        return None
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("unit") != CHECK_TIMER_UNIT:
+            continue
+        next_usec = entry.get("next")
+        if isinstance(next_usec, int) and next_usec > 0:
+            stamp = dt.datetime.fromtimestamp(next_usec / 1_000_000, dt.timezone.utc)
+            return stamp.replace(microsecond=0).isoformat()
+    return None
 
 
 def _truthy(value: Any) -> bool:
@@ -1185,7 +1325,32 @@ def _find_release_for_deb_version(candidate_deb_version: str, token: str | None)
 # Update check (the "Check for Updates" action + the scheduled timer)
 # ---------------------------------------------------------------------------
 
+# Non-blocking: a "Check for Updates" click that lands while the
+# scheduled timer's own update-check happens to already be running (or
+# vice versa) must not queue up and re-run the exact same check a moment
+# later -- it should simply report that a check is already in flight and
+# let the caller re-read whatever the in-flight check is about to write.
+# Unlike deploy()'s blocking DEPLOY_LOCK (which serializes genuinely
+# different work that must eventually all happen), two concurrent
+# update-checks are redundant by definition -- they'd both just re-fetch
+# the same GitHub releases feed and write the same settings.
+CHECK_LOCK = Path("/var/lib/alderpointdns/software-updates/check.lock")
+
+
 def run_check(force: bool = False) -> dict[str, Any]:
+    CHECK_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with CHECK_LOCK.open("w") as lock_handle:
+        try:
+            fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return {"skipped": True, "reason": "a check is already in progress"}
+        try:
+            return _run_check_locked(force=force)
+        finally:
+            fcntl.flock(lock_handle, fcntl.LOCK_UN)
+
+
+def _run_check_locked(force: bool) -> dict[str, Any]:
     conn = connect()
     try:
         init_db(conn)
@@ -1235,6 +1400,7 @@ def update_status(conn: sqlite3.Connection | None = None) -> dict[str, Any]:
         except json.JSONDecodeError:
             latest = {}
         job = latest_job(db)
+        auto_check_enabled = _truthy(cfg.get("auto_check_enabled", "1"))
         return {
             "settings": cfg,
             "version_status": version_status,
@@ -1243,6 +1409,11 @@ def update_status(conn: sqlite3.Connection | None = None) -> dict[str, Any]:
             "update_available": bool(latest),
             "job": dict(job) if job else None,
             "job_events": job_events(job["id"], db) if job else [],
+            "check_interval_hours": _clamped_check_interval_hours(cfg),
+            # Only queried when checking is actually on -- a disabled
+            # schedule must not display a next-check time at all, matching
+            # filter_schedule_context()'s equivalent guard.
+            "next_check_at": next_check_at() if auto_check_enabled else None,
         }
     finally:
         if close:
