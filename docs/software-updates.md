@@ -26,7 +26,7 @@ validates a request and writes a row to `software_update_jobs`.
   service -- partway through (via the package's `postinst`). A `sudo`
   child of the HTTP request handling that install would be killed along
   with the rest of that service's process tree when it restarts. Instead,
-  the web process asks `sudo systemctl start
+  the web process asks `sudo systemctl start --no-block
   alderpointdns-software-update.service` to hand the work to a wholly
   independent systemd unit (its own cgroup, owned by PID 1), which execs
   `alderpointdns_compiler.py update-run` as root and survives

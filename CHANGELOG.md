@@ -15,12 +15,18 @@ may still change between releases before a stable 1.0.
   quick_check`, DNS resolution, a new local `/healthz` endpoint, and
   installed-version verification) all happen before/around the actual
   `apt` install. Installing runs as an independent systemd unit
-  (`alderpointdns-software-update.service`, started via `systemctl start`
-  through a fixed sudoers entry) rather than as a child of the web
-  request, since the install restarts `alderpointdns.service` itself
-  partway through; the browser polls durable job state
+  (`alderpointdns-software-update.service`, started via `systemctl start
+  --no-block` through a fixed sudoers entry) rather than as a child of
+  the web request, since the install restarts `alderpointdns.service`
+  itself partway through; the browser polls durable job state
   (`software_update_jobs`/`software_update_events`) and survives that
-  restart. Automatic **checking** is on by default
+  restart. (`--no-block` is required, not optional: `systemctl start` on
+  a `Type=oneshot` unit is synchronous by default, which would have left
+  the triggering HTTP request itself blocked -- and killed along with
+  the rest of that request's process tree -- exactly when the install it
+  kicked off restarts `alderpointdns.service`; found via a real
+  disposable-VM install, not caught by any mocked unit test.) Automatic
+  **checking** is on by default
   (`alderpointdns-software-update-check.timer`, every 6h); automatic
   **installation** is off by default and has no execution path yet. A
   private-repo GitHub credential, if configured, lives at

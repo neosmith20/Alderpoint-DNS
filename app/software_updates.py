@@ -16,8 +16,8 @@ argument-free sudoers entry lets it trigger the actual work as root:
     this web process's own service -- partway through, which would kill a
     child `sudo` process invoked directly from a request. So installs are
     never run as a child of the web request at all: the web process asks
-    `sudo systemctl start alderpointdns-software-update.service` to start
-    a wholly independent systemd unit (own cgroup, owned by PID 1, not a
+    `sudo systemctl start --no-block alderpointdns-software-update.service`
+    to start a wholly independent systemd unit (own cgroup, owned by PID 1, not a
     descendant of alderpointdns.service), which execs this module's
     `run_pending_job()` as root and survives alderpointdns.service being
     restarted or killed out from under it. The browser reconnects and

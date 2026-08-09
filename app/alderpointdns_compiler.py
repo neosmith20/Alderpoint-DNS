@@ -1533,7 +1533,7 @@ def update_check(args: argparse.Namespace) -> None:
 
 
 def update_run(_: argparse.Namespace) -> None:
-    # Invoked only by `systemctl start alderpointdns-software-update.service`
+    # Invoked only by `systemctl start --no-block alderpointdns-software-update.service`
     # (see packaging/*.service), never as a `sudo` child of the web
     # request: this call may restart alderpointdns.service partway
     # through, and this process must survive that. Reads its instructions

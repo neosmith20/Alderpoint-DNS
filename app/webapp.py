@@ -2803,7 +2803,19 @@ def software_updates_start_install_runner() -> tuple[int, str]:
     # unit (its own cgroup, owned by PID 1) that survives that restart --
     # see app/software_updates.py's module docstring and
     # packaging/alderpointdns-software-update.service.
-    return run(["sudo", "systemctl", "start", "alderpointdns-software-update.service"])
+    #
+    # --no-block is required, not optional: `systemctl start` on a
+    # Type=oneshot unit is synchronous by default (it waits for the job to
+    # finish before returning), which would defeat the entire point of an
+    # independent runner -- this HTTP request (and the sudo child waiting
+    # on it) would itself be killed when alderpointdns.service restarts
+    # partway through the very install this call kicked off, exactly the
+    # failure mode this design exists to avoid. Confirmed against a real
+    # disposable-VM install (see the completion report): without
+    # --no-block, a same-process restart during install left this call
+    # blocked until the unit exited, reporting "control process exited
+    # with error" back to the browser instead of returning immediately.
+    return run(["sudo", "systemctl", "start", "--no-block", "alderpointdns-software-update.service"])
 
 
 def software_updates_context(request: Request) -> dict[str, Any]:
