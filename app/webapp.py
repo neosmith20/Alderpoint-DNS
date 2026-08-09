@@ -66,6 +66,25 @@ def _replication_autostart() -> None:
     replication.autostart()
 
 
+@app.on_event("startup")
+def _reap_abandoned_restores() -> None:
+    # A restore that was mid-flight when this process (or the whole host)
+    # died would otherwise sit at status='running' forever -- this is
+    # exactly what happened to the real large-analytics restore that
+    # motivated this check (see docs/backup-recovery.md). last_restore()
+    # also reaps on every view, but startup is the one moment guaranteed to
+    # run after a host reboot or service restart, so an abandoned restore
+    # from before that event is caught immediately rather than waiting for
+    # someone to open the Backup & Restore page. Best-effort: must never
+    # prevent the web service from starting.
+    try:
+        reaped = backup.reap_abandoned_restores()
+        for entry in reaped:
+            _log(4, f"reaped abandoned restore id={entry['id']}: {entry['message']}")
+    except Exception as exc:  # noqa: BLE001
+        _log(3, f"reap_abandoned_restores failed at startup: {exc}")
+
+
 def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
 

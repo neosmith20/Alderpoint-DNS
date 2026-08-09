@@ -1141,6 +1141,202 @@ class ArchiveSecurityTest(BackupTestBase):
         self.assertIn("not compatible", str(ctx.exception))
 
 
+class AbandonedRestoreLifecycleTest(BackupTestBase):
+    """Regression coverage for the restore lifecycle hardening: a restore
+    whose worker died (killed process, host reboot) must never sit at
+    status='running' forever -- see reap_abandoned_restores()."""
+
+    def _insert_running_row(self, **overrides) -> int:
+        row = {
+            "started_at": backup.now(),
+            "backup_path": "/var/lib/alderpointdns/backups/fake.tar.gz",
+            "components_json": "{}",
+            "status": "running",
+            "message": "",
+            "worker_pid": None,
+            "worker_start_ticks": None,
+            "worker_boot_id": backup._current_boot_id(),
+            "heartbeat_at": backup.now(),
+            "phase": "restoring_analytics",
+            "phase_detail": "query_events",
+            "staging_dir": None,
+        }
+        row.update(overrides)
+        with closing(backup.connect()) as conn:
+            backup.init_db(conn)
+            cursor = conn.execute(
+                "INSERT INTO restore_history(started_at, backup_path, components_json, status, message, worker_pid, "
+                "worker_start_ticks, worker_boot_id, heartbeat_at, phase, phase_detail, staging_dir) "
+                "VALUES (:started_at, :backup_path, :components_json, :status, :message, :worker_pid, "
+                ":worker_start_ticks, :worker_boot_id, :heartbeat_at, :phase, :phase_detail, :staging_dir)",
+                row,
+            )
+            conn.commit()
+            return cursor.lastrowid
+
+    def _spawn_and_kill(self) -> int:
+        """Returns a PID that definitely does not correspond to any live
+        process -- a real process, started and then killed and reaped, so
+        the PID is guaranteed not to coincide with an unrelated live
+        process on this host purely by chance."""
+        proc = subprocess.Popen(["sleep", "100"])
+        pid = proc.pid
+        proc.kill()
+        proc.wait()
+        return pid
+
+    def test_reap_marks_dead_worker_restore_interrupted(self) -> None:
+        dead_pid = self._spawn_and_kill()
+        restore_id = self._insert_running_row(worker_pid=dead_pid, worker_start_ticks=1)
+        reaped = backup.reap_abandoned_restores()
+        self.assertEqual([r["id"] for r in reaped], [restore_id])
+        last = backup.last_restore()
+        self.assertEqual(last["id"], restore_id)
+        self.assertEqual(last["status"], "interrupted")
+        self.assertIsNotNone(last["finished_at"])
+        self.assertIn("no longer running", last["message"])
+        self.assertIn("restoring_analytics", last["message"])
+
+    def test_reap_leaves_genuinely_alive_worker_running_no_matter_how_long(self) -> None:
+        pid, start_ticks, boot_id = backup._worker_identity()
+        # A heartbeat from an hour ago: a real, still-alive worker on a
+        # legitimately huge restore must never be declared stale just for
+        # taking a long time -- see reap_abandoned_restores()'s docstring.
+        old_heartbeat = (dt := __import__("datetime")).datetime.now(dt.timezone.utc).replace(microsecond=0) - dt.timedelta(hours=1)
+        restore_id = self._insert_running_row(
+            worker_pid=pid, worker_start_ticks=start_ticks, worker_boot_id=boot_id,
+            heartbeat_at=old_heartbeat.isoformat(),
+        )
+        reaped = backup.reap_abandoned_restores()
+        self.assertEqual(reaped, [])
+        last = backup.last_restore()
+        self.assertEqual(last["id"], restore_id)
+        self.assertEqual(last["status"], "running")
+        self.assertTrue(last["heartbeat_stale_suspected"])
+
+    def test_reap_marks_reboot_stale_row_interrupted_regardless_of_pid(self) -> None:
+        pid, start_ticks, _ = backup._worker_identity()
+        restore_id = self._insert_running_row(
+            worker_pid=pid, worker_start_ticks=start_ticks, worker_boot_id="a-previous-boot-that-no-longer-exists",
+        )
+        reaped = backup.reap_abandoned_restores()
+        self.assertEqual([r["id"] for r in reaped], [restore_id])
+        self.assertEqual(backup.last_restore()["status"], "interrupted")
+
+    def test_reap_handles_legacy_row_with_no_worker_identity(self) -> None:
+        # Rows created before this migration (or, in production, the real
+        # forensic row this hardening responds to) have NULL worker
+        # columns entirely -- must still be reaped, not left running
+        # forever for lack of an identity to check.
+        restore_id = self._insert_running_row(worker_pid=None, worker_start_ticks=None, worker_boot_id=None, heartbeat_at=None)
+        reaped = backup.reap_abandoned_restores()
+        self.assertEqual([r["id"] for r in reaped], [restore_id])
+        last = backup.last_restore()
+        self.assertEqual(last["status"], "interrupted")
+        self.assertIn("no worker identity recorded", last["message"])
+
+    def test_reap_cleans_staging_but_preserves_archive_and_safety_backup(self) -> None:
+        dead_pid = self._spawn_and_kill()
+        staging_subdir = backup.STAGING_DIR / "tmpabandoned123"
+        (staging_subdir / "extract").mkdir(parents=True)
+        (staging_subdir / "extract" / "leftover.db").write_bytes(b"partial extract")
+        source_archive = backup.BACKUP_DIR / "source-archive.tar.gz"
+        source_archive.write_bytes(b"the original uploaded archive")
+        safety_backup = backup.BACKUP_DIR / "pre-restore-safety.tar.gz"
+        safety_backup.write_bytes(b"the pre-restore safety net")
+        restore_id = self._insert_running_row(
+            worker_pid=dead_pid, worker_start_ticks=1,
+            backup_path=str(source_archive), staging_dir=str(staging_subdir),
+        )
+        with closing(backup.connect()) as conn:
+            conn.execute("UPDATE restore_history SET pre_restore_backup_path=? WHERE id=?", (str(safety_backup), restore_id))
+            conn.commit()
+        reaped = backup.reap_abandoned_restores()
+        self.assertEqual(reaped[0]["staging_cleaned"], True)
+        self.assertFalse(staging_subdir.exists())
+        self.assertTrue(source_archive.exists())
+        self.assertTrue(safety_backup.exists())
+
+    def test_cleanup_abandoned_staging_refuses_path_outside_staging_dir(self) -> None:
+        canary_dir = backup.BACKUP_DIR / "not-staging"
+        canary_dir.mkdir()
+        (canary_dir / "must-survive.txt").write_text("do not delete me")
+        cleaned = backup._cleanup_abandoned_staging(str(canary_dir))
+        self.assertFalse(cleaned)
+        self.assertTrue((canary_dir / "must-survive.txt").exists())
+        # STAGING_DIR itself must also never be the thing removed.
+        cleaned_root = backup._cleanup_abandoned_staging(str(backup.STAGING_DIR))
+        self.assertFalse(cleaned_root)
+        self.assertTrue(backup.STAGING_DIR.exists())
+
+    def test_cleanup_abandoned_staging_handles_missing_and_empty_path(self) -> None:
+        self.assertFalse(backup._cleanup_abandoned_staging(None))
+        self.assertFalse(backup._cleanup_abandoned_staging(""))
+        self.assertFalse(backup._cleanup_abandoned_staging(str(backup.STAGING_DIR / "never-existed")))
+
+    def test_restore_backup_records_worker_identity_and_reaches_completed_phase(self) -> None:
+        path = self._make_backup_helper()
+        with mock.patch.object(backup, "run", self.fake_run), mock.patch.object(backup, "resolves", return_value=True), \
+                mock.patch.object(backup, "_wait_active", return_value=True), mock.patch.object(backup, "_wait_inactive", return_value=True):
+            backup.restore_backup(path, None, dict.fromkeys(backup.COMPONENT_KEYS, True))
+        last = backup.last_restore()
+        self.assertEqual(last["status"], "deployed")
+        self.assertEqual(last["phase"], "completed")
+        self.assertEqual(last["worker_pid"], os.getpid())
+        self.assertIsNone(last["staging_dir"])
+        self.assertIsNotNone(last["heartbeat_at"])
+
+    def test_restore_backup_resumes_paused_analytics_collector_even_on_failure(self) -> None:
+        # analytics_history must actually be in the backup's own manifest
+        # for the pause/resume path to engage at all -- COMPONENT_DEFAULTS
+        # has it off, so _make_backup_helper()'s default backup wouldn't do.
+        with mock.patch.object(backup, "run", self.fake_run):
+            path = backup.create_backup(dict.fromkeys(backup.COMPONENT_KEYS, True))
+        os.environ["ALDERPOINTDNS_TEST_FORCE_RESTORE_FAIL"] = "1"
+        stop_start_calls = []
+
+        def tracking_run(command, check=True, input_text=None, env=None):
+            if command[:2] == ["systemctl", "stop"] or command[:2] == ["systemctl", "restart"]:
+                stop_start_calls.append(tuple(command[1:3]))
+            return self.fake_run(command, check=check, input_text=input_text, env=env)
+
+        try:
+            with mock.patch.object(backup, "run", tracking_run), mock.patch.object(backup, "resolves", return_value=True), \
+                    mock.patch.object(backup, "_wait_active", return_value=True), mock.patch.object(backup, "_wait_inactive", return_value=True):
+                with self.assertRaises(RuntimeError):
+                    backup.restore_backup(path, None, dict.fromkeys(backup.COMPONENT_KEYS, True))
+        finally:
+            del os.environ["ALDERPOINTDNS_TEST_FORCE_RESTORE_FAIL"]
+        self.assertIn(("stop", "alderpointdns-analytics"), stop_start_calls)
+        self.assertIn(("restart", "alderpointdns-analytics"), stop_start_calls)
+
+    def test_chunked_merge_requires_confirmed_stop_not_just_a_request(self) -> None:
+        # allow_chunking=True must only ever be passed once the caller has
+        # *confirmed* (not merely requested) that nothing else can write to
+        # these tables -- see _merge_database's docstring. This doesn't
+        # re-run the full concurrency stress test (that lives in the
+        # profiling harness, not the unit suite), just pins the contract:
+        # restore_backup() never passes allow_chunking=True without having
+        # called _wait_inactive() first and observed True.
+        path = self._make_backup_helper()
+        seen = {}
+        real_merge = backup._merge_database
+
+        def spy_merge(staged_db, components, progress_cb=None, allow_chunking=False):
+            seen["allow_chunking"] = allow_chunking
+            return real_merge(staged_db, components, progress_cb=progress_cb, allow_chunking=allow_chunking)
+
+        with mock.patch.object(backup, "run", self.fake_run), mock.patch.object(backup, "resolves", return_value=True), \
+                mock.patch.object(backup, "_wait_active", return_value=True), mock.patch.object(backup, "_wait_inactive", return_value=False), \
+                mock.patch.object(backup, "_merge_database", spy_merge):
+            backup.restore_backup(path, None, dict.fromkeys(backup.COMPONENT_KEYS, True))
+        self.assertFalse(seen["allow_chunking"])  # _wait_inactive returned False above -> must not chunk
+
+    def _make_backup_helper(self) -> Path:
+        with mock.patch.object(backup, "run", self.fake_run):
+            return backup.create_backup(backup.validate_components(None))
+
+
 class _ZeroFile:
     """File-like object that yields `size` zero bytes without materializing
     them all in memory at once -- used to build a compressed-archive-bomb

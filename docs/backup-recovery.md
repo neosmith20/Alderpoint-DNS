@@ -75,6 +75,117 @@ Restore workflow:
 7. DNS health checks run.
 8. Failure triggers rollback to the safety backup.
 
+### Restore lifecycle: phases, heartbeat, and abandoned-restore recovery
+
+A restore records its progress durably in `restore_history` as it moves
+through phases (`validating` -> `extracting` -> `pre_restore_backup` ->
+`restoring_configuration` -> `restoring_analytics`/`restoring_database` ->
+`validating_database` -> `restarting_services` -> `postcheck` -> `cleanup`
+-> `completed`/`failed`), each with a `heartbeat_at` timestamp and, for the
+large analytics-history table, `progress_current`/`progress_total` row
+counts updated between committed chunks (not per-row).
+
+The row also records the exact worker that's doing the work: PID, that
+PID's process-start time (guards against PID reuse), and the host's boot
+ID (guards against a reboot). On application startup, and every time
+Backup & Restore status is fetched, `reap_abandoned_restores()` checks
+every `status='running'` row against this identity. A restore is only ever
+reaped -- marked `interrupted`, `finished_at` set, a diagnostic message
+recorded, its staging directory cleaned up -- once its recorded worker can
+no longer be found alive. Elapsed time alone never triggers this: a
+genuinely long-running restore whose worker is still alive is left
+running no matter how long it's been, by design (`heartbeat_at` age is
+surfaced to the UI as "may be stuck" only, never used to fail a restore
+outright). Cleanup only ever removes the specific staging subdirectory
+recorded for that restore, and refuses to act on anything that isn't
+strictly inside `STAGING_DIR` -- the uploaded archive and the pre-restore
+safety backup (both in `BACKUP_DIR`) are never touched by it.
+
+### Large analytics restore: what was actually slow, and the fix
+
+An earlier disposable-VM validation pass hit a ~296 MiB / 2.8M-row
+Analytics History restore that ran for **over 10 hours** without ever
+finishing, on a severely memory-constrained (2 GiB RAM) sandbox VM, and
+was eventually terminated externally with the restore's own state stuck
+at `status='running'` forever -- the exact scenario the lifecycle tracking
+above now detects and recovers from automatically.
+
+Forensic recovery of that VM's disk (see the incident notes) plus direct
+profiling of the real `_merge_database()` merge code against synthetic
+2.8M-row data on comparable hardware established, with evidence rather
+than assumption:
+
+- The merge itself (`ATTACH` + `INSERT INTO ... SELECT` from the archived
+  copy) is **not** algorithmically slow: `EXPLAIN QUERY PLAN` shows a
+  plain table scan (no missing-index lookups), and profiling measured
+  roughly 18,000-40,000+ rows/sec depending on commit strategy -- a
+  2.8M-row table merges in well under three minutes on unconstrained
+  hardware.
+- Deliberately constraining the same operation to a 200 MiB memory
+  cgroup (with swap available) reproduced a dramatic, multi-hundred-times
+  slowdown -- still incomplete and eventually OOM-killed after nearly six
+  minutes, versus ~67 seconds unconstrained for the exact same merge. This
+  is strong, directly-reproduced evidence that **severe memory/swap
+  pressure in that specific sandbox, not a defect in the merge algorithm,
+  was the dominant real-world cause** of the multi-hour hang.
+- Separately, and confirmed by the forensic VM's own logs (a live
+  `sqlite3.OperationalError: database is locked` from the analytics
+  collector's poll thread), the restore's SQLite write transaction and the
+  live analytics collector's own writer were racing for the same file's
+  single write lock.
+
+Two changes follow directly from that evidence:
+
+1. **The analytics collector is now explicitly paused** (`systemctl stop
+   alderpointdns-analytics`) before an analytics-history merge begins, and
+   restarted afterward unconditionally (success, failure, or an exception
+   during rollback) -- eliminating the write-lock race at its source
+   instead of leaving it to `busy_timeout` retries.
+2. **Large tables are copied in committed chunks** (200,000 rows per
+   chunk, by primary-key range) instead of one multi-hour uncommitted
+   transaction, so heartbeat/progress is durably visible to another
+   connection (the web UI, or a startup abandoned-restore check) while a
+   huge restore is still running. This is gated behind confirmation --
+   not merely a request -- that the analytics collector actually stopped
+   (`_wait_inactive()`): a competing-writer stress test reproduced a real
+   `UNIQUE constraint` / `database is locked` failure when chunked commits
+   were allowed to interleave with an active concurrent writer, which is
+   exactly why that confirmation is mandatory rather than assumed. If the
+   collector can't be confirmed stopped, the merge falls back to the
+   original one-shot atomic path for that table -- slower to observe,
+   never wrong.
+3. A `PRAGMA quick_check` now runs against the live database immediately
+   after a database-touching merge, before services are restarted --
+   failing (and rolling back) a restore whose merge somehow left the
+   database inconsistent, rather than only ever being checked
+   after the fact by an administrator.
+
+Validated locally against the real `restore_backup()` code path end to end
+(this engineering host has 3.8 GiB total RAM -- not enough to spin up the
+4-8 GiB disposable VM this would ideally be validated in, so this is a
+same-host, no-mocked-merge-logic run instead; see the incident notes for
+that caveat spelled out explicitly):
+
+- A ~2.8M-row / 75 MiB-compressed synthetic analytics restore (smaller
+  compression ratio than the original real-world 296 MiB, since synthetic
+  domains/clients compress better than organic traffic, but the same row
+  count) completed in seconds, not hours; destination `query_events` count
+  matched the archived source count exactly (2,800,001 = 2,800,001);
+  `PRAGMA quick_check` returned `ok`; `user_auth_data` (admins table) and
+  other requested components restored correctly; the staging directory was
+  fully cleaned up; `restore_history` recorded the real worker PID and
+  reached `phase='completed'`.
+- A second run intentionally `SIGKILL`ed the restore process while it was
+  actively mid-`restoring_analytics` (progress `0/1500001` at kill time, a
+  1.5M-row archive): the very next status read (no manual intervention)
+  found it already reaped -- `status='interrupted'`, `finished_at` set, a
+  message naming the dead PID, its last phase/component, and last
+  heartbeat -- staging cleaned up, and the source archive left untouched.
+- named/dnsdist/DNS-resolution/web-UI health were **not** exercised by
+  this local run (this host has neither daemon installed) -- those need
+  the real disposable-VM environment; this only proves the SQLite
+  merge/lifecycle logic itself, not full-system health after a restore.
+
 Emergency recovery:
 
 - DNS should continue through BIND/dnsdist even if the web app is down.

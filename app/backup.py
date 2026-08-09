@@ -259,6 +259,186 @@ def harden_backup_file_permissions(path: Path) -> None:
     os.chmod(path, 0o640)
 
 
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {row["name"] if isinstance(row, sqlite3.Row) else row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        conn.execute(f'ALTER TABLE {table} ADD COLUMN "{column}" {definition}')
+
+
+# ---------------------------------------------------------------------------
+# Restore worker identity / heartbeat
+#
+# A restore that dies (killed process, host reboot, OOM) must never leave its
+# restore_history row stuck at status='running' forever -- that's exactly
+# what happened to the real 296.47 MiB / 2.8M-row restore this hardening
+# responds to (see docs/backup-recovery.md and the forensic recovery notes):
+# its row sat at status='running', finished_at=NULL, indefinitely, because
+# nothing ever recorded who was supposed to be working on it or gave later
+# code a way to tell "still going" from "abandoned".
+#
+# The authoritative signal is worker identity, not elapsed time: a
+# (pid, process-start-time, boot id) triple recorded when the restore begins.
+# A restore is only ever *reaped* when that exact process can no longer be
+# found alive -- a wall-clock/heartbeat-age check alone is deliberately never
+# sufficient to fail a restore, so a legitimately huge, slow-but-progressing
+# restore is never killed just for taking a long time. heartbeat_at is
+# recorded for observability (surfacing "no progress in N minutes, worker
+# still alive" to an operator) but is not, by itself, a failure trigger.
+STALE_HEARTBEAT_SECONDS = 300  # informational threshold only; see above
+
+
+def _current_boot_id() -> str:
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        return ""
+
+
+def _process_start_ticks(pid: int) -> int | None:
+    """Field 22 (starttime, in clock ticks since boot) of /proc/<pid>/stat --
+    stable identity for a PID even across reuse, since a process's starttime
+    can't be forged or coincide with another process's by chance the way a
+    bare PID can once the original exits and the number is recycled."""
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    # comm (arg 2) is parenthesized and may itself contain spaces/parens;
+    # split on the *last* ')' to get past it reliably.
+    rest = raw.rsplit(")", 1)[-1].split()
+    try:
+        return int(rest[19])  # index 19 of the post-comm fields == stat field 22
+    except (IndexError, ValueError):
+        return None
+
+
+def _worker_identity() -> tuple[int, int | None, str]:
+    pid = os.getpid()
+    return pid, _process_start_ticks(pid), _current_boot_id()
+
+
+def _worker_alive(pid: int | None, start_ticks: int | None, boot_id: str | None) -> bool:
+    """True only if `pid` is (still) the exact process that recorded this
+    identity -- not merely if some process with that number happens to
+    exist. A missing/empty boot_id or pid (rows from before this migration,
+    or a host that's since rebooted) is never considered alive."""
+    if not pid or pid <= 0 or not boot_id or boot_id != _current_boot_id():
+        return False
+    current_ticks = _process_start_ticks(pid)
+    if current_ticks is None:
+        return False
+    if start_ticks is not None and current_ticks != start_ticks:
+        return False
+    return True
+
+
+def _touch_restore(
+    db: sqlite3.Connection,
+    restore_id: int,
+    *,
+    phase: str | None = None,
+    detail: str | None = None,
+    current: int | None = None,
+    total: int | None = None,
+    staging_dir: str | None = None,
+) -> None:
+    """Records a heartbeat plus (optionally) phase/progress/staging-dir for
+    a running restore. Called at phase transitions and at bounded intervals
+    within long-running phases -- never per-row -- so this stays cheap even
+    across a multi-million-row analytics restore."""
+    sets = ["heartbeat_at=?"]
+    params: list[Any] = [now()]
+    if phase is not None:
+        sets.append("phase=?")
+        params.append(phase)
+    if detail is not None:
+        sets.append("phase_detail=?")
+        params.append(detail)
+    if current is not None:
+        sets.append("progress_current=?")
+        params.append(current)
+    if total is not None:
+        sets.append("progress_total=?")
+        params.append(total)
+    if staging_dir is not None:
+        sets.append("staging_dir=?")
+        params.append(staging_dir)
+    params.append(restore_id)
+    db.execute(f"UPDATE restore_history SET {', '.join(sets)} WHERE id=?", params)
+    db.commit()
+
+
+def reap_abandoned_restores(conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
+    """Finds restore_history rows stuck at status='running' whose recorded
+    worker is provably no longer alive (process gone, PID reused, or a
+    reboot happened since it started) and marks them 'interrupted' with a
+    diagnostic message and finished_at set, then best-effort cleans up their
+    staging directory. Called on application startup and whenever Backup &
+    Restore status is fetched (backup.last_restore()), so an abandoned
+    restore is caught promptly without needing an operator to notice.
+
+    Deliberately does NOT act on any row whose worker is still alive, no
+    matter how long it's been running -- see the worker-identity docstring
+    above."""
+    close = conn is None
+    db = conn or connect()
+    init_db(db)
+    reaped: list[dict[str, Any]] = []
+    try:
+        rows = db.execute("SELECT * FROM restore_history WHERE status='running'").fetchall()
+        for row in rows:
+            if _worker_alive(row["worker_pid"], row["worker_start_ticks"], row["worker_boot_id"]):
+                continue
+            worker_desc = (
+                f"pid {row['worker_pid']} (started {row['started_at']})"
+                if row["worker_pid"]
+                else "no worker identity recorded (pre-dates lifecycle tracking or was never set)"
+            )
+            message = (
+                f"restore worker disappeared -- {worker_desc} is no longer running; "
+                f"marked interrupted during {'startup' if close else 'status'} check at {now()}. "
+                f"Last known phase: {row['phase'] or 'unknown'}"
+                + (f" ({row['phase_detail']})" if row["phase_detail"] else "")
+                + f". Last heartbeat: {row['heartbeat_at'] or 'never recorded'}."
+            )
+            db.execute(
+                "UPDATE restore_history SET status='interrupted', finished_at=?, message=? WHERE id=?",
+                (now(), message, row["id"]),
+            )
+            cleaned = _cleanup_abandoned_staging(row["staging_dir"])
+            reaped.append({"id": row["id"], "message": message, "staging_cleaned": cleaned})
+        db.commit()
+    finally:
+        if close:
+            db.close()
+    return reaped
+
+
+def _cleanup_abandoned_staging(staging_dir: str | None) -> bool:
+    """Removes a dead restore's extraction staging directory. Refuses to
+    touch anything that isn't a direct child of STAGING_DIR -- never the
+    uploaded/source archive (BACKUP_DIR), never a pre-restore safety backup
+    (also BACKUP_DIR), never STAGING_DIR itself, and never any path outside
+    STAGING_DIR at all -- so a corrupted/malicious staging_dir value can
+    never turn this into an arbitrary-path delete."""
+    if not staging_dir:
+        return False
+    try:
+        candidate = Path(staging_dir).resolve()
+        staging_root = STAGING_DIR.resolve()
+    except OSError:
+        return False
+    if candidate == staging_root or staging_root not in candidate.parents:
+        return False
+    if not candidate.exists():
+        return False
+    try:
+        shutil.rmtree(candidate)
+        return True
+    except OSError:
+        return False
+
+
 def init_db(conn: sqlite3.Connection | None = None) -> None:
     close = conn is None
     db = conn or connect()
@@ -303,6 +483,25 @@ def init_db(conn: sqlite3.Connection | None = None) -> None:
             );
             """
         )
+        # restore_history lifecycle-tracking columns, added after the table
+        # already existed in the field -- ALTER TABLE, not part of the
+        # CREATE TABLE IF NOT EXISTS above, so upgrading installs migrate in
+        # place rather than silently keeping the old, heartbeat-less shape.
+        # See restore_backup()/reap_abandoned_restores() for how these are
+        # used to tell "still working" apart from "worker disappeared"
+        # without relying on a single wall-clock timeout.
+        for column, definition in (
+            ("worker_pid", "INTEGER"),
+            ("worker_start_ticks", "INTEGER"),
+            ("worker_boot_id", "TEXT"),
+            ("heartbeat_at", "TEXT"),
+            ("phase", "TEXT NOT NULL DEFAULT 'validating'"),
+            ("phase_detail", "TEXT NOT NULL DEFAULT ''"),
+            ("progress_current", "INTEGER"),
+            ("progress_total", "INTEGER"),
+            ("staging_dir", "TEXT"),
+        ):
+            _ensure_column(db, "restore_history", column, definition)
         db.executemany(
             "INSERT OR IGNORE INTO backup_settings(key, value) VALUES (?, ?)",
             list(SETTINGS_DEFAULTS.items()),
@@ -1309,14 +1508,66 @@ def _rollback_paths(backups: list[tuple[Path, Path]]) -> None:
             continue
 
 
-def _merge_database(staged_db: Path, components: dict[str, bool]) -> list[str]:
+# Row-count threshold above which a table is copied in committed chunks
+# (with heartbeat/progress between them) instead of one uncommitted
+# DELETE+INSERT. Profiling against a synthetic 2.8M-row query_events table
+# (docs/backup-recovery.md "Large analytics restore" section) showed the
+# straight INSERT...SELECT itself is fast (tens of thousands of rows/sec,
+# unindexed-lookup-free -- EXPLAIN QUERY PLAN shows a plain table scan); the
+# real forensic failure mode was a single, multi-hour, *never-committed*
+# transaction with no observable progress and no way to tell "still working"
+# from "abandoned" if the process died. Chunking trades a small amount of
+# cross-table atomicity (each chunk commits independently; the existing
+# exception handler's compensating re-merge from the pre-restore safety
+# backup already tolerates a partially-merged live db) for real, durable
+# progress a UI or an abandoned-restore check can actually see mid-restore.
+CHUNK_ROW_THRESHOLD = 50_000
+CHUNK_SIZE = 200_000
+
+
+def _integer_pk_column(live_conn: sqlite3.Connection, table: str) -> str | None:
+    """The single INTEGER PRIMARY KEY column (a rowid alias), if any --
+    chunking by contiguous id ranges only works for such a column, since
+    it's the one column SQLite can range-scan via its own rowid btree
+    without a separate index and without OFFSET's linear skip cost."""
+    pk_cols = [row["name"] for row in live_conn.execute(f"PRAGMA table_info({table})") if row["pk"] == 1]
+    if len(pk_cols) != 1:
+        return None
+    col = pk_cols[0]
+    col_type = next(row["type"] for row in live_conn.execute(f"PRAGMA table_info({table})") if row["name"] == col)
+    return col if col_type.upper() in ("INTEGER", "INT") else None
+
+
+def _merge_database(
+    staged_db: Path,
+    components: dict[str, bool],
+    progress_cb: Callable[[str, str, int, int], None] | None = None,
+    allow_chunking: bool = False,
+) -> list[str]:
     """Merge selected tables from a backed-up database copy into the live
     database, table by table, via ATTACH + per-table replace. Tables mapped
     in TABLE_COMPONENT_MAP are gated only by their own specific component
     flag; every other table is gated by the broad ``sqlite_data`` flag. This
     intentionally allows restoring a single narrow table (e.g. just
     custom_rules) even when sqlite_data is off, so a restore never has to
-    touch tables an operator did not select. See the module docstring."""
+    touch tables an operator did not select. See the module docstring.
+
+    `progress_cb(phase, table, current, total)` is called before/after each
+    table (and, for large chunked tables, between chunks) so a caller can
+    surface durable heartbeat/progress -- see CHUNK_ROW_THRESHOLD above.
+
+    `allow_chunking=False` (the default) always uses one atomic
+    DELETE+INSERT per table, exactly like the pre-hardening implementation:
+    safe against any concurrent writer, but only observable/durable once
+    the *entire* table is done. Passing True switches large tables to
+    incrementally committed chunks for real mid-restore progress -- but
+    each chunk commit is a window another connection could write through,
+    so the caller MUST have already confirmed no other writer can touch
+    these tables (restore_backup() only sets this once it has verified the
+    analytics collector is actually stopped, not merely asked it to stop).
+    A stress test against a concurrent writer reproduced exactly this as a
+    UNIQUE-constraint failure before this flag existed -- see
+    docs/backup-recovery.md "Large analytics restore"."""
     if not staged_db.exists():
         return []
     merged_tables: list[str] = []
@@ -1351,12 +1602,39 @@ def _merge_database(staged_db: Path, components: dict[str, bool]) -> list[str]:
                 if not shared:
                     continue
                 column_list = ", ".join(f'"{name}"' for name in shared)
+                phase = "restoring_analytics" if gating_component == "analytics_history" else "restoring_database"
+                row_count = live_conn.execute(f"SELECT count(*) FROM backupdb.{table}").fetchone()[0]
+                pk_col = _integer_pk_column(live_conn, table)
+                if progress_cb:
+                    progress_cb(phase, table, 0, row_count)
                 live_conn.execute(f"DELETE FROM {table}")
-                live_conn.execute(f"INSERT INTO {table}({column_list}) SELECT {column_list} FROM backupdb.{table}")
+                if allow_chunking and pk_col and row_count > CHUNK_ROW_THRESHOLD:
+                    copied = 0
+                    id_range = live_conn.execute(f'SELECT min("{pk_col}"), max("{pk_col}") FROM backupdb.{table}').fetchone()
+                    lo, hi = id_range[0], id_range[1]
+                    live_conn.commit()  # commit the DELETE alone before starting committed chunks
+                    window_start = lo
+                    while window_start <= hi:
+                        window_end = min(window_start + CHUNK_SIZE - 1, hi)
+                        live_conn.execute(
+                            f'INSERT INTO {table}({column_list}) SELECT {column_list} FROM backupdb.{table} '
+                            f'WHERE "{pk_col}" BETWEEN ? AND ?',
+                            (window_start, window_end),
+                        )
+                        live_conn.commit()
+                        copied = live_conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                        if progress_cb:
+                            progress_cb(phase, table, copied, row_count)
+                        window_start = window_end + 1
+                else:
+                    live_conn.execute(f"INSERT INTO {table}({column_list}) SELECT {column_list} FROM backupdb.{table}")
+                    live_conn.commit()
+                if progress_cb:
+                    progress_cb(phase, table, row_count, row_count)
                 merged_tables.append(table)
-            live_conn.commit()
         finally:
             live_conn.execute("DETACH DATABASE backupdb")
+            live_conn.commit()
     finally:
         live_conn.close()
     return merged_tables
@@ -1366,14 +1644,23 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
     close = conn is None
     db = conn or connect()
     init_db(db)
+    # Reap anything left stuck 'running' from a previous, now-dead worker
+    # before starting a new restore -- otherwise last_restore()/the UI would
+    # keep reporting a phantom in-progress restore alongside this real one.
+    reap_abandoned_restores(db)
     components = validate_components(components)
     started = now()
+    worker_pid, worker_start_ticks, worker_boot_id = _worker_identity()
     cursor = db.execute(
-        "INSERT INTO restore_history(started_at, backup_path, components_json, status, message) VALUES (?, ?, ?, 'running', '')",
-        (started, str(path), json.dumps(components)),
+        "INSERT INTO restore_history(started_at, backup_path, components_json, status, message, worker_pid, worker_start_ticks, worker_boot_id, heartbeat_at, phase) "
+        "VALUES (?, ?, ?, 'running', '', ?, ?, ?, ?, 'validating')",
+        (started, str(path), json.dumps(components), worker_pid, worker_start_ticks, worker_boot_id, started),
     )
     restore_id = cursor.lastrowid
     db.commit()
+
+    def touch(phase: str | None = None, detail: str | None = None, current: int | None = None, total: int | None = None, staging_dir: str | None = None) -> None:
+        _touch_restore(db, restore_id, phase=phase, detail=detail, current=current, total=total, staging_dir=staging_dir)
 
     STAGING_DIR.mkdir(parents=True, exist_ok=True)
     status = "failed"
@@ -1386,9 +1673,11 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
     dnsdist_touched = False
     systemd_touched = False
     db_touched = False
+    analytics_collector_paused = False
 
     with tempfile.TemporaryDirectory(dir=str(STAGING_DIR)) as tmp:
         extract_dir = Path(tmp) / "extract"
+        touch(phase="extracting", staging_dir=tmp)
         try:
             manifest = extract_backup(path, password, extract_dir)
             fmt_version = manifest.get("backup_format_version")
@@ -1404,11 +1693,13 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
             # A pre-restore safety net: always take a full backup of the
             # current live state before changing anything, unless the
             # request explicitly targets nothing at all.
+            touch(phase="pre_restore_backup")
             try:
                 pre_restore_backup_path = create_backup(dict.fromkeys(COMPONENT_KEYS, True), password=None, conn=db)
             except Exception as exc:
                 raise BackupError(f"could not take pre-restore safety backup, aborting restore: {exc}") from None
 
+            touch(phase="restoring_configuration")
             compiled_source = extract_dir / "var/lib/alderpointdns/compiled"
             rpz_zone_label = "alderpointdns.rpz"
 
@@ -1488,13 +1779,52 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
                         _replace_path(ETC_ALDERPOINTDNS / name, staged, file_backups)
 
             staged_db = extract_dir / DB_ARCHIVE_RELPATH
-            merged_tables = _merge_database(staged_db, effective)
+            # The live analytics collector (alderpointdns-analytics.service)
+            # writes to this same SQLite file on its own schedule. Racing it
+            # against a multi-million-row analytics_history merge is exactly
+            # what produced the forensic evidence's "database is locked"
+            # error -- pause it explicitly for the duration of the merge
+            # instead of relying on busy_timeout/retry to sort contention
+            # out. Best-effort: a collector that isn't running (or fails to
+            # stop) never blocks the restore itself.
+            # Chunked, incrementally-committed large-table copies (see
+            # _merge_database's allow_chunking docstring) are only safe once
+            # we've *confirmed* the collector actually stopped -- "we asked
+            # it to" is not enough; a stress test against a still-writing
+            # concurrent connection reproduced a real UNIQUE-constraint
+            # failure from exactly this gap. If it won't stop in time, fall
+            # back to the original one-shot atomic merge for this table
+            # (slower to observe, never wrong).
+            collector_confirmed_stopped = False
+            if effective.get("analytics_history") and staged_db.exists():
+                run(["systemctl", "stop", "alderpointdns-analytics"], check=False)
+                analytics_collector_paused = True
+                collector_confirmed_stopped = _wait_inactive("alderpointdns-analytics", timeout=10)
+                if not collector_confirmed_stopped:
+                    validation_output += "warning: could not confirm alderpointdns-analytics stopped; large analytics tables restored without chunked progress\n"
+
+            def merge_progress(phase: str, table: str, current: int, total: int) -> None:
+                touch(phase=phase, detail=table, current=current, total=total)
+
+            merged_tables = _merge_database(staged_db, effective, progress_cb=merge_progress, allow_chunking=collector_confirmed_stopped)
             if merged_tables:
                 db_touched = True
 
             if os.environ.get("ALDERPOINTDNS_TEST_FORCE_RESTORE_FAIL") == "1":
                 raise RuntimeError("forced restore failure for rollback test")
 
+            if db_touched:
+                touch(phase="validating_database")
+                quick_check_conn = connect()
+                try:
+                    quick_check_result = quick_check_conn.execute("PRAGMA quick_check").fetchone()[0]
+                finally:
+                    quick_check_conn.close()
+                validation_output += f"PRAGMA quick_check: {quick_check_result}\n"
+                if quick_check_result != "ok":
+                    raise RuntimeError(f"post-restore database integrity check failed: {quick_check_result}")
+
+            touch(phase="restarting_services")
             if named_touched:
                 proc = run(["named-checkconf", "-p", "/etc/bind/named.conf"])
                 validation_output += proc.stdout
@@ -1511,10 +1841,12 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
                 run(["systemctl", "restart", "named"])
             if dnsdist_touched:
                 run(["systemctl", "restart", "dnsdist"])
-            if db_touched or systemd_touched:
+            if db_touched or systemd_touched or analytics_collector_paused:
                 run(["systemctl", "restart", "alderpointdns-analytics"], check=False)
+                analytics_collector_paused = False
                 run(["systemctl", "restart", "alderpointdns"], check=False)
 
+            touch(phase="postcheck")
             if named_touched and not _wait_active("named", timeout=20):
                 raise RuntimeError("named did not become active after restore")
             if dnsdist_touched and not _wait_active("dnsdist", timeout=20):
@@ -1527,6 +1859,7 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
             message = f"restored components: {', '.join(k for k, v in effective.items() if v)}; merged db tables: {', '.join(merged_tables) if merged_tables else 'none'}"
         except Exception as exc:
             message = str(exc)
+            touch(phase="failed", detail=message[:200])
             try:
                 _rollback_paths(file_backups)
                 if pre_restore_backup_path is not None and (merged_tables or db_touched):
@@ -1541,8 +1874,9 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
                     run(["systemctl", "restart", "named"], check=False)
                 if dnsdist_touched:
                     run(["systemctl", "restart", "dnsdist"], check=False)
-                if db_touched or systemd_touched:
+                if db_touched or systemd_touched or analytics_collector_paused:
                     run(["systemctl", "restart", "alderpointdns-analytics"], check=False)
+                    analytics_collector_paused = False
                     run(["systemctl", "restart", "alderpointdns"], check=False)
                 if resolves("cloudflare.com", "53"):
                     status = "rolled_back"
@@ -1553,9 +1887,23 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
                 status = "rollback_failed"
                 message = f"{message}; rollback failed: {rollback_exc}"
         finally:
+            # Belt-and-suspenders: if anything above left the collector
+            # paused without reaching a restart call (an exception inside
+            # the rollback's own try block, for instance), never leave it
+            # stopped -- a restore's failure must not silently disable
+            # ongoing analytics collection.
+            if analytics_collector_paused:
+                run(["systemctl", "restart", "alderpointdns-analytics"], check=False)
+            touch(phase="cleanup")
+            # tempfile.TemporaryDirectory is about to remove `tmp` on its own
+            # __exit__ (we're still inside its `with` block); clear
+            # staging_dir now so a later abandoned-restore sweep never tries
+            # to rmtree a path that's already gone (harmless either way --
+            # _cleanup_abandoned_staging() no-ops on a missing path -- but
+            # this keeps the row accurate for anyone reading it directly).
             db.execute(
-                "UPDATE restore_history SET finished_at=?, status=?, message=?, pre_restore_backup_path=?, validation_output=? WHERE id=?",
-                (now(), status, message, str(pre_restore_backup_path) if pre_restore_backup_path else None, validation_output[-4000:], restore_id),
+                "UPDATE restore_history SET finished_at=?, status=?, message=?, pre_restore_backup_path=?, validation_output=?, phase=?, staging_dir=NULL WHERE id=?",
+                (now(), status, message, str(pre_restore_backup_path) if pre_restore_backup_path else None, validation_output[-4000:], "completed" if status in ("deployed", "unchanged") else "failed", restore_id),
             )
             db.commit()
             _fix_backup_dir_permissions()
@@ -1576,6 +1924,21 @@ def _wait_active(service: str, timeout: int = 15) -> bool:
     return run(["systemctl", "is-active", service], check=False).stdout.strip() == "active"
 
 
+def _wait_inactive(service: str, timeout: int = 10) -> bool:
+    """True only once systemctl confirms `service` is fully stopped -- used
+    to gate _merge_database's chunked/incrementally-committed path, which
+    is only safe with no other writer touching the same tables. Requesting
+    a stop is not the same as confirming it happened (the unit could still
+    be mid-`ExecStop`, or the request itself could silently no-op)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = run(["systemctl", "is-active", service], check=False)
+        if result.stdout.strip() in ("inactive", "failed"):
+            return True
+        time.sleep(0.5)
+    return run(["systemctl", "is-active", service], check=False).stdout.strip() in ("inactive", "failed")
+
+
 def last_backup(conn: sqlite3.Connection | None = None) -> dict[str, Any] | None:
     close = conn is None
     db = conn or connect()
@@ -1593,8 +1956,24 @@ def last_restore(conn: sqlite3.Connection | None = None) -> dict[str, Any] | Non
     db = conn or connect()
     try:
         init_db(db)
+        # Catch an abandoned restore the moment status is viewed, not only
+        # at the next application startup -- see reap_abandoned_restores().
+        reap_abandoned_restores(db)
         row = db.execute("SELECT * FROM restore_history ORDER BY id DESC LIMIT 1").fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        result = dict(row)
+        if result.get("status") == "running":
+            heartbeat_at = result.get("heartbeat_at")
+            if heartbeat_at:
+                try:
+                    age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(heartbeat_at)).total_seconds()
+                    result["heartbeat_stale_suspected"] = age > STALE_HEARTBEAT_SECONDS
+                except ValueError:
+                    result["heartbeat_stale_suspected"] = False
+            else:
+                result["heartbeat_stale_suspected"] = False
+        return result
     finally:
         if close:
             db.close()
