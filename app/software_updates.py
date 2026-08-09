@@ -96,10 +96,12 @@ UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024
 
 CREDENTIAL_FILE = Path("/etc/alderpointdns/software-updates.env")
 
-# The project's own repository. Not a release tag, beta number, or asset
-# filename/URL -- those are always discovered from the GitHub API response,
-# never hardcoded. Overridable via software_update_settings for forks/dev.
-DEFAULT_GITHUB_REPO = "alderpointdns/alderpointdns"
+# The project's own canonical repository. Not a release tag, beta number, or
+# asset filename/URL -- those are always discovered from the GitHub API
+# response, never hardcoded. Overridable via software_update_settings for
+# forks/dev. Matches the repository the README's Quick Start install command
+# downloads from -- see docs/software-updates.md.
+DEFAULT_GITHUB_REPO = "neosmith20/Alderpoint-DNS"
 GITHUB_API_BASE = "https://api.github.com"
 
 CONNECT_TIMEOUT = 20

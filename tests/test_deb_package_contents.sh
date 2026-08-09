@@ -252,4 +252,36 @@ grep -q '/var/log/alderpointdns/compiler-errors.log' "$ROOT/data/etc/logrotate.d
 grep -q 'create 0600 root root' "$ROOT/data/etc/logrotate.d/alderpointdns" || \
   fail "logrotate config does not recreate the CLI error log at a root-only 0600 -- a rotation cycle must never widen it to group/world-readable"
 
+# --- development-only content must never ship in the installed product ---
+# The confirmed defect: the project's complete pytest/shell test suite
+# (including fixtures) and Dex's v1 performance benchmark harness/writeup
+# were both landing in the built package because build-deb.sh's tar file
+# list simply named whole top-level directories (tests, scripts, docs)
+# without excluding their development-only contents.
+SHIPPED_TESTS_DIR="$ROOT/data/opt/alderpointdns/tests"
+test -d "$SHIPPED_TESTS_DIR" || fail "opt/alderpointdns/tests directory missing entirely from built package"
+SHIPPED_TEST_FILES="$(find "$SHIPPED_TESTS_DIR" -mindepth 1 | sed "s|^$SHIPPED_TESTS_DIR/||" | sort)"
+EXPECTED_TEST_FILES="test_dnsdist_frontend.sh"
+[ "$SHIPPED_TEST_FILES" = "$EXPECTED_TEST_FILES" ] || \
+  fail "built package ships more than the one required file under opt/alderpointdns/tests -- the full test suite must not be shipped; found: $SHIPPED_TEST_FILES"
+# The one file that IS shipped there is a real runtime dependency, not an
+# oversight -- app/webapp.py's DNS Settings page checks for its presence
+# (never its content, never executes it) to render a "client address
+# preservation verified" indicator; confirm it's actually there rather
+# than silently regressing that indicator on every real install.
+test -f "$SHIPPED_TESTS_DIR/test_dnsdist_frontend.sh" || \
+  fail "built package is missing opt/alderpointdns/tests/test_dnsdist_frontend.sh, which app/webapp.py's DNS Settings page checks for at runtime"
+test -f "$ROOT/data/opt/alderpointdns/scripts/benchmark_filtering.py" && \
+  fail "built package ships the development-only benchmark_filtering.py script"
+test -f "$ROOT/data/opt/alderpointdns/docs/performance-baseline.md" && \
+  fail "built package ships the development-only performance-baseline.md writeup"
+test -d "$ROOT/data/opt/alderpointdns/benchmarks" && \
+  fail "built package ships the benchmarks/ directory (raw profiling result data)"
+# Sanity check the exclusions above didn't also swallow real runtime
+# content: the actual application code, a real doc, and a real packaging
+# script must still be present.
+test -f "$ROOT/data/opt/alderpointdns/app/webapp.py" || fail "built package is missing app/webapp.py"
+test -f "$ROOT/data/opt/alderpointdns/docs/known-limitations.md" || fail "built package is missing docs/known-limitations.md"
+test -f "$ROOT/data/opt/alderpointdns/scripts/install.sh" || fail "built package is missing scripts/install.sh"
+
 echo "deb package content tests passed"

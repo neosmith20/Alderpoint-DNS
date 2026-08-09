@@ -2,9 +2,12 @@
 
 All notable changes to Alderpoint DNS are documented in this file.
 
-## v1.0.0 (2026-08-09)
+## v1.0.0 (unreleased)
 
-The first stable release. Everything below this line, back through
+The first stable release. The date above is set to the actual publication
+date as part of the final release-publication step, not before -- see
+`docs/release-notes.md` for the equivalent user-facing summary. Everything
+below this line, back through
 `v0.4.0-beta.1`, was beta-cycle work; interfaces, on-disk formats, and
 configuration from this release forward follow normal stable-release
 compatibility expectations instead of beta-era churn.

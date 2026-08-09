@@ -4,7 +4,7 @@ These notes describe what changed in each release. See
 `docs/known-limitations.md` for the current honest state of the project.
 Everything below `v1.0.0` was a beta-cycle build.
 
-## v1.0.0
+## v1.0.0 (unreleased)
 
 Alderpoint DNS's first stable release. Highlights since the beta.4/beta.5
 line, by area (see `CHANGELOG.md` for the full detailed log):

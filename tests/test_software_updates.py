@@ -685,6 +685,15 @@ class SettingsTest(SoftwareUpdatesTestBase):
         self.assertEqual(cfg["unattended_install_enabled"], "0")
         self.assertEqual(cfg["channel"], "stable")
 
+    def test_default_github_repo_is_the_canonical_repository(self) -> None:
+        """Online discovery must default to the real, canonical repository
+        -- not a placeholder -- so a fresh install's automatic checking
+        works out of the box against the actual project once it's public,
+        and a private-repo credential (if configured) authenticates against
+        the right repo."""
+        self.assertEqual(su.DEFAULT_GITHUB_REPO, "neosmith20/Alderpoint-DNS")
+        self.assertEqual(su.settings()["github_repo"], "neosmith20/Alderpoint-DNS")
+
     def test_update_settings_validates_channel(self) -> None:
         with self.assertRaises(su.SoftwareUpdateError):
             su.update_settings({"channel": "nightly"})
