@@ -244,7 +244,11 @@ class ClientAddressPreservationStatusTest(unittest.TestCase):
     tests/test_dnsdist_frontend.sh presence-on-disk check: the "Client
     Address Test" indicator on /dns-settings must be driven entirely by
     production-owned signals (dnsdist.conf content + a live socket check),
-    never by whether a file happens to exist under tests/."""
+    never by whether a file happens to exist under tests/, and must never
+    claim to have proven client-address preservation itself -- only that
+    PROXYv2 forwarding is configured and its backend listener is up. The
+    behavioral proof stays the exclusive job of the separate shell
+    acceptance suite."""
 
     def test_not_configured_when_dnsdist_conf_lacks_proxy_backend(self) -> None:
         with mock.patch.object(webapp, "proxy_backend_enabled", return_value=False), \
@@ -252,23 +256,23 @@ class ClientAddressPreservationStatusTest(unittest.TestCase):
             status = webapp.client_address_preservation_status()
         self.assertEqual(status["state"], "Not configured")
 
-    def test_passed_when_configured_and_backend_socket_listening(self) -> None:
+    def test_configured_when_configured_and_backend_socket_listening(self) -> None:
         with mock.patch.object(webapp, "proxy_backend_enabled", return_value=True), \
              mock.patch.object(webapp, "_ss_listener_dump", return_value=(0, SS_PROXY_BACKEND_UP)):
             status = webapp.client_address_preservation_status()
-        self.assertEqual(status["state"], "Passed")
+        self.assertEqual(status["state"], "Configured")
 
-    def test_failed_when_configured_but_backend_socket_not_fully_listening(self) -> None:
+    def test_listener_unavailable_when_configured_but_backend_socket_not_fully_listening(self) -> None:
         with mock.patch.object(webapp, "proxy_backend_enabled", return_value=True), \
              mock.patch.object(webapp, "_ss_listener_dump", return_value=(0, SS_PROXY_BACKEND_TCP_ONLY)):
             status = webapp.client_address_preservation_status()
-        self.assertEqual(status["state"], "Failed")
+        self.assertEqual(status["state"], "Listener unavailable")
 
-    def test_failed_when_configured_but_backend_socket_entirely_down(self) -> None:
+    def test_listener_unavailable_when_configured_but_backend_socket_entirely_down(self) -> None:
         with mock.patch.object(webapp, "proxy_backend_enabled", return_value=True), \
              mock.patch.object(webapp, "_ss_listener_dump", return_value=(0, "")):
             status = webapp.client_address_preservation_status()
-        self.assertEqual(status["state"], "Failed")
+        self.assertEqual(status["state"], "Listener unavailable")
 
     def test_never_renders_a_filesystem_path(self) -> None:
         with mock.patch.object(webapp, "proxy_backend_enabled", return_value=True), \
@@ -276,6 +280,21 @@ class ClientAddressPreservationStatusTest(unittest.TestCase):
             status = webapp.client_address_preservation_status()
         self.assertNotIn("tests/", status["detail"])
         self.assertNotIn(".sh", status["detail"])
+
+    def test_no_state_claims_pass_fail_verification(self) -> None:
+        # The indicator must never phrase its state as though it had run and
+        # passed/failed a behavioral test -- it only reports configuration
+        # and listener liveness, never a verification verdict.
+        banned = {"Passed", "Failed"}
+        for proxy_enabled, ss_output in (
+            (False, SS_PROXY_BACKEND_UP),
+            (True, SS_PROXY_BACKEND_UP),
+            (True, SS_PROXY_BACKEND_TCP_ONLY),
+        ):
+            with mock.patch.object(webapp, "proxy_backend_enabled", return_value=proxy_enabled), \
+                 mock.patch.object(webapp, "_ss_listener_dump", return_value=(0, ss_output)):
+                status = webapp.client_address_preservation_status()
+            self.assertNotIn(status["state"], banned)
 
 
 if __name__ == "__main__":

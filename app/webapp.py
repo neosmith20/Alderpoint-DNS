@@ -650,16 +650,16 @@ PROXY_BACKEND_SOCKET = "127.0.0.1:5354"
 
 
 def client_address_preservation_status() -> dict[str, str]:
-    """Whether real client addresses are preserved end-to-end through the
-    dnsdist -> BIND PROXYv2 backend hop.
+    """Configuration/listener status for the dnsdist -> BIND PROXYv2 backend
+    hop that lets BIND log/see the real client address.
 
-    This used to be inferred from the presence-on-disk of the shell
-    acceptance test tests/test_dnsdist_frontend.sh -- a development/test
-    artifact the production package should not need to ship or depend on,
-    and one that was never actually *run* by this check to begin with (only
-    checked for existing). The replacement uses the same two production-
-    owned signals protocol_statuses() already relies on for every other
-    listener:
+    This deliberately does NOT claim to prove that a real client address has
+    actually traversed dnsdist -> PROXYv2 -> BIND -- doing that from a
+    production web request would mean firing a live self-test DNS query
+    (with a spoofed source address) on every page load, which this
+    intentionally does not do. It reports only what it can truthfully prove
+    from two production-owned signals protocol_statuses() already relies on
+    for every other listener:
 
     - proxy_backend_enabled() proves dnsdist.conf is *configured* to forward
       through the PROXYv2 backend.
@@ -667,18 +667,27 @@ def client_address_preservation_status() -> dict[str, str]:
       used elsewhere in this module) proves BIND's PROXYv2 listener is
       *actually up* right now, not just present in a config file on disk.
 
-    This does not replace the full live query exercised by the shell
-    acceptance suite (tests/test_dnsdist_frontend.sh, still run in CI/
-    pre-release testing) -- it is the always-available, dependency-free
-    runtime signal the production UI can show on every page load.
+    The full behavioral proof -- that a real client address actually
+    survives the hop -- is exercised by the separate shell acceptance suite
+    (tests/test_dnsdist_frontend.sh, still run in CI/pre-release testing,
+    unaffected by this function). This used to be inferred here too, from
+    the presence-on-disk of that same script -- a development/test artifact
+    the production package should not need to ship or depend on, and one
+    that was never actually *run* by this check to begin with (only checked
+    for existing) -- which is what motivated replacing it with the honest,
+    dependency-free configuration/listener signal below.
     """
-    detail = f"PROXYv2 backend {PROXY_BACKEND_SOCKET} (BIND, tcp+udp)"
+    detail = f"PROXYv2 forwarding configured; BIND backend listener {PROXY_BACKEND_SOCKET} (tcp+udp)"
     if not proxy_backend_enabled():
-        return {"state": "Not configured", "detail": detail}
+        return {"state": "Not configured", "detail": "PROXYv2 forwarding is not configured in dnsdist.conf"}
     listeners = listener_addresses()
     expected = [("tcp", PROXY_BACKEND_SOCKET), ("udp", PROXY_BACKEND_SOCKET)]
-    state = "Passed" if _socket_coverage(listeners, expected) == "full" else "Failed"
-    return {"state": state, "detail": detail}
+    if _socket_coverage(listeners, expected) == "full":
+        return {"state": "Configured", "detail": f"{detail} is up"}
+    return {
+        "state": "Listener unavailable",
+        "detail": f"PROXYv2 forwarding is configured, but the BIND backend listener {PROXY_BACKEND_SOCKET} (tcp+udp) is not fully up",
+    }
 
 
 # (name, capability key in encryption.dnsdist_capabilities(), enabled-flag
