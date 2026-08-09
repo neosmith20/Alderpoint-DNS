@@ -1,0 +1,3 @@
+dataset,target_domains,input_rules,unique_domains,rpz_bytes,peak_tracemalloc_mb,peak_rss_mb,custom_collect_precedence,db_schema_seed,db_write_stats,dedupe_unique_contribution,fixture_generate,named_checkzone,normalize_subtime,parse,rpz_render,rpz_write,source_read
+medium,500000,521739,385507,25443844,220.95,390.70,3.240305,0.019051,0.000592,0.086940,2.570094,2.754115,46.735533,136.291159,3.926349,0.020636,0.010331
+large,1000000,1043478,771013,50887240,442.73,755.36,6.502393,0.008810,0.000559,0.177793,5.368221,5.541180,93.687622,271.190599,7.900485,0.041762,0.012039

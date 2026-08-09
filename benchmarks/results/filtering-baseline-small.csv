@@ -1,0 +1,2 @@
+dataset,target_domains,input_rules,unique_domains,rpz_bytes,peak_tracemalloc_mb,peak_rss_mb,custom_collect_precedence,db_schema_seed,db_write_stats,dedupe_unique_contribution,fixture_generate,named_checkzone,normalize_subtime,parse,rpz_render,rpz_write,source_read
+small,100000,104349,77101,5089048,49.62,104.45,0.623302,0.017925,0.000505,0.016450,0.506146,0.596388,9.156984,26.663646,0.742533,0.004412,0.003969
