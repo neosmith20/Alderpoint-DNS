@@ -75,6 +75,8 @@ import time
 from pathlib import Path
 from typing import Any, BinaryIO, Callable
 
+from app.service_logs import sanitize as _sanitize_secrets
+
 
 DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
 BACKUP_DIR = Path("/var/lib/alderpointdns/backups")
@@ -1503,16 +1505,150 @@ def resolves(domain: str, port: str = "53") -> bool:
     return result.returncode == 0 and "status: NOERROR" in result.stdout and "\tA\t" in result.stdout
 
 
+# ---------------------------------------------------------------------------
+# Runtime ownership normalization for restored files
+#
+# `tar.extractall(..., filter="data")` (see _scan_and_extract) deliberately
+# ignores whatever uid/gid a backup archive's members claim -- trusting
+# archive-supplied numeric ownership would let a backup file dictate
+# arbitrary on-disk ownership on restore, and every extracted file instead
+# ends up owned by the extracting process itself: root:root, since restore
+# always runs as root. A backup archive's numeric ownership would not be
+# portable across appliances even if it *were* trusted: system accounts
+# like `_dnsdist`/`bind`/`alderpointdns` are created with `adduser
+# --system`, which allocates the next available UID/GID independently on
+# each install, so the same *name* can hold a different numeric ID on the
+# appliance a backup came from than on the one it's restored to.
+#
+# The pre-1.0.1 restore code mirrored whatever ownership the *staged,
+# already-extracted* file happened to have (root:root, per the above)
+# straight onto the live destination -- correct for the many restored
+# paths that genuinely are root:root (dnsdist.conf, /etc/bind/*.conf,
+# systemd units, sudoers.d/alderpointdns, compiled BIND content: none of
+# these need a second system account to read them, and BIND/systemd/sudo
+# themselves read their own config as root before dropping privileges),
+# but silently wrong for the small set of files that are intentionally
+# NOT root:root because a *different*, unprivileged system account must
+# be able to read them directly: dnsdist's TLS private key (must be
+# readable by the `_dnsdist` account dnsdist actually runs as) and
+# alderpointdns's own session/API secrets (must be readable by the
+# `alderpointdns` account the web app itself runs as). This is the exact
+# failure found on a real restore: a restored TLS private key landed
+# root:root 0640, `dnsdist --check-config` validated it fine (config
+# syntax doesn't care who can read a referenced file), but the live
+# `_dnsdist`-user daemon then failed to start with "Permission denied"
+# opening it.
+#
+# RUNTIME_OWNERSHIP_POLICY is therefore consulted *by name*, resolved
+# fresh on the destination appliance via shutil.chown, never by copying a
+# numeric uid/gid from anywhere -- correct regardless of what UID/GID
+# those accounts happen to be allocated locally. A path with no policy
+# entry falls back to mirroring the staged file's ownership (root:root,
+# already safe and correct for those paths).
+def _runtime_ownership_for(dest: Path) -> tuple[str, str, int] | None:
+    """(owner, group, mode) `dest` must have on this appliance for its
+    actual runtime reader to work, or None if extraction's default
+    root:root is already correct for it. Mirrors the exact policy
+    app/encryption.py's _write_owned()/ensure_local_ca()/
+    ensure_dnscrypt_provider_keys() and packaging/debian/postinst apply
+    when these files are first created (see docs/security.md)."""
+    if dest.parent == CERT_DIR:
+        # CA private key and the DNSCrypt *provider* (issuing) private key
+        # are never loaded by the live dnsdist process -- only used
+        # offline to sign/issue other material -- so, like every other
+        # root-owned secret in this table, they stay root:root, most
+        # restrictive.
+        if dest.name in ("alderpointdns-ca.key", "dnscrypt-provider.private"):
+            return ("root", "root", 0o600)
+        if dest.suffix in (".key", ".private"):
+            # The TLS-serving key, the uploaded key, and the DNSCrypt
+            # resolver key are all opened directly by the live dnsdist
+            # process.
+            return ("root", "_dnsdist", 0o640)
+        return ("root", "_dnsdist", 0o644)  # certs/public keys/serial file: not secret, but match creation-time group for consistency
+    if dest in (SECRETS_ENV, DNSDIST_API_KEY, DNSDIST_WEB_CREDS):
+        # Read directly by the unprivileged alderpointdns.service process
+        # itself (session secret at startup, dnsdist API/web credentials
+        # for its own outbound calls to dnsdist) -- see app/webapp.py's
+        # SECRET_FILE handling.
+        return ("root", "alderpointdns", 0o640)
+    if dest == COMPILED_DIR:
+        return ("alderpointdns", "alderpointdns", 0o755)
+    return None
+
+
+def _apply_runtime_ownership(dest: Path) -> None:
+    policy = _runtime_ownership_for(dest)
+    if policy is None:
+        return
+    owner, group, mode = policy
+    try:
+        shutil.chown(dest, user=owner, group=group)
+    except (LookupError, PermissionError, OSError):
+        pass
+    try:
+        os.chmod(dest, mode)
+    except OSError:
+        pass
+
+
+def _apply_runtime_ownership_recursive(path: Path) -> None:
+    """Used after rollback moves a pre-restore backup back into place: even
+    though a plain move preserves whatever ownership that backup already
+    had (normally already correct, since it was the live file before the
+    restore attempted to replace it), re-normalizing here too means
+    rollback's guarantee -- "this appliance's runtime accounts can read
+    what they need" -- does not silently depend on the pre-restore state
+    having been correct in the first place."""
+    if not path.exists():
+        return
+    if path.is_dir():
+        for root, _dirs, files in os.walk(path):
+            root_path = Path(root)
+            _apply_runtime_ownership(root_path)
+            for name in files:
+                _apply_runtime_ownership(root_path / name)
+    else:
+        _apply_runtime_ownership(path)
+
+
+def _verify_runtime_readable(path: Path, user: str) -> bool:
+    """Prove, via a real subprocess actually running as `user`, that the
+    account can open `path` for reading -- the only reliable way to
+    validate this. Reimplementing Unix permission-bit logic in Python
+    would mean separately handling owner/group/other bits and
+    supplementary group membership, and could silently drift from what
+    the kernel actually enforces; asking the kernel directly, as the real
+    account, cannot drift. `dnsdist --check-config`/`named-checkconf`
+    validate only config *syntax* -- they do not open referenced files as
+    the account that will actually need to read them at runtime, which is
+    exactly the gap a real restore hit: a private key landed root:root,
+    config validation passed, and the live `_dnsdist`-user daemon then
+    failed at startup with "Permission denied".
+
+    Restore always runs as root, so `sudo -u <user> -g <user>` needs no
+    extra sudoers entry (root can already run as any user); this never
+    logs or returns file content, only whether the open succeeded."""
+    proc = run(["sudo", "-u", user, "-g", user, "--", "/usr/bin/test", "-r", str(path)], check=False)
+    return proc.returncode == 0
+
+
 def _copy_with_ownership(src: str | Path, dest: str | Path) -> None:
     """shutil.copy2 preserves content/mode/times but NOT owner/group, which
-    matters here: e.g. dnsdist.conf must stay root:_dnsdist or the dnsdist
-    process (running as _dnsdist) cannot read its own config after a
-    restore. Extraction from the tar archive (run as root) does preserve
-    original ownership on the staged copy, so mirror it onto the live path
-    explicitly rather than relying on copy2's defaults. Accepts str paths
-    too, since shutil.copytree's copy_function callback is invoked with
-    strings, not Path objects."""
+    matters here: e.g. dnsdist.conf must stay root:root (see
+    _runtime_ownership_for's module docstring) or a handful of runtime-
+    read files must land owned by the specific unprivileged account that
+    actually reads them, or the corresponding service cannot start after
+    a restore. Accepts str paths too, since shutil.copytree's
+    copy_function callback is invoked with strings, not Path objects."""
     shutil.copy2(src, dest)
+    dest_path = Path(dest)
+    if _runtime_ownership_for(dest_path) is not None:
+        _apply_runtime_ownership(dest_path)
+        return
+    # No specific policy for this path: mirror the staged (already
+    # extracted, therefore already root:root-safe) file's ownership, as
+    # before.
     src_stat = os.stat(src)
     try:
         os.chown(dest, src_stat.st_uid, src_stat.st_gid)
@@ -1523,6 +1659,10 @@ def _copy_with_ownership(src: str | Path, dest: str | Path) -> None:
 def _copytree_with_ownership(src: Path, dest: Path) -> None:
     shutil.copytree(src, dest, copy_function=_copy_with_ownership)
     for root, _dirs, _files in os.walk(dest):
+        root_path = Path(root)
+        if _runtime_ownership_for(root_path) is not None:
+            _apply_runtime_ownership(root_path)
+            continue
         rel = Path(root).relative_to(dest)
         src_dir = src / rel
         try:
@@ -1560,6 +1700,14 @@ def _rollback_paths(backups: list[tuple[Path, Path]]) -> None:
                     live.unlink()
             if backup_target != Path("") and backup_target.exists():
                 shutil.move(str(backup_target), str(live))
+                # Same normalization forward restore applies (see
+                # _runtime_ownership_for's docstring) -- a plain move
+                # preserves whatever ownership the pre-restore file
+                # already had, which is normally already correct, but
+                # rollback's guarantee that this appliance's runtime
+                # accounts can read what they need should not silently
+                # depend on that having been true beforehand.
+                _apply_runtime_ownership_recursive(live)
         except Exception:
             continue
 
@@ -1942,6 +2090,8 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
     named_touched = False
     dnsdist_touched = False
     systemd_touched = False
+    restored_dnsdist_key_paths: list[Path] = []
+    restored_alderpointdns_secret_paths: list[Path] = []
     db_touched = False
     analytics_collector_paused = False
     promoted = False  # the one bit that decides which failure branch below applies
@@ -1974,7 +2124,19 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
             touch(pre_restore_backup_path=str(pre_restore_backup_path))
 
             touch(phase="restoring_configuration")
-            compiled_source = extract_dir / "var/lib/alderpointdns/compiled"
+            # Every extract_dir / "..." lookup below is built from the same
+            # module-level path constants select_files() uses to decide
+            # what goes *into* the archive in the first place
+            # (entries[str(path.relative_to("/"))] = path) -- never a
+            # separately hardcoded string literal. Keeping restore's read
+            # side and create_backup's write side derived from one shared
+            # source of truth means they cannot silently drift apart, and
+            # (this is what surfaced the drift) lets tests that redirect
+            # these constants to an isolated tmp sandbox actually exercise
+            # this code path at all, rather than every staged.exists()
+            # check below silently evaluating False against a path that
+            # only ever matched the real, unredirected production layout.
+            compiled_source = extract_dir / COMPILED_DIR.relative_to("/")
             rpz_zone_label = "alderpointdns.rpz"
 
             # Cheap standalone pre-activation checks (no include resolution
@@ -1994,50 +2156,50 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
                 staged_compiled = compiled_source
                 _replace_path(COMPILED_DIR, staged_compiled, file_backups)
                 for name in ("alderpointdns.service", "alderpointdns-analytics.service"):
-                    staged = extract_dir / "etc" / "systemd" / "system" / name
+                    staged = extract_dir / SYSTEMD_DIR.relative_to("/") / name
                     if staged.exists():
                         _replace_path(SYSTEMD_DIR / name, staged, file_backups)
                         systemd_touched = True
                 for name in ("alderpointdns.service.d", "alderpointdns-analytics.service.d", "dnsdist.service.d"):
-                    staged = extract_dir / "etc" / "systemd" / "system" / name
+                    staged = extract_dir / SYSTEMD_DIR.relative_to("/") / name
                     if staged.exists():
                         _replace_path(SYSTEMD_DIR / name, staged, file_backups)
                         systemd_touched = True
                         if name == "dnsdist.service.d":
                             dnsdist_touched = True
-                staged_sudoers = extract_dir / "etc" / "sudoers.d" / "alderpointdns"
+                staged_sudoers = extract_dir / SUDOERS_FILE.relative_to("/")
                 if staged_sudoers.exists():
                     _replace_path(SUDOERS_FILE, staged_sudoers, file_backups)
                 named_touched = True
 
             if effective.get("local_dns_zones"):
-                staged = extract_dir / "var/lib/alderpointdns/compiled/bind/local"
+                staged = extract_dir / LOCAL_ZONE_DIR.relative_to("/")
                 if staged.exists():
                     _replace_path(LOCAL_ZONE_DIR, staged, file_backups)
                     named_touched = True
-                staged_conf = extract_dir / "var/lib/alderpointdns/compiled/bind/local-zones.conf"
+                staged_conf = extract_dir / LOCAL_ZONES_CONF.relative_to("/")
                 if staged_conf.exists():
                     _replace_path(LOCAL_ZONES_CONF, staged_conf, file_backups)
                     named_touched = True
 
             if effective.get("last_downloaded_lists"):
-                staged = extract_dir / "var/lib/alderpointdns/downloads"
+                staged = extract_dir / DOWNLOADS_DIR.relative_to("/")
                 _replace_path(DOWNLOADS_DIR, staged, file_backups)
 
             if effective.get("dnsdist_source_config"):
-                staged = extract_dir / "etc" / "dnsdist" / "dnsdist.conf"
+                staged = extract_dir / DNSDIST_CONF.relative_to("/")
                 if staged.exists():
                     _replace_path(DNSDIST_CONF, staged, file_backups)
                     dnsdist_touched = True
 
             if effective.get("bind_source_config"):
                 for name in BIND_CONF_FILES:
-                    staged = extract_dir / "etc" / "bind" / name
+                    staged = extract_dir / ETC_BIND.relative_to("/") / name
                     if staged.exists():
                         _replace_path(ETC_BIND / name, staged, file_backups)
                         named_touched = True
 
-            staged_cert_dir = extract_dir / "etc/alderpointdns/certs"
+            staged_cert_dir = extract_dir / CERT_DIR.relative_to("/")
             if staged_cert_dir.exists():
                 for staged_file in sorted(staged_cert_dir.iterdir()):
                     if not staged_file.is_file():
@@ -2047,14 +2209,20 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
                         continue
                     if not is_public and not effective.get("private_keys"):
                         continue
-                    _replace_path(CERT_DIR / staged_file.name, staged_file, file_backups)
+                    dest = CERT_DIR / staged_file.name
+                    _replace_path(dest, staged_file, file_backups)
                     dnsdist_touched = True
+                    policy = _runtime_ownership_for(dest)
+                    if policy is not None and policy[1] == "_dnsdist" and not is_public:
+                        restored_dnsdist_key_paths.append(dest)
 
             if effective.get("private_keys") or effective.get("user_auth_data"):
                 for name in ("secrets.env", "dnsdist-api.key", "dnsdist-web.creds"):
-                    staged = extract_dir / f"etc/alderpointdns/{name}"
+                    staged = extract_dir / ETC_ALDERPOINTDNS.relative_to("/") / name
                     if staged.exists():
-                        _replace_path(ETC_ALDERPOINTDNS / name, staged, file_backups)
+                        dest = ETC_ALDERPOINTDNS / name
+                        _replace_path(dest, staged, file_backups)
+                        restored_alderpointdns_secret_paths.append(dest)
 
             # File-component validation and named/dnsdist restart happen
             # here, still entirely before the database is touched in any
@@ -2070,6 +2238,40 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
             if SUDOERS_FILE.exists():
                 proc = run(["visudo", "-cf", str(SUDOERS_FILE)])
                 validation_output += proc.stdout
+            # `dnsdist --check-config`/`named-checkconf` above only prove
+            # the config is syntactically valid -- not that the runtime
+            # account actually reads it. This is the exact validation gap
+            # a real restore hit: a private key landed root:root, config
+            # validation passed, and the live _dnsdist-user daemon then
+            # failed at startup with "Permission denied". Prove the real
+            # runtime identity can actually open every restored secret
+            # this restore just wrote, before committing to a restart --
+            # never by re-deriving Unix permission-bit logic in Python
+            # (owner/group/other bits, supplementary group membership),
+            # which could silently drift from what the kernel enforces,
+            # but by asking the kernel directly via a real subprocess
+            # running as that account. See _verify_runtime_readable's
+            # docstring; never logs file *content*, only path + pass/fail.
+            for key_path in restored_dnsdist_key_paths:
+                if not key_path.exists():
+                    continue
+                readable = _verify_runtime_readable(key_path, "_dnsdist")
+                validation_output += f"dnsdist runtime-read check for {key_path.name}: {'ok' if readable else 'FAILED'}\n"
+                if not readable:
+                    raise RuntimeError(
+                        f"restored private key {key_path.name} is not readable by the dnsdist runtime "
+                        "user (_dnsdist) after ownership normalization -- refusing to restart dnsdist"
+                    )
+            for secret_path in restored_alderpointdns_secret_paths:
+                if not secret_path.exists():
+                    continue
+                readable = _verify_runtime_readable(secret_path, "alderpointdns")
+                validation_output += f"alderpointdns runtime-read check for {secret_path.name}: {'ok' if readable else 'FAILED'}\n"
+                if not readable:
+                    raise RuntimeError(
+                        f"restored secret {secret_path.name} is not readable by the alderpointdns runtime "
+                        "user after ownership normalization -- refusing to proceed"
+                    )
             if systemd_touched:
                 run(["systemctl", "daemon-reload"])
             if named_touched:
@@ -2251,9 +2453,19 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
             # no-ops on a missing path -- but this keeps the row accurate
             # for anyone reading it directly).
             terminal_phase = "completed" if status in ("deployed", "unchanged") else status if status == "promoted_recovery_required" else "failed"
+            # validation_output includes `named-checkconf -p /etc/bind/named.conf`
+            # output, which echoes the fully rendered BIND config verbatim --
+            # including any `key "name" { ...; secret "..."; };` block
+            # (RNDC/TSIG shared secret) -- so this must never reach SQLite
+            # (and therefore the UI's restore history) unredacted. `message`
+            # is sanitized too: it can embed subprocess output via an
+            # exception's str() (e.g. a CalledProcessError's stdout). Applied
+            # to the *full* text before truncation, not after -- truncating
+            # first could cut a secret in half and leave a partial match the
+            # patterns below no longer recognize.
             db.execute(
                 "UPDATE restore_history SET finished_at=?, status=?, message=?, pre_restore_backup_path=?, validation_output=?, phase=?, staging_dir=NULL WHERE id=?",
-                (now(), status, message, str(pre_restore_backup_path) if pre_restore_backup_path else None, validation_output[-4000:], terminal_phase, restore_id),
+                (now(), status, _sanitize_secrets(message), str(pre_restore_backup_path) if pre_restore_backup_path else None, _sanitize_secrets(validation_output)[-4000:], terminal_phase, restore_id),
             )
             db.commit()
             _fix_backup_dir_permissions()

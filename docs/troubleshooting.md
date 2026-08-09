@@ -25,6 +25,10 @@ Common failures:
 - Encrypted DNS fails: validate certificate/key match and listener status on
   `/encryption`.
 - Cache flush fails: check the `dns_cache_flushes` history and `rndc status`.
+- `apt install ./alderpointdns.deb` prints `Download is performed unsandboxed
+  as root because ... _apt ... Permission denied`: harmless. It means the
+  `.deb` is in a directory (e.g. `/root`) apt's unprivileged `_apt` user can't
+  read, so apt reads it as root instead; the install itself is unaffected.
 
 Do not expose Alderpoint DNS publicly while troubleshooting. Keep firewall rules
 restricted to intended private clients.

@@ -109,6 +109,12 @@ curl -fLO https://github.com/neosmith20/Alderpoint-DNS/releases/latest/download/
 sha256sum --ignore-missing -c SHA256SUMS
 ```
 
+If `apt install ./alderpointdns.deb` prints a notice like `Download is
+performed unsandboxed as root because ... _apt ... Permission denied`, that's
+harmless — it just means the `.deb` sits in a directory (e.g. `/root`) that
+apt's unprivileged `_apt` user can't read, so apt reads it as root instead.
+It does not mean the install failed.
+
 Installing creates a dedicated `alderpointdns` service account, generates
 local secrets, initializes the database, deploys generated DNS
 configuration, and enables services. No default administrator account

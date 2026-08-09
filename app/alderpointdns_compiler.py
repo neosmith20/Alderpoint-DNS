@@ -1666,6 +1666,26 @@ def deploy(download: bool = True, trigger: str | None = None, fail_on_source_err
     return deployment_id
 
 
+# Bounded backoff between fresh-install-init's own retries of the initial
+# deploy: two retries (three attempts total) at these delays. Found via a
+# real appliance install where the curated default sources transiently
+# failed to resolve (DHCP-provided resolvers not yet reachable at the
+# exact moment postinst ran, immediately after apt itself had just
+# successfully resolved and downloaded bind9/dnsdist) and a manual "Update
+# All Now" moments later succeeded -- i.e. genuinely transient, not
+# "network was never configured". This must stay short: postinst/dpkg
+# configure blocks on this call, so it cannot retry indefinitely waiting
+# for Internet access. Worst case this adds ~20s to a fresh install;
+# nothing here can leave the package half-configured or corrupt existing
+# state either way (see the function's docstring).
+FRESH_INSTALL_DEPLOY_RETRY_DELAYS_SECONDS: tuple[int, ...] = (5, 15)
+
+FRESH_INSTALL_RECOVERY_HINT = (
+    "once network connectivity is available, open Security > Blocklists and "
+    "click \"Update All Now\" to complete initial filtering setup"
+)
+
+
 def fresh_install_init(_: argparse.Namespace | None = None) -> None:
     """First-install bootstrap only.
 
@@ -1674,24 +1694,53 @@ def fresh_install_init(_: argparse.Namespace | None = None) -> None:
     sqlite_master. Existing installs that merely need migration may also have
     user_version=0, so the no-user-tables condition is the critical guard.
     Only that fresh case seeds ordinary source rows and runs the normal
-    download/compile/deploy path. Download failures are reported but do not
-    abort package configure; the seeded rows remain ordinary editable sources
-    for an administrator to update or deploy again.
+    download/compile/deploy path -- exactly once, regardless of outcome:
+    upgrades/reinstalls never re-seed or re-deploy these defaults.
+
+    The initial deploy is retried a bounded number of times
+    (FRESH_INSTALL_DEPLOY_RETRY_DELAYS_SECONDS) to absorb a short transient
+    network/DNS-resolution hiccup right at postinst time without demanding
+    the administrator notice and retry manually -- but never indefinitely:
+    dpkg configure blocks on this call, and a genuinely offline appliance
+    must not hang it. Persistent failure (offline, or a real, non-transient
+    problem) is reported honestly and does not corrupt or half-configure
+    anything: init_db already committed the three seeded source rows as
+    ordinary editable sources (deploy()'s own rollback keeps the compiled
+    policy/live services untouched on any failure), and the `deployments`
+    table's own failed-status row (active_domains=0) is the single source
+    of truth the dashboard's Protection indicator reads -- so it always
+    truthfully reports "Disabled", never a false "Active", when this
+    never/didn't-yet succeed. See FRESH_INSTALL_RECOVERY_HINT for the
+    manual recovery path once connectivity exists.
     """
     seeded = init_db(seed_defaults=True)
     if not seeded:
         print("fresh_install=0")
         return
     print(f"fresh_install=1 seeded_defaults={len(DEFAULT_FRESH_INSTALL_SOURCES)}")
-    try:
-        deployment_id = deploy(download=True, trigger="fresh-install", fail_on_source_errors=True)
-    except Exception as exc:
-        print(f"initial_deploy=failed error={exc}")
+    attempts = len(FRESH_INSTALL_DEPLOY_RETRY_DELAYS_SECONDS) + 1
+    deployment_id: int | None = None
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            deployment_id = deploy(download=True, trigger="fresh-install", fail_on_source_errors=True)
+            last_exc = None
+            break
+        except Exception as exc:
+            last_exc = exc
+            if attempt <= len(FRESH_INSTALL_DEPLOY_RETRY_DELAYS_SECONDS):
+                delay = FRESH_INSTALL_DEPLOY_RETRY_DELAYS_SECONDS[attempt - 1]
+                print(f"initial_deploy=retrying attempt={attempt}/{attempts} error={exc} retry_in={delay}s")
+                time.sleep(delay)
+    if last_exc is not None:
+        print(f"initial_deploy=failed attempts={attempts} error={last_exc}")
+        print(f"initial_deploy=recovery {FRESH_INSTALL_RECOVERY_HINT}")
         return
     row = deployment_row(deployment_id)
     active_domains = row["active_domains"] if row else 0
     if not row or row["status"] != "deployed" or active_domains <= 0:
         print(f"initial_deploy=failed status={row['status'] if row else 'missing'} active_domains={active_domains}")
+        print(f"initial_deploy=recovery {FRESH_INSTALL_RECOVERY_HINT}")
         return
     print(f"initial_deploy=deployed deployment_id={deployment_id} active_domains={active_domains}")
 

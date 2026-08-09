@@ -2430,7 +2430,7 @@ async def backup_restore_route(request: Request, _: sqlite3.Row = Depends(curren
         backup_restore_apply()
         result = backup.latest_request_result("restore")
         if result and result.get("status") != "done":
-            raise backup.BackupError("restore did not complete; check the restore history table below")
+            raise backup.BackupError("restore did not complete; check the Last Restore card below for status and details")
     except Exception as exc:
         return backup_error(request, str(exc))
     return redirect("/backup")

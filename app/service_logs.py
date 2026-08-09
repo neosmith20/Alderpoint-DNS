@@ -40,16 +40,29 @@ PRIORITY_LABELS = {
 
 # A conservative subset of the diagnostics bundle's redaction patterns,
 # applied to every log line before it ever leaves the root helper process.
+# Also reused (see sanitize()'s docstring) by every module that persists
+# raw `named-checkconf -p`/`dnsdist --check-config` subprocess output into
+# a *_deployments/restore_history table's validation_output column, since
+# `named-checkconf -p` echoes the fully rendered BIND config verbatim --
+# including any `key "name" { ...; secret "..."; };` block (RNDC/TSIG
+# shared secrets) -- and that output would otherwise be persisted to
+# SQLite and shown in the UI's deployment/restore history exactly as
+# produced.
 REDACTION_PATTERNS = [
     (re.compile(r"(?i)(authorization:\s*basic\s+)[A-Za-z0-9+/=._:-]+"), r"\1[REDACTED]"),
     (re.compile(r"(?i)(authorization:\s*bearer\s+)[A-Za-z0-9._:-]+"), r"\1[REDACTED]"),
     (re.compile(r"(?i)(x-api-key:\s*)\S+"), r"\1[REDACTED]"),
     (re.compile(r"(?i)\b(api[_-]?key\s*[=:]\s*)(['\"]?)[^'\"\s,;]+\2"), r"\1[REDACTED]"),
     (re.compile(r"(?i)\b(password\s*[=:]\s*)(['\"]?)[^'\"\s,;]+\2"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)\b(session[_-]?secret\s*[=:]\s*)(['\"]?)[^'\"\s,;]+\2"), r"\1[REDACTED]"),
     (re.compile(r"(?i)\b(secret\s*[=:]\s*)(['\"]?)[^'\"\s,;]+\2"), r"\1[REDACTED]"),
     (re.compile(r"(?i)\b(token\s*[=:]\s*)(['\"]?)[^'\"\s,;]+\2"), r"\1[REDACTED]"),
     (re.compile(r"(?i)\b(private[_-]?key\s*[=:]\s*)(['\"]?)[^'\"\s,;]+\2"), r"\1[REDACTED]"),
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S), "[REDACTED PRIVATE KEY]"),
+    (re.compile(r"(https://[^?\s]+)\?[^ \n\r\t]+"), r"\1?[REDACTED_QUERY]"),
+    # BIND config `key "name" { ...; secret "..."; };` blocks (rndc-key,
+    # TSIG keys) -- see module docstring above.
+    (re.compile(r'(?i)(secret\s+)"[^"]*"'), r'\1"[REDACTED]"'),
 ]
 
 

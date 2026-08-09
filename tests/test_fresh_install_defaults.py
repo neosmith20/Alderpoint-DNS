@@ -137,17 +137,99 @@ class FreshInstallDefaultTests(unittest.TestCase):
         self.assertGreater(len(compiler.COMPILED_RPZ.read_text()), 0)
 
     def test_download_failure_does_not_mark_protection_active_and_retry_can_succeed(self):
+        # fresh_install_init() itself now retries the initial deploy a
+        # bounded number of times (see FRESH_INSTALL_DEPLOY_RETRY_DELAYS_SECONDS);
+        # a persistently broken source exhausts all of them, so patch
+        # time.sleep to keep this test fast rather than actually waiting.
         with self._patch_successful_deploy_edges():
             with mock.patch.object(compiler, "download_source", side_effect=self._download_side_effect(broken_id=2)):
-                with contextlib.redirect_stdout(io.StringIO()) as out:
-                    compiler.fresh_install_init()
+                with mock.patch.object(compiler.time, "sleep") as mock_sleep:
+                    with contextlib.redirect_stdout(io.StringIO()) as out:
+                        compiler.fresh_install_init()
         self.assertIn("initial_deploy=failed", out.getvalue())
+        self.assertEqual(
+            list(compiler.FRESH_INSTALL_DEPLOY_RETRY_DELAYS_SECONDS),
+            [call.args[0] for call in mock_sleep.call_args_list],
+        )
         self.assertFalse(compiler.COMPILED_RPZ.exists())
         with compiler.connect() as conn:
             deployment = conn.execute("SELECT * FROM deployments ORDER BY id DESC LIMIT 1").fetchone()
             self.assertEqual("rolled_back", deployment["status"])
             self.assertEqual(0, deployment["active_domains"])
             self.assertEqual(3, conn.execute("SELECT count(*) FROM sources").fetchone()[0])
+
+    def test_transient_download_failure_retries_automatically_and_succeeds(self):
+        # Reproduces the real appliance bug: the first attempt hits a
+        # transient resolution failure (DHCP-provided resolvers not yet
+        # reachable at the exact moment postinst ran), and a later attempt
+        # -- here, fresh_install_init()'s own automatic retry, not a
+        # separate manual one -- succeeds once connectivity is there.
+        attempt_count = {"n": 0}
+        broken_then_fixed = self._download_side_effect()  # succeeds
+        always_broken = self._download_side_effect(broken_id=2)  # source 2 fails
+
+        def flaky_download(source: sqlite3.Row) -> SourceResult:
+            attempt_count["n"] += 1
+            # Only the *first* deploy() call (covering all 3 sources) sees
+            # the broken behavior; every source download within it fails
+            # together the way a resolver outage would affect all of them.
+            if attempt_count["n"] <= 3:
+                return always_broken(source)
+            return broken_then_fixed(source)
+
+        with self._patch_successful_deploy_edges():
+            with mock.patch.object(compiler, "download_source", side_effect=flaky_download):
+                with mock.patch.object(compiler.time, "sleep") as mock_sleep:
+                    with contextlib.redirect_stdout(io.StringIO()) as out:
+                        compiler.fresh_install_init()
+        output = out.getvalue()
+        self.assertIn("initial_deploy=retrying attempt=1/3", output)
+        self.assertIn("initial_deploy=deployed", output)
+        self.assertNotIn("initial_deploy=failed", output)
+        # Retried exactly once (succeeded on the second attempt): only the
+        # first configured delay was ever waited on.
+        self.assertEqual([compiler.FRESH_INSTALL_DEPLOY_RETRY_DELAYS_SECONDS[0]], [call.args[0] for call in mock_sleep.call_args_list])
+        with compiler.connect() as conn:
+            deployment = conn.execute("SELECT * FROM deployments ORDER BY id DESC LIMIT 1").fetchone()
+            self.assertEqual("deployed", deployment["status"])
+            self.assertGreater(deployment["active_domains"], 0)
+            self.assertEqual(3, conn.execute("SELECT count(*) FROM sources").fetchone()[0])
+
+    def test_persistent_offline_failure_exhausts_bounded_retries_with_recovery_hint(self):
+        with self._patch_successful_deploy_edges():
+            with mock.patch.object(compiler, "download_source", side_effect=self._download_side_effect(broken_id=2)):
+                with mock.patch.object(compiler.time, "sleep") as mock_sleep:
+                    with contextlib.redirect_stdout(io.StringIO()) as out:
+                        compiler.fresh_install_init()
+        output = out.getvalue()
+        # Bounded: exactly len(FRESH_INSTALL_DEPLOY_RETRY_DELAYS_SECONDS)
+        # retries were attempted (never an open-ended/indefinite loop that
+        # could hang dpkg configure on a genuinely offline appliance), each
+        # with the configured, short delay.
+        attempts = len(compiler.FRESH_INSTALL_DEPLOY_RETRY_DELAYS_SECONDS) + 1
+        self.assertEqual(attempts, mock_sleep.call_count + 1)
+        self.assertEqual(list(compiler.FRESH_INSTALL_DEPLOY_RETRY_DELAYS_SECONDS), [call.args[0] for call in mock_sleep.call_args_list])
+        self.assertIn(f"initial_deploy=failed attempts={attempts}", output)
+        # Failure state stays truthful/actionable: a clear manual recovery
+        # path is reported, and it references UI labels that actually
+        # exist (Security > Blocklists > "Update All Now"), not invented
+        # ones.
+        self.assertIn(compiler.FRESH_INSTALL_RECOVERY_HINT, output)
+        self.assertIn("Update All Now", output)
+        with compiler.connect() as conn:
+            deployments = conn.execute("SELECT status, active_domains FROM deployments ORDER BY id").fetchall()
+            sources_count = conn.execute("SELECT count(*) FROM sources").fetchone()[0]
+        # One attempted (and rolled back) deployment row per attempt --
+        # nothing corrupted or half-configured, and the three curated
+        # sources were seeded exactly once despite the repeated attempts.
+        self.assertEqual(attempts, len(deployments))
+        self.assertTrue(all(row["status"] == "rolled_back" and row["active_domains"] == 0 for row in deployments))
+        self.assertEqual(3, sources_count)
+        # Protection's own source of truth (the latest deployment row) is
+        # truthfully "not deployed" -- app/webapp.py's protection_state()
+        # reads active_domains from exactly this row, so it can never
+        # report Protection as falsely Active here.
+        self.assertEqual(0, deployments[-1]["active_domains"])
 
         with self._patch_successful_deploy_edges():
             with mock.patch.object(compiler, "download_source", side_effect=self._download_side_effect()):
