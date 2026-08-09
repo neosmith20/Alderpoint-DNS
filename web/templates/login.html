@@ -11,6 +11,7 @@
     <span>Alderpoint DNS</span>
   </div>
   <h1>Login</h1>
+  {% if notice %}<p class="alert" role="status">{{ notice }}</p>{% endif %}
   {% if error %}<p class="alert error">{{ error }}</p>{% endif %}
   <label>Username <input name="username" autocomplete="username" required></label>
   <label>Password <input name="password" type="password" autocomplete="current-password" required></label>

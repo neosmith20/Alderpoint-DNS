@@ -312,6 +312,60 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(health["state"], compiler.HEALTH_USING_CACHED)
         self.assertEqual(health["label"], "Using cached copy")
 
+    def test_last_error_clears_once_a_later_update_actually_succeeds(self):
+        # Regression: a live appliance restore left `sources.last_error` set
+        # from a stale (pre-restore) DNS-resolution failure. After the host
+        # regained connectivity, a real successful re-download of the same
+        # source must clear that stale error -- it must not linger forever
+        # just because it was once recorded.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source_file = tmp_path / "source.txt"
+            source_file.write_text("0.0.0.0 recovers.example\n")
+            original_db = compiler.DB_PATH
+            original_download_dir = compiler.DOWNLOAD_DIR
+            compiler.DB_PATH = tmp_path / "alderpointdns.db"
+            compiler.DOWNLOAD_DIR = tmp_path / "downloads"
+            try:
+                compiler.init_db()
+                with compiler.connect() as conn:
+                    conn.execute(
+                        "INSERT INTO sources(name, url, enabled, category) VALUES (?, ?, 1, 'ads_trackers')",
+                        ("Windows Spy Blocker", source_file.as_uri()),
+                    )
+                    source = conn.execute("SELECT * FROM sources WHERE name='Windows Spy Blocker'").fetchone()
+
+                    # First attempt: DNS resolution failure, exactly the
+                    # shape urllib raises for `[Errno -5] No address
+                    # associated with hostname`.
+                    conn.execute(
+                        "UPDATE sources SET url=? WHERE id=?",
+                        ("https://this-host-does-not-resolve.invalid/list.txt", source["id"]),
+                    )
+                    source = conn.execute("SELECT * FROM sources WHERE id=?", (source["id"],)).fetchone()
+                    result, _stats = compiler.update_one_source(conn, source)
+                    self.assertFalse(result.success)
+                    failed_row = conn.execute("SELECT * FROM sources WHERE id=?", (source["id"],)).fetchone()
+                    self.assertIsNotNone(failed_row["last_error"])
+                    self.assertEqual(compiler.source_health(failed_row)["state"], compiler.HEALTH_ERROR)
+
+                    # Connectivity restored, same source now resolves and
+                    # downloads cleanly -- exactly what "Update All Now"
+                    # (update_sources -> collect_rules(download=True) ->
+                    # record_download_result) performs.
+                    conn.execute("UPDATE sources SET url=? WHERE id=?", (source_file.as_uri(), source["id"]))
+                    conn.commit()
+                    compiler.collect_rules(conn, download=True)
+                    healed_row = conn.execute("SELECT * FROM sources WHERE id=?", (source["id"],)).fetchone()
+            finally:
+                compiler.DB_PATH = original_db
+                compiler.DOWNLOAD_DIR = original_download_dir
+
+        self.assertIsNone(healed_row["last_error"])
+        self.assertIsNotNone(healed_row["last_success"])
+        self.assertEqual(healed_row["using_cached_copy"], 0)
+        self.assertEqual(compiler.source_health(healed_row)["state"], compiler.HEALTH_HEALTHY)
+
     def test_public_source_catalog_seeds_large_list_set(self):
         with tempfile.TemporaryDirectory() as tmp:
             original_db = compiler.DB_PATH

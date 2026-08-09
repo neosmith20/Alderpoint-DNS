@@ -23,7 +23,18 @@ from itsdangerous import BadSignature, URLSafeTimedSerializer
 from app import analytics, auth, backup, custom_rules as custom_rules_model, dns_cache, encryption, filter_schedule, importer, local_dns, network_config, notifications, replication, software_updates, upstream_dns
 from app import blocklist_categories
 from app import service_logs
-from app.alderpointdns_compiler import AlderpointDNSConnection, DB_PATH, add_source, init_db, normalize_domain, source_health
+from app.alderpointdns_compiler import (
+    AlderpointDNSConnection,
+    DB_PATH,
+    HEALTH_ERROR,
+    HEALTH_UNSUPPORTED_FORMAT,
+    HEALTH_USING_CACHED,
+    HEALTH_WARNING,
+    add_source,
+    init_db,
+    normalize_domain,
+    source_health,
+)
 from app.db_retry import DatabaseBusyError, is_lock_error, retry_on_locked
 
 
@@ -1011,11 +1022,20 @@ def setup_post(
     return redirect("/login")
 
 
+# Fixed vocabulary, not the raw query string: `reason` only ever selects one
+# of these known, pre-written messages -- never echoes arbitrary request
+# text back into the page.
+LOGIN_NOTICES = {
+    "restore": "Restore completed. Authentication/session data changed, so you need to sign in again.",
+}
+
+
 @app.get("/login", response_class=HTMLResponse)
 def login_get(request: Request):
     if admin_count() == 0:
         return redirect("/setup")
-    return render(request, "login.html", error=None)
+    notice = LOGIN_NOTICES.get(request.query_params.get("reason", ""))
+    return render(request, "login.html", error=None, notice=notice)
 
 
 @app.post("/login")
@@ -1074,6 +1094,37 @@ def filter_schedule_context() -> dict[str, Any]:
     }
 
 
+# Health states that mean "this source is not currently in good shape" --
+# used to decide whether a past automatic-update failure is still relevant
+# to what's on screen right now, or has been superseded by later successful
+# fetches (manual or automatic).
+_DEGRADED_HEALTH_STATES = {HEALTH_ERROR, HEALTH_WARNING, HEALTH_UNSUPPORTED_FORMAT, HEALTH_USING_CACHED}
+
+
+def automatic_update_banner(sources: list[dict[str, Any]], fs: dict[str, Any]) -> dict[str, Any] | None:
+    """"Last automatic update" only ever reflects the most recent *timer*
+    run (see filter_schedule.record_result(), only called from
+    filter_update_run()) -- "Update All Now" and per-source "Update now"
+    intentionally do not overwrite it, so this must never be presented as
+    if it were live current-source health. Without this, a real failure
+    recorded by one automatic run stayed on screen, worded as if still
+    happening, for the entire interval until the next scheduled run --
+    even after every implicated source had since been refreshed
+    successfully (by hand or by a later timer run). History is still
+    shown (never erased), just no longer framed as an ongoing problem
+    once nothing currently enabled is actually unhealthy."""
+    last = fs.get("last_result")
+    if not last or not last.get("error"):
+        return None
+    currently_degraded = any(s["health"]["state"] in _DEGRADED_HEALTH_STATES for s in sources if s.get("enabled"))
+    return {
+        "status": last.get("status"),
+        "finished_at": last.get("finished_at"),
+        "error": last.get("error"),
+        "resolved": not currently_degraded,
+    }
+
+
 def enrich_sources(sources: list[sqlite3.Row]) -> list[dict[str, Any]]:
     """Attaches the derived health state and a safely-parsed rejected-sample
     list to each source row for template rendering. Templates need the
@@ -1092,17 +1143,20 @@ def enrich_sources(sources: list[sqlite3.Row]) -> list[dict[str, Any]]:
 
 
 def blocklists_error(request: Request, message: str) -> HTMLResponse:
+    sources = enrich_sources(compiler_status()["sources"])
+    fs = filter_schedule_context()
     return render(
         request,
         "blocklists.html",
-        sources=enrich_sources(compiler_status()["sources"]),
+        sources=sources,
         categories=blocklist_categories.list_categories(),
         category_error=message,
         category_filter="",
         status_filter="",
         search="",
         sort="name",
-        filter_schedule=filter_schedule_context(),
+        filter_schedule=fs,
+        automatic_update_banner=automatic_update_banner(sources, fs),
         status_code=400,
     )
 
@@ -1116,7 +1170,10 @@ def resolve_category_key(requested: str) -> str:
 @app.get("/blocklists", response_class=HTMLResponse)
 def blocklists(request: Request, _: sqlite3.Row = Depends(current_admin)):
     blocklist_categories.migrate_existing_categories()
-    sources = enrich_sources(compiler_status()["sources"])
+    all_sources = enrich_sources(compiler_status()["sources"])
+    fs = filter_schedule_context()
+    banner = automatic_update_banner(all_sources, fs)
+    sources = all_sources
     category_filter = request.query_params.get("category", "")
     status_filter = request.query_params.get("status", "")
     search = request.query_params.get("search", "").strip().lower()
@@ -1148,7 +1205,13 @@ def blocklists(request: Request, _: sqlite3.Row = Depends(current_admin)):
         status_filter=status_filter,
         search=search,
         sort=sort,
-        filter_schedule=filter_schedule_context(),
+        filter_schedule=fs,
+        # Computed against every source (before category/status/search
+        # narrow what's *displayed* below), so a filter can never hide the
+        # one source that would have proven a historical automatic-update
+        # failure resolved -- or, symmetrically, hide the one still-failing
+        # source that keeps it genuinely current.
+        automatic_update_banner=banner,
     )
 
 
@@ -2336,6 +2399,19 @@ def backup_page(request: Request, _: sqlite3.Row = Depends(current_admin)):
     return render(request, "backup.html", **context)
 
 
+@app.get("/backup/restore/status", response_class=HTMLResponse)
+def backup_restore_status_partial(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    """Polled by backup.html while a restore is in flight (see the inline
+    script there). Deliberately gated by current_admin like every other
+    page here: if the restore being polled replaced the session-signing
+    secret or the sessions table itself, this naturally 303s to /login the
+    same way any other page would -- the poller detects that redirect and
+    is what actually sends the browser there on purpose, instead of a
+    fetch() silently following it and handing back /login's HTML as if it
+    were this fragment."""
+    return render(request, "backup_last_restore_card.html", last_restore=backup.last_restore())
+
+
 @app.post("/backup/create")
 async def backup_create_route(request: Request, _: sqlite3.Row = Depends(current_admin)):
     form = await request.form()
@@ -2458,7 +2534,12 @@ async def backup_restore_route(request: Request, _: sqlite3.Row = Depends(curren
             raise backup.BackupError(f"failed to start the restore runner: {output}")
     except Exception as exc:
         return backup_error(request, str(exc))
-    return redirect("/backup")
+    # `restore_started=1` tells backup.html to start polling the Last
+    # Restore card immediately, even though the worker (a separate,
+    # just-started systemd unit) may not have inserted its restore_history
+    # row yet -- without it, a page load that lands in that brief gap would
+    # see no in-progress restore at all and never start polling.
+    return redirect("/backup?restore_started=1")
 
 
 @app.get("/backup/{identifier}/download")

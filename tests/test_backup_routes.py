@@ -236,6 +236,12 @@ class BackupRestoreAsyncDispatchHttpTest(BackupImportHttpTest):
         pending = backup.latest_request_result("restore")
         self.assertIsNotNone(pending)
         self.assertEqual(pending["status"], "pending")
+        # backup.html's inline poller (see its `restore_just_dispatched`
+        # gate) needs this on the very first page load, before the
+        # separately-started runner unit has even inserted a
+        # restore_history row -- without it, a page load landing in that
+        # gap would see no in-progress restore and never start polling.
+        self.assertEqual(response.headers["location"], "/backup?restore_started=1")
 
     def test_dispatch_failure_is_reported_as_an_error(self) -> None:
         # If *starting* the independent runner itself fails (e.g. the unit
@@ -258,6 +264,115 @@ class BackupRestoreAsyncDispatchHttpTest(BackupImportHttpTest):
         self.assertEqual(response.status_code, 303, response.text)
         done = backup.latest_request_result("restore")
         self.assertEqual(done["status"], "done")
+
+
+class RestoreSessionTransitionHttpTest(BackupRestoreAsyncDispatchHttpTest):
+    """Regression coverage for a real appliance report: a restore that
+    touches app_config/user_auth_data/sessions works (restore_history ends
+    status=deployed, services healthy) but the browser is left on a
+    misleading half-authenticated page, because a fetch()-driven poll
+    follows the resulting 303-to-/login on its own and hands back /login's
+    HTML as if it were a normal response. The fix is backup.html's inline
+    poller against GET /backup/restore/status, which explicitly checks
+    `response.redirected` and does a real top-level navigation to
+    /login?reason=restore itself. These tests cover the server-side half of
+    that contract: the exact redirect status/target the poller depends on,
+    the login notice it navigates to, and that the Last Restore card is
+    never blank/misleading at any point in the sequence."""
+
+    def _invalidate_session_like_a_restore_would(self) -> None:
+        # A restore's app_config/user_auth_data component replaces the
+        # live sessions table with the backup's -- from the current
+        # browser's point of view, its own session row simply no longer
+        # exists afterward. (A rotated session-signing secret would break
+        # the cookie's signature outright and never even reach here; a
+        # stale-but-still-verifiable cookie whose row is just gone is the
+        # more interesting case to prove current_admin() actually rejects.)
+        with sqlite3.connect(webapp.DB_PATH) as conn:
+            conn.execute("DELETE FROM sessions WHERE id='test-session-id'")
+            conn.commit()
+
+    def test_restore_status_partial_requires_auth_and_redirects_to_login(self) -> None:
+        self.client.cookies.clear()
+        response = self.client.get("/backup/restore/status", follow_redirects=False)
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["location"], "/login")
+
+    def test_session_invalidated_by_restore_yields_a_real_redirect_not_a_disguised_200(self) -> None:
+        # This is exactly what the poller's `response.redirected` check
+        # depends on: the browser (and TestClient, which mirrors fetch()'s
+        # redirect-following here) must see a genuine 303 with a /login
+        # Location, never a 200 carrying login HTML under this URL.
+        self._invalidate_session_like_a_restore_would()
+        response = self.client.get("/backup/restore/status", follow_redirects=False)
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["location"], "/login")
+
+    def test_login_shows_the_restore_reason_notice_only_when_asked(self) -> None:
+        response = self.client.get("/login?reason=restore")
+        self.assertIn("Restore completed. Authentication/session data changed, so you need to sign in again.", response.text)
+        plain = self.client.get("/login")
+        self.assertNotIn("Authentication/session data changed", plain.text)
+
+    def test_login_notice_is_a_fixed_vocabulary_not_arbitrary_query_text(self) -> None:
+        # `reason` must never let arbitrary request text get echoed onto an
+        # unauthenticated page -- only the fixed, pre-written messages.
+        response = self.client.get("/login?reason=%3Cscript%3Ealert(1)%3C%2Fscript%3E")
+        self.assertNotIn("<script>alert(1)</script>", response.text)
+        self.assertNotIn("alert(1)", response.text)
+
+    def test_no_misleading_empty_state_before_any_restore(self) -> None:
+        response = self.client.get("/backup/restore/status")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("No restores yet.", response.text)
+        self.assertIn('data-restore-active="0"', response.text)
+
+    def test_running_restore_is_flagged_active_for_the_poller_to_keep_polling(self) -> None:
+        # A bare 'running' row with no live worker identity is exactly what
+        # reap_abandoned_restores() (backup.last_restore()'s own stale-worker
+        # detection, deliberately left unmodified by this fix) treats as
+        # abandoned. Running a real restore first records a genuine worker
+        # identity (this still-alive test process's own pid/boot id), then
+        # flipping its finished row back to 'running' reproduces "still in
+        # progress" without tripping that unrelated detection.
+        source = self._seed_backup()
+        self._restore(source)
+        with backup.connect() as conn:
+            conn.execute("UPDATE restore_history SET status='running', finished_at=NULL WHERE id=(SELECT max(id) FROM restore_history)")
+            conn.commit()
+        response = self.client.get("/backup/restore/status")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('data-restore-active="1"', response.text)
+
+    def test_completed_restore_remains_visible_after_reauthentication(self) -> None:
+        # Simulates the full real sequence: the restore replaces the
+        # sessions table (old cookie now rejected) but restore_history
+        # itself -- durable state, not session state -- still shows the
+        # completed restore once the admin signs back in with a fresh
+        # session.
+        with backup.connect() as conn:
+            conn.execute(
+                "INSERT INTO restore_history(started_at, finished_at, backup_path, components_json, status, message, phase) "
+                "VALUES ('now', 'now', '/tmp/x.tar.gz', '{}', 'deployed', '', 'completed')"
+            )
+            conn.commit()
+        self._invalidate_session_like_a_restore_would()
+        # Confirms the old session really is rejected first (proving this
+        # test isn't accidentally reusing a still-valid cookie).
+        rejected = self.client.get("/backup/restore/status", follow_redirects=False)
+        self.assertEqual(rejected.status_code, 303)
+
+        # A fresh session, exactly like a real re-login would create.
+        with sqlite3.connect(webapp.DB_PATH) as conn:
+            conn.execute(
+                "INSERT INTO sessions(id, admin_id, created_at, last_seen_at, ip, user_agent, csrf) VALUES ('fresh-session-id', 1, 'now', 'now', '', '', 'fresh-csrf')"
+            )
+            conn.commit()
+        self.client.cookies.set("alderpointdns_session", webapp.serializer.dumps({"sid": "fresh-session-id"}))
+        response = self.client.get("/backup/restore/status")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('data-restore-active="0"', response.text)
+        self.assertNotIn("No restores yet.", response.text)
 
 
 class BackupCreateAutoDownloadHttpTest(BackupImportHttpTest):

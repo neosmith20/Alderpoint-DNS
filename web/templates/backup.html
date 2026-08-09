@@ -19,7 +19,7 @@
 
 <section class="grid">
   <article class="card"><div class="card__head"><h2>Last Backup</h2>{% if last_backup %}{{ ui.status_badge(last_backup.status|title, "healthy" if last_backup.status == "deployed" else "down" if last_backup.status == "failed" else "neutral") }}{% endif %}</div>{% if last_backup %}<p class="muted mono">{{ last_backup.created_at|local_time }}</p><p class="muted">{{ (last_backup.size_bytes / 1048576)|round(2) }} MB</p>{% else %}<p class="muted">No backups yet.</p>{% endif %}</article>
-  <article class="card"><div class="card__head"><h2>Last Restore</h2>{% if last_restore %}{{ ui.status_badge(last_restore.status|title, "healthy" if last_restore.status == "deployed" else "down" if last_restore.status in ("failed", "rollback_failed", "interrupted") else "neutral") }}{% endif %}</div>{% if last_restore %}<p class="muted mono">{{ (last_restore.finished_at or last_restore.started_at)|local_time }}</p>{% if last_restore.status == "running" %}<p class="muted">Phase: {{ last_restore.phase or "starting" }}{% if last_restore.phase_detail %} ({{ last_restore.phase_detail }}{% if last_restore.progress_total %}: {{ last_restore.progress_current or 0 }}/{{ last_restore.progress_total }}{% endif %}){% endif %}</p>{% if last_restore.heartbeat_stale_suspected %}<p class="muted">No progress reported recently -- worker may be stuck.</p>{% endif %}{% elif last_restore.status == "interrupted" %}<p class="muted">{{ last_restore.message }}</p>{% endif %}{% else %}<p class="muted">No restores yet.</p>{% endif %}</article>
+  {% include "backup_last_restore_card.html" %}
   <article class="card"><div class="card__head"><h2>Schedule</h2>{{ ui.status_badge("Enabled" if backup_settings.schedule_enabled == "1" else "Disabled", "healthy" if backup_settings.schedule_enabled == "1" else "neutral") }}</div><p class="muted">Every {{ backup_settings.schedule_interval_hours }}h, keep {{ backup_settings.retention_count }} newest</p></article>
   <article class="card"><div class="card__head"><h2>Stored Backups</h2></div><p class="muted">{{ backups|length }} archive{{ "s" if backups|length != 1 else "" }} in <span class="mono">/var/lib/alderpointdns/backups</span></p></article>
 </section>
@@ -225,4 +225,57 @@
     <p class="muted">The SQLite database is always captured through SQLite's own online backup API, never a raw file copy, so a concurrently-writing web app or analytics collector can never produce a torn archive. Restores always take a fresh safety backup of the current state first and automatically roll back if any post-restore health check fails.</p>
   </div>
 </section>
+{% set restore_just_dispatched = request.query_params.get("restore_started") %}
+{% if restore_just_dispatched or (last_restore and last_restore.status == "running") %}
+<script>
+  (function () {
+    // A restore that touches app config/auth/session data restarts
+    // alderpointdns.service and can replace the very session cookie this
+    // page is using (a new signing secret, or a sessions table that no
+    // longer has this session's row) partway through. Left alone, that
+    // silently breaks every subsequent fetch()-driven action on this page
+    // -- fetch() follows the resulting redirect to /login on its own and
+    // hands back the login page's HTML as if it were a normal response,
+    // which is what produced the "restore looks like it vanished" reports.
+    // This polls the Last Restore card in place (surviving the restart,
+    // retrying through the brief window the service is down) and, the
+    // moment it detects the session was actually redirected to /login,
+    // deliberately does a full top-level navigation there itself with a
+    // clear reason -- instead of leaving that half-broken fetch response
+    // sitting in the page.
+    var target = document.getElementById('lastRestoreCard');
+    if (!target) return;
+    var url = target.dataset.refreshUrl;
+    var attempts = 0;
+    var maxAttempts = 100; // ~100 * 3s = 5 minutes, generous for a restart + restore tail
+    var timer = setInterval(function () {
+      attempts += 1;
+      if (attempts > maxAttempts) {
+        clearInterval(timer);
+        return;
+      }
+      fetch(url, { headers: { 'X-Requested-With': 'AlderpointDNSAutoRefresh' } }).then(function (response) {
+        if (response.redirected) {
+          var redirectedTo = new URL(response.url);
+          if (redirectedTo.pathname === '/login') {
+            clearInterval(timer);
+            window.location.href = '/login?reason=restore';
+            return null;
+          }
+        }
+        return response.ok ? response.text() : null;
+      }).then(function (html) {
+        if (html === null || html === undefined) return;
+        target.outerHTML = html;
+        var refreshed = document.getElementById('lastRestoreCard');
+        if (refreshed && refreshed.dataset.restoreActive !== '1') clearInterval(timer);
+      }).catch(function () {
+        // Connection refused/reset while alderpointdns.service is mid-restart
+        // is expected here -- just retry on the next tick rather than
+        // treating one failed poll as the restore having failed.
+      });
+    }, 3000);
+  })();
+</script>
+{% endif %}
 {% endblock %}
