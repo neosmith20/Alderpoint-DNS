@@ -83,7 +83,7 @@ class BackupImportHttpTest(unittest.TestCase):
         # exactly as app/backup.py's own request/response contract expects.
         self.patches = [
             mock.patch.object(webapp, "backup_create_apply", lambda: backup.process_pending_request("create")),
-            mock.patch.object(webapp, "backup_restore_apply", lambda: backup.process_pending_request("restore")),
+            mock.patch.object(webapp, "backup_restore_apply", lambda: (0, str(backup.process_pending_request("restore")))),
             mock.patch.object(webapp, "backup_preview_apply", lambda: backup.process_pending_request("preview")),
             mock.patch.object(webapp, "global_service_status", lambda: {"label": "Active", "tone": "healthy", "detail": "test"}),
             mock.patch.object(replication, "autostart", lambda: None),
@@ -194,6 +194,70 @@ class BackupImportHttpTest(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertIn(".tar.gz", response.text)
+
+
+class BackupRestoreAsyncDispatchHttpTest(BackupImportHttpTest):
+    """Regression coverage for a real appliance restore failure: the web
+    request that starts a restore used to run it synchronously (`sudo
+    alderpointdns_compiler.py backup-restore` as a direct child of this
+    request's own process), and app/webapp.py's route then required
+    `latest_request_result("restore")` to already show status="done"
+    before it would even redirect successfully. A restore that touches
+    app_config restarts alderpointdns.service (this same process's own
+    service) partway through -- which killed that direct child outright,
+    and would ALSO have made the route's own synchronous "must be done
+    already" check wrong even in a fully healthy async run, since
+    dispatching the independent runner unit (systemctl start --no-block)
+    returns immediately, long before the restore itself has finished.
+    These tests replace the class fixture's synchronous inline-processing
+    mock with one that reproduces the real, current contract: dispatch
+    only starts the runner and returns immediately."""
+
+    def _restore(self, source: str, **extra_fields: str):
+        data = {"csrf": self.csrf, "source": source}
+        data.update(extra_fields)
+        return self.client.post("/backup/restore", data=data, follow_redirects=False)
+
+    def _seed_backup(self) -> str:
+        path = backup.create_backup(dict.fromkeys(backup.COMPONENT_KEYS, False) | {"sqlite_data": True})
+        return str(path)
+
+    def test_route_does_not_require_the_restore_to_already_be_done(self) -> None:
+        # A true fire-and-forget dispatch: unlike the class fixture's
+        # default mock, this does NOT process the pending request inline
+        # -- it only starts the (fake) runner, exactly like the real
+        # systemctl start --no-block does. If the route still required
+        # status="done" synchronously (the pre-fix bug), this would raise
+        # and return an error status instead of redirecting.
+        source = self._seed_backup()
+        with mock.patch.object(webapp, "backup_restore_apply", lambda: (0, "Started alderpointdns-backup-restore.service.")):
+            response = self._restore(source)
+        self.assertEqual(response.status_code, 303, response.text)
+        pending = backup.latest_request_result("restore")
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending["status"], "pending")
+
+    def test_dispatch_failure_is_reported_as_an_error(self) -> None:
+        # If *starting* the independent runner itself fails (e.g. the unit
+        # is missing, or sudoers denies it), that must still surface as a
+        # real error -- this is the one case backup_restore_apply()'s
+        # return code is checked for.
+        source = self._seed_backup()
+        with mock.patch.object(webapp, "backup_restore_apply", lambda: (1, "Failed to start alderpointdns-backup-restore.service: Unit not found.")):
+            response = self._restore(source)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("failed to start the restore runner", response.text)
+
+    def test_successful_dispatch_and_completion_still_redirects(self) -> None:
+        # The class fixture's default mock (restored by tearDown after
+        # this test) processes the request inline, simulating a restore
+        # that both started and finished by the time the request returns
+        # -- still must redirect cleanly, not regress the happy path.
+        source = self._seed_backup()
+        response = self._restore(source)
+        self.assertEqual(response.status_code, 303, response.text)
+        done = backup.latest_request_result("restore")
+        self.assertEqual(done["status"], "done")
 
 
 class BackupCreateAutoDownloadHttpTest(BackupImportHttpTest):
@@ -404,6 +468,25 @@ class BackupFilenameLocalTimeTest(unittest.TestCase):
         row = backup.last_backup()
         resolved = backup.find_backup_path(str(row["id"]))
         self.assertEqual(resolved, path)
+
+
+class BackupRestoreApplyDispatchTest(unittest.TestCase):
+    """webapp.backup_restore_apply() must start the independent
+    alderpointdns-backup-restore.service runner (systemctl start
+    --no-block), never invoke alderpointdns_compiler.py backup-restore
+    directly as a sudo child of the web request -- that direct-child shape
+    is exactly what a real restore's app_config-triggered
+    alderpointdns.service restart killed mid-restore on a live appliance."""
+
+    def test_dispatches_the_independent_runner_unit_not_a_direct_child(self) -> None:
+        with mock.patch.object(webapp, "run") as mock_run:
+            mock_run.return_value = (0, "Started alderpointdns-backup-restore.service.")
+            webapp.backup_restore_apply()
+        mock_run.assert_called_once_with(
+            ["sudo", "systemctl", "start", "--no-block", "alderpointdns-backup-restore.service"]
+        )
+        called_command = mock_run.call_args[0][0]
+        self.assertNotIn("alderpointdns_compiler.py", called_command)
 
 
 if __name__ == "__main__":

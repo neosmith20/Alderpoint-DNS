@@ -311,14 +311,19 @@ class RestoreHistorySecretRedactionTest(BackupTestBase):
 
 
 class RestoreFailureUiWordingTest(unittest.TestCase):
-    """The restore-failure error message must point at UI content that
-    actually exists on the page (the "Last Restore" card), not a
-    nonexistent "restore history table"."""
+    """The restore route's error message must never point at a
+    nonexistent "restore history table". Since backup_restore_apply() now
+    only dispatches the independent runner unit and returns immediately
+    (see BackupRestoreAsyncDispatchHttpTest), the route no longer emits a
+    message about the restore's *outcome* at all -- the actual outcome is
+    always visible on the page via the "Last Restore" card, which must
+    still exist in the template regardless."""
 
-    def test_backup_restore_route_error_references_existing_ui_content(self) -> None:
+    def test_backup_restore_route_never_references_a_nonexistent_table(self) -> None:
         source = (ROOT / "app" / "webapp.py").read_text()
         self.assertNotIn("restore history table", source)
-        self.assertIn("Last Restore card", source)
+
+    def test_last_restore_card_still_exists_in_the_template(self) -> None:
         with (ROOT / "web" / "templates" / "backup.html").open() as fh:
             template = fh.read()
         self.assertIn("Last Restore", template)

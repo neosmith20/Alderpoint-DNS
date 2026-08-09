@@ -1,0 +1,26 @@
+[Unit]
+Description=Alderpoint DNS Backup Restore Runner
+
+[Service]
+Type=oneshot
+# Deliberately its own independent unit, not something `sudo`-invoked as a
+# child of alderpointdns.service's request handling: a restore's app_config
+# component restarts alderpointdns.service (this process's own service)
+# partway through the run, which would kill a child process of that
+# service's own process tree/cgroup -- exactly the real failure found on a
+# live appliance restore (the sudo-spawned restore worker vanished the
+# instant alderpointdns.service's cgroup was torn down and restarted,
+# mid-restore, right after the database had already been promoted --
+# status=interrupted, phase=restarting_services, promoted_at non-null).
+# This unit is started via `sudo systemctl start --no-block
+# alderpointdns-backup-restore.service` (a fixed, argument-free sudoers
+# entry) from the web process, but the web process never waits on it -- it
+# returns immediately, and the browser reads durable job state from
+# restore_history (the "Last Restore" card) instead. See
+# app/software_updates.py's module docstring and
+# packaging/alderpointdns-software-update.service for the identical,
+# already-established pattern this follows.
+#
+# Not enabled/started automatically at boot or on any timer: a restore
+# only ever runs because an administrator explicitly requested one.
+ExecStart=/opt/alderpointdns/app/alderpointdns_compiler.py backup-restore

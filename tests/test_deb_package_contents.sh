@@ -238,6 +238,31 @@ grep -q 'enable.*alderpointdns-software-update\.service\|start.*alderpointdns-so
 grep -q 'update-run' "$ROOT/data/lib/systemd/system/alderpointdns-software-update.service" || \
   fail "alderpointdns-software-update.service does not exec the update-run subcommand"
 
+# --- Backup Restore: independent runner unit, same reasoning as the
+# Software Updates install runner above -- a restore's app_config
+# component restarts alderpointdns.service partway through, which would
+# kill a direct sudo child of the web request that started it (the exact
+# failure found on a live appliance: the restore worker vanished the
+# instant alderpointdns.service's cgroup was torn down mid-restore, right
+# after the database had already been promoted). Unlike the install
+# runner, this one has no companion timer -- a restore never runs on a
+# schedule, only on an explicit administrator request. ---
+test -f "$ROOT/data/lib/systemd/system/alderpointdns-backup-restore.service" || \
+  fail "alderpointdns-backup-restore.service missing from built package"
+grep -q 'backup-restore' "$ROOT/data/lib/systemd/system/alderpointdns-backup-restore.service" || \
+  fail "alderpointdns-backup-restore.service does not exec the backup-restore subcommand"
+grep -q 'enable.*alderpointdns-backup-restore\.service\|start.*alderpointdns-backup-restore\.service' "$POSTINST" && \
+  fail "postinst must never enable/start the backup-restore runner unit automatically -- a restore only ever runs because an administrator explicitly requested one"
+SUDOERS_CONTENT="$(cat "$ROOT/data/etc/sudoers.d/alderpointdns")"
+case "$SUDOERS_CONTENT" in
+  *"systemctl start --no-block alderpointdns-backup-restore.service"*) : ;;
+  *) fail "sudoers does not allow the fixed, argument-free systemctl start --no-block alderpointdns-backup-restore.service form" ;;
+esac
+case "$SUDOERS_CONTENT" in
+  *"alderpointdns_compiler.py backup-restore"*)
+    fail "sudoers still allows invoking backup-restore directly as a sudo child of the web request -- it must only run via the independent systemd unit above" ;;
+esac
+
 # --- logrotate config for the CLI's dedicated error-traceback log ---
 # The confirmed defect: alderpointdns_compiler.py's CLI dispatch logs full
 # Python tracebacks (which can embed exception arguments -- paths, domain

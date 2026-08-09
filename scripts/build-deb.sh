@@ -92,6 +92,7 @@ cp "$SOURCE_DIR/packaging/alderpointdns.service" "$PKG/lib/systemd/system/alderp
 cp "$SOURCE_DIR/packaging/alderpointdns-analytics.service" "$PKG/lib/systemd/system/alderpointdns-analytics.service"
 cp "$SOURCE_DIR/packaging/alderpointdns-backup.service" "$PKG/lib/systemd/system/alderpointdns-backup.service"
 cp "$SOURCE_DIR/packaging/alderpointdns-backup.timer" "$PKG/lib/systemd/system/alderpointdns-backup.timer"
+cp "$SOURCE_DIR/packaging/alderpointdns-backup-restore.service" "$PKG/lib/systemd/system/alderpointdns-backup-restore.service"
 cp "$SOURCE_DIR/packaging/alderpointdns-filter-update.service" "$PKG/lib/systemd/system/alderpointdns-filter-update.service"
 cp "$SOURCE_DIR/packaging/alderpointdns-filter-update.timer" "$PKG/lib/systemd/system/alderpointdns-filter-update.timer"
 cp "$SOURCE_DIR/packaging/alderpointdns-notify.service" "$PKG/lib/systemd/system/alderpointdns-notify.service"

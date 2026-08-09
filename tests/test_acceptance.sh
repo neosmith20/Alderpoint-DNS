@@ -22,6 +22,7 @@ set -eu
 /opt/alderpointdns/tests/test_encryption_layout.sh
 /opt/alderpointdns/tests/test_service_restart_analytics.sh
 /opt/alderpointdns/tests/test_service_optional_backend_paths.sh
+/opt/alderpointdns/tests/test_restore_worker_service_lifecycle.sh
 /opt/alderpointdns/tests/test_backup_restore.sh
 
 echo "Alderpoint DNS acceptance suite passed"

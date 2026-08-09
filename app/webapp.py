@@ -2263,7 +2263,22 @@ def backup_create_apply() -> tuple[int, str]:
 
 
 def backup_restore_apply() -> tuple[int, str]:
-    return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "backup-restore"])
+    # Deliberately NOT `sudo alderpointdns_compiler.py backup-restore`
+    # directly: a restore's app_config component restarts
+    # alderpointdns.service (this process's own service) partway through,
+    # which would kill a direct sudo child of this request -- exactly the
+    # real failure found on a live appliance restore: the sudo-spawned
+    # restore worker vanished the instant alderpointdns.service's cgroup
+    # was torn down and restarted mid-restore, right after the database
+    # had already been promoted (status=interrupted,
+    # phase=restarting_services, promoted_at non-null). `systemctl start`
+    # hands the work to an independent unit (its own cgroup, owned by
+    # PID 1) that survives that restart -- see
+    # packaging/alderpointdns-backup-restore.service and
+    # software_updates_start_install_runner()'s identical, already-
+    # established pattern (including why --no-block is required, not
+    # optional, there).
+    return run(["sudo", "systemctl", "start", "--no-block", "alderpointdns-backup-restore.service"])
 
 
 def backup_preview_apply() -> tuple[int, str]:
@@ -2427,10 +2442,20 @@ async def backup_restore_route(request: Request, _: sqlite3.Row = Depends(curren
         components = backup_component_flags(form)
         password = str(form.get("password", "")).strip() or None
         backup.request_backup("restore", {"path": source, "components": components}, password)
-        backup_restore_apply()
-        result = backup.latest_request_result("restore")
-        if result and result.get("status") != "done":
-            raise backup.BackupError("restore did not complete; check the Last Restore card below for status and details")
+        # backup_restore_apply() now only *starts* the independent
+        # alderpointdns-backup-restore.service runner (systemctl start
+        # --no-block) and returns immediately -- it does not wait for the
+        # restore to finish, exactly like software_updates_install_route()
+        # never waits for an install to finish. A restore that touches
+        # app_config restarts alderpointdns.service (this request's own
+        # process) partway through, so this request must never block on
+        # (or synchronously report) the restore's outcome; only the exit
+        # status of *starting* the runner is checked here. The actual
+        # outcome is durable state in restore_history that the "Last
+        # Restore" card (backup_context()) reads on the next page load.
+        code, output = backup_restore_apply()
+        if code != 0:
+            raise backup.BackupError(f"failed to start the restore runner: {output}")
     except Exception as exc:
         return backup_error(request, str(exc))
     return redirect("/backup")
