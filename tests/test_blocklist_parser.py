@@ -462,6 +462,44 @@ class ParserTests(unittest.TestCase):
         self.assertFalse(ok_source_changed)
         self.assertFalse(ok_custom_changed)
 
+    def test_reusable_policy_refuses_enabled_regex_rules(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            original_db = compiler.DB_PATH
+            original_download_dir = compiler.DOWNLOAD_DIR
+            original_rpz = compiler.COMPILED_RPZ
+            original_staging = compiler.STAGING_DIR
+            original_custom_db = compiler.custom_rules.DB_PATH
+            compiler.DB_PATH = tmp_path / "alderpointdns.db"
+            compiler.DOWNLOAD_DIR = tmp_path / "downloads"
+            compiler.COMPILED_RPZ = tmp_path / "compiled" / "bind" / "alderpointdns.rpz"
+            compiler.STAGING_DIR = tmp_path / "staging"
+            compiler.custom_rules.DB_PATH = compiler.DB_PATH
+            try:
+                compiler.init_db()
+                with compiler.connect() as conn:
+                    conn.execute(
+                        "INSERT INTO sources(name, url, enabled, category) VALUES (?, ?, 1, ?)",
+                        ("local fixture", (tmp_path / "unused.txt").as_uri(), "ads_trackers"),
+                    )
+                    conn.commit()
+                    source = conn.execute("SELECT * FROM sources WHERE name='local fixture'").fetchone()
+                    current, _ = compiler.source_paths(source)
+                    current.parent.mkdir(parents=True, exist_ok=True)
+                    current.write_text("0.0.0.0 cached.example\n")
+                    compiler.record_reusable_protection_policy(conn, compiler.render_rpz({"cached.example"}), 1)
+                    compiler.custom_rules.add_rule("/(^|\\.)regex-block\\.example$/")
+                    ok, reason = compiler.reusable_protection_policy_available(conn)
+            finally:
+                compiler.DB_PATH = original_db
+                compiler.DOWNLOAD_DIR = original_download_dir
+                compiler.COMPILED_RPZ = original_rpz
+                compiler.STAGING_DIR = original_staging
+                compiler.custom_rules.DB_PATH = original_custom_db
+
+        self.assertFalse(ok)
+        self.assertIn("regex", reason)
+
     # -- CLI exit-code contract -----------------------------------------------
 
     def test_update_sources_cli_exit_zero_when_all_healthy(self):

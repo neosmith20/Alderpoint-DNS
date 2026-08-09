@@ -1185,6 +1185,14 @@ def reusable_protection_policy_available(conn: sqlite3.Connection) -> tuple[bool
     rpz_cache, manifest_cache = protection_cache_paths()
     if not rpz_cache.exists() or not manifest_cache.exists():
         return False, "cached policy artifact is missing"
+    if conn.execute(
+        """
+        SELECT 1 FROM custom_filter_rules
+        WHERE enabled=1 AND validation_state='valid' AND rule_type IN ('regex_allow', 'regex_block')
+        LIMIT 1
+        """
+    ).fetchone():
+        return False, "enabled regex rules require full dnsdist-layer deployment"
     try:
         cached = json.loads(manifest_cache.read_text())
     except (OSError, json.JSONDecodeError) as exc:
@@ -1227,9 +1235,6 @@ def protection_enable_reuse(_: argparse.Namespace | None = None) -> None:
             active_domains = 0
             blocked_test = None
             allowed_test = None
-            dnsdist_layer: dict | None = None
-            cache_options_snapshot: str | None = None
-            cache_deployed_this_run = False
             failure: Exception | None = None
             try:
                 cached_manifest = json.loads(_manifest_cache.read_text())
@@ -1246,13 +1251,6 @@ def protection_enable_reuse(_: argparse.Namespace | None = None) -> None:
                 reload_bind()
                 conn.execute("UPDATE sources SET last_compile_success=? WHERE enabled=1", (now(),))
                 conn.commit()
-                custom_active = custom_rules.collect_active(conn)
-                local_dns.deploy_zones(conn)
-                cache_options_snapshot = dns_cache.CACHE_OPTIONS_CONF.read_text() if dns_cache.CACHE_OPTIONS_CONF.exists() else None
-                dns_cache.deploy_cache_options(conn)
-                cache_deployed_this_run = True
-                upstream_dns.deploy_upstreams(conn)
-                dnsdist_layer = custom_rules.deploy_dnsdist_layer(conn, custom_active)
                 if not resolves("cloudflare.com"):
                     raise RuntimeError("post-deploy ordinary resolution failed")
                 status = "deployed"
@@ -1261,8 +1259,6 @@ def protection_enable_reuse(_: argparse.Namespace | None = None) -> None:
             except Exception as exc:
                 failure = exc
                 message = str(exc)
-                if dnsdist_layer:
-                    custom_rules.rollback_dnsdist_layer(dnsdist_layer)
                 if backup_path.exists():
                     try:
                         os.replace(backup_path, COMPILED_RPZ)
@@ -1273,15 +1269,6 @@ def protection_enable_reuse(_: argparse.Namespace | None = None) -> None:
                         message = f"{message}; RPZ rollback failed: {rollback_exc}"
                 else:
                     status = "rolled_back"
-                if cache_deployed_this_run:
-                    try:
-                        if cache_options_snapshot is not None:
-                            dns_cache.CACHE_OPTIONS_CONF.write_text(cache_options_snapshot)
-                        elif dns_cache.CACHE_OPTIONS_CONF.exists():
-                            dns_cache.CACHE_OPTIONS_CONF.unlink()
-                        run(["rndc", "reconfig"], check=False)
-                    except Exception:
-                        pass
             finally:
                 conn.execute(
                     """
