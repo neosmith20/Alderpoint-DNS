@@ -39,7 +39,12 @@ class ServiceSandboxWritePathsTest(unittest.TestCase):
         unit_text = (ROOT / "packaging" / "alderpointdns.service").read_text()
         match = re.search(r"^ReadWritePaths=(.*)$", unit_text, re.MULTILINE)
         self.assertIsNotNone(match, "packaging/alderpointdns.service has no ReadWritePaths= line")
-        self.read_write_paths = [Path(p) for p in match.group(1).split()]
+        # A leading "-" (systemd.exec(5)) makes an entry a no-op instead of
+        # a startup failure when the path is absent -- strip it before
+        # comparing so these tests still recognize the path as "covered"
+        # rather than requiring every optional backend directory to be
+        # unconditional.
+        self.read_write_paths = [Path(p.lstrip("-")) for p in match.group(1).split()]
 
     def _assert_writable(self, target: Path) -> None:
         covered = any(target == rw or rw in target.parents for rw in self.read_write_paths)
@@ -201,7 +206,12 @@ class BackupRestoreSandboxWritePathsTest(unittest.TestCase):
         unit_text = (ROOT / "packaging" / "alderpointdns.service").read_text()
         match = re.search(r"^ReadWritePaths=(.*)$", unit_text, re.MULTILINE)
         self.assertIsNotNone(match, "packaging/alderpointdns.service has no ReadWritePaths= line")
-        self.read_write_paths = [Path(p) for p in match.group(1).split()]
+        # A leading "-" (systemd.exec(5)) makes an entry a no-op instead of
+        # a startup failure when the path is absent -- strip it before
+        # comparing so these tests still recognize the path as "covered"
+        # rather than requiring every optional backend directory to be
+        # unconditional.
+        self.read_write_paths = [Path(p.lstrip("-")) for p in match.group(1).split()]
 
     def _assert_writable(self, target: Path) -> None:
         covered = any(target == rw or rw in target.parents for rw in self.read_write_paths)

@@ -154,6 +154,24 @@ compatibility expectations instead of beta-era churn.
   report) -- every previous test of this feature had mocked the actual
   backend file writes, which is exactly the class of bug real-network
   testing was added to catch.
+- Fixed `alderpointdns.service` failing to start after the
+  `ReadWritePaths=` fix above (`Failed to set up mount namespacing:
+  /etc/netplan: No such file or directory`, `status=226/NAMESPACE`) on any
+  host where one of the three networking-backend directories isn't
+  present -- `/etc/netplan` in particular is Ubuntu-centric and does not
+  exist on a stock Debian install with no `netplan.io` package. Unlike
+  `ReadOnlyPaths=`, a `ReadWritePaths=` entry for a path that does not
+  exist is fatal to the whole unit's mount-namespace setup, not silently
+  skipped -- and `app/network_config.py`'s `detect_backend()` only ever
+  has one of Netplan/systemd-networkd/ifupdown active on a given host, so
+  the other two are expected to be absent. `/etc/netplan`,
+  `/etc/systemd/network`, and `/etc/network` are now each prefixed with
+  `-` (`systemd.exec(5)`: a leading `-` makes a `ReadWritePaths=` entry a
+  no-op instead of a startup failure when the path is absent); the other
+  entries in the list are guaranteed present (this package's own postinst,
+  or a hard package dependency) and are deliberately left unprefixed.
+  Discovered via a real `0.4.0~beta6-1` -> `1.0.0-1` in-place upgrade on a
+  disposable Debian appliance with no `/etc/netplan`.
 - Fixed `named` failing to start (`/etc/bind/named.conf.options:N: parsing
   failed: file not found` for `cache-options.conf`) whenever
   `/var/lib/alderpointdns` is missing at postinst time but
