@@ -353,3 +353,123 @@ Recommended checks:
 - No HTTP freshness model exists, so scheduled/manual updates cannot skip unchanged sources.
 - No durable compiled-policy/source-artifact metadata exists to safely skip work.
 - Multi-million source scale was not practical to complete under full cProfile on this host; future VM benchmarking should include unprofiled wall-clock runs and live BIND reload timings.
+
+## v1 Feature-Freeze Optimization Pass
+
+Authoritative starting point: `15c9fa92f8cfa3eb45cf5c38feb53aaeff74cf06`
+
+Fresh worktree: `/root/alderpointdns-dex-v1-performance`
+
+Branch: `dex/v1-performance`
+
+### Fresh Before Baseline
+
+Command:
+
+```bash
+python3 scripts/benchmark_filtering.py --datasets small,medium,large --output benchmarks/results/v1-before-filtering-baseline
+```
+
+| Dataset | Input rules | Unique domains | Parse s | Normalize subtime s | RPZ render s | named-checkzone s | Peak RSS MB | RPZ size MB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Small | 104,349 | 77,101 | 27.115 | 9.316 | 0.761 | 0.655 | 104.80 | 4.85 |
+| Medium | 521,739 | 385,507 | 136.289 | 46.988 | 3.906 | 2.824 | 392.38 | 24.26 |
+| Large | 1,043,478 | 771,013 | 266.071 | 91.703 | 7.553 | 5.621 | 756.93 | 48.53 |
+
+### Implemented Optimizations
+
+- Added a conservative fast path for common source-list records:
+  - `domain.example`
+  - `||domain.example^`
+  - `|domain.example^`
+  - `@@||domain.example^`
+  - `@@domain.example`
+- Kept complex AdGuard/Pi-hole rules on the existing parser path.
+- Added cheap IP-literal prechecks before `ipaddress.ip_address()`.
+- Skipped IDNA encode/decode for already-ASCII domains.
+- Added streaming source-file parsing for production cache misses.
+- Added source parse artifacts keyed by source id, SHA-256 content hash, and parser-cache version.
+- Added compiled protection-policy artifact reuse keyed by a canonical manifest of current source rows, source content hashes, custom rules, Local DNS records/settings, DNS cache settings, upstream resolver settings, parser version, and policy-cache version.
+- Wired Protection enable to try the fixed privileged `protection-enable-reuse` command first, falling back to `deploy --no-download` whenever reuse cannot be proven safe.
+
+The reuse design fails closed: missing artifacts, unreadable manifests, missing source files, source content changes, source enable/disable changes, custom-rule changes, Local DNS changes, DNS cache setting changes, upstream resolver changes, parser-cache version changes, or policy-cache version changes all force the existing rebuild path.
+
+### Final After Baseline
+
+Command:
+
+```bash
+python3 scripts/benchmark_filtering.py --datasets small,medium,large --output benchmarks/results/v1-after-filtering-baseline
+```
+
+| Dataset | Input rules | Unique domains | Parse s | Normalize subtime s | RPZ render s | named-checkzone s | Peak RSS MB | RPZ size MB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Small | 104,349 | 77,101 | 9.001 | 2.520 | 0.768 | 0.626 | 103.72 | 4.85 |
+| Medium | 521,739 | 385,507 | 45.042 | 12.689 | 3.978 | 3.102 | 391.22 | 24.26 |
+| Large | 1,043,478 | 771,013 | 90.827 | 25.651 | 8.104 | 5.949 | 756.27 | 48.53 |
+
+Parser speedup:
+
+| Dataset | Before parse s | After parse s | Speedup |
+| --- | ---: | ---: | ---: |
+| Small | 27.115 | 9.001 | 3.01x |
+| Medium | 136.289 | 45.042 | 3.03x |
+| Large | 266.071 | 90.827 | 2.93x |
+
+Normalization speedup:
+
+| Dataset | Before normalize s | After normalize s | Speedup |
+| --- | ---: | ---: | ---: |
+| Small | 9.316 | 2.520 | 3.70x |
+| Medium | 46.988 | 12.689 | 3.70x |
+| Large | 91.703 | 25.651 | 3.57x |
+
+Peak RSS was essentially unchanged in the direct parser benchmark because the
+harness intentionally still materializes the full generated source text and
+full block/allow/domain sets while running cProfile. Production cache misses
+now parse source files as streams, and unchanged source runs avoid parsing
+entirely through artifacts.
+
+### Source Cache Reuse Benchmark
+
+Command used a local harness snippet over the same generated datasets and
+called `collect_rules(download=False)` twice: first cache miss, then unchanged
+cache hit.
+
+Result file: `benchmarks/results/v1-source-cache-reuse.json`
+
+| Dataset | Input rules | Unique domains | First collect s | Second unchanged collect s | Speedup | Equivalent |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Small | 104,349 | 77,101 | 0.741 | 0.060 | 12.38x | yes |
+| Medium | 521,739 | 385,507 | 3.742 | 0.295 | 12.69x | yes |
+| Large | 1,043,478 | 771,013 | 8.077 | 0.639 | 12.64x | yes |
+
+These figures are unprofiled wall-clock timings, so they are much lower than
+the cProfile direct-parser benchmark. The important comparison is first
+cache-miss collect versus second unchanged collect in the same process.
+
+### Final Hotspots
+
+After optimization, large-dataset cumulative profile:
+
+- `parse_rule_lines`: 90.328s
+- `parse_source_line`: 70.069s
+- `_fast_common_source_rule`: 28.244s
+- `normalize_domain`: 24.860s
+- `_is_hosts_line`: 17.401s
+- `ipaddress.ip_address`: 15.389s
+
+The original `custom_rules.parse_rule` hotspot is no longer on the common-path
+top list for the synthetic blocklist mix because common source lines no longer
+delegate to the full custom-rule parser.
+
+### Remaining Bottlenecks
+
+- First-time parsing of very large ASCII source lists still spends significant
+  time in per-line Python string processing and set insertion.
+- Memory is still dominated by the complete effective domain sets and generated
+  RPZ text. Reducing that further would require deeper streaming/partitioning
+  design and more semantic proof.
+- Live `rndc reload`, dnsdist restart, and full appliance DNS behavior were not
+  measured in this local worktree benchmark because this branch was not
+  installed over the running appliance.

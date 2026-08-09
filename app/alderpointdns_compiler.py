@@ -227,7 +227,19 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition
         conn.execute(f'ALTER TABLE {table} ADD COLUMN "{column}" {definition}')
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+PARSER_CACHE_VERSION = "2026-08-09-v1-parser-fastpath"
+POLICY_CACHE_VERSION = "2026-08-09-v1-policy-manifest"
+PROTECTION_REUSE_UNAVAILABLE = 2
+
+
+def source_parse_cache_dir() -> Path:
+    return DOWNLOAD_DIR / "parse-cache"
+
+
+def protection_cache_paths() -> tuple[Path, Path]:
+    cache_dir = COMPILED_RPZ.parent / "policy-cache"
+    return cache_dir / "protection-current.rpz", cache_dir / "protection-current.manifest.json"
 
 
 @contextlib.contextmanager
@@ -400,6 +412,15 @@ def _apply_schema(conn: sqlite3.Connection, *, seed_defaults: bool = False) -> N
             ip TEXT,
             detail TEXT NOT NULL DEFAULT ''
         );
+        CREATE TABLE IF NOT EXISTS source_parse_cache (
+            source_id INTEGER PRIMARY KEY,
+            content_sha256 TEXT NOT NULL,
+            parser_version TEXT NOT NULL,
+            blocks_path TEXT NOT NULL,
+            allows_path TEXT NOT NULL,
+            stats_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
         """
     )
     conn.executemany(
@@ -498,17 +519,20 @@ def normalize_domain(raw: str) -> str | None:
         return None
     if "://" in value or "/" in value or ":" in value or "@" in value:
         return None
-    try:
-        value = value.encode("idna").decode("ascii")
-    except UnicodeError:
-        return None
+    if not value.isascii():
+        try:
+            value = value.encode("idna").decode("ascii")
+        except UnicodeError:
+            return None
     if not DOMAIN_RE.match(value + "."):
         return None
-    try:
-        ipaddress.ip_address(value)
-        return None
-    except ValueError:
-        return value
+    if _looks_like_ip_literal(value):
+        try:
+            ipaddress.ip_address(value)
+            return None
+        except ValueError:
+            pass
+    return value
 
 
 def _adguard_blockpage_normalize(text: str) -> str:
@@ -532,11 +556,57 @@ def _adguard_blockpage_normalize(text: str) -> str:
 
 
 def _is_hosts_line(first_token: str) -> bool:
+    if not _could_be_ip_literal(first_token):
+        return False
     try:
         ipaddress.ip_address(first_token)
         return True
     except ValueError:
         return False
+
+
+def _could_be_ip_literal(value: str) -> bool:
+    if not value:
+        return False
+    first = value[0]
+    return first.isdigit() or first == ":" or ":" in value
+
+
+def _looks_like_ip_literal(value: str) -> bool:
+    if ":" in value:
+        return True
+    if "." not in value:
+        return False
+    return all(part.isdigit() for part in value.split(".") if part)
+
+
+_FAST_DOMAIN_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+
+
+def _fast_common_source_rule(raw: str) -> list[tuple[str, str | None, str]] | None:
+    """Fast path for the overwhelmingly common source-list rule shapes.
+
+    Anything with modifiers, paths, regex/cosmetic syntax, wildcards, or other
+    ambiguity falls back to custom_rules.parse_rule(), preserving its exact
+    validation behavior for complex AdGuard/Pi-hole syntax.
+    """
+    is_allow = raw.startswith("@@")
+    body = raw[2:] if is_allow else raw
+    candidate: str | None = None
+    if body.startswith("||") and body.endswith("^") and body.count("^") == 1:
+        candidate = body[2:-1]
+    elif body.startswith("|") and body.endswith("^") and body.count("^") == 1:
+        candidate = body[1:-1]
+    elif not is_allow and all(ch in _FAST_DOMAIN_CHARS for ch in body):
+        candidate = body
+    elif is_allow and all(ch in _FAST_DOMAIN_CHARS for ch in body):
+        candidate = body
+    if not candidate or not all(ch in _FAST_DOMAIN_CHARS for ch in candidate):
+        return None
+    domain = normalize_domain(candidate)
+    if domain is None:
+        return None
+    return [("allow" if is_allow else "block", domain, "")]
 
 
 def parse_source_line(raw: str) -> list[tuple[str, str | None, str]]:
@@ -556,7 +626,7 @@ def parse_source_line(raw: str) -> list[tuple[str, str | None, str]]:
     filtering rules, so blocklist sources and custom rules share one
     AdBlock-syntax implementation instead of two incompatible ones.
     """
-    first_token = raw.split(None, 1)[0] if raw.split(None, 1) else ""
+    first_token = raw.split(None, 1)[0] if raw else ""
     if _is_hosts_line(first_token):
         body, _, _inline = raw.partition("#")
         parts = body.split()
@@ -583,6 +653,9 @@ def parse_source_line(raw: str) -> list[tuple[str, str | None, str]]:
         return results
 
     normalized = _adguard_blockpage_normalize(raw)
+    common = _fast_common_source_rule(normalized)
+    if common is not None:
+        return common
     parsed = custom_rules.parse_rule(normalized, plain_domain_subdomains=True)
     results = []
     for rule in parsed:
@@ -610,11 +683,11 @@ def parse_source_line(raw: str) -> list[tuple[str, str | None, str]]:
     return results
 
 
-def parse_rules(content: str) -> tuple[set[str], set[str], ParseStats]:
+def parse_rule_lines(lines) -> tuple[set[str], set[str], ParseStats]:
     blocks: set[str] = set()
     allows: set[str] = set()
     stats = ParseStats()
-    for line_number, line in enumerate(content.splitlines(), 1):
+    for line_number, line in enumerate(lines, 1):
         raw = line.strip()
         if not raw or raw.startswith("#") or raw.startswith("!") or raw.startswith("//"):
             continue
@@ -657,9 +730,109 @@ def parse_rules(content: str) -> tuple[set[str], set[str], ParseStats]:
     return blocks, allows, stats
 
 
+def parse_rules(content: str) -> tuple[set[str], set[str], ParseStats]:
+    return parse_rule_lines(content.splitlines())
+
+
 def source_paths(source: sqlite3.Row) -> tuple[Path, Path]:
     name = f"{source['id']}-{slug(source['name'])}.txt"
     return DOWNLOAD_DIR / "current" / name, DOWNLOAD_DIR / "staging" / name
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _stats_to_json(stats: ParseStats) -> str:
+    return json.dumps(
+        {
+            "downloaded_entries": stats.downloaded_entries,
+            "parsed_rules": stats.parsed_rules,
+            "accepted_domains": stats.accepted_domains,
+            "duplicate_domains": stats.duplicate_domains,
+            "invalid_rules": stats.invalid_rules,
+            "unsupported_rules": stats.unsupported_rules,
+            "unique_active_domains": stats.unique_active_domains,
+            "exceptions": stats.exceptions,
+            "rejected_samples": stats.rejected_samples[:20],
+        },
+        sort_keys=True,
+    )
+
+
+def _stats_from_json(text: str) -> ParseStats:
+    data = json.loads(text)
+    return ParseStats(
+        downloaded_entries=int(data.get("downloaded_entries", 0)),
+        parsed_rules=int(data.get("parsed_rules", 0)),
+        accepted_domains=int(data.get("accepted_domains", 0)),
+        duplicate_domains=int(data.get("duplicate_domains", 0)),
+        invalid_rules=int(data.get("invalid_rules", 0)),
+        unsupported_rules=int(data.get("unsupported_rules", 0)),
+        unique_active_domains=int(data.get("unique_active_domains", 0)),
+        exceptions=int(data.get("exceptions", 0)),
+        rejected_samples=list(data.get("rejected_samples", []))[:20],
+    )
+
+
+def _read_domain_artifact(path: Path) -> set[str]:
+    if not path.exists():
+        raise FileNotFoundError(path)
+    return {line.strip() for line in path.read_text().splitlines() if line.strip()}
+
+
+def _write_domain_artifact(path: Path, domains: set[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(f"{domain}\n" for domain in sorted(domains)))
+
+
+def parse_source_file(conn: sqlite3.Connection, source: sqlite3.Row, path: Path) -> tuple[set[str], set[str], ParseStats]:
+    content_hash = file_sha256(path)
+    cache = conn.execute(
+        """
+        SELECT * FROM source_parse_cache
+        WHERE source_id=? AND content_sha256=? AND parser_version=?
+        """,
+        (source["id"], content_hash, PARSER_CACHE_VERSION),
+    ).fetchone()
+    if cache:
+        try:
+            blocks = _read_domain_artifact(Path(cache["blocks_path"]))
+            allows = _read_domain_artifact(Path(cache["allows_path"]))
+            stats = _stats_from_json(cache["stats_json"])
+            return blocks, allows, stats
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            pass
+
+    with path.open("r", errors="replace") as handle:
+        blocks, allows, stats = parse_rule_lines(handle)
+    cache_dir = source_parse_cache_dir()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    prefix = cache_dir / f"{source['id']}-{content_hash}"
+    blocks_path = prefix.with_suffix(".blocks")
+    allows_path = prefix.with_suffix(".allows")
+    _write_domain_artifact(blocks_path, blocks)
+    _write_domain_artifact(allows_path, allows)
+    conn.execute(
+        """
+        INSERT INTO source_parse_cache(
+            source_id, content_sha256, parser_version, blocks_path, allows_path, stats_json, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source_id) DO UPDATE SET
+            content_sha256=excluded.content_sha256,
+            parser_version=excluded.parser_version,
+            blocks_path=excluded.blocks_path,
+            allows_path=excluded.allows_path,
+            stats_json=excluded.stats_json,
+            updated_at=excluded.updated_at
+        """,
+        (source["id"], content_hash, PARSER_CACHE_VERSION, str(blocks_path), str(allows_path), _stats_to_json(stats), now()),
+    )
+    return blocks, allows, stats
 
 
 def download_source(source: sqlite3.Row) -> SourceResult:
@@ -769,8 +942,7 @@ def collect_rules(conn: sqlite3.Connection, download: bool) -> tuple[set[str], s
     for source, result in pending:
         stats = ParseStats()
         if result.path and result.path.exists():
-            content = result.path.read_text(errors="replace")
-            blocks, allows, stats = parse_rules(content)
+            blocks, allows, stats = parse_source_file(conn, source, result.path)
             all_blocks.update(blocks)
             all_allows.update(allows)
             per_source_blocks[source["id"]] = blocks
@@ -905,6 +1077,228 @@ def validate_bind() -> None:
 
 def reload_bind() -> None:
     run(["rndc", "reload", RPZ_ZONE])
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    return bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone())
+
+
+def _canonical_rows(conn: sqlite3.Connection, table: str, columns: list[str], order_by: str) -> list[dict[str, object]]:
+    if not _table_exists(conn, table):
+        return []
+    selected = ", ".join(f'"{column}"' for column in columns)
+    return [
+        {column: row[column] for column in columns}
+        for row in conn.execute(f"SELECT {selected} FROM {table} ORDER BY {order_by}")
+    ]
+
+
+def protection_policy_manifest(conn: sqlite3.Connection) -> dict[str, object] | None:
+    """Canonical inputs that materially affect the compiled protection policy.
+
+    Returning None means reuse cannot be proven safe and callers must run the
+    ordinary rebuild/deploy path.
+    """
+    sources = []
+    for source in conn.execute("SELECT id, name, url, enabled, category FROM sources ORDER BY id"):
+        item = dict(source)
+        if source["enabled"]:
+            current_path, _ = source_paths(source)
+            if not current_path.exists():
+                return None
+            item["content_sha256"] = file_sha256(current_path)
+        else:
+            item["content_sha256"] = None
+        sources.append(item)
+    manifest = {
+        "policy_cache_version": POLICY_CACHE_VERSION,
+        "parser_cache_version": PARSER_CACHE_VERSION,
+        "rpz_zone": RPZ_ZONE,
+        "sources": sources,
+        "custom_filter_rules": _canonical_rows(
+            conn,
+            "custom_filter_rules",
+            [
+                "id",
+                "rule_text",
+                "normalized",
+                "rule_type",
+                "action",
+                "domain",
+                "match_subdomains",
+                "pattern",
+                "rewrite_address",
+                "address_family",
+                "qtype_restriction",
+                "priority",
+                "enabled",
+                "validation_state",
+            ],
+            "id",
+        ),
+        "custom_rules": _canonical_rows(conn, "custom_rules", ["id", "domain", "action", "enabled", "comment"], "id"),
+        "local_dns_settings": _canonical_rows(conn, "local_dns_settings", ["key", "value"], "key"),
+        "local_dns_records": _canonical_rows(
+            conn,
+            "local_dns_records",
+            ["id", "name", "fqdn", "record_type", "value", "ttl", "enabled", "auto_ptr", "ptr_record_id", "comment"],
+            "id",
+        ),
+        "dns_cache_settings": _canonical_rows(conn, "dns_cache_settings", ["key", "value"], "key"),
+        "upstream_resolvers": _canonical_rows(
+            conn,
+            "upstream_resolvers",
+            ["id", "name", "protocol", "address", "port", "doh_path", "tls_hostname", "bootstrap_ips", "enabled", "position"],
+            "position, id",
+        ),
+    }
+    encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    manifest["manifest_sha256"] = hashlib.sha256(encoded).hexdigest()
+    return manifest
+
+
+def record_reusable_protection_policy(conn: sqlite3.Connection, rpz_text: str, active_domains: int) -> None:
+    if active_domains <= 0:
+        return
+    manifest = protection_policy_manifest(conn)
+    if manifest is None:
+        return
+    manifest["active_domains"] = active_domains
+    rpz_cache, manifest_cache = protection_cache_paths()
+    rpz_cache.parent.mkdir(parents=True, exist_ok=True)
+    staged_rpz = rpz_cache.with_suffix(".rpz.tmp")
+    staged_manifest = manifest_cache.with_suffix(".json.tmp")
+    try:
+        staged_rpz.write_text(rpz_text)
+        staged_manifest.write_text(json.dumps(manifest, sort_keys=True, indent=2))
+        os.replace(staged_rpz, rpz_cache)
+        os.replace(staged_manifest, manifest_cache)
+    except OSError:
+        for path in (staged_rpz, staged_manifest):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
+def reusable_protection_policy_available(conn: sqlite3.Connection) -> tuple[bool, str]:
+    rpz_cache, manifest_cache = protection_cache_paths()
+    if not rpz_cache.exists() or not manifest_cache.exists():
+        return False, "cached policy artifact is missing"
+    try:
+        cached = json.loads(manifest_cache.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        return False, f"cached policy manifest is unreadable: {exc}"
+    current = protection_policy_manifest(conn)
+    if current is None:
+        return False, "current policy inputs are incomplete"
+    if cached.get("manifest_sha256") != current.get("manifest_sha256"):
+        return False, "current policy inputs do not match cached manifest"
+    return True, "cached compiled policy matches current inputs"
+
+
+def protection_enable_reuse(_: argparse.Namespace | None = None) -> None:
+    init_db()
+    DEPLOY_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with DEPLOY_LOCK.open("w") as lock_handle:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX)
+        conn = connect()
+        try:
+            ok, reason = reusable_protection_policy_available(conn)
+            if not ok:
+                print(f"reused=0 reason={reason}")
+                raise SystemExit(PROTECTION_REUSE_UNAVAILABLE)
+            rpz_cache, _manifest_cache = protection_cache_paths()
+            started = now()
+            cursor = conn.execute(
+                """
+                INSERT INTO deployments(started_at, status, message, "trigger")
+                VALUES (?, 'running', 'reusing cached compiled protection policy', 'protection-reuse')
+                """,
+                (started,),
+            )
+            deployment_id = cursor.lastrowid
+            conn.commit()
+            stage = Path(tempfile.mkdtemp(prefix="alderpointdns-rpz-reuse-", dir=str(STAGING_DIR)))
+            staged_rpz = stage / "alderpointdns.rpz"
+            backup_path = BACKUP_DIR / f"alderpointdns.rpz.last-good.{int(time.time())}"
+            status = "failed"
+            message = reason
+            active_domains = 0
+            blocked_test = None
+            allowed_test = None
+            dnsdist_layer: dict | None = None
+            cache_options_snapshot: str | None = None
+            cache_deployed_this_run = False
+            failure: Exception | None = None
+            try:
+                cached_manifest = json.loads(_manifest_cache.read_text())
+                shutil.copy2(rpz_cache, staged_rpz)
+                rpz_text = staged_rpz.read_text()
+                active_domains = int(cached_manifest.get("active_domains") or 0)
+                validate_rpz(staged_rpz)
+                validate_bind()
+                if COMPILED_RPZ.exists():
+                    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(COMPILED_RPZ, backup_path)
+                COMPILED_RPZ.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(staged_rpz, COMPILED_RPZ)
+                reload_bind()
+                conn.execute("UPDATE sources SET last_compile_success=? WHERE enabled=1", (now(),))
+                conn.commit()
+                custom_active = custom_rules.collect_active(conn)
+                local_dns.deploy_zones(conn)
+                cache_options_snapshot = dns_cache.CACHE_OPTIONS_CONF.read_text() if dns_cache.CACHE_OPTIONS_CONF.exists() else None
+                dns_cache.deploy_cache_options(conn)
+                cache_deployed_this_run = True
+                upstream_dns.deploy_upstreams(conn)
+                dnsdist_layer = custom_rules.deploy_dnsdist_layer(conn, custom_active)
+                if not resolves("cloudflare.com"):
+                    raise RuntimeError("post-deploy ordinary resolution failed")
+                status = "deployed"
+                message = "reused cached compiled protection policy"
+                replication.on_deploy_success(conn)
+            except Exception as exc:
+                failure = exc
+                message = str(exc)
+                if dnsdist_layer:
+                    custom_rules.rollback_dnsdist_layer(dnsdist_layer)
+                if backup_path.exists():
+                    try:
+                        os.replace(backup_path, COMPILED_RPZ)
+                        reload_bind()
+                        status = "rolled_back"
+                    except Exception as rollback_exc:
+                        status = "rollback_failed"
+                        message = f"{message}; RPZ rollback failed: {rollback_exc}"
+                else:
+                    status = "rolled_back"
+                if cache_deployed_this_run:
+                    try:
+                        if cache_options_snapshot is not None:
+                            dns_cache.CACHE_OPTIONS_CONF.write_text(cache_options_snapshot)
+                        elif dns_cache.CACHE_OPTIONS_CONF.exists():
+                            dns_cache.CACHE_OPTIONS_CONF.unlink()
+                        run(["rndc", "reconfig"], check=False)
+                    except Exception:
+                        pass
+            finally:
+                conn.execute(
+                    """
+                    UPDATE deployments
+                    SET finished_at=?, status=?, active_domains=?,
+                        blocked_test_domain=?, allowed_test_domain=?, message=?
+                    WHERE id=?
+                    """,
+                    (now(), status, active_domains, blocked_test, allowed_test, message, deployment_id),
+                )
+                conn.commit()
+                shutil.rmtree(stage, ignore_errors=True)
+            if failure:
+                raise failure
+            print(f"reused=1 deployment_id={deployment_id} active_domains={active_domains}")
+        finally:
+            conn.close()
 
 
 def dig(domain: str) -> subprocess.CompletedProcess[str]:
@@ -1220,6 +1614,7 @@ def deploy(download: bool = True, trigger: str | None = None, fail_on_source_err
                     rewrite_addr = rewrite_entry[rewrite_type]
                     if not wait_until(lambda: resolves_to(rewrite_name, rewrite_type, rewrite_addr)):
                         raise RuntimeError(f"post-deploy rewrite test failed for {rewrite_name}")
+                record_reusable_protection_policy(conn, rpz_text, active_domains)
                 status = "deployed"
                 message = "; ".join(errors)
                 replication.on_deploy_success(conn)
@@ -1675,6 +2070,8 @@ def main(argv: list[str] | None = None) -> int:
     dep = sub.add_parser("deploy")
     dep.add_argument("--no-download", action="store_true")
     dep.set_defaults(func=lambda args: print(deploy(download=not args.no_download)))
+    protection_reuse_parser = sub.add_parser("protection-enable-reuse")
+    protection_reuse_parser.set_defaults(func=protection_enable_reuse)
     local_dep = sub.add_parser("local-dns-deploy")
     local_dep.set_defaults(func=lambda args: print(local_dns.deploy_zones()))
     cache_dep = sub.add_parser("cache-deploy")

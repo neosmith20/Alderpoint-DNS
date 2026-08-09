@@ -1,0 +1,314 @@
+{
+  "environment": {
+    "python": "3.13.5 (main, Jul 15 2026, 20:25:40) [GCC 14.2.0]",
+    "platform": "Linux-6.12.96+deb13-amd64-x86_64-with-glibc2.41",
+    "machine": "x86_64",
+    "processor": "",
+    "cpu_count": 4
+  },
+  "results": [
+    {
+      "dataset": "small",
+      "target_domains": 100000,
+      "input_rules": 104349,
+      "unique_domains": 77101,
+      "rpz_bytes": 5089048,
+      "peak_tracemalloc_mb": 49.61638259887695,
+      "peak_rss_mb": 104.8046875,
+      "phases": {
+        "fixture_generate": {
+          "wall_s": 0.5370926609903108,
+          "cpu_s": 0.5369707690000001
+        },
+        "db_schema_seed": {
+          "wall_s": 0.018860340991523117,
+          "cpu_s": 0.017996817
+        },
+        "source_read": {
+          "wall_s": 0.0036921810096828267,
+          "cpu_s": 0.0036922110000000563
+        },
+        "parse": {
+          "wall_s": 27.11514898999303,
+          "cpu_s": 27.105100713
+        },
+        "normalize_subtime": {
+          "wall_s": 9.315573653235333,
+          "cpu_s": 9.315573653235333
+        },
+        "dedupe_unique_contribution": {
+          "wall_s": 0.02404645200294908,
+          "cpu_s": 0.024053578000000186
+        },
+        "db_write_stats": {
+          "wall_s": 0.0005174039979465306,
+          "cpu_s": 0.0005177510000002883
+        },
+        "custom_collect_precedence": {
+          "wall_s": 0.6640691369975684,
+          "cpu_s": 0.6636054510000022
+        },
+        "rpz_render": {
+          "wall_s": 0.760841037001228,
+          "cpu_s": 0.7606531830000023
+        },
+        "rpz_write": {
+          "wall_s": 0.004596918006427586,
+          "cpu_s": 0.004600152000001856
+        },
+        "named_checkzone": {
+          "wall_s": 0.6548195229988778,
+          "cpu_s": 0.0017964199999980224
+        }
+      },
+      "profile_top_cumulative": [
+        "",
+        "   ncalls  tottime  percall  cumtime  percall filename:lineno(function)",
+        "        3    1.576    0.525   27.107    9.036 alderpointdns_compiler.py:613(parse_rules)",
+        "   104349    1.482    0.000   24.769    0.000 alderpointdns_compiler.py:542(parse_source_line)",
+        "    59994    3.064    0.000   14.218    0.000 custom_rules.py:497(parse_rule)",
+        "   268692    1.890    0.000   11.013    0.000 ipaddress.py:28(ip_address)",
+        "   104349    0.187    0.000    9.472    0.000 benchmark_filtering.py:251(timed_normalize)",
+        "   104349    1.133    0.000    9.203    0.000 alderpointdns_compiler.py:495(normalize_domain)",
+        "    59994    0.074    0.000    5.570    0.000 custom_rules.py:96(_normalize_domain)",
+        "   224337    1.590    0.000    5.052    0.000 ipaddress.py:1939(__init__)",
+        "   104349    0.117    0.000    4.166    0.000 alderpointdns_compiler.py:534(_is_hosts_line)",
+        "   268692    1.143    0.000    4.071    0.000 ipaddress.py:1286(__init__)",
+        "   224337    2.463    0.000    3.051    0.000 ipaddress.py:1661(_ip_int_from_string)",
+        "    59994    0.360    0.000    2.960    0.000 custom_rules.py:441(_parse_hosts_line)",
+        "   268692    1.194    0.000    2.844    0.000 ipaddress.py:1187(_ip_int_from_string)",
+        "208709/104360    0.454    0.000    2.442    0.000 {method 'encode' of 'str' objects}",
+        "   104349    1.327    0.000    2.101    0.000 idna.py:179(encode)",
+        "",
+        ""
+      ],
+      "profile_top_calls": [
+        "",
+        "   ncalls  tottime  percall  cumtime  percall filename:lineno(function)",
+        "  3219687    0.256    0.000    0.256    0.000 {built-in method builtins.ord}",
+        "  1669833    0.534    0.000    0.790    0.000 custom_rules.py:508(<genexpr>)",
+        "1669629/1669627    0.707    0.000    0.707    0.000 {built-in method builtins.len}",
+        "   986165    0.147    0.000    0.147    0.000 {built-in method builtins.isinstance}",
+        "   806082    1.208    0.000    1.208    0.000 {method 'split' of 'str' objects}",
+        "   787383    1.069    0.000    1.069    0.000 {method 'startswith' of 'str' objects}",
+        "   537393    0.462    0.000    0.462    0.000 {method 'strip' of 'str' objects}",
+        "   388680    0.419    0.000    0.419    0.000 {method 'partition' of 'str' objects}",
+        "   268692    1.143    0.000    4.071    0.000 ipaddress.py:1286(__init__)",
+        "   268692    1.194    0.000    2.844    0.000 ipaddress.py:1187(_ip_int_from_string)",
+        "   268692    1.890    0.000   11.013    0.000 ipaddress.py:28(ip_address)",
+        "   258607    0.605    0.000    0.605    0.000 {method 'append' of 'list' objects}",
+        "   224337    1.590    0.000    5.052    0.000 ipaddress.py:1939(__init__)",
+        "   224337    2.463    0.000    3.051    0.000 ipaddress.py:1661(_ip_int_from_string)",
+        "   224337    0.196    0.000    0.349    0.000 ipaddress.py:1904(_split_scope_id)",
+        "",
+        ""
+      ],
+      "notes": [
+        "normalize_domain calls=104349",
+        "zone alderpointdns.rpz/IN: loaded serial 1786260523\nOK\n"
+      ]
+    },
+    {
+      "dataset": "medium",
+      "target_domains": 500000,
+      "input_rules": 521739,
+      "unique_domains": 385507,
+      "rpz_bytes": 25443844,
+      "peak_tracemalloc_mb": 220.80834484100342,
+      "peak_rss_mb": 392.3828125,
+      "phases": {
+        "fixture_generate": {
+          "wall_s": 2.819563634999213,
+          "cpu_s": 2.818163309999999
+        },
+        "db_schema_seed": {
+          "wall_s": 0.00755111500620842,
+          "cpu_s": 0.006735071999997899
+        },
+        "source_read": {
+          "wall_s": 0.010756764007965103,
+          "cpu_s": 0.010757894000001045
+        },
+        "parse": {
+          "wall_s": 136.28928386799817,
+          "cpu_s": 136.227503917
+        },
+        "normalize_subtime": {
+          "wall_s": 46.987655589255155,
+          "cpu_s": 46.987655589255155
+        },
+        "dedupe_unique_contribution": {
+          "wall_s": 0.07667840999783948,
+          "cpu_s": 0.07665678600000092
+        },
+        "db_write_stats": {
+          "wall_s": 0.0005182430031709373,
+          "cpu_s": 0.0005187100000227929
+        },
+        "custom_collect_precedence": {
+          "wall_s": 3.1927949949895265,
+          "cpu_s": 3.1888234529999977
+        },
+        "rpz_render": {
+          "wall_s": 3.906066641997313,
+          "cpu_s": 3.9040273409999884
+        },
+        "rpz_write": {
+          "wall_s": 0.021773803993710317,
+          "cpu_s": 0.021775968000014245
+        },
+        "named_checkzone": {
+          "wall_s": 2.82372747399495,
+          "cpu_s": 0.001884079999996402
+        }
+      },
+      "profile_top_cumulative": [
+        "",
+        "   ncalls  tottime  percall  cumtime  percall filename:lineno(function)",
+        "        3    7.971    2.657  136.262   45.421 alderpointdns_compiler.py:613(parse_rules)",
+        "   521739    7.167    0.000  124.449    0.000 alderpointdns_compiler.py:542(parse_source_line)",
+        "   299994   15.295    0.000   71.419    0.000 custom_rules.py:497(parse_rule)",
+        "  1343472    9.643    0.000   55.698    0.000 ipaddress.py:28(ip_address)",
+        "   521739    0.973    0.000   47.722    0.000 benchmark_filtering.py:251(timed_normalize)",
+        "   521739    5.728    0.000   46.486    0.000 alderpointdns_compiler.py:495(normalize_domain)",
+        "   299994    0.377    0.000   28.023    0.000 custom_rules.py:96(_normalize_domain)",
+        "  1121727    8.020    0.000   25.410    0.000 ipaddress.py:1939(__init__)",
+        "   521739    0.585    0.000   21.156    0.000 alderpointdns_compiler.py:534(_is_hosts_line)",
+        "  1343472    5.777    0.000   20.644    0.000 ipaddress.py:1286(__init__)",
+        "  1121727   12.502    0.000   15.423    0.000 ipaddress.py:1661(_ip_int_from_string)",
+        "   299994    1.816    0.000   14.993    0.000 custom_rules.py:441(_parse_hosts_line)",
+        "  1343472    6.107    0.000   14.440    0.000 ipaddress.py:1187(_ip_int_from_string)",
+        "1043489/521750    2.321    0.000   12.411    0.000 {method 'encode' of 'str' objects}",
+        "   521739    6.751    0.000   10.664    0.000 idna.py:179(encode)",
+        "",
+        ""
+      ],
+      "profile_top_calls": [
+        "",
+        "   ncalls  tottime  percall  cumtime  percall filename:lineno(function)",
+        " 16099668    1.301    0.000    1.301    0.000 {built-in method builtins.ord}",
+        "  8349828    2.701    0.000    4.002    0.000 custom_rules.py:508(<genexpr>)",
+        "  8347843    3.584    0.000    3.584    0.000 {built-in method builtins.len}",
+        "  4930492    0.746    0.000    0.746    0.000 {built-in method builtins.isinstance}",
+        "  4030422    6.041    0.000    6.041    0.000 {method 'split' of 'str' objects}",
+        "  3936942    5.396    0.000    5.396    0.000 {method 'startswith' of 'str' objects}",
+        "  2686953    2.336    0.000    2.336    0.000 {method 'strip' of 'str' objects}",
+        "  1943460    1.824    0.000    1.824    0.000 {method 'partition' of 'str' objects}",
+        "  1343472    5.777    0.000   20.644    0.000 ipaddress.py:1286(__init__)",
+        "  1343472    6.107    0.000   14.440    0.000 ipaddress.py:1187(_ip_int_from_string)",
+        "  1343472    9.643    0.000   55.698    0.000 ipaddress.py:28(ip_address)",
+        "  1292781    3.030    0.000    3.030    0.000 {method 'append' of 'list' objects}",
+        "  1121727    8.020    0.000   25.410    0.000 ipaddress.py:1939(__init__)",
+        "  1121727   12.502    0.000   15.423    0.000 ipaddress.py:1661(_ip_int_from_string)",
+        "  1121727    0.971    0.000    1.649    0.000 ipaddress.py:1904(_split_scope_id)",
+        "",
+        ""
+      ],
+      "notes": [
+        "normalize_domain calls=521739",
+        "zone alderpointdns.rpz/IN: loaded serial 1786260667\nOK\n"
+      ]
+    },
+    {
+      "dataset": "large",
+      "target_domains": 1000000,
+      "input_rules": 1043478,
+      "unique_domains": 771013,
+      "rpz_bytes": 50887240,
+      "peak_tracemalloc_mb": 442.7306032180786,
+      "peak_rss_mb": 756.92578125,
+      "phases": {
+        "fixture_generate": {
+          "wall_s": 5.282975014008116,
+          "cpu_s": 5.280294799999979
+        },
+        "db_schema_seed": {
+          "wall_s": 0.007276766002178192,
+          "cpu_s": 0.006335032999999157
+        },
+        "source_read": {
+          "wall_s": 0.011707312005455606,
+          "cpu_s": 0.011709903999985727
+        },
+        "parse": {
+          "wall_s": 266.0714240119996,
+          "cpu_s": 265.979400507
+        },
+        "normalize_subtime": {
+          "wall_s": 91.70252326376794,
+          "cpu_s": 91.70252326376794
+        },
+        "dedupe_unique_contribution": {
+          "wall_s": 0.16333106099045835,
+          "cpu_s": 0.1633366549999664
+        },
+        "db_write_stats": {
+          "wall_s": 0.0005117530090501532,
+          "cpu_s": 0.0005122600000504463
+        },
+        "custom_collect_precedence": {
+          "wall_s": 6.2880536150041735,
+          "cpu_s": 6.286098056000014
+        },
+        "rpz_render": {
+          "wall_s": 7.552591557003325,
+          "cpu_s": 7.5500597750000225
+        },
+        "rpz_write": {
+          "wall_s": 0.04035136000311468,
+          "cpu_s": 0.040353653000011036
+        },
+        "named_checkzone": {
+          "wall_s": 5.621304356987821,
+          "cpu_s": 0.0016653209999617502
+        }
+      },
+      "profile_top_cumulative": [
+        "",
+        "   ncalls  tottime  percall  cumtime  percall filename:lineno(function)",
+        "        3   15.586    5.195  266.018   88.673 alderpointdns_compiler.py:613(parse_rules)",
+        "  1043478   14.017    0.000  242.898    0.000 alderpointdns_compiler.py:542(parse_source_line)",
+        "   599994   29.895    0.000  139.404    0.000 custom_rules.py:497(parse_rule)",
+        "  2686950   18.709    0.000  108.581    0.000 ipaddress.py:28(ip_address)",
+        "  1043478    1.903    0.000   93.126    0.000 benchmark_filtering.py:251(timed_normalize)",
+        "  1043478   11.172    0.000   90.727    0.000 alderpointdns_compiler.py:495(normalize_domain)",
+        "   599994    0.716    0.000   54.619    0.000 custom_rules.py:96(_normalize_domain)",
+        "  2243466   15.715    0.000   49.693    0.000 ipaddress.py:1939(__init__)",
+        "  1043478    1.109    0.000   41.199    0.000 alderpointdns_compiler.py:534(_is_hosts_line)",
+        "  2686950   11.244    0.000   40.179    0.000 ipaddress.py:1286(__init__)",
+        "  2243466   24.466    0.000   30.173    0.000 ipaddress.py:1661(_ip_int_from_string)",
+        "   599994    3.520    0.000   29.179    0.000 custom_rules.py:441(_parse_hosts_line)",
+        "  2686950   11.888    0.000   28.096    0.000 ipaddress.py:1187(_ip_int_from_string)",
+        "2086967/1043489    4.505    0.000   24.194    0.000 {method 'encode' of 'str' objects}",
+        "  1043478   13.174    0.000   20.813    0.000 idna.py:179(encode)",
+        "",
+        ""
+      ],
+      "profile_top_calls": [
+        "",
+        "   ncalls  tottime  percall  cumtime  percall filename:lineno(function)",
+        " 32199678    2.545    0.000    2.545    0.000 {built-in method builtins.ord}",
+        " 16699833    5.307    0.000    7.851    0.000 custom_rules.py:508(<genexpr>)",
+        " 16695667    7.016    0.000    7.016    0.000 {built-in method builtins.len}",
+        "  9860926    1.467    0.000    1.467    0.000 {built-in method builtins.isinstance}",
+        "  8060856   11.733    0.000   11.733    0.000 {method 'split' of 'str' objects}",
+        "  7873899   10.586    0.000   10.586    0.000 {method 'startswith' of 'str' objects}",
+        "  5373909    4.570    0.000    4.570    0.000 {method 'strip' of 'str' objects}",
+        "  3886938    3.530    0.000    3.530    0.000 {method 'partition' of 'str' objects}",
+        "  2686950   11.244    0.000   40.179    0.000 ipaddress.py:1286(__init__)",
+        "  2686950   11.888    0.000   28.096    0.000 ipaddress.py:1187(_ip_int_from_string)",
+        "  2686950   18.709    0.000  108.581    0.000 ipaddress.py:28(ip_address)",
+        "  2585532    5.905    0.000    5.905    0.000 {method 'append' of 'list' objects}",
+        "  2243466   15.715    0.000   49.693    0.000 ipaddress.py:1939(__init__)",
+        "  2243466   24.466    0.000   30.173    0.000 ipaddress.py:1661(_ip_int_from_string)",
+        "  2243466    1.882    0.000    3.178    0.000 ipaddress.py:1904(_split_scope_id)",
+        "",
+        ""
+      ],
+      "notes": [
+        "normalize_domain calls=1043478",
+        "zone alderpointdns.rpz/IN: loaded serial 1786260952\nOK\n"
+      ]
+    }
+  ]
+}

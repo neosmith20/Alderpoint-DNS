@@ -358,6 +358,110 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(2, row["unique_active_domains"])  # 2 blocks + 1 allow (allow not counted as "block contribution")
         self.assertIsNone(row["last_error"])
 
+    def test_unchanged_source_reuses_parse_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source_file = tmp_path / "source.txt"
+            source_file.write_text("0.0.0.0 cached.example\n||ads.example^\n@@||allowed.example^\n")
+            original_db = compiler.DB_PATH
+            original_download_dir = compiler.DOWNLOAD_DIR
+            original_parse_rules = compiler.parse_rules
+            compiler.DB_PATH = tmp_path / "alderpointdns.db"
+            compiler.DOWNLOAD_DIR = tmp_path / "downloads"
+            try:
+                compiler.init_db()
+                with compiler.connect() as conn:
+                    conn.execute(
+                        "INSERT INTO sources(name, url, enabled, category) VALUES (?, ?, 1, ?)",
+                        ("local fixture", source_file.as_uri(), "ads_trackers"),
+                    )
+                    first_blocks, first_allows, _per_source, _errors = compiler.collect_rules(conn, download=True)
+
+                    def fail_if_reparsed(_content):
+                        raise AssertionError("unchanged source was reparsed instead of loaded from cache")
+
+                    compiler.parse_rules = fail_if_reparsed
+                    second_blocks, second_allows, _per_source, _errors = compiler.collect_rules(conn, download=False)
+            finally:
+                compiler.DB_PATH = original_db
+                compiler.DOWNLOAD_DIR = original_download_dir
+                compiler.parse_rules = original_parse_rules
+
+        self.assertEqual(first_blocks, second_blocks)
+        self.assertEqual(first_allows, second_allows)
+
+    def test_parse_cache_invalidates_when_source_content_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source_file = tmp_path / "source.txt"
+            source_file.write_text("0.0.0.0 before.example\n")
+            original_db = compiler.DB_PATH
+            original_download_dir = compiler.DOWNLOAD_DIR
+            compiler.DB_PATH = tmp_path / "alderpointdns.db"
+            compiler.DOWNLOAD_DIR = tmp_path / "downloads"
+            try:
+                compiler.init_db()
+                with compiler.connect() as conn:
+                    conn.execute(
+                        "INSERT INTO sources(name, url, enabled, category) VALUES (?, ?, 1, ?)",
+                        ("local fixture", source_file.as_uri(), "ads_trackers"),
+                    )
+                    before, _, _per_source, _errors = compiler.collect_rules(conn, download=True)
+                    current, _ = compiler.source_paths(conn.execute("SELECT * FROM sources WHERE name='local fixture'").fetchone())
+                    current.write_text("0.0.0.0 after.example\n")
+                    after, _, _per_source, _errors = compiler.collect_rules(conn, download=False)
+            finally:
+                compiler.DB_PATH = original_db
+                compiler.DOWNLOAD_DIR = original_download_dir
+
+        self.assertEqual(before, {"before.example"})
+        self.assertEqual(after, {"after.example"})
+
+    def test_reusable_policy_manifest_invalidates_on_source_and_custom_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            original_db = compiler.DB_PATH
+            original_download_dir = compiler.DOWNLOAD_DIR
+            original_rpz = compiler.COMPILED_RPZ
+            original_staging = compiler.STAGING_DIR
+            original_custom_db = compiler.custom_rules.DB_PATH
+            compiler.DB_PATH = tmp_path / "alderpointdns.db"
+            compiler.DOWNLOAD_DIR = tmp_path / "downloads"
+            compiler.COMPILED_RPZ = tmp_path / "compiled" / "bind" / "alderpointdns.rpz"
+            compiler.STAGING_DIR = tmp_path / "staging"
+            compiler.custom_rules.DB_PATH = compiler.DB_PATH
+            try:
+                compiler.init_db()
+                with compiler.connect() as conn:
+                    conn.execute(
+                        "INSERT INTO sources(name, url, enabled, category) VALUES (?, ?, 1, ?)",
+                        ("local fixture", (tmp_path / "unused.txt").as_uri(), "ads_trackers"),
+                    )
+                    conn.commit()
+                    source = conn.execute("SELECT * FROM sources WHERE name='local fixture'").fetchone()
+                    current, _ = compiler.source_paths(source)
+                    current.parent.mkdir(parents=True, exist_ok=True)
+                    current.write_text("0.0.0.0 cached.example\n")
+                    rpz_text = compiler.render_rpz({"cached.example"})
+                    compiler.record_reusable_protection_policy(conn, rpz_text, 1)
+                    ok_initial, _ = compiler.reusable_protection_policy_available(conn)
+                    current.write_text("0.0.0.0 changed.example\n")
+                    ok_source_changed, _ = compiler.reusable_protection_policy_available(conn)
+                    current.write_text("0.0.0.0 cached.example\n")
+                    custom_rules = compiler.custom_rules
+                    custom_rules.add_rule("||custom-block.example^")
+                    ok_custom_changed, _ = compiler.reusable_protection_policy_available(conn)
+            finally:
+                compiler.DB_PATH = original_db
+                compiler.DOWNLOAD_DIR = original_download_dir
+                compiler.COMPILED_RPZ = original_rpz
+                compiler.STAGING_DIR = original_staging
+                compiler.custom_rules.DB_PATH = original_custom_db
+
+        self.assertTrue(ok_initial)
+        self.assertFalse(ok_source_changed)
+        self.assertFalse(ok_custom_changed)
+
     # -- CLI exit-code contract -----------------------------------------------
 
     def test_update_sources_cli_exit_zero_when_all_healthy(self):
