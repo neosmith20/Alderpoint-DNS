@@ -543,7 +543,7 @@ class LegacyArchiveRestoreTest(FilterScheduleTestBase):
         archive.commit()
         archive.close()
 
-        merged = self.backup._merge_database(staged, {"sqlite_data": True})
+        merged = self.backup._merge_database(staged, {"sqlite_data": True}, target_db_path=self.backup.DB_PATH)
         self.assertIn("deployments", merged)
         with compiler.connect() as conn:
             row = conn.execute('SELECT active_domains, "trigger" FROM deployments WHERE id=5').fetchone()

@@ -79,11 +79,13 @@ Restore workflow:
 
 A restore records its progress durably in `restore_history` as it moves
 through phases (`validating` -> `extracting` -> `pre_restore_backup` ->
-`restoring_configuration` -> `restoring_analytics`/`restoring_database` ->
-`validating_database` -> `restarting_services` -> `postcheck` -> `cleanup`
--> `completed`/`failed`), each with a `heartbeat_at` timestamp and, for the
-large analytics-history table, `progress_current`/`progress_total` row
-counts updated between committed chunks (not per-row).
+`restoring_configuration` -> `preparing_working_db` ->
+`restoring_analytics`/`restoring_database` -> `validating_database` ->
+`promoting` -> `promoted` -> `restarting_services` -> `postcheck` ->
+`cleanup` -> `completed`/`failed`/`promoted_recovery_required`), each with
+a `heartbeat_at` timestamp and, for the large analytics-history table,
+`progress_current`/`progress_total` row counts updated between committed
+chunks (not per-row).
 
 The row also records the exact worker that's doing the work: PID, that
 PID's process-start time (guards against PID reuse), and the host's boot
@@ -100,6 +102,92 @@ outright). Cleanup only ever removes the specific staging subdirectory
 recorded for that restore, and refuses to act on anything that isn't
 strictly inside `STAGING_DIR` -- the uploaded archive and the pre-restore
 safety backup (both in `BACKUP_DIR`) are never touched by it.
+`pre_restore_backup_path` is itself written to the row as soon as that
+backup exists (not only in the restore's final update), so it's always
+discoverable even from a row that was reaped mid-restore.
+
+`promoted_at` is the authoritative "point of no return" marker (see the
+staged/atomic-promotion architecture immediately below): NULL means the
+live database was never touched by this restore attempt, no matter what
+else it did; once set, the live database's data changes have already
+committed. `reap_abandoned_restores()` treats these very differently --
+see below.
+
+### Staged/atomic-promotion database restore
+
+The database side of a restore never writes to the live database file
+directly. All of the expensive work -- extracting, merging potentially
+millions of archived rows, validating -- happens against a private
+**working copy**; the live database is only ever touched by one brief,
+already-fully-validated **promotion** step at the very end. A restore
+interrupted at any point before that step leaves the live database
+completely untouched, because nothing was ever written to it -- there is
+nothing to roll back. A restore interrupted during or after that step has
+already committed its (already-validated) database changes.
+
+1. The usual pre-restore safety backup is taken first, as always.
+2. A private working copy of the live database is created with SQLite's
+   own online backup API (`Connection.backup()`, the same mechanism
+   `sqlite_backup_copy()` uses for regular backup creation) -- safe
+   against a live, concurrently-written WAL-mode database, unlike a raw
+   file copy.
+3. Every selected table is merged from the backup archive into that
+   working copy -- never the live db -- in independently committed chunks
+   (200,000 rows per chunk, by primary-key range) for real progress on
+   large tables. This is now unconditionally safe regardless of any other
+   process writing to the *live* database, because nothing else can see
+   or write to a private working copy in the first place -- the earlier
+   "confirmed collector stop" gate this replaced existed only because an
+   earlier version of this code chunked directly against the live
+   database.
+4. `PRAGMA quick_check` runs against the working copy. A failure here
+   raises before anything live is ever touched.
+5. Only once the working copy is fully valid: every other database writer
+   is quiesced, the *current* live state of every table not touched by
+   the merge (excluded/unselected components, and this restore's own
+   bookkeeping tables, which are always excluded from the archive merge
+   itself) is copied into the working copy -- closing the gap between
+   when the working copy was snapshotted and now -- both databases are
+   checkpointed to a single file with no outstanding WAL, and the working
+   copy atomically replaces the live file via a plain filesystem rename
+   (`os.replace`, atomic on the same filesystem: any process opening the
+   path mid-rename gets either the fully-old or fully-new file, never a
+   torn mix).
+6. Services are restarted and DNS is health-checked as before.
+
+**Writer quiescing, and why it isn't `systemctl stop alderpointdns`:**
+Every real writer of this database -- the web app, the analytics
+collector, and every scheduled backup/filter-update/notify/
+software-update-check timer job -- opens a fresh SQLite connection per
+operation rather than holding one open (see `app/webapp.py`'s `db()`), so
+`PRAGMA locking_mode=EXCLUSIVE` on a dedicated connection (retried with
+backoff) is sufficient to guarantee exclusivity for the brief promotion
+window, uniformly, without having to enumerate every writer individually.
+This includes closing the restore's own bookkeeping connection first: WAL
+mode's exclusive locking requires being the *only* open connection to the
+file, even the restore's own idle one. `alderpointdns-analytics.service`
+is still explicitly stopped as a courtesy beforehand (cutting down on
+wasted retries -- it's a separate systemd unit, safe to stop from here),
+but correctness never depends on that succeeding. `alderpointdns.service`
+itself is deliberately *never* stopped via `systemctl` for this: restores
+run as (or as a descendant of) that very service's sudo-escalated
+privileged helper, and systemd's default `KillMode=control-group` would
+send a stop's `SIGTERM` to the restore's own process too.
+
+**Post-promotion failure never fakes a rollback.** If service restart or
+the final DNS postcheck fails *after* promotion has already committed,
+`restore_backup()` does not attempt to revert the database: it was only
+ever promoted after passing `PRAGMA quick_check`, so a later, unrelated
+failure is a service/health-recovery situation, not a data-integrity one,
+and automatically reverting an already-valid database would itself be the
+riskier action. The restore is marked `promoted_recovery_required` (never
+left `running`), service restarts are attempted automatically, and the
+message names the pre-restore safety backup's path for manual recovery if
+that's genuinely what's needed. `reap_abandoned_restores()` applies the
+same distinction to a promoted-but-then-killed worker: `promoted_at` set
+means the reap message says so explicitly and also attempts the same
+best-effort service restart, rather than the generic "safe to retry"
+message it gives an abandoned restore that never reached promotion.
 
 ### Large analytics restore: what was actually slow, and the fix
 
@@ -134,57 +222,63 @@ than assumption:
   live analytics collector's own writer were racing for the same file's
   single write lock.
 
-Two changes follow directly from that evidence:
+That evidence originally motivated two narrower fixes (pausing the
+analytics collector around a live-database merge, and gating chunked
+commits behind a *confirmed* collector stop before they were safe). Both
+are superseded by the staged/atomic-promotion architecture described
+above: the merge no longer touches the live database at all, so chunked
+commits are unconditionally safe regardless of what else is writing to
+the live db, and `PRAGMA quick_check` now runs against the working copy
+*before* anything live is touched, rather than against the live database
+after the fact. The analytics collector is still stopped as a courtesy
+during promotion (see "Writer quiescing" above), but that's an
+optimization now, not a correctness requirement.
 
-1. **The analytics collector is now explicitly paused** (`systemctl stop
-   alderpointdns-analytics`) before an analytics-history merge begins, and
-   restarted afterward unconditionally (success, failure, or an exception
-   during rollback) -- eliminating the write-lock race at its source
-   instead of leaving it to `busy_timeout` retries.
-2. **Large tables are copied in committed chunks** (200,000 rows per
-   chunk, by primary-key range) instead of one multi-hour uncommitted
-   transaction, so heartbeat/progress is durably visible to another
-   connection (the web UI, or a startup abandoned-restore check) while a
-   huge restore is still running. This is gated behind confirmation --
-   not merely a request -- that the analytics collector actually stopped
-   (`_wait_inactive()`): a competing-writer stress test reproduced a real
-   `UNIQUE constraint` / `database is locked` failure when chunked commits
-   were allowed to interleave with an active concurrent writer, which is
-   exactly why that confirmation is mandatory rather than assumed. If the
-   collector can't be confirmed stopped, the merge falls back to the
-   original one-shot atomic path for that table -- slower to observe,
-   never wrong.
-3. A `PRAGMA quick_check` now runs against the live database immediately
-   after a database-touching merge, before services are restarted --
-   failing (and rolling back) a restore whose merge somehow left the
-   database inconsistent, rather than only ever being checked
-   after the fact by an administrator.
+Validated locally against the real, staged `restore_backup()` code path
+end to end (this engineering host has 3.8 GiB total RAM -- not enough to
+spin up the 4-8 GiB disposable VM this would ideally be validated in, so
+this is a same-host, no-mocked-merge-logic run instead; see the incident
+notes for that caveat spelled out explicitly):
 
-Validated locally against the real `restore_backup()` code path end to end
-(this engineering host has 3.8 GiB total RAM -- not enough to spin up the
-4-8 GiB disposable VM this would ideally be validated in, so this is a
-same-host, no-mocked-merge-logic run instead; see the incident notes for
-that caveat spelled out explicitly):
-
-- A ~2.8M-row / 75 MiB-compressed synthetic analytics restore (smaller
-  compression ratio than the original real-world 296 MiB, since synthetic
+- A real ~2.8M-row analytics restore (32 MiB compressed archive; smaller
+  than the original 296 MiB real-world archive since synthetic
   domains/clients compress better than organic traffic, but the same row
-  count) completed in seconds, not hours; destination `query_events` count
-  matched the archived source count exactly (2,800,001 = 2,800,001);
-  `PRAGMA quick_check` returned `ok`; `user_auth_data` (admins table) and
-  other requested components restored correctly; the staging directory was
-  fully cleaned up; `restore_history` recorded the real worker PID and
-  reached `phase='completed'`.
-- A second run intentionally `SIGKILL`ed the restore process while it was
-  actively mid-`restoring_analytics` (progress `0/1500001` at kill time, a
-  1.5M-row archive): the very next status read (no manual intervention)
-  found it already reaped -- `status='interrupted'`, `finished_at` set, a
-  message naming the dead PID, its last phase/component, and last
-  heartbeat -- staging cleaned up, and the source archive left untouched.
+  count) completed in **7.0 seconds total**, with the actual live-database
+  **promotion window measured at ~0.09 seconds** -- extraction, the
+  pre-restore safety backup, and file components together took ~1.9s;
+  creating the working copy plus merging all 2.8M rows into it together
+  took ~4.2s (roughly 666,000 rows/sec for that combined phase, working
+  entirely against the private copy); `PRAGMA quick_check` took ~0.8s.
+  Destination `query_events` count matched the archive's source count
+  **exactly** (2,800,000 = 2,800,000); `PRAGMA quick_check` returned `ok`;
+  `promoted_at` was recorded; peak RSS for the whole restore was ~36 MiB;
+  the staging directory (including the working copy) was fully cleaned up.
+- Three separate real `SIGKILL` interruption tests, each proving the live
+  database is byte-for-byte/row-for-row unaffected by a kill before
+  promotion, and correctly reflects the promoted content after one:
+  - **Mid-chunked-merge into the working copy** (a 250,001-row table,
+    killed mid-chunk): live database proven **byte-identical** before and
+    after the kill; the next status read reaped it as `interrupted`,
+    `promoted_at` NULL, staging cleaned, source archive retained.
+  - **Immediately before promotion** (working copy fully merged and
+    validated, killed right before the exclusive lock is acquired): same
+    result -- live database untouched, `promoted_at` NULL.
+  - **Immediately after promotion, before postcheck** (killed right after
+    the atomic swap committed): reaped as `interrupted` with `promoted_at`
+    **set**, the message explicitly stating the swap had already
+    committed, and a best-effort restart of `alderpointdns`/
+    `alderpointdns-analytics` attempted automatically since a
+    promoted-but-interrupted restore may have left them stopped; the
+    pre-restore safety backup remained present and discoverable from the
+    row (a real bug found and fixed by this exact test: that path wasn't
+    recorded until a restore's *final* update, so a worker killed before
+    reaching it left the row unable to point at its own safety backup even
+    though the backup file existed all along).
 - named/dnsdist/DNS-resolution/web-UI health were **not** exercised by
   this local run (this host has neither daemon installed) -- those need
   the real disposable-VM environment; this only proves the SQLite
-  merge/lifecycle logic itself, not full-system health after a restore.
+  merge/lifecycle/promotion logic itself, not full-system health after a
+  restore.
 
 Emergency recovery:
 

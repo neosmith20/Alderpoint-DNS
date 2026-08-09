@@ -701,10 +701,62 @@ class RestoreTest(BackupTestBase):
             unrelated = conn.execute("SELECT count(*) FROM dns_cache_settings WHERE key='unrelated_key'").fetchone()[0]
             self.assertEqual(unrelated, 0)
 
+    def test_promoted_restore_records_promoted_at_and_reaches_completed(self) -> None:
+        path = self._make_backup()
+        with mock.patch.object(backup, "run", self.fake_run), mock.patch.object(backup, "resolves", return_value=True), \
+                mock.patch.object(backup, "_wait_active", return_value=True), mock.patch.object(backup, "_wait_inactive", return_value=True):
+            backup.restore_backup(path, None, dict.fromkeys(backup.COMPONENT_KEYS, True))
+        last = backup.last_restore()
+        self.assertEqual(last["status"], "deployed")
+        self.assertEqual(last["phase"], "completed")
+        self.assertIsNotNone(last["promoted_at"])
+
+    def test_excluded_components_retain_live_values_across_a_real_promotion(self) -> None:
+        # Representative exclusions per the staged-restore architecture's
+        # requirement that the working copy starts as a full live snapshot
+        # and only *selected* components are overwritten from the archive
+        # -- administrator/auth state, custom rules, and client aliases
+        # here -- verified through an actual promoted (not just merged)
+        # restore, since _resync_live_state_into_working() re-syncs
+        # untouched tables from live immediately before the swap and this
+        # must still hold after that step.
+        path = self._make_backup()
+        with closing(backup.connect()) as conn:
+            conn.execute("INSERT INTO admins(username) VALUES ('kept-live-admin')")
+            conn.execute("INSERT INTO custom_rules(domain) VALUES ('kept-live-rule.example')")
+            conn.execute("INSERT INTO client_aliases(cidr) VALUES ('10.10.10.10/32')")
+            conn.commit()
+        # Selects sqlite_data broadly but explicitly leaves out
+        # user_auth_data, custom_rules, and client_aliases -- each gated
+        # independently of sqlite_data per TABLE_COMPONENT_MAP.
+        components = dict.fromkeys(backup.COMPONENT_KEYS, True) | {
+            "user_auth_data": False, "custom_rules": False, "client_aliases": False,
+        }
+        with mock.patch.object(backup, "run", self.fake_run), mock.patch.object(backup, "resolves", return_value=True), \
+                mock.patch.object(backup, "_wait_active", return_value=True), mock.patch.object(backup, "_wait_inactive", return_value=True):
+            backup.restore_backup(path, None, components)
+        last = backup.last_restore()
+        self.assertEqual(last["status"], "deployed")
+        self.assertIsNotNone(last["promoted_at"])
+        with closing(backup.connect()) as conn:
+            admins = [row[0] for row in conn.execute("SELECT username FROM admins")]
+            rules = [row[0] for row in conn.execute("SELECT domain FROM custom_rules")]
+            aliases = [row[0] for row in conn.execute("SELECT cidr FROM client_aliases")]
+        self.assertIn("kept-live-admin", admins)
+        self.assertIn("kept-live-rule.example", rules)
+        self.assertIn("10.10.10.10/32", aliases)
+
     def test_restore_backup_rolls_back_on_failed_health_check(self) -> None:
+        # File components only (no database component selected) -- this is
+        # deliberately a *pre-promotion* failure: the database is never
+        # touched, so the fix here is the original, simpler file-rollback
+        # path (_rollback_paths), not the staged/atomic-promotion database
+        # machinery (see test_restore_backup_health_check_failure_after_promotion_is_not_rolled_back
+        # for the equivalent postcheck failure *after* promotion).
         path = self._make_backup()
         original = backup.DNSDIST_CONF.read_text()
         backup.DNSDIST_CONF.write_text("changed-live-content\n")
+        file_only_components = dict.fromkeys(backup.COMPONENT_KEYS, False) | {"dnsdist_source_config": True}
         # The post-restore health check fails once (triggering rollback);
         # the rollback's own re-check then succeeds (as it would in reality,
         # since rollback restores exactly the config that was working
@@ -712,10 +764,30 @@ class RestoreTest(BackupTestBase):
         with mock.patch.object(backup, "run", self.fake_run), mock.patch.object(backup, "resolves", side_effect=[False, True]), \
                 mock.patch.object(backup, "_wait_active", return_value=True):
             with self.assertRaises(RuntimeError):
-                backup.restore_backup(path, None, dict.fromkeys(backup.COMPONENT_KEYS, True))
+                backup.restore_backup(path, None, file_only_components)
         self.assertEqual(backup.DNSDIST_CONF.read_text(), "changed-live-content\n")
         last = backup.last_restore()
         self.assertEqual(last["status"], "rolled_back")
+        self.assertIsNone(last["promoted_at"])
+
+    def test_restore_backup_health_check_failure_after_promotion_is_not_rolled_back(self) -> None:
+        # Same failing postcheck, but with the database *included* this
+        # time, so promotion has already committed by the time resolves()
+        # is checked. Per the staged/atomic-promotion architecture's
+        # explicit design (see restore_backup()'s except block), an
+        # already-validated, already-promoted database is never
+        # automatically reverted just because a later, unrelated step
+        # fails -- this asserts that contract directly.
+        path = self._make_backup()
+        with mock.patch.object(backup, "run", self.fake_run), mock.patch.object(backup, "resolves", return_value=False), \
+                mock.patch.object(backup, "_wait_active", return_value=True), mock.patch.object(backup, "_wait_inactive", return_value=True):
+            with self.assertRaises(RuntimeError):
+                backup.restore_backup(path, None, dict.fromkeys(backup.COMPONENT_KEYS, True))
+        last = backup.last_restore()
+        self.assertEqual(last["status"], "promoted_recovery_required")
+        self.assertIsNotNone(last["promoted_at"])
+        self.assertIn("already promoted", last["message"])
+        self.assertIn(last["pre_restore_backup_path"], last["message"])
 
     def test_restore_backup_rolls_back_on_forced_failure(self) -> None:
         path = self._make_backup()
@@ -732,6 +804,105 @@ class RestoreTest(BackupTestBase):
         self.assertEqual(backup.DNSDIST_CONF.read_text(), "changed-live-content\n")
         last = backup.last_restore()
         self.assertEqual(last["status"], "rolled_back")
+
+    def _live_sources(self) -> list[str]:
+        # restore_history itself legitimately changes on the live db
+        # throughout a restore (that's by design -- bookkeeping/heartbeat
+        # stays live even while the expensive work happens against a
+        # private working copy), so a whole-file byte comparison isn't the
+        # right "untouched" check here. What must NOT change pre-promotion
+        # is the actual data content of a table this restore is targeting.
+        with closing(backup.connect()) as conn:
+            return [row[0] for row in conn.execute("SELECT name FROM sources ORDER BY id")]
+
+    def test_forced_failure_immediately_before_promotion_leaves_live_db_untouched(self) -> None:
+        # Deterministic, in-process equivalent of interruption test B (a
+        # real SIGKILL immediately before the exclusive lock is acquired) --
+        # working copy fully merged and quick_check-passed, but the atomic
+        # swap never starts.
+        path = self._make_backup()
+        with closing(backup.connect()) as conn:
+            conn.execute("INSERT INTO sources(name) VALUES ('added-after-backup-still-live')")
+            conn.commit()
+        before = self._live_sources()
+        os.environ["ALDERPOINTDNS_TEST_FAIL_BEFORE_PROMOTE"] = "1"
+        try:
+            with mock.patch.object(backup, "run", self.fake_run), mock.patch.object(backup, "resolves", return_value=True), \
+                    mock.patch.object(backup, "_wait_active", return_value=True), mock.patch.object(backup, "_wait_inactive", return_value=True):
+                with self.assertRaises(RuntimeError):
+                    backup.restore_backup(path, None, dict.fromkeys(backup.COMPONENT_KEYS, True))
+        finally:
+            del os.environ["ALDERPOINTDNS_TEST_FAIL_BEFORE_PROMOTE"]
+        self.assertEqual(self._live_sources(), before)
+        last = backup.last_restore()
+        self.assertEqual(last["status"], "rolled_back")
+        self.assertIsNone(last["promoted_at"])
+
+    def test_forced_failure_during_promotion_window_leaves_live_db_untouched(self) -> None:
+        # Deterministic, in-process equivalent of interruption test C: fails
+        # after the exclusive lock is held and the live-state resync into
+        # the working copy has run, but before the atomic rename itself --
+        # the closest safely-in-process approximation of "during the
+        # promotion window" (a real kill exactly inside the rename syscall
+        # isn't reproducible on demand). The live db must still be
+        # untouched: nothing is written to it until the rename.
+        path = self._make_backup()
+        with closing(backup.connect()) as conn:
+            conn.execute("INSERT INTO sources(name) VALUES ('added-after-backup-still-live')")
+            conn.commit()
+        before = self._live_sources()
+        os.environ["ALDERPOINTDNS_TEST_FAIL_DURING_PROMOTE"] = "1"
+        try:
+            with mock.patch.object(backup, "run", self.fake_run), mock.patch.object(backup, "resolves", return_value=True), \
+                    mock.patch.object(backup, "_wait_active", return_value=True), mock.patch.object(backup, "_wait_inactive", return_value=True):
+                with self.assertRaises(RuntimeError):
+                    backup.restore_backup(path, None, dict.fromkeys(backup.COMPONENT_KEYS, True))
+        finally:
+            del os.environ["ALDERPOINTDNS_TEST_FAIL_DURING_PROMOTE"]
+        self.assertEqual(self._live_sources(), before)
+        last = backup.last_restore()
+        self.assertEqual(last["status"], "rolled_back")
+        self.assertIsNone(last["promoted_at"])
+
+    def test_forced_failure_after_promotion_is_recovery_required_not_rolled_back(self) -> None:
+        # Deterministic, in-process equivalent of interruption test D: fails
+        # right after promoted_at is stamped, before restarting_services/
+        # postcheck. Must never claim a rollback that didn't happen.
+        path = self._make_backup()
+        os.environ["ALDERPOINTDNS_TEST_FAIL_AFTER_PROMOTE"] = "1"
+        try:
+            with mock.patch.object(backup, "run", self.fake_run), mock.patch.object(backup, "resolves", return_value=True), \
+                    mock.patch.object(backup, "_wait_active", return_value=True), mock.patch.object(backup, "_wait_inactive", return_value=True):
+                with self.assertRaises(RuntimeError):
+                    backup.restore_backup(path, None, dict.fromkeys(backup.COMPONENT_KEYS, True))
+        finally:
+            del os.environ["ALDERPOINTDNS_TEST_FAIL_AFTER_PROMOTE"]
+        last = backup.last_restore()
+        self.assertEqual(last["status"], "promoted_recovery_required")
+        self.assertIsNotNone(last["promoted_at"])
+        self.assertIsNotNone(last["pre_restore_backup_path"])
+        self.assertTrue(Path(last["pre_restore_backup_path"]).exists())
+
+    def test_pre_restore_backup_path_recorded_before_promotion_not_only_at_the_end(self) -> None:
+        # A worker that dies immediately after promotion (before reaching
+        # its own final bookkeeping UPDATE) must still leave an operator
+        # able to find the safety backup from the row -- pin that it's
+        # written durably as soon as it exists, not only in the very last
+        # UPDATE. Simulated here via the same after-promote failure hook
+        # (which never reaches the final "happy path" UPDATE that also sets
+        # this field) rather than a real kill, matching this file's other
+        # forced-failure interruption tests.
+        path = self._make_backup()
+        os.environ["ALDERPOINTDNS_TEST_FAIL_AFTER_PROMOTE"] = "1"
+        try:
+            with mock.patch.object(backup, "run", self.fake_run), mock.patch.object(backup, "resolves", return_value=True), \
+                    mock.patch.object(backup, "_wait_active", return_value=True), mock.patch.object(backup, "_wait_inactive", return_value=True):
+                with self.assertRaises(RuntimeError):
+                    backup.restore_backup(path, None, dict.fromkeys(backup.COMPONENT_KEYS, True))
+        finally:
+            del os.environ["ALDERPOINTDNS_TEST_FAIL_AFTER_PROMOTE"]
+        last = backup.last_restore()
+        self.assertIsNotNone(last["pre_restore_backup_path"])
 
     def test_restore_backup_takes_pre_restore_safety_backup(self) -> None:
         path = self._make_backup()
@@ -1310,27 +1481,31 @@ class AbandonedRestoreLifecycleTest(BackupTestBase):
         self.assertIn(("stop", "alderpointdns-analytics"), stop_start_calls)
         self.assertIn(("restart", "alderpointdns-analytics"), stop_start_calls)
 
-    def test_chunked_merge_requires_confirmed_stop_not_just_a_request(self) -> None:
-        # allow_chunking=True must only ever be passed once the caller has
-        # *confirmed* (not merely requested) that nothing else can write to
-        # these tables -- see _merge_database's docstring. This doesn't
-        # re-run the full concurrency stress test (that lives in the
-        # profiling harness, not the unit suite), just pins the contract:
-        # restore_backup() never passes allow_chunking=True without having
-        # called _wait_inactive() first and observed True.
+    def test_merge_always_targets_the_working_copy_never_the_live_db(self) -> None:
+        # Superseded by the staged/atomic-promotion architecture: chunked
+        # commits used to require a *confirmed* (not merely requested)
+        # collector stop before they were safe against the live database
+        # (allow_chunking, now removed). Now the merge never targets the
+        # live database at all -- it always targets a private working
+        # copy, so chunked commits are unconditionally safe regardless of
+        # what else is writing to the live db. Pin that contract directly:
+        # _merge_database is never called with target_db_path == DB_PATH.
         path = self._make_backup_helper()
-        seen = {}
+        seen = []
         real_merge = backup._merge_database
 
-        def spy_merge(staged_db, components, progress_cb=None, allow_chunking=False):
-            seen["allow_chunking"] = allow_chunking
-            return real_merge(staged_db, components, progress_cb=progress_cb, allow_chunking=allow_chunking)
+        def spy_merge(staged_db, components, target_db_path, progress_cb=None):
+            seen.append(target_db_path)
+            return real_merge(staged_db, components, target_db_path, progress_cb=progress_cb)
 
         with mock.patch.object(backup, "run", self.fake_run), mock.patch.object(backup, "resolves", return_value=True), \
-                mock.patch.object(backup, "_wait_active", return_value=True), mock.patch.object(backup, "_wait_inactive", return_value=False), \
+                mock.patch.object(backup, "_wait_active", return_value=True), mock.patch.object(backup, "_wait_inactive", return_value=True), \
                 mock.patch.object(backup, "_merge_database", spy_merge):
             backup.restore_backup(path, None, dict.fromkeys(backup.COMPONENT_KEYS, True))
-        self.assertFalse(seen["allow_chunking"])  # _wait_inactive returned False above -> must not chunk
+        self.assertTrue(seen, "expected _merge_database to be called")
+        for target in seen:
+            self.assertNotEqual(Path(target), backup.DB_PATH)
+            self.assertEqual(Path(target).name, backup.WORKING_DB_FILENAME)
 
     def _make_backup_helper(self) -> Path:
         with mock.patch.object(backup, "run", self.fake_run):
