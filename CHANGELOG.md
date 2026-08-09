@@ -6,6 +6,46 @@ may still change between releases before a stable 1.0.
 
 ## Unreleased
 
+- Backup & Restore quality-of-life: backup creation/restore timestamps
+  shown to administrators (Backup & Restore listing, restore preview,
+  Last Backup/Last Restore cards) now display in the server's configured
+  local timezone with a clear abbreviation/offset (e.g. "Aug 8, 2026 at
+  6:47 PM MDT") via a new `local_time` Jinja filter
+  (`webapp.format_local_datetime`), instead of raw UTC. Canonical
+  timestamps (backup manifest `created_at`, `backup_history.created_at`,
+  every other stored timestamp) remain UTC/ISO-8601 and are never parsed
+  from the display string, so this cannot affect restore correctness.
+  Archive filenames also now use the server's local date/time (still
+  filesystem-safe -- numeric `+HHMM`/`-HHMM` offset, no colons) instead
+  of a UTC `...Z` stamp, purely for human identification; restore/backup
+  lookups always match by history id or the literal filename, never by
+  parsing the stamp.
+- Backup & Restore quality-of-life: a successful interactive **Create
+  Backup** from the web UI now also automatically triggers a browser
+  download of the newly created archive (via the same authenticated
+  streamed `/backup/{id}/download` route the existing manual Download
+  button already uses, through a hidden iframe so the page itself never
+  buffers the file), while still retaining and listing the backup on the
+  server exactly as before. The existing manual Download action remains
+  available afterward for downloading the same backup again. A failed
+  create never triggers a download.
+- Fixed fresh-install default blocklist seeding never actually triggering
+  on a real `apt install` of a genuinely fresh system, despite passing
+  every unit test. Root cause: `analytics.py`'s `init-db` subcommand calls
+  `alderpointdns_compiler.py`'s `init_db()` unconditionally, which on a
+  genuinely fresh database applies the full schema and bumps `PRAGMA
+  user_version` to `SCHEMA_VERSION` as a side effect; `postinst` (and
+  `scripts/install.sh`) ran this call *before*
+  `alderpointdns_compiler.py fresh-install-init`, so by the time
+  fresh-install-init's own freshness check ran, the database already
+  looked established and it silently skipped seeding the default
+  blocklists and the initial deploy entirely (`fresh_install=0` on every
+  install). Discovered installing a real combined development `.deb` on a
+  disposable Debian 13 VM -- `sources` had zero rows after a clean
+  install. Fixed by running `analytics.py init-db` after
+  `fresh-install-init` in both `postinst` and `scripts/install.sh`
+  (harmless reordering: it is idempotent `CREATE TABLE IF NOT EXISTS`
+  either way).
 - Fixed dnsdist failing to bind port 53 (`Fatal error: binding socket to
   0.0.0.0:53: Address already in use`) on an otherwise completely
   unmodified, default fresh install of Debian 12/13 or Ubuntu. Root cause:

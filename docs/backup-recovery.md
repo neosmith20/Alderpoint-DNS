@@ -16,6 +16,17 @@ Routine backups:
   them.
 - Use password encryption for backups that leave the VM.
 - Scheduled backups use `alderpointdns-backup.timer`.
+- Timestamps shown on this page (Backup & Restore listing, restore preview,
+  Last Backup/Last Restore) display in the server's own configured local
+  timezone, with a clear abbreviation/offset (e.g. "Aug 8, 2026 at 6:47 PM
+  MDT") -- not UTC. This is display-only: the canonical timestamp in each
+  backup's `manifest.json` and in `backup_history` stays UTC/ISO-8601, and
+  restore never depends on the displayed or filename timestamp.
+- A successful interactive **Create Backup** also automatically starts a
+  browser download of that backup (via the same authenticated download
+  route the manual **Download** button uses), in addition to -- not
+  instead of -- keeping it stored and listed on the server for later
+  re-download.
 
 ## Large backups and Analytics History
 

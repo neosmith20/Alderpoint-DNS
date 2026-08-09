@@ -146,6 +146,51 @@ class PostinstSystemdResolvedConflictTest(unittest.TestCase):
         self.assertIn('[ -L /etc/resolv.conf ]', self.postinst)
 
 
+class FreshInstallInitOrderingTest(unittest.TestCase):
+    """Regression for a real bug found integrating the fresh-install
+    default-blocklist feature: analytics.py's `init-db` subcommand calls
+    alderpointdns_compiler.py's init_db() unconditionally, which -- on a
+    genuinely fresh database -- applies the full schema and bumps PRAGMA
+    user_version to SCHEMA_VERSION as a side effect. If that call runs
+    before `alderpointdns_compiler.py fresh-install-init`, the latter's own
+    init_db(seed_defaults=True) call sees current_version already >=
+    SCHEMA_VERSION and returns immediately without ever seeding the default
+    blocklists or attempting the initial deploy, silently turning every
+    fresh install into a no-op (fresh_install=0 on a genuinely fresh
+    database). Confirmed with a real `apt install` of a fresh .deb on a
+    disposable Debian 13 VM: zero rows in `sources` after install until
+    this ordering fix."""
+
+    def _assert_fresh_install_init_precedes_analytics_init_db(self, text: str, label: str) -> None:
+        # Match only the actual invocation lines, not comment prose that
+        # happens to mention either command by name.
+        fresh_idx = analytics_idx = None
+        for lineno, line in enumerate(text.splitlines()):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if fresh_idx is None and "alderpointdns_compiler.py fresh-install-init" in line:
+                fresh_idx = lineno
+            if analytics_idx is None and "analytics.py init-db" in line:
+                analytics_idx = lineno
+        self.assertIsNotNone(fresh_idx, f"{label} does not call fresh-install-init")
+        self.assertIsNotNone(analytics_idx, f"{label} does not call analytics.py init-db")
+        self.assertLess(
+            fresh_idx,
+            analytics_idx,
+            f"{label} calls analytics.py init-db before fresh-install-init, which "
+            "silently defeats fresh-install detection (see class docstring)",
+        )
+
+    def test_postinst_ordering(self) -> None:
+        text = (ROOT / "packaging" / "debian" / "postinst").read_text()
+        self._assert_fresh_install_init_precedes_analytics_init_db(text, "postinst")
+
+    def test_install_sh_ordering(self) -> None:
+        text = (ROOT / "scripts" / "install.sh").read_text()
+        self._assert_fresh_install_init_precedes_analytics_init_db(text, "scripts/install.sh")
+
+
 class BackupRestoreSandboxWritePathsTest(unittest.TestCase):
     """app/backup.py's restore path directly replaces live /etc files for
     the app_config/dnsdist_source_config/bind_source_config components --

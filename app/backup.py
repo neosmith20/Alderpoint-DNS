@@ -754,7 +754,15 @@ def create_backup(components: dict[str, bool] | None = None, password: str | Non
         manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
         tar_pairs.append((stage, "manifest.json"))
 
-        stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        # Filename timestamp uses the server's configured local time (not
+        # UTC) so an administrator can identify a backup by filename alone
+        # without mentally converting timezones -- purely cosmetic: restore
+        # never parses or depends on this stamp, only on the backup_history
+        # row (by id) or the literal filename returned here, both matched
+        # verbatim regardless of what the stamp says. The numeric
+        # +HHMM/-HHMM offset (not a zone abbreviation) keeps this
+        # filesystem-safe and unambiguous even without tzdata available.
+        stamp = dt.datetime.now().astimezone().strftime("%Y%m%d-%H%M%S%z")
         tmp_archive = stage / f"{FILENAME_PREFIX}{stamp}.tar.gz"
         tar_args = ["tar", "-czf", str(tmp_archive)]
         for base, relpath in tar_pairs:

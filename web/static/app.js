@@ -207,6 +207,24 @@
     return (event && event.submitter) || form.querySelector('button[type="submit"], button:not([type])');
   }
 
+  // Backup & Restore: after a successful "Create Backup" (either the
+  // async-form fetch swap below, or a full page load if JS-driven fetch
+  // didn't run), auto-trigger a browser download of the newly created
+  // archive via a hidden iframe -- same authenticated GET the manual
+  // Download button already uses, so it can't bypass auth/CSRF, doesn't
+  // buffer the file in this page's JS, and never touches the server-side
+  // retained copy or navigates the page away.
+  function triggerAutoDownload(scope) {
+    const marker = scope && scope.querySelector && scope.querySelector('[data-auto-download]');
+    const url = marker && marker.dataset.autoDownload;
+    if (!url) return;
+    const iframe = document.createElement('iframe');
+    iframe.style.display = 'none';
+    iframe.src = url;
+    document.body.appendChild(iframe);
+  }
+  triggerAutoDownload(document);
+
   document.addEventListener('submit', async (event) => {
     const form = event.target.closest('form');
     if (!form) return;
@@ -241,6 +259,7 @@
           const url = new URL(response.url);
           if (url.origin === window.location.origin) window.history.replaceState({}, '', url.pathname + url.search);
         }
+        triggerAutoDownload(main);
       }
       const error = doc.querySelector('.alert.error');
       if (error) showToast(error.textContent.trim() || 'Local DNS change failed.', 'error');

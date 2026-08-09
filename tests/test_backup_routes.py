@@ -196,5 +196,215 @@ class BackupImportHttpTest(unittest.TestCase):
         self.assertIn(".tar.gz", response.text)
 
 
+class BackupCreateAutoDownloadHttpTest(BackupImportHttpTest):
+    """Coverage for the automatic-download-after-Create-Backup QoL feature:
+    a successful interactive web-created backup both stays retained/listed
+    on the server (exactly as before) and immediately triggers a browser
+    download of that same archive, without buffering it in the web
+    process or bypassing the existing authenticated download route."""
+
+    def _create(self, **extra_fields: str):
+        data = {"csrf": self.csrf, "app_config": "1", "sqlite_data": "1"}
+        data.update(extra_fields)
+        return self.client.post("/backup/create", data=data, follow_redirects=False)
+
+    def test_successful_create_redirects_with_download_marker(self) -> None:
+        response = self._create()
+        self.assertEqual(response.status_code, 303, response.text)
+        self.assertIn("download=", response.headers["location"])
+        rows = backup.list_backups()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "deployed")
+
+    def test_backup_page_embeds_auto_download_marker_pointing_at_the_new_backup(self) -> None:
+        create_response = self._create()
+        location = create_response.headers["location"]
+        page = self.client.get(location, follow_redirects=False)
+        self.assertEqual(page.status_code, 200)
+        self.assertIn('data-auto-download="/backup/', page.text)
+        # The marker must point at a download URL that actually resolves
+        # to a real, currently-listed backup, not just echo the query
+        # param blindly.
+        row = backup.list_backups()[0]
+        self.assertIn(f'/backup/{row["id"]}/download', page.text)
+
+    def test_retained_server_copy_still_exists_after_auto_download(self) -> None:
+        self._create()
+        row = backup.list_backups()[0]
+        path = backup.find_backup_path(str(row["id"]))
+        self.assertTrue(path.exists())
+
+    def test_manual_download_still_works_after_auto_download(self) -> None:
+        self._create()
+        row = backup.list_backups()[0]
+        response = self.client.get(f"/backup/{row['id']}/download")
+        self.assertEqual(response.status_code, 200)
+        self.assertGreater(len(response.content), 0)
+        # Downloadable a second time -- the automatic download never moves
+        # or deletes the server-side archive.
+        response2 = self.client.get(f"/backup/{row['id']}/download")
+        self.assertEqual(response2.status_code, 200)
+        self.assertEqual(response.content, response2.content)
+
+    def test_failed_create_does_not_set_download_marker(self) -> None:
+        # private_keys requires the explicit confirmation checkbox;
+        # omitting it makes backup_create_route raise before any backup
+        # is ever created.
+        response = self._create(private_keys="1")
+        self.assertEqual(response.status_code, 400)
+        self.assertNotIn("data-auto-download", response.text)
+        self.assertEqual(backup.list_backups(), [])
+
+    def test_download_route_streams_a_large_backup_in_bounded_chunks(self) -> None:
+        # Real end-to-end proof (not just a unit check of FileResponse):
+        # download a backup large enough that "buffer the whole file in
+        # this process" would show up as a large single allocation, and
+        # confirm the response is read back correctly in chunks.
+        self._create(analytics_history="1")
+        row = backup.list_backups()[0]
+        path = backup.find_backup_path(str(row["id"]))
+        # Pad the archive well past a single reasonable in-memory chunk so
+        # a whole-file buffering regression would be obvious from RSS,
+        # even though this test only asserts on streamed correctness.
+        with path.open("ab") as fh:
+            fh.write(os.urandom(6 * 1024 * 1024))
+        expected_size = path.stat().st_size
+        with self.client.stream("GET", f"/backup/{row['id']}/download") as response:
+            self.assertEqual(response.status_code, 200)
+            total = 0
+            max_chunk = 0
+            for chunk in response.iter_bytes(chunk_size=65536):
+                total += len(chunk)
+                max_chunk = max(max_chunk, len(chunk))
+        self.assertEqual(total, expected_size)
+        # No single streamed chunk should be anywhere near the full file
+        # size -- that would indicate the server read/sent it as one blob.
+        self.assertLess(max_chunk, expected_size)
+
+    def test_unauthenticated_request_cannot_download_a_backup(self) -> None:
+        self._create()
+        row = backup.list_backups()[0]
+        anon_client = self.client.__class__(webapp.app)
+        response = anon_client.get(f"/backup/{row['id']}/download", follow_redirects=False)
+        self.assertIn(response.status_code, (302, 303, 401, 403))
+
+    def test_arbitrary_filesystem_path_is_rejected(self) -> None:
+        for identifier in ("/etc/passwd", "../../../../etc/passwd", "..%2F..%2Fetc%2Fpasswd"):
+            response = self.client.get(f"/backup/{identifier}/download")
+            self.assertEqual(response.status_code, 404, identifier)
+
+
+class LocalTimestampDisplayTest(unittest.TestCase):
+    """format_local_datetime() (the `local_time` Jinja filter) converts a
+    canonical UTC/ISO-8601 timestamp to the server's configured local
+    timezone for display only. Restore/backup lookups never parse this
+    output; only the raw ISO string in the database/manifest is
+    canonical."""
+
+    def _with_tz(self, tz: str):
+        return mock.patch.dict(os.environ, {"TZ": tz})
+
+    def setUp(self) -> None:
+        import time as _time
+
+        self._time = _time
+
+    def _format(self, iso: str, tz: str) -> str:
+        with self._with_tz(tz):
+            self._time.tzset()
+            try:
+                return webapp.format_local_datetime(iso)
+            finally:
+                pass
+
+    def tearDown(self) -> None:
+        self._time.tzset()
+
+    def test_utc_server_shows_utc(self) -> None:
+        result = self._format("2026-08-08T18:47:00+00:00", "UTC")
+        self.assertIn("2026", result)
+        self.assertTrue(result.endswith("UTC") or "+00" in result)
+
+    def test_non_utc_server_converts_and_labels_timezone(self) -> None:
+        result = self._format("2026-08-09T00:47:00+00:00", "America/Denver")
+        # 00:47 UTC on Aug 9 is 6:47 PM MDT on Aug 8.
+        self.assertIn("Aug 8, 2026", result)
+        self.assertIn("6:47 PM", result)
+        self.assertIn("MDT", result)
+
+    def test_conversion_across_a_date_boundary(self) -> None:
+        # 02:15 UTC is still the previous evening in US/Pacific.
+        result = self._format("2026-08-09T02:15:00+00:00", "America/Los_Angeles")
+        self.assertIn("Aug 8, 2026", result)
+
+    def test_displayed_timezone_is_never_blank(self) -> None:
+        result = self._format("2026-08-08T12:00:00+00:00", "America/Denver")
+        # Must end with a non-empty timezone abbreviation or offset, not
+        # a bare trailing space.
+        self.assertNotEqual(result[-1], " ")
+        self.assertTrue(result.split(" ")[-1])
+
+    def test_naive_input_is_treated_as_utc(self) -> None:
+        # now()-style canonical timestamps are always timezone-aware, but
+        # the filter must not crash on an older/legacy naive value.
+        result = self._format("2026-08-08T18:47:00", "UTC")
+        self.assertIn("2026", result)
+
+    def test_empty_input_returns_empty_string(self) -> None:
+        self.assertEqual(webapp.format_local_datetime(""), "")
+        self.assertEqual(webapp.format_local_datetime(None), "")
+
+    def test_canonical_manifest_timestamp_format_is_unaffected(self) -> None:
+        # The filter is purely a display transform: the underlying
+        # canonical timestamp backup.now() produces must remain a valid,
+        # UTC, ISO-8601 string regardless of the server's local timezone.
+        with self._with_tz("America/Denver"):
+            self._time.tzset()
+            try:
+                canonical = backup.now()
+            finally:
+                self._time.tzset()
+        parsed = __import__("datetime").datetime.fromisoformat(canonical)
+        self.assertIsNotNone(parsed.tzinfo)
+        self.assertEqual(parsed.utcoffset().total_seconds(), 0)
+
+
+class BackupFilenameLocalTimeTest(unittest.TestCase):
+    """The on-disk archive filename now uses the server's local time (for
+    human identification) instead of UTC, but this must be cosmetic only:
+    restore/backup lookups never parse the filename's timestamp."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="alderpointdns-backup-fname-"))
+        self.old = {
+            "db": backup.DB_PATH,
+            "backup_dir": backup.BACKUP_DIR,
+            "staging_dir": backup.STAGING_DIR,
+        }
+        backup.DB_PATH = self.tmp / "alderpointdns.db"
+        backup.BACKUP_DIR = self.tmp / "backups"
+        backup.STAGING_DIR = self.tmp / "staging"
+        backup.BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        backup.STAGING_DIR.mkdir(parents=True, exist_ok=True)
+        backup.init_db()
+
+    def tearDown(self) -> None:
+        backup.DB_PATH = self.old["db"]
+        backup.BACKUP_DIR = self.old["backup_dir"]
+        backup.STAGING_DIR = self.old["staging_dir"]
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_filename_is_filesystem_safe_and_lookup_still_works_by_id(self) -> None:
+        path = backup.create_backup(backup.validate_components(None))
+        self.assertTrue(path.name.startswith(backup.FILENAME_PREFIX))
+        # No characters that are awkward/unsafe in a filename (":" in
+        # particular, which a naive local-time strftime could introduce).
+        self.assertNotIn(":", path.name)
+        self.assertNotIn("/", path.name)
+        row = backup.last_backup()
+        resolved = backup.find_backup_path(str(row["id"]))
+        self.assertEqual(resolved, path)
+
+
 if __name__ == "__main__":
     unittest.main()

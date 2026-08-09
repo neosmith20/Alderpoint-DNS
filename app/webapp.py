@@ -70,6 +70,43 @@ def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
 
 
+def format_local_datetime(iso_str: str | None) -> str:
+    """Renders a canonical UTC/ISO-8601 timestamp (as stored in the
+    database and in backup manifests) for display in the server's
+    configured local timezone, e.g. "Aug 8, 2026 at 6:47 PM MDT". Purely a
+    display transform -- registered as the `local_time` Jinja filter and
+    never used for anything that affects correctness (backup/restore
+    lookups always match by history id or the literal, unparsed filename;
+    manifest.json and backup_history.created_at stay UTC/ISO-8601)."""
+    if not iso_str:
+        return ""
+    try:
+        parsed = dt.datetime.fromisoformat(iso_str)
+    except ValueError:
+        return iso_str
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    # .astimezone() with no argument converts to the system's configured
+    # local timezone (TZ env var, falling back to /etc/localtime) -- this
+    # process never stores or guesses a timezone of its own.
+    local = parsed.astimezone()
+    hour12 = local.hour % 12 or 12
+    ampm = "AM" if local.hour < 12 else "PM"
+    # Avoid %-d/%-I (glibc-only strftime extensions) for portability.
+    tz_label = local.strftime("%Z") or local.strftime("%z") or "UTC"
+    return f"{local.strftime('%b')} {local.day}, {local.year} at {hour12}:{local.minute:02d} {ampm} {tz_label}"
+
+
+# Registered here (not only inside render()) so every consumer of the
+# module-level TEMPLATES object -- including scripts that call
+# TEMPLATES.get_template(...).render(...) directly (tests/test_web_smoke.sh,
+# tests/test_encryption_layout.sh) rather than going through render() below
+# -- gets the filter without having to know it exists. render() additionally
+# re-applies it with setdefault() for the handful of tests that replace
+# webapp.TEMPLATES with a brand new Jinja2Templates instance at runtime.
+TEMPLATES.env.filters["local_time"] = format_local_datetime
+
+
 def get_secret() -> str:
     SECRET_FILE.parent.mkdir(parents=True, exist_ok=True)
     if SECRET_FILE.exists():
@@ -657,6 +694,11 @@ def protocol_statuses() -> list[dict[str, str]]:
 
 
 def render(request: Request, template: str, status_code: int = 200, **context: Any) -> HTMLResponse:
+    # setdefault, not a one-time module-load registration: some tests
+    # replace webapp.TEMPLATES with a fresh Jinja2Templates instance
+    # (e.g. to point at an isolated directory), which would otherwise
+    # start without the local_time filter registered.
+    TEMPLATES.env.filters.setdefault("local_time", format_local_datetime)
     session = signed_session(request)
     new_anonymous_session = not session
     if new_anonymous_session:
@@ -2139,15 +2181,37 @@ def backup_context() -> dict[str, Any]:
 
 def backup_error(request: Request, message: str, status_code: int = 400, **extra: Any) -> HTMLResponse:
     context = backup_context()
-    context.update({"error": message, "preview": None, "preview_source": None, "imported": None})
+    context.update({"error": message, "preview": None, "preview_source": None, "imported": None, "auto_download_url": None})
     context.update(extra)
     return render(request, "backup.html", **context, status_code=status_code)
+
+
+def _auto_download_url(request: Request) -> str | None:
+    """Resolves the `download` query param (set only by backup_create_route
+    right after a successful create) to a same-origin download URL, using
+    the same find_backup_path() confinement/lookup the manual Download
+    button and the download route itself use -- never trusts the query
+    param blindly, and never fires for a nonexistent/foreign path."""
+    identifier = request.query_params.get("download", "").strip()
+    if not identifier:
+        return None
+    try:
+        backup.find_backup_path(identifier)
+    except backup.BackupError:
+        return None
+    return f"/backup/{identifier}/download"
 
 
 @app.get("/backup", response_class=HTMLResponse)
 def backup_page(request: Request, _: sqlite3.Row = Depends(current_admin)):
     context = backup_context()
-    context.update({"error": None, "preview": None, "preview_source": None, "imported": request.query_params.get("imported")})
+    context.update({
+        "error": None,
+        "preview": None,
+        "preview_source": None,
+        "imported": request.query_params.get("imported"),
+        "auto_download_url": _auto_download_url(request),
+    })
     return render(request, "backup.html", **context)
 
 
@@ -2164,6 +2228,14 @@ async def backup_create_route(request: Request, _: sqlite3.Row = Depends(current
         backup_create_apply()
     except Exception as exc:
         return backup_error(request, str(exc))
+    # Auto-download only fires for a backup that genuinely finished
+    # ("deployed"); a failed create() (caught above only if request_backup/
+    # backup_create_apply themselves raised -- a create that ran but ended
+    # status='failed' does not) must not trigger a download of nothing/a
+    # partial file.
+    created = backup.last_backup()
+    if created and created.get("status") == "deployed" and created.get("id") is not None:
+        return redirect(f"/backup?download={created['id']}")
     return redirect("/backup")
 
 

@@ -267,7 +267,19 @@ RESOLVCONFEOF
 
     install -d -m 0755 /etc/systemd/system/dnsdist.service.d
     install -m 0644 /opt/alderpointdns/packaging/dnsdist.service.d/alderpointdns.conf /etc/systemd/system/dnsdist.service.d/alderpointdns.conf
-    PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/analytics.py init-db
+    # NOT analytics.py init-db here (deliberately moved below,
+    # after fresh-install-init): analytics.py's own init-db subcommand
+    # calls alderpointdns_compiler.py's init_db() unconditionally, which
+    # -- on a genuinely fresh database -- applies the full schema and
+    # bumps PRAGMA user_version to SCHEMA_VERSION as a side effect. If
+    # that ran first, fresh-install-init's own init_db(seed_defaults=True)
+    # call below would see current_version already >= SCHEMA_VERSION and
+    # return immediately without ever seeding the default blocklists or
+    # attempting the initial deploy -- silently turning every fresh
+    # install into a no-op. Running analytics.py init-db after
+    # fresh-install-init keeps the freshness check correct while still
+    # being a no-op change in effect (it is idempotent CREATE TABLE IF
+    # NOT EXISTS statements either way).
     systemctl daemon-reload >/dev/null 2>&1 || true
     # named.conf.local above unconditionally `include`s the generated
     # local-zones.conf; alderpointdns_compiler.py deploy (below) bootstraps
@@ -326,6 +338,11 @@ RESOLVCONFEOF
     # schema user_version established during the first initialization; it
     # must not reseed sources or replace an existing compiled policy.
     PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py fresh-install-init
+    # Must run after fresh-install-init (see the comment above the removed
+    # earlier call) so the freshness check above sees the database exactly
+    # as fresh-install-init left it; this call itself is an idempotent
+    # no-op either way once the schema already exists.
+    PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/analytics.py init-db
     # The database (created above by fresh-install-init on a new install,
     # or migrated there on an existing install, running as root in this
     # postinst) is the one thing under /var/lib/alderpointdns that both

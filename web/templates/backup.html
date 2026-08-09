@@ -8,9 +8,18 @@
   <div class="alert error" role="alert">{{ error }}</div>
 {% endif %}
 
+{% if auto_download_url %}
+  {# Signals app.js to trigger a browser download of the backup just
+     created via a hidden iframe (never buffered/re-fetched by this page
+     itself) -- see the delegated data-async-form handler in app.js. The
+     server-side retained copy and the existing manual Download button
+     below are unaffected either way. #}
+  <div id="backup-auto-download" data-auto-download="{{ auto_download_url }}" hidden></div>
+{% endif %}
+
 <section class="grid">
-  <article class="card"><div class="card__head"><h2>Last Backup</h2>{% if last_backup %}{{ ui.status_badge(last_backup.status|title, "healthy" if last_backup.status == "deployed" else "down" if last_backup.status == "failed" else "neutral") }}{% endif %}</div>{% if last_backup %}<p class="muted mono">{{ last_backup.created_at }}</p><p class="muted">{{ (last_backup.size_bytes / 1048576)|round(2) }} MB</p>{% else %}<p class="muted">No backups yet.</p>{% endif %}</article>
-  <article class="card"><div class="card__head"><h2>Last Restore</h2>{% if last_restore %}{{ ui.status_badge(last_restore.status|title, "healthy" if last_restore.status == "deployed" else "down" if last_restore.status in ("failed", "rollback_failed") else "neutral") }}{% endif %}</div>{% if last_restore %}<p class="muted mono">{{ last_restore.finished_at or last_restore.started_at }}</p>{% else %}<p class="muted">No restores yet.</p>{% endif %}</article>
+  <article class="card"><div class="card__head"><h2>Last Backup</h2>{% if last_backup %}{{ ui.status_badge(last_backup.status|title, "healthy" if last_backup.status == "deployed" else "down" if last_backup.status == "failed" else "neutral") }}{% endif %}</div>{% if last_backup %}<p class="muted mono">{{ last_backup.created_at|local_time }}</p><p class="muted">{{ (last_backup.size_bytes / 1048576)|round(2) }} MB</p>{% else %}<p class="muted">No backups yet.</p>{% endif %}</article>
+  <article class="card"><div class="card__head"><h2>Last Restore</h2>{% if last_restore %}{{ ui.status_badge(last_restore.status|title, "healthy" if last_restore.status == "deployed" else "down" if last_restore.status in ("failed", "rollback_failed") else "neutral") }}{% endif %}</div>{% if last_restore %}<p class="muted mono">{{ (last_restore.finished_at or last_restore.started_at)|local_time }}</p>{% else %}<p class="muted">No restores yet.</p>{% endif %}</article>
   <article class="card"><div class="card__head"><h2>Schedule</h2>{{ ui.status_badge("Enabled" if backup_settings.schedule_enabled == "1" else "Disabled", "healthy" if backup_settings.schedule_enabled == "1" else "neutral") }}</div><p class="muted">Every {{ backup_settings.schedule_interval_hours }}h, keep {{ backup_settings.retention_count }} newest</p></article>
   <article class="card"><div class="card__head"><h2>Stored Backups</h2></div><p class="muted">{{ backups|length }} archive{{ "s" if backups|length != 1 else "" }} in <span class="mono">/var/lib/alderpointdns/backups</span></p></article>
 </section>
@@ -75,7 +84,7 @@
 {% if preview %}
 <section class="panel stack">
   <div class="panel__head"><h2>Restore Preview</h2>{{ ui.status_badge("Compatible" if preview.compatible else "Format mismatch", "healthy" if preview.compatible else "down") }}</div>
-  <p class="mono">Backup created: {{ preview.manifest.created_at }} &middot; Source Alderpoint version: {{ preview.manifest.alderpointdns_app_version }} &middot; Archive size: {{ (preview.archive_size_bytes / 1048576)|round(2) }} MiB &middot; source node: {{ preview.manifest.source_node_id }} &middot; schema: {{ preview.manifest.database_schema_version }}</p>
+  <p class="mono">Backup created: {{ preview.manifest.created_at|local_time }} &middot; Source Alderpoint version: {{ preview.manifest.alderpointdns_app_version }} &middot; Archive size: {{ (preview.archive_size_bytes / 1048576)|round(2) }} MiB &middot; source node: {{ preview.manifest.source_node_id }} &middot; schema: {{ preview.manifest.database_schema_version }}</p>
   {% if preview.warnings %}
     {% for warning in preview.warnings %}
       <div class="alert error" role="alert">{{ warning }}</div>
@@ -155,7 +164,7 @@
         <tbody>
           {% for row in backups %}
             <tr>
-              <td class="mono">{{ row.created_at }}</td>
+              <td class="mono">{{ row.created_at|local_time }}</td>
               <td>{{ (row.size_bytes / 1048576)|round(2) }} MB</td>
               <td class="mono wrap-anywhere">{{ row.components_summary }}</td>
               <td>{{ ui.status_badge(row.status|title, "healthy" if row.status in ("deployed", "unchanged") else "down" if row.status == "failed" else "neutral") }}</td>
