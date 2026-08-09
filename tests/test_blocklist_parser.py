@@ -39,6 +39,17 @@ class ParserTests(unittest.TestCase):
     def test_idn_normalization(self):
         self.assertEqual(normalize_domain("bücher.example"), "xn--bcher-kva.example")
 
+    def test_refresh_rpz_serial_updates_soa_without_changing_records(self):
+        original = (
+            "$TTL 2h\n"
+            "@ IN SOA localhost. hostmaster.localhost. 1 1h 15m 30d 2h\n"
+            "@ IN NS localhost.\n"
+            "example.com CNAME .\n"
+        )
+        refreshed = compiler.refresh_rpz_serial(original)
+        self.assertIn("example.com CNAME .", refreshed)
+        self.assertNotIn("hostmaster.localhost. 1 1h", refreshed)
+
     # -- Hosts-file format support -----------------------------------------
 
     def test_hosts_sinkhole_address_forms_all_block(self):

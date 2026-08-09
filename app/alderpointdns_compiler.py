@@ -1063,6 +1063,16 @@ def render_rpz(domains: set[str], custom: custom_rules.ActiveRuleSet | None = No
     return "\n".join(lines) + "\n"
 
 
+def refresh_rpz_serial(rpz_text: str) -> str:
+    serial = str(int(time.time()))
+    return re.sub(
+        r"(@\s+IN\s+SOA\s+localhost\.\s+hostmaster\.localhost\.\s+)\d+(\s+1h\s+15m\s+30d\s+2h)",
+        rf"\g<1>{serial}\2",
+        rpz_text,
+        count=1,
+    )
+
+
 def run(command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=check)
 
@@ -1239,7 +1249,8 @@ def protection_enable_reuse(_: argparse.Namespace | None = None) -> None:
             try:
                 cached_manifest = json.loads(_manifest_cache.read_text())
                 shutil.copy2(rpz_cache, staged_rpz)
-                rpz_text = staged_rpz.read_text()
+                rpz_text = refresh_rpz_serial(staged_rpz.read_text())
+                staged_rpz.write_text(rpz_text)
                 active_domains = int(cached_manifest.get("active_domains") or 0)
                 validate_rpz(staged_rpz)
                 validate_bind()
