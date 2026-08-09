@@ -5,6 +5,7 @@ import io
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import app.alderpointdns_compiler as compiler
@@ -49,6 +50,30 @@ class ParserTests(unittest.TestCase):
         refreshed = compiler.refresh_rpz_serial(original)
         self.assertIn("example.com CNAME .", refreshed)
         self.assertNotIn("hostmaster.localhost. 1 1h", refreshed)
+
+    def test_restore_rpz_backup_for_rollback_refreshes_serial(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            backup = tmp_path / "old-good.rpz"
+            compiled = tmp_path / "alderpointdns.rpz"
+            backup.write_text(
+                "$TTL 2h\n"
+                "@ IN SOA localhost. hostmaster.localhost. 1 1h 15m 30d 2h\n"
+                "@ IN NS localhost.\n"
+                "good.example CNAME .\n"
+            )
+            original_compiled = compiler.COMPILED_RPZ
+            compiler.COMPILED_RPZ = compiled
+            try:
+                with mock.patch.object(compiler, "reload_bind") as reload_bind:
+                    compiler.restore_rpz_backup_for_rollback(backup)
+                restored = compiled.read_text()
+            finally:
+                compiler.COMPILED_RPZ = original_compiled
+
+        self.assertIn("good.example CNAME .", restored)
+        self.assertNotIn("hostmaster.localhost. 1 1h", restored)
+        reload_bind.assert_called_once_with()
 
     # -- Hosts-file format support -----------------------------------------
 

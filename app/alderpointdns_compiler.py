@@ -1089,6 +1089,13 @@ def reload_bind() -> None:
     run(["rndc", "reload", RPZ_ZONE])
 
 
+def restore_rpz_backup_for_rollback(backup_path: Path) -> None:
+    rpz_text = refresh_rpz_serial(backup_path.read_text())
+    COMPILED_RPZ.parent.mkdir(parents=True, exist_ok=True)
+    COMPILED_RPZ.write_text(rpz_text)
+    reload_bind()
+
+
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone())
 
@@ -1272,8 +1279,7 @@ def protection_enable_reuse(_: argparse.Namespace | None = None) -> None:
                 message = str(exc)
                 if backup_path.exists():
                     try:
-                        os.replace(backup_path, COMPILED_RPZ)
-                        reload_bind()
+                        restore_rpz_backup_for_rollback(backup_path)
                         status = "rolled_back"
                     except Exception as rollback_exc:
                         status = "rollback_failed"
@@ -1623,9 +1629,8 @@ def deploy(download: bool = True, trigger: str | None = None, fail_on_source_err
                 if dnsdist_layer:
                     custom_rules.rollback_dnsdist_layer(dnsdist_layer)
                 if backup_path.exists():
-                    os.replace(backup_path, COMPILED_RPZ)
                     try:
-                        reload_bind()
+                        restore_rpz_backup_for_rollback(backup_path)
                     except Exception as rollback_exc:
                         rollback_errors.append(f"RPZ rollback failed: {rollback_exc}")
                 if cache_deployed_this_run:
