@@ -55,6 +55,28 @@ Software Updates page auto-refreshes its job panel every 3 seconds while a
 job is in a non-terminal phase (via the same `data-refresh-url` fragment
 mechanism `/system/logs` already uses).
 
+### Abandoned-job recovery
+
+If the runner itself dies (host reboot, OOM, `systemctl stop`) while a job
+is in a non-terminal phase, `software_updates.reap_abandoned_jobs()` --
+mirroring `app/backup.py`'s `reap_abandoned_restores()` worker-identity
+design exactly (a recorded `(pid, process-start-ticks, boot-id)` triple, not
+a wall-clock timeout) -- fails that job with a diagnostic message instead of
+leaving it stuck forever. This matters beyond the UI: the install/upload
+routes refuse to start a new job while an existing one is in a non-terminal
+phase (`"an update is already in progress"`), so an unreaped abandoned job
+would otherwise permanently block every future update attempt. Reaping runs
+on application startup and on every `update_status()` call (i.e. every time
+the Software Updates page or its job-status fragment is loaded), so an
+abandoned job is caught promptly either way.
+
+A job reaped before it reached the `installing` phase made no package
+changes and is reported as safe to retry. One reaped from `installing`
+onward is reported as package-state-uncertain (apt-get may have partially
+run) -- an administrator should confirm actual installed state
+(`dpkg -l alderpointdns`, `systemctl status`) before assuming either
+outcome; no automatic package rollback is attempted here either.
+
 ## GitHub release discovery
 
 No release tag, `.deb` filename, beta number, or asset URL is ever

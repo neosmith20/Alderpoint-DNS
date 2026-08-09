@@ -85,6 +85,24 @@ def _reap_abandoned_restores() -> None:
         _log(3, f"reap_abandoned_restores failed at startup: {exc}")
 
 
+@app.on_event("startup")
+def _reap_abandoned_software_update_jobs() -> None:
+    # Mirrors _reap_abandoned_restores() above exactly, for
+    # software_update_jobs: a job whose runner (alderpointdns-software-
+    # update.service) died mid-flight would otherwise sit at a
+    # non-terminal phase forever, permanently blocking every future
+    # install/upload attempt behind the "an update is already in
+    # progress" gate. software_updates.update_status() also reaps on
+    # every view; startup additionally catches one abandoned by a host
+    # reboot or service restart before anyone opens the page.
+    try:
+        reaped = software_updates.reap_abandoned_jobs()
+        for entry in reaped:
+            _log(4, f"reaped abandoned software update job id={entry['id']}: {entry['message']}")
+    except Exception as exc:  # noqa: BLE001
+        _log(3, f"reap_abandoned_jobs failed at startup: {exc}")
+
+
 def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
 

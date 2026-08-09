@@ -97,6 +97,28 @@ PHASES = (
     "simulating", "installing", "restarting", "postcheck", "completed", "failed",
 )
 
+# Phases from "installing" onward are the ones where apt-get may have
+# actually started mutating installed package state -- see
+# reap_abandoned_jobs()'s differing message for a job found stuck in one of
+# these versus an earlier, pre-apt phase.
+PACKAGE_STATE_UNCERTAIN_PHASES = frozenset({"installing", "restarting", "postcheck"})
+
+# A job sits at phase='pending' -- with no worker identity recorded yet --
+# from the moment the unprivileged web process creates its row until
+# run_pending_job() (running as root inside the independently-dispatched
+# alderpointdns-software-update.service unit) actually picks it up and
+# stamps worker_pid/worker_start_ticks/worker_boot_id, a few hundred
+# milliseconds to a few seconds later under normal load. reap_abandoned_jobs()
+# must never treat a job still inside that ordinary dispatch window as
+# abandoned merely because it has no worker identity yet -- that's not a
+# "worker died" question, since no worker has been assigned at all yet, so
+# the worker-identity-liveness check the rest of this function relies on
+# doesn't apply. This grace period exists only to eventually catch the rarer
+# case where dispatch itself silently failed (e.g. `systemctl start` was
+# accepted but the unit never actually ran) and a job would otherwise sit at
+# 'pending' forever.
+PENDING_DISPATCH_GRACE_SECONDS = 120
+
 DEFAULT_SETTINGS = {
     "auto_check_enabled": "1",
     "unattended_install_enabled": "0",
@@ -117,6 +139,18 @@ class SoftwareUpdateError(ValueError):
 
 def now() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _seconds_since(timestamp: str | None) -> float | None:
+    if not timestamp:
+        return None
+    try:
+        then = dt.datetime.fromisoformat(timestamp)
+    except ValueError:
+        return None
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=dt.timezone.utc)
+    return (dt.datetime.now(dt.timezone.utc) - then).total_seconds()
 
 
 def connect() -> sqlite3.Connection:
@@ -173,6 +207,20 @@ def init_db(conn: sqlite3.Connection | None = None) -> None:
             );
             """
         )
+        # software_update_jobs worker-identity columns, added after the
+        # table already existed in the field -- ALTER TABLE, not part of
+        # CREATE TABLE IF NOT EXISTS above, so upgrading installs migrate
+        # in place. Mirrors app/backup.py's restore_history worker-identity
+        # columns/reap_abandoned_restores() exactly: a job whose runner
+        # (alderpointdns-software-update.service) is killed or crashes
+        # (OOM, host reboot, `systemctl stop`) must never leave its row
+        # stuck at a non-terminal phase forever -- see reap_abandoned_jobs().
+        for column, definition in (
+            ("worker_pid", "INTEGER"),
+            ("worker_start_ticks", "INTEGER"),
+            ("worker_boot_id", "TEXT"),
+        ):
+            backup._ensure_column(db, "software_update_jobs", column, definition)
         db.commit()
     finally:
         if close:
@@ -866,6 +914,87 @@ def _fail_job(db: sqlite3.Connection, job_id: int, error: str) -> None:
     db.commit()
 
 
+def reap_abandoned_jobs(conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
+    """Finds software_update_jobs rows stuck at a non-terminal phase whose
+    recorded worker (the alderpointdns-software-update.service process that
+    called run_pending_job()) is provably no longer alive -- process gone,
+    PID reused, or a reboot happened since it started -- and fails them with
+    a diagnostic message, exactly mirroring app/backup.py's
+    reap_abandoned_restores()/worker-identity design (see its docstring for
+    the full rationale). Called on application startup and whenever
+    Software Updates status is fetched (update_status()), so an abandoned
+    job (killed runner, OOM, `systemctl stop`, host crash mid-install)
+    never leaves the page reporting "in progress" -- and, critically, never
+    leaves the install/upload routes' "an update is already in progress"
+    gate permanently blocking every future update -- forever.
+
+    Deliberately does NOT act on any row whose worker is still alive, no
+    matter how long it's been running -- a slow download/apt run is never
+    killed just for taking a long time. A job still at phase='pending' with
+    no worker identity recorded yet is likewise left alone unless
+    PENDING_DISPATCH_GRACE_SECONDS has elapsed since it was requested --
+    that phase, uniquely, is a normal, expected (if usually brief) window
+    between the web request creating the row and the independently
+    dispatched runner unit actually picking it up, not evidence of a dead
+    worker (see PENDING_DISPATCH_GRACE_SECONDS's docstring above).
+
+    Never attempts any package/service recovery itself: unlike a restore's
+    atomic database promotion, there is no single point-of-no-return this
+    module controls once apt-get is invoked, so a job reaped while still in
+    an early phase (before "installing") is safe to say made no package
+    changes; one reaped from "installing" onward must be reported as
+    package-state-uncertain, requiring administrator verification
+    (`dpkg -l alderpointdns`, `systemctl status`) rather than an assumption
+    either way.
+    """
+    close = conn is None
+    db = conn or connect()
+    init_db(db)
+    reaped: list[dict[str, Any]] = []
+    try:
+        rows = db.execute(
+            "SELECT * FROM software_update_jobs WHERE phase NOT IN ('completed', 'failed')"
+        ).fetchall()
+        for row in rows:
+            if backup._worker_alive(row["worker_pid"], row["worker_start_ticks"], row["worker_boot_id"]):
+                continue
+            if row["phase"] == "pending" and not row["worker_pid"]:
+                requested_age = _seconds_since(row["requested_at"])
+                if requested_age is None or requested_age < PENDING_DISPATCH_GRACE_SECONDS:
+                    continue
+            worker_desc = (
+                f"pid {row['worker_pid']} (started {row['started_at']})"
+                if row["worker_pid"]
+                else "no worker identity recorded (pre-dates lifecycle tracking, or the job never actually started)"
+            )
+            if row["phase"] in PACKAGE_STATE_UNCERTAIN_PHASES:
+                message = (
+                    f"update job {row['id']} was abandoned: its worker ({worker_desc}) is no longer running, "
+                    f"and it had already reached phase {row['phase']!r} -- the package installation may have been "
+                    "partially applied. Verify actual installed state ('dpkg -l alderpointdns', 'systemctl status "
+                    "alderpointdns alderpointdns-analytics named dnsdist') before assuming either success or "
+                    "failure; the pre-upgrade backup was retained if one was recorded on this job."
+                )
+            else:
+                message = (
+                    f"update job {row['id']} was abandoned: its worker ({worker_desc}) is no longer running, "
+                    f"but it had not yet reached the 'installing' phase (was {row['phase']!r}) -- no package "
+                    "changes were made; it is safe to retry."
+                )
+            db.execute(
+                "UPDATE software_update_jobs SET phase='failed', result='failed', error=?, completed_at=? WHERE id=?",
+                (message, now(), row["id"]),
+            )
+            _record_event(db, row["id"], "failed", message)
+            reaped.append({"id": row["id"], "message": message})
+        if reaped:
+            db.commit()
+        return reaped
+    finally:
+        if close:
+            db.close()
+
+
 def run_pending_job() -> dict[str, Any] | None:
     """The privileged runner's entry point (update-run CLI subcommand,
     always root). Picks up the most recently created job still in
@@ -879,7 +1008,11 @@ def run_pending_job() -> dict[str, Any] | None:
         if row is None:
             return None
         job_id = row["id"]
-        conn.execute("UPDATE software_update_jobs SET started_at=? WHERE id=?", (now(), job_id))
+        worker_pid, worker_start_ticks, worker_boot_id = backup._worker_identity()
+        conn.execute(
+            "UPDATE software_update_jobs SET started_at=?, worker_pid=?, worker_start_ticks=?, worker_boot_id=? WHERE id=?",
+            (now(), worker_pid, worker_start_ticks, worker_boot_id, job_id),
+        )
         conn.commit()
         try:
             _run_job(conn, dict(row))
@@ -1090,6 +1223,11 @@ def update_status(conn: sqlite3.Connection | None = None) -> dict[str, Any]:
     db = conn or connect()
     try:
         init_db(db)
+        # See reap_abandoned_jobs()'s docstring: called here (in addition
+        # to the application-startup hook) so a job whose runner died
+        # since the last check is caught the moment anything asks for
+        # Software Updates status, not only at the next restart.
+        reap_abandoned_jobs(db)
         cfg = settings(db)
         version_status = installed_version_status()
         try:

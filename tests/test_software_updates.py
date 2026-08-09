@@ -11,6 +11,7 @@ what was verified there.
 """
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import json
 import os
@@ -474,6 +475,97 @@ class JobRunTest(SoftwareUpdatesTestBase):
             result = su.run_pending_job()
         self.assertEqual(result["phase"], "failed")
         self.assertIn("unmanaged", result["error"])
+
+
+class ReapAbandonedJobsTest(SoftwareUpdatesTestBase):
+    """A runner (alderpointdns-software-update.service) that dies mid-job
+    must never leave software_update_jobs stuck at a non-terminal phase
+    forever -- see software_updates.reap_abandoned_jobs()."""
+
+    def _stuck_job(self, phase: str, worker_pid: int | None, alive: bool) -> int:
+        job_id = su.create_github_job(_release("0.5.0"), requested_by="admin")
+        conn = su.connect()
+        if alive:
+            pid, ticks, boot_id = backup_module._worker_identity()
+        else:
+            pid, ticks, boot_id = worker_pid, 999999999, "stale-boot-id-that-will-never-match"
+        conn.execute(
+            "UPDATE software_update_jobs SET phase=?, started_at=?, worker_pid=?, worker_start_ticks=?, worker_boot_id=? WHERE id=?",
+            (phase, su.now(), pid, ticks, boot_id, job_id),
+        )
+        conn.commit()
+        conn.close()
+        return job_id
+
+    def test_job_with_dead_worker_before_installing_is_reaped_as_safe_to_retry(self) -> None:
+        job_id = self._stuck_job("downloading", worker_pid=999999, alive=False)
+        reaped = su.reap_abandoned_jobs()
+        self.assertEqual([r["id"] for r in reaped], [job_id])
+        row = su.get_job(job_id)
+        self.assertEqual(row["phase"], "failed")
+        self.assertIn("safe to retry", row["error"])
+
+    def test_job_with_dead_worker_during_install_is_reaped_as_package_state_uncertain(self) -> None:
+        job_id = self._stuck_job("installing", worker_pid=999999, alive=False)
+        reaped = su.reap_abandoned_jobs()
+        self.assertEqual([r["id"] for r in reaped], [job_id])
+        row = su.get_job(job_id)
+        self.assertEqual(row["phase"], "failed")
+        self.assertIn("partially applied", row["error"])
+
+    def test_job_with_live_worker_is_not_reaped(self) -> None:
+        job_id = self._stuck_job("installing", worker_pid=None, alive=True)
+        reaped = su.reap_abandoned_jobs()
+        self.assertEqual(reaped, [])
+        row = su.get_job(job_id)
+        self.assertEqual(row["phase"], "installing")
+
+    def test_completed_and_failed_jobs_are_never_touched(self) -> None:
+        job_id = su.create_github_job(_release("0.5.0"), requested_by="admin")
+        conn = su.connect()
+        conn.execute("UPDATE software_update_jobs SET phase='completed', result='success' WHERE id=?", (job_id,))
+        conn.commit()
+        conn.close()
+        reaped = su.reap_abandoned_jobs()
+        self.assertEqual(reaped, [])
+        self.assertEqual(su.get_job(job_id)["phase"], "completed")
+
+    def test_reap_unblocks_the_in_progress_gate(self) -> None:
+        """The exact scenario this fixes: without reaping, an abandoned job
+        stuck at a non-terminal phase would make
+        `existing_job.get("phase") not in ("completed", "failed")` true
+        forever, permanently blocking install/upload routes."""
+        self._stuck_job("installing", worker_pid=999999, alive=False)
+        status = su.update_status()  # reaps internally
+        job = status["job"]
+        self.assertIn(job["phase"], ("completed", "failed"))
+
+    def test_reap_runs_via_update_status_without_explicit_call(self) -> None:
+        job_id = self._stuck_job("backing_up", worker_pid=999999, alive=False)
+        su.update_status()
+        self.assertEqual(su.get_job(job_id)["phase"], "failed")
+
+    def test_freshly_created_pending_job_is_not_reaped(self) -> None:
+        """A job's row exists (phase='pending', no worker identity yet) for
+        an ordinary, expected moment between the web request creating it
+        and the independently-dispatched runner unit picking it up -- this
+        must never be mistaken for an abandoned worker. Regression test for
+        exactly the race the initial version of this fix introduced."""
+        job_id = su.create_github_job(_release("0.5.0"), requested_by="admin")
+        reaped = su.reap_abandoned_jobs()
+        self.assertEqual(reaped, [])
+        self.assertEqual(su.get_job(job_id)["phase"], "pending")
+
+    def test_pending_job_past_the_dispatch_grace_period_is_reaped(self) -> None:
+        job_id = su.create_github_job(_release("0.5.0"), requested_by="admin")
+        stale_requested_at = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=su.PENDING_DISPATCH_GRACE_SECONDS + 30)).replace(microsecond=0).isoformat()
+        conn = su.connect()
+        conn.execute("UPDATE software_update_jobs SET requested_at=? WHERE id=?", (stale_requested_at, job_id))
+        conn.commit()
+        conn.close()
+        reaped = su.reap_abandoned_jobs()
+        self.assertEqual([r["id"] for r in reaped], [job_id])
+        self.assertEqual(su.get_job(job_id)["phase"], "failed")
 
 
 class JobDurabilityTest(SoftwareUpdatesTestBase):
