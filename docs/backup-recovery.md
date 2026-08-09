@@ -6,7 +6,7 @@ anything important — see `docs/known-limitations.md`.
 
 Routine backups:
 
-- Use **System > Administration > Backup & Restore** (`/backup`) for
+- Use **Operations > Backup & Restore** (`/backup`) for
   previewable, checksummed backups. This is a dedicated workflow, separate
   from **Spreadsheet/Text Import** (`/import`) -- native `.tar.gz`/
   `.tar.gz.enc` Alderpoint DNS backups are never restored through the
