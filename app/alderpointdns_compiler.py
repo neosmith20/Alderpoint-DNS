@@ -156,6 +156,19 @@ class DefaultSource(PublicSource):
     purpose: str
 
 
+# Single source of truth for HaGeZi's "Multi Normal" list's URL, used by
+# both DEFAULT_FRESH_INSTALL_SOURCES (the curated fresh-install seed) and
+# PUBLIC_SOURCES (the broader, admin-invoked "add all suggested sources"
+# catalog) below -- the raw.githubusercontent.com mirror this used to point
+# at 404s; jsDelivr's @latest tag is HaGeZi's own documented primary
+# Adblock link for this exact list. A shared constant, not two separately
+# hand-maintained literals, is what actually prevents the two catalogs'
+# entries for the same upstream list from silently drifting to different
+# URLs again -- see test_hagezi_catalog_entries_share_the_same_url in
+# tests/test_fresh_install_defaults.py.
+HAGEZI_MULTI_NORMAL_URL = "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/multi.txt"
+
+
 DEFAULT_FRESH_INSTALL_SOURCES = (
     DefaultSource(
         "AdGuard DNS filter",
@@ -173,12 +186,15 @@ DEFAULT_FRESH_INSTALL_SOURCES = (
     ),
     DefaultSource(
         "HaGeZi Multi Normal",
-        # The raw.githubusercontent.com mirror of this file (still used by
-        # the broader PUBLIC_SOURCES catalog's own separate HaGeZi Multi
-        # Normal entry, deliberately left unchanged here) currently 404s.
-        # jsDelivr's @latest tag is HaGeZi's own documented primary Adblock
-        # link for this exact list and mirrors the same content.
-        "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/multi.txt",
+        # The raw.githubusercontent.com mirror of this file currently
+        # 404s. jsDelivr's @latest tag is HaGeZi's own documented primary
+        # Adblock link for this exact list and mirrors the same content.
+        # PUBLIC_SOURCES' own "HaGeZi Multi Normal" entry below must use
+        # this same URL -- see
+        # HAGEZI_MULTI_NORMAL_URL/test_hagezi_catalog_entries_share_the_same_url
+        # in tests/test_fresh_install_defaults.py, which pins both against
+        # drifting apart again.
+        HAGEZI_MULTI_NORMAL_URL,
         "ads_trackers",
         "hagezi/dns-blocklists",
         "Balanced ads, tracking, telemetry, device, mobile tracker, phishing, and malware coverage",
@@ -191,7 +207,7 @@ PUBLIC_SOURCES = (
     PublicSource("OISD Blocklist Big", "https://adguardteam.github.io/HostlistsRegistry/assets/filter_27.txt", "ads_trackers"),
     PublicSource("1Hosts Lite", "https://adguardteam.github.io/HostlistsRegistry/assets/filter_24.txt", "ads_trackers"),
     PublicSource("StevenBlack Unified Hosts", "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts", "ads_trackers"),
-    PublicSource("HaGeZi Multi Normal", "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/multi.txt", "ads_trackers"),
+    PublicSource("HaGeZi Multi Normal", HAGEZI_MULTI_NORMAL_URL, "ads_trackers"),
     PublicSource("HaGeZi Multi Pro", "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.txt", "ads_trackers"),
     PublicSource("Peter Lowe Blocklist", "https://adguardteam.github.io/HostlistsRegistry/assets/filter_3.txt", "ads_trackers"),
     PublicSource("Dan Pollock Hosts", "https://adguardteam.github.io/HostlistsRegistry/assets/filter_4.txt", "ads_trackers"),

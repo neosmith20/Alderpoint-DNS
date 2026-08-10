@@ -113,8 +113,25 @@ class FreshInstallDefaultTests(unittest.TestCase):
         # mirrors the same content -- a fresh install must seed that, not
         # the dead mirror.
         hagezi = next(s for s in compiler.DEFAULT_FRESH_INSTALL_SOURCES if s.name == "HaGeZi Multi Normal")
-        self.assertEqual(hagezi.url, "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/multi.txt")
+        self.assertEqual(hagezi.url, compiler.HAGEZI_MULTI_NORMAL_URL)
         self.assertNotIn("raw.githubusercontent.com", hagezi.url)
+
+    def test_hagezi_catalog_entries_share_the_same_url(self) -> None:
+        # Regression: PUBLIC_SOURCES (the broader, admin-invoked "add all
+        # suggested sources" catalog) had its own separate "HaGeZi Multi
+        # Normal" entry that was left pointed at the same dead
+        # raw.githubusercontent.com mirror after DEFAULT_FRESH_INSTALL_SOURCES's
+        # entry was fixed -- a known-dead URL shipped in the built-in public
+        # catalog. Both entries are built from the single
+        # HAGEZI_MULTI_NORMAL_URL constant now; this pins them from ever
+        # silently diverging to two different URLs for the same upstream
+        # list again, regardless of how either literal is edited in the
+        # future.
+        fresh_install_hagezi = next(s for s in compiler.DEFAULT_FRESH_INSTALL_SOURCES if s.name == "HaGeZi Multi Normal")
+        public_catalog_hagezi = next(s for s in compiler.PUBLIC_SOURCES if s.name == "HaGeZi Multi Normal")
+        self.assertEqual(fresh_install_hagezi.url, public_catalog_hagezi.url)
+        self.assertEqual(fresh_install_hagezi.url, compiler.HAGEZI_MULTI_NORMAL_URL)
+        self.assertNotIn("raw.githubusercontent.com", public_catalog_hagezi.url)
 
     def test_fresh_install_seeds_defaults_once_as_ordinary_sources(self):
         compiler.init_db(seed_defaults=True)
