@@ -192,6 +192,60 @@ class DeployCoordinatorTest(unittest.TestCase):
             "sequential upstream UI changes can trip dnsdist's systemd StartLimitBurst again",
         )
 
+    @staticmethod
+    def _would_trip_start_limit(timestamps: list[float], interval: float, burst: int) -> bool:
+        """Replicates the conservative (worst-case) reading of systemd's own
+        start-rate algorithm: it trips if any `burst` consecutive start
+        attempts all fall within `interval` seconds of each other."""
+        for i in range(len(timestamps) - burst + 1):
+            window = timestamps[i:i + burst]
+            if window[-1] - window[0] <= interval:
+                return True
+        return False
+
+    def test_restart_fallback_pacing_alone_stays_under_dns1s_actual_start_limit(self) -> None:
+        """dns1's *actual* installed dnsdist.service policy, confirmed from
+        its live systemd unit, is StartLimitBurst=5 within a 60s window --
+        not systemd's generic 10s/5 default the first pass at this fix
+        assumed. app.upstream_dns.deploy_upstreams() now applies ordinary
+        upstream changes to the already-running dnsdist over its console
+        without restarting at all (see deploy_upstreams()'s own
+        _console_reconcile() docstring for the primary fix); this test
+        instead proves the *backstop* -- min_interval_seconds pacing alone,
+        with no console reconciliation help at all, exactly the situation
+        if every deploy in a burst had to fall back to a real restart --
+        still respects dns1's real policy on its own. Scaled down 100x
+        (0.6s window instead of 60s, matching ratio for the spacing) to
+        keep the test fast while preserving the exact margin the
+        production configuration relies on: 16s spacing between restarts
+        means 5 restarts span at least 64s, safely over the real 60s
+        window on either side of the boundary.
+
+        Calls are made strictly sequentially (each one fully returns before
+        the next begins) rather than threaded, because that -- not
+        overlapping concurrency -- is exactly what dns1's own incident was:
+        ordinary one-after-another HTTP requests, each restarting dnsdist
+        in turn."""
+        restart_times: list[float] = []
+
+        def run_once() -> tuple[int, str]:
+            restart_times.append(time.monotonic())
+            return (0, "deployed")
+
+        # Same ratio as production (min_interval_seconds=16 / StartLimitIntervalSec=60),
+        # scaled to keep the test fast: 0.16 / 0.6.
+        coordinator = webapp._DeployCoordinator(run_once, min_interval_seconds=0.16)
+
+        call_count = 9  # more than dns1's StartLimitBurst=5
+        for _ in range(call_count):
+            coordinator.run()
+
+        self.assertEqual(len(restart_times), call_count, "sequential calls must never coalesce with nothing else in flight")
+        self.assertFalse(
+            self._would_trip_start_limit(restart_times, interval=0.6, burst=5),
+            f"restart-fallback pacing alone would trip dns1's real StartLimitBurst=5/60s policy: {restart_times}",
+        )
+
     def test_failed_run_reports_nonzero_code_and_output_to_every_coalesced_caller(self) -> None:
         def run_once() -> tuple[int, str]:
             time.sleep(0.05)

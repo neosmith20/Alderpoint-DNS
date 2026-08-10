@@ -1578,6 +1578,23 @@ def _locked(fn):
         return fn()
 
 
+def _run_upstream_deploy_for_cli(args) -> None:
+    """Prints the deployment id *and* its own truthful message -- not just
+    the id `upstream-deploy` used to print alone -- so the webapp's
+    upstream deploy coordinator can tell, from this subprocess's own
+    stdout, whether this particular deploy actually restarted dnsdist or
+    applied live over its console (see upstream_dns.deploy_upstreams()'s
+    _console_reconcile() docstring). That distinction is what lets the
+    coordinator's restart-rate pacing apply only when a restart really
+    happened, instead of throttling every ordinary sequential upstream
+    change to one every min_interval_seconds regardless of whether
+    anything was ever actually restarted."""
+    deployment_id = _locked(upstream_dns.deploy_upstreams)
+    row = upstream_dns.last_deployment()
+    message = row["message"] if row else ""
+    print(f"{deployment_id} {message}")
+
+
 def deploy(download: bool = True, trigger: str | None = None, fail_on_source_errors: bool = False) -> int:
     init_db()
     with deploy_lock():
@@ -2231,7 +2248,7 @@ def main(argv: list[str] | None = None) -> int:
     cache_flush = sub.add_parser("cache-flush")
     cache_flush.set_defaults(func=lambda args: print(_locked(dns_cache.process_pending_flush)))
     upstream_dep = sub.add_parser("upstream-deploy")
-    upstream_dep.set_defaults(func=lambda args: print(_locked(upstream_dns.deploy_upstreams)))
+    upstream_dep.set_defaults(func=_run_upstream_deploy_for_cli)
     encryption_dep = sub.add_parser("encryption-deploy")
     encryption_dep.set_defaults(func=lambda args: print(_locked(encryption.deploy_encryption)))
     dnsdist_conf_migrate_parser = sub.add_parser(

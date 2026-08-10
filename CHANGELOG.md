@@ -142,6 +142,46 @@ date as part of the final release-publication step, not before.
   `tests/test_upstream_dns.py::test_post_deploy_check_forces_fresh_resolution_not_stale_cache`
   (proves an all-unreachable upstream set cannot inherit a prior deploy's
   cached success).
+- Corrected the restart-rate-limit fix once dns1's *actual* dnsdist.service
+  policy was confirmed: `StartLimitIntervalUSec=1min`, `StartLimitBurst=5`
+  -- not systemd's generic 10s/5 default the first pass assumed. A 3s
+  pacing interval was not safe against a 60s window (six restarts 3s apart
+  still all land inside it), and simply widening the interval to 15-16s
+  would have made every ordinary sequential upstream change wait that long
+  for no functional reason, while leaving the deeper problem -- one
+  dnsdist restart per desired-state change -- in place. Investigated
+  whether dnsdist supports changing its backend set without a restart: it
+  does, officially, over its own console (`newServer()`/`rmServer()`, the
+  same Lua functions the static startup config uses -- dnsdist calls
+  itself a "DNS Loadbalancer" and ships this mechanism for exactly this).
+  `upstream_dns.deploy_upstreams()` now applies an ordinary upstream
+  add/edit/toggle/move/delete to the already-running dnsdist over that
+  console -- clearing and re-adding the full desired backend set as a
+  single console round trip, typically sub-millisecond, with no frontend
+  socket interruption -- instead of restarting the process at all. The
+  static config files are still rendered, validated, and staged exactly as
+  before (so a future real restart, e.g. a reboot or package upgrade,
+  loads the identical state), and a real restart remains the fallback
+  whenever live reconciliation isn't possible or doesn't verifiably
+  succeed (console unreachable, the very first upstream deploy ever on a
+  fresh install, or a post-check mismatch) -- itself still protected by
+  the deploy coordinator's restart-rate pacing, now correctly scaled to
+  dns1's real policy (16s spacing, keeping 5 restarts spread over more
+  than 64s) and, after fixing a real bug caught while retesting, applied
+  *only* when a run's own output confirms it actually restarted dnsdist --
+  an earlier version of this fix paced every deploy unconditionally and
+  turned 8 ordinary sequential toggles into a 123-second wait even though
+  none of them ever restarted anything. Verified live: 8 genuine
+  sequential upstream changes now complete in ~13 seconds total with 0
+  dnsdist restarts, no `start-limit-hit`, truthful DB/runtime/deployment
+  history throughout, and DNS available the whole time. Added
+  `tests/test_deploy_coordinator.py::test_restart_fallback_pacing_alone_stays_under_dns1s_actual_start_limit`
+  (replicates systemd's own start-limit algorithm against dns1's real
+  60s/5 policy) and rewrote `tests/test_upstream_restart_rate_limiting.sh`
+  to drive more than 5 genuine sequential desired-state changes (not
+  idempotent re-deploys) through the real production coordinator and real
+  dnsdist, verifying restart count, DB/runtime parity, deployment history
+  truthfulness, and DNS availability together.
 
 ## v1.0.0 (unreleased)
 

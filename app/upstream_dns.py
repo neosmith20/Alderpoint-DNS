@@ -369,6 +369,28 @@ def _address_for_dnsdist(row: dict[str, Any]) -> str:
     return f"{host}:{int(row['port'])}"
 
 
+def _new_server_statement(row: dict[str, Any]) -> str:
+    """Renders exactly one `newServer({...})` Lua statement for a single
+    enabled resolver row. Shared by render_dnsdist_upstreams() (the static
+    file dnsdist loads at startup/restart) and the live console
+    reconciliation path (_console_reconcile()) so a resolver is defined
+    identically regardless of which activation mechanism applies it."""
+    opts = [
+        f"address={_lua_quote(_address_for_dnsdist(row))}",
+        f"name={_lua_quote('upstream-' + str(row['id']) + '-' + re.sub(r'[^a-zA-Z0-9_-]+', '-', row['name'])[:42])}",
+        'pool="alderpointdns_upstreams"',
+        "checkName=\"cloudflare.com.\"",
+        "checkType=\"A\"",
+        "mustResolve=true",
+        f"order={int(row['position'])}",
+    ]
+    if row["protocol"] in {"dot", "doh"}:
+        opts.extend(['tls="openssl"', "validateCertificates=true", f"subjectName={_lua_quote(row['tls_hostname'] or row['address'])}"])
+    if row["protocol"] == "doh":
+        opts.append(f"dohPath={_lua_quote(row['doh_path'] or '/dns-query')}")
+    return "newServer({" + ", ".join(opts) + "})"
+
+
 def render_dnsdist_upstreams(rows: list[dict[str, Any]]) -> str:
     lines = [
         "-- Managed by Alderpoint DNS. Generated upstream forwarder; do not edit by hand.",
@@ -377,20 +399,7 @@ def render_dnsdist_upstreams(rows: list[dict[str, Any]]) -> str:
         'setPoolServerPolicy(firstAvailable, "alderpointdns_upstreams")',
     ]
     for row in rows:
-        opts = [
-            f"address={_lua_quote(_address_for_dnsdist(row))}",
-            f"name={_lua_quote('upstream-' + str(row['id']) + '-' + re.sub(r'[^a-zA-Z0-9_-]+', '-', row['name'])[:42])}",
-            'pool="alderpointdns_upstreams"',
-            "checkName=\"cloudflare.com.\"",
-            "checkType=\"A\"",
-            "mustResolve=true",
-            f"order={int(row['position'])}",
-        ]
-        if row["protocol"] in {"dot", "doh"}:
-            opts.extend(['tls="openssl"', "validateCertificates=true", f"subjectName={_lua_quote(row['tls_hostname'] or row['address'])}"])
-        if row["protocol"] == "doh":
-            opts.append(f"dohPath={_lua_quote(row['doh_path'] or '/dns-query')}")
-        lines.append("newServer({" + ", ".join(opts) + "})")
+        lines.append(_new_server_statement(row))
     return "\n".join(lines) + "\n"
 
 
@@ -510,6 +519,97 @@ def _backend_up_states() -> dict[str, bool]:
     return states
 
 
+def _live_upstream_pool_snapshot() -> list[dict[str, str]] | None:
+    """Every backend currently in dnsdist's live "alderpointdns_upstreams"
+    pool, as [{"index": ..., "address": ...}, ...] straight from
+    `showServers()` -- or None if the console can't be reached/parsed at
+    all. An empty list (as opposed to None) means the console answered but
+    the pool has no members, which _console_reconcile() treats as "this
+    running process has never had upstream routing wired up" rather than
+    attempting to reconcile against nothing -- see its docstring."""
+    try:
+        result = run(["dnsdist", "-e", "showServers()"], check=False)
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    entries: list[dict[str, str]] = []
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 5 or not parts[0].isdigit():
+            continue
+        if parts[-1] != "alderpointdns_upstreams":
+            continue
+        entries.append({"index": parts[0], "address": parts[2]})
+    return entries
+
+
+def _console_reconcile(rows: list[dict[str, Any]]) -> bool:
+    """Applies `rows` (the enabled resolver set) to the *live* running
+    dnsdist by adding/removing backends in the "alderpointdns_upstreams"
+    pool over its console -- an officially supported dnsdist runtime
+    reconfiguration mechanism (`newServer()`/`rmServer()`, the exact same
+    Lua functions the static config file uses at startup) -- instead of
+    restarting the whole process.
+
+    Why this exists: dns1's live upstream_deployments history and dnsdist
+    journal showed that restarting dnsdist once per ordinary sequential
+    upstream UI change was frequent enough to trip systemd's own
+    StartLimitBurst crash-loop protection (intentionally left untouched --
+    see deploy_upstreams()'s own restart fallback below). Pacing those
+    restarts alone (app/webapp.py's _upstream_deploy_coordinator) is not
+    enough against dns1's *actual* policy (StartLimitBurst=5 within a 60s
+    window): spacing restarts far enough apart to always stay under that
+    budget would make a single isolated admin click wait many seconds for
+    no functional reason. dnsdist is explicitly designed to have its
+    backend set changed at runtime -- it calls itself a "DNS Loadbalancer"
+    and ships a console/API for exactly this -- so the right fix is to
+    stop needing a restart at all for the common case: ordinary
+    add/edit/toggle/move/delete of a managed upstream resolver.
+
+    This unconditionally clears every backend currently in the pool and
+    re-adds the full desired set from `rows`, rather than diffing
+    field-by-field, because dnsdist's own `showServers()` output truncates
+    backend *names* to a fixed display width (not a safe identity key),
+    and because a full replace exactly matches what a restart already
+    does -- a restart already resets every backend's health-check state
+    and query counters on every deploy, so this changes no observable
+    semantics other than removing the restart itself. The whole script
+    runs as a single console round trip, on the order of milliseconds --
+    multiple orders of magnitude faster than a process restart, with no
+    frontend socket interruption at all.
+
+    Returns True only if the live pool was confirmed, *after* the fact, to
+    exactly match the desired address set -- never merely "the script
+    didn't error". Returns False for anything else (console unreachable,
+    pool never wired up in this process's lifetime yet, a mid-script
+    failure, or a post-check mismatch); the caller must then fall back to
+    a full restart, which remains protected by the same rate-limited
+    coordinator either way."""
+    snapshot = _live_upstream_pool_snapshot()
+    if not snapshot:
+        # None (console unreachable) or [] (pool never wired up in this
+        # process yet -- e.g. the very first upstream deploy ever on a
+        # fresh install) -- either way, only a real restart can establish
+        # the DSTPortRule(5355) -> alderpointdns_upstreams routing this
+        # relies on; that wiring is only (re-)evaluated at dnsdist startup.
+        return False
+    statements = [f'rmServer(getServer({entry["index"]}))' for entry in sorted(snapshot, key=lambda e: -int(e["index"]))]
+    statements.extend(_new_server_statement(row) for row in rows)
+    try:
+        result = run(["dnsdist", "-e", "\n".join(statements)], check=False)
+    except Exception:
+        return False
+    if result.returncode != 0:
+        return False
+    after = _live_upstream_pool_snapshot()
+    if after is None:
+        return False
+    desired_addresses = sorted(_address_for_dnsdist(row) for row in rows)
+    live_addresses = sorted(entry["address"] for entry in after)
+    return live_addresses == desired_addresses
+
+
 def deploy_upstreams(conn: sqlite3.Connection | None = None) -> int:
     close = conn is None
     db = conn or connect()
@@ -541,6 +641,7 @@ def deploy_upstreams(conn: sqlite3.Connection | None = None) -> int:
     status = "failed"
     message = ""
     validation_output = ""
+    activation_mode = "restart"
     try:
         dnsdist_staged = _write_staged(stage / "upstream-forwarder.conf", render_dnsdist_upstreams(rows))
         bind_staged = _write_staged(stage / "upstream-forwarders.conf", render_bind_forwarders())
@@ -555,7 +656,19 @@ def deploy_upstreams(conn: sqlite3.Connection | None = None) -> int:
         ensure_named_forwarders_include()
         validation_output += run(["dnsdist", "--check-config"]).stdout
         validation_output += run(["named-checkconf", "-p", "/etc/bind/named.conf"]).stdout
-        run(["systemctl", "restart", "dnsdist"])
+        # Prefer applying the new backend set to the already-running
+        # dnsdist over its console (no process restart at all) -- see
+        # _console_reconcile()'s docstring for the full rationale. Only
+        # fall back to a real restart when that isn't possible (console
+        # unreachable, or this process has never had upstream routing
+        # wired up yet) or didn't verifiably succeed; either way the
+        # static files just staged above are exactly what that restart
+        # would load, so the fallback is always correct, just slower.
+        if _console_reconcile(rows):
+            activation_mode = "console"
+        else:
+            run(["systemctl", "restart", "dnsdist"])
+            activation_mode = "restart"
         run(["rndc", "reconfig"])
         start = time.monotonic()
         # This check must prove the *newly staged* upstream set can actually
@@ -617,7 +730,8 @@ def deploy_upstreams(conn: sqlite3.Connection | None = None) -> int:
             # else: state unknown -- leave the row's last_status untouched
             # rather than guess.
         status = "deployed"
-        message = f"deployed {len(rows)} enabled upstream resolver(s)"
+        activation_note = "applied live, no dnsdist restart" if activation_mode == "console" else "applied via dnsdist restart"
+        message = f"deployed {len(rows)} enabled upstream resolver(s) ({activation_note})"
         if down_count:
             message += f" ({down_count} of them currently unreachable; traffic is being served by the rest)"
     except Exception as exc:

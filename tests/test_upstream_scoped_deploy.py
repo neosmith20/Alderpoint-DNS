@@ -215,7 +215,7 @@ class UpstreamScopedDeployTest(unittest.TestCase):
             ("post", f"/dns-settings/upstreams/{quad9_id}/move", {"csrf": self.csrf, "direction": "up"}),
             ("post", f"/dns-settings/upstreams/{quad9_id}/delete", {"csrf": self.csrf}),
         ]
-        with mock.patch.object(webapp, "run", return_value=(0, "deployed 1 enabled upstream resolver(s)")) as run_mock:
+        with mock.patch.object(webapp, "run", return_value=(0, "1 deployed 1 enabled upstream resolver(s) (applied live, no dnsdist restart)")) as run_mock:
             for _, path, data in actions:
                 response = self.client.post(path, data=data, follow_redirects=False)
                 self.assertEqual(response.status_code, 303, response.text)
@@ -238,7 +238,12 @@ class UpstreamScopedDeployTest(unittest.TestCase):
             with run_guard:
                 run_count += 1
             time.sleep(0.1)
-            return (0, "deployed 2 enabled upstream resolver(s)")
+            # Matches the real subprocess output for the common case (see
+            # app.upstream_dns.deploy_upstreams()'s _console_reconcile()):
+            # applied live, no restart -- so this test isn't slowed down by
+            # _upstream_deploy_coordinator's restart-only pacing, which
+            # only fires when a run's own output says otherwise.
+            return (0, "1 deployed 2 enabled upstream resolver(s) (applied live, no dnsdist restart)")
 
         responses: list = []
         response_guard = threading.Lock()
@@ -291,8 +296,16 @@ class UpstreamScopedDeployTest(unittest.TestCase):
         self.assertEqual(row[0], 1, "final DB state must truthfully reflect the last applied change")
 
     def test_sequential_ordinary_use_still_works(self) -> None:
+        """Also guards the exact UX regression an earlier version of the
+        restart-rate fix introduced: pacing every deploy unconditionally at
+        _upstream_deploy_coordinator's min_interval_seconds (16s in
+        production) turned 3 ordinary sequential toggles into a many-second
+        wait even though none of them ever restarted dnsdist. Pacing must
+        apply only when a deploy's own output says it actually restarted --
+        this mock's "no dnsdist restart" response must never be throttled."""
         resolver_id = self._resolver_id("Quad9")
-        with mock.patch.object(webapp, "run", return_value=(0, "deployed 2 enabled upstream resolver(s)")):
+        start = time.monotonic()
+        with mock.patch.object(webapp, "run", return_value=(0, "1 deployed 2 enabled upstream resolver(s) (applied live, no dnsdist restart)")):
             for enabled in ("1", "0", "1"):
                 resp = self.client.post(
                     f"/dns-settings/upstreams/{resolver_id}/toggle",
@@ -300,6 +313,12 @@ class UpstreamScopedDeployTest(unittest.TestCase):
                     follow_redirects=False,
                 )
                 self.assertEqual(resp.status_code, 303)
+        elapsed = time.monotonic() - start
+        self.assertLess(
+            elapsed, 5.0,
+            f"3 sequential ordinary toggles that never restarted dnsdist took {elapsed:.1f}s -- "
+            "restart-rate pacing must not apply to non-restart deploys",
+        )
         with sqlite3.connect(webapp.DB_PATH) as conn:
             row = conn.execute("SELECT enabled FROM upstream_resolvers WHERE id=?", (resolver_id,)).fetchone()
         self.assertEqual(row[0], 1)

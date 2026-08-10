@@ -553,13 +553,29 @@ class _DeployCoordinator:
     does not replace that lock.
     """
 
-    def __init__(self, run_once, wait_timeout: float = 180.0, busy_message: str = "a deployment is already in progress; your change was saved and will be applied automatically once it finishes", min_interval_seconds: float = 0.0):
+    def __init__(self, run_once, wait_timeout: float = 180.0, busy_message: str = "a deployment is already in progress; your change was saved and will be applied automatically once it finishes", min_interval_seconds: float = 0.0, should_pace=None):
         self._run_once = run_once
         self._wait_timeout = wait_timeout
         self._busy_message = busy_message
         # See the "restart-rate limiting" note below `run()` for why this
         # exists and how it interacts with coalescing.
         self._min_interval_seconds = min_interval_seconds
+        # should_pace(result: tuple[int, str]) -> bool: decides whether a
+        # completed run counts toward the min_interval_seconds cooldown at
+        # all. Defaults to "every run counts" (unconditional pacing), which
+        # is correct for a coordinator whose underlying operation always
+        # does the one rate-limited thing it exists to pace. It is NOT
+        # correct once an operation can satisfy the same request two
+        # different ways with very different costs -- see
+        # _upstream_deploy_coordinator, where most runs apply live over
+        # dnsdist's console (no restart, nothing to pace) and only a rare
+        # fallback actually restarts dnsdist (the thing that must be
+        # paced). Pacing every run unconditionally there would throttle
+        # ordinary sequential clicks to one every min_interval_seconds
+        # even when no restart ever happened -- an earlier version of this
+        # fix did exactly that and turned 8 ordinary sequential toggles
+        # into a 123-second wait for nothing.
+        self._should_pace = should_pace or (lambda result: True)
         self._cv = threading.Condition()
         self._in_flight = False
         self._coalesced = False
@@ -604,7 +620,12 @@ class _DeployCoordinator:
             # one restart every `min_interval_seconds` instead of one per
             # click. It never delays a truly isolated click by more than
             # `min_interval_seconds`, and never delays the very first click
-            # after an idle period at all.
+            # after an idle period at all. Critically, `_last_finished` is
+            # only set below when `_should_pace(result)` says this
+            # particular run actually did the rate-limited thing -- a run
+            # that didn't (e.g. applied live over dnsdist's console, no
+            # restart at all) leaves it untouched, so it never starts a
+            # cooldown the next call would have to wait out.
             if self._min_interval_seconds and self._last_finished is not None:
                 remaining_cooldown = self._min_interval_seconds - (time.monotonic() - self._last_finished)
                 if remaining_cooldown > 0:
@@ -619,7 +640,11 @@ class _DeployCoordinator:
                 self._round += 1
                 self._result = result
                 self._error = error
-                self._last_finished = time.monotonic()
+                # Conservative on error: if run_once() raised, we can't
+                # know whether a restart happened before the failure, so
+                # this round still counts toward the cooldown.
+                if error is not None or self._should_pace(result):
+                    self._last_finished = time.monotonic()
                 run_again = self._coalesced
                 self._coalesced = False
                 if not run_again:
@@ -652,13 +677,35 @@ def upstream_deploy() -> tuple[int, str]:
     return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "upstream-deploy"])
 
 
-# min_interval_seconds=3.0: systemd's default dnsdist.service start-rate
-# protection (deliberately left untouched -- see deploy_upstreams()'s own
-# docstring) is 5 restarts per rolling 10s window. Spacing our own
-# intentional restarts at least 3s apart caps us at at most 4 restarts in
-# any 10s window, comfortably under that limit even in the worst-case
-# alignment, while adding no delay at all to an isolated click.
-_upstream_deploy_coordinator = _DeployCoordinator(lambda: upstream_deploy(), min_interval_seconds=3.0)
+# min_interval_seconds=16.0: this is now only a defense-in-depth backstop,
+# not the primary fix -- app.upstream_dns.deploy_upstreams() applies
+# ordinary upstream changes to the already-running dnsdist over its
+# console (see _console_reconcile()'s docstring), so a normal add/edit/
+# toggle/move/delete never restarts dnsdist at all and this spacing is
+# almost never actually waited on. It only matters for the rare case where
+# every deploy in a burst falls back to a real restart (console
+# unreachable, or the very first upstream deploy ever on a fresh install,
+# which still needs one restart to wire up routing). dns1's *actual*
+# installed dnsdist.service policy is StartLimitBurst=5 within a 60s
+# window (not systemd's 10s default) -- 5 restarts spaced 16s apart span
+# 64s, so 16s spacing guarantees an all-restart fallback burst can never
+# fit 5 restarts inside any rolling 60s window, with real margin either
+# side of the boundary. An isolated click (the overwhelmingly common case,
+# and the only one that matters for UX) is never delayed by this at all
+# since it always takes the console path.
+def _upstream_deploy_used_a_restart(result: tuple[int, str]) -> bool:
+    """True unless this deploy's own subprocess output says, in so many
+    words, that it applied live without restarting dnsdist (see
+    _run_upstream_deploy_for_cli() in alderpointdns_compiler.py and
+    upstream_dns.deploy_upstreams()'s _console_reconcile() docstring).
+    Conservative by construction: a failed run, an unparseable/unexpected
+    output, or an explicit restart all count as "yes, pace this" -- only a
+    confirmed non-restart success skips pacing."""
+    code, out = result
+    return not (code == 0 and "no dnsdist restart" in out)
+
+
+_upstream_deploy_coordinator = _DeployCoordinator(lambda: upstream_deploy(), min_interval_seconds=16.0, should_pace=_upstream_deploy_used_a_restart)
 
 
 def upstream_deploy_or_raise() -> None:
