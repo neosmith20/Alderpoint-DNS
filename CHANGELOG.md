@@ -2,6 +2,30 @@
 
 All notable changes to Alderpoint DNS are documented in this file.
 
+## v1.0.1 (unreleased)
+
+A targeted bugfix release. The date above is set to the actual publication
+date as part of the final release-publication step, not before.
+
+- Fixed a live-incident-derived bug where managed upstream DNS resolvers
+  could silently diverge between the database and the live dnsdist/BIND
+  config: `deploy()` ran the cache-options deployment stage before the
+  upstream-resolvers deployment stage, so a stale/dead live upstream
+  config could fail the cache stage's own health check and abort the
+  whole deploy before the upstream stage -- which would have fixed it --
+  ever ran. An ordinary upstream resolver edit through the UI could then
+  commit to the database with no corresponding `upstream_deployments`
+  record and no live effect, while the operator saw a misleading
+  cache-related error. Upstream resolvers now deploy first.
+- Restoring a backup now reconciles managed upstream resolvers against
+  the live config whenever a restore could have changed either the
+  database rows or the generated runtime/base config files that must
+  match them, closing a restore-time divergence gap surfaced by the same
+  incident.
+- Replicated configuration now explicitly, defensively excludes managed
+  upstream resolvers (they were already never replicated in practice) --
+  upstream resolvers are appliance-local by design.
+
 ## v1.0.0 (unreleased)
 
 The first stable release. The date above is set to the actual publication

@@ -1,3 +1,29 @@
+alderpointdns (1.0.1-1) unstable; urgency=medium
+
+  * Fixed a live-incident-derived upstream DNS resolver bug: deploy()
+    ran the cache-options stage before the managed-upstream-resolvers
+    stage, so a stale/dead live upstream config could fail the cache
+    stage's own health check and abort the whole deploy before the
+    upstream stage -- which would have fixed it -- ever ran. An ordinary
+    upstream resolver edit could then commit to the database with no
+    corresponding upstream_deployments record and no live effect, while
+    the UI showed a misleading cache-related error. Upstream resolvers
+    now deploy first, so every full deploy always attempts (and
+    truthfully records) upstream reconciliation before any later stage
+    can be misled by a stale upstream chain.
+  * Restoring a backup now reconciles managed upstream resolvers against
+    the live dnsdist/BIND config whenever a restore could have changed
+    either side of that pair (the database rows or the generated
+    runtime/base config files), closing a gap where a restore could
+    otherwise leave the database and the live upstream config silently
+    mismatched.
+  * Replicated configuration explicitly excludes managed upstream
+    resolvers (already true in practice; now enforced defensively) --
+    upstream resolvers are appliance-local by design and must never be
+    overwritten by primary-to-replica sync.
+
+ -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Mon, 10 Aug 2026 01:56:48 -0600
+
 alderpointdns (1.0.0-1) unstable; urgency=medium
 
   * First stable release. Since 0.4.0~beta5: Software Updates (GitHub/
