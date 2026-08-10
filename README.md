@@ -117,8 +117,10 @@ It does not mean the install failed.
 
 Installing creates a dedicated `alderpointdns` service account, generates
 local secrets, initializes the database, deploys generated DNS
-configuration, and enables services. No default administrator account
-exists — create the first one through the web UI's `/setup` page.
+configuration, and enables services. The web admin UI is available at
+`http://<server-ip>:3000`. No default administrator account exists — after
+installation, open `http://<server-ip>:3000/setup` to create the first
+administrator account.
 
 To install from a reviewed local source tree instead (e.g. for
 development), see `docs/install.md`. Once installed, use **System >
