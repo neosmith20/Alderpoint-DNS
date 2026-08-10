@@ -25,6 +25,33 @@ date as part of the final release-publication step, not before.
 - Replicated configuration now explicitly, defensively excludes managed
   upstream resolvers (they were already never replicated in practice) --
   upstream resolvers are appliance-local by design.
+- Fixed a second live-incident-derived bug found during v1.0.1 RC
+  acceptance: normal UI use -- toggling several upstream resolvers before
+  each one's request had finished -- spawned multiple concurrent full
+  `deploy()` pipelines. An OS-level lock already existed and prevented any
+  actual runtime-file corruption, but had no visibility from the web
+  layer, so overlapping requests each queued their own full 20-90s
+  pipeline run: "database is locked", "post-deploy upstream resolution
+  failed", repeated dnsdist restarts, and a UI that looked hung. The same
+  lock previously only covered the full pipeline and `protection-enable-reuse`;
+  the narrower single-stage cache/upstream/encryption CLI deploys -- which
+  write the same live BIND/dnsdist files -- acquired no lock at all
+  standing alone and could have raced a concurrent full deploy. Fixed by:
+  (1) extending the shared deploy lock to those narrower deploys, and (2)
+  adding an in-process coordinator in the web app that serializes and
+  coalesces overlapping deploy requests into at most one extra trailing
+  run instead of one queued run per click, with a clear "already in
+  progress" response instead of a raw SQLite error for a caller that times
+  out waiting.
+- Upstream resolver add/edit/toggle/move/delete no longer invoke the full
+  blocklist/RPZ deploy pipeline at all -- they now call
+  `upstream_dns.deploy_upstreams()`'s own scoped deployment path directly,
+  which already owned its own validation, restart/reload, health check,
+  and last-good rollback/history end to end. Nothing else in the pipeline
+  depends on upstream resolver state. On the reference lab appliance this
+  took a single upstream toggle from ~8.8s (full deploy --no-download) to
+  ~1.3s (scoped upstream-deploy); on a real appliance with a full-size
+  blocklist, full deploys have been observed taking 20-90s.
 
 ## v1.0.0 (unreleased)
 

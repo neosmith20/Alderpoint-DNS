@@ -395,8 +395,15 @@ class ScheduledRunTest(FilterScheduleTestBase):
         code = source.split('"""')[-1]
         for bypassed in ("collect_rules", "flock", "render_rpz", "reload_bind", "os.replace"):
             self.assertNotIn(bypassed, code)
+        # deploy()'s exclusive lock now lives in the shared deploy_lock()
+        # helper (also used by protection_enable_reuse() and the narrower
+        # single-stage cache/upstream/encryption CLI deploys -- see
+        # tests/test_deploy_lock_concurrency.py) rather than inlined in
+        # deploy() itself; pin that deploy() still actually acquires it.
         deploy_source = inspect.getsource(compiler.deploy)
-        self.assertIn("fcntl.flock(lock_handle, fcntl.LOCK_EX)", deploy_source)
+        self.assertIn("with deploy_lock():", deploy_source)
+        deploy_lock_source = inspect.getsource(compiler.deploy_lock)
+        self.assertIn("fcntl.flock(lock_handle, fcntl.LOCK_EX)", deploy_lock_source)
         self.assertIn("enabled_sources", inspect.getsource(compiler.collect_rules))
 
     def test_main_wires_both_subcommands(self) -> None:
