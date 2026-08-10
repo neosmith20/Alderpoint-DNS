@@ -53,10 +53,10 @@ need dig
 
 DB=/var/lib/alderpointdns/alderpointdns.db
 SNAPSHOT=$(mktemp)
-sqlite3 "$DB" ".mode insert upstream_resolvers" "SELECT * FROM upstream_resolvers;" > "$SNAPSHOT"
+sqlite3 -cmd ".timeout 5000" "$DB" ".mode insert upstream_resolvers" "SELECT * FROM upstream_resolvers;" > "$SNAPSHOT"
 restore() {
-  sqlite3 "$DB" "DELETE FROM upstream_resolvers;"
-  sqlite3 "$DB" < "$SNAPSHOT"
+  sqlite3 -cmd ".timeout 5000" "$DB" "DELETE FROM upstream_resolvers;"
+  sqlite3 -cmd ".timeout 5000" "$DB" < "$SNAPSHOT"
   /opt/alderpointdns/app/alderpointdns_compiler.py upstream-deploy >/dev/null 2>&1 || true
   rm -f "$SNAPSHOT"
 }
@@ -78,7 +78,7 @@ if not coordinator._min_interval_seconds or coordinator._min_interval_seconds <=
     print("FAIL: upstream deploy coordinator has no restart-rate limiting configured", file=sys.stderr)
     sys.exit(1)
 
-conn = sqlite3.connect(upstream_dns.DB_PATH)
+conn = sqlite3.connect(upstream_dns.DB_PATH, timeout=5.0)
 conn.row_factory = sqlite3.Row
 ids = [row["id"] for row in conn.execute("SELECT id FROM upstream_resolvers ORDER BY position, id")]
 conn.close()
@@ -117,12 +117,12 @@ echo "dnsdist restarted ${restart_count} time(s) during 8 genuine sequential des
 [ "$restart_count" -lt 5 ] || fail "8 changes produced ${restart_count} restarts -- not safely under dns1's real StartLimitBurst=5"
 
 echo "== verifying DB desired state matches live runtime state =="
-db_enabled_addresses="$(sqlite3 "$DB" "SELECT address || ':' || port FROM upstream_resolvers WHERE enabled=1 ORDER BY address;")"
+db_enabled_addresses="$(sqlite3 -cmd ".timeout 5000" "$DB" "SELECT address || ':' || port FROM upstream_resolvers WHERE enabled=1 ORDER BY address;")"
 live_addresses="$(dnsdist -e "showServers()" | awk '$NF == "alderpointdns_upstreams" {print $3}' | sort)"
 [ "$(echo "$db_enabled_addresses" | sort)" = "$live_addresses" ] || fail "DB enabled resolver set does not match dnsdist's live pool: DB=[$db_enabled_addresses] live=[$live_addresses]"
 
 echo "== verifying deployment history is truthful =="
-sqlite3 "$DB" "SELECT status, message FROM upstream_deployments ORDER BY id DESC LIMIT 1;" | grep -q '^deployed|' || fail "most recent deployment history entry is not truthfully 'deployed'"
+sqlite3 -cmd ".timeout 5000" "$DB" "SELECT status, message FROM upstream_deployments ORDER BY id DESC LIMIT 1;" | grep -q '^deployed|' || fail "most recent deployment history entry is not truthfully 'deployed'"
 
 echo "== verifying DNS stays available =="
 systemctl is-active --quiet dnsdist || fail "dnsdist is not active after the burst"

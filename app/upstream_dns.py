@@ -585,7 +585,17 @@ def _console_reconcile(rows: list[dict[str, Any]]) -> bool:
     pool never wired up in this process's lifetime yet, a mid-script
     failure, or a post-check mismatch); the caller must then fall back to
     a full restart, which remains protected by the same rate-limited
-    coordinator either way."""
+    coordinator either way.
+
+    Compatibility: live-verified against both dnsdist builds Alderpoint
+    supports -- 1.9.16-0+deb13u1 (the default Debian-archive package this
+    project's own `Depends: dnsdist (>= 1.9.0)` targets, and the exact
+    version running on the appliance that originally surfaced the
+    restart-rate defect this exists to fix) and 2.1.x (the opt-in
+    `install-enhanced-dnsdist` build). `showServers()`'s output format and
+    every `newServer()`/`rmServer()` option this module emits behave
+    identically on both -- see docs/dnsdist.md's "Managed upstream
+    resolvers and the dnsdist console" section."""
     snapshot = _live_upstream_pool_snapshot()
     if not snapshot:
         # None (console unreachable) or [] (pool never wired up in this
