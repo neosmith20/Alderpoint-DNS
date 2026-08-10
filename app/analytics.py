@@ -195,10 +195,27 @@ def bucket_start(ts: int, size: int = BUCKET_SECONDS) -> int:
 
 
 def init_analytics_db() -> None:
+    """Called on essentially every analytics read/write (dashboard_data(),
+    settings(), update_settings(), ...), so this is by far the most
+    frequently-opened write transaction against the shared database --
+    unlike the writer thread's own batched event/cleanup writes
+    (_write_events()/_run_cleanup()), it used to rely solely on the
+    connection's PRAGMA busy_timeout with no Python-level retry at all. A
+    real appliance reproduction (multiple systemd units restarting together
+    after a restore/upgrade, each re-running init_db()/init_analytics_db()
+    within milliseconds of each other, on the same schedule a real restore
+    or update actually triggers) showed that gap: this write occasionally
+    lost the SQLITE_BUSY race and surfaced a raw sqlite3.OperationalError
+    instead of retrying, exactly the asymmetry _retry_on_lock() already
+    closes for the writer thread. The script is entirely idempotent (CREATE
+    TABLE IF NOT EXISTS / INSERT OR IGNORE), so retrying it from scratch on
+    a lock is always safe."""
     init_db()
-    with connect() as conn:
-        conn.executescript(
-            """
+
+    def _do() -> None:
+        with connect() as conn:
+            conn.executescript(
+                """
             PRAGMA journal_mode=WAL;
             CREATE TABLE IF NOT EXISTS analytics_settings (
                 key TEXT PRIMARY KEY,
@@ -286,23 +303,25 @@ def init_analytics_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_query_events_client ON query_events(client);
             CREATE INDEX IF NOT EXISTS idx_query_events_blocked ON query_events(blocked, ts DESC);
             CREATE INDEX IF NOT EXISTS idx_upstream_resolver_buckets_resolver ON upstream_resolver_aggregate_buckets(resolver_id, bucket_start DESC);
-            """
-        )
-        defaults = {
-            "analytics_enabled": "1",
-            "detailed_query_logging_enabled": "1",
-            "privacy_mode": "full",
-            "detailed_retention_days": str(DEFAULT_DETAILED_RETENTION_DAYS),
-            "aggregate_retention_days": str(DEFAULT_AGGREGATE_RETENTION_DAYS),
-            "db_size_limit_bytes": str(DEFAULT_DB_LIMIT_BYTES),
-            "client_anonymization": "truncate",
-            "collection_interval": str(DEFAULT_INTERVAL),
-            "recent_query_limit": str(DEFAULT_RECENT_LIMIT),
-        }
-        conn.executemany(
-            "INSERT OR IGNORE INTO analytics_settings(key, value) VALUES (?, ?)",
-            defaults.items(),
-        )
+                """
+            )
+            defaults = {
+                "analytics_enabled": "1",
+                "detailed_query_logging_enabled": "1",
+                "privacy_mode": "full",
+                "detailed_retention_days": str(DEFAULT_DETAILED_RETENTION_DAYS),
+                "aggregate_retention_days": str(DEFAULT_AGGREGATE_RETENTION_DAYS),
+                "db_size_limit_bytes": str(DEFAULT_DB_LIMIT_BYTES),
+                "client_anonymization": "truncate",
+                "collection_interval": str(DEFAULT_INTERVAL),
+                "recent_query_limit": str(DEFAULT_RECENT_LIMIT),
+            }
+            conn.executemany(
+                "INSERT OR IGNORE INTO analytics_settings(key, value) VALUES (?, ?)",
+                defaults.items(),
+            )
+
+    _retry_on_lock(_do)
 
 
 def settings(conn: sqlite3.Connection | None = None) -> dict[str, str]:
