@@ -97,6 +97,34 @@ class ReplicationTest(unittest.TestCase):
         self.assertNotIn("replication_settings", payload)
         self.assertEqual(payload["local_dns_settings"], {"internal_domain": "old.home.arpa"})
 
+    def test_payload_never_carries_upstream_resolver_state(self) -> None:
+        # Managed upstream DNS resolvers are appliance-local (dns1 and dns2
+        # can legitimately need different upstream resolvers) and each
+        # appliance already reconciles its own upstream_resolvers rows
+        # against its own live dnsdist config via
+        # app.upstream_dns.deploy_upstreams(). Replication carrying this
+        # table would let a primary silently overwrite a replica's
+        # independently-managed resolvers/deployment history -- this must
+        # never happen, structurally, not just by the current
+        # REPLICABLE_TABLES allowlist happening not to mention it.
+        self.assertNotIn("upstream_resolvers", replication.REPLICABLE_TABLES)
+        self.assertNotIn("upstream_deployments", replication.REPLICABLE_TABLES)
+        self.assertIn("upstream_resolvers", replication.NEVER_REPLICATED_TABLES)
+        self.assertIn("upstream_deployments", replication.NEVER_REPLICATED_TABLES)
+        with closing(replication.connect()) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE upstream_resolvers (id INTEGER PRIMARY KEY, name TEXT, address TEXT, enabled INTEGER DEFAULT 1);
+                CREATE TABLE upstream_deployments (id INTEGER PRIMARY KEY, status TEXT);
+                """
+            )
+            conn.execute("INSERT INTO upstream_resolvers(name, address, enabled) VALUES ('primary-only', '9.9.9.9', 1)")
+            conn.execute("INSERT INTO upstream_deployments(status) VALUES ('deployed')")
+            conn.commit()
+            payload = replication.build_payload(conn)
+        self.assertNotIn("upstream_resolvers", payload)
+        self.assertNotIn("upstream_deployments", payload)
+
     def test_replica_sync_rolls_back_sqlite_changes_when_deploy_fails(self) -> None:
         generation_sections = {
             "sources": [{"name": "primary", "url": "file:///primary", "enabled": 1, "category": "custom"}],

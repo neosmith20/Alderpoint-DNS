@@ -129,6 +129,16 @@ class UpstreamDNSTest(unittest.TestCase):
                 upstream_dns.deploy_upstreams()
         self.assertEqual(upstream_dns.DNSDIST_UPSTREAM_CONF.read_text(), good)
         self.assertEqual(upstream_dns.last_deployment()["status"], "rolled_back")
+        # The database still says every previously/still-enabled resolver
+        # (including "bad") is enabled -- an ordinary failed activation must
+        # never silently flip that -- but each row's own last_status/
+        # last_message must truthfully say it failed to actually apply, so
+        # the UI never shows a bare "enabled" checkbox with no indication
+        # the live config disagrees.
+        rows = {row["name"]: row for row in upstream_dns.resolvers()}
+        self.assertTrue(rows["bad"]["enabled"])
+        self.assertEqual(rows["bad"]["last_status"], "failed")
+        self.assertIn("post-deploy upstream resolution failed", rows["bad"]["last_message"])
 
     def test_resolvers_persist_after_new_connection(self) -> None:
         upstream_dns.add_resolver({"name": "Persisted", "protocol": "plain", "address": "8.8.8.8", "enabled": "1"})

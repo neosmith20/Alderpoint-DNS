@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 warnings.simplefilter("ignore", ResourceWarning)
 
-from app import backup  # noqa: E402
+from app import backup, upstream_dns  # noqa: E402
 
 
 class BackupTestBase(unittest.TestCase):
@@ -62,8 +62,22 @@ class BackupTestBase(unittest.TestCase):
 
         backup.ETC_BIND.joinpath("named.conf").write_text("options {};\n")
         backup.ETC_BIND.joinpath("named.conf.local").write_text("// local\n")
-        backup.ETC_BIND.joinpath("named.conf.options").write_text("options {};\n")
-        backup.DNSDIST_CONF.write_text("setLocal('127.0.0.1:53')\n")
+        # Includes the "forward only;" marker app.upstream_dns.
+        # ensure_named_forwarders_include() requires -- this fixture is
+        # shared with the upstream-reconciliation-on-restore machinery (see
+        # the upstream_dns.* redirection below), not just backup's own
+        # named-checkconf validation.
+        backup.ETC_BIND.joinpath("named.conf.options").write_text("options {\n\tforward only;\n};\n")
+        # Includes the exact markers app.upstream_dns.ensure_dnsdist_include()
+        # requires (packet-cache pool line, bind-proxy newServer stanza,
+        # RCodeAction route marker) -- same reason as named.conf.options
+        # above.
+        backup.DNSDIST_CONF.write_text(
+            'newServer({\n  address="127.0.0.1:5354",\n  name="bind-proxy"\n})\n'
+            'pc = newPacketCache(100)\n'
+            'getPool(""):setCache(pc)\n'
+            'addAction(OrRule({\n  QTypeRule(DNSQType.AXFR)\n}), RCodeAction(DNSRCode.REFUSED))\n'
+        )
         backup.CERT_DIR.joinpath("alderpointdns-lab.crt").write_text("PUBLIC CERT\n")
         backup.CERT_DIR.joinpath("alderpointdns-lab.key").write_text("PRIVATE KEY\n")
         backup.SECRETS_ENV.write_text("ALDERPOINTDNS_SESSION_SECRET=topsecret\n")
@@ -77,6 +91,32 @@ class BackupTestBase(unittest.TestCase):
         backup.DOWNLOADS_DIR.joinpath("current").mkdir(parents=True, exist_ok=True)
         backup.DOWNLOADS_DIR.joinpath("current", "1-source.txt").write_text("example.com\n")
         backup.SUDOERS_FILE.write_text("alderpointdns ALL=(root) NOPASSWD: /opt/alderpointdns/app/alderpointdns_compiler.py deploy\n")
+
+        # restore_backup() reconciles managed upstream DNS resolvers via
+        # app.upstream_dns.deploy_upstreams() -- point that module at the
+        # same sandboxed paths backup's own constants above use (never the
+        # real /var/lib/alderpointdns, /etc/bind, /etc/dnsdist), and fake
+        # its subprocess calls the same way backup.run is faked, so restore
+        # tests never depend on a real dnsdist/BIND install. Assigned
+        # directly (not via mock.patch) so it's in effect for every test in
+        # this module regardless of whether/how that test separately
+        # patches backup.run -- upstream_dns.run is a distinct function
+        # object backup.run's own patching never reaches.
+        self.upstream_old = {name: getattr(upstream_dns, name) for name in (
+            "DB_PATH", "COMPILED_DIR", "BIND_FORWARDERS_CONF", "DNSDIST_UPSTREAM_CONF",
+            "NAMED_OPTIONS_CONF", "DNSDIST_CONF", "DNSDIST_PACKAGING_CONF", "BACKUP_DIR",
+            "STAGING_DIR", "run",
+        )}
+        upstream_dns.DB_PATH = backup.DB_PATH
+        upstream_dns.COMPILED_DIR = backup.COMPILED_DIR
+        upstream_dns.BIND_FORWARDERS_CONF = backup.COMPILED_DIR / "bind" / "upstream-forwarders.conf"
+        upstream_dns.DNSDIST_UPSTREAM_CONF = backup.COMPILED_DIR / "dnsdist" / "upstream-forwarder.conf"
+        upstream_dns.NAMED_OPTIONS_CONF = backup.ETC_BIND / "named.conf.options"
+        upstream_dns.DNSDIST_CONF = backup.DNSDIST_CONF
+        upstream_dns.DNSDIST_PACKAGING_CONF = backup.DNSDIST_CONF
+        upstream_dns.BACKUP_DIR = backup.BACKUP_DIR
+        upstream_dns.STAGING_DIR = backup.STAGING_DIR
+        upstream_dns.run = self.fake_upstream_run
 
         backup.init_db()
         with closing(backup.connect()) as conn:
@@ -108,6 +148,8 @@ class BackupTestBase(unittest.TestCase):
     def tearDown(self) -> None:
         for key, value in self.old.items():
             setattr(backup, key, value)
+        for key, value in self.upstream_old.items():
+            setattr(upstream_dns, key, value)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     # Commands that must really execute for the test to mean anything (they
@@ -120,6 +162,18 @@ class BackupTestBase(unittest.TestCase):
     def fake_run(self, command: list[str], check: bool = True, input_text: str | None = None, env=None) -> subprocess.CompletedProcess[str]:
         if command and command[0] in self.PASSTHROUGH_COMMANDS:
             return subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=check, input=input_text, env=env)
+        return subprocess.CompletedProcess(command, 0, "ok\n")
+
+    # app.upstream_dns.deploy_upstreams()'s own post-deploy health check
+    # requires a `dig` reply that actually looks like a successful A-record
+    # answer (status: NOERROR plus an "A" record line) -- generic "ok\n"
+    # output from fake_run() above would make that check fail every time,
+    # which would turn every restore that reconciles upstream resolvers
+    # into a spurious failure unrelated to whatever the test is actually
+    # exercising.
+    def fake_upstream_run(self, command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+        if command[:2] == ["dig", "@127.0.0.1"]:
+            return subprocess.CompletedProcess(command, 0, ";; ->>HEADER<<- status: NOERROR\ncloudflare.com.\t300\tIN\tA\t1.1.1.1\n")
         return subprocess.CompletedProcess(command, 0, "ok\n")
 
 
@@ -914,6 +968,62 @@ class RestoreTest(BackupTestBase):
         self.assertGreater(history_after, history_before)
         last = backup.last_restore()
         self.assertTrue(last["pre_restore_backup_path"])
+
+    def test_restore_reconciles_generated_upstream_config_with_restored_resolvers(self) -> None:
+        # upstream_resolvers/upstream_deployments aren't in TABLE_COMPONENT_MAP,
+        # so they ride along with the broad sqlite_data flag; the *generated*
+        # runtime file that must match them lives under the separately
+        # selectable app_config component. A cross-appliance restore (or any
+        # restore that doesn't select every relevant component together) can
+        # select one without the other -- this is exactly the shape of the
+        # live dns1 incident's restore step. Restoring sqlite_data alone must
+        # still leave the live generated dnsdist upstream config matching the
+        # now-restored database, never a stale mix of the two appliances'
+        # states.
+        with closing(backup.connect()) as conn:
+            upstream_dns.init_db(conn)
+            conn.execute("DELETE FROM upstream_resolvers")
+            conn.execute(
+                "INSERT INTO upstream_resolvers(name, protocol, address, port, enabled, position, created_at, updated_at) "
+                "VALUES ('Backed up resolver', 'plain', '9.9.9.9', 53, 1, 1, '2026-08-01T00:00:00+00:00', '2026-08-01T00:00:00+00:00')"
+            )
+            conn.commit()
+        path = self._make_backup()
+
+        # Since the backup was taken: the operator edited upstream DNS again
+        # (a different resolver is now enabled) and that edit was actually
+        # deployed, so the live generated file currently names it -- not the
+        # backed-up resolver.
+        with closing(backup.connect()) as conn:
+            conn.execute("DELETE FROM upstream_resolvers")
+            conn.execute(
+                "INSERT INTO upstream_resolvers(name, protocol, address, port, enabled, position, created_at, updated_at) "
+                "VALUES ('Post-backup resolver', 'plain', '203.0.113.53', 53, 1, 1, '2026-08-09T00:00:00+00:00', '2026-08-09T00:00:00+00:00')"
+            )
+            conn.commit()
+        upstream_dns.DNSDIST_UPSTREAM_CONF.parent.mkdir(parents=True, exist_ok=True)
+        upstream_dns.DNSDIST_UPSTREAM_CONF.write_text('newServer({address="203.0.113.53:53", name="upstream-1-Post-backup-resolver"})\n')
+
+        # Restore only sqlite_data -- app_config (the generated compiled
+        # dir) is deliberately left unselected, standing in for a restore
+        # that doesn't happen to touch it (e.g. a cross-appliance config
+        # restore focused on policy/resolver data, or simply a different
+        # component selection than the one that produced today's generated
+        # files).
+        components = dict.fromkeys(backup.COMPONENT_KEYS, False) | {"sqlite_data": True}
+        with mock.patch.object(backup, "run", self.fake_run), mock.patch.object(backup, "resolves", return_value=True), \
+                mock.patch.object(backup, "_wait_active", return_value=True):
+            backup.restore_backup(path, None, components)
+
+        with closing(backup.connect()) as conn:
+            rows = [dict(r) for r in conn.execute("SELECT name, address FROM upstream_resolvers")]
+        self.assertEqual([r["name"] for r in rows], ["Backed up resolver"])
+
+        # The live generated file must now match the *restored* database,
+        # not the pre-restore live state nor a stale mix of the two.
+        live_conf = upstream_dns.DNSDIST_UPSTREAM_CONF.read_text()
+        self.assertIn("9.9.9.9:53", live_conf)
+        self.assertNotIn("203.0.113.53", live_conf)
 
 
 class RetentionTest(BackupTestBase):

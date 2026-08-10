@@ -1604,10 +1604,31 @@ def deploy(download: bool = True, trigger: str | None = None, fail_on_source_err
                 # validation work below.
                 conn.commit()
                 local_dns.deploy_zones(conn)
+                # Upstream forwarders must be (re)deployed before cache
+                # options: dns_cache.deploy_cache_options()'s own post-deploy
+                # health check resolves a live domain through BIND :5353,
+                # which forwards through dnsdist's managed upstream listener
+                # (:5355) -- i.e. it transitively depends on the upstream
+                # forwarder chain already being current. Deploying upstream
+                # second used to let a stale/dead upstream runtime config
+                # (e.g. from an earlier failed edit, or resolvers that have
+                # since gone down) fail the *cache* stage's health check
+                # before upstream_dns.deploy_upstreams() ever ran -- which
+                # aborted the whole pipeline right there, so a just-saved,
+                # perfectly valid upstream_resolvers.enabled change was
+                # never actually applied, never recorded in
+                # upstream_deployments (success or failure), and the
+                # operator saw a misleading "cache options" error while the
+                # database and the live dnsdist config silently diverged.
+                # Deploying upstream first means every full deploy always
+                # attempts to reconcile the live upstream config with the
+                # database first, so its own success/failure is always
+                # attempted and recorded, and any later stage's health
+                # check observes the freshly applied upstream state.
+                upstream_dns.deploy_upstreams(conn)
                 cache_options_snapshot = dns_cache.CACHE_OPTIONS_CONF.read_text() if dns_cache.CACHE_OPTIONS_CONF.exists() else None
                 dns_cache.deploy_cache_options(conn)
                 cache_deployed_this_run = True
-                upstream_dns.deploy_upstreams(conn)
                 # Restarts dnsdist only when the custom-rule dnsdist-layer
                 # files actually changed; rolls its own files back and
                 # re-raises on failure.
