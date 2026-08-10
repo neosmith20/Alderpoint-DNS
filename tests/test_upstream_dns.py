@@ -125,7 +125,9 @@ class UpstreamDNSTest(unittest.TestCase):
 
         upstream_dns.add_resolver({"name": "bad", "protocol": "plain", "address": "192.0.2.53", "port": "53", "enabled": "1"})
         with self.assertRaises(RuntimeError):
-            with mock.patch.object(upstream_dns, "run", fail_dig):
+            with mock.patch.object(upstream_dns, "run", fail_dig), \
+                 mock.patch.object(upstream_dns, "POST_DEPLOY_CHECK_TIMEOUT_SECONDS", 0.2), \
+                 mock.patch.object(upstream_dns, "POST_DEPLOY_CHECK_RETRY_INTERVAL_SECONDS", 0.05):
                 upstream_dns.deploy_upstreams()
         self.assertEqual(upstream_dns.DNSDIST_UPSTREAM_CONF.read_text(), good)
         self.assertEqual(upstream_dns.last_deployment()["status"], "rolled_back")
@@ -139,6 +141,57 @@ class UpstreamDNSTest(unittest.TestCase):
         self.assertTrue(rows["bad"]["enabled"])
         self.assertEqual(rows["bad"]["last_status"], "failed")
         self.assertIn("post-deploy upstream resolution failed", rows["bad"]["last_message"])
+
+    def test_post_deploy_check_forces_fresh_resolution_not_stale_cache(self) -> None:
+        """Regression test for the exact defect found live on dns1: a
+        deployment could be recorded 'deployed' even though the newly
+        staged upstream set was entirely unreachable, because the
+        post-deploy check's `dig` query was answered from BIND's own
+        resolver cache -- a leftover answer from a prior, genuinely good
+        deploy -- rather than by an actual round trip through the freshly
+        staged upstream chain.
+
+        This fake `run()` models that cache explicitly: a `dig` reply only
+        counts as fresh if a `rndc flushname` for TEST_DOMAIN happened
+        immediately before it; otherwise it just replays whatever the last
+        real answer was (exactly what a real cache would do). If
+        deploy_upstreams() ever stopped flushing before checking, the
+        second deploy below -- upstream now genuinely unreachable -- would
+        incorrectly inherit the first deploy's cached success instead of
+        failing and rolling back.
+        """
+        state = {"cached_answer": None, "reachable": True}
+
+        def cache_aware_run(command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+            if command[:2] == ["rndc", "flushname"]:
+                state["cached_answer"] = None
+                return subprocess.CompletedProcess(command, 0, "flushed\n")
+            if command[:2] == ["dig", "@127.0.0.1"]:
+                if state["cached_answer"] is not None:
+                    return state["cached_answer"]
+                if state["reachable"]:
+                    answer = subprocess.CompletedProcess(command, 0, ";; ->>HEADER<<- status: NOERROR\ncloudflare.com.\t300\tIN\tA\t1.1.1.1\n")
+                else:
+                    answer = subprocess.CompletedProcess(command, 9, "SERVFAIL\n")
+                state["cached_answer"] = answer
+                return answer
+            return subprocess.CompletedProcess(command, 0, "ok\n")
+
+        with mock.patch.object(upstream_dns, "run", cache_aware_run):
+            upstream_dns.deploy_upstreams()
+        self.assertEqual(upstream_dns.last_deployment()["status"], "deployed")
+
+        state["reachable"] = False
+        with self.assertRaises(RuntimeError):
+            with mock.patch.object(upstream_dns, "run", cache_aware_run), \
+                 mock.patch.object(upstream_dns, "POST_DEPLOY_CHECK_TIMEOUT_SECONDS", 0.2), \
+                 mock.patch.object(upstream_dns, "POST_DEPLOY_CHECK_RETRY_INTERVAL_SECONDS", 0.05):
+                upstream_dns.deploy_upstreams()
+        self.assertEqual(
+            upstream_dns.last_deployment()["status"], "rolled_back",
+            "an all-unreachable upstream set must never be recorded as a successful "
+            "deployment merely because a stale cached answer was still lying around",
+        )
 
     def test_resolvers_persist_after_new_connection(self) -> None:
         upstream_dns.add_resolver({"name": "Persisted", "protocol": "plain", "address": "8.8.8.8", "enabled": "1"})

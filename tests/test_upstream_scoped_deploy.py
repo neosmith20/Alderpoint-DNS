@@ -158,8 +158,19 @@ class UpstreamScopedDeployTest(unittest.TestCase):
         upstream_dns.STAGING_DIR = self.old_paths["upstream_staging_dir"]
         # Coordinators are process-wide singletons; a leftover in-flight/
         # coalesced state from one test must never bleed into the next.
-        webapp._deploy_coordinator = webapp._DeployCoordinator(lambda: webapp.deploy_no_download())
-        webapp._upstream_deploy_coordinator = webapp._DeployCoordinator(lambda: webapp.upstream_deploy())
+        # Reset in place (not by constructing replacements) so each
+        # coordinator's real production configuration -- e.g.
+        # _upstream_deploy_coordinator's min_interval_seconds restart-rate
+        # limit -- survives every test file that runs after this one in the
+        # same process instead of silently reverting to the constructor
+        # defaults.
+        for coordinator in (webapp._deploy_coordinator, webapp._upstream_deploy_coordinator, webapp._cache_flush_coordinator, webapp._cache_options_coordinator):
+            coordinator._in_flight = False
+            coordinator._coalesced = False
+            coordinator._round = 0
+            coordinator._result = None
+            coordinator._error = None
+            coordinator._last_finished = None
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _resolver_id(self, name: str) -> int:

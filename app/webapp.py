@@ -553,16 +553,20 @@ class _DeployCoordinator:
     does not replace that lock.
     """
 
-    def __init__(self, run_once, wait_timeout: float = 180.0, busy_message: str = "a deployment is already in progress; your change was saved and will be applied automatically once it finishes"):
+    def __init__(self, run_once, wait_timeout: float = 180.0, busy_message: str = "a deployment is already in progress; your change was saved and will be applied automatically once it finishes", min_interval_seconds: float = 0.0):
         self._run_once = run_once
         self._wait_timeout = wait_timeout
         self._busy_message = busy_message
+        # See the "restart-rate limiting" note below `run()` for why this
+        # exists and how it interacts with coalescing.
+        self._min_interval_seconds = min_interval_seconds
         self._cv = threading.Condition()
         self._in_flight = False
         self._coalesced = False
         self._round = 0
         self._result: tuple[int, str] | None = None
         self._error: BaseException | None = None
+        self._last_finished: float | None = None
 
     def run(self) -> tuple[int, str]:
         with self._cv:
@@ -581,6 +585,30 @@ class _DeployCoordinator:
             self._in_flight = True
 
         while True:
+            # Restart-rate limiting (v1.0.1 RC #3 continuation): a burst of
+            # ordinary, *sequential* UI clicks -- each one returning before
+            # the next arrives, so nothing above is ever "in flight" to
+            # coalesce against -- previously still triggered one full
+            # `systemctl restart dnsdist` per click. Live dns1 acceptance
+            # showed five clicks in under ten seconds is enough to trip
+            # systemd's StartLimitBurst on dnsdist.service (a real, intended
+            # crash-loop protection this code must never weaken or bypass --
+            # see docs/testing.md). Instead, when `min_interval_seconds` is
+            # set, every actual `run_once()` call (the first one included)
+            # is spaced at least that far apart from the previous one's
+            # completion; a caller arriving before that spacing has elapsed
+            # is *already* holding `_in_flight`, so any further caller in
+            # the meantime coalesces the normal way above -- this sleep
+            # doesn't add a new queue, it just gives coalescing a wider
+            # window to catch a fast sequential burst in, converging it to
+            # one restart every `min_interval_seconds` instead of one per
+            # click. It never delays a truly isolated click by more than
+            # `min_interval_seconds`, and never delays the very first click
+            # after an idle period at all.
+            if self._min_interval_seconds and self._last_finished is not None:
+                remaining_cooldown = self._min_interval_seconds - (time.monotonic() - self._last_finished)
+                if remaining_cooldown > 0:
+                    time.sleep(remaining_cooldown)
             result: tuple[int, str] | None = None
             error: BaseException | None = None
             try:
@@ -591,6 +619,7 @@ class _DeployCoordinator:
                 self._round += 1
                 self._result = result
                 self._error = error
+                self._last_finished = time.monotonic()
                 run_again = self._coalesced
                 self._coalesced = False
                 if not run_again:
@@ -623,7 +652,13 @@ def upstream_deploy() -> tuple[int, str]:
     return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "upstream-deploy"])
 
 
-_upstream_deploy_coordinator = _DeployCoordinator(lambda: upstream_deploy())
+# min_interval_seconds=3.0: systemd's default dnsdist.service start-rate
+# protection (deliberately left untouched -- see deploy_upstreams()'s own
+# docstring) is 5 restarts per rolling 10s window. Spacing our own
+# intentional restarts at least 3s apart caps us at at most 4 restarts in
+# any 10s window, comfortably under that limit even in the worst-case
+# alignment, while adding no delay at all to an isolated click.
+_upstream_deploy_coordinator = _DeployCoordinator(lambda: upstream_deploy(), min_interval_seconds=3.0)
 
 
 def upstream_deploy_or_raise() -> None:
@@ -644,7 +679,14 @@ def upstream_deploy_or_raise() -> None:
     from the generic settings-save convention, not a real dependency --
     identified investigating the v1.0.1 RC concurrency incident, where it
     meant a single checkbox click could take 20-90 seconds and legitimately
-    overlap with someone else's unrelated blocklist/local-DNS/cache change."""
+    overlap with someone else's unrelated blocklist/local-DNS/cache change.
+
+    Also rate-limited (see _upstream_deploy_coordinator's
+    min_interval_seconds): a burst of ordinary sequential clicks converges
+    to the fewest dnsdist restarts needed to reach the final desired state,
+    instead of one restart per click -- found necessary when a real burst
+    of upstream toggles on dns1 restarted dnsdist often enough, quickly
+    enough, to trip systemd's own StartLimitBurst crash-loop protection."""
     code, out = _upstream_deploy_coordinator.run()
     if code != 0:
         raise RuntimeError(out.strip() or "upstream deployment failed")

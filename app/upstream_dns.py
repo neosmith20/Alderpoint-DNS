@@ -47,6 +47,12 @@ STAGING_DIR = Path("/var/lib/alderpointdns/staging")
 LOOPBACK_FORWARDER = "127.0.0.1"
 LOOPBACK_FORWARDER_PORT = 5355
 TEST_DOMAIN = "cloudflare.com"
+# How long/often deploy_upstreams()'s post-deploy functional check retries
+# a freshly-flushed resolution before giving up -- module-level so tests can
+# shrink them instead of paying the real wall-clock wait for a deliberately
+# failing case.
+POST_DEPLOY_CHECK_TIMEOUT_SECONDS = 5.0
+POST_DEPLOY_CHECK_RETRY_INTERVAL_SECONDS = 0.5
 PROTOCOLS = {"plain", "dot", "doh"}
 DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
@@ -470,6 +476,40 @@ def _capture_service_diagnostics(unit: str, lines: int = 60) -> str:
         return ""
 
 
+def _backend_up_states() -> dict[str, bool]:
+    """Best-effort per-backend up/down state straight from dnsdist's own
+    console (`showServers()`), keyed by the exact "host:port" string
+    `_address_for_dnsdist()` renders for each row -- so it can be matched
+    directly against the enabled resolver set.
+
+    This exists because the pool-level post-deploy check only proves *some*
+    enabled backend is reachable (dnsdist's `firstAvailable` policy skips
+    down backends transparently) -- a live incident showed a mixed
+    plain+DoH deploy get recorded 'deployed' with *every* enabled row
+    blanket-marked `last_status='healthy'`, even though the DoH backend was
+    actually down the whole time and only the plain resolver ever answered
+    anything. That was truthful about the pool as a whole but not about
+    that one resolver, and the UI had no way to show the difference.
+
+    Returns {} if the console can't be reached -- callers must treat that
+    as "state unknown", never as "everything is up": marking a row healthy
+    on missing data would silently reintroduce the same false-positive."""
+    try:
+        result = run(["dnsdist", "-e", "showServers()"], check=False)
+    except Exception:
+        return {}
+    if result.returncode != 0:
+        return {}
+    states: dict[str, bool] = {}
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 4 or not parts[0].isdigit():
+            continue
+        address, state = parts[2], parts[3]
+        states[address] = state.strip().lower() == "up"
+    return states
+
+
 def deploy_upstreams(conn: sqlite3.Connection | None = None) -> int:
     close = conn is None
     db = conn or connect()
@@ -518,18 +558,68 @@ def deploy_upstreams(conn: sqlite3.Connection | None = None) -> int:
         run(["systemctl", "restart", "dnsdist"])
         run(["rndc", "reconfig"])
         start = time.monotonic()
-        result = run(["dig", "@127.0.0.1", "-p", "5353", TEST_DOMAIN, "A", "+time=5", "+tries=1"], check=False)
+        # This check must prove the *newly staged* upstream set can actually
+        # resolve, not merely that BIND has some old cached answer for
+        # TEST_DOMAIN lying around from before this deploy. A live incident
+        # showed exactly that gap: a deploy that left dnsdist's sole
+        # backend genuinely unreachable was still recorded 'deployed'
+        # because BIND answered this same check from cache, without ever
+        # actually asking the new upstream chain anything. `rndc flushname`
+        # forces a real cache miss for TEST_DOMAIN immediately before every
+        # attempt, so a NOERROR/A answer here can only have come from a
+        # live round trip through the config just staged. This still
+        # exercises the exact path a LAN client uses (BIND -> loopback
+        # forwarder -> dnsdist -> upstream), not a synthetic shortcut, so a
+        # forwarding-configuration mistake would be caught too, not just an
+        # unreachable backend. A short bounded retry tolerates dnsdist's own
+        # backend health check (asynchronous, runs on its own interval)
+        # not having completed its very first round yet immediately after
+        # restart -- a benign startup race, not evidence the backend is
+        # actually down.
+        deadline = time.monotonic() + POST_DEPLOY_CHECK_TIMEOUT_SECONDS
+        result = None
+        while True:
+            run(["rndc", "flushname", TEST_DOMAIN])
+            result = run(["dig", "@127.0.0.1", "-p", "5353", TEST_DOMAIN, "A", "+time=5", "+tries=1"], check=False)
+            if result.returncode == 0 and "status: NOERROR" in result.stdout and "\tA\t" in result.stdout:
+                break
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(POST_DEPLOY_CHECK_RETRY_INTERVAL_SECONDS)
         latency_ms = (time.monotonic() - start) * 1000.0
         if result.returncode != 0 or "status: NOERROR" not in result.stdout or "\tA\t" not in result.stdout:
-            raise RuntimeError("post-deploy upstream resolution failed")
-        ts = now()
-        for row in rows:
-            db.execute(
-                "UPDATE upstream_resolvers SET last_status='healthy', last_message='resolved through active upstream set', last_latency_ms=?, last_checked_at=? WHERE id=?",
-                (latency_ms, ts, row["id"]),
+            raise RuntimeError(
+                "post-deploy upstream resolution failed: none of the currently enabled "
+                "upstream resolvers returned a successful answer (checked against a "
+                "freshly flushed cache entry, so a stale cached answer could not mask this)"
             )
+        ts = now()
+        backend_states = _backend_up_states()
+        down_count = 0
+        for row in rows:
+            address = _address_for_dnsdist(row)
+            # Unknown (console unreachable, or this address not found in
+            # showServers() output) is treated as "no claim either way" --
+            # never as healthy -- so a probe failure can't manufacture a
+            # false-positive the way the blanket update it replaced could.
+            is_up = backend_states.get(address)
+            if is_up is False:
+                down_count += 1
+                db.execute(
+                    "UPDATE upstream_resolvers SET last_status='failed', last_message=?, last_checked_at=? WHERE id=?",
+                    ("dnsdist marked this upstream unreachable; other enabled upstreams are handling traffic", ts, row["id"]),
+                )
+            elif is_up is True:
+                db.execute(
+                    "UPDATE upstream_resolvers SET last_status='healthy', last_message='resolved through active upstream set', last_latency_ms=?, last_checked_at=? WHERE id=?",
+                    (latency_ms, ts, row["id"]),
+                )
+            # else: state unknown -- leave the row's last_status untouched
+            # rather than guess.
         status = "deployed"
         message = f"deployed {len(rows)} enabled upstream resolver(s)"
+        if down_count:
+            message += f" ({down_count} of them currently unreachable; traffic is being served by the rest)"
     except Exception as exc:
         message = _safe_message(str(exc))
         diagnostics = _capture_service_diagnostics("dnsdist")

@@ -104,6 +104,44 @@ date as part of the final release-publication step, not before.
   resolves for one/multiple plain, one/multiple DoH, and mixed plain+DoH
   enabled sets, and that an attempted zero-enabled deploy leaves the live
   runtime and DB state unchanged).
+- Fixed the `systemctl restart dnsdist` failure from the same live session
+  for real: dns1's own upstream_deployments history and dnsdist journal
+  showed dnsdist repeatedly restarting *successfully* during a burst of
+  ordinary sequential upstream UI changes, closely enough together to trip
+  systemd's own start-rate crash-loop protection (`start-limit-hit`) --
+  not a DoH-specific config defect. That protection is intentional and is
+  left untouched. Instead, `app/webapp.py`'s upstream deploy coordinator
+  now paces its own intentional restarts at least 3 seconds apart
+  (comfortably under systemd's default 5-per-10s limit with margin); a
+  rapid burst of clicks converges to the fewest actual restarts needed to
+  reach the final desired state instead of one restart per click, and an
+  isolated click is never delayed. Verified live: a burst of 10 rapid
+  sequential calls against the real coordinator/dnsdist produced 3 actual
+  restarts, no `start-limit-hit`, and a healthy, resolving service
+  afterward (`tests/test_upstream_restart_rate_limiting.sh`, also covered
+  at the coordinator level in `tests/test_deploy_coordinator.py`).
+- Fixed a related correctness gap surfaced investigating the same session:
+  `deploy_upstreams()`'s post-deploy functional check queried BIND, which
+  could still answer from its own resolver cache -- a leftover answer from
+  a prior, genuinely good deploy -- without ever actually asking the
+  newly-staged upstream chain anything, so a deploy could be recorded
+  'deployed' even though every enabled upstream was actually unreachable.
+  The check now issues `rndc flushname` immediately before every
+  resolution attempt, forcing a genuine cache miss every time, with a
+  short bounded retry to tolerate dnsdist's own asynchronous backend
+  health check not having completed its first round yet. Separately, a
+  successful deploy used to blanket-mark every enabled resolver row
+  `last_status='healthy'` off that one pool-level check, even when
+  `firstAvailable` routing meant only some of them actually carried
+  traffic; `deploy_upstreams()` now reads dnsdist's own per-backend
+  up/down state (`showServers()`) and records each row's *own* truthful
+  status, so a down DoH backend sitting alongside working plain resolvers
+  shows as down in the database/UI instead of falsely healthy, while the
+  overall deploy still succeeds (a single down backend has never required
+  dnsdist itself to fail, and still doesn't). Added
+  `tests/test_upstream_dns.py::test_post_deploy_check_forces_fresh_resolution_not_stale_cache`
+  (proves an all-unreachable upstream set cannot inherit a prior deploy's
+  cached success).
 
 ## v1.0.0 (unreleased)
 

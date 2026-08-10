@@ -320,6 +320,12 @@ class UpstreamCacheReconciliationOrderTests(unittest.TestCase):
         def always_ok_dig(command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
             if command[:2] == ["dig", "@127.0.0.1"]:
                 return subprocess.CompletedProcess(command, 0, ";; ->>HEADER<<- status: NOERROR\ncloudflare.com.\t300\tIN\tA\t1.1.1.1\n")
+            if command[:2] == ["dnsdist", "-e"]:
+                # A synthetic `showServers()` reply reporting Quad9's own
+                # backend as up -- deploy_upstreams() now records each
+                # row's real per-backend state instead of blanket-marking
+                # every enabled row 'healthy' off the pool-level check alone.
+                return subprocess.CompletedProcess(command, 0, "0   Quad9                9.9.9.9:53                                      up     0.0       0          1          1          1       0   0.0   0.5     -           0 alderpointdns_upstreams\n")
             return subprocess.CompletedProcess(command, 0, "ok\n")
 
         def always_fail_dig(command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:

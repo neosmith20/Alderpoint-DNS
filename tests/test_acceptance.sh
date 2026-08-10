@@ -11,6 +11,7 @@ set -eu
 /opt/alderpointdns/tests/test_upstream_dns.py
 /opt/alderpointdns/tests/test_upstream_last_enabled_guard.py
 /opt/alderpointdns/tests/test_upstream_enabled_set_combinations.sh
+/opt/alderpointdns/tests/test_upstream_restart_rate_limiting.sh
 /opt/alderpointdns/tests/test_dns_cache_benchmark.sh
 /opt/alderpointdns/tests/test_encryption.py
 /opt/alderpointdns/tests/test_importer.py

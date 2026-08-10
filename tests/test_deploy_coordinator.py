@@ -124,6 +124,74 @@ class DeployCoordinatorTest(unittest.TestCase):
         t.join(timeout=5)
         self.assertEqual(first_result, [(0, "deployed")])
 
+    def test_isolated_call_is_never_delayed_by_min_interval_seconds(self) -> None:
+        coordinator = webapp._DeployCoordinator(lambda: (0, "deployed"), min_interval_seconds=1.0)
+        start = time.monotonic()
+        coordinator.run()
+        self.assertLess(time.monotonic() - start, 0.2, "a call with nothing recently run before it must not be rate-limited")
+
+    def test_min_interval_seconds_paces_a_rapid_sequential_burst_and_still_converges(self) -> None:
+        """Coordinator-level reproduction of the dns1 defect: a burst of
+        calls arriving faster than min_interval_seconds apart -- some
+        overlapping, some each starting just as the previous call returns,
+        exactly like a real burst of individually-fast HTTP requests --
+        must never result in one actual run per call (that's what tripped
+        systemd's StartLimitBurst restarting dnsdist live), and whatever
+        runs do happen must never be closer together than
+        min_interval_seconds."""
+        run_times: list[float] = []
+        guard = threading.Lock()
+
+        def run_once() -> tuple[int, str]:
+            with guard:
+                run_times.append(time.monotonic())
+            return (0, "deployed")
+
+        coordinator = webapp._DeployCoordinator(run_once, min_interval_seconds=0.3)
+
+        results: list[tuple[int, str]] = []
+        errors: list[BaseException] = []
+        result_guard = threading.Lock()
+
+        def caller() -> None:
+            try:
+                result = coordinator.run()
+                with result_guard:
+                    results.append(result)
+            except BaseException as exc:  # pragma: no cover
+                with result_guard:
+                    errors.append(exc)
+
+        threads = []
+        for _ in range(12):
+            t = threading.Thread(target=caller)
+            t.start()
+            threads.append(t)
+            time.sleep(0.05)  # faster than min_interval_seconds -- a real rapid-click burst
+        for t in threads:
+            t.join(timeout=15)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 12, "every caller must still get a result")
+        self.assertLess(
+            len(run_times), 12,
+            f"a rapid burst of 12 calls triggered {len(run_times)} separate runs -- "
+            "exactly the pile-up of dnsdist restarts that tripped systemd's StartLimitBurst on dns1",
+        )
+        for earlier, later in zip(run_times, run_times[1:]):
+            self.assertGreaterEqual(later - earlier, 0.3 - 0.02, "two runs happened closer together than min_interval_seconds")
+
+    def test_production_upstream_coordinator_has_restart_rate_limiting_configured(self) -> None:
+        """Pins the actual production wiring: if a future change ever drops
+        min_interval_seconds back to 0 (or removes it) for the upstream
+        deploy coordinator specifically, this fails immediately instead of
+        waiting for another live dns1 start-limit-hit to notice."""
+        self.assertGreater(
+            webapp._upstream_deploy_coordinator._min_interval_seconds, 0.0,
+            "the upstream deploy coordinator has no restart-rate limiting -- a burst of "
+            "sequential upstream UI changes can trip dnsdist's systemd StartLimitBurst again",
+        )
+
     def test_failed_run_reports_nonzero_code_and_output_to_every_coalesced_caller(self) -> None:
         def run_once() -> tuple[int, str]:
             time.sleep(0.05)
