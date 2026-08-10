@@ -263,12 +263,41 @@ def add_resolver(values: dict[str, Any]) -> int:
         return int(cur.lastrowid)
 
 
+LAST_ENABLED_MESSAGE = "at least one upstream resolver must be enabled"
+
+
+def _would_leave_zero_enabled(conn: sqlite3.Connection, resolver_id: int, *, disabling: bool, deleting: bool = False) -> bool:
+    """True if disabling/deleting `resolver_id` right now would leave no
+    enabled resolver anywhere in the table.
+
+    This exists so every mutating entry point (set_enabled, delete_resolver,
+    update_resolver) can refuse to *commit* a zero-enabled desired state in
+    the first place, rather than writing it and relying on
+    deploy_upstreams() to reject it after the fact. That after-the-fact
+    check is still correct as a last line of defense (a scoped deploy could
+    still be triggered some other way), but by itself it left a window --
+    found during v1.0.1 RC live acceptance -- where set_enabled(False) had
+    already committed the all-disabled row before deploy_upstreams() ever
+    ran, so a *rejected* deploy still left the desired-state DB permanently
+    at zero enabled resolvers (a state no later deploy of any kind could
+    ever succeed from without first re-enabling something by hand)."""
+    if not disabling:
+        return False
+    others_enabled = conn.execute(
+        "SELECT count(*) FROM upstream_resolvers WHERE id != ? AND enabled=1", (resolver_id,)
+    ).fetchone()[0]
+    return others_enabled == 0
+
+
 def update_resolver(resolver_id: int, values: dict[str, Any]) -> None:
     data = validate_resolver(values, require_enabled_set=True)
     with connect() as conn:
         init_db(conn)
         if not conn.execute("SELECT 1 FROM upstream_resolvers WHERE id=?", (resolver_id,)).fetchone():
             raise UpstreamDNSError("resolver not found")
+        disabling = not bool(int(data["enabled"]))
+        if _would_leave_zero_enabled(conn, resolver_id, disabling=disabling):
+            raise UpstreamDNSError(LAST_ENABLED_MESSAGE)
         conn.execute(
             """
             UPDATE upstream_resolvers
@@ -283,6 +312,9 @@ def update_resolver(resolver_id: int, values: dict[str, Any]) -> None:
 def delete_resolver(resolver_id: int) -> None:
     with connect() as conn:
         init_db(conn)
+        row = conn.execute("SELECT enabled FROM upstream_resolvers WHERE id=?", (resolver_id,)).fetchone()
+        if row is not None and _would_leave_zero_enabled(conn, resolver_id, disabling=bool(row["enabled"]), deleting=True):
+            raise UpstreamDNSError(LAST_ENABLED_MESSAGE)
         conn.execute("DELETE FROM upstream_resolvers WHERE id=?", (resolver_id,))
         renumber(conn)
         conn.commit()
@@ -291,6 +323,8 @@ def delete_resolver(resolver_id: int) -> None:
 def set_enabled(resolver_id: int, enabled: bool) -> None:
     with connect() as conn:
         init_db(conn)
+        if _would_leave_zero_enabled(conn, resolver_id, disabling=not enabled):
+            raise UpstreamDNSError(LAST_ENABLED_MESSAGE)
         conn.execute("UPDATE upstream_resolvers SET enabled=?, updated_at=? WHERE id=?", (1 if enabled else 0, now(), resolver_id))
         conn.commit()
 
@@ -418,6 +452,24 @@ def _safe_message(text: str) -> str:
     return re.sub(r"https://([^/?#]+)[^\\s'\"]*", r"https://\\1/...", text)
 
 
+def _capture_service_diagnostics(unit: str, lines: int = 60) -> str:
+    """Best-effort `journalctl -u <unit>` tail, grabbed the moment a deploy
+    fails so the actual reason (e.g. why `systemctl restart dnsdist` exited
+    non-zero) survives in upstream_deployments.validation_output even when
+    nobody can get a shell on the appliance before the journal rotates --
+    exactly the gap that stalled triaging a live DoH-only restart failure
+    with no local root access. Never raises: a diagnostics probe must never
+    itself turn a clean rollback into a second failure."""
+    try:
+        result = subprocess.run(
+            ["journalctl", "-u", unit, "-n", str(lines), "--no-pager", "--output=short-iso"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10, check=False,
+        )
+        return result.stdout
+    except Exception:
+        return ""
+
+
 def deploy_upstreams(conn: sqlite3.Connection | None = None) -> int:
     close = conn is None
     db = conn or connect()
@@ -428,7 +480,13 @@ def deploy_upstreams(conn: sqlite3.Connection | None = None) -> int:
     db.commit()
     rows = enabled_resolvers(db)
     if not rows:
-        message = "at least one upstream resolver must be enabled"
+        # Defense in depth only: with the pre-commit guards in set_enabled()/
+        # delete_resolver()/update_resolver(), the desired-state DB should
+        # never actually reach zero enabled rows via the normal web routes
+        # any more -- see _would_leave_zero_enabled(). This still protects
+        # any other caller (CLI, backup restore, replication) that mutates
+        # the table directly.
+        message = LAST_ENABLED_MESSAGE
         db.execute(
             "UPDATE upstream_deployments SET finished_at=?, status='failed', message=? WHERE id=?",
             (now(), message, deployment_id),
@@ -474,6 +532,9 @@ def deploy_upstreams(conn: sqlite3.Connection | None = None) -> int:
         message = f"deployed {len(rows)} enabled upstream resolver(s)"
     except Exception as exc:
         message = _safe_message(str(exc))
+        diagnostics = _capture_service_diagnostics("dnsdist")
+        if diagnostics:
+            validation_output += "\n\n--- journalctl -u dnsdist (captured at failure, before rollback) ---\n" + diagnostics
         for live, backup in backups:
             try:
                 if backup and backup.exists():

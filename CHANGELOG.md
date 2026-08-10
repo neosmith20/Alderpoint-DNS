@@ -71,6 +71,39 @@ date as part of the final release-publication step, not before.
   packaged install, uses `sudo -n -l` (an authorization check only, no
   privileged execution) as the real `alderpointdns` account to prove the
   *installed* policy matches too -- now part of the acceptance suite.
+- Fixed a third live-incident-derived bug found during v1.0.1 RC acceptance:
+  disabling the last enabled upstream resolver correctly showed "at least
+  one upstream resolver must be enabled" (`upstream_dns.deploy_upstreams()`
+  refuses to ever promote a zero-upstream config to the live runtime), but
+  `set_enabled(resolver_id, False)` had already *committed* the
+  all-disabled desired state to the database before `deploy_upstreams()`
+  ever ran and rejected it. The runtime config stayed correct, but the
+  database no longer matched it, and no future deploy of any kind (scoped
+  or full) could ever succeed again without an admin re-enabling a resolver
+  by hand first. `set_enabled()`, `delete_resolver()`, and
+  `update_resolver()` now check, in the same transaction and before the
+  mutating statement runs, whether the change they're about to commit would
+  leave zero enabled resolvers, and refuse to commit it if so -- the
+  invalid desired state can no longer be written at all, not merely
+  rejected downstream. `deploy_upstreams()`'s own check remains as defense
+  in depth for callers that mutate the table directly (backup restore,
+  replication, the CLI). A related `systemctl restart dnsdist` failure
+  reported from the same live session, seen only with a DoH-only enabled
+  upstream set, could not be reproduced against this appliance's own
+  network conditions after live investigation (an unreachable/firewalled
+  DoH backend was confirmed, separately, to fail safely: dnsdist starts
+  normally and simply marks that backend down); `deploy_upstreams()` now
+  captures a `journalctl -u dnsdist` snapshot into the deployment's stored
+  `validation_output` at the moment any deploy failure triggers a rollback,
+  so a future occurrence is diagnosable from deployment history alone,
+  without needing appliance shell access before the journal rotates. Added
+  `tests/test_upstream_last_enabled_guard.py` (unit- and web-route-level:
+  the guard rejects before any DB commit and before any `sudo` invocation
+  is ever reached) and `tests/test_upstream_enabled_set_combinations.sh`
+  (live-service acceptance coverage proving dnsdist actually starts and
+  resolves for one/multiple plain, one/multiple DoH, and mixed plain+DoH
+  enabled sets, and that an attempted zero-enabled deploy leaves the live
+  runtime and DB state unchanged).
 
 ## v1.0.0 (unreleased)
 
