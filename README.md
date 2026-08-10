@@ -86,11 +86,16 @@ Per `docs/supported-systems.md` and `docs/hardware-requirements.md`:
 
 ## Quick start
 
-Install the latest stable release directly from GitHub Releases:
+Install the latest stable release directly from GitHub Releases. Run this as
+`root` (for example, after `su -`); minimal Debian installs may not include
+`sudo` by default:
 
 ```sh
-curl -fL -o alderpointdns.deb https://github.com/neosmith20/Alderpoint-DNS/releases/latest/download/alderpointdns_latest_all.deb && sudo apt update && sudo apt install -y ./alderpointdns.deb
+curl -fL -o alderpointdns.deb https://github.com/neosmith20/Alderpoint-DNS/releases/latest/download/alderpointdns_latest_all.deb && apt update && apt install -y ./alderpointdns.deb
 ```
+
+If you are using a sudo-enabled administrator account instead of a root shell,
+prefix both `apt` commands with `sudo`.
 
 This one command always installs the current latest stable release — the
 `alderpointdns_latest_all.deb` asset is byte-identical to that release's
