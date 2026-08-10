@@ -645,6 +645,10 @@ class TemplateRenderTest(FilterScheduleTestBase):
         from fastapi.templating import Jinja2Templates
 
         cls.templates = Jinja2Templates(directory=str(ROOT / "web" / "templates"))
+        # base.html (extended by blocklists.html) calls static_url() --
+        # a fresh Jinja2Templates instance built here (not through
+        # webapp.render(), which registers this defensively) needs it too.
+        cls.templates.env.globals["static_url"] = webapp.static_url
 
     def render(self, filter_schedule_context: dict | None, sources: list | None = None, automatic_update_banner: dict | None = None) -> str:
         request = SimpleNamespace(url=SimpleNamespace(path="/blocklists"), query_params={})

@@ -58,6 +58,10 @@ templates = (
     if Path(webapp.ROOT) == root
     else Jinja2Templates(directory=str(root / "web" / "templates"))
 )
+# base.html calls static_url() -- a freshly-built Jinja2Templates instance
+# above (the `else` branch) doesn't go through webapp.render(), which
+# registers this defensively, so it needs it set explicitly too.
+templates.env.globals.setdefault("static_url", webapp.static_url)
 
 long_domain = "extremely-long-subdomain-name-that-must-wrap-without-horizontal-overflow.example.invalid"
 

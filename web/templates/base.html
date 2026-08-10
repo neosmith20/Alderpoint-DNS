@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>{% block title %}Alderpoint DNS{% endblock %}</title>
-  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="{{ static_url('app.css') }}">
   <script>
     (function () {
       try {
@@ -137,7 +137,7 @@
   {% else %}
     <main class="auth-shell">{{ self.content() }}</main>
   {% endif %}
-  <script src="/static/app.js"></script>
+  <script src="{{ static_url('app.js') }}"></script>
   {% block scripts %}{% endblock %}
 </body>
 </html>

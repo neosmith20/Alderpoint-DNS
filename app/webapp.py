@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import base64
+import hashlib
 import json
 import os
 import secrets
@@ -44,7 +45,71 @@ STATIC_DIR = ROOT / "web" / "static"
 SESSION_MAX_AGE = 8 * 60 * 60
 SECRET_FILE = Path("/etc/alderpointdns/secrets.env")
 app = FastAPI(title="Alderpoint DNS")
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+def static_asset_fingerprint(directory: Path) -> str:
+    """A short content hash of every file actually shipped under
+    web/static, computed once (see STATIC_ASSET_FINGERPRINT below) from the
+    real bytes on disk -- not from the installed package version string.
+    An appliance upgrade always changes the files under web/static/ when
+    (and only when) it actually changes them, which is exactly what needs
+    to invalidate a browser's cache; the package version alone can't be
+    trusted for that (a version bump with no front-end change would force
+    every returning browser to refetch unnecessarily, and -- the actual
+    bug this fixes -- nothing about the version string is otherwise tied
+    to what a browser has cached under a fixed, unversioned /static/app.js
+    URL in the first place).
+
+    Appended as a cache-busting query string (see static_url()) to every
+    /static asset URL templates emit: a browser that already cached the
+    current bytes under the current URL keeps reusing them with zero
+    network round-trips (see VersionedStaticFiles below), while a real
+    Alderpoint package upgrade that changes app.js/app.css always produces
+    a new URL a fresh page load fetches for real -- no Ctrl+Shift+R or
+    manual cache clear required. Confirmed live: the installed app.js on
+    disk and http://127.0.0.1:3000/static/app.js both already reflected a
+    new build, but a browser tab left open across the upgrade kept
+    executing the old cached app.js at the old, unchanged URL until a hard
+    refresh -- the bug was the fixed URL, not anything server-side about
+    what bytes it served.
+    """
+    digest = hashlib.sha256()
+    for path in sorted(directory.rglob("*")):
+        if path.is_file():
+            digest.update(path.relative_to(directory).as_posix().encode())
+            digest.update(path.read_bytes())
+    return digest.hexdigest()[:12]
+
+
+STATIC_ASSET_FINGERPRINT = static_asset_fingerprint(STATIC_DIR)
+
+
+def static_url(filename: str) -> str:
+    return f"/static/{filename}?v={STATIC_ASSET_FINGERPRINT}"
+
+
+TEMPLATES.env.globals["static_url"] = static_url
+
+
+class VersionedStaticFiles(StaticFiles):
+    """Identical to StaticFiles except: a request carrying the `v=`
+    cache-busting query parameter static_url() appends gets a long-lived,
+    immutable Cache-Control -- safe because that query parameter *is* a
+    hash of the exact bytes being served, so the same URL can never
+    legitimately resolve to different content later. A request for the
+    bare, unversioned path (a stale bookmark, a direct curl, anything not
+    generated through static_url()) gets Starlette's ordinary
+    ETag/Last-Modified conditional-GET behavior unchanged -- never told to
+    cache for a year on nothing but a guess."""
+
+    def file_response(self, full_path, stat_result, scope, status_code: int = 200):
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        if b"v=" in scope.get("query_string", b""):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
+
+
+app.mount("/static", VersionedStaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 def secure_session_cookie_enabled() -> bool:
@@ -800,6 +865,7 @@ def render(request: Request, template: str, status_code: int = 200, **context: A
     # (e.g. to point at an isolated directory), which would otherwise
     # start without the local_time filter registered.
     TEMPLATES.env.filters.setdefault("local_time", format_local_datetime)
+    TEMPLATES.env.globals.setdefault("static_url", static_url)
     session = signed_session(request)
     new_anonymous_session = not session
     if new_anonymous_session:

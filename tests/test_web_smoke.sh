@@ -82,8 +82,8 @@ if "overflow-wrap: normal" not in css or "word-break: normal" not in css:
     raise SystemExit("status-badge/heading word-break protection rule is missing")
 if "https://" in template + css + js or "http://" in css + js:
     raise SystemExit("runtime CDN or public asset reference found")
-if "/static/app.css" not in template or "/static/app.js" not in template:
-    raise SystemExit("local static assets are not referenced")
+if "static_url('app.css')" not in template or "static_url('app.js')" not in template:
+    raise SystemExit("local static assets are not referenced through the cache-busting static_url() helper")
 if "data-nav-toggle" not in template or "appNav" not in template or "data-primary-nav" not in template:
     raise SystemExit("mobile navigation hooks are missing")
 for nav_hook in ('nav_section("dns"', 'nav_section("security"', 'nav_section("operations"', 'nav_section("system"'):
@@ -371,6 +371,18 @@ dashboard = TEMPLATES.get_template("dashboard.html").render(
 )
 if "DNS Query Volume" not in dashboard or "queryChart" not in dashboard:
     raise SystemExit("dashboard analytics chart did not render")
+# Regression: a browser kept executing a stale cached app.js after an
+# Alderpoint package upgrade even though the served /static/app.js content
+# had genuinely changed, because the asset URL itself never changed.
+# static_url() must resolve to the real, current content fingerprint at
+# render time -- not merely be present as an unrendered template call.
+if f"/static/app.css?v={webapp.STATIC_ASSET_FINGERPRINT}" not in dashboard:
+    raise SystemExit("rendered page does not reference a fingerprinted app.css URL")
+if f"/static/app.js?v={webapp.STATIC_ASSET_FINGERPRINT}" not in dashboard:
+    raise SystemExit("rendered page does not reference a fingerprinted app.js URL")
+recomputed_fingerprint = webapp.static_asset_fingerprint(webapp.STATIC_DIR)
+if recomputed_fingerprint != webapp.STATIC_ASSET_FINGERPRINT:
+    raise SystemExit("static asset fingerprint does not match the actual files on disk")
 for expected in ("Protection Active", "Disable protection", "Top Upstream Resolvers", "Cloudflare DoH", "11 ok", "1 failed", "Resolver attribution is based on dnsdist backend counters", "BIND Cache Effectiveness", "80.0", long_domain, long_client):
     if expected not in dashboard:
         raise SystemExit(f"dashboard missing {expected}")
