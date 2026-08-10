@@ -92,12 +92,12 @@
 </section>
 
 <section class="grid wide" aria-label="Ranked analytics panels">
-  {{ ui.ranked_list("Top Clients", analytics.top_clients, total, "/query-log") }}
+  {{ ui.ranked_list("Top Clients", analytics.top_clients, total, "/clients?range=" ~ analytics.range) }}
   {{ ui.ranked_list("Top Queried Domains", analytics.top_domains, total, "/query-log") }}
-  {{ ui.ranked_list("Top Blocked Domains", analytics.top_blocked, blocked, "/query-log?blocked=1") }}
-  {{ ui.ranked_list("Query Types", analytics.qtypes, total, "/query-log") }}
-  {{ ui.ranked_list("Response Codes", analytics.rcodes, total, "/query-log") }}
-  {{ ui.ranked_list("Protocol Usage", analytics.protocols, total, "/query-log") }}
+  {{ ui.ranked_list("Top Blocked Domains", analytics.top_blocked, blocked, "/query-log?blocked=1", link_param="domain", link_extra="&blocked=1") }}
+  {{ ui.ranked_list("Query Types", analytics.qtypes, total, "/query-log", link_param="qtype") }}
+  {{ ui.ranked_list("Response Codes", analytics.rcodes, total, "/query-log", link_param="rcode") }}
+  {{ ui.ranked_list("Protocol Usage", analytics.protocols, total, "/query-log", link_param="protocol") }}
   <article class="panel">
     <div class="panel__head"><h2>BIND Cache Effectiveness</h2><a href="/dns-cache">Manage</a></div>
     {% if cache_stats.available %}

@@ -178,12 +178,23 @@ grep -q 'StartLimitIntervalSec' /opt/alderpointdns/packaging/dnsdist.service.d/a
 # The confirmed defect: every mandatory postinst step (database init,
 # config deploy, service restart/enable) was suffixed with `|| true`,
 # so a completely broken install still reported dpkg/apt success.
-grep -q 'PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py deploy --no-download$' "$POSTINST" || \
-  fail "postinst still swallows failures from alderpointdns_compiler.py deploy with || true (or a trailing redirect) instead of failing the install"
+grep -q 'PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py fresh-install-init$' "$POSTINST" || \
+  fail "postinst does not run the fresh-install initializer for first-use blocklist setup"
+if grep -q 'alderpointdns_compiler.py deploy --no-download$' "$POSTINST"; then
+  fail "postinst still runs an unconditional no-download deploy, which would replace existing compiled policy during upgrade"
+fi
 grep -q '^    systemctl restart named dnsdist$' "$POSTINST" || \
   fail "postinst still swallows failures from 'systemctl restart named dnsdist' with || true instead of failing the install"
-grep -q '^    systemctl enable --now alderpointdns alderpointdns-analytics$' "$POSTINST" || \
+# enable + an unconditional restart, not `enable --now`: on an
+# already-active unit (the normal upgrade case) `--now` is a no-op
+# restart-wise, silently leaving the *previous* version's process (and,
+# critically, its previous ProtectSystem=full ReadWritePaths=) running --
+# a real bug found and fixed via this project's own disposable-VM upgrade
+# testing (see CHANGELOG.md). Both lines must still be un-`|| true`d.
+grep -q '^    systemctl enable alderpointdns alderpointdns-analytics$' "$POSTINST" || \
   fail "postinst still swallows failures from enabling the web/analytics services with || true instead of failing the install"
+grep -q '^    systemctl restart alderpointdns alderpointdns-analytics$' "$POSTINST" || \
+  fail "postinst does not unconditionally restart alderpointdns/alderpointdns-analytics on every install/upgrade (enable --now alone does not restart an already-active unit)"
 grep -q 'alderpointdns_wait_active' "$POSTINST" || \
   fail "postinst does not verify named/dnsdist/alderpointdns/alderpointdns-analytics actually reached the active state before reporting success"
 for svc in named dnsdist alderpointdns alderpointdns-analytics; do
@@ -206,6 +217,52 @@ grep -q '^User=alderpointdns$' "$ROOT/data/lib/systemd/system/alderpointdns-noti
 grep -q 'systemctl enable --now alderpointdns-notify.timer' "$POSTINST" || \
   fail "postinst does not enable alderpointdns-notify.timer"
 
+# --- Software Updates: check timer (auto-check on by default), independent
+# install runner unit (never enabled/started automatically -- installs only
+# ever happen because an administrator explicitly requested one) ---
+test -f "$ROOT/data/lib/systemd/system/alderpointdns-software-update-check.service" || \
+  fail "alderpointdns-software-update-check.service missing from built package"
+test -f "$ROOT/data/lib/systemd/system/alderpointdns-software-update-check.timer" || \
+  fail "alderpointdns-software-update-check.timer missing from built package"
+test -f "$ROOT/data/lib/systemd/system/alderpointdns-software-update.service" || \
+  fail "alderpointdns-software-update.service missing from built package"
+# Enabling the check timer is no longer a bare `systemctl enable --now`
+# line: postinst calls update-check-schedule-deploy, which renders the
+# timer's cadence from software_update_settings (auto-check on,
+# check_interval_hours honored) and enables/starts it accordingly -- see
+# app/software_updates.py's deploy_check_schedule().
+grep -q 'update-check-schedule-deploy' "$POSTINST" || \
+  fail "postinst does not deploy the software update check schedule"
+grep -q 'enable.*alderpointdns-software-update\.service\|start.*alderpointdns-software-update\.service' "$POSTINST" && \
+  fail "postinst must never enable/start the install runner unit automatically -- unattended installation must be off by default"
+grep -q 'update-run' "$ROOT/data/lib/systemd/system/alderpointdns-software-update.service" || \
+  fail "alderpointdns-software-update.service does not exec the update-run subcommand"
+
+# --- Backup Restore: independent runner unit, same reasoning as the
+# Software Updates install runner above -- a restore's app_config
+# component restarts alderpointdns.service partway through, which would
+# kill a direct sudo child of the web request that started it (the exact
+# failure found on a live appliance: the restore worker vanished the
+# instant alderpointdns.service's cgroup was torn down mid-restore, right
+# after the database had already been promoted). Unlike the install
+# runner, this one has no companion timer -- a restore never runs on a
+# schedule, only on an explicit administrator request. ---
+test -f "$ROOT/data/lib/systemd/system/alderpointdns-backup-restore.service" || \
+  fail "alderpointdns-backup-restore.service missing from built package"
+grep -q 'backup-restore' "$ROOT/data/lib/systemd/system/alderpointdns-backup-restore.service" || \
+  fail "alderpointdns-backup-restore.service does not exec the backup-restore subcommand"
+grep -q 'enable.*alderpointdns-backup-restore\.service\|start.*alderpointdns-backup-restore\.service' "$POSTINST" && \
+  fail "postinst must never enable/start the backup-restore runner unit automatically -- a restore only ever runs because an administrator explicitly requested one"
+SUDOERS_CONTENT="$(cat "$ROOT/data/etc/sudoers.d/alderpointdns")"
+case "$SUDOERS_CONTENT" in
+  *"systemctl start --no-block alderpointdns-backup-restore.service"*) : ;;
+  *) fail "sudoers does not allow the fixed, argument-free systemctl start --no-block alderpointdns-backup-restore.service form" ;;
+esac
+case "$SUDOERS_CONTENT" in
+  *"alderpointdns_compiler.py backup-restore"*)
+    fail "sudoers still allows invoking backup-restore directly as a sudo child of the web request -- it must only run via the independent systemd unit above" ;;
+esac
+
 # --- logrotate config for the CLI's dedicated error-traceback log ---
 # The confirmed defect: alderpointdns_compiler.py's CLI dispatch logs full
 # Python tracebacks (which can embed exception arguments -- paths, domain
@@ -219,5 +276,37 @@ grep -q '/var/log/alderpointdns/compiler-errors.log' "$ROOT/data/etc/logrotate.d
   fail "logrotate config does not cover /var/log/alderpointdns/compiler-errors.log"
 grep -q 'create 0600 root root' "$ROOT/data/etc/logrotate.d/alderpointdns" || \
   fail "logrotate config does not recreate the CLI error log at a root-only 0600 -- a rotation cycle must never widen it to group/world-readable"
+
+# --- development-only content must never ship in the installed product ---
+# The confirmed defect: the project's complete pytest/shell test suite
+# (including fixtures) and Dex's v1 performance benchmark harness/writeup
+# were both landing in the built package because build-deb.sh's tar file
+# list simply named whole top-level directories (tests, scripts, docs)
+# without excluding their development-only contents.
+#
+# opt/alderpointdns/tests used to ship exactly one file
+# (test_dnsdist_frontend.sh) as a deliberate exception, because
+# app/webapp.py's DNS Settings page checked for that file's on-disk
+# presence to render its "client address preservation" indicator -- a
+# test/dev artifact standing in as a production runtime marker. That
+# indicator now derives its state from client_address_preservation_status()
+# (a live socket check against BIND's PROXYv2 listener, the same
+# production-owned pattern protocol_statuses() already uses), so the
+# package no longer needs anything under tests/ at runtime and the whole
+# directory must be absent.
+test -d "$ROOT/data/opt/alderpointdns/tests" && \
+  fail "built package ships opt/alderpointdns/tests -- no file under tests/ is a runtime dependency any more; the full test suite must not be shipped"
+test -f "$ROOT/data/opt/alderpointdns/scripts/benchmark_filtering.py" && \
+  fail "built package ships the development-only benchmark_filtering.py script"
+test -f "$ROOT/data/opt/alderpointdns/docs/performance-baseline.md" && \
+  fail "built package ships the development-only performance-baseline.md writeup"
+test -d "$ROOT/data/opt/alderpointdns/benchmarks" && \
+  fail "built package ships the benchmarks/ directory (raw profiling result data)"
+# Sanity check the exclusions above didn't also swallow real runtime
+# content: the actual application code, a real doc, and a real packaging
+# script must still be present.
+test -f "$ROOT/data/opt/alderpointdns/app/webapp.py" || fail "built package is missing app/webapp.py"
+test -f "$ROOT/data/opt/alderpointdns/docs/known-limitations.md" || fail "built package is missing docs/known-limitations.md"
+test -f "$ROOT/data/opt/alderpointdns/scripts/install.sh" || fail "built package is missing scripts/install.sh"
 
 echo "deb package content tests passed"

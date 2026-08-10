@@ -24,8 +24,8 @@
   <article class="card"><div class="card__head"><h2>Certificate</h2>{{ ui.status_badge(cert.state|title, "healthy" if cert.state == "present" else "down") }}</div><p class="muted">{{ cert.detail }}</p></article>
   <article class="card"><div class="card__head"><h2>PROXYv2 Backend</h2>{{ ui.status_badge(proxy_backend|title, "healthy" if proxy_backend == "enabled" else "degraded") }}</div></article>
   <article class="card">
-    <div class="card__head"><h2>Client Address Test</h2>{{ ui.status_badge(client_address_test.state, "healthy" if client_address_test.state == "Passed" else "down" if client_address_test.state == "Failed" else "unavailable") }}</div>
-    <p class="muted mono">{{ client_address_test.filename }}</p>
+    <div class="card__head"><h2>Client Address Test</h2>{{ ui.status_badge(client_address_test.state, "healthy" if client_address_test.state == "Configured" else "down" if client_address_test.state == "Listener unavailable" else "unavailable") }}</div>
+    <p class="muted mono">{{ client_address_test.detail }}</p>
   </article>
 </section>
 

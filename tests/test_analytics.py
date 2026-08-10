@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import tempfile
+import threading
 import time
 import unittest
 import unittest.mock
@@ -454,6 +455,105 @@ class WriterResilienceTests(unittest.TestCase):
         self.assertFalse(collector.fatal_error.is_set())
         self.assertFalse(collector.stop_event.is_set())
         self.assertEqual(analytics.writer_health()["status"], "degraded")
+
+
+class InitAnalyticsDbLockContentionTest(unittest.TestCase):
+    """Regression for a real appliance "database is locked" seen during
+    acceptance testing: init_analytics_db() is on the hot path for
+    essentially every analytics read/write (dashboard_data(), settings(),
+    update_settings(), ...) but, unlike the writer thread's own batched
+    writes (_write_events()/_run_cleanup(), both wrapped in
+    _retry_on_lock()), it used to rely solely on the connection's own
+    PRAGMA busy_timeout with no Python-level retry at all. Multiple
+    systemd units (alderpointdns, alderpointdns-analytics, a filter/update
+    timer) can realistically call init_db()/init_analytics_db() within
+    milliseconds of each other right after a restart -- e.g. the restore
+    and software-update flows that intentionally restart
+    alderpointdns.service and alderpointdns-analytics close together. These
+    tests use a second, real (not mocked) connection that genuinely holds
+    the database's single write lock, to prove init_analytics_db() now
+    survives that contention instead of surfacing a raw
+    sqlite3.OperationalError."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        compiler.DB_PATH = root / "alderpointdns.db"
+        analytics.DB_PATH = compiler.DB_PATH
+        analytics.init_analytics_db()
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _short_timeout_connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(analytics.DB_PATH, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        # Deliberately much shorter than production's real 5000ms: this
+        # test needs a single unretried attempt against the real lock held
+        # below to reliably fail fast, proving the reproduction is genuine
+        # contention rather than something SQLite's own busy_timeout alone
+        # would have absorbed -- it is not standing in for production's
+        # actual timeout, which this test cannot afford to wait out.
+        conn.execute("PRAGMA busy_timeout=100")
+        return conn
+
+    def _hold_write_lock_briefly(self, hold_seconds: float) -> threading.Thread:
+        # sqlite3 connections are thread-affine (check_same_thread=True by
+        # default) -- opened and released entirely inside the background
+        # thread, not just scheduled from it, so the hold is genuine for
+        # its whole real duration rather than an artifact of cross-thread
+        # connection reuse. The caller waits on `acquired` before
+        # proceeding, so the contention below is never a race against this
+        # thread merely starting up.
+        acquired = threading.Event()
+
+        def hold_then_release() -> None:
+            holder = sqlite3.connect(analytics.DB_PATH, timeout=5.0)
+            holder.execute("BEGIN IMMEDIATE")
+            holder.execute("CREATE TABLE IF NOT EXISTS _lock_holder_probe(x INTEGER)")
+            acquired.set()
+            time.sleep(hold_seconds)
+            holder.commit()
+            holder.close()
+
+        thread = threading.Thread(target=hold_then_release)
+        thread.start()
+        acquired.wait(timeout=5)
+        return thread
+
+    def test_a_single_unretried_attempt_really_would_fail(self) -> None:
+        # Proves the contention below is real, not a no-op: without
+        # _retry_on_lock's retry loop, the same short busy_timeout against
+        # a lock that's still held genuinely raises "database is locked".
+        holder = sqlite3.connect(analytics.DB_PATH, timeout=5.0)
+        holder.execute("BEGIN IMMEDIATE")
+        holder.execute("CREATE TABLE IF NOT EXISTS _lock_holder_probe(x INTEGER)")
+        try:
+            conn = self._short_timeout_connect()
+            with self.assertRaises(sqlite3.OperationalError) as ctx:
+                conn.execute("INSERT OR IGNORE INTO analytics_settings(key, value) VALUES ('probe', '1')")
+            self.assertIn("locked", str(ctx.exception).lower())
+        finally:
+            holder.commit()
+            holder.close()
+
+    def test_init_analytics_db_survives_a_real_concurrent_writer(self) -> None:
+        # The lock is held for 250ms -- comfortably longer than the 100ms
+        # single-attempt busy_timeout above (so the first attempt inside
+        # _retry_on_lock() genuinely fails), but well within
+        # _retry_on_lock's own real (unmocked) exponential backoff budget,
+        # so a later attempt succeeds once the lock is released.
+        releaser = self._hold_write_lock_briefly(0.25)
+        try:
+            with unittest.mock.patch.object(analytics, "connect", self._short_timeout_connect):
+                analytics.init_analytics_db()  # must not raise
+        finally:
+            releaser.join(timeout=5)
+        self.assertFalse(releaser.is_alive())
+        # And the write this contended over actually landed.
+        with compiler.connect() as conn:
+            row = conn.execute("SELECT value FROM analytics_settings WHERE key='analytics_enabled'").fetchone()
+        self.assertEqual(row["value"], "1")
 
 
 if __name__ == "__main__":

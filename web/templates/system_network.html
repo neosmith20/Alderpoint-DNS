@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% import "components.html" as ui %}
+{% block title %}Network Configuration - Alderpoint DNS{% endblock %}
+{% block content %}
+{{ ui.page_header("Network Configuration", "This server's own network interface (DHCP/static IP, gateway) -- separate from DNS upstream/resolver settings.") }}
+
+{% if error %}
+  <div class="alert error" role="alert">{{ error }}</div>
+{% endif %}
+
+{% if pending %}
+<section class="panel stack">
+  <div class="panel__head"><h2>Network configuration changed</h2>{{ ui.status_badge("Awaiting confirmation", "neutral") }}</div>
+  <p>New address: <span class="mono">{{ pending.proposed.ipv4.address }}/{{ pending.proposed.ipv4.prefix if pending.proposed.ipv4 else "" }}</span></p>
+  {% if pending.proposed.ipv4 %}<p>Gateway: <span class="mono">{{ pending.proposed.ipv4.gateway }}</span></p>{% endif %}
+  <p class="muted" data-network-deadline="{{ pending.rollback_deadline }}">
+    Confirm this configuration before <span class="mono">{{ pending.rollback_deadline }}</span>
+    (about 120 seconds from when it was applied), or Alderpoint DNS will automatically restore
+    the previous network configuration -- no reboot required. If you are reading this from the
+    <strong>new</strong> address, everything is working; click below to make it permanent.
+  </p>
+  <form method="post" action="/system/network/confirm" data-async-form data-success-message="Configuration confirmed; automatic rollback cancelled.">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="form-actions"><button data-pending-label="Confirming…">Keep Configuration</button></div>
+  </form>
+</section>
+{% endif %}
+
+<section class="grid">
+  <article class="card">
+    <div class="card__head"><h2>Detected Backend</h2>{{ ui.status_badge(current.backend, "healthy" if current.backend != "unsupported" else "down") }}</div>
+    <p class="muted">{{ current.backend_detail }}</p>
+    {% if current.ambiguous %}
+      <p class="alert error" role="alert" style="display:block" data-static-notice="1">Multiple networking backends appear active on this host. Alderpoint DNS refuses to guess which one owns configuration here -- settings are shown read-only below.</p>
+    {% endif %}
+  </article>
+  <article class="card">
+    <div class="card__head"><h2>Active Interface</h2></div>
+    <p class="mono">{{ current.interface or "none detected" }}</p>
+  </article>
+</section>
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Current Network Settings</h2></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Value</th></tr></thead>
+      <tbody>
+        <tr><td>IPv4 mode</td><td class="mono">{{ current.ipv4.mode if current.ipv4 else "unknown" }}</td></tr>
+        <tr><td>Current IPv4 address</td><td class="mono">{{ current.ipv4.address if current.ipv4 and current.ipv4.address else "none" }}{% if current.ipv4 and current.ipv4.prefixlen %}/{{ current.ipv4.prefixlen }}{% endif %}</td></tr>
+        <tr><td>Default gateway (IPv4)</td><td class="mono">{{ current.ipv4.gateway if current.ipv4 and current.ipv4.gateway else "none" }}</td></tr>
+        <tr><td>IPv6 mode</td><td class="mono">{{ current.ipv6.mode if current.ipv6 else "unknown" }}</td></tr>
+        <tr><td>Current IPv6 address</td><td class="mono">{{ current.ipv6.address if current.ipv6 and current.ipv6.address else "none" }}{% if current.ipv6 and current.ipv6.prefixlen %}/{{ current.ipv6.prefixlen }}{% endif %}</td></tr>
+        <tr><td>Default gateway (IPv6)</td><td class="mono">{{ current.ipv6.gateway if current.ipv6 and current.ipv6.gateway else "none" }}</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+{% if current.backend != "unsupported" and not pending %}
+<section class="panel stack">
+  <div class="panel__head"><h2>Change Network Configuration</h2></div>
+  <p class="alert error" role="alert" style="display:block" data-static-notice="1">
+    Changing this server's IP address may disconnect your browser. Alderpoint DNS will
+    automatically restore the previous network configuration if the new settings are not
+    confirmed within 120 seconds.
+  </p>
+  <form method="post" action="/system/network/apply" class="stack" data-confirm="Apply this network configuration? Alderpoint DNS will automatically roll back if it is not confirmed within about 2 minutes.">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Interface
+      <select name="interface">
+        {% for iface in current.interfaces %}
+          <option value="{{ iface }}" {% if iface == current.interface %}selected{% endif %}>{{ iface }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <div class="grid compact">
+      <label>IPv4 mode
+        <select name="ipv4_mode">
+          <option value="unchanged">Leave unchanged</option>
+          <option value="dhcp">DHCP</option>
+          <option value="static">Static</option>
+        </select>
+      </label>
+      <label>Static IPv4 address
+        <input name="ipv4_address" placeholder="192.168.1.10">
+      </label>
+      <label>Prefix length (CIDR)
+        <input name="ipv4_prefix" type="number" min="0" max="32" placeholder="24">
+      </label>
+      <label>Gateway
+        <input name="ipv4_gateway" placeholder="192.168.1.1">
+      </label>
+    </div>
+    <details>
+      <summary>IPv6 (optional)</summary>
+      <div class="grid compact">
+        <label>IPv6 mode
+          <select name="ipv6_mode">
+            <option value="unchanged">Leave unchanged</option>
+            <option value="slaac">SLAAC (router-advertised)</option>
+            <option value="dhcp">DHCPv6</option>
+            <option value="static">Static</option>
+          </select>
+        </label>
+        <label>Static IPv6 address
+          <input name="ipv6_address" placeholder="2001:db8::10">
+        </label>
+        <label>Prefix length
+          <input name="ipv6_prefix" type="number" min="0" max="128" placeholder="64">
+        </label>
+        <label>Gateway
+          <input name="ipv6_gateway" placeholder="2001:db8::1">
+        </label>
+      </div>
+    </details>
+    <div class="form-actions"><button data-pending-label="Applying…">Apply</button></div>
+  </form>
+</section>
+{% elif not pending %}
+  {{ ui.empty_state("Network configuration is read-only on this host", current.backend_detail) }}
+{% endif %}
+{% endblock %}

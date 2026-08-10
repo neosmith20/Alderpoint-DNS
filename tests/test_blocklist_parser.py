@@ -5,6 +5,7 @@ import io
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import app.alderpointdns_compiler as compiler
@@ -38,6 +39,41 @@ class ParserTests(unittest.TestCase):
 
     def test_idn_normalization(self):
         self.assertEqual(normalize_domain("bücher.example"), "xn--bcher-kva.example")
+
+    def test_refresh_rpz_serial_updates_soa_without_changing_records(self):
+        original = (
+            "$TTL 2h\n"
+            "@ IN SOA localhost. hostmaster.localhost. 1 1h 15m 30d 2h\n"
+            "@ IN NS localhost.\n"
+            "example.com CNAME .\n"
+        )
+        refreshed = compiler.refresh_rpz_serial(original)
+        self.assertIn("example.com CNAME .", refreshed)
+        self.assertNotIn("hostmaster.localhost. 1 1h", refreshed)
+
+    def test_restore_rpz_backup_for_rollback_refreshes_serial(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            backup = tmp_path / "old-good.rpz"
+            compiled = tmp_path / "alderpointdns.rpz"
+            backup.write_text(
+                "$TTL 2h\n"
+                "@ IN SOA localhost. hostmaster.localhost. 1 1h 15m 30d 2h\n"
+                "@ IN NS localhost.\n"
+                "good.example CNAME .\n"
+            )
+            original_compiled = compiler.COMPILED_RPZ
+            compiler.COMPILED_RPZ = compiled
+            try:
+                with mock.patch.object(compiler, "reload_bind") as reload_bind:
+                    compiler.restore_rpz_backup_for_rollback(backup)
+                restored = compiled.read_text()
+            finally:
+                compiler.COMPILED_RPZ = original_compiled
+
+        self.assertIn("good.example CNAME .", restored)
+        self.assertNotIn("hostmaster.localhost. 1 1h", restored)
+        reload_bind.assert_called_once_with()
 
     # -- Hosts-file format support -----------------------------------------
 
@@ -276,6 +312,60 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(health["state"], compiler.HEALTH_USING_CACHED)
         self.assertEqual(health["label"], "Using cached copy")
 
+    def test_last_error_clears_once_a_later_update_actually_succeeds(self):
+        # Regression: a live appliance restore left `sources.last_error` set
+        # from a stale (pre-restore) DNS-resolution failure. After the host
+        # regained connectivity, a real successful re-download of the same
+        # source must clear that stale error -- it must not linger forever
+        # just because it was once recorded.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source_file = tmp_path / "source.txt"
+            source_file.write_text("0.0.0.0 recovers.example\n")
+            original_db = compiler.DB_PATH
+            original_download_dir = compiler.DOWNLOAD_DIR
+            compiler.DB_PATH = tmp_path / "alderpointdns.db"
+            compiler.DOWNLOAD_DIR = tmp_path / "downloads"
+            try:
+                compiler.init_db()
+                with compiler.connect() as conn:
+                    conn.execute(
+                        "INSERT INTO sources(name, url, enabled, category) VALUES (?, ?, 1, 'ads_trackers')",
+                        ("Windows Spy Blocker", source_file.as_uri()),
+                    )
+                    source = conn.execute("SELECT * FROM sources WHERE name='Windows Spy Blocker'").fetchone()
+
+                    # First attempt: DNS resolution failure, exactly the
+                    # shape urllib raises for `[Errno -5] No address
+                    # associated with hostname`.
+                    conn.execute(
+                        "UPDATE sources SET url=? WHERE id=?",
+                        ("https://this-host-does-not-resolve.invalid/list.txt", source["id"]),
+                    )
+                    source = conn.execute("SELECT * FROM sources WHERE id=?", (source["id"],)).fetchone()
+                    result, _stats = compiler.update_one_source(conn, source)
+                    self.assertFalse(result.success)
+                    failed_row = conn.execute("SELECT * FROM sources WHERE id=?", (source["id"],)).fetchone()
+                    self.assertIsNotNone(failed_row["last_error"])
+                    self.assertEqual(compiler.source_health(failed_row)["state"], compiler.HEALTH_ERROR)
+
+                    # Connectivity restored, same source now resolves and
+                    # downloads cleanly -- exactly what "Update All Now"
+                    # (update_sources -> collect_rules(download=True) ->
+                    # record_download_result) performs.
+                    conn.execute("UPDATE sources SET url=? WHERE id=?", (source_file.as_uri(), source["id"]))
+                    conn.commit()
+                    compiler.collect_rules(conn, download=True)
+                    healed_row = conn.execute("SELECT * FROM sources WHERE id=?", (source["id"],)).fetchone()
+            finally:
+                compiler.DB_PATH = original_db
+                compiler.DOWNLOAD_DIR = original_download_dir
+
+        self.assertIsNone(healed_row["last_error"])
+        self.assertIsNotNone(healed_row["last_success"])
+        self.assertEqual(healed_row["using_cached_copy"], 0)
+        self.assertEqual(compiler.source_health(healed_row)["state"], compiler.HEALTH_HEALTHY)
+
     def test_public_source_catalog_seeds_large_list_set(self):
         with tempfile.TemporaryDirectory() as tmp:
             original_db = compiler.DB_PATH
@@ -357,6 +447,148 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(3, row["accepted_domains"])
         self.assertEqual(2, row["unique_active_domains"])  # 2 blocks + 1 allow (allow not counted as "block contribution")
         self.assertIsNone(row["last_error"])
+
+    def test_unchanged_source_reuses_parse_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source_file = tmp_path / "source.txt"
+            source_file.write_text("0.0.0.0 cached.example\n||ads.example^\n@@||allowed.example^\n")
+            original_db = compiler.DB_PATH
+            original_download_dir = compiler.DOWNLOAD_DIR
+            original_parse_rules = compiler.parse_rules
+            compiler.DB_PATH = tmp_path / "alderpointdns.db"
+            compiler.DOWNLOAD_DIR = tmp_path / "downloads"
+            try:
+                compiler.init_db()
+                with compiler.connect() as conn:
+                    conn.execute(
+                        "INSERT INTO sources(name, url, enabled, category) VALUES (?, ?, 1, ?)",
+                        ("local fixture", source_file.as_uri(), "ads_trackers"),
+                    )
+                    first_blocks, first_allows, _per_source, _errors = compiler.collect_rules(conn, download=True)
+
+                    def fail_if_reparsed(_content):
+                        raise AssertionError("unchanged source was reparsed instead of loaded from cache")
+
+                    compiler.parse_rules = fail_if_reparsed
+                    second_blocks, second_allows, _per_source, _errors = compiler.collect_rules(conn, download=False)
+            finally:
+                compiler.DB_PATH = original_db
+                compiler.DOWNLOAD_DIR = original_download_dir
+                compiler.parse_rules = original_parse_rules
+
+        self.assertEqual(first_blocks, second_blocks)
+        self.assertEqual(first_allows, second_allows)
+
+    def test_parse_cache_invalidates_when_source_content_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source_file = tmp_path / "source.txt"
+            source_file.write_text("0.0.0.0 before.example\n")
+            original_db = compiler.DB_PATH
+            original_download_dir = compiler.DOWNLOAD_DIR
+            compiler.DB_PATH = tmp_path / "alderpointdns.db"
+            compiler.DOWNLOAD_DIR = tmp_path / "downloads"
+            try:
+                compiler.init_db()
+                with compiler.connect() as conn:
+                    conn.execute(
+                        "INSERT INTO sources(name, url, enabled, category) VALUES (?, ?, 1, ?)",
+                        ("local fixture", source_file.as_uri(), "ads_trackers"),
+                    )
+                    before, _, _per_source, _errors = compiler.collect_rules(conn, download=True)
+                    current, _ = compiler.source_paths(conn.execute("SELECT * FROM sources WHERE name='local fixture'").fetchone())
+                    current.write_text("0.0.0.0 after.example\n")
+                    after, _, _per_source, _errors = compiler.collect_rules(conn, download=False)
+            finally:
+                compiler.DB_PATH = original_db
+                compiler.DOWNLOAD_DIR = original_download_dir
+
+        self.assertEqual(before, {"before.example"})
+        self.assertEqual(after, {"after.example"})
+
+    def test_reusable_policy_manifest_invalidates_on_source_and_custom_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            original_db = compiler.DB_PATH
+            original_download_dir = compiler.DOWNLOAD_DIR
+            original_rpz = compiler.COMPILED_RPZ
+            original_staging = compiler.STAGING_DIR
+            original_custom_db = compiler.custom_rules.DB_PATH
+            compiler.DB_PATH = tmp_path / "alderpointdns.db"
+            compiler.DOWNLOAD_DIR = tmp_path / "downloads"
+            compiler.COMPILED_RPZ = tmp_path / "compiled" / "bind" / "alderpointdns.rpz"
+            compiler.STAGING_DIR = tmp_path / "staging"
+            compiler.custom_rules.DB_PATH = compiler.DB_PATH
+            try:
+                compiler.init_db()
+                with compiler.connect() as conn:
+                    conn.execute(
+                        "INSERT INTO sources(name, url, enabled, category) VALUES (?, ?, 1, ?)",
+                        ("local fixture", (tmp_path / "unused.txt").as_uri(), "ads_trackers"),
+                    )
+                    conn.commit()
+                    source = conn.execute("SELECT * FROM sources WHERE name='local fixture'").fetchone()
+                    current, _ = compiler.source_paths(source)
+                    current.parent.mkdir(parents=True, exist_ok=True)
+                    current.write_text("0.0.0.0 cached.example\n")
+                    rpz_text = compiler.render_rpz({"cached.example"})
+                    compiler.record_reusable_protection_policy(conn, rpz_text, 1)
+                    ok_initial, _ = compiler.reusable_protection_policy_available(conn)
+                    current.write_text("0.0.0.0 changed.example\n")
+                    ok_source_changed, _ = compiler.reusable_protection_policy_available(conn)
+                    current.write_text("0.0.0.0 cached.example\n")
+                    custom_rules = compiler.custom_rules
+                    custom_rules.add_rule("||custom-block.example^")
+                    ok_custom_changed, _ = compiler.reusable_protection_policy_available(conn)
+            finally:
+                compiler.DB_PATH = original_db
+                compiler.DOWNLOAD_DIR = original_download_dir
+                compiler.COMPILED_RPZ = original_rpz
+                compiler.STAGING_DIR = original_staging
+                compiler.custom_rules.DB_PATH = original_custom_db
+
+        self.assertTrue(ok_initial)
+        self.assertFalse(ok_source_changed)
+        self.assertFalse(ok_custom_changed)
+
+    def test_reusable_policy_refuses_enabled_regex_rules(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            original_db = compiler.DB_PATH
+            original_download_dir = compiler.DOWNLOAD_DIR
+            original_rpz = compiler.COMPILED_RPZ
+            original_staging = compiler.STAGING_DIR
+            original_custom_db = compiler.custom_rules.DB_PATH
+            compiler.DB_PATH = tmp_path / "alderpointdns.db"
+            compiler.DOWNLOAD_DIR = tmp_path / "downloads"
+            compiler.COMPILED_RPZ = tmp_path / "compiled" / "bind" / "alderpointdns.rpz"
+            compiler.STAGING_DIR = tmp_path / "staging"
+            compiler.custom_rules.DB_PATH = compiler.DB_PATH
+            try:
+                compiler.init_db()
+                with compiler.connect() as conn:
+                    conn.execute(
+                        "INSERT INTO sources(name, url, enabled, category) VALUES (?, ?, 1, ?)",
+                        ("local fixture", (tmp_path / "unused.txt").as_uri(), "ads_trackers"),
+                    )
+                    conn.commit()
+                    source = conn.execute("SELECT * FROM sources WHERE name='local fixture'").fetchone()
+                    current, _ = compiler.source_paths(source)
+                    current.parent.mkdir(parents=True, exist_ok=True)
+                    current.write_text("0.0.0.0 cached.example\n")
+                    compiler.record_reusable_protection_policy(conn, compiler.render_rpz({"cached.example"}), 1)
+                    compiler.custom_rules.add_rule("/(^|\\.)regex-block\\.example$/")
+                    ok, reason = compiler.reusable_protection_policy_available(conn)
+            finally:
+                compiler.DB_PATH = original_db
+                compiler.DOWNLOAD_DIR = original_download_dir
+                compiler.COMPILED_RPZ = original_rpz
+                compiler.STAGING_DIR = original_staging
+                compiler.custom_rules.DB_PATH = original_custom_db
+
+        self.assertFalse(ok)
+        self.assertIn("regex", reason)
 
     # -- CLI exit-code contract -----------------------------------------------
 

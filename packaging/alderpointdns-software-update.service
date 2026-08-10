@@ -1,0 +1,21 @@
+[Unit]
+Description=Alderpoint DNS Software Update Install Runner
+
+[Service]
+Type=oneshot
+# Deliberately root, and deliberately its own independent unit rather than
+# something `sudo`-invoked as a child of alderpointdns.service's request
+# handling: installing a package restarts alderpointdns.service partway
+# through this run (postinst's unconditional service restart), which would
+# kill a child process of that service's own process tree. This unit is
+# started via `sudo systemctl start alderpointdns-software-update.service`
+# (a fixed, argument-free sudoers entry) from the web process, but the web
+# process never waits on it -- it returns immediately, and the browser
+# polls durable job state in software_update_jobs/software_update_events
+# instead. See app/software_updates.py's module docstring.
+#
+# Not enabled/started automatically at boot or on any timer: an update
+# install only ever runs because an administrator explicitly requested one
+# (either directly, or -- not yet implemented in 1.0 -- a future opt-in
+# unattended-install setting, which defaults OFF).
+ExecStart=/opt/alderpointdns/app/alderpointdns_compiler.py update-run

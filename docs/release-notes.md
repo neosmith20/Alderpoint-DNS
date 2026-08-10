@@ -1,38 +1,83 @@
 # Release Notes
 
-Alderpoint DNS is pre-release beta software. These notes describe what
-changed in each beta build; they are not a claim of production readiness or
-long-term stability. See `docs/known-limitations.md` and
-`docs/beta-readiness.md` for the current honest state of the project.
+These notes describe what changed in each release. See
+`docs/known-limitations.md` for the current honest state of the project.
+Everything below `v1.0.0` was a beta-cycle build.
 
-## 0.4.0-beta.6
+## v1.0.0 (2026-08-09)
 
-Reliability beta focused on SQLite contention, replication enrollment
-correctness, migration-lock compatibility, and deterministic encrypted-DNS
-release validation.
+Alderpoint DNS's first stable release. Highlights since the beta.4/beta.5
+line, by area (see `CHANGELOG.md` for the full detailed log):
 
-- Ordinary authenticated web requests no longer run schema initialization,
-  migrations, or seed writes on each database connection. Initialization is
-  handled by the serialized startup/package path instead.
-- SQLite busy/locked handling is bounded and explicit: noncritical session
-  `last_seen_at` updates retry briefly or skip safely, while exhausted
-  required writes return controlled HTTP 503 responses without raw lock
-  tracebacks reaching clients.
-- Compiler deployments now keep SQLite write transactions shorter by
-  deferring source status writes until after download and parse work has
-  completed.
-- Replication enrollment now reserves tokens atomically, consumes successful
-  enrollments once, rejects replay, releases reservations after failed
-  privileged execution, recovers orphaned reservations after TTL, and avoids
-  holding a SQLite write transaction open across the privileged subprocess.
-- Schema migration locking now works whether root package hooks or the
-  unprivileged service create/use the lock first; repeated initialization
-  remains serialized and idempotent.
-- DoQ/DoH3 acceptance validation now deploys the requested Alderpoint
-  encrypted-DNS settings before testing and verifies real UDP 853/443
-  listeners before live DoQ/DoH3 queries. The final DoQ investigation was
-  stale undeployed test state plus sandbox socket restrictions, not a
-  dnsdist, UDP, certificate, or kdig product defect.
+- **DNS/filtering**: fast paths for the overwhelmingly common blocklist
+  rule shapes, cheap IP-literal prechecks, an ASCII-normalization
+  shortcut, and a source-parse cache keyed by content hash and parser
+  version make blocklist updates and deploys substantially faster on
+  large lists. Turning **Protection** back on can now reuse a previously
+  compiled policy (validated against a canonical hash of everything that
+  could have changed it) instead of always rebuilding from scratch.
+- **Fresh-install behavior**: a new install now seeds a curated,
+  recommended set of default blocklists automatically instead of
+  starting with an empty policy.
+- **Backup & Restore**: native database restore is now staged and
+  atomically promoted -- the expensive merge work happens against a
+  private working copy, never directly against the live database, and is
+  only swapped in via a brief, validated atomic operation. A restore
+  interrupted before that point leaves the live database completely
+  untouched. Abandoned restores (a worker that died mid-run) are now
+  reliably detected and reported instead of appearing stuck forever.
+- **Network Configuration**: change this server's own network interface
+  (DHCP/static IPv4/IPv6, gateway) with an explicit confirm-within-timeout
+  safety window and automatic rollback if a change leaves the server
+  unreachable.
+- **Replication and Import**: one-way primary-to-replica sync with hashed,
+  one-time, revocable enrollment tokens and mTLS; preview-first import
+  from AdGuard Home, Pi-hole, BIND zones, hosts files, and CSV/XLSX.
+- **Software Updates**: check for and install newer Alderpoint DNS
+  releases from GitHub, or upload a `.deb` manually, with SHA-256 +
+  package-metadata validation, an `apt` install simulation, and a
+  mandatory pre-upgrade backup before every install. Automatic checking
+  is on by default and its interval is configurable; automatic
+  installation is intentionally not implemented -- every install is an
+  explicit administrator action.
+- **Security/hardening**: every privileged operation (deployment, Backup &
+  Restore, Network Configuration, Software Updates, Replication) runs
+  through fixed, argument-free sudoers entries; see `docs/security.md` and
+  `docs/hardening-review.md` for the full reviewed control list.
+- **UI/QoL/navigation**: Backup & Restore moved to a reorganized
+  **Operations** menu (Import, Backup & Restore, Replication);
+  Administration was decluttered of launcher cards that only pointed at
+  neighboring System menu items; Dashboard's Top Clients now opens a
+  proper client-focused view instead of the unfiltered Query Log.
+- **Upgrade/persistence**: upgrading an existing installation (via
+  `scripts/upgrade.sh` or in-app Software Updates) preserves all
+  configuration and data; schema migrations are idempotent and
+  interprocess-lock-protected.
+- **Upgrade path from beta**: a real `0.4.0~beta6-1` -> `1.0.0-1`
+  in-place upgrade on a disposable Debian appliance surfaced
+  `alderpointdns.service` failing to start (`status=226/NAMESPACE`) on
+  any host missing one of the three supported networking-backend
+  directories (`/etc/netplan` in particular is Ubuntu-centric); fixed so
+  the service starts correctly regardless of which backend(s) a given
+  host actually has installed.
+- **Release-hardening fixes found via live appliance acceptance
+  testing**: restored TLS/DNSCrypt private keys and runtime secrets now
+  land with correct ownership (and restore proves the runtime user can
+  actually read them, not just that the config validates); restore
+  history no longer persists secret-bearing rendered configuration; a
+  fresh install retries an initial deploy through a transient network
+  hiccup instead of reporting a false failure; a restore's own worker now
+  survives `alderpointdns`/`alderpointdns-analytics`/`named`/`dnsdist`
+  being restarted mid-run (its own independent systemd unit, not a child
+  of the web request); the browser is sent to a clear re-login screen
+  instead of a misleading blank page when a restore invalidates the
+  current session; an intermittent `database is locked` error from the
+  analytics subsystem is fixed; the curated default HaGeZi Multi Normal
+  blocklist URL was updated after its previous mirror stopped resolving;
+  a browser no longer keeps executing a stale cached `app.js`/`app.css`
+  after an in-place upgrade; and the Dashboard's blocked-domains/query-
+  type/response-code/protocol panels now drill into the Query Log
+  pre-filtered to the exact value clicked.
 
 ## 0.4.0-beta.4 (unreleased beta update)
 

@@ -1,13 +1,13 @@
 # Hardware Requirements
 
-Minimum beta test system:
+Minimum system:
 
 - 1 vCPU
 - 512 MiB RAM
 - 1 GiB free disk after OS installation
 - One private network interface
 
-Recommended beta test system:
+Recommended system:
 
 - 2 vCPU
 - 2 GiB RAM

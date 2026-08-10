@@ -1,0 +1,27 @@
+{% import "components.html" as ui %}
+{# Standalone fragment: rendered both inline on the Backup & Restore page and
+   by GET /backup/restore/status for the auto-refresh poll in backup.html
+   below. `data-restore-active` tells that poll whether to keep polling --
+   it must never be missing/blank (that would read as neither active nor
+   settled, i.e. a silently-stuck poll), so it always resolves to "1" or
+   "0". #}
+<div id="lastRestoreCard" data-refresh-url="/backup/restore/status" data-restore-active="{{ '1' if last_restore and last_restore.status == 'running' else '0' }}">
+  <article class="card">
+    <div class="card__head">
+      <h2>Last Restore</h2>
+      {% if last_restore %}{{ ui.status_badge(last_restore.status|title, "healthy" if last_restore.status == "deployed" else "down" if last_restore.status in ("failed", "rollback_failed", "interrupted") else "neutral") }}{% endif %}
+    </div>
+    {% if last_restore %}
+      <p class="muted mono">{{ (last_restore.finished_at or last_restore.started_at)|local_time }}</p>
+      {% if last_restore.status == "running" %}
+        <p class="muted">Phase: {{ last_restore.phase or "starting" }}{% if last_restore.phase_detail %} ({{ last_restore.phase_detail }}{% if last_restore.progress_total %}: {{ last_restore.progress_current or 0 }}/{{ last_restore.progress_total }}{% endif %}){% endif %}</p>
+        <p class="muted">If this restore includes app config/auth/session data, this page will keep checking automatically and will send you to sign in again once it finishes -- no need to refresh by hand.</p>
+        {% if last_restore.heartbeat_stale_suspected %}<p class="muted">No progress reported recently -- worker may be stuck.</p>{% endif %}
+      {% elif last_restore.status == "interrupted" %}
+        <p class="muted">{{ last_restore.message }}</p>
+      {% endif %}
+    {% else %}
+      <p class="muted">No restores yet.</p>
+    {% endif %}
+  </article>
+</div>

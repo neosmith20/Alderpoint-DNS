@@ -38,12 +38,14 @@ Local test package build:
 
 ```sh
 ./scripts/build-deb.sh --output-dir /tmp
-dpkg-deb --info /tmp/alderpointdns_0.4.0~beta6-1_all.deb
+dpkg-deb --info /tmp/alderpointdns_1.0.0-1_all.deb
 ```
 
-The `.deb` filename and package `Version:` field use the Debian pre-release
-convention (`~betaN-1`), derived from the semver-style `VERSION` file
-(`0.4.0-beta.6`) by `build-deb.sh` -- not the raw `VERSION` contents.
+The `.deb` filename and package `Version:` field are derived from the
+semver-style `VERSION` file (`1.0.0`) by `build-deb.sh`; a pre-release
+`VERSION` (e.g. `1.1.0-beta.1`) would use the Debian pre-release convention
+(`~betaN-1`) instead -- not the raw `VERSION` contents either way. See
+`docs/versioning.md`.
 
 This lightweight `dpkg-deb` path validates package contents without requiring
 `debhelper` on the active appliance VM.
@@ -54,5 +56,5 @@ Future repository package build command after installing build dependencies:
 dpkg-buildpackage -us -uc
 ```
 
-This scaffold is intended for isolated package-build testing before external
-beta. It does not yet publish a signed repository or release channel.
+This scaffold is intended for isolated package-build testing. It does not
+yet publish a signed repository or release channel.

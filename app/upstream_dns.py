@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from app.service_logs import sanitize as _sanitize_secrets
+
 DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
 
 
@@ -486,9 +488,16 @@ def deploy_upstreams(conn: sqlite3.Connection | None = None) -> int:
         db.execute("UPDATE upstream_resolvers SET last_status='failed', last_message=?, last_checked_at=? WHERE enabled=1", (message[:400], now()))
         raise
     finally:
+        # validation_output includes `named-checkconf -p` output, which
+        # echoes the fully rendered BIND config verbatim -- including any
+        # `key "name" { ...; secret "..."; };` block (RNDC/TSIG shared
+        # secret) -- so this must never reach SQLite (and therefore the UI's
+        # deployment history) unredacted. Sanitize the full text before
+        # truncating, not after: truncating first could cut a secret in
+        # half and leave a partial match the patterns no longer recognize.
         db.execute(
             "UPDATE upstream_deployments SET finished_at=?, status=?, message=?, validation_output=? WHERE id=?",
-            (now(), status, message, validation_output[-4000:], deployment_id),
+            (now(), status, _sanitize_secrets(message), _sanitize_secrets(validation_output)[-4000:], deployment_id),
         )
         db.commit()
         shutil.rmtree(stage, ignore_errors=True)

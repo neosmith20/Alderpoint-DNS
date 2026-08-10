@@ -1,12 +1,296 @@
 # Changelog
 
-All notable changes to Alderpoint DNS are documented in this file. Alderpoint
-DNS is currently in **beta**; interfaces, on-disk formats, and configuration
-may still change between releases before a stable 1.0.
+All notable changes to Alderpoint DNS are documented in this file.
 
-## Unreleased
+## v1.0.0 (2026-08-09)
 
-## 0.4.0-beta.6 (2026-08-01)
+The first stable release. See `docs/release-notes.md` for the equivalent
+user-facing summary. Everything below this line, back through
+`v0.4.0-beta.1`, was beta-cycle work; interfaces, on-disk formats, and
+configuration from this release forward follow normal stable-release
+compatibility expectations instead of beta-era churn.
+
+- Fixed Dashboard **Top Clients** navigation: clicking it used to open the
+  generic, unfiltered Query Log, which misrepresented the destination as
+  client-specific. It now opens a new lightweight **Clients** view (`/clients`,
+  also linked from the DNS nav section) showing every client seen in the
+  selected time range, ranked by query volume, with alias display names where
+  configured; each client row links to the Query Log pre-filtered to that
+  client (`/query-log?client=...`), which the Query Log already supported.
+- Added **System > Administration > Software Updates**: check for and
+  install newer Alderpoint DNS releases from GitHub, or upload a `.deb`
+  manually. Stable/prerelease channel filtering, SHA-256 + `dpkg-deb`
+  package validation, `apt-get install -s` simulation, a mandatory
+  pre-upgrade backup (install aborts if it fails -- no "install anyway"
+  override), and a post-upgrade health check (services, `PRAGMA
+  quick_check`, DNS resolution, a new local `/healthz` endpoint, and
+  installed-version verification) all happen before/around the actual
+  `apt` install. Installing runs as an independent systemd unit
+  (`alderpointdns-software-update.service`, started via `systemctl start
+  --no-block` through a fixed sudoers entry) rather than as a child of
+  the web request, since the install restarts `alderpointdns.service`
+  itself partway through; the browser polls durable job state
+  (`software_update_jobs`/`software_update_events`) and survives that
+  restart. (`--no-block` is required, not optional: `systemctl start` on
+  a `Type=oneshot` unit is synchronous by default, which would have left
+  the triggering HTTP request itself blocked -- and killed along with
+  the rest of that request's process tree -- exactly when the install it
+  kicked off restarts `alderpointdns.service`; found via a real
+  disposable-VM install, not caught by any mocked unit test.) Automatic
+  **checking** is on by default
+  (`alderpointdns-software-update-check.timer`, every 6h); automatic
+  **installation** is off by default and has no execution path yet. A
+  private-repo GitHub credential, if configured, lives at
+  `/etc/alderpointdns/software-updates.env` (root-owned, mode 0600) and
+  is never readable by the web process, rendered in templates, or
+  written to diagnostics/logs. See `docs/software-updates.md`.
+- Established a canonical version model for update safety
+  (`docs/versioning.md`): the development `VERSION` for this cycle is
+  now `0.5.0-dev.1` (Debian form `0.5.0~dev1-1`), strictly newer than
+  the published `0.4.0-beta.6` by SemVer core-version comparison alone
+  and correctly ordered *older* than a future final `0.5.0` release via
+  Debian's `~` pre-release convention. `scripts/build-deb.sh`'s and
+  `app/backup.py`'s `-beta.N` &harr; `~betaN` substitution was
+  generalized to any `-<tag>.<N>` pre-release tag (`beta`, `dev`, `rc`,
+  ...), not just `beta`.
+- Backup & Restore quality-of-life: backup creation/restore timestamps
+  shown to administrators (Backup & Restore listing, restore preview,
+  Last Backup/Last Restore cards) now display in the server's configured
+  local timezone with a clear abbreviation/offset (e.g. "Aug 8, 2026 at
+  6:47 PM MDT") via a new `local_time` Jinja filter
+  (`webapp.format_local_datetime`), instead of raw UTC. Canonical
+  timestamps (backup manifest `created_at`, `backup_history.created_at`,
+  every other stored timestamp) remain UTC/ISO-8601 and are never parsed
+  from the display string, so this cannot affect restore correctness.
+  Archive filenames also now use the server's local date/time (still
+  filesystem-safe -- numeric `+HHMM`/`-HHMM` offset, no colons) instead
+  of a UTC `...Z` stamp, purely for human identification; restore/backup
+  lookups always match by history id or the literal filename, never by
+  parsing the stamp.
+- Backup & Restore quality-of-life: a successful interactive **Create
+  Backup** from the web UI now also automatically triggers a browser
+  download of the newly created archive (via the same authenticated
+  streamed `/backup/{id}/download` route the existing manual Download
+  button already uses, through a hidden iframe so the page itself never
+  buffers the file), while still retaining and listing the backup on the
+  server exactly as before. The existing manual Download action remains
+  available afterward for downloading the same backup again. A failed
+  create never triggers a download.
+- Fixed fresh-install default blocklist seeding never actually triggering
+  on a real `apt install` of a genuinely fresh system, despite passing
+  every unit test. Root cause: `analytics.py`'s `init-db` subcommand calls
+  `alderpointdns_compiler.py`'s `init_db()` unconditionally, which on a
+  genuinely fresh database applies the full schema and bumps `PRAGMA
+  user_version` to `SCHEMA_VERSION` as a side effect; `postinst` (and
+  `scripts/install.sh`) ran this call *before*
+  `alderpointdns_compiler.py fresh-install-init`, so by the time
+  fresh-install-init's own freshness check ran, the database already
+  looked established and it silently skipped seeding the default
+  blocklists and the initial deploy entirely (`fresh_install=0` on every
+  install). Discovered installing a real combined development `.deb` on a
+  disposable Debian 13 VM -- `sources` had zero rows after a clean
+  install. Fixed by running `analytics.py init-db` after
+  `fresh-install-init` in both `postinst` and `scripts/install.sh`
+  (harmless reordering: it is idempotent `CREATE TABLE IF NOT EXISTS`
+  either way).
+- Fixed dnsdist failing to bind port 53 (`Fatal error: binding socket to
+  0.0.0.0:53: Address already in use`) on an otherwise completely
+  unmodified, default fresh install of Debian 12/13 or Ubuntu. Root cause:
+  systemd-resolved's stub DNS listener is enabled by default and binds
+  specific loopback aliases (127.0.0.53:53, sometimes also 127.0.0.54:53)
+  without `SO_REUSEPORT`; Linux refuses a subsequent *wildcard* bind
+  (0.0.0.0:53, what dnsdist needs) on a port already claimed by any
+  non-`SO_REUSEPORT` socket, even one bound to a different, more specific
+  address. `packaging/debian/postinst` now disables only
+  systemd-resolved's stub *listener* (`DNSStubListener=no`, via a drop-in)
+  when systemd-resolved is active, and repoints `/etc/resolv.conf` (only
+  when it's still the default symlink -- a real administrator-owned file
+  is left untouched) at this host's own Alderpoint DNS listener, since
+  that's the intended end state for a host running Alderpoint DNS as its
+  resolver anyway. Discovered during this pass's clean-VM install
+  validation (see the completion report) -- this affected every fresh
+  install on a stock Debian/Ubuntu host, not anything specific to this
+  branch's other changes.
+- Fixed `alderpointdns`/`alderpointdns-analytics` not actually restarting
+  on upgrade. `packaging/debian/postinst` used `systemctl enable --now`
+  for these two services, which -- unlike named/dnsdist, which already
+  get an explicit `systemctl restart` -- only ensures an *already-active*
+  unit stays enabled/running; it does not restart it. Every upgrade of
+  this package was silently leaving the *previous* version's web
+  app/analytics-collector process running (with the previous version's
+  code, and, for the systemd sandboxing fix above, the previous version's
+  `ReadWritePaths=`) until something else happened to restart it. Now
+  `enable` (idempotent) is followed by an unconditional `restart`, the
+  same pattern named/dnsdist already used. Discovered while verifying the
+  `ReadWritePaths=` fix above actually took effect after a `dpkg -i`
+  upgrade in this pass's real testing -- it silently didn't, for exactly
+  this reason.
+- Fixed native backup restore failing (`[Errno 30] Read-only file system:
+  '/etc/systemd/system/dnsdist.service.d'`) for the `app_config`,
+  `dnsdist_source_config`, and `bind_source_config` restore components --
+  the same `ProtectSystem=full` root cause as the network Apply fix
+  below, this time affecting `app/backup.py`'s restore path, which
+  directly replaces live files under `/etc/bind`, `/etc/dnsdist`,
+  `/etc/systemd/system/*.service[.d]`, and `/etc/sudoers.d`. Discovered
+  restoring a real ~296 MiB backup (2.8M Analytics History rows) through
+  the actual streamed restore path on a disposable Debian 13 VM.
+  `packaging/alderpointdns.service`'s `ReadWritePaths=` now covers all of
+  these.
+- Fixed Network Configuration's Apply always failing (`[Errno 30]
+  Read-only file system`) for every backend that writes its own
+  persistent config file (netplan, systemd-networkd, ifupdown -- not
+  NetworkManager, which goes through `nmcli`/D-Bus instead). Root cause:
+  `alderpointdns.service` runs with `ProtectSystem=full`, which
+  read-only-bind-mounts `/etc` for the unit's private mount namespace;
+  since the privileged `alderpointdns_compiler.py network-apply` helper
+  runs as a `sudo`-escalated *child* of that same process (without its
+  own new mount namespace), it inherited the same read-only `/etc`, even
+  running as root. `packaging/alderpointdns.service` now explicitly lists
+  `/etc/netplan`, `/etc/systemd/network`, and `/etc/network` in
+  `ReadWritePaths=`. Discovered via this pass's real Netplan-backend
+  apply/rollback test on a disposable Debian 13 VM (see the completion
+  report) -- every previous test of this feature had mocked the actual
+  backend file writes, which is exactly the class of bug real-network
+  testing was added to catch.
+- Fixed `alderpointdns.service` failing to start after the
+  `ReadWritePaths=` fix above (`Failed to set up mount namespacing:
+  /etc/netplan: No such file or directory`, `status=226/NAMESPACE`) on any
+  host where one of the three networking-backend directories isn't
+  present -- `/etc/netplan` in particular is Ubuntu-centric and does not
+  exist on a stock Debian install with no `netplan.io` package. Unlike
+  `ReadOnlyPaths=`, a `ReadWritePaths=` entry for a path that does not
+  exist is fatal to the whole unit's mount-namespace setup, not silently
+  skipped -- and `app/network_config.py`'s `detect_backend()` only ever
+  has one of Netplan/systemd-networkd/ifupdown active on a given host, so
+  the other two are expected to be absent. `/etc/netplan`,
+  `/etc/systemd/network`, and `/etc/network` are now each prefixed with
+  `-` (`systemd.exec(5)`: a leading `-` makes a `ReadWritePaths=` entry a
+  no-op instead of a startup failure when the path is absent); the other
+  entries in the list are guaranteed present (this package's own postinst,
+  or a hard package dependency) and are deliberately left unprefixed.
+  Discovered via a real `0.4.0~beta6-1` -> `1.0.0-1` in-place upgrade on a
+  disposable Debian appliance with no `/etc/netplan`.
+- Fixed `named` failing to start (`/etc/bind/named.conf.options:N: parsing
+  failed: file not found` for `cache-options.conf`) whenever
+  `/var/lib/alderpointdns` is missing at postinst time but
+  `/etc/bind/named.conf.options` already has the `include` line a prior
+  successful install's DNS Cache Settings deploy added (that line is
+  permanent once added; the template itself is only installed on first
+  install and never rewritten). Reproduced by `apt purge alderpointdns`
+  followed by reinstall without also resetting bind9's own
+  `/etc/bind/named.conf.options`. `packaging/debian/postinst` now
+  pre-creates an empty `cache-options.conf` bootstrap placeholder the same
+  way it already did for `local-zones.conf`, so `named` can always start
+  regardless of ordering; the real generated content replaces it in the
+  same postinst run once `alderpointdns_compiler.py deploy` runs.
+- Fixed native Alderpoint DNS backup restore rejecting large backups with
+  "uploaded file exceeds 10 MiB limit". Root cause: the only 10 MiB cap in
+  the codebase is `MAX_UPLOAD_BYTES` in `app/importer.py`, which exists for
+  the Spreadsheet/Text Import page (CSV/XLSX/hosts/zone/Pi-hole/AdGuard
+  YAML/"Alderpoint DNS native JSON" record exports -- all genuinely small,
+  hand-editable data). Native `.tar.gz`/`.tar.gz.enc` backup archives were
+  not clearly and separately surfaced as their own workflow, so a large,
+  Analytics-History-inclusive backup could end up uploaded through that
+  page and hit its limit; and the existing `/backup/import` route itself
+  read the whole upload into memory (`await upload.read()`) with no
+  independent size policy, free-space check, or archive-bomb protection of
+  its own. Both are fixed:
+  - System > Administration now has a dedicated **Backup & Restore**
+    section (moved out of the Operations nav group) with explicit
+    **Create Backup** and **Restore Alderpoint Backup** actions, entirely
+    separate from Spreadsheet/Text Import.
+  - `/backup/import` now streams the upload to a restrictive-permission
+    (0600, IMPORTS_DIR-confined) staging file in bounded ~4 MiB chunks
+    (`backup.begin_streamed_upload`/`finalize_streamed_upload`/
+    `abort_streamed_upload`), so memory use is independent of archive
+    size. A native backup upload is governed by its own, separately
+    configurable `max_upload_mib`/`max_extracted_mib` policy
+    (`backup.max_upload_bytes()`/`max_extracted_bytes_setting()`, default
+    4 GiB upload / 16 GiB extracted, admin-adjustable up to a 50 GiB / 200
+    GiB hard ceiling -- never unlimited), fully independent of
+    `importer.MAX_UPLOAD_BYTES`.
+  - Free disk space is checked before accepting an upload and again before
+    extraction (using the archive's real scanned size), and periodically
+    during a large streamed upload.
+  - `backup.extract_backup()` now validates the archive is recognizably an
+    Alderpoint DNS native backup (manifest.json present with required
+    fields) before extracting anything, rejects absolute paths, `../`
+    traversal, symlinks, hardlinks, and device/fifo members, enforces a
+    total extracted-size ceiling (compressed-archive-bomb protection) via
+    a pre-extraction member scan, and uses Python's `tarfile` `"data"`
+    extraction filter as defense in depth instead of shelling out to
+    `tar -xzf` directly. `restore_backup()` now also refuses a
+    `backup_format_version` mismatch outright rather than only warning
+    about it in the preview.
+  - The restore preview now shows archive size and an explicit
+    Included/Not Included status per component, matching the shape
+    administrators need to confirm before restoring (configuration,
+    blocklists/custom rules, DNS cache settings, analytics history,
+    certificates, admin/auth data).
+
+- Added a **Network Configuration** section under System > Administration
+  for the Alderpoint server's own network interface (DHCP vs static IPv4/
+  IPv6, gateway) -- separate from DNS upstream/resolver settings. New
+  `app/network_config.py`:
+  - Detects the actual networking backend in use (systemd-networkd,
+    NetworkManager, Netplan, or classic ifupdown/`/etc/network/
+    interfaces`) rather than assuming one; an unsupported or ambiguous
+    setup (e.g. more than one backend simultaneously active) is shown
+    read-only and every write path refuses outright.
+  - Validates a proposed change (interface exists, IPv4/IPv6 syntax,
+    prefix length, gateway syntax and subnet membership, rejects loopback/
+    multicast/unspecified addresses and collisions with another local
+    interface) before anything is written.
+  - On Apply: snapshots the current persistent config (and, for
+    NetworkManager, the connection profile via `nmcli`) to a root-only,
+    group-readable rollback state file; stages the new persistent config
+    in backend-isolated functions; arms an *independent* rollback watchdog
+    via `systemd-run --on-active=120s ... network-rollback-check` (owned
+    by PID 1, not this web process, request, or the administrator's
+    browser); then actively reconfigures the live interface through the
+    backend's own mechanism (`networkctl reload`+`reconfigure`, `netplan
+    generate`+`apply`, `nmcli con mod`+`up`, or a controlled `ifdown`/
+    `ifup` -- never a bare `ip link set ... up/down`, which does not
+    itself apply a backend's persistent config).
+  - If the administrator doesn't confirm within the countdown, the
+    watchdog restores both the persistent config files and the live
+    interface state -- no reboot required -- and logs the automatic
+    rollback. Confirming cancels the watchdog and deletes the rollback
+    state.
+  - All privileged operations go through the same narrow, argument-free
+    sudoers/`alderpointdns_compiler.py` pattern backup/replication already
+    use (`network-apply`, `network-confirm`, `network-rollback-check`):
+    the web process never gains general root, and no interface name, path,
+    or shell fragment from a request ever reaches argv or a shell.
+  - `audit_ip_references()`/`cert_covers_address()` support reporting
+    (never silently rewriting) whether generated BIND/dnsdist config or
+    the current TLS certificate still reference the old address after a
+    confirmed change.
+  - See `docs/network-configuration.md` for what has and has not yet been
+    verified against a real interface (unit-tested with every backend
+    command mocked; live reconfigure/rollback on real hardware/VM is
+    outstanding -- see that doc's Limitations section).
+- Fresh installations now seed three ordinary recommended blocklist sources
+  (AdGuard DNS filter, StevenBlack Unified Hosts, and HaGeZi Multi Normal),
+  then attempt the normal initial download, validation, compile, staged RPZ
+  deployment, and health checks automatically. The seeded lists are normal
+  editable/removable blocklist entries. Protection becomes active only after
+  that initial deployment succeeds; download/deploy failures are reported
+  without marking filtering active, and the administrator can retry through
+  the existing update/deploy paths. Upgrades and reinstalls no longer alter
+  existing blocklists, enabled states, or Protection state, and do not run
+  the fresh-install seeding path.
+  - AdGuard DNS filter:
+    `https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt`;
+    upstream `AdGuardTeam/AdGuardSDNSFilter`; EasyList/EasyPrivacy-derived
+    DNS-compatible advertising and tracking coverage.
+  - StevenBlack Unified Hosts:
+    `https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts`;
+    upstream `StevenBlack/hosts`; unified adware and malware hosts coverage.
+  - HaGeZi Multi Normal:
+    `https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/multi.txt`;
+    upstream `hagezi/dns-blocklists`; balanced ads, tracking, telemetry,
+    device, mobile tracker, phishing, and malware coverage.
 
 - Fixed the replication enrollment handoff (`replication.py::_handle_enroll`)
   holding no reservation across its privileged sudo subprocess: a token was
@@ -72,23 +356,158 @@ may still change between releases before a stable 1.0.
     all existing data are preserved. Existing installations upgrading from
     beta.5 (which never set `PRAGMA user_version`) are migrated forward
     exactly once on the next `init_db()` call.
-
-- Fixed root-created migration-lock compatibility between package operations
-  and the unprivileged Alderpoint service: schema initialization now uses a
-  read-only `flock` handle after creating the lock file if needed, so a
-  postinst/upgrade run can create `/var/lib/alderpointdns/staging/schema-migration.lock`
-  as root without making later service startup fail with `PermissionError`.
-  Repeated initialization remains serialized and idempotent across root CLI,
-  package hooks, and the web process.
-
-- Hardened encrypted-DNS release validation so DoQ/DoH3 acceptance tests
-  deploy the requested Alderpoint encryption settings before asserting live
-  listeners. The dnsdist frontend test now explicitly enables DoQ/DoH3 in
-  the test settings, runs the normal `encryption-deploy` path, verifies real
-  UDP 853 and UDP 443 listener state, and then performs mandatory live DoQ,
-  DoH3, DoH, DoT, and wrong-host certificate checks. This prevents stale
-  undeployed test state or sandbox socket restrictions from being mislabeled
-  as a dnsdist, UDP, certificate, or kdig product defect.
+- Backup & Restore lifecycle hardening: a restore's `restore_history` row now
+  records worker identity (PID, process-start-ticks, boot ID) and a periodic
+  heartbeat/phase/progress instead of relying on elapsed time, so a restore
+  whose worker actually died (killed process, OOM, host reboot) is reliably
+  told apart from one that is simply still running a large, slow restore --
+  the former is reaped and reported as interrupted, the latter is never
+  killed just for taking a long time. Fixed a real large-analytics-restore
+  slowdown found via profiling (chunked commits instead of one giant
+  transaction, coordinated pausing of the analytics collector during the
+  merge) and added a real multi-million-row restore validation.
+- Native database restore is now staged and atomically promoted: the
+  expensive merge work happens against a private working copy of the
+  database (via SQLite's own online backup API), never directly against the
+  live database, and is only ever swapped into place with a brief
+  exclusive-lock-guarded atomic file replace once fully validated. A restore
+  interrupted before that swap leaves the previously working live database
+  completely untouched; one interrupted after it is reported honestly as
+  requiring administrator verification rather than silently claimed as
+  rolled back. Verified with real interruption testing (process kills at
+  each stage) in addition to unit tests.
+- Software Updates: an update job whose privileged runner
+  (`alderpointdns-software-update.service`) died mid-install no longer gets
+  stuck "in progress" forever -- the same worker-identity-based staleness
+  detection used for Backup & Restore now applies to
+  `software_update_jobs`, so a dead runner's job is reaped and future
+  install attempts are not permanently blocked behind it.
+- Software Updates: automatic **checking** now actually honors the
+  configurable check interval (`check_interval_hours`, System >
+  Administration > Software Updates) via a runtime systemd timer drop-in,
+  the same mechanism already used for scheduled blocklist updates and
+  backups; turning automatic checking off now actually stops the scheduled
+  timer rather than only making a triggered check a no-op. Automatic
+  **installation** remains off by default with no execution path.
+- Filtering/deploy performance: added fast paths for the overwhelmingly
+  common blocklist source-line shapes (`||domain^`, `@@||domain^`, plain
+  hostnames), cheap IP-literal prechecks, and an ASCII-normalization
+  shortcut that skips IDNA encoding for ordinary domains, plus a
+  source-parse cache (keyed by content hash and parser version) so an
+  unchanged blocklist source is never re-parsed. Turning **Protection**
+  back on after it was off can now reuse a previously compiled policy
+  (validated against a canonical hash of every input that could have
+  changed it) instead of always rebuilding from scratch, refreshing the
+  RPZ zone's SOA serial correctly either way; falls back to a full rebuild
+  automatically whenever reuse cannot be proven safe.
+- Navigation cleanup: **Backup & Restore** moved from System to
+  **Operations** (Import, Backup & Restore, Replication), keeping its
+  existing `/backup` route. **Administration** no longer carries launcher
+  cards that only pointed at Network Configuration, Software Updates, or
+  Backup & Restore -- each already has its own direct System/Operations
+  submenu entry one level away -- while keeping its actual purpose
+  (administrator password change, session management) unchanged.
+- Fixed restored TLS/DNSCrypt private keys and dnsdist/Alderpoint runtime
+  secrets landing with the wrong ownership after a restore (e.g. a
+  restored certificate key as `root:root 0640` instead of
+  `root:_dnsdist`), which passed `dnsdist --check-config` but then failed
+  at runtime with a real permission error -- archive-embedded ownership
+  can never be trusted across appliances (Python's `tarfile.extractall`
+  always extracts as the extracting process's own uid/gid regardless of
+  what the archive claims). Restore now normalizes every runtime-owned
+  path by name against a fixed policy table (private keys stay
+  `root:_dnsdist 0640`, the CA key and DNSCrypt provider key stay
+  `root:root 0600`, certs `root:_dnsdist 0644`, Alderpoint secrets
+  `root:alderpointdns 0640`), applied on both the forward restore and
+  rollback path, and actually proves the runtime user can read each
+  restored secret (`sudo -u <user> -g <user> -- test -r <path>`) before
+  declaring the restore healthy -- not just that its syntax validates.
+- Fixed `restore_history.validation_output` persisting rendered BIND
+  configuration -- including live RNDC/TSIG secret key material --
+  whenever a restore's post-checks captured `named-checkconf`/
+  `rndc`-adjacent output. Restore history (and the equivalent DNS Cache/
+  Upstream DNS/Local DNS deployment history) now sanitizes secret-shaped
+  content before persisting, reusing the same redaction patterns already
+  applied to System Status's Recent Logs.
+- Fixed a fresh install's initial default-blocklist deployment reporting
+  `initial_deploy=failed` on a transient DNS-resolution hiccup moments
+  after apt itself had just succeeded -- not a real network
+  misconfiguration. Fresh install now retries the initial deploy with
+  bounded backoff, still seeds the three curated default sources exactly
+  once (never re-seeded on upgrade), and reports a truthful, actionable
+  recovery hint (Security > Blocklists > Update All Now) if connectivity
+  genuinely isn't available yet, instead of silently leaving Protection
+  in an unclear state.
+- Fixed a restore worker being killed mid-run by its own `app_config`
+  component restarting `alderpointdns.service` -- the worker used to run
+  as a direct child of the web request that started it, inside that same
+  service's cgroup, so the intentional restart tore it down along with
+  everything else, sometimes after the database had already been
+  promoted but before post-checks or a final status could be recorded
+  (`status=interrupted`, `promoted_at` set). Restore now runs as its own
+  independent systemd unit (`alderpointdns-backup-restore.service`,
+  started via `systemctl start --no-block`, mirroring Software Updates'
+  already-established install-runner pattern) with its own cgroup, so it
+  survives any of `alderpointdns`/`alderpointdns-analytics`/`named`/
+  `dnsdist` being restarted along the way and always reaches a truthful
+  final status.
+- Fixed Blocklists' "Last automatic update" banner showing a stale
+  automatic-run failure (e.g. a transient DNS resolution error) worded as
+  an ongoing problem long after the affected source had since updated
+  successfully -- "Update All Now" and per-source updates intentionally
+  never overwrite that banner, which only ever reflects the last
+  *timer*-triggered run. The banner still shows the historical error and
+  its timestamp (nothing is erased) but is no longer rendered as a
+  current failure once nothing currently enabled is actually unhealthy.
+  Per-source warning/failure reasons are now also shown inline in the
+  sources table itself, not only via a tooltip or the row's edit panel,
+  so the reason is visible on touch devices too.
+- Fixed the browser being left on a misleading, apparently-empty page
+  after a restore that touches app config/session data: such a restore
+  replaces the live sessions table (and can rotate the session-signing
+  secret) when it restarts `alderpointdns.service`, which silently broke
+  every subsequent in-page action because the browser's `fetch()`-driven
+  requests were quietly following the resulting redirect to the login
+  page and rendering its HTML as if it were a normal response. The
+  restore status card now polls in place, surviving the restart, and
+  explicitly navigates the browser to a login page carrying a clear
+  "Restore completed -- sign in again" message the moment it detects the
+  session was actually invalidated, instead of leaving that half-broken
+  state on screen.
+- Fixed an intermittent `sqlite3.OperationalError: database is locked`
+  that could surface from `init_analytics_db()` -- called on essentially
+  every analytics read/write -- when it raced a concurrent writer (most
+  often the analytics writer thread's own batched query-event writes)
+  shortly after `alderpointdns`/`alderpointdns-analytics` restart close
+  together, as they do during a real restore or software update. Unlike
+  the writer thread's own writes, this call previously relied solely on
+  the connection's `busy_timeout` with no application-level retry; it now
+  retries with backoff the same way the writer thread's writes already
+  did.
+- Fixed the curated fresh-install "HaGeZi Multi Normal" blocklist
+  (also present in the broader built-in public source catalog) pointing
+  at a raw.githubusercontent.com mirror that now 404s; both now use
+  HaGeZi's own documented primary jsDelivr link for the same list. Added
+  `scripts/release-preflight-check-curated-sources.py`, a manual,
+  network-requiring release step (deliberately not part of the normal
+  test suite) that verifies all three curated default source URLs are
+  actually reachable before a release ships.
+- Fixed a browser continuing to execute a stale cached `app.js`/`app.css`
+  after installing a newer Alderpoint DNS package at the same URL/IP --
+  the served files were correct, but their URL never changed across an
+  upgrade, so a normal page load had no reason to refetch them. Static
+  asset URLs are now fingerprinted from the actual shipped file contents
+  (`/static/app.js?v=<hash>`); the versioned URL is served with a
+  long-lived, immutable `Cache-Control`, while the bare unversioned path
+  keeps ordinary conditional-GET caching, so a real content change is
+  always picked up on the next page load with no hard refresh required.
+- Fixed the Dashboard's Top Blocked Domains, Query Types, Response Codes,
+  and Protocol Usage panels reaching the Query Log with no filter/context
+  applied. Every row now links directly into the Query Log pre-filtered
+  to that exact domain/QTYPE/response code/protocol (reusing the Query
+  Log's own existing filter parameters, not a second implementation of
+  it); Top Blocked Domains' "View All" link stays scoped to blocked
+  queries.
 
 ## v0.4.0-beta.5 (2026-07-31)
 

@@ -38,3 +38,21 @@
   restarts, blocklist/deploy failure, backup failure, upstream resolver
   degraded/all-unavailable, and replication delayed/failed are actually
   wired to fire. Real detectors for the remaining three are follow-up work.
+- Software Updates supports automatic *checking* only, on a
+  configurable interval (`System > Software Updates`, default every 6
+  hours). Unattended automatic *installation* is intentionally off by
+  default and has no execution path in this release; every install
+  requires an explicit administrator action (Download & Install Update,
+  or a manual `.deb` upload). Automatic package rollback on a failed
+  install is not implemented -- recovery after a failed install (past the
+  install step) is via the mandatory pre-upgrade backup, which is always
+  retained. A signed apt repository is not published; releases are
+  distributed as checksummed `.deb` assets on GitHub Releases. See
+  `docs/software-updates.md`.
+- A native database restore is staged and atomically promoted against a
+  private working copy, so an interrupted restore never leaves the live
+  database partially applied -- but there is still no automatic *data*
+  rollback for a restore interrupted *after* that atomic promotion point;
+  such a case is reported honestly as requiring administrator
+  verification rather than claimed as rolled back. See
+  `docs/backup-recovery.md`.

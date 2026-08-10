@@ -214,9 +214,72 @@ case "$1" in
       exit 1
     fi
 
+    # systemd-resolved's stub DNS listener is enabled by default on
+    # Debian 12/13 and Ubuntu and binds specific loopback aliases
+    # (127.0.0.53:53, sometimes also 127.0.0.54:53) without SO_REUSEPORT.
+    # Because a *wildcard* bind (0.0.0.0:53, what dnsdist needs) on a port
+    # already claimed by any non-SO_REUSEPORT socket -- even one bound to
+    # a different, more specific address -- is refused by the kernel,
+    # dnsdist's own bind to port 53 fails with EADDRINUSE on a completely
+    # unmodified, default fresh install, before this package's own config
+    # is even a factor. systemd-resolved's LLMNR responder (also enabled
+    # by default) binds 0.0.0.0:5355 the same way, which conflicts
+    # identically with dnsdist's own loopback upstream-routing listener
+    # (127.0.0.1:5355 -- see app/upstream_dns.py's LOOPBACK_FORWARDER_PORT
+    # and ensure_dnsdist_include()). Disable only the stub listener and
+    # LLMNR; systemd-resolved keeps running and NSS/D-Bus-based name
+    # resolution (the "resolve" nsswitch.conf module) is unaffected --
+    # only these two legacy listeners go away, freeing both ports.
+    if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+      install -d -m 0755 /etc/systemd/resolved.conf.d
+      cat > /etc/systemd/resolved.conf.d/alderpointdns-disable-stub.conf <<'RESOLVEDCONF'
+# Installed by alderpointdns (packaging/debian/postinst). Alderpoint DNS
+# itself listens on ports 53 and 5355 (via dnsdist) once installed;
+# systemd-resolved's stub listener and LLMNR responder conflict with
+# those binds (see postinst for the full explanation). Only these two
+# listeners are disabled -- systemd-resolved keeps running for
+# everything else.
+[Resolve]
+DNSStubListener=no
+LLMNR=no
+RESOLVEDCONF
+      systemctl restart systemd-resolved
+      # /etc/resolv.conf is normally a symlink to systemd-resolved's
+      # dynamic stub file (nameserver 127.0.0.53), which stops answering
+      # once the stub listener above is disabled. Repoint it at this
+      # host's own Alderpoint DNS listener -- the intended end state for
+      # a host running Alderpoint DNS as its resolver anyway -- but only
+      # when it's still the default symlink/absent; an administrator's
+      # own static /etc/resolv.conf (a real, non-symlink file) is left
+      # alone rather than silently overwritten.
+      if [ -L /etc/resolv.conf ]; then
+        rm -f /etc/resolv.conf
+        cat > /etc/resolv.conf <<'RESOLVCONFEOF'
+# Managed by alderpointdns. systemd-resolved's stub listener was disabled
+# (see /etc/systemd/resolved.conf.d/alderpointdns-disable-stub.conf) so
+# Alderpoint DNS's own dnsdist could bind port 53. Points at this host's
+# own Alderpoint DNS listener.
+nameserver 127.0.0.1
+options edns0 trust-ad
+RESOLVCONFEOF
+      fi
+    fi
+
     install -d -m 0755 /etc/systemd/system/dnsdist.service.d
     install -m 0644 /opt/alderpointdns/packaging/dnsdist.service.d/alderpointdns.conf /etc/systemd/system/dnsdist.service.d/alderpointdns.conf
-    PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/analytics.py init-db
+    # NOT analytics.py init-db here (deliberately moved below,
+    # after fresh-install-init): analytics.py's own init-db subcommand
+    # calls alderpointdns_compiler.py's init_db() unconditionally, which
+    # -- on a genuinely fresh database -- applies the full schema and
+    # bumps PRAGMA user_version to SCHEMA_VERSION as a side effect. If
+    # that ran first, fresh-install-init's own init_db(seed_defaults=True)
+    # call below would see current_version already >= SCHEMA_VERSION and
+    # return immediately without ever seeding the default blocklists or
+    # attempting the initial deploy -- silently turning every fresh
+    # install into a no-op. Running analytics.py init-db after
+    # fresh-install-init keeps the freshness check correct while still
+    # being a no-op change in effect (it is idempotent CREATE TABLE IF
+    # NOT EXISTS statements either way).
     systemctl daemon-reload >/dev/null 2>&1 || true
     # named.conf.local above unconditionally `include`s the generated
     # local-zones.conf; alderpointdns_compiler.py deploy (below) bootstraps
@@ -231,19 +294,57 @@ case "$1" in
     # stopped named in between. Create the same empty bootstrap placeholder
     # deploy() would and (re)start named explicitly here so this doesn't
     # depend on another package's maintainer script side effect.
+    # named.conf.options only ever gains its `include
+    # ".../cache-options.conf"` line the first time DNS Cache Settings is
+    # deployed (dns_cache.ensure_named_options_include(), called from
+    # deploy_cache_options() below) -- but once added, that line is
+    # permanent (named.conf.options is a first-install-only template, never
+    # rewritten on upgrade; see the marker-guarded block above). If
+    # /var/lib/alderpointdns is ever missing at that point while the
+    # include line already persists in named.conf.options -- e.g. `apt
+    # purge` followed by reinstall without also resetting bind9's own
+    # config, or any other loss of just the compiled state directory --
+    # this same bootstrap placeholder pattern applies: an empty
+    # cache-options.conf is a valid, honest "no cache tuning applied yet"
+    # bootstrap default that lets named start at all, and
+    # deploy_cache_options() below replaces it with the real content in
+    # the same run regardless.
+    # Same reasoning as cache-options.conf above applies to
+    # upstream-forwarders.conf (app/upstream_dns.py's
+    # deploy_upstreams()): once its own `include` line is added to
+    # named.conf.options by a first successful deploy, it's permanent.
+    # Unlike cache-options.conf/local-zones.conf, an *empty* file isn't a
+    # safe placeholder here: named.conf.options also unconditionally sets
+    # `forward only;`, and BIND treats that combined with a `forwarders`
+    # statement that resolves to zero addresses as a fatal config error
+    # ("no matching 'forwarders' statement"), not a silently-ignored
+    # no-op. Render the real function's own default (a loopback forwarder
+    # back to Alderpoint DNS's own dnsdist upstream-routing listener) so
+    # the placeholder is never invalid -- and deploy_upstreams() below
+    # replaces it with the administrator's actual configured upstreams in
+    # the same run regardless.
     install -d -m 0755 /var/lib/alderpointdns/compiled/bind
     [ -e /var/lib/alderpointdns/compiled/bind/local-zones.conf ] || install -m 0644 /dev/null /var/lib/alderpointdns/compiled/bind/local-zones.conf
+    [ -e /var/lib/alderpointdns/compiled/bind/cache-options.conf ] || install -m 0644 /dev/null /var/lib/alderpointdns/compiled/bind/cache-options.conf
+    if [ ! -e /var/lib/alderpointdns/compiled/bind/upstream-forwarders.conf ]; then
+      PYTHONPATH=/opt/alderpointdns python3 -c \
+        "from app import upstream_dns; print(upstream_dns.render_bind_forwarders(), end='')" \
+        > /var/lib/alderpointdns/compiled/bind/upstream-forwarders.conf
+    fi
     systemctl restart named
-    # Generate the actual RPZ/local-zone/upstream config under
-    # /var/lib/alderpointdns/compiled and reload named/dnsdist so they pick
-    # it up. Not swallowed with `|| true`: this is where
-    # alderpointdns_compiler.py itself validates the generated BIND config
-    # (see validate_bind() in app/alderpointdns_compiler.py) and rolls back
-    # on failure; a failure here means the install is genuinely broken and
-    # must be reported as such, not silently treated as a successful
-    # install of four services that don't actually work.
-    PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py deploy --no-download
-    # The database (created above by init-db, running as root in this
+    # On a genuinely fresh database, seed the ordinary recommended
+    # blocklist rows and run the normal download/compile/deploy path. On
+    # upgrades/reinstalls this command is a strict no-op, keyed by the
+    # schema user_version established during the first initialization; it
+    # must not reseed sources or replace an existing compiled policy.
+    PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py fresh-install-init
+    # Must run after fresh-install-init (see the comment above the removed
+    # earlier call) so the freshness check above sees the database exactly
+    # as fresh-install-init left it; this call itself is an idempotent
+    # no-op either way once the schema already exists.
+    PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/analytics.py init-db
+    # The database (created above by fresh-install-init on a new install,
+    # or migrated there on an existing install, running as root in this
     # postinst) is the one thing under /var/lib/alderpointdns that both
     # needs fixing up and is safe to hand to alderpointdns: unlike
     # backups/imports/staging (already alderpointdns-owned from the
@@ -280,7 +381,19 @@ case "$1" in
     # state from a prior one.
     systemctl reset-failed named dnsdist alderpointdns alderpointdns-analytics >/dev/null 2>&1 || true
     systemctl restart named dnsdist
-    systemctl enable --now alderpointdns alderpointdns-analytics
+    # `enable --now` on an *already-active* unit (the normal upgrade case)
+    # only ensures it is enabled/running -- it does not restart an
+    # already-running process, so this package's own updated code
+    # (app/webapp.py, app/*.py) and, critically, an updated
+    # alderpointdns.service unit file itself (e.g. its ProtectSystem
+    # sandboxing/ReadWritePaths) would silently keep running under the
+    # *previous* version's process/mount namespace until something else
+    # happened to restart it. `enable` (idempotent, harmless if already
+    # enabled) plus an explicit unconditional `restart` -- exactly the
+    # same pattern already used for named/dnsdist above -- guarantees
+    # every install and upgrade actually runs what was just installed.
+    systemctl enable alderpointdns alderpointdns-analytics
+    systemctl restart alderpointdns alderpointdns-analytics
     # Scheduled backups and automatic filter updates are both timer-driven.
     # Enabling is idempotent, and filter-schedule-deploy writes the
     # filter-update timer drop-in from the stored Filter Update Interval
@@ -290,6 +403,15 @@ case "$1" in
     systemctl enable alderpointdns-backup.timer >/dev/null 2>&1 || true
     systemctl enable alderpointdns-filter-update.timer >/dev/null 2>&1 || true
     systemctl enable --now alderpointdns-notify.timer >/dev/null 2>&1 || true
+    # Automatic update *checking* is on by default (never automatic
+    # *installation* -- see software_update_settings.unattended_install_enabled,
+    # which defaults off and has no timer of its own in this release).
+    # update-check-schedule-deploy writes the automatic-check timer
+    # drop-in from the stored auto_check_enabled/check_interval_hours
+    # settings (preserved across upgrades; enabled/6h on a fresh install),
+    # exactly mirroring filter-schedule-deploy below -- see
+    # app/software_updates.py's deploy_check_schedule().
+    PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py update-check-schedule-deploy >/dev/null 2>&1 || true
     PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py filter-schedule-deploy >/dev/null 2>&1 || true
 
     # Final gate: confirm the four services this package ships/depends on

@@ -82,8 +82,8 @@ if "overflow-wrap: normal" not in css or "word-break: normal" not in css:
     raise SystemExit("status-badge/heading word-break protection rule is missing")
 if "https://" in template + css + js or "http://" in css + js:
     raise SystemExit("runtime CDN or public asset reference found")
-if "/static/app.css" not in template or "/static/app.js" not in template:
-    raise SystemExit("local static assets are not referenced")
+if "static_url('app.css')" not in template or "static_url('app.js')" not in template:
+    raise SystemExit("local static assets are not referenced through the cache-busting static_url() helper")
 if "data-nav-toggle" not in template or "appNav" not in template or "data-primary-nav" not in template:
     raise SystemExit("mobile navigation hooks are missing")
 for nav_hook in ('nav_section("dns"', 'nav_section("security"', 'nav_section("operations"', 'nav_section("system"'):
@@ -194,6 +194,31 @@ if "setInterval(() => window.location.reload()" in js:
     raise SystemExit("query log auto-refresh still reloads the full page")
 if "data-async-form" not in template or "AlderpointDNSAsyncForm" not in js or "showToast" not in js or ".toast" not in css:
     raise SystemExit("Local DNS async form and toast behavior is missing")
+# Regression: an always-on-the-page contextual warning (backup.html's
+# "including private keys..." text, system_network.html's "changing this
+# server's IP..." text) shares the .alert.error styling a real submission
+# error uses, but is not conditioned on that submission's outcome. Without
+# excluding data-static-notice elements, a *successful* async submission on
+# either page had its static warning text mistaken for the response's error
+# and shown -- then auto-dismissed after 3.6s -- as an "error" toast instead
+# of the real success message, which is exactly what made that long security
+# warning read as if it "auto-dismissed too quickly".
+if "data-static-notice" not in js or ":not([data-static-notice])" not in js:
+    raise SystemExit("async-form error detection does not exclude static contextual notices")
+backup_template = Path("/opt/alderpointdns/web/templates/backup.html").read_text()
+if 'data-static-notice="1"' not in backup_template:
+    raise SystemExit("backup.html's private-key warning is missing its data-static-notice marker")
+system_network_template = Path("/opt/alderpointdns/web/templates/system_network.html").read_text()
+if system_network_template.count('data-static-notice="1"') != 2:
+    raise SystemExit("system_network.html's contextual warnings are missing their data-static-notice markers")
+# Regression: a long/important toast (the private-key warning's own text is
+# well over the threshold) must stay up until the reader dismisses it,
+# hovers away, or unfocuses it -- not vanish on the same fixed short timer
+# ordinary short confirmations use.
+if "toast__close" not in js or "pauseToastTimer" not in js or "resumeToastTimer" not in js:
+    raise SystemExit("toast dismiss/pause-on-hover-or-focus behavior is missing")
+if "TOAST_LONG_MESSAGE_CHARS" not in js:
+    raise SystemExit("toast long-message persistence threshold is missing")
 local_dns_template = Path("/opt/alderpointdns/web/templates/local_dns.html").read_text()
 for forbidden in (
     'data-confirm="Add this host',
@@ -263,7 +288,7 @@ context = {
     ],
     "cert": {"state": "present", "detail": "/etc/alderpointdns/certs/alderpointdns-lab.crt"},
     "proxy_backend": "enabled",
-    "client_address_test": {"state": "Passed", "filename": "test_dnsdist_frontend.sh"},
+    "client_address_test": {"state": "Configured", "detail": "PROXYv2 forwarding configured; BIND backend listener 127.0.0.1:5354 (tcp+udp) is up"},
     "upstream_resolvers": [{"id": 1, "name": "Cloudflare DoH", "protocol": "doh", "address": long_domain, "port": 443, "doh_path": "/dns-query", "tls_hostname": long_domain, "bootstrap_ips": "1.1.1.1, 1.0.0.1", "enabled": 1, "last_status": "healthy", "last_latency_ms": 4.2, "last_message": "resolved through active upstream set"}],
     "upstream_deployment": {"status": "deployed", "message": "deployed 1 enabled upstream resolver(s)"},
     "upstream_error": None,
@@ -274,8 +299,8 @@ for expected in (
     "loopback",
     "fc00::/7",
     "Allow all: Disabled",
-    "Passed",
-    "test_dnsdist_frontend.sh",
+    "Configured",
+    "PROXYv2 forwarding configured; BIND backend listener 127.0.0.1:5354 (tcp+udp) is up",
     "Upstream Resolvers",
     "Cloudflare DoH",
     "DNS-over-HTTPS",
@@ -291,8 +316,8 @@ for expected in (
 ):
     if expected not in html:
         raise SystemExit(f"missing rendered content: {expected}")
-if "/opt/alderpointdns/tests/test_dnsdist_frontend.sh" in html:
-    raise SystemExit("client address test renders a raw path")
+if "/opt/alderpointdns/tests/test_dnsdist_frontend.sh" in html or "/opt/alderpointdns/tests" in html:
+    raise SystemExit("client address test renders a filesystem path instead of a runtime socket check")
 if 'class="mono">/dns-query<' not in html or 'class="mono">dnsdist 2.0.0-alpha' not in html:
     raise SystemExit("monospace styling missing from path/version values")
 
@@ -346,6 +371,18 @@ dashboard = TEMPLATES.get_template("dashboard.html").render(
 )
 if "DNS Query Volume" not in dashboard or "queryChart" not in dashboard:
     raise SystemExit("dashboard analytics chart did not render")
+# Regression: a browser kept executing a stale cached app.js after an
+# Alderpoint package upgrade even though the served /static/app.js content
+# had genuinely changed, because the asset URL itself never changed.
+# static_url() must resolve to the real, current content fingerprint at
+# render time -- not merely be present as an unrendered template call.
+if f"/static/app.css?v={webapp.STATIC_ASSET_FINGERPRINT}" not in dashboard:
+    raise SystemExit("rendered page does not reference a fingerprinted app.css URL")
+if f"/static/app.js?v={webapp.STATIC_ASSET_FINGERPRINT}" not in dashboard:
+    raise SystemExit("rendered page does not reference a fingerprinted app.js URL")
+recomputed_fingerprint = webapp.static_asset_fingerprint(webapp.STATIC_DIR)
+if recomputed_fingerprint != webapp.STATIC_ASSET_FINGERPRINT:
+    raise SystemExit("static asset fingerprint does not match the actual files on disk")
 for expected in ("Protection Active", "Disable protection", "Top Upstream Resolvers", "Cloudflare DoH", "11 ok", "1 failed", "Resolver attribution is based on dnsdist backend counters", "BIND Cache Effectiveness", "80.0", long_domain, long_client):
     if expected not in dashboard:
         raise SystemExit(f"dashboard missing {expected}")
@@ -538,18 +575,20 @@ backup_html = TEMPLATES.get_template("backup.html").render(
     component_defaults={"app_config": True, "sqlite_data": True, "custom_rules": True, "private_keys": False},
     last_backup={"created_at": "2026-07-29T00:00:00Z", "size_bytes": 1048576, "status": "deployed"},
     last_restore={"started_at": "2026-07-29T00:00:00Z", "finished_at": "2026-07-29T00:00:00Z", "status": "deployed"},
-    backup_settings={"schedule_enabled": "1", "schedule_interval_hours": "24", "retention_count": "7"},
+    backup_settings={"schedule_enabled": "1", "schedule_interval_hours": "24", "retention_count": "7", "max_upload_mib": "4096", "max_extracted_mib": "16384"},
     backups=[{"id": 1, "created_at": "2026-07-29T00:00:00Z", "size_bytes": 2097152, "components_summary": long_upstream, "status": "deployed", "path": "alderpointdns-backup-x.tar.gz"}],
     preview={
         "compatible": True, "warnings": [],
         "manifest": {"source_node_id": "alderpointdns-1", "created_at": "2026-07-29T00:00:00Z", "alderpointdns_app_version": "unreleased+git.abc", "database_schema_version": "abc123"},
         "included_components": ["app_config", "sqlite_data"],
+        "component_status": [{"key": "app_config", "label": "App Config", "included": True}, {"key": "analytics_history", "label": "Analytics History", "included": False}],
+        "archive_size_bytes": 2097152,
         "table_diffs": [{"table": "custom_rules", "component": "custom_rules", "live_rows": 3, "backup_rows": 2}],
         "file_diffs": [{"path": long_domain, "diff": "modified"}],
         "unchanged_file_count": 5,
     },
 )
-for expected in ("Create Backup", "Preview a Restore", "Restore Preview", "Scheduled Backups", "private_keys", long_upstream, long_domain, "data-async-form"):
+for expected in ("Create Backup", "Restore Alderpoint Backup", "Preview a Restore", "Restore Preview", "Scheduled Backups", "Restore Upload Limits", "private_keys", long_upstream, long_domain, "data-async-form"):
     if expected not in backup_html:
         raise SystemExit(f"backup page missing {expected}")
 

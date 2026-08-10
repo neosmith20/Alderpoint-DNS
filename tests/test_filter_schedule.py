@@ -14,6 +14,7 @@ import contextlib
 import inspect
 import io
 import json
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -543,7 +544,7 @@ class LegacyArchiveRestoreTest(FilterScheduleTestBase):
         archive.commit()
         archive.close()
 
-        merged = self.backup._merge_database(staged, {"sqlite_data": True})
+        merged = self.backup._merge_database(staged, {"sqlite_data": True}, target_db_path=self.backup.DB_PATH)
         self.assertIn("deployments", merged)
         with compiler.connect() as conn:
             row = conn.execute('SELECT active_domains, "trigger" FROM deployments WHERE id=5').fetchone()
@@ -644,8 +645,12 @@ class TemplateRenderTest(FilterScheduleTestBase):
         from fastapi.templating import Jinja2Templates
 
         cls.templates = Jinja2Templates(directory=str(ROOT / "web" / "templates"))
+        # base.html (extended by blocklists.html) calls static_url() --
+        # a fresh Jinja2Templates instance built here (not through
+        # webapp.render(), which registers this defensively) needs it too.
+        cls.templates.env.globals["static_url"] = webapp.static_url
 
-    def render(self, filter_schedule_context: dict | None) -> str:
+    def render(self, filter_schedule_context: dict | None, sources: list | None = None, automatic_update_banner: dict | None = None) -> str:
         request = SimpleNamespace(url=SimpleNamespace(path="/blocklists"), query_params={})
         context = {
             "request": request,
@@ -654,13 +659,14 @@ class TemplateRenderTest(FilterScheduleTestBase):
             "csrf": "token",
             "protection": {"label": "Active", "tone": "healthy"},
             "global_status": {"label": "Active", "tone": "healthy", "detail": "all core services active"},
-            "sources": [],
+            "sources": sources if sources is not None else [],
             "categories": [{"key": "uncategorized", "name": "Uncategorized", "description": "", "source_count": 0}],
             "category_error": None,
             "category_filter": "",
             "status_filter": "",
             "search": "",
             "sort": "name",
+            "automatic_update_banner": automatic_update_banner,
         }
         if filter_schedule_context is not None:
             context["filter_schedule"] = filter_schedule_context
@@ -712,12 +718,72 @@ class TemplateRenderTest(FilterScheduleTestBase):
         html = self.render(None)
         self.assertIn("Automatic Updates", html)
 
-    def test_last_automatic_result_error_is_shown_sanitized(self) -> None:
-        context = self.enabled_context()
-        context["last_result"] = {"status": "rolled_back", "active_domains": 0, "error": "Private List: HTTP Error 401 for [url removed]"}
-        html = self.render(context)
-        self.assertIn("Last automatic update (rolled_back)", html)
+    def test_last_automatic_result_error_is_shown_sanitized_and_still_current(self) -> None:
+        # A degraded source (still in error) makes the historical automatic
+        # failure genuinely current -- shown with the "bad"/alarming tone.
+        degraded_source = {"enabled": True, "health": {"state": "error"}}
+        banner = webapp.automatic_update_banner(
+            [degraded_source],
+            {"last_result": {"status": "rolled_back", "finished_at": "2026-07-30T00:00:00+00:00", "active_domains": 0, "error": "Private List: HTTP Error 401 for [url removed]"}},
+        )
+        html = self.render(self.enabled_context(), automatic_update_banner=banner)
+        self.assertIn("Last automatic update on 2026-07-30T00:00:00+00:00 (rolled_back)", html)
         self.assertIn("[url removed]", html)
+        self.assertIn("bad", html)
+
+    def test_last_automatic_result_error_is_downgraded_once_resolved(self) -> None:
+        # This is the exact real-appliance bug: an automatic run's failure
+        # (e.g. a transient DNS resolution error) stayed on screen worded as
+        # a current problem even after every source had since updated
+        # successfully. Once nothing enabled is currently degraded, the
+        # historical error must still be shown (never erased) but not
+        # framed as ongoing.
+        healthy_source = {"enabled": True, "health": {"state": "healthy"}}
+        banner = webapp.automatic_update_banner(
+            [healthy_source],
+            {"last_result": {"status": "deployed", "finished_at": "2026-07-30T00:00:00+00:00", "active_domains": 100, "error": "Windows Spy Blocker: <urlopen error [Errno -5] No address associated with hostname>"}},
+        )
+        self.assertTrue(banner["resolved"])
+        html = self.render(self.enabled_context(), automatic_update_banner=banner)
+        self.assertIn("2026-07-30T00:00:00+00:00", html)
+        self.assertIn("No address associated with hostname", html)
+        self.assertIn("since updated successfully", html)
+        self.assertNotIn('class="bad', html)
+
+    def test_no_banner_when_nothing_has_ever_failed(self) -> None:
+        html = self.render(self.enabled_context(), automatic_update_banner=None)
+        self.assertNotIn("Last automatic update on", html)
+
+    def test_source_warning_reason_is_visible_without_hovering(self) -> None:
+        # The reason must be an actual visible text node in the row, not
+        # only a title= tooltip attribute -- touch devices have no hover.
+        source = {
+            "id": 1,
+            "name": "Windows Spy Blocker",
+            "url": "https://raw.githubusercontent.com/example/list.txt",
+            "category": "ads_trackers",
+            "enabled": True,
+            "using_cached_copy": False,
+            "last_error": "urlopen error [Errno -5] No address associated with hostname",
+            "last_warning": "",
+            "last_success": "",
+            "last_attempt": "2026-08-08T12:00:00+00:00",
+            "last_compile_success": "",
+            "parsed_rules": 0,
+            "duplicate_domains": 0,
+            "invalid_rules": 0,
+            "unsupported_rules": 0,
+            "unique_active_domains": 0,
+            "downloaded_entries": 0,
+            "rejected_samples_parsed": [],
+            "health": {"state": "error", "label": "Error", "tone": "down"},
+        }
+        html = self.render(self.enabled_context(), sources=[source])
+        # Strip the title="..." tooltip attribute before searching, so the
+        # assertion can only pass on the visible text, never the tooltip.
+        visible = re.sub(r'title="[^"]*"', "", html)
+        self.assertIn("No address associated with hostname", visible)
+        self.assertIn("2026-08-08T12:00:00+00:00", visible)
 
     def test_manual_update_routes_are_not_gated_by_the_schedule(self) -> None:
         html = self.render(self.disabled_context())

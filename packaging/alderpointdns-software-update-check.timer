@@ -1,0 +1,20 @@
+[Unit]
+Description=Alderpoint DNS Software Update Check Timer
+
+[Timer]
+# Default cadence (the fresh-install 6-hour setting); overridden at
+# runtime by app/software_updates.py's deploy_check_schedule() writing
+# /etc/systemd/system/alderpointdns-software-update-check.timer.d/alderpointdns.conf
+# from software_update_settings.check_interval_hours, exactly mirroring
+# app/filter_schedule.py's equivalent drop-in mechanism. When the
+# administrator's "Automatically check for updates" toggle is off,
+# deploy_check_schedule() removes the drop-in and disables/stops this
+# timer entirely -- update-check itself *also* no-ops in that state
+# (belt and suspenders against a stale enabled timer surviving a failed
+# deploy), but the timer is not left running unconditionally.
+OnBootSec=10m
+OnUnitActiveSec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

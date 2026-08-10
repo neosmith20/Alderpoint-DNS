@@ -13,13 +13,21 @@ EOF
 OUTPUT_DIR="/tmp"
 SOURCE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 VERSION="$(cat "$SOURCE_DIR/VERSION")"
-# The VERSION file uses semver-style pre-release tags (e.g. 0.4.0-beta.2) for
-# release notes/UI display, but Debian's version syntax treats the *last*
-# hyphen as the start of the debian_revision, so passing that string through
-# unchanged would make dpkg parse "0.4.0-beta.2" as upstream "0.4.0-beta"
-# revision "2". Derive the conventional Debian pre-release form instead
-# (0.4.0~beta2-1), matching packaging/debian/changelog.
-DEB_VERSION="$(printf '%s' "$VERSION" | sed -E 's/-beta\.([0-9]+)/~beta\1/')-1"
+# The VERSION file uses semver-style pre-release tags (e.g. 0.4.0-beta.2,
+# 0.5.0-dev.1) for release notes/UI display, but Debian's version syntax
+# treats the *last* hyphen as the start of the debian_revision, so passing
+# that string through unchanged would make dpkg parse "0.4.0-beta.2" as
+# upstream "0.4.0-beta" revision "2". Derive the conventional Debian
+# pre-release form instead: any "-<tag>.<N>" pre-release suffix (beta.2,
+# dev.1, rc.1, ...) becomes "~<tag><N>" (0.4.0~beta2-1, 0.5.0~dev1-1),
+# matching packaging/debian/changelog. The leading "~" is significant, not
+# cosmetic: dpkg orders "~" before everything (including the empty string),
+# so a pre-release always compares as older than the final release it is a
+# pre-release *of* (0.5.0~dev1-1 < 0.5.0-1) -- app/backup.py's
+# _dpkg_version_to_source_form() reverses this exact substitution, and
+# app/software_updates.py's update-safety comparisons depend on both
+# directions staying in sync. See docs/versioning.md.
+DEB_VERSION="$(printf '%s' "$VERSION" | sed -E 's/-([A-Za-z]+)\.([0-9]+)/~\1\2/')-1"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -58,9 +66,22 @@ cp "$SOURCE_DIR/packaging/debian/prerm" "$PKG/DEBIAN/prerm"
 cp "$SOURCE_DIR/packaging/debian/postrm" "$PKG/DEBIAN/postrm"
 chmod 0755 "$PKG/DEBIAN/postinst" "$PKG/DEBIAN/prerm" "$PKG/DEBIAN/postrm"
 
+# The project's own test suite, benchmark harness, and profiling writeups
+# are development-only content and must never ship in the installed
+# product -- see docs/known-limitations.md and the packaging tests
+# (tests/test_deb_package_contents.sh) that enforce this. `tests` is
+# therefore deliberately absent from this file list, and
+# benchmark_filtering.py/performance-baseline.md are excluded from `scripts`
+# and `docs` respectively. There is no longer any exception carved out of
+# that exclusion: app/webapp.py's DNS Settings "client address preservation"
+# indicator used to check tests/test_dnsdist_frontend.sh for presence-on-
+# disk as a production runtime marker, but now derives its state from a
+# live socket check (client_address_preservation_status() in app/webapp.py),
+# so nothing under tests/ is a runtime dependency of the installed product.
 tar -C "$SOURCE_DIR" \
   --exclude .git --exclude __pycache__ --exclude '*.pyc' --exclude venv \
-  -cf - app docs packaging scripts tests web VERSION requirements.txt requirements-debian.txt | \
+  --exclude scripts/benchmark_filtering.py --exclude docs/performance-baseline.md \
+  -cf - app docs packaging scripts web VERSION requirements.txt requirements-debian.txt | \
   tar -C "$PKG/opt/alderpointdns" -xf -
 
 cp "$SOURCE_DIR/scripts/alderpointdns-diagnostics" "$PKG/usr/sbin/alderpointdns-diagnostics"
@@ -71,10 +92,14 @@ cp "$SOURCE_DIR/packaging/alderpointdns.service" "$PKG/lib/systemd/system/alderp
 cp "$SOURCE_DIR/packaging/alderpointdns-analytics.service" "$PKG/lib/systemd/system/alderpointdns-analytics.service"
 cp "$SOURCE_DIR/packaging/alderpointdns-backup.service" "$PKG/lib/systemd/system/alderpointdns-backup.service"
 cp "$SOURCE_DIR/packaging/alderpointdns-backup.timer" "$PKG/lib/systemd/system/alderpointdns-backup.timer"
+cp "$SOURCE_DIR/packaging/alderpointdns-backup-restore.service" "$PKG/lib/systemd/system/alderpointdns-backup-restore.service"
 cp "$SOURCE_DIR/packaging/alderpointdns-filter-update.service" "$PKG/lib/systemd/system/alderpointdns-filter-update.service"
 cp "$SOURCE_DIR/packaging/alderpointdns-filter-update.timer" "$PKG/lib/systemd/system/alderpointdns-filter-update.timer"
 cp "$SOURCE_DIR/packaging/alderpointdns-notify.service" "$PKG/lib/systemd/system/alderpointdns-notify.service"
 cp "$SOURCE_DIR/packaging/alderpointdns-notify.timer" "$PKG/lib/systemd/system/alderpointdns-notify.timer"
+cp "$SOURCE_DIR/packaging/alderpointdns-software-update-check.service" "$PKG/lib/systemd/system/alderpointdns-software-update-check.service"
+cp "$SOURCE_DIR/packaging/alderpointdns-software-update-check.timer" "$PKG/lib/systemd/system/alderpointdns-software-update-check.timer"
+cp "$SOURCE_DIR/packaging/alderpointdns-software-update.service" "$PKG/lib/systemd/system/alderpointdns-software-update.service"
 cp "$SOURCE_DIR/packaging/sudoers-alderpointdns" "$PKG/etc/sudoers.d/alderpointdns"
 chmod 0440 "$PKG/etc/sudoers.d/alderpointdns"
 cp "$SOURCE_DIR/packaging/logrotate-alderpointdns" "$PKG/etc/logrotate.d/alderpointdns"

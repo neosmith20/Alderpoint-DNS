@@ -143,6 +143,39 @@
     });
   }
 
+  // Ordinary short confirmations ("Saved.", "Backup created.") stay on this
+  // timeout -- unchanged from before, so routine notifications still clear
+  // themselves promptly and never linger unnecessarily. A long message
+  // (the length threshold below) is treated as important enough that
+  // dismissing it needs to be the reader's decision, not a fixed clock --
+  // it stays up until the user closes it, hovers away from it, or clicks
+  // elsewhere; see dismissToast()/pauseToastTimer()/resumeToastTimer().
+  const TOAST_SHORT_MS = 3600;
+  const TOAST_LONG_MESSAGE_CHARS = 100;
+  let toastRemainingMs = 0;
+  let toastDeadline = 0;
+  let toastTimer = null;
+
+  function dismissToast() {
+    const toast = document.getElementById('appToast');
+    if (toast) toast.classList.remove('toast--visible');
+    window.clearTimeout(toastTimer);
+    toastTimer = null;
+  }
+
+  function pauseToastTimer() {
+    if (!toastTimer) return;
+    window.clearTimeout(toastTimer);
+    toastTimer = null;
+    toastRemainingMs = Math.max(0, toastDeadline - Date.now());
+  }
+
+  function resumeToastTimer() {
+    if (toastTimer || toastRemainingMs <= 0) return;
+    toastDeadline = Date.now() + toastRemainingMs;
+    toastTimer = window.setTimeout(dismissToast, toastRemainingMs);
+  }
+
   function showToast(message, tone) {
     let toast = document.getElementById('appToast');
     if (!toast) {
@@ -150,13 +183,39 @@
       toast.id = 'appToast';
       toast.className = 'toast';
       toast.setAttribute('role', 'status');
+      const text = document.createElement('span');
+      text.className = 'toast__text';
+      const close = document.createElement('button');
+      close.type = 'button';
+      close.className = 'toast__close';
+      close.setAttribute('aria-label', 'Dismiss notification');
+      close.textContent = '×';
+      close.addEventListener('click', dismissToast);
+      toast.appendChild(text);
+      toast.appendChild(close);
+      // Pausing on hover/keyboard-focus (not just while the pointer is
+      // actively over the close button) is what makes a long warning
+      // "readable" rather than racing a clock while the reader's eyes are
+      // still on it -- covers both mouse and keyboard/touch users tabbing
+      // onto the close button.
+      toast.addEventListener('mouseenter', pauseToastTimer);
+      toast.addEventListener('mouseleave', resumeToastTimer);
+      toast.addEventListener('focusin', pauseToastTimer);
+      toast.addEventListener('focusout', resumeToastTimer);
       document.body.appendChild(toast);
     }
-    toast.textContent = message;
+    toast.querySelector('.toast__text').textContent = message;
     toast.dataset.tone = tone || 'success';
     toast.classList.add('toast--visible');
-    window.clearTimeout(showToast.timer);
-    showToast.timer = window.setTimeout(() => toast.classList.remove('toast--visible'), 3600);
+    window.clearTimeout(toastTimer);
+    toastTimer = null;
+    if (message.length > TOAST_LONG_MESSAGE_CHARS) {
+      toastRemainingMs = 0; // persistent: only dismissToast() ever removes it
+    } else {
+      toastRemainingMs = TOAST_SHORT_MS;
+      toastDeadline = Date.now() + toastRemainingMs;
+      toastTimer = window.setTimeout(dismissToast, toastRemainingMs);
+    }
   }
 
   // Reusable pending-action button state, applied to every form submit
@@ -207,6 +266,24 @@
     return (event && event.submitter) || form.querySelector('button[type="submit"], button:not([type])');
   }
 
+  // Backup & Restore: after a successful "Create Backup" (either the
+  // async-form fetch swap below, or a full page load if JS-driven fetch
+  // didn't run), auto-trigger a browser download of the newly created
+  // archive via a hidden iframe -- same authenticated GET the manual
+  // Download button already uses, so it can't bypass auth/CSRF, doesn't
+  // buffer the file in this page's JS, and never touches the server-side
+  // retained copy or navigates the page away.
+  function triggerAutoDownload(scope) {
+    const marker = scope && scope.querySelector && scope.querySelector('[data-auto-download]');
+    const url = marker && marker.dataset.autoDownload;
+    if (!url) return;
+    const iframe = document.createElement('iframe');
+    iframe.style.display = 'none';
+    iframe.src = url;
+    document.body.appendChild(iframe);
+  }
+  triggerAutoDownload(document);
+
   document.addEventListener('submit', async (event) => {
     const form = event.target.closest('form');
     if (!form) return;
@@ -241,8 +318,19 @@
           const url = new URL(response.url);
           if (url.origin === window.location.origin) window.history.replaceState({}, '', url.pathname + url.search);
         }
+        triggerAutoDownload(main);
       }
-      const error = doc.querySelector('.alert.error');
+      // :not([data-static-notice]) excludes always-on-the-page contextual
+      // warnings (e.g. backup.html's "including private keys..." text,
+      // system_network.html's "changing this server's IP may disconnect
+      // you" text) that carry the same .alert.error styling as a real
+      // flash error but are not conditioned on this submission's outcome
+      // -- without it, a plain *successful* submission on a page that
+      // happens to render one of those elsewhere in `main` would have its
+      // static warning text mistaken for this response's error and shown
+      // (then auto-dismissed) as an "error" toast instead of the actual
+      // success message.
+      const error = doc.querySelector('.alert.error:not([data-static-notice])');
       if (error) showToast(error.textContent.trim() || 'Local DNS change failed.', 'error');
       else if (response.ok) showToast(form.dataset.successMessage || 'Saved.', 'success');
       else showToast('Local DNS change failed.', 'error');

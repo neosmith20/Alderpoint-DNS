@@ -18,6 +18,8 @@ from io import StringIO
 from pathlib import Path
 from typing import Any
 
+from app.service_logs import sanitize as _sanitize_secrets
+
 
 DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
 COMPILED_DIR = Path("/var/lib/alderpointdns/compiled/bind")
@@ -651,13 +653,20 @@ def deploy_zones(conn: sqlite3.Connection | None = None) -> int:
                 message = f"{message}; rollback failed: {rollback_exc}"
         raise
     finally:
+        # validation_output includes `named-checkconf -p` output, which
+        # echoes the fully rendered BIND config verbatim -- including any
+        # `key "name" { ...; secret "..."; };` block (RNDC/TSIG shared
+        # secret) -- so this must never reach SQLite (and therefore the UI's
+        # deployment history) unredacted. Sanitize the full text before
+        # truncating, not after: truncating first could cut a secret in
+        # half and leave a partial match the patterns no longer recognize.
         db.execute(
             """
             UPDATE local_dns_deployments
             SET finished_at=?, status=?, forward_zone=?, reverse_zones=?, serial=?, message=?, validation_output=?
             WHERE id=?
             """,
-            (now(), status, settings(db).get("internal_domain", DEFAULT_DOMAIN), reverse_count, serial, message, validation_output[-4000:], deployment_id),
+            (now(), status, settings(db).get("internal_domain", DEFAULT_DOMAIN), reverse_count, serial, _sanitize_secrets(message), _sanitize_secrets(validation_output)[-4000:], deployment_id),
         )
         db.commit()
         shutil.rmtree(stage, ignore_errors=True)

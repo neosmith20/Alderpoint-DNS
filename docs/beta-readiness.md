@@ -1,7 +1,9 @@
 # Beta Readiness Checklist
 
-This checklist is for external beta handoff. Passing automated tests is
-required but not sufficient for v1.0 readiness.
+This was the pre-1.0 readiness checklist used throughout the beta cycle;
+every item below was satisfied before the v1.0.0 release. Kept here as a
+historical record and as the baseline bar future major releases should
+continue to clear.
 
 - [x] Fresh installation path documented and dry-run tested.
 - [x] First-run setup has no default administrator.

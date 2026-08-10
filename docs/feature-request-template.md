@@ -9,4 +9,4 @@
 - Migration/upgrade impact:
 - UI expectations:
 - Alternatives considered:
-- Priority for beta/v1.0:
+- Priority:

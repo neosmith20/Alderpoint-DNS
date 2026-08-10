@@ -1,0 +1,162 @@
+{% extends "base.html" %}
+{% import "components.html" as ui %}
+{% block title %}Software Updates - Alderpoint DNS{% endblock %}
+{% block content %}
+{{ ui.page_header("Software Updates", "Check for and install newer Alderpoint DNS releases. A mandatory pre-upgrade backup is taken before every install.") }}
+
+{% if error %}
+  <div class="alert error" role="alert">{{ error }}</div>
+{% endif %}
+
+{% if version_status.mismatch %}
+  <div class="alert error" role="alert">
+    The installed <span class="mono">VERSION</span> file ({{ version_status.file_version }}) does not match the
+    dpkg-installed package version ({{ version_status.dpkg_version }}). Automatic update decisions are disabled
+    until this is resolved -- see <span class="mono">docs/versioning.md</span>.
+  </div>
+{% elif not version_status.dpkg_managed %}
+  <div class="alert" role="status">
+    Software Updates: unmanaged source installation. This install was not made through <span class="mono">dpkg</span>/<span class="mono">apt</span>,
+    so it cannot be updated from this page; Alderpoint DNS will not attempt to silently convert it into a Debian package installation.
+  </div>
+{% endif %}
+
+<section class="grid">
+  <article class="card">
+    <div class="card__head"><h2>Current Version</h2></div>
+    <p class="mono">{{ version_status.resolved }}</p>
+    {% if version_status.dpkg_managed %}<p class="muted">dpkg: <span class="mono">{{ version_status.dpkg_version }}</span></p>{% endif %}
+  </article>
+  <article class="card">
+    <div class="card__head"><h2>Latest Version</h2></div>
+    <p class="mono">{{ latest_release.tag_name if latest_release else "unknown -- check for updates" }}</p>
+  </article>
+  <article class="card">
+    <div class="card__head"><h2>Update Channel</h2></div>
+    <p class="mono">{{ settings.channel }}</p>
+  </article>
+  <article class="card">
+    <div class="card__head"><h2>Last Checked</h2></div>
+    <p class="mono">{{ settings.last_checked_at | local_time if settings.last_checked_at else "never" }}</p>
+    {% if settings.auto_check_enabled == "1" %}
+      <p class="muted">Next automatic check: <span class="mono">{{ next_check_at | local_time if next_check_at else "not yet scheduled" }}</span></p>
+    {% else %}
+      <p class="muted">Automatic checking is off.</p>
+    {% endif %}
+  </article>
+  <article class="card">
+    <div class="card__head"><h2>Update Status</h2></div>
+    {% if update_available %}
+      {{ ui.status_badge("Update available", "warning") }}
+    {% elif settings.last_check_error %}
+      {{ ui.status_badge("Check failed", "down") }}
+    {% else %}
+      {{ ui.status_badge("Up to date", "healthy") }}
+    {% endif %}
+  </article>
+</section>
+
+{% if settings.last_check_error %}
+  <div class="alert error" role="alert">Last check failed: {{ settings.last_check_error }}</div>
+{% endif %}
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Check for Updates</h2></div>
+  <form method="post" action="/system/administration/software-updates/check" data-async-form data-success-message="Checked for updates.">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="form-actions"><button data-pending-label="Checking…">Check for Updates</button></div>
+  </form>
+</section>
+
+{% if update_available %}
+<section class="panel stack">
+  <div class="panel__head"><h2>{{ latest_release.name or latest_release.tag_name }}</h2>{{ ui.status_badge("prerelease" if latest_release.prerelease else "stable", "neutral") }}</div>
+  <p class="muted">Published {{ latest_release.published_at | local_time if latest_release.published_at else "unknown" }}. <a href="{{ latest_release.html_url }}" target="_blank" rel="noopener">View Release Notes</a></p>
+  {% if latest_release.body %}
+    <details><summary>Release notes</summary><pre class="mono" style="white-space:pre-wrap">{{ latest_release.body }}</pre></details>
+  {% endif %}
+  {% if version_status.dpkg_managed and not version_status.mismatch %}
+  <form method="post" action="/system/administration/software-updates/install" data-async-form data-success-message="Update started.">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <p class="muted">A mandatory pre-upgrade backup is created before installation. If it fails, the update is aborted -- no changes are made.</p>
+    <div class="form-actions"><button data-pending-label="Starting…">Download &amp; Install Update</button></div>
+  </form>
+  {% endif %}
+</section>
+{% endif %}
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Manual Update</h2></div>
+  <p class="muted">Upload an Alderpoint DNS <span class="mono">.deb</span> package directly -- a fallback for offline or private-repo-unreachable installs. Fed into the same validation/install pipeline as an automatic update (package name, architecture, version, APT simulation, mandatory pre-upgrade backup).</p>
+  <form method="post" action="/system/administration/software-updates/upload" enctype="multipart/form-data" data-async-form data-success-message="Manual update started.">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Alderpoint DNS .deb
+      <input type="file" name="upload" accept=".deb" required>
+    </label>
+    <label>Expected SHA-256 (optional -- required if Alderpoint cannot automatically verify this upload against an official release)
+      <input type="text" name="expected_sha256" class="mono" placeholder="sha256 checksum" pattern="[0-9a-fA-F]{64}">
+    </label>
+    <div class="form-actions"><button data-pending-label="Uploading…">Validate &amp; Install</button></div>
+  </form>
+</section>
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Update Settings</h2></div>
+  <form method="post" action="/system/administration/software-updates/settings" data-async-form data-success-message="Settings saved.">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label class="row">
+      <input type="checkbox" name="auto_check_enabled" value="1" {% if settings.auto_check_enabled == "1" %}checked{% endif %}>
+      Automatically check for updates
+    </label>
+    <label>Check Interval
+      <select name="check_interval_hours">
+        {% for value, label in check_interval_choices %}
+        <option value="{{ value }}" {% if check_interval_hours|string == value %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Channel
+      <select name="channel">
+        <option value="stable" {% if settings.channel == "stable" %}selected{% endif %}>Stable</option>
+        <option value="prerelease" {% if settings.channel == "prerelease" %}selected{% endif %}>Prerelease (includes beta/dev releases)</option>
+      </select>
+    </label>
+    <p class="muted">Unattended automatic <strong>installation</strong> is always off in this release -- checking never installs anything by itself; every install requires an explicit administrator action above.</p>
+    <div class="form-actions"><button data-pending-label="Saving…">Save Settings</button></div>
+  </form>
+</section>
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Private Repository Credential</h2></div>
+  <p class="muted">
+    {% if credential.configured %}
+      A GitHub credential is configured at <span class="mono">/etc/alderpointdns/software-updates.env</span> (root-owned, mode 0600) for private-repository release discovery.
+    {% elif credential.file_exists and not credential.permissions_ok %}
+      A credential file exists at <span class="mono">/etc/alderpointdns/software-updates.env</span> but its permissions are not root-only mode 0600 -- it is being ignored for safety. Fix its ownership/permissions on the server.
+    {% else %}
+      No GitHub credential is configured. Public releases work without one; a private repository requires an administrator to create <span class="mono">/etc/alderpointdns/software-updates.env</span> (root-owned, mode 0600, containing <span class="mono">GITHUB_TOKEN=...</span>) directly on the server -- it is never entered through this web UI, never rendered here, and never sent to the browser.
+    {% endif %}
+  </p>
+</section>
+
+<div id="jobStatusPanel" data-refresh-url="/system/administration/software-updates/job">
+  {% include "system_software_updates_job.html" %}
+</div>
+{% if job and job.phase not in ('completed', 'failed') %}
+<script>
+  (function () {
+    var target = document.getElementById('jobStatusPanel');
+    var url = target.dataset.refreshUrl;
+    var timer = setInterval(function () {
+      fetch(url, { headers: { 'X-Requested-With': 'AlderpointDNSAutoRefresh' } }).then(function (response) {
+        return response.ok ? response.text() : null;
+      }).then(function (html) {
+        if (html === null) return;
+        target.innerHTML = html;
+        if (!/data-phase-active="1"/.test(html)) clearInterval(timer);
+      });
+    }, 3000);
+  })();
+</script>
+{% endif %}
+{% endblock %}

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>{% block title %}Alderpoint DNS{% endblock %}</title>
-  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="{{ static_url('app.css') }}">
   <script>
     (function () {
       try {
@@ -19,9 +19,9 @@
 <body>
   {% if admin %}
     {% set path = request.url.path %}
-    {% set dns_active = path in ["/query-log", "/local-dns", "/dns-settings", "/dns-cache"] %}
+    {% set dns_active = path in ["/query-log", "/clients", "/local-dns", "/dns-settings", "/dns-cache"] %}
     {% set security_active = path in ["/custom-rules", "/blocklists"] or path.startswith("/encryption") %}
-    {% set operations_active = path.startswith("/import") or path.startswith("/backup") or path == "/replication" %}
+    {% set operations_active = path.startswith("/import") or path == "/replication" or path.startswith("/backup") %}
     {% set system_active = path.startswith("/statistics-settings") or path.startswith("/system") %}
     {% macro nav_chevron() -%}
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.7 5.3 15.4 12l-6.7 6.7 1.9 1.8 8.5-8.5-8.5-8.5-1.9 1.8Z"/></svg>
@@ -96,6 +96,7 @@
           </a>
           {% call nav_section("dns", "DNS", dns_active, "dns") %}
             <a class="nav-subitem{% if path == '/query-log' %} is-active{% endif %}" href="/query-log" {% if path == "/query-log" %}aria-current="page"{% endif %}>Query Log</a>
+            <a class="nav-subitem{% if path == '/clients' %} is-active{% endif %}" href="/clients" {% if path == "/clients" %}aria-current="page"{% endif %}>Clients</a>
             <a class="nav-subitem{% if path == '/local-dns' %} is-active{% endif %}" href="/local-dns" {% if path == "/local-dns" %}aria-current="page"{% endif %}>Local DNS</a>
             <a class="nav-subitem{% if path == '/dns-settings' %} is-active{% endif %}" href="/dns-settings" {% if path == "/dns-settings" %}aria-current="page"{% endif %}>DNS Settings</a>
             <a class="nav-subitem{% if path == '/dns-cache' %} is-active{% endif %}" href="/dns-cache" {% if path == "/dns-cache" %}aria-current="page"{% endif %}>Cache</a>
@@ -107,14 +108,16 @@
           {% endcall %}
           {% call nav_section("operations", "Operations", operations_active, "operations") %}
             <a class="nav-subitem{% if path.startswith('/import') %} is-active{% endif %}" href="/import" {% if path.startswith("/import") %}aria-current="page"{% endif %}>Import</a>
-            <a class="nav-subitem{% if path.startswith('/backup') %} is-active{% endif %}" href="/backup" {% if path.startswith("/backup") %}aria-current="page"{% endif %}>Backup</a>
+            <a class="nav-subitem{% if path.startswith('/backup') %} is-active{% endif %}" href="/backup" {% if path.startswith("/backup") %}aria-current="page"{% endif %}>Backup &amp; Restore</a>
             <a class="nav-subitem{% if path == '/replication' %} is-active{% endif %}" href="/replication" {% if path == "/replication" %}aria-current="page"{% endif %}>Replication</a>
           {% endcall %}
           {% call nav_section("system", "System", system_active, "system") %}
             <a class="nav-subitem{% if path.startswith('/statistics-settings') %} is-active{% endif %}" href="/statistics-settings" {% if path.startswith("/statistics-settings") %}aria-current="page"{% endif %}>Statistics</a>
             <a class="nav-subitem{% if path == '/system' %} is-active{% endif %}" href="/system" {% if path == "/system" %}aria-current="page"{% endif %}>System Status</a>
             <a class="nav-subitem{% if path == '/system/administration' %} is-active{% endif %}" href="/system/administration" {% if path == "/system/administration" %}aria-current="page"{% endif %}>Administration</a>
+            <a class="nav-subitem{% if path.startswith('/system/network') %} is-active{% endif %}" href="/system/network" {% if path.startswith("/system/network") %}aria-current="page"{% endif %}>Network Configuration</a>
             <a class="nav-subitem{% if path == '/system/notifications' %} is-active{% endif %}" href="/system/notifications" {% if path == "/system/notifications" %}aria-current="page"{% endif %}>Notifications</a>
+            <a class="nav-subitem{% if path.startswith('/system/administration/software-updates') %} is-active{% endif %}" href="/system/administration/software-updates" {% if path.startswith("/system/administration/software-updates") %}aria-current="page"{% endif %}>Software Updates</a>
           {% endcall %}
         </nav>
         <div class="account-menu">
@@ -134,7 +137,7 @@
   {% else %}
     <main class="auth-shell">{{ self.content() }}</main>
   {% endif %}
-  <script src="/static/app.js"></script>
+  <script src="{{ static_url('app.js') }}"></script>
   {% block scripts %}{% endblock %}
 </body>
 </html>

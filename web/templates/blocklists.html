@@ -42,9 +42,12 @@
     </div>
     <div class="form-actions"><button>Save schedule</button></div>
   </form>
-  {% set last = fs.get("last_result") %}
-  {% if last and last.get("error") %}
-    <p class="bad wrap-anywhere">Last automatic update ({{ last.get("status") }}): {{ last.get("error") }}</p>
+  {% if automatic_update_banner %}
+    {% if automatic_update_banner.resolved %}
+      <p class="muted wrap-anywhere">Last automatic update attempt on {{ automatic_update_banner.finished_at }} ({{ automatic_update_banner.status }}) reported: {{ automatic_update_banner.error }} &mdash; sources have since updated successfully; see each source's status below for current health.</p>
+    {% else %}
+      <p class="bad wrap-anywhere">Last automatic update on {{ automatic_update_banner.finished_at }} ({{ automatic_update_banner.status }}): {{ automatic_update_banner.error }}</p>
+    {% endif %}
   {% endif %}
   <div class="row">
     <form method="post" action="/blocklists/update" data-confirm="Update all blocklist sources?">
@@ -157,7 +160,16 @@
             <td>{{ ui.status_badge("Enabled", "healthy") if s.enabled else ui.status_badge("Disabled", "unavailable") }}</td>
             <td class="mono" title="{{ s.parsed_rules }} parsed, {{ s.duplicate_domains }} duplicates, {{ s.invalid_rules }} invalid, {{ s.unsupported_rules }} unsupported">{{ s.unique_active_domains }}</td>
             <td class="mono truncate">{{ s.last_success or "Never" }}</td>
-            <td>{{ ui.status_badge(h.label, h.tone) }}{% if s.using_cached_copy %} <span class="muted secondary">(cached)</span>{% endif %}</td>
+            <td>
+              {{ ui.status_badge(h.label, h.tone) }}{% if s.using_cached_copy %} <span class="muted secondary">(cached)</span>{% endif %}
+              {% set reason = s.last_error or s.last_warning %}
+              {% if h.state in ("warning", "unsupported_format", "error", "using_cached") and reason %}
+                {# Shown inline (not only via title=) so touch devices, which have no
+                   hover, can still see why -- see the Details disclosure below for
+                   the fuller history/timestamp. #}
+                <p class="muted secondary wrap-anywhere" title="{{ reason }}">{{ reason|truncate(80) }}</p>
+              {% endif %}
+            </td>
             <td class="actions-col">
               <div class="row">
                 <button type="button" class="secondary" data-row-edit-toggle aria-controls="blocklistEdit{{ s.id }}" aria-expanded="false">Edit</button>

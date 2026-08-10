@@ -35,7 +35,15 @@
   </article>
 {%- endmacro %}
 
-{% macro ranked_list(title, rows, total=0, href='', empty='No data yet.') -%}
+{% macro ranked_list(title, rows, total=0, href='', empty='No data yet.', link_param='', link_extra='') -%}
+  {# link_param, when set (e.g. "domain"/"qtype"/"rcode"/"protocol"), turns
+     each row's label into a drill-down link to the Query Log, pre-filtered
+     to that exact value via the same query-param filters
+     query_log_context()/analytics.query_log() already read -- reusing the
+     Query Log's existing filtering, not a second implementation of it.
+     link_extra appends any additional fixed filter this panel implies
+     (e.g. "&blocked=1" for Top Blocked Domains, so a specific blocked
+     domain's row stays scoped to its blocked occurrences). #}
   <article class="panel">
     <div class="panel__head">
       <h2>{{ title }}</h2>
@@ -47,7 +55,11 @@
           {% set percent = ((row.value / total * 100) if total else 0) %}
           <div class="ranked-row">
             <div class="ranked-row__top">
-              <span class="ranked-row__label mono" title="{{ row.label }}">{{ row.label }}</span>
+              {% if link_param %}
+                <a class="ranked-row__label mono" title="{{ row.label }}" href="/query-log?{{ link_param }}={{ row.label|urlencode }}{{ link_extra }}">{{ row.label }}</a>
+              {% else %}
+                <span class="ranked-row__label mono" title="{{ row.label }}">{{ row.label }}</span>
+              {% endif %}
               <span class="ranked-row__value">{{ row.value }}</span>
             </div>
             <div class="ranked-row__meta">

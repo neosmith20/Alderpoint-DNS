@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import base64
+import hashlib
 import json
 import os
 import secrets
@@ -20,10 +21,21 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
-from app import analytics, auth, backup, custom_rules as custom_rules_model, dns_cache, encryption, filter_schedule, importer, local_dns, notifications, replication, upstream_dns
+from app import analytics, auth, backup, custom_rules as custom_rules_model, dns_cache, encryption, filter_schedule, importer, local_dns, network_config, notifications, replication, software_updates, upstream_dns
 from app import blocklist_categories
 from app import service_logs
-from app.alderpointdns_compiler import AlderpointDNSConnection, DB_PATH, add_source, init_db, normalize_domain, source_health
+from app.alderpointdns_compiler import (
+    AlderpointDNSConnection,
+    DB_PATH,
+    HEALTH_ERROR,
+    HEALTH_UNSUPPORTED_FORMAT,
+    HEALTH_USING_CACHED,
+    HEALTH_WARNING,
+    add_source,
+    init_db,
+    normalize_domain,
+    source_health,
+)
 from app.db_retry import DatabaseBusyError, is_lock_error, retry_on_locked
 
 
@@ -33,7 +45,71 @@ STATIC_DIR = ROOT / "web" / "static"
 SESSION_MAX_AGE = 8 * 60 * 60
 SECRET_FILE = Path("/etc/alderpointdns/secrets.env")
 app = FastAPI(title="Alderpoint DNS")
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+def static_asset_fingerprint(directory: Path) -> str:
+    """A short content hash of every file actually shipped under
+    web/static, computed once (see STATIC_ASSET_FINGERPRINT below) from the
+    real bytes on disk -- not from the installed package version string.
+    An appliance upgrade always changes the files under web/static/ when
+    (and only when) it actually changes them, which is exactly what needs
+    to invalidate a browser's cache; the package version alone can't be
+    trusted for that (a version bump with no front-end change would force
+    every returning browser to refetch unnecessarily, and -- the actual
+    bug this fixes -- nothing about the version string is otherwise tied
+    to what a browser has cached under a fixed, unversioned /static/app.js
+    URL in the first place).
+
+    Appended as a cache-busting query string (see static_url()) to every
+    /static asset URL templates emit: a browser that already cached the
+    current bytes under the current URL keeps reusing them with zero
+    network round-trips (see VersionedStaticFiles below), while a real
+    Alderpoint package upgrade that changes app.js/app.css always produces
+    a new URL a fresh page load fetches for real -- no Ctrl+Shift+R or
+    manual cache clear required. Confirmed live: the installed app.js on
+    disk and http://127.0.0.1:3000/static/app.js both already reflected a
+    new build, but a browser tab left open across the upgrade kept
+    executing the old cached app.js at the old, unchanged URL until a hard
+    refresh -- the bug was the fixed URL, not anything server-side about
+    what bytes it served.
+    """
+    digest = hashlib.sha256()
+    for path in sorted(directory.rglob("*")):
+        if path.is_file():
+            digest.update(path.relative_to(directory).as_posix().encode())
+            digest.update(path.read_bytes())
+    return digest.hexdigest()[:12]
+
+
+STATIC_ASSET_FINGERPRINT = static_asset_fingerprint(STATIC_DIR)
+
+
+def static_url(filename: str) -> str:
+    return f"/static/{filename}?v={STATIC_ASSET_FINGERPRINT}"
+
+
+TEMPLATES.env.globals["static_url"] = static_url
+
+
+class VersionedStaticFiles(StaticFiles):
+    """Identical to StaticFiles except: a request carrying the `v=`
+    cache-busting query parameter static_url() appends gets a long-lived,
+    immutable Cache-Control -- safe because that query parameter *is* a
+    hash of the exact bytes being served, so the same URL can never
+    legitimately resolve to different content later. A request for the
+    bare, unversioned path (a stale bookmark, a direct curl, anything not
+    generated through static_url()) gets Starlette's ordinary
+    ETag/Last-Modified conditional-GET behavior unchanged -- never told to
+    cache for a year on nothing but a guess."""
+
+    def file_response(self, full_path, stat_result, scope, status_code: int = 200):
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        if b"v=" in scope.get("query_string", b""):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
+
+
+app.mount("/static", VersionedStaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 def secure_session_cookie_enabled() -> bool:
@@ -66,8 +142,82 @@ def _replication_autostart() -> None:
     replication.autostart()
 
 
+@app.on_event("startup")
+def _reap_abandoned_restores() -> None:
+    # A restore that was mid-flight when this process (or the whole host)
+    # died would otherwise sit at status='running' forever -- this is
+    # exactly what happened to the real large-analytics restore that
+    # motivated this check (see docs/backup-recovery.md). last_restore()
+    # also reaps on every view, but startup is the one moment guaranteed to
+    # run after a host reboot or service restart, so an abandoned restore
+    # from before that event is caught immediately rather than waiting for
+    # someone to open the Backup & Restore page. Best-effort: must never
+    # prevent the web service from starting.
+    try:
+        reaped = backup.reap_abandoned_restores()
+        for entry in reaped:
+            _log(4, f"reaped abandoned restore id={entry['id']}: {entry['message']}")
+    except Exception as exc:  # noqa: BLE001
+        _log(3, f"reap_abandoned_restores failed at startup: {exc}")
+
+
+@app.on_event("startup")
+def _reap_abandoned_software_update_jobs() -> None:
+    # Mirrors _reap_abandoned_restores() above exactly, for
+    # software_update_jobs: a job whose runner (alderpointdns-software-
+    # update.service) died mid-flight would otherwise sit at a
+    # non-terminal phase forever, permanently blocking every future
+    # install/upload attempt behind the "an update is already in
+    # progress" gate. software_updates.update_status() also reaps on
+    # every view; startup additionally catches one abandoned by a host
+    # reboot or service restart before anyone opens the page.
+    try:
+        reaped = software_updates.reap_abandoned_jobs()
+        for entry in reaped:
+            _log(4, f"reaped abandoned software update job id={entry['id']}: {entry['message']}")
+    except Exception as exc:  # noqa: BLE001
+        _log(3, f"reap_abandoned_jobs failed at startup: {exc}")
+
+
 def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+
+
+def format_local_datetime(iso_str: str | None) -> str:
+    """Renders a canonical UTC/ISO-8601 timestamp (as stored in the
+    database and in backup manifests) for display in the server's
+    configured local timezone, e.g. "Aug 8, 2026 at 6:47 PM MDT". Purely a
+    display transform -- registered as the `local_time` Jinja filter and
+    never used for anything that affects correctness (backup/restore
+    lookups always match by history id or the literal, unparsed filename;
+    manifest.json and backup_history.created_at stay UTC/ISO-8601)."""
+    if not iso_str:
+        return ""
+    try:
+        parsed = dt.datetime.fromisoformat(iso_str)
+    except ValueError:
+        return iso_str
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    # .astimezone() with no argument converts to the system's configured
+    # local timezone (TZ env var, falling back to /etc/localtime) -- this
+    # process never stores or guesses a timezone of its own.
+    local = parsed.astimezone()
+    hour12 = local.hour % 12 or 12
+    ampm = "AM" if local.hour < 12 else "PM"
+    # Avoid %-d/%-I (glibc-only strftime extensions) for portability.
+    tz_label = local.strftime("%Z") or local.strftime("%z") or "UTC"
+    return f"{local.strftime('%b')} {local.day}, {local.year} at {hour12}:{local.minute:02d} {ampm} {tz_label}"
+
+
+# Registered here (not only inside render()) so every consumer of the
+# module-level TEMPLATES object -- including scripts that call
+# TEMPLATES.get_template(...).render(...) directly (tests/test_web_smoke.sh,
+# tests/test_encryption_layout.sh) rather than going through render() below
+# -- gets the filter without having to know it exists. render() additionally
+# re-applies it with setdefault() for the handful of tests that replace
+# webapp.TEMPLATES with a brand new Jinja2Templates instance at runtime.
+TEMPLATES.env.filters["local_time"] = format_local_datetime
 
 
 def get_secret() -> str:
@@ -367,6 +517,10 @@ def deploy_no_download() -> tuple[int, str]:
     return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "deploy", "--no-download"])
 
 
+def protection_enable_reuse() -> tuple[int, str]:
+    return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "protection-enable-reuse"])
+
+
 def deploy_no_download_or_raise() -> None:
     code, out = deploy_no_download()
     if code != 0:
@@ -563,6 +717,55 @@ def proxy_backend_enabled() -> bool:
     return False
 
 
+# The PROXYv2 backend hop that lets BIND log/see the real client address
+# instead of dnsdist's own loopback address: dnsdist.conf forwards to this
+# socket with useProxyProtocol=true (proxy_backend_enabled(), above), and
+# packaging/named.conf.options has BIND listen on it with
+# `listen-on port 5354 proxy plain`.
+PROXY_BACKEND_SOCKET = "127.0.0.1:5354"
+
+
+def client_address_preservation_status() -> dict[str, str]:
+    """Configuration/listener status for the dnsdist -> BIND PROXYv2 backend
+    hop that lets BIND log/see the real client address.
+
+    This deliberately does NOT claim to prove that a real client address has
+    actually traversed dnsdist -> PROXYv2 -> BIND -- doing that from a
+    production web request would mean firing a live self-test DNS query
+    (with a spoofed source address) on every page load, which this
+    intentionally does not do. It reports only what it can truthfully prove
+    from two production-owned signals protocol_statuses() already relies on
+    for every other listener:
+
+    - proxy_backend_enabled() proves dnsdist.conf is *configured* to forward
+      through the PROXYv2 backend.
+    - a live socket check (listener_addresses(), the same ss-backed helper
+      used elsewhere in this module) proves BIND's PROXYv2 listener is
+      *actually up* right now, not just present in a config file on disk.
+
+    The full behavioral proof -- that a real client address actually
+    survives the hop -- is exercised by the separate shell acceptance suite
+    (tests/test_dnsdist_frontend.sh, still run in CI/pre-release testing,
+    unaffected by this function). This used to be inferred here too, from
+    the presence-on-disk of that same script -- a development/test artifact
+    the production package should not need to ship or depend on, and one
+    that was never actually *run* by this check to begin with (only checked
+    for existing) -- which is what motivated replacing it with the honest,
+    dependency-free configuration/listener signal below.
+    """
+    detail = f"PROXYv2 forwarding configured; BIND backend listener {PROXY_BACKEND_SOCKET} (tcp+udp)"
+    if not proxy_backend_enabled():
+        return {"state": "Not configured", "detail": "PROXYv2 forwarding is not configured in dnsdist.conf"}
+    listeners = listener_addresses()
+    expected = [("tcp", PROXY_BACKEND_SOCKET), ("udp", PROXY_BACKEND_SOCKET)]
+    if _socket_coverage(listeners, expected) == "full":
+        return {"state": "Configured", "detail": f"{detail} is up"}
+    return {
+        "state": "Listener unavailable",
+        "detail": f"PROXYv2 forwarding is configured, but the BIND backend listener {PROXY_BACKEND_SOCKET} (tcp+udp) is not fully up",
+    }
+
+
 # (name, capability key in encryption.dnsdist_capabilities(), enabled-flag
 # key in encryption.settings(), port-setting key, transport, endpoint label,
 # protocol_tests key from encryption.test_protocols())
@@ -657,6 +860,12 @@ def protocol_statuses() -> list[dict[str, str]]:
 
 
 def render(request: Request, template: str, status_code: int = 200, **context: Any) -> HTMLResponse:
+    # setdefault, not a one-time module-load registration: some tests
+    # replace webapp.TEMPLATES with a fresh Jinja2Templates instance
+    # (e.g. to point at an isolated directory), which would otherwise
+    # start without the local_time filter registered.
+    TEMPLATES.env.filters.setdefault("local_time", format_local_datetime)
+    TEMPLATES.env.globals.setdefault("static_url", static_url)
     session = signed_session(request)
     new_anonymous_session = not session
     if new_anonymous_session:
@@ -729,6 +938,18 @@ def status_summary(_: sqlite3.Row = Depends(current_admin)):
     return JSONResponse(global_service_status())
 
 
+@app.get("/healthz")
+def healthz() -> JSONResponse:
+    # Deliberately unauthenticated (a liveness probe must work before any
+    # session exists) and deliberately minimal: no admin/session/analytics
+    # data, nothing an unauthenticated caller couldn't already infer from
+    # `systemctl is-active alderpointdns`. Used by
+    # app/software_updates.py's post-upgrade health check to confirm the
+    # web process itself is actually accepting local connections again
+    # after a restart, not just that systemd reports the unit active.
+    return JSONResponse({"status": "ok", "version": backup.alderpointdns_app_version()})
+
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request, _: sqlite3.Row = Depends(current_admin)):
     status = compiler_status()
@@ -774,6 +995,12 @@ def dashboard(request: Request, _: sqlite3.Row = Depends(current_admin)):
     )
 
 
+@app.get("/clients", response_class=HTMLResponse)
+def clients(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    range_key = request.query_params.get("range", "24h")
+    return render(request, "clients.html", clients=analytics.clients_data(range_key))
+
+
 @app.get("/analytics/chart-data")
 def analytics_chart_data(request: Request, _: sqlite3.Row = Depends(current_admin)):
     data = analytics.dashboard_data(request.query_params.get("range", "24h"))
@@ -809,6 +1036,10 @@ def protection_toggle(request: Request, csrf: str = Form(...), _: sqlite3.Row = 
             conn.execute("UPDATE custom_filter_rules SET enabled=1 WHERE validation_state='valid'")
         else:
             conn.execute("UPDATE custom_filter_rules SET enabled=0")
+    if enable:
+        code, _out = protection_enable_reuse()
+        if code == 0:
+            return redirect("/")
     deploy_no_download()
     return redirect("/")
 
@@ -857,11 +1088,20 @@ def setup_post(
     return redirect("/login")
 
 
+# Fixed vocabulary, not the raw query string: `reason` only ever selects one
+# of these known, pre-written messages -- never echoes arbitrary request
+# text back into the page.
+LOGIN_NOTICES = {
+    "restore": "Restore completed. Authentication/session data changed, so you need to sign in again.",
+}
+
+
 @app.get("/login", response_class=HTMLResponse)
 def login_get(request: Request):
     if admin_count() == 0:
         return redirect("/setup")
-    return render(request, "login.html", error=None)
+    notice = LOGIN_NOTICES.get(request.query_params.get("reason", ""))
+    return render(request, "login.html", error=None, notice=notice)
 
 
 @app.post("/login")
@@ -920,6 +1160,37 @@ def filter_schedule_context() -> dict[str, Any]:
     }
 
 
+# Health states that mean "this source is not currently in good shape" --
+# used to decide whether a past automatic-update failure is still relevant
+# to what's on screen right now, or has been superseded by later successful
+# fetches (manual or automatic).
+_DEGRADED_HEALTH_STATES = {HEALTH_ERROR, HEALTH_WARNING, HEALTH_UNSUPPORTED_FORMAT, HEALTH_USING_CACHED}
+
+
+def automatic_update_banner(sources: list[dict[str, Any]], fs: dict[str, Any]) -> dict[str, Any] | None:
+    """"Last automatic update" only ever reflects the most recent *timer*
+    run (see filter_schedule.record_result(), only called from
+    filter_update_run()) -- "Update All Now" and per-source "Update now"
+    intentionally do not overwrite it, so this must never be presented as
+    if it were live current-source health. Without this, a real failure
+    recorded by one automatic run stayed on screen, worded as if still
+    happening, for the entire interval until the next scheduled run --
+    even after every implicated source had since been refreshed
+    successfully (by hand or by a later timer run). History is still
+    shown (never erased), just no longer framed as an ongoing problem
+    once nothing currently enabled is actually unhealthy."""
+    last = fs.get("last_result")
+    if not last or not last.get("error"):
+        return None
+    currently_degraded = any(s["health"]["state"] in _DEGRADED_HEALTH_STATES for s in sources if s.get("enabled"))
+    return {
+        "status": last.get("status"),
+        "finished_at": last.get("finished_at"),
+        "error": last.get("error"),
+        "resolved": not currently_degraded,
+    }
+
+
 def enrich_sources(sources: list[sqlite3.Row]) -> list[dict[str, Any]]:
     """Attaches the derived health state and a safely-parsed rejected-sample
     list to each source row for template rendering. Templates need the
@@ -938,17 +1209,20 @@ def enrich_sources(sources: list[sqlite3.Row]) -> list[dict[str, Any]]:
 
 
 def blocklists_error(request: Request, message: str) -> HTMLResponse:
+    sources = enrich_sources(compiler_status()["sources"])
+    fs = filter_schedule_context()
     return render(
         request,
         "blocklists.html",
-        sources=enrich_sources(compiler_status()["sources"]),
+        sources=sources,
         categories=blocklist_categories.list_categories(),
         category_error=message,
         category_filter="",
         status_filter="",
         search="",
         sort="name",
-        filter_schedule=filter_schedule_context(),
+        filter_schedule=fs,
+        automatic_update_banner=automatic_update_banner(sources, fs),
         status_code=400,
     )
 
@@ -962,7 +1236,10 @@ def resolve_category_key(requested: str) -> str:
 @app.get("/blocklists", response_class=HTMLResponse)
 def blocklists(request: Request, _: sqlite3.Row = Depends(current_admin)):
     blocklist_categories.migrate_existing_categories()
-    sources = enrich_sources(compiler_status()["sources"])
+    all_sources = enrich_sources(compiler_status()["sources"])
+    fs = filter_schedule_context()
+    banner = automatic_update_banner(all_sources, fs)
+    sources = all_sources
     category_filter = request.query_params.get("category", "")
     status_filter = request.query_params.get("status", "")
     search = request.query_params.get("search", "").strip().lower()
@@ -994,7 +1271,13 @@ def blocklists(request: Request, _: sqlite3.Row = Depends(current_admin)):
         status_filter=status_filter,
         search=search,
         sort=sort,
-        filter_schedule=filter_schedule_context(),
+        filter_schedule=fs,
+        # Computed against every source (before category/status/search
+        # narrow what's *displayed* below), so a filter can never hide the
+        # one source that would have proven a historical automatic-update
+        # failure resolved -- or, symmetrically, hide the one still-failing
+        # source that keeps it genuinely current.
+        automatic_update_banner=banner,
     )
 
 
@@ -1745,13 +2028,7 @@ def encryption_apple_profile(protocol: str, _: sqlite3.Row = Depends(current_adm
 def dns_settings(request: Request, _: sqlite3.Row = Depends(current_admin)):
     version = dnsdist_version_info()
     proxy_backend = proxy_backend_enabled()
-    client_address_test_path = Path("/opt/alderpointdns/tests/test_dnsdist_frontend.sh")
-    if proxy_backend and client_address_test_path.exists():
-        client_address_test = {"state": "Passed", "filename": client_address_test_path.name}
-    elif client_address_test_path.exists():
-        client_address_test = {"state": "Failed", "filename": client_address_test_path.name}
-    else:
-        client_address_test = {"state": "Not tested", "filename": "test_dnsdist_frontend.sh"}
+    client_address_test = client_address_preservation_status()
     return render(
         request,
         "dns_settings.html",
@@ -2115,7 +2392,22 @@ def backup_create_apply() -> tuple[int, str]:
 
 
 def backup_restore_apply() -> tuple[int, str]:
-    return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "backup-restore"])
+    # Deliberately NOT `sudo alderpointdns_compiler.py backup-restore`
+    # directly: a restore's app_config component restarts
+    # alderpointdns.service (this process's own service) partway through,
+    # which would kill a direct sudo child of this request -- exactly the
+    # real failure found on a live appliance restore: the sudo-spawned
+    # restore worker vanished the instant alderpointdns.service's cgroup
+    # was torn down and restarted mid-restore, right after the database
+    # had already been promoted (status=interrupted,
+    # phase=restarting_services, promoted_at non-null). `systemctl start`
+    # hands the work to an independent unit (its own cgroup, owned by
+    # PID 1) that survives that restart -- see
+    # packaging/alderpointdns-backup-restore.service and
+    # software_updates_start_install_runner()'s identical, already-
+    # established pattern (including why --no-block is required, not
+    # optional, there).
+    return run(["sudo", "systemctl", "start", "--no-block", "alderpointdns-backup-restore.service"])
 
 
 def backup_preview_apply() -> tuple[int, str]:
@@ -2139,16 +2431,51 @@ def backup_context() -> dict[str, Any]:
 
 def backup_error(request: Request, message: str, status_code: int = 400, **extra: Any) -> HTMLResponse:
     context = backup_context()
-    context.update({"error": message, "preview": None, "preview_source": None, "imported": None})
+    context.update({"error": message, "preview": None, "preview_source": None, "imported": None, "auto_download_url": None})
     context.update(extra)
     return render(request, "backup.html", **context, status_code=status_code)
+
+
+def _auto_download_url(request: Request) -> str | None:
+    """Resolves the `download` query param (set only by backup_create_route
+    right after a successful create) to a same-origin download URL, using
+    the same find_backup_path() confinement/lookup the manual Download
+    button and the download route itself use -- never trusts the query
+    param blindly, and never fires for a nonexistent/foreign path."""
+    identifier = request.query_params.get("download", "").strip()
+    if not identifier:
+        return None
+    try:
+        backup.find_backup_path(identifier)
+    except backup.BackupError:
+        return None
+    return f"/backup/{identifier}/download"
 
 
 @app.get("/backup", response_class=HTMLResponse)
 def backup_page(request: Request, _: sqlite3.Row = Depends(current_admin)):
     context = backup_context()
-    context.update({"error": None, "preview": None, "preview_source": None, "imported": request.query_params.get("imported")})
+    context.update({
+        "error": None,
+        "preview": None,
+        "preview_source": None,
+        "imported": request.query_params.get("imported"),
+        "auto_download_url": _auto_download_url(request),
+    })
     return render(request, "backup.html", **context)
+
+
+@app.get("/backup/restore/status", response_class=HTMLResponse)
+def backup_restore_status_partial(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    """Polled by backup.html while a restore is in flight (see the inline
+    script there). Deliberately gated by current_admin like every other
+    page here: if the restore being polled replaced the session-signing
+    secret or the sessions table itself, this naturally 303s to /login the
+    same way any other page would -- the poller detects that redirect and
+    is what actually sends the browser there on purpose, instead of a
+    fetch() silently following it and handing back /login's HTML as if it
+    were this fragment."""
+    return render(request, "backup_last_restore_card.html", last_restore=backup.last_restore())
 
 
 @app.post("/backup/create")
@@ -2164,18 +2491,60 @@ async def backup_create_route(request: Request, _: sqlite3.Row = Depends(current
         backup_create_apply()
     except Exception as exc:
         return backup_error(request, str(exc))
+    # Auto-download only fires for a backup that genuinely finished
+    # ("deployed"); a failed create() (caught above only if request_backup/
+    # backup_create_apply themselves raised -- a create that ran but ended
+    # status='failed' does not) must not trigger a download of nothing/a
+    # partial file.
+    created = backup.last_backup()
+    if created and created.get("status") == "deployed" and created.get("id") is not None:
+        return redirect(f"/backup?download={created['id']}")
     return redirect("/backup")
 
 
 @app.post("/backup/import")
 async def backup_import_route(request: Request, csrf: str = Form(...), upload: UploadFile = File(...), _: sqlite3.Row = Depends(current_admin)):
     check_csrf(request, csrf)
+    # Streamed in bounded chunks straight to a restrictive-permission
+    # staging file -- never buffered whole in this process's memory,
+    # regardless of archive size. See backup.begin_streamed_upload's
+    # docstring. A native backup upload is governed by its own size policy
+    # (backup.max_upload_bytes()), separate from app/importer.py's 10 MiB
+    # spreadsheet/text-import cap: Analytics History legitimately makes a
+    # long-running server's backup large, and that must never be rejected
+    # at the import-page's limit.
+    content_length_hint: int | None = None
+    raw_length = request.headers.get("content-length")
+    if raw_length and raw_length.isdigit():
+        content_length_hint = int(raw_length)
+    tmp_path: Path | None = None
     try:
-        data = await upload.read()
-        if not data:
+        tmp_path, max_bytes, safe_name = backup.begin_streamed_upload(upload.filename or "uploaded-backup.tar.gz", content_length_hint)
+        total = 0
+        since_last_space_check = 0
+        with tmp_path.open("wb") as fh:
+            while True:
+                chunk = await upload.read(backup.UPLOAD_CHUNK_BYTES)
+                if not chunk:
+                    break
+                total += len(chunk)
+                since_last_space_check += len(chunk)
+                if total > max_bytes:
+                    raise backup.BackupError(f"uploaded backup exceeds the {max_bytes // (1024 * 1024)} MiB backup upload limit")
+                fh.write(chunk)
+                # Re-check free space periodically (not just up front) for
+                # uploads large enough, or without a Content-Length hint
+                # accurate enough, that the disk could fill up mid-stream.
+                if since_last_space_check >= backup.FREE_SPACE_RECHECK_INTERVAL_BYTES:
+                    since_last_space_check = 0
+                    backup.check_upload_free_space(tmp_path.parent, remaining_hint=max_bytes - total)
+        if total == 0:
             raise backup.BackupError("uploaded file is empty")
-        path = backup.stage_import(upload.filename or "uploaded-backup.tar.gz", data)
+        path = backup.finalize_streamed_upload(tmp_path, safe_name)
+        tmp_path = None
     except Exception as exc:
+        if tmp_path is not None:
+            backup.abort_streamed_upload(tmp_path)
         return backup_error(request, str(exc))
     return redirect(f"/backup?imported={path.name}")
 
@@ -2215,13 +2584,28 @@ async def backup_restore_route(request: Request, _: sqlite3.Row = Depends(curren
         components = backup_component_flags(form)
         password = str(form.get("password", "")).strip() or None
         backup.request_backup("restore", {"path": source, "components": components}, password)
-        backup_restore_apply()
-        result = backup.latest_request_result("restore")
-        if result and result.get("status") != "done":
-            raise backup.BackupError("restore did not complete; check the restore history table below")
+        # backup_restore_apply() now only *starts* the independent
+        # alderpointdns-backup-restore.service runner (systemctl start
+        # --no-block) and returns immediately -- it does not wait for the
+        # restore to finish, exactly like software_updates_install_route()
+        # never waits for an install to finish. A restore that touches
+        # app_config restarts alderpointdns.service (this request's own
+        # process) partway through, so this request must never block on
+        # (or synchronously report) the restore's outcome; only the exit
+        # status of *starting* the runner is checked here. The actual
+        # outcome is durable state in restore_history that the "Last
+        # Restore" card (backup_context()) reads on the next page load.
+        code, output = backup_restore_apply()
+        if code != 0:
+            raise backup.BackupError(f"failed to start the restore runner: {output}")
     except Exception as exc:
         return backup_error(request, str(exc))
-    return redirect("/backup")
+    # `restore_started=1` tells backup.html to start polling the Last
+    # Restore card immediately, even though the worker (a separate,
+    # just-started systemd unit) may not have inserted its restore_history
+    # row yet -- without it, a page load that lands in that brief gap would
+    # see no in-progress restore at all and never start polling.
+    return redirect("/backup?restore_started=1")
 
 
 @app.get("/backup/{identifier}/download")
@@ -2250,17 +2634,22 @@ def backup_schedule_route(
     schedule_enabled: str = Form("0"),
     schedule_interval_hours: int = Form(24),
     retention_count: int = Form(7),
+    max_upload_mib: int | None = Form(None),
+    max_extracted_mib: int | None = Form(None),
     _: sqlite3.Row = Depends(current_admin),
 ):
     check_csrf(request, csrf)
     try:
-        backup.update_settings(
-            {
-                "schedule_enabled": schedule_enabled,
-                "schedule_interval_hours": schedule_interval_hours,
-                "retention_count": retention_count,
-            }
-        )
+        values: dict[str, Any] = {
+            "schedule_enabled": schedule_enabled,
+            "schedule_interval_hours": schedule_interval_hours,
+            "retention_count": retention_count,
+        }
+        if max_upload_mib is not None:
+            values["max_upload_mib"] = max_upload_mib
+        if max_extracted_mib is not None:
+            values["max_extracted_mib"] = max_extracted_mib
+        backup.update_settings(values)
         backup_schedule_apply()
     except Exception as exc:
         return backup_error(request, str(exc))
@@ -2575,6 +2964,290 @@ def administration_revoke_sessions(request: Request, csrf: str = Form(...), admi
     with db() as conn:
         audit_log(conn, admin["id"], admin["username"], "sessions_revoked", True, ip, f"{revoked} other session(s) revoked")
     return redirect("/system/administration")
+
+
+def network_apply_apply() -> tuple[int, str]:
+    return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "network-apply"])
+
+
+def network_confirm_apply() -> tuple[int, str]:
+    return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "network-confirm"])
+
+
+def network_context() -> dict[str, Any]:
+    current = network_config.read_current_config()
+    pending = network_config.read_rollback_state()
+    return {
+        "current": current,
+        "pending": pending,
+    }
+
+
+@app.get("/system/network", response_class=HTMLResponse)
+def network_page(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    context = network_context()
+    context.update({"error": None})
+    return render(request, "system_network.html", **context)
+
+
+@app.post("/system/network/apply")
+async def network_apply_route(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    form = await request.form()
+    check_csrf(request, str(form.get("csrf", "")))
+    try:
+        interface = str(form.get("interface", "")).strip()
+        ipv4_mode = str(form.get("ipv4_mode", "unchanged")).strip()
+        ipv6_mode = str(form.get("ipv6_mode", "unchanged")).strip()
+        payload = {
+            "interface": interface,
+            "ipv4_mode": ipv4_mode,
+            "ipv4_address": str(form.get("ipv4_address", "")).strip() or None,
+            "ipv4_prefix": int(form["ipv4_prefix"]) if str(form.get("ipv4_prefix", "")).strip() else None,
+            "ipv4_gateway": str(form.get("ipv4_gateway", "")).strip() or None,
+            "ipv6_mode": ipv6_mode,
+            "ipv6_address": str(form.get("ipv6_address", "")).strip() or None,
+            "ipv6_prefix": int(form["ipv6_prefix"]) if str(form.get("ipv6_prefix", "")).strip() else None,
+            "ipv6_gateway": str(form.get("ipv6_gateway", "")).strip() or None,
+        }
+        # Defense-in-depth: the same validation the privileged helper runs,
+        # so an obviously-bad submission gets a friendly error immediately
+        # rather than a round trip through sudo. The privileged side (which
+        # is the one that actually matters for security) always re-validates
+        # independently before touching anything.
+        network_config.validate_proposed(
+            payload["interface"], payload["ipv4_mode"], payload["ipv4_address"], payload["ipv4_prefix"], payload["ipv4_gateway"],
+            payload["ipv6_mode"], payload["ipv6_address"], payload["ipv6_prefix"], payload["ipv6_gateway"],
+        )
+        network_config.request_change(payload)
+        network_apply_apply()
+        result = network_config.latest_request_result("apply")
+        if not result or result.get("status") != "done":
+            raise network_config.NetworkConfigError("network configuration change did not complete; check the privileged helper's logs")
+        payload_result = json.loads(result["result_json"] or "{}")
+        if "error" in payload_result:
+            raise network_config.NetworkConfigError(payload_result["error"])
+    except Exception as exc:
+        context = network_context()
+        context.update({"error": str(exc)})
+        return render(request, "system_network.html", status_code=400, **context)
+    return redirect("/system/network")
+
+
+@app.post("/system/network/confirm")
+async def network_confirm_route(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    form = await request.form()
+    check_csrf(request, str(form.get("csrf", "")))
+    try:
+        network_config.request_confirm()
+        network_confirm_apply()
+        result = network_config.latest_request_result("confirm")
+        if not result or result.get("status") != "done":
+            raise network_config.NetworkConfigError("confirmation did not complete; check the privileged helper's logs")
+    except Exception as exc:
+        context = network_context()
+        context.update({"error": str(exc)})
+        return render(request, "system_network.html", status_code=400, **context)
+    return redirect("/system/network")
+
+
+# ---------------------------------------------------------------------------
+# Software Updates
+# ---------------------------------------------------------------------------
+
+def software_updates_check_apply(force: bool) -> tuple[int, str]:
+    args = ["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "update-check"]
+    if force:
+        args.append("--force")
+    return run(args)
+
+
+def software_updates_check_schedule_apply() -> tuple[int, str]:
+    # Mirrors filter_schedule_apply() exactly: redeploys the automatic-check
+    # timer drop-in from whatever was just saved to
+    # auto_check_enabled/check_interval_hours. Safe to call directly via
+    # sudo from the request handler (like update-check itself) -- this
+    # only ever writes a timer drop-in and calls systemctl
+    # enable/disable/daemon-reload, never restarts alderpointdns.service.
+    return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "update-check-schedule-deploy"])
+
+
+def software_updates_check_schedule_apply_or_raise() -> None:
+    code, out = software_updates_check_schedule_apply()
+    if code != 0:
+        raise software_updates.SoftwareUpdateError(out.strip() or "automatic-check schedule deployment failed")
+
+
+def software_updates_start_install_runner() -> tuple[int, str]:
+    # Deliberately NOT `sudo alderpointdns_compiler.py update-run` directly:
+    # installing restarts alderpointdns.service (this process's own
+    # service) partway through, which would kill a direct sudo child of
+    # this request. `systemctl start` hands the work to an independent
+    # unit (its own cgroup, owned by PID 1) that survives that restart --
+    # see app/software_updates.py's module docstring and
+    # packaging/alderpointdns-software-update.service.
+    #
+    # --no-block is required, not optional: `systemctl start` on a
+    # Type=oneshot unit is synchronous by default (it waits for the job to
+    # finish before returning), which would defeat the entire point of an
+    # independent runner -- this HTTP request (and the sudo child waiting
+    # on it) would itself be killed when alderpointdns.service restarts
+    # partway through the very install this call kicked off, exactly the
+    # failure mode this design exists to avoid. Confirmed against a real
+    # disposable-VM install (see the completion report): without
+    # --no-block, a same-process restart during install left this call
+    # blocked until the unit exited, reporting "control process exited
+    # with error" back to the browser instead of returning immediately.
+    return run(["sudo", "systemctl", "start", "--no-block", "alderpointdns-software-update.service"])
+
+
+def software_updates_context(request: Request) -> dict[str, Any]:
+    status = software_updates.update_status()
+    context = dict(status)
+    context["csrf"] = signed_session(request)["csrf"]
+    context["check_interval_choices"] = software_updates.CHECK_INTERVAL_CHOICES
+    return context
+
+
+@app.get("/system/administration/software-updates", response_class=HTMLResponse)
+def software_updates_page(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    context = software_updates_context(request)
+    context["error"] = None
+    return render(request, "system_software_updates.html", **context)
+
+
+@app.get("/system/administration/software-updates/job", response_class=HTMLResponse)
+def software_updates_job_partial(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    context = software_updates_context(request)
+    return render(request, "system_software_updates_job.html", **context)
+
+
+def software_updates_error(request: Request, message: str) -> HTMLResponse:
+    context = software_updates_context(request)
+    context["error"] = message
+    return render(request, "system_software_updates.html", status_code=400, **context)
+
+
+@app.post("/system/administration/software-updates/settings")
+async def software_updates_settings_route(request: Request, admin: sqlite3.Row = Depends(current_admin)):
+    form = await request.form()
+    check_csrf(request, str(form.get("csrf", "")))
+    ip = request.client.host if request.client else None
+    try:
+        software_updates.update_settings(
+            {
+                "auto_check_enabled": form.get("auto_check_enabled", "0"),
+                "channel": str(form.get("channel", "stable")),
+                "check_interval_hours": form.get("check_interval_hours", software_updates.DEFAULT_SETTINGS["check_interval_hours"]),
+            }
+        )
+        # Redeploys the automatic-check timer drop-in from what was just
+        # saved -- without this, changing the interval or toggling
+        # automatic checking off would update the database but never
+        # actually change the running schedule. See
+        # software_updates.deploy_check_schedule().
+        software_updates_check_schedule_apply_or_raise()
+    except software_updates.SoftwareUpdateError as exc:
+        with db() as conn:
+            audit_log(conn, admin["id"], admin["username"], "software_update_settings_change", False, ip, str(exc))
+        return software_updates_error(request, str(exc))
+    with db() as conn:
+        audit_log(conn, admin["id"], admin["username"], "software_update_settings_change", True, ip, "")
+    return redirect("/system/administration/software-updates")
+
+
+@app.post("/system/administration/software-updates/check")
+async def software_updates_check_route(request: Request, admin: sqlite3.Row = Depends(current_admin)):
+    form = await request.form()
+    check_csrf(request, str(form.get("csrf", "")))
+    ip = request.client.host if request.client else None
+    code, output = software_updates_check_apply(force=True)
+    with db() as conn:
+        audit_log(conn, admin["id"], admin["username"], "software_update_check", code == 0, ip, output[-500:])
+    if code != 0:
+        return software_updates_error(request, f"update check failed: {output}")
+    return redirect("/system/administration/software-updates")
+
+
+@app.post("/system/administration/software-updates/install")
+async def software_updates_install_route(request: Request, admin: sqlite3.Row = Depends(current_admin)):
+    form = await request.form()
+    check_csrf(request, str(form.get("csrf", "")))
+    ip = request.client.host if request.client else None
+    try:
+        status = software_updates.update_status()
+        release = status.get("latest_release")
+        if not release:
+            raise software_updates.SoftwareUpdateError("no update is currently available -- check for updates first")
+        if not status["version_status"].get("dpkg_managed"):
+            raise software_updates.SoftwareUpdateError("Software Updates: unmanaged source installation -- cannot install a package here")
+        if status["version_status"].get("mismatch"):
+            raise software_updates.SoftwareUpdateError("installed VERSION/dpkg version drift detected -- resolve this before installing an update")
+        existing_job = status.get("job")
+        if existing_job and existing_job.get("phase") not in ("completed", "failed"):
+            raise software_updates.SoftwareUpdateError("an update is already in progress")
+        job_id = software_updates.create_github_job(release, requested_by=admin["username"])
+        code, output = software_updates_start_install_runner()
+        with db() as conn:
+            audit_log(conn, admin["id"], admin["username"], "software_update_install", code == 0, ip, f"job_id={job_id} release={release.get('tag_name')}")
+        if code != 0:
+            raise software_updates.SoftwareUpdateError(f"failed to start the update runner: {output}")
+    except software_updates.SoftwareUpdateError as exc:
+        with db() as conn:
+            audit_log(conn, admin["id"], admin["username"], "software_update_install", False, ip, str(exc))
+        return software_updates_error(request, str(exc))
+    return redirect("/system/administration/software-updates")
+
+
+@app.post("/system/administration/software-updates/upload")
+async def software_updates_upload_route(
+    request: Request,
+    csrf: str = Form(...),
+    expected_sha256: str = Form(""),
+    upload: UploadFile = File(...),
+    admin: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    ip = request.client.host if request.client else None
+    tmp_path: Path | None = None
+    try:
+        status = software_updates.update_status()
+        if not status["version_status"].get("dpkg_managed"):
+            raise software_updates.SoftwareUpdateError("Software Updates: unmanaged source installation -- cannot install a package here")
+        existing_job = status.get("job")
+        if existing_job and existing_job.get("phase") not in ("completed", "failed"):
+            raise software_updates.SoftwareUpdateError("an update is already in progress")
+        # Streamed in bounded chunks to a restrictive-permission staging
+        # file -- never buffered whole in this process's memory,
+        # regardless of package size. Mirrors app/backup.py's
+        # begin_streamed_upload/finalize_streamed_upload pattern.
+        tmp_path, max_bytes = software_updates.begin_manual_upload(upload.filename or "upload.deb")
+        total = 0
+        with tmp_path.open("wb") as fh:
+            while True:
+                chunk = await upload.read(software_updates.UPLOAD_CHUNK_BYTES)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise software_updates.SoftwareUpdateError(f"uploaded package exceeds the {max_bytes // (1024 * 1024)} MiB limit")
+                fh.write(chunk)
+        if total == 0:
+            raise software_updates.SoftwareUpdateError("uploaded file is empty")
+        uploaded_path = software_updates.finalize_manual_upload(tmp_path, upload.filename or "upload.deb")
+        tmp_path = None
+        job_id = software_updates.create_manual_job(uploaded_path, expected_sha256.strip() or None, requested_by=admin["username"])
+        code, output = software_updates_start_install_runner()
+        with db() as conn:
+            audit_log(conn, admin["id"], admin["username"], "software_update_manual_upload", code == 0, ip, f"job_id={job_id} filename={uploaded_path.name}")
+        if code != 0:
+            raise software_updates.SoftwareUpdateError(f"failed to start the update runner: {output}")
+    except Exception as exc:
+        if tmp_path is not None:
+            software_updates.abort_manual_upload(tmp_path)
+        with db() as conn:
+            audit_log(conn, admin["id"], admin["username"], "software_update_manual_upload", False, ip, str(exc))
+        return software_updates_error(request, str(exc))
+    return redirect("/system/administration/software-updates")
 
 
 def notifications_context() -> dict[str, Any]:

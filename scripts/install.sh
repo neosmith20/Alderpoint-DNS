@@ -200,9 +200,20 @@ generate_secrets() {
 initialize() {
   if [ "$DRY_RUN" -eq 0 ]; then
     /opt/alderpointdns/scripts/ensure_tls_cert.sh
+    # fresh-install-init must run before analytics.py init-db: analytics.py's
+    # own init-db subcommand calls alderpointdns_compiler.py's init_db()
+    # unconditionally, which -- on a genuinely fresh database -- applies the
+    # full schema and bumps PRAGMA user_version to SCHEMA_VERSION as a side
+    # effect. If that ran first, fresh-install-init's own
+    # init_db(seed_defaults=True) call would see current_version already >=
+    # SCHEMA_VERSION and return immediately without ever seeding the default
+    # blocklists or attempting the initial deploy -- silently turning every
+    # fresh install into a no-op.
+    PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py fresh-install-init
+    # Idempotent either way (CREATE TABLE IF NOT EXISTS) once the schema
+    # already exists from fresh-install-init above.
     PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/analytics.py init-db
-    PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py deploy --no-download
-    # Narrowly the database (created above by init-db, running as root),
+    # Narrowly the database (created above by fresh-install-init, running as root),
     # not a blanket recursive chown of /var/lib/alderpointdns: backups/
     # imports/staging are already alderpointdns-owned from create_layout()
     # and never written to as root, and compiled/bind + compiled/dnsdist
