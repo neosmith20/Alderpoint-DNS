@@ -173,7 +173,12 @@ DEFAULT_FRESH_INSTALL_SOURCES = (
     ),
     DefaultSource(
         "HaGeZi Multi Normal",
-        "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/multi.txt",
+        # The raw.githubusercontent.com mirror of this file (still used by
+        # the broader PUBLIC_SOURCES catalog's own separate HaGeZi Multi
+        # Normal entry, deliberately left unchanged here) currently 404s.
+        # jsDelivr's @latest tag is HaGeZi's own documented primary Adblock
+        # link for this exact list and mirrors the same content.
+        "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/multi.txt",
         "ads_trackers",
         "hagezi/dns-blocklists",
         "Balanced ads, tracking, telemetry, device, mobile tracker, phishing, and malware coverage",

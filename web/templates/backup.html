@@ -37,7 +37,7 @@
     </div>
     <details>
       <summary>Private keys and credentials (off by default)</summary>
-      <p class="alert error" role="alert" style="display:block">Including private keys bundles TLS private keys, the DNSCrypt provider/resolver private keys, the web session-signing secret, and dnsdist API/webserver credentials into the archive. Anyone who obtains this archive (and its password, if set) can impersonate this server or the admin UI. Only enable this for a full disaster-recovery backup stored somewhere trusted.</p>
+      <p class="alert error" role="alert" style="display:block" data-static-notice="1">Including private keys bundles TLS private keys, the DNSCrypt provider/resolver private keys, the web session-signing secret, and dnsdist API/webserver credentials into the archive. Anyone who obtains this archive (and its password, if set) can impersonate this server or the admin UI. Only enable this for a full disaster-recovery backup stored somewhere trusted.</p>
       <label class="row"><input type="checkbox" name="private_keys" value="1"> Include private keys and credentials</label>
       <label class="row"><input type="checkbox" name="confirm_private_keys" value="1"> I understand the risk and confirm including private keys and credentials</label>
     </details>

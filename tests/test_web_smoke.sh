@@ -194,6 +194,31 @@ if "setInterval(() => window.location.reload()" in js:
     raise SystemExit("query log auto-refresh still reloads the full page")
 if "data-async-form" not in template or "AlderpointDNSAsyncForm" not in js or "showToast" not in js or ".toast" not in css:
     raise SystemExit("Local DNS async form and toast behavior is missing")
+# Regression: an always-on-the-page contextual warning (backup.html's
+# "including private keys..." text, system_network.html's "changing this
+# server's IP..." text) shares the .alert.error styling a real submission
+# error uses, but is not conditioned on that submission's outcome. Without
+# excluding data-static-notice elements, a *successful* async submission on
+# either page had its static warning text mistaken for the response's error
+# and shown -- then auto-dismissed after 3.6s -- as an "error" toast instead
+# of the real success message, which is exactly what made that long security
+# warning read as if it "auto-dismissed too quickly".
+if "data-static-notice" not in js or ":not([data-static-notice])" not in js:
+    raise SystemExit("async-form error detection does not exclude static contextual notices")
+backup_template = Path("/opt/alderpointdns/web/templates/backup.html").read_text()
+if 'data-static-notice="1"' not in backup_template:
+    raise SystemExit("backup.html's private-key warning is missing its data-static-notice marker")
+system_network_template = Path("/opt/alderpointdns/web/templates/system_network.html").read_text()
+if system_network_template.count('data-static-notice="1"') != 2:
+    raise SystemExit("system_network.html's contextual warnings are missing their data-static-notice markers")
+# Regression: a long/important toast (the private-key warning's own text is
+# well over the threshold) must stay up until the reader dismisses it,
+# hovers away, or unfocuses it -- not vanish on the same fixed short timer
+# ordinary short confirmations use.
+if "toast__close" not in js or "pauseToastTimer" not in js or "resumeToastTimer" not in js:
+    raise SystemExit("toast dismiss/pause-on-hover-or-focus behavior is missing")
+if "TOAST_LONG_MESSAGE_CHARS" not in js:
+    raise SystemExit("toast long-message persistence threshold is missing")
 local_dns_template = Path("/opt/alderpointdns/web/templates/local_dns.html").read_text()
 for forbidden in (
     'data-confirm="Add this host',

@@ -98,13 +98,23 @@ class FreshInstallDefaultTests(unittest.TestCase):
                 ),
                 (
                     "HaGeZi Multi Normal",
-                    "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/multi.txt",
+                    "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/multi.txt",
                     "hagezi/dns-blocklists",
                 ),
             ],
             [(source.name, source.url, source.upstream_project) for source in defaults],
         )
         self.assertTrue(all(source.purpose for source in defaults))
+
+    def test_hagezi_multi_normal_uses_the_supported_jsdelivr_url_not_the_dead_raw_github_mirror(self) -> None:
+        # Regression: raw.githubusercontent.com/hagezi/dns-blocklists/main/
+        # adblock/multi.txt currently 404s. jsDelivr's @latest tag is
+        # HaGeZi's own documented primary Adblock link for this list and
+        # mirrors the same content -- a fresh install must seed that, not
+        # the dead mirror.
+        hagezi = next(s for s in compiler.DEFAULT_FRESH_INSTALL_SOURCES if s.name == "HaGeZi Multi Normal")
+        self.assertEqual(hagezi.url, "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/multi.txt")
+        self.assertNotIn("raw.githubusercontent.com", hagezi.url)
 
     def test_fresh_install_seeds_defaults_once_as_ordinary_sources(self):
         compiler.init_db(seed_defaults=True)
@@ -328,6 +338,67 @@ class FreshInstallDefaultTests(unittest.TestCase):
         self.assertEqual(2, per_source[1].unique_active_domains)
         self.assertEqual(1, per_source[2].unique_active_domains)
         self.assertEqual(1, per_source[3].unique_active_domains)
+
+
+class ReleasePreflightCuratedSourcesScriptTests(unittest.TestCase):
+    """Offline coverage for scripts/release-preflight-check-curated-sources.py's
+    logic -- the script itself is a manual, network-requiring release step
+    (see its own docstring for why it must never run as part of this test
+    suite), but check_one()'s status/response handling and main()'s
+    exactly-3-sources guard are ordinary Python worth covering without
+    touching the network."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import importlib.util
+
+        script_path = Path(__file__).resolve().parents[1] / "scripts" / "release-preflight-check-curated-sources.py"
+        spec = importlib.util.spec_from_file_location("release_preflight_check_curated_sources", script_path)
+        cls.preflight = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.preflight)
+
+    def _fake_urlopen(self, status: int, body: bytes):
+        response = mock.MagicMock()
+        response.status = status
+        response.read.return_value = body
+        response.__enter__ = mock.Mock(return_value=response)
+        response.__exit__ = mock.Mock(return_value=False)
+        return response
+
+    def test_check_one_reports_success_for_a_200_with_content(self) -> None:
+        with mock.patch.object(self.preflight.urllib.request, "urlopen", return_value=self._fake_urlopen(200, b"||ads.example^\n")):
+            ok, detail = self.preflight.check_one("Example", "https://example.test/list.txt")
+        self.assertTrue(ok)
+        self.assertIn("200", detail)
+
+    def test_check_one_reports_failure_for_a_404(self) -> None:
+        import urllib.error
+
+        with mock.patch.object(self.preflight.urllib.request, "urlopen", side_effect=urllib.error.HTTPError("u", 404, "Not Found", {}, None)):
+            ok, detail = self.preflight.check_one("Dead Mirror", "https://example.test/gone.txt")
+        self.assertFalse(ok)
+        self.assertIn("404", detail)
+
+    def test_check_one_reports_failure_for_an_empty_200_response(self) -> None:
+        with mock.patch.object(self.preflight.urllib.request, "urlopen", return_value=self._fake_urlopen(200, b"")):
+            ok, detail = self.preflight.check_one("Empty", "https://example.test/empty.txt")
+        self.assertFalse(ok)
+        self.assertIn("empty", detail.lower())
+
+    def test_main_fails_closed_if_the_curated_catalog_is_not_exactly_three(self) -> None:
+        with mock.patch.object(self.preflight, "DEFAULT_FRESH_INSTALL_SOURCES", ()):
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(1, self.preflight.main())
+
+    def test_main_succeeds_when_every_curated_source_is_reachable(self) -> None:
+        with mock.patch.object(self.preflight, "check_one", return_value=(True, "HTTP 200, 4096+ bytes")):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(0, self.preflight.main())
+
+    def test_main_fails_if_any_curated_source_is_unreachable(self) -> None:
+        with mock.patch.object(self.preflight, "check_one", side_effect=[(True, "ok"), (False, "HTTP 404"), (True, "ok")]):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(1, self.preflight.main())
 
 
 if __name__ == "__main__":

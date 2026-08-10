@@ -31,7 +31,7 @@
     <div class="card__head"><h2>Detected Backend</h2>{{ ui.status_badge(current.backend, "healthy" if current.backend != "unsupported" else "down") }}</div>
     <p class="muted">{{ current.backend_detail }}</p>
     {% if current.ambiguous %}
-      <p class="alert error" role="alert" style="display:block">Multiple networking backends appear active on this host. Alderpoint DNS refuses to guess which one owns configuration here -- settings are shown read-only below.</p>
+      <p class="alert error" role="alert" style="display:block" data-static-notice="1">Multiple networking backends appear active on this host. Alderpoint DNS refuses to guess which one owns configuration here -- settings are shown read-only below.</p>
     {% endif %}
   </article>
   <article class="card">
@@ -60,7 +60,7 @@
 {% if current.backend != "unsupported" and not pending %}
 <section class="panel stack">
   <div class="panel__head"><h2>Change Network Configuration</h2></div>
-  <p class="alert error" role="alert" style="display:block">
+  <p class="alert error" role="alert" style="display:block" data-static-notice="1">
     Changing this server's IP address may disconnect your browser. Alderpoint DNS will
     automatically restore the previous network configuration if the new settings are not
     confirmed within 120 seconds.
