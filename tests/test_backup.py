@@ -1025,6 +1025,97 @@ class RestoreTest(BackupTestBase):
         self.assertIn("9.9.9.9:53", live_conf)
         self.assertNotIn("203.0.113.53", live_conf)
 
+    def test_restore_reconciles_upstream_from_app_config_component_alone(self) -> None:
+        # app_config (the compiled/ dir, including the generated
+        # dnsdist/upstream-forwarder.conf) restored with sqlite_data left
+        # OFF: the live upstream_resolvers rows are untouched by this
+        # restore, but app_config's own archived copy of the generated
+        # upstream file could be a different appliance's/an older run's
+        # content. Reconciliation must regenerate it from the live
+        # (untouched) database, not leave whatever app_config's raw file
+        # copy just wrote.
+        with closing(backup.connect()) as conn:
+            upstream_dns.init_db(conn)
+            conn.execute("DELETE FROM upstream_resolvers")
+            conn.execute(
+                "INSERT INTO upstream_resolvers(name, protocol, address, port, enabled, position, created_at, updated_at) "
+                "VALUES ('Live resolver', 'plain', '198.51.100.53', 53, 1, 1, '2026-08-01T00:00:00+00:00', '2026-08-01T00:00:00+00:00')"
+            )
+            conn.commit()
+        upstream_dns.DNSDIST_UPSTREAM_CONF.parent.mkdir(parents=True, exist_ok=True)
+        # The archived app_config content differs from what the live DB
+        # would render (as if this backup came from a different appliance).
+        upstream_dns.DNSDIST_UPSTREAM_CONF.write_text('newServer({address="203.0.113.53:53", name="upstream-1-Archived-resolver"})\n')
+        path = self._make_backup()
+        upstream_dns.DNSDIST_UPSTREAM_CONF.write_text('-- overwritten live content before restore\n')
+
+        components = dict.fromkeys(backup.COMPONENT_KEYS, False) | {"app_config": True}
+        with mock.patch.object(backup, "run", self.fake_run), mock.patch.object(backup, "resolves", return_value=True), \
+                mock.patch.object(backup, "_wait_active", return_value=True):
+            backup.restore_backup(path, None, components)
+
+        with closing(backup.connect()) as conn:
+            names = [r[0] for r in conn.execute("SELECT name FROM upstream_resolvers")]
+        # sqlite_data was off -- the database is untouched by this restore.
+        self.assertEqual(names, ["Live resolver"])
+        # But the live generated file must match that (untouched) database,
+        # not the archived app_config snapshot from a different resolver set.
+        live_conf = upstream_dns.DNSDIST_UPSTREAM_CONF.read_text()
+        self.assertIn("198.51.100.53:53", live_conf)
+        self.assertNotIn("203.0.113.53", live_conf)
+
+    def test_restore_reconciles_upstream_from_dnsdist_source_config_component_alone(self) -> None:
+        # dnsdist_source_config (/etc/dnsdist/dnsdist.conf) restored alone:
+        # if the archived version predates upstream_dns's include hook (or
+        # simply doesn't have it), ensure_dnsdist_include() must reinsert it
+        # via the same reconciliation call -- never leave a restored
+        # dnsdist.conf that doesn't even wire in the generated upstream
+        # config.
+        with closing(backup.connect()) as conn:
+            upstream_dns.init_db(conn)
+            conn.execute("DELETE FROM upstream_resolvers")
+            conn.execute(
+                "INSERT INTO upstream_resolvers(name, protocol, address, port, enabled, position, created_at, updated_at) "
+                "VALUES ('Quad9', 'plain', '9.9.9.9', 53, 1, 1, '2026-08-01T00:00:00+00:00', '2026-08-01T00:00:00+00:00')"
+            )
+            conn.commit()
+        # A dnsdist.conf that has never had upstream_dns's include hook
+        # wired in (e.g. an older backup) -- still has the markers
+        # ensure_dnsdist_include() itself requires to inject that hook.
+        pre_upstream_dnsdist_conf = (
+            'newServer({\n  address="127.0.0.1:5354",\n  name="bind-proxy"\n})\n'
+            'pc = newPacketCache(100)\n'
+            'getPool(""):setCache(pc)\n'
+            'addAction(OrRule({\n  QTypeRule(DNSQType.AXFR)\n}), RCodeAction(DNSRCode.REFUSED))\n'
+        )
+        backup.DNSDIST_CONF.write_text(pre_upstream_dnsdist_conf)
+        path = self._make_backup()
+        backup.DNSDIST_CONF.write_text("-- unrelated live edit since backup\n" + pre_upstream_dnsdist_conf)
+
+        components = dict.fromkeys(backup.COMPONENT_KEYS, False) | {"dnsdist_source_config": True}
+        with mock.patch.object(backup, "run", self.fake_run), mock.patch.object(backup, "resolves", return_value=True), \
+                mock.patch.object(backup, "_wait_active", return_value=True):
+            backup.restore_backup(path, None, components)
+
+        restored_dnsdist_conf = backup.DNSDIST_CONF.read_text()
+        self.assertNotIn("unrelated live edit", restored_dnsdist_conf)
+        self.assertIn(str(upstream_dns.DNSDIST_UPSTREAM_CONF), restored_dnsdist_conf)
+        self.assertIn("9.9.9.9:53", upstream_dns.DNSDIST_UPSTREAM_CONF.read_text())
+
+    def test_restore_skips_upstream_reconciliation_when_nothing_upstream_relevant_selected(self) -> None:
+        # Precision, not just recall: a restore that touches none of
+        # sqlite_data/app_config/dnsdist_source_config/bind_source_config
+        # (e.g. custom_rules alone) cannot have changed anything upstream
+        # reconciliation cares about, and must not pay for (or risk) an
+        # unnecessary dnsdist restart.
+        path = self._make_backup()
+        components = dict.fromkeys(backup.COMPONENT_KEYS, False) | {"custom_rules": True}
+        with mock.patch.object(backup, "run", self.fake_run), mock.patch.object(backup, "resolves", return_value=True), \
+                mock.patch.object(backup, "_wait_active", return_value=True), \
+                mock.patch.object(upstream_dns, "deploy_upstreams") as deploy_upstreams_mock:
+            backup.restore_backup(path, None, components)
+        deploy_upstreams_mock.assert_not_called()
+
 
 class RetentionTest(BackupTestBase):
     def test_prune_backups_keeps_only_newest_n(self) -> None:

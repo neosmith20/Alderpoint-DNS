@@ -2383,8 +2383,12 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
             # Reconcile managed upstream DNS resolvers against whatever this
             # restore actually put in place. upstream_resolvers/
             # upstream_deployments aren't in TABLE_COMPONENT_MAP, so they
-            # ride along with the broad `sqlite_data` flag, while the
-            # *generated* runtime files that must match them
+            # ride along with the broad `sqlite_data` flag specifically (not
+            # e.g. `custom_rules` or `local_dns_zones`, which merge their own
+            # tables under their own component flags without ever touching
+            # sqlite_data-gated tables) -- see _merge_database()'s
+            # `TABLE_COMPONENT_MAP.get(table, "sqlite_data")` gating. The
+            # *generated* runtime files that must match those rows
             # (compiled/dnsdist/upstream-forwarder.conf,
             # compiled/bind/upstream-forwarders.conf) live under the
             # separately-selectable `app_config` component, and the base
@@ -2400,13 +2404,20 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
             # reconciliation the rest of the app already performs after
             # every ordinary upstream edit (see webapp.py's
             # deploy_no_download_or_raise() calls) -- restore must not be a
-            # second, divergent path that can silently skip it. A failure
-            # here (e.g. every restored resolver being genuinely
-            # unreachable from this appliance) is deliberately handled by
-            # the same promoted/not-promoted branches below as the plain
-            # DNS postcheck a few lines down: never a silent no-op, and
-            # never a reason to roll back an already-validated database.
-            if promoted or any(effective.get(key) for key in ("app_config", "dnsdist_source_config", "bind_source_config")):
+            # second, divergent path that can silently skip it. Deliberately
+            # gated on `effective.get("sqlite_data")` rather than the
+            # broader `promoted` flag: `promoted` is true for *any*
+            # db-touching restore (e.g. a custom_rules-only restore, whose
+            # own gating component is "custom_rules", not "sqlite_data"),
+            # and coupling an entirely unrelated restore's success to
+            # upstream DNS reachability would itself be a new, needless
+            # failure mode this fix must not introduce. A failure here
+            # (e.g. every restored resolver being genuinely unreachable
+            # from this appliance) is deliberately handled by the same
+            # promoted/not-promoted branches below as the plain DNS
+            # postcheck a few lines down: never a silent no-op, and never a
+            # reason to roll back an already-validated database.
+            if effective.get("sqlite_data") or any(effective.get(key) for key in ("app_config", "dnsdist_source_config", "bind_source_config")):
                 touch(phase="reconciling_upstream")
                 upstream_dns.deploy_upstreams(db)
 

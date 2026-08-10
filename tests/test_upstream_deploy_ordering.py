@@ -297,6 +297,75 @@ class UpstreamCacheReconciliationOrderTests(unittest.TestCase):
         self.assertEqual(row["enabled"], 1)
         self.assertEqual(row["last_status"], "failed")
 
+    def test_successful_upstream_deploy_is_not_undone_by_a_later_cache_failure(self) -> None:
+        """Pins the exact question the reorder raises: upstream deploys
+        successfully and changes live runtime, then a *later*, independent
+        stage (cache options) fails. deploy() has never rolled back an
+        already-successful *earlier* subsystem just because a later one
+        failed (RPZ/local zones aren't undone by a custom-rules failure
+        either) -- each subsystem owns its own last-good rollback, and the
+        aggregate `deployments` row is the only thing that reports the
+        overall run as failed. Moving upstream earlier must not change that:
+        upstream's own success (SQLite, live runtime, upstream_deployments)
+        must stand untouched, truthfully recorded as 'deployed', while the
+        cache stage's own failure is independently and truthfully recorded
+        against dns_cache_deployments/deployments -- never misattributed to
+        upstream, and never silently reverting upstream's real, live
+        success."""
+        # Decoupled from self.fake_run on purpose: dns_cache.run's `dig`
+        # always fails here while upstream_dns.run's `dig` always succeeds,
+        # so the two subsystems' outcomes can't be accidentally coupled by
+        # a single shared fake the way self.fake_run ties them to the same
+        # file's content.
+        def always_ok_dig(command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+            if command[:2] == ["dig", "@127.0.0.1"]:
+                return subprocess.CompletedProcess(command, 0, ";; ->>HEADER<<- status: NOERROR\ncloudflare.com.\t300\tIN\tA\t1.1.1.1\n")
+            return subprocess.CompletedProcess(command, 0, "ok\n")
+
+        def always_fail_dig(command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+            if command[:2] == ["dig", "@127.0.0.1"]:
+                return subprocess.CompletedProcess(command, 9, ";; connection timed out; no servers could be reached\n")
+            return subprocess.CompletedProcess(command, 0, "ok\n")
+
+        with mock.patch.object(compiler, "run", always_ok_dig), \
+                mock.patch.object(dns_cache, "run", always_fail_dig), \
+                mock.patch.object(upstream_dns, "run", always_ok_dig), \
+                mock.patch.object(custom_rules, "run", always_ok_dig), \
+                mock.patch.object(compiler, "is_blocked", lambda domain: True), \
+                mock.patch.object(compiler.local_dns, "deploy_zones", lambda conn=None: 1), \
+                mock.patch.object(compiler.custom_rules, "deploy_dnsdist_layer", lambda conn, active=None: {"changed": False, "backups": [], "counts": {}}), \
+                mock.patch.object(compiler.replication, "on_deploy_success", lambda conn=None: None):
+            with self.assertRaises(Exception) as ctx:
+                compiler.deploy(download=False)
+
+        with self.connect() as conn:
+            deployment = conn.execute("SELECT status, message FROM deployments ORDER BY id DESC LIMIT 1").fetchone()
+            upstream_deployment = conn.execute("SELECT status, message FROM upstream_deployments ORDER BY id DESC LIMIT 1").fetchone()
+            cache_deployment = conn.execute("SELECT status FROM dns_cache_deployments ORDER BY id DESC LIMIT 1").fetchone()
+            resolver_row = conn.execute("SELECT enabled, last_status FROM upstream_resolvers WHERE name='Quad9'").fetchone()
+
+        # The overall run is truthfully reported as failed/rolled back, and
+        # for the right (cache) reason -- never silent, never misattributed.
+        self.assertEqual(deployment["status"], "rolled_back")
+        self.assertIn("post-deploy ordinary resolution failed after cache options reload", str(ctx.exception))
+        self.assertIn("post-deploy ordinary resolution failed after cache options reload", deployment["message"])
+
+        # Upstream's own success is untouched: still recorded as 'deployed'
+        # (never silently flipped to rolled_back just because a later,
+        # unrelated stage failed), and both SQLite and the live runtime
+        # file agree with it.
+        self.assertEqual(upstream_deployment["status"], "deployed")
+        self.assertIn("9.9.9.9:53", upstream_dns.DNSDIST_UPSTREAM_CONF.read_text())
+        self.assertEqual(resolver_row["enabled"], 1)
+        self.assertEqual(resolver_row["last_status"], "healthy")
+
+        # Cache's own failure is independently, truthfully recorded and
+        # rolled back to its own last-good (no prior cache-options.conf
+        # existed, so last-good is "not installed") -- never left half
+        # applied.
+        self.assertEqual(cache_deployment["status"], "rolled_back")
+        self.assertFalse(dns_cache.CACHE_OPTIONS_CONF.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
