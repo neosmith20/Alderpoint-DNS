@@ -52,6 +52,25 @@ date as part of the final release-publication step, not before.
   took a single upstream toggle from ~8.8s (full deploy --no-download) to
   ~1.3s (scoped upstream-deploy); on a real appliance with a full-size
   blocklist, full deploys have been observed taking 20-90s.
+- Fixed a packaging defect surfaced by live RC acceptance immediately after
+  the fix above: the newly-added scoped `upstream-deploy` sudo invocation
+  had no matching entry in `packaging/sudoers-alderpointdns`, so the
+  `alderpointdns` service account could not run it non-interactively --
+  clicking Disable (or any other upstream add/edit/toggle/move/delete
+  action) on a packaged install failed with "sudo: a terminal is required
+  to read the password; ... sudo: a password is required". Every other
+  scoped/single-stage deploy command the web app calls (cache-deploy,
+  cache-flush, encryption-deploy, etc.) was already correctly granted; only
+  `upstream-deploy` was missing, because it was newly wired into the web
+  layer rather than newly added to the compiler. Added the single missing
+  NOPASSWD entry -- explicit, exact-match, no wildcards or broadened scope --
+  and added `tests/test_sudoers_policy.py`, which (1) statically checks
+  every literal `sudo .../alderpointdns_compiler.py <subcommand>` call in
+  `app/webapp.py` against `packaging/sudoers-alderpointdns` so a future
+  missing grant fails a test instead of live acceptance, and (2), on a real
+  packaged install, uses `sudo -n -l` (an authorization check only, no
+  privileged execution) as the real `alderpointdns` account to prove the
+  *installed* policy matches too -- now part of the acceptance suite.
 
 ## v1.0.0 (unreleased)
 

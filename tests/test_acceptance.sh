@@ -15,6 +15,7 @@ set -eu
 /opt/alderpointdns/tests/test_backup.py
 /opt/alderpointdns/tests/test_replication.py
 /opt/alderpointdns/tests/test_install_upgrade_diagnostics.sh
+/opt/alderpointdns/tests/test_sudoers_policy.py
 /opt/alderpointdns/tests/test_deb_package_contents.sh
 /opt/alderpointdns/tests/test_licensing_hygiene.sh
 /opt/alderpointdns/tests/test_beta_hardening_docs.sh
