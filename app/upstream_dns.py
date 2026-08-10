@@ -362,11 +362,72 @@ def _lua_quote(value: str) -> str:
 
 
 def _address_for_dnsdist(row: dict[str, Any]) -> str:
-    bootstrap = [ip.strip() for ip in str(row.get("bootstrap_ips") or "").split(",") if ip.strip()]
-    host = bootstrap[0] if row["protocol"] in {"dot", "doh"} and not _host_is_ip(row["address"]) and bootstrap else row["address"]
+    override = str(row.get("_dnsdist_address") or "").strip()
+    if override:
+        host = override
+    else:
+        host = row["address"]
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
     return f"{host}:{int(row['port'])}"
+
+
+def _bootstrap_ips(row: dict[str, Any]) -> list[str]:
+    bootstrap = [ip.strip() for ip in str(row.get("bootstrap_ips") or "").split(",") if ip.strip()]
+    return bootstrap
+
+
+def _resolve_backend_address(row: dict[str, Any]) -> str:
+    """Return the literal backend IP dnsdist should connect to.
+
+    dnsdist 1.9's `newServer(address=...)` is an ip:port endpoint, while
+    `subjectName` supplies TLS SNI and the DoH HTTP Host. For hostname-based
+    DoH/DoT resolvers, Alderpoint's bootstrap IPs are DNS resolvers used to
+    resolve that hostname, not the encrypted backend endpoint itself.
+    """
+    address = str(row["address"])
+    if row["protocol"] not in {"dot", "doh"} or _host_is_ip(address):
+        return address
+
+    bootstrap = _bootstrap_ips(row)
+    if not bootstrap:
+        raise UpstreamDNSError(f"{row['protocol'].upper()} resolver hostname requires at least one bootstrap IP")
+
+    errors: list[str] = []
+    for qtype in ("A", "AAAA"):
+        for resolver in bootstrap:
+            result = run(["dig", f"@{resolver}", address, qtype, "+short", "+time=3", "+tries=1"], check=False)
+            if result.returncode != 0:
+                errors.append(f"{resolver} {qtype}: dig exited {result.returncode}")
+                continue
+            for raw in result.stdout.splitlines():
+                candidate = raw.strip().split()[0] if raw.strip() else ""
+                try:
+                    return str(ipaddress.ip_address(candidate))
+                except ValueError:
+                    continue
+    detail = "; ".join(errors[:4]) if errors else "no A or AAAA address returned"
+    raise UpstreamDNSError(f"bootstrap resolution failed for {address}: {detail}")
+
+
+def prepare_dnsdist_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    prepared: list[dict[str, Any]] = []
+    for row in rows:
+        copy = dict(row)
+        copy["_dnsdist_address"] = _resolve_backend_address(copy)
+        prepared.append(copy)
+    return prepared
+
+
+def prepare_dnsdist_rows_partial(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[tuple[dict[str, Any], str]]]:
+    prepared: list[dict[str, Any]] = []
+    failures: list[tuple[dict[str, Any], str]] = []
+    for row in rows:
+        try:
+            prepared.extend(prepare_dnsdist_rows([row]))
+        except UpstreamDNSError as exc:
+            failures.append((row, str(exc)))
+    return prepared, failures
 
 
 def _new_server_statement(row: dict[str, Any]) -> str:
@@ -653,7 +714,11 @@ def deploy_upstreams(conn: sqlite3.Connection | None = None) -> int:
     validation_output = ""
     activation_mode = "restart"
     try:
-        dnsdist_staged = _write_staged(stage / "upstream-forwarder.conf", render_dnsdist_upstreams(rows))
+        dnsdist_rows, render_failures = prepare_dnsdist_rows_partial(rows)
+        if not dnsdist_rows:
+            detail = render_failures[0][1] if render_failures else "no enabled upstream resolver could be rendered"
+            raise UpstreamDNSError(f"no enabled upstream resolver could be rendered: {detail}")
+        dnsdist_staged = _write_staged(stage / "upstream-forwarder.conf", render_dnsdist_upstreams(dnsdist_rows))
         bind_staged = _write_staged(stage / "upstream-forwarders.conf", render_bind_forwarders())
         for live, staged in ((DNSDIST_UPSTREAM_CONF, dnsdist_staged), (BIND_FORWARDERS_CONF, bind_staged)):
             live.parent.mkdir(parents=True, exist_ok=True)
@@ -674,7 +739,7 @@ def deploy_upstreams(conn: sqlite3.Connection | None = None) -> int:
         # wired up yet) or didn't verifiably succeed; either way the
         # static files just staged above are exactly what that restart
         # would load, so the fallback is always correct, just slower.
-        if _console_reconcile(rows):
+        if _console_reconcile(dnsdist_rows):
             activation_mode = "console"
         else:
             run(["systemctl", "restart", "dnsdist"])
@@ -717,9 +782,14 @@ def deploy_upstreams(conn: sqlite3.Connection | None = None) -> int:
                 "freshly flushed cache entry, so a stale cached answer could not mask this)"
             )
         ts = now()
+        for failed_row, failed_message in render_failures:
+            db.execute(
+                "UPDATE upstream_resolvers SET last_status='failed', last_message=?, last_checked_at=? WHERE id=?",
+                (failed_message[:400], ts, failed_row["id"]),
+            )
         backend_states = _backend_up_states()
-        down_count = 0
-        for row in rows:
+        down_count = len(render_failures)
+        for row in dnsdist_rows:
             address = _address_for_dnsdist(row)
             # Unknown (console unreachable, or this address not found in
             # showServers() output) is treated as "no claim either way" --
@@ -741,7 +811,10 @@ def deploy_upstreams(conn: sqlite3.Connection | None = None) -> int:
             # rather than guess.
         status = "deployed"
         activation_note = "applied live, no dnsdist restart" if activation_mode == "console" else "applied via dnsdist restart"
-        message = f"deployed {len(rows)} enabled upstream resolver(s) ({activation_note})"
+        if len(dnsdist_rows) == len(rows):
+            message = f"deployed {len(rows)} enabled upstream resolver(s) ({activation_note})"
+        else:
+            message = f"deployed {len(dnsdist_rows)} of {len(rows)} enabled upstream resolver(s) ({activation_note})"
         if down_count:
             message += f" ({down_count} of them currently unreachable; traffic is being served by the rest)"
     except Exception as exc:

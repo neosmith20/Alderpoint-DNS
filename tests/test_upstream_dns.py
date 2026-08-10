@@ -56,6 +56,11 @@ class UpstreamDNSTest(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def fake_run(self, command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+        if command[:1] == ["dig"] and len(command) > 3 and command[1].startswith("@") and command[1] != "@127.0.0.1":
+            if command[2] == "cloudflare-dns.com" and command[3] == "A":
+                return subprocess.CompletedProcess(command, 0, "104.16.248.249\n104.16.249.249\n")
+            if command[3] == "AAAA":
+                return subprocess.CompletedProcess(command, 0, "")
         if command[:2] == ["dig", "@127.0.0.1"]:
             return subprocess.CompletedProcess(command, 0, ";; ->>HEADER<<- status: NOERROR\ncloudflare.com.\t300\tIN\tA\t1.1.1.1\n")
         return subprocess.CompletedProcess(command, 0, "ok\n")
@@ -83,7 +88,7 @@ class UpstreamDNSTest(unittest.TestCase):
         self.assertEqual(ok["doh_path"], "/dns-query")
         self.assertEqual(ok["tls_hostname"], "dns.example")
 
-    def test_render_doh_upstream_uses_dnsdist_tls_doh_backend(self) -> None:
+    def test_prepare_doh_upstream_resolves_hostname_through_bootstrap(self) -> None:
         rows = [{
             "id": 10,
             "name": "Cloudflare DoH",
@@ -95,13 +100,54 @@ class UpstreamDNSTest(unittest.TestCase):
             "bootstrap_ips": "1.1.1.1",
             "position": 1,
         }]
-        text = upstream_dns.render_dnsdist_upstreams(rows)
+        calls: list[list[str]] = []
+
+        def bootstrap_run(command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            if command == ["dig", "@1.1.1.1", "cloudflare-dns.com", "A", "+short", "+time=3", "+tries=1"]:
+                return subprocess.CompletedProcess(command, 0, "104.16.248.249\n104.16.249.249\n")
+            return subprocess.CompletedProcess(command, 0, "")
+
+        with mock.patch.object(upstream_dns, "run", bootstrap_run):
+            prepared = upstream_dns.prepare_dnsdist_rows(rows)
+
+        text = upstream_dns.render_dnsdist_upstreams(prepared)
         self.assertIn('addLocal("127.0.0.1:5355"', text)
         self.assertIn('pool="alderpointdns_upstreams"', text)
-        self.assertIn('address="1.1.1.1:443"', text)
+        self.assertIn('address="104.16.248.249:443"', text)
+        self.assertNotIn('address="1.1.1.1:443"', text)
         self.assertIn('tls="openssl"', text)
         self.assertIn('subjectName="cloudflare-dns.com"', text)
         self.assertIn('dohPath="/dns-query"', text)
+        self.assertEqual(calls[0], ["dig", "@1.1.1.1", "cloudflare-dns.com", "A", "+short", "+time=3", "+tries=1"])
+
+    def test_prepare_doh_upstream_tries_later_bootstrap_resolvers(self) -> None:
+        rows = [{
+            "id": 11,
+            "name": "Slash8 DoH",
+            "protocol": "doh",
+            "address": "dns.slash8network.com",
+            "port": 443,
+            "doh_path": "/dns-query/redacted",
+            "tls_hostname": "dns.slash8network.com",
+            "bootstrap_ips": "1.1.1.2, 1.0.0.2",
+            "position": 1,
+        }]
+
+        def bootstrap_run(command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+            if command[:3] == ["dig", "@1.1.1.2", "dns.slash8network.com"]:
+                return subprocess.CompletedProcess(command, 9, "")
+            if command == ["dig", "@1.0.0.2", "dns.slash8network.com", "A", "+short", "+time=3", "+tries=1"]:
+                return subprocess.CompletedProcess(command, 0, "104.21.25.172\n172.67.134.106\n")
+            return subprocess.CompletedProcess(command, 0, "")
+
+        with mock.patch.object(upstream_dns, "run", bootstrap_run):
+            prepared = upstream_dns.prepare_dnsdist_rows(rows)
+
+        text = upstream_dns.render_dnsdist_upstreams(prepared)
+        self.assertIn('address="104.21.25.172:443"', text)
+        self.assertNotIn('address="1.1.1.2:443"', text)
+        self.assertIn('subjectName="dns.slash8network.com"', text)
 
     def test_deploy_multiple_enabled_resolvers(self) -> None:
         upstream_dns.add_resolver({"name": "Cloudflare DoH", "protocol": "doh", "address": "https://cloudflare-dns.com/dns-query", "bootstrap_ips": "1.1.1.1", "enabled": "1"})
@@ -110,8 +156,52 @@ class UpstreamDNSTest(unittest.TestCase):
         self.assertIn("forwarders port 5355", upstream_dns.BIND_FORWARDERS_CONF.read_text())
         dnsdist = upstream_dns.DNSDIST_UPSTREAM_CONF.read_text()
         self.assertIn("9.9.9.9:53", dnsdist)
-        self.assertIn("1.1.1.1:443", dnsdist)
+        self.assertIn("104.16.248.249:443", dnsdist)
+        self.assertNotIn("1.1.1.1:443", dnsdist)
         self.assertEqual(upstream_dns.last_deployment()["status"], "deployed")
+
+    def test_mixed_plain_and_unresolvable_doh_deploys_plain_and_marks_doh_failed(self) -> None:
+        upstream_dns.add_resolver({"name": "Broken DoH", "protocol": "doh", "address": "https://broken.example/dns-query", "bootstrap_ips": "1.1.1.1", "enabled": "1"})
+
+        def mixed_run(command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+            if command[:3] == ["dig", "@1.1.1.1", "broken.example"]:
+                return subprocess.CompletedProcess(command, 0, "")
+            return self.fake_run(command, check)
+
+        with mock.patch.object(upstream_dns, "run", mixed_run):
+            upstream_dns.deploy_upstreams()
+
+        dnsdist = upstream_dns.DNSDIST_UPSTREAM_CONF.read_text()
+        self.assertIn("9.9.9.9:53", dnsdist)
+        self.assertNotIn("broken.example", dnsdist)
+        rows = {row["name"]: row for row in upstream_dns.resolvers()}
+        self.assertEqual(rows["Broken DoH"]["last_status"], "failed")
+        self.assertIn("bootstrap resolution failed", rows["Broken DoH"]["last_message"])
+        self.assertEqual(upstream_dns.last_deployment()["status"], "deployed")
+        self.assertIn("deployed 2 of 3 enabled", upstream_dns.last_deployment()["message"])
+
+    def test_doh_only_unresolvable_bootstrap_fails_safely(self) -> None:
+        with sqlite3.connect(upstream_dns.DB_PATH) as conn:
+            conn.execute("DELETE FROM upstream_resolvers")
+            conn.execute(
+                "INSERT INTO upstream_resolvers(name, protocol, address, port, doh_path, tls_hostname, bootstrap_ips, enabled, position, created_at, updated_at) "
+                "VALUES ('Broken DoH', 'doh', 'broken.example', 443, '/dns-query', 'broken.example', '1.1.1.1', 1, 1, 'now', 'now')"
+            )
+            conn.commit()
+
+        def fail_bootstrap(command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+            if command[:3] == ["dig", "@1.1.1.1", "broken.example"]:
+                return subprocess.CompletedProcess(command, 0, "")
+            return self.fake_run(command, check)
+
+        with self.assertRaises(upstream_dns.UpstreamDNSError):
+            with mock.patch.object(upstream_dns, "run", fail_bootstrap):
+                upstream_dns.deploy_upstreams()
+
+        self.assertEqual(upstream_dns.last_deployment()["status"], "rolled_back")
+        rows = {row["name"]: row for row in upstream_dns.resolvers()}
+        self.assertTrue(rows["Broken DoH"]["enabled"])
+        self.assertEqual(rows["Broken DoH"]["last_status"], "failed")
 
     def test_failed_connectivity_rolls_back(self) -> None:
         with mock.patch.object(upstream_dns, "run", self.fake_run):

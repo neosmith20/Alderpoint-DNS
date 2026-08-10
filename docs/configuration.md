@@ -56,6 +56,11 @@ Upstream DNS resolvers are managed from DNS Settings. On first use, Alderpoint D
 imports the existing BIND `forwarders` values into `upstream_resolvers`.
 Subsequent deployments render dnsdist upstream backends for enabled plain DNS,
 DoT, and DoH resolvers and point BIND at the local dnsdist upstream listener.
+For hostname-based DoT/DoH upstreams, `bootstrap_ips` are bootstrap DNS
+resolvers used to resolve the configured upstream hostname at deploy time. They
+are not treated as the encrypted service endpoint. dnsdist receives the resolved
+endpoint IP in `newServer(address=...)`, while `subjectName` and the DoH HTTP
+Host remain the configured TLS hostname.
 DoH URLs with query strings or fragments are rejected so credentials or tokens
 are not stored or exposed in diagnostics.
 

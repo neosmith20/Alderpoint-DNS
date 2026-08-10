@@ -103,10 +103,14 @@ This was live-verified against **both** supported dnsdist builds:
 `name`, `pool`, `checkName`, `checkType`, `mustResolve`, `order`, and the
 `tls`/`validateCertificates`/`subjectName`/`dohPath` options used for
 DoT/DoH backends), and `rmServer()` all behave identically across both
-versions for Alderpoint's usage. No DoQ/DoH3-only or otherwise 2.1-only
-console feature is used anywhere in the upstream-reconciliation path, so
-this mechanism needs no capability detection of its own (unlike the
-DoQ/DoH3 *frontend* listeners above, which do).
+versions for Alderpoint's usage. For hostname-based DoT/DoH upstreams,
+Alderpoint resolves the hostname through the configured bootstrap DNS
+resolvers during deployment and gives dnsdist the resolved endpoint IP in
+`address`; `subjectName` remains the configured hostname so TLS SNI,
+certificate validation, and DoH Host semantics stay correct. No DoQ/DoH3-only
+or otherwise 2.1-only console feature is used anywhere in the
+upstream-reconciliation path, so this mechanism needs no capability detection
+of its own (unlike the DoQ/DoH3 *frontend* listeners above, which do).
 
 ### Runtime status model (Encryption Settings / `/dns-settings`)
 
