@@ -30,8 +30,13 @@ validates a request and writes a row to `software_update_jobs`.
   alderpointdns-software-update.service` to hand the work to a wholly
   independent systemd unit (its own cgroup, owned by PID 1), which execs
   `alderpointdns_compiler.py update-run` as root and survives
-  `alderpointdns.service` being restarted or killed out from under it. The
-  web request returns immediately; the browser polls durable job state.
+  `alderpointdns.service` being restarted or killed out from under it.
+  After `apt` installs the new package, that long-lived runner executes
+  `alderpointdns_compiler.py update-postcheck` in a fresh Python process
+  so post-upgrade health verification imports and reports the newly
+  installed Alderpoint DNS code, not modules loaded before installation.
+  The web request returns immediately; the browser polls durable job
+  state.
 
 Both entry points are fixed, argument-free sudoers lines -- no arbitrary
 command, path, or URL from the web process is ever passed to `sudo`.
@@ -59,16 +64,17 @@ GitHub request. Polling continues after a transient web-service restart
 because the browser retries and re-renders the same stored job when the
 service is reachable again.
 
-### v1.0.0 bridge-upgrade UI limitation
+### v1.0.0/v1.0.1 bridge-upgrade UI limitation
 
-v1.0.2 is a one-time bridge release for appliances still running v1.0.0.
+v1.0.2 is a one-time bridge release for appliances still running v1.0.0
+or v1.0.1.
 Those appliances can start the update through **System > Software Updates**,
-but the browser tab that initiated the update is still running the v1.0.0
-frontend. It does not contain the v1.0.2 durable JSON job-status polling
-renderer, so that first bridge update may not show live phase progress in
-the already-open tab while the package install restarts the web service.
-Allow the update a few minutes to finish, then refresh the page to read the
-stored job state and installed version.
+but the browser tab that initiated the update is still running the old
+frontend. It does not contain the v1.0.2 live-progress renderer, so that
+first bridge update may stay on Pending while the package install runs and
+restarts the web service. Do not repeatedly click Install. Allow the
+update a few minutes to finish, then refresh the Software Updates page to
+read the stored job state and installed version.
 
 Once v1.0.2 is installed, future updates use the v1.0.2+ live-progress UI:
 the page polls local job state, reconnects after transient web-service

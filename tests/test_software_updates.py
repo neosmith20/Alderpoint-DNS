@@ -424,6 +424,41 @@ class HealthCheckTest(unittest.TestCase):
         self.assertEqual(result["error_type"], "integrity_check_failed")
         self.assertEqual(run_mock.call_count, 1)
 
+    def test_fresh_postcheck_spawns_installed_cli_and_parses_structured_result(self) -> None:
+        health = {
+            "ok": True,
+            "database_quick_check_ok": True,
+            "database_quick_check": {"ok": True, "path": "/var/lib/alderpointdns/alderpointdns.db", "attempts": 1, "result": "ok"},
+            "installed_dpkg_version": "1.0.2-1",
+            "application_version": "1.0.2",
+            "installed_version_matches_expected": True,
+        }
+        proc = subprocess.CompletedProcess(["update-postcheck"], 0, json.dumps(health))
+        with mock.patch.object(su, "run", return_value=proc) as run_mock:
+            result = su.run_fresh_post_upgrade_health_check(expected_deb_version="1.0.2-1")
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["postcheck_process_ok"])
+        self.assertEqual(result["database_quick_check"]["result"], "ok")
+        command = run_mock.call_args.args[0]
+        self.assertEqual(command[:2], [sys.executable, "/opt/alderpointdns/app/alderpointdns_compiler.py"])
+        self.assertIn("update-postcheck", command)
+        self.assertIn("--expected-deb-version", command)
+
+    def test_fresh_postcheck_does_not_call_already_imported_health_function(self) -> None:
+        proc = subprocess.CompletedProcess(["update-postcheck"], 0, json.dumps({"ok": True, "application_version": "new-code"}))
+        with mock.patch.object(su, "post_upgrade_health_check", side_effect=AssertionError("old imported health function reused")), \
+             mock.patch.object(su, "run", return_value=proc):
+            result = su.run_fresh_post_upgrade_health_check(expected_deb_version="1.0.2-1")
+        self.assertEqual(result["application_version"], "new-code")
+
+    def test_fresh_postcheck_invalid_json_fails_closed(self) -> None:
+        proc = subprocess.CompletedProcess(["update-postcheck"], 0, "not json")
+        with mock.patch.object(su, "run", return_value=proc):
+            result = su.run_fresh_post_upgrade_health_check(expected_deb_version="1.0.2-1")
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["postcheck_process_ok"])
+        self.assertIn("invalid JSON", result["postcheck_process_error"])
+
 
 # ---------------------------------------------------------------------------
 # Job durability / pre-upgrade backup gating / full job run
@@ -460,7 +495,7 @@ class JobRunTest(SoftwareUpdatesTestBase):
             mock.patch.object(su, "inspect_deb", return_value={"Package": "alderpointdns", "Version": "0.5.0-1", "Architecture": "all"}),
             mock.patch.object(su, "installed_package_version", return_value="0.4.0~beta6-1"),
             mock.patch.object(su, "simulate_install", return_value="Inst alderpointdns"),
-            mock.patch.object(su, "post_upgrade_health_check", return_value={"ok": True, "services_ok": True, "database_quick_check_ok": True, "dns_resolution_ok": True, "webapp_responding": True, "installed_version_matches_expected": True}),
+            mock.patch.object(su, "run_fresh_post_upgrade_health_check", return_value={"ok": True, "services_ok": True, "database_quick_check_ok": True, "dns_resolution_ok": True, "webapp_responding": True, "installed_version_matches_expected": True}),
         ]
 
     def test_backup_failure_blocks_install(self) -> None:
@@ -541,7 +576,7 @@ class JobRunTest(SoftwareUpdatesTestBase):
             mock.patch.object(su, "run", side_effect=_real_dpkg_passthrough(__import__("subprocess").CompletedProcess(["apt-get"], 0, "ok"))),
             mock.patch.object(
                 su,
-                "post_upgrade_health_check",
+                "run_fresh_post_upgrade_health_check",
                 return_value={
                     "ok": False,
                     "services_ok": True,
@@ -577,6 +612,40 @@ class JobRunTest(SoftwareUpdatesTestBase):
         self.assertEqual(status["job"]["status_tone"], "warning")
         self.assertIn("database quick_check failed", status["job"]["health_summary"])
 
+    def test_run_job_invokes_fresh_postcheck_subprocess_after_install(self) -> None:
+        (self.tmp / "fake.deb").write_bytes(b"deb")
+        su.create_github_job(self.release, requested_by="admin")
+        backup_path = self.tmp / "fake-backup.tar.gz"
+        backup_path.write_bytes(b"backup")
+        fresh_health = {
+            "ok": True,
+            "services_ok": True,
+            "database_quick_check_ok": True,
+            "database_quick_check": {"ok": True, "result": "ok", "attempts": 1},
+            "dns_resolution_ok": True,
+            "webapp_responding": True,
+            "installed_version_matches_expected": True,
+        }
+        patches = self._common_patches() + [
+            mock.patch.object(backup_module, "create_backup", return_value=backup_path),
+            mock.patch.object(backup_module, "last_backup", return_value={"id": 11}),
+            mock.patch.object(su, "run", side_effect=_real_dpkg_passthrough(subprocess.CompletedProcess(["apt-get"], 0, "ok"))),
+            mock.patch.object(su, "_service_active", return_value=True),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            with mock.patch.object(su, "post_upgrade_health_check", side_effect=AssertionError("old in-memory postcheck reused")), \
+                 mock.patch.object(su, "run_fresh_post_upgrade_health_check", return_value=fresh_health) as fresh_mock:
+                result = su.run_pending_job()
+        finally:
+            for p in patches:
+                p.stop()
+        self.assertEqual(result["phase"], "completed")
+        fresh_mock.assert_called_once_with(expected_deb_version="0.5.0-1")
+        diagnostics = json.loads(result["diagnostics_json"])
+        self.assertEqual(diagnostics["post_upgrade_health"]["database_quick_check"]["result"], "ok")
+
     def test_no_pending_job_is_a_noop(self) -> None:
         self.assertIsNone(su.run_pending_job())
 
@@ -591,7 +660,7 @@ class JobRunTest(SoftwareUpdatesTestBase):
             mock.patch.object(su, "run", side_effect=_real_dpkg_passthrough(subprocess.CompletedProcess(["apt-get"], 0, "ok"))),
             mock.patch.object(
                 su,
-                "post_upgrade_health_check",
+                "run_fresh_post_upgrade_health_check",
                 return_value={
                     "ok": False,
                     "services_ok": True,
@@ -627,6 +696,31 @@ class JobRunTest(SoftwareUpdatesTestBase):
             result = su.run_pending_job()
         self.assertEqual(result["phase"], "failed")
         self.assertIn("unmanaged", result["error"])
+
+
+class UpdateRunnerSystemdSemanticsTest(unittest.TestCase):
+    def test_update_run_exits_cleanly_after_durably_recorded_job_failure(self) -> None:
+        from app import alderpointdns_compiler
+
+        result = {"phase": "failed", "result": "failed", "error": "recorded failure"}
+        with mock.patch.object(alderpointdns_compiler.software_updates, "run_pending_job", return_value=result), \
+             mock.patch("builtins.print") as print_mock:
+            alderpointdns_compiler.update_run(mock.Mock())
+        print_mock.assert_called()
+
+    def test_update_postcheck_cli_prints_structured_health_json(self) -> None:
+        from app import alderpointdns_compiler
+
+        health = {"ok": True, "application_version": "1.0.2", "database_quick_check": {"ok": True, "result": "ok"}}
+        def noisy_health(expected_deb_version=None):
+            print("old-version diagnostic that must not pollute stdout")
+            return json.dumps(health)
+
+        with mock.patch.object(alderpointdns_compiler.software_updates, "post_upgrade_health_check_json", side_effect=noisy_health), \
+             mock.patch("builtins.print") as print_mock:
+            alderpointdns_compiler.update_postcheck(mock.Mock(expected_deb_version="1.0.2-1"))
+        self.assertEqual(json.loads(print_mock.call_args.args[0])["application_version"], "1.0.2")
+        self.assertNotIn("old-version diagnostic", print_mock.call_args.args[0])
 
 
 class ReapAbandonedJobsTest(SoftwareUpdatesTestBase):
@@ -1066,6 +1160,18 @@ class CheckSchedulingTest(SoftwareUpdatesTestBase):
         self.assertNotIn("leaked-schedule-token-xyz", content)
         for call in self.systemctl_calls:
             self.assertNotIn("leaked-schedule-token-xyz", " ".join(call))
+
+
+class SoftwareUpdatesFrontendStaticTest(unittest.TestCase):
+    def test_install_submission_renders_immediate_pending_state_before_poll_response(self) -> None:
+        js = (ROOT / "web" / "static" / "app.js").read_text()
+        self.assertIn("AlderpointDNSSoftwareUpdatePending", js)
+        self.assertIn("Update in progress...", js)
+        self.assertIn("The page will update automatically.", js)
+        self.assertIn("Do not start another update while this job is active.", js)
+        self.assertIn("/system/administration/software-updates/install", js)
+        self.assertIn("/system/administration/software-updates/upload", js)
+        self.assertIn("guardUpdateActions(true)", js)
 
 
 # ---------------------------------------------------------------------------

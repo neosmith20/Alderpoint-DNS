@@ -208,12 +208,41 @@
       section.appendChild(node('p', 'muted', 'No update has been started yet.'));
       panel.replaceChildren(section);
     };
+    const guardUpdateActions = (disabled) => {
+      document.querySelectorAll(
+        'form[action$="/system/administration/software-updates/install"] button, ' +
+        'form[action$="/system/administration/software-updates/upload"] button'
+      ).forEach((button) => {
+        button.disabled = disabled;
+      });
+    };
+    const renderPendingUpdate = (operation) => {
+      const panel = document.querySelector('[data-job-status-url]');
+      if (!panel) return;
+      const section = node('section', 'panel stack');
+      section.dataset.phaseActive = '1';
+      const head = node('div', 'panel__head');
+      head.appendChild(node('h2', '', 'Update Job'));
+      head.appendChild(badge('Update in progress...', 'neutral'));
+      section.appendChild(head);
+      const live = node('p', 'muted');
+      live.setAttribute('role', 'status');
+      live.setAttribute('aria-live', 'polite');
+      const spinner = node('span', 'btn-spinner');
+      spinner.setAttribute('aria-hidden', 'true');
+      live.append(spinner, ` ${operation === 'manual' ? 'Manual update' : 'Update'} in progress... The page will update automatically.`);
+      section.appendChild(live);
+      section.appendChild(node('p', 'muted', 'Do not start another update while this job is active.'));
+      panel.replaceChildren(section);
+      guardUpdateActions(true);
+    };
     const renderJob = (panel, payload) => {
       const job = payload.job;
       if (!job) {
         renderNoJob(panel);
         return;
       }
+      guardUpdateActions(Boolean(job.active));
       const section = node('section', 'panel stack');
       section.dataset.phaseActive = job.active ? '1' : '0';
       const head = node('div', 'panel__head');
@@ -293,6 +322,7 @@
     const intervalMs = Math.max(2000, Number(softwareUpdateJobPanel.dataset.jobStatusIntervalMs || 3000));
     refreshSoftwareUpdateJob();
     window.setInterval(refreshSoftwareUpdateJob, intervalMs);
+    window.AlderpointDNSSoftwareUpdatePending = renderPendingUpdate;
   }
 
   const rangeLinks = document.querySelectorAll('[data-range-link]');
@@ -470,6 +500,13 @@
     }
     event.preventDefault();
     if (button) startPending(button);
+    const action = new URL(form.action, window.location.href).pathname;
+    if (
+      (action === '/system/administration/software-updates/install' || action === '/system/administration/software-updates/upload') &&
+      typeof window.AlderpointDNSSoftwareUpdatePending === 'function'
+    ) {
+      window.AlderpointDNSSoftwareUpdatePending(action.endsWith('/upload') ? 'manual' : 'github');
+    }
     try {
       const response = await fetch(form.action, {
         method: form.method || 'POST',

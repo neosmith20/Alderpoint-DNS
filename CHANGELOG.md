@@ -19,6 +19,12 @@ set during final public release publication, not during RC preparation.
 - Added live local update-job status polling to the Software Updates page.
   Open browsers now show update phases/messages from durable job state and
   reconnect to the same stored job state after transient web-service restarts.
+- Post-upgrade health verification now runs in a fresh installed-code
+  process after apt succeeds, so bridge updates do not reuse health-check
+  modules imported by the pre-upgrade updater runner.
+- The one-time bridge update from v1.0.0/v1.0.1 may still require a page
+  refresh afterward because those already-loaded frontends do not contain
+  the v1.0.2 live-progress renderer.
 
 ### v1.0.2 public bridge-release asset rule
 

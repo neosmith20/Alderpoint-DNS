@@ -52,6 +52,7 @@ import shutil
 import socket
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -1140,6 +1141,71 @@ def post_upgrade_health_check(expected_deb_version: str | None = None) -> dict[s
     return result
 
 
+def post_upgrade_health_check_json(expected_deb_version: str | None = None) -> str:
+    """CLI-safe wrapper used by the post-install runner subprocess."""
+    return json.dumps(post_upgrade_health_check(expected_deb_version=expected_deb_version), default=str)
+
+
+def run_fresh_post_upgrade_health_check(expected_deb_version: str | None = None) -> dict[str, Any]:
+    """Run post-upgrade health in a fresh installed-code Python process.
+
+    The software-update runner is intentionally long-lived across
+    apt-get install because it must survive alderpointdns.service being
+    restarted. That also means modules imported before apt runs remain the
+    old version in memory. The health check must execute the newly
+    installed package code, so the runner shells out to the installed
+    compiler entry point after apt succeeds and parses the JSON result.
+    """
+    command = [sys.executable, "/opt/alderpointdns/app/alderpointdns_compiler.py", "update-postcheck"]
+    if expected_deb_version is not None:
+        command.extend(["--expected-deb-version", expected_deb_version])
+    try:
+        proc = run(command, check=False, timeout=90)
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "postcheck_process_ok": False,
+            "postcheck_process_error": "fresh post-upgrade health check timed out",
+            "expected_deb_version": expected_deb_version,
+        }
+    except (OSError, FileNotFoundError) as exc:
+        return {
+            "ok": False,
+            "postcheck_process_ok": False,
+            "postcheck_process_error": redact(str(exc))[:400],
+            "expected_deb_version": expected_deb_version,
+        }
+    output = (proc.stdout or "").strip()
+    if proc.returncode != 0:
+        return {
+            "ok": False,
+            "postcheck_process_ok": False,
+            "postcheck_process_error": redact(output)[:1000] or f"fresh post-upgrade health check exited with status {proc.returncode}",
+            "postcheck_process_returncode": proc.returncode,
+            "expected_deb_version": expected_deb_version,
+        }
+    try:
+        health = json.loads(output)
+    except json.JSONDecodeError:
+        return {
+            "ok": False,
+            "postcheck_process_ok": False,
+            "postcheck_process_error": "fresh post-upgrade health check returned invalid JSON",
+            "postcheck_process_output": redact(output)[:1000],
+            "expected_deb_version": expected_deb_version,
+        }
+    if not isinstance(health, dict):
+        return {
+            "ok": False,
+            "postcheck_process_ok": False,
+            "postcheck_process_error": "fresh post-upgrade health check returned a non-object result",
+            "expected_deb_version": expected_deb_version,
+        }
+    health["postcheck_process_ok"] = True
+    health["postcheck_process_command"] = "update-postcheck"
+    return health
+
+
 # ---------------------------------------------------------------------------
 # Jobs / events (durable state, read by the web process across restarts)
 # ---------------------------------------------------------------------------
@@ -1545,8 +1611,8 @@ def _run_job(db: sqlite3.Connection, job: dict[str, Any]) -> None:
             break
         time.sleep(1)
 
-    _set_phase(db, job_id, "postcheck", "running post-upgrade health check")
-    health = post_upgrade_health_check(expected_deb_version=candidate_deb_version)
+    _set_phase(db, job_id, "postcheck", "running post-upgrade health check with newly installed code")
+    health = run_fresh_post_upgrade_health_check(expected_deb_version=candidate_deb_version)
     _diagnostics_merge(db, job_id, {"post_upgrade_health": health})
     if not health["ok"]:
         health_summary = _health_failure_summary(health)
