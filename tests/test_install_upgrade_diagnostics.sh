@@ -103,6 +103,12 @@ grep -q "alderpointdns-filter-update.timer.d" /opt/alderpointdns/packaging/debia
   echo "debian purge does not clean the filter update timer drop-in directory" >&2
   exit 1
 }
+for artifact in alderpointdns-software-update-check.timer.d dnsdist.service.d/alderpointdns.conf timers.target.wants/alderpointdns-notify.timer multi-user.target.wants/alderpointdns.service __pycache__; do
+  grep -q "$artifact" /opt/alderpointdns/packaging/debian/postrm || {
+    echo "debian purge does not clean generated artifact: $artifact" >&2
+    exit 1
+  }
+done
 grep -q "Filter Update Interval" /opt/alderpointdns/docs/configuration.md || {
   echo "configuration documentation missing the Filter Update Interval section" >&2
   exit 1

@@ -72,9 +72,9 @@ Those appliances can start the update through **System > Software Updates**,
 but the browser tab that initiated the update is still running the old
 frontend. It does not contain the v1.0.2 live-progress renderer, so that
 first bridge update may stay on Pending while the package install runs and
-restarts the web service. Do not repeatedly click Install. Allow the
-update a few minutes to finish, then refresh the Software Updates page to
-read the stored job state and installed version.
+restarts the web service. Click Install once, do not repeatedly click, allow
+the update several minutes to finish, then refresh the Software Updates page
+if it remains on Pending to read the stored job state and installed version.
 
 Once v1.0.2 is installed, future updates use the v1.0.2+ live-progress UI:
 the page polls local job state, reconnects after transient web-service
@@ -198,6 +198,13 @@ the fresh structured postcheck reported `[Errno 2] No such file or
 directory: 'sqlite3'`. That finding did not prove historical database
 corruption or contention. The health check no longer depends on that
 undeclared executable.
+
+For bridge compatibility, the v1.0.2 package still depends on Debian's
+`sqlite3` package. This is not a current v1.0.2 runtime/postcheck
+requirement. It exists so a v1.0.0/v1.0.1 update-run process that started
+before apt installed v1.0.2 can finish its old external-CLI quick_check
+after apt returns. Keep this dependency while any supported direct upgrade
+path can originate from v1.0.0 or v1.0.1.
 
 ## Manual `.deb` upload
 

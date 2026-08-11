@@ -21,6 +21,31 @@ from app import network_config as nc  # noqa: E402
 from app import backup  # noqa: E402
 
 
+class PurgeCleanupTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.postrm = (ROOT / "packaging" / "debian" / "postrm").read_text()
+
+    def test_purge_removes_generated_systemd_artifacts(self) -> None:
+        for artifact in (
+            "/etc/systemd/system/alderpointdns-software-update-check.timer.d",
+            "/etc/systemd/system/dnsdist.service.d/alderpointdns.conf",
+            "/etc/systemd/system/multi-user.target.wants/alderpointdns.service",
+            "/etc/systemd/system/multi-user.target.wants/alderpointdns-analytics.service",
+            "/etc/systemd/system/timers.target.wants/alderpointdns-notify.timer",
+            "/etc/systemd/system/timers.target.wants/alderpointdns-software-update-check.timer",
+        ):
+            self.assertIn(artifact, self.postrm)
+
+    def test_purge_does_not_delete_shared_systemd_directories(self) -> None:
+        self.assertNotRegex(self.postrm, r"rm -rf\s+/etc/systemd/system(?:\s|$)")
+        self.assertNotRegex(self.postrm, r"rm -rf\s+/etc/systemd/system/(?:multi-user|timers)\.target\.wants(?:\s|$)")
+
+    def test_purge_cleans_runtime_python_bytecode_from_app_tree(self) -> None:
+        self.assertIn("__pycache__", self.postrm)
+        self.assertIn("*.pyc", self.postrm)
+        self.assertIn("rmdir /opt/alderpointdns/app /opt/alderpointdns", self.postrm)
+
+
 class ServiceSandboxWritePathsTest(unittest.TestCase):
     """app/network_config.py writes backend persistent config files
     directly from the alderpointdns.service-sandboxed request path (no

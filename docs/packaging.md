@@ -27,8 +27,10 @@ Maintainer scripts:
   including `alderpointdns-filter-update.timer`.
 - `postrm remove`: prints where persistent data remains.
 - `postrm purge`: removes `/etc/alderpointdns`, `/var/lib/alderpointdns`,
-  `/var/log/alderpointdns`, and the runtime timer drop-in directories
-  (`alderpointdns-backup.timer.d`, `alderpointdns-filter-update.timer.d`).
+  `/var/log/alderpointdns`, Alderpoint-owned/generated systemd drop-ins and
+  enablement symlinks, and runtime Python bytecode caches under the
+  application tree. It removes only Alderpoint-owned files/directories, not
+  shared systemd parent directories.
 
 A normal uninstall must not destroy persistent data. Only `apt purge
 alderpointdns` is allowed to remove configuration, database, generated DNS files,

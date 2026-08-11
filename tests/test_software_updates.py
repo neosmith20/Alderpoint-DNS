@@ -773,6 +773,36 @@ class UpdaterExecutableContractTest(unittest.TestCase):
         source = (ROOT / "app" / "software_updates.py").read_text()
         self.assertNotIn('["sqlite3"', source)
 
+    def test_package_keeps_sqlite3_as_old_runner_bridge_dependency(self) -> None:
+        control = (ROOT / "packaging" / "debian" / "control").read_text()
+        build_script = (ROOT / "scripts" / "build-deb.sh").read_text()
+        for text in (control, build_script):
+            self.assertRegex(text, r"Depends: .*sqlite3|sqlite3,")
+
+    def test_old_runner_bridge_sequence_has_sqlite3_available_after_apt(self) -> None:
+        """Models the v1.0.0/v1.0.1 bootstrap path.
+
+        The old runner stays alive across apt, so it cannot use the new
+        Python quick_check implementation. Its old postcheck invokes the
+        sqlite3 CLI after apt-get install returns. The v1.0.2 package must
+        therefore depend on sqlite3 so apt installs it before the old
+        runner reaches that postcheck phase.
+        """
+        events: list[str] = []
+
+        def apt_install_candidate_package() -> None:
+            events.append("apt-get install alderpointdns_1.0.2-1_all.deb")
+            events.append("dependency sqlite3 installed")
+
+        def old_v101_postcheck() -> str:
+            self.assertIn("dependency sqlite3 installed", events)
+            events.append("old sqlite3 CLI quick_check")
+            return "ok"
+
+        apt_install_candidate_package()
+        self.assertEqual(old_v101_postcheck(), "ok")
+        self.assertEqual(events[-1], "old sqlite3 CLI quick_check")
+
     def test_updater_external_executables_are_accounted_for(self) -> None:
         expected = {"apt-get", "dig", "dpkg", "dpkg-deb", "dpkg-query", "systemctl", "update-postcheck"}
         self.assertEqual(set(su.UPDATER_EXTERNAL_EXECUTABLE_CONTRACT), expected)

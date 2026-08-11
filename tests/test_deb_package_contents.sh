@@ -26,6 +26,8 @@ echo "$DEPENDS_FIELD" | grep -q 'dnsdist (>= 2\.' && \
   fail "control Depends requires dnsdist >= 2.x again, which is only available from the PowerDNS project's own repository -- this regresses the stock Debian 13 install failure ('none of the choices are installable')"
 echo "$DEPENDS_FIELD" | grep -q 'bind9-dnsutils' || \
   fail "control Depends does not require bind9-dnsutils, which provides dig for Software Updates post-upgrade DNS health verification"
+echo "$DEPENDS_FIELD" | grep -q 'sqlite3' || \
+  fail "control Depends does not require sqlite3, which is a v1.0.0/v1.0.1 bridge shim for old in-memory update runners that still invoke the sqlite3 CLI after installing v1.0.2"
 echo "$DEPENDS_FIELD" | grep -q 'sudo' || \
   fail "control Depends does not require sudo, which the web UI uses for the fixed software-update runner handoff"
 
@@ -36,6 +38,9 @@ dpkg-deb -x "$DEB" "$ROOT/data"
 POSTINST="$ROOT/ctl/postinst"
 test -f "$POSTINST" || fail "postinst missing from built package"
 sh -n "$POSTINST" || fail "postinst has a shell syntax error"
+POSTRM="$ROOT/ctl/postrm"
+test -f "$POSTRM" || fail "postrm missing from built package"
+sh -n "$POSTRM" || fail "postrm has a shell syntax error"
 
 # --- secrets.env / dnsdist-api.key / dnsdist-web.creds ownership+mode ---
 # The confirmed defect: these were left 0600 root:alderpointdns (group has
@@ -220,6 +225,21 @@ grep -q '^User=alderpointdns$' "$ROOT/data/lib/systemd/system/alderpointdns-noti
   fail "alderpointdns-notify.service does not run as the unprivileged alderpointdns account"
 grep -q 'systemctl enable --now alderpointdns-notify.timer' "$POSTINST" || \
   fail "postinst does not enable alderpointdns-notify.timer"
+
+# --- Purge cleanup: generated systemd artifacts and runtime bytecode ---
+for artifact in \
+  'alderpointdns-software-update-check.timer.d' \
+  'dnsdist.service.d/alderpointdns.conf' \
+  'multi-user.target.wants/alderpointdns.service' \
+  'multi-user.target.wants/alderpointdns-analytics.service' \
+  'timers.target.wants/alderpointdns-notify.timer' \
+  'timers.target.wants/alderpointdns-software-update-check.timer' \
+  '__pycache__' \
+  "'*.pyc'"; do
+  grep -q "$artifact" "$POSTRM" || fail "postrm purge cleanup does not mention $artifact"
+done
+grep -Eq 'rm -rf /etc/systemd/system($|[[:space:]])' "$POSTRM" && \
+  fail "postrm purge must not recursively remove the shared /etc/systemd/system directory"
 
 # --- Software Updates: check timer (auto-check on by default), independent
 # install runner unit (never enabled/started automatically -- installs only

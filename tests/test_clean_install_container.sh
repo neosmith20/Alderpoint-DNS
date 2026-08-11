@@ -475,6 +475,14 @@ run "grep -E 'password=|apiKey=|setKey\(' /etc/dnsdist/dnsdist.conf" >> "$WORK/c
 echo "+ purging and reinstalling to prove two independent installs mint different credentials"
 run "apt-get purge -y -qq alderpointdns >/dev/null 2>&1; systemctl reset-failed >/dev/null 2>&1; true"
 test -z "$(run "ls /etc/alderpointdns 2>/dev/null" || true)" || fail "purge did not remove /etc/alderpointdns"
+for artifact in \
+  /etc/systemd/system/alderpointdns-software-update-check.timer.d/alderpointdns.conf \
+  /etc/systemd/system/multi-user.target.wants/alderpointdns.service \
+  /etc/systemd/system/multi-user.target.wants/alderpointdns-analytics.service \
+  /etc/systemd/system/dnsdist.service.d/alderpointdns.conf \
+  /etc/systemd/system/timers.target.wants/alderpointdns-notify.timer; do
+  run "test ! -e '$artifact'" || fail "purge left Alderpoint-owned generated systemd artifact: $artifact"
+done
 
 install_and_check "install-B"
 run "md5sum /etc/alderpointdns/secrets.env /etc/alderpointdns/dnsdist-api.key /etc/alderpointdns/dnsdist-web.creds" > "$WORK/creds-B.txt"

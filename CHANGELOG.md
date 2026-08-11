@@ -26,9 +26,15 @@ set during final public release publication, not during RC preparation.
   Python's stdlib `sqlite3` module instead of requiring the optional
   external `sqlite3` command-line tool, preserving structured diagnostics
   for lock/busy, SQLite errors, and genuine non-`ok` quick_check results.
+- Added `sqlite3` as a v1.0.2 bridge dependency for update jobs initiated by
+  v1.0.0/v1.0.1, whose already-running updater process still invokes the old
+  external `sqlite3` CLI postcheck after apt installs v1.0.2.
 - The one-time bridge update from v1.0.0/v1.0.1 may still require a page
   refresh afterward because those already-loaded frontends do not contain
   the v1.0.2 live-progress renderer.
+- Purge cleanup now removes Alderpoint-owned/generated systemd drop-ins,
+  enablement symlinks, and runtime Python bytecode caches without deleting
+  shared systemd directories.
 
 ### v1.0.2 public bridge-release asset rule
 

@@ -4,9 +4,23 @@ set -e
 case "$1" in
   purge)
     rm -rf /etc/alderpointdns /var/lib/alderpointdns /var/log/alderpointdns
-    # Runtime timer drop-in directories written from stored schedule settings.
+    # Alderpoint-owned/generated systemd drop-ins, enablement symlinks, and
+    # runtime timer drop-ins. Remove only our files/directories, never the
+    # shared systemd parent directories themselves.
     rm -rf /etc/systemd/system/alderpointdns-backup.timer.d \
-      /etc/systemd/system/alderpointdns-filter-update.timer.d
+      /etc/systemd/system/alderpointdns-filter-update.timer.d \
+      /etc/systemd/system/alderpointdns-software-update-check.timer.d \
+      /etc/systemd/system/dnsdist.service.d/alderpointdns.conf \
+      /etc/systemd/system/multi-user.target.wants/alderpointdns.service \
+      /etc/systemd/system/multi-user.target.wants/alderpointdns-analytics.service \
+      /etc/systemd/system/timers.target.wants/alderpointdns-backup.timer \
+      /etc/systemd/system/timers.target.wants/alderpointdns-filter-update.timer \
+      /etc/systemd/system/timers.target.wants/alderpointdns-notify.timer \
+      /etc/systemd/system/timers.target.wants/alderpointdns-software-update-check.timer
+    if [ -d /opt/alderpointdns ]; then
+      find /opt/alderpointdns \( -type d -name __pycache__ -o -type f -name '*.pyc' \) -exec rm -rf {} + 2>/dev/null || true
+      rmdir /opt/alderpointdns/app /opt/alderpointdns 2>/dev/null || true
+    fi
     systemctl daemon-reload >/dev/null 2>&1 || true
     ;;
   remove)

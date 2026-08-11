@@ -53,7 +53,7 @@ Core packages (the `.deb`'s own `Depends:` installs these automatically;
 listed here for a manual/from-source install):
 
 ```sh
-apt-get install -y bind9 bind9-dnsutils knot-dnsutils curl openssl jq sudo dnsdist
+apt-get install -y bind9 bind9-dnsutils knot-dnsutils curl openssl jq sqlite3 sudo dnsdist
 apt-get install -y python3-fastapi uvicorn python3-uvicorn python3-jinja2 python3-argon2 python3-itsdangerous python3-multipart python3-yaml
 apt-get install -y python3-dnspython python3-httpx python3-aioquic
 apt-get install -y python3-openpyxl
