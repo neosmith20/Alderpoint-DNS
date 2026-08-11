@@ -58,6 +58,7 @@ TEST_DOMAIN = "cloudflare.com"
 POST_DEPLOY_CHECK_TIMEOUT_SECONDS = 5.0
 POST_DEPLOY_CHECK_RETRY_INTERVAL_SECONDS = 0.5
 UPSTREAM_PROBE_INTERVAL_SECONDS = 30.0
+UPSTREAM_PROBE_MIN_SPACING_SECONDS = 5.0
 UPSTREAM_PROBE_TIMEOUT_SECONDS = 4.0
 UPSTREAM_PROBE_FAILURE_THRESHOLD = 3
 PROTOCOLS = {"plain", "dot", "doh"}
@@ -859,7 +860,7 @@ def probe_and_record(row: dict[str, Any], *, timeout: float = UPSTREAM_PROBE_TIM
 def probe_spacing_seconds(provider_count: int, *, interval: float = UPSTREAM_PROBE_INTERVAL_SECONDS) -> float:
     if provider_count <= 0:
         return interval
-    return max(0.5, interval / provider_count)
+    return max(UPSTREAM_PROBE_MIN_SPACING_SECONDS, interval / provider_count)
 
 
 def upstream_probe_loop(stop_event: threading.Event, *, interval: float = UPSTREAM_PROBE_INTERVAL_SECONDS, timeout: float = UPSTREAM_PROBE_TIMEOUT_SECONDS) -> None:

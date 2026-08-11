@@ -342,10 +342,71 @@ class UpstreamDNSTest(unittest.TestCase):
         self.assertEqual(probed, [1, 4, 2])
         self.assertEqual(waits[:3], [10.0, 15.0, 15.0])
 
-    def test_probe_spacing_targets_thirty_seconds_per_provider(self) -> None:
+    def test_probe_spacing_targets_thirty_seconds_per_provider_for_normal_counts(self) -> None:
         self.assertEqual(upstream_dns.probe_spacing_seconds(1), 30.0)
         self.assertEqual(upstream_dns.probe_spacing_seconds(3), 10.0)
         self.assertEqual(upstream_dns.probe_spacing_seconds(6), 5.0)
+
+    def test_probe_spacing_enforces_minimum_global_spacing_for_large_counts(self) -> None:
+        self.assertEqual(upstream_dns.probe_spacing_seconds(10), 5.0)
+        self.assertEqual(upstream_dns.probe_spacing_seconds(12), 5.0)
+        self.assertEqual(upstream_dns.probe_spacing_seconds(20), 5.0)
+        self.assertEqual(upstream_dns.probe_spacing_seconds(60), 5.0)
+        self.assertEqual(upstream_dns.probe_spacing_seconds(300), 5.0)
+
+        self.assertEqual(upstream_dns.probe_spacing_seconds(10) * 10, 50.0)
+        self.assertEqual(upstream_dns.probe_spacing_seconds(12) * 12, 60.0)
+        self.assertEqual(upstream_dns.probe_spacing_seconds(20) * 20, 100.0)
+
+    def test_scheduler_never_catches_up_with_multi_probe_burst_after_restart_or_delay(self) -> None:
+        rows = [
+            {"id": idx, "name": f"resolver-{idx}", "protocol": "plain", "address": f"203.0.113.{idx}", "port": 53, "position": idx, "enabled": 1}
+            for idx in range(1, 61)
+        ]
+        waits: list[float] = []
+        probed: list[int] = []
+
+        class StopAfterFourWaits(threading.Event):
+            def wait(self, timeout: float | None = None) -> bool:  # type: ignore[override]
+                waits.append(float(timeout or 0))
+                if len(waits) >= 4:
+                    self.set()
+                return self.is_set()
+
+        with mock.patch.object(upstream_dns, "enabled_resolvers", return_value=rows), \
+             mock.patch.object(upstream_dns, "probe_and_record", lambda row, timeout=4.0: probed.append(int(row["id"]))):
+            upstream_dns.upstream_probe_loop(StopAfterFourWaits(), interval=30.0)
+
+        self.assertEqual(probed, [1, 2, 3, 4])
+        self.assertEqual(waits, [5.0, 5.0, 5.0, 5.0])
+        self.assertEqual(len(probed), len(waits))
+
+    def test_dynamic_provider_changes_keep_one_probe_per_spacing_without_burst(self) -> None:
+        large_set = [
+            {"id": idx, "name": f"resolver-{idx}", "protocol": "plain", "address": f"198.51.100.{idx}", "port": 53, "position": idx, "enabled": 1}
+            for idx in range(1, 21)
+        ]
+        small_set = large_set[:3]
+        waits: list[float] = []
+        probed: list[int] = []
+
+        class StopAfterFourWaits(threading.Event):
+            def wait(self, timeout: float | None = None) -> bool:  # type: ignore[override]
+                waits.append(float(timeout or 0))
+                if len(waits) >= 4:
+                    self.set()
+                return self.is_set()
+
+        def dynamic_rows() -> list[dict[str, object]]:
+            return large_set if len(probed) < 2 else small_set
+
+        with mock.patch.object(upstream_dns, "enabled_resolvers", dynamic_rows), \
+             mock.patch.object(upstream_dns, "probe_and_record", lambda row, timeout=4.0: probed.append(int(row["id"]))):
+            upstream_dns.upstream_probe_loop(StopAfterFourWaits(), interval=30.0)
+
+        self.assertEqual(probed, [1, 2, 3, 1])
+        self.assertEqual(waits, [5.0, 5.0, 10.0, 10.0])
+        self.assertEqual(len(probed), len(waits))
 
     def test_probe_protocol_dispatch_uses_direct_protocol_implementation(self) -> None:
         rows = {
