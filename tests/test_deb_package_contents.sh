@@ -24,6 +24,10 @@ echo "$DEPENDS_FIELD" | grep -q 'dnsdist (>= 1.9.0)' || \
   fail "control Depends does not require dnsdist (>= 1.9.0), the lowest version bound Debian 13's own archive dnsdist (1.9.x) satisfies with no third-party repository -- a stock 'apt-get install -y ./alderpointdns.deb' must resolve dependencies successfully with no PowerDNS repository configured"
 echo "$DEPENDS_FIELD" | grep -q 'dnsdist (>= 2\.' && \
   fail "control Depends requires dnsdist >= 2.x again, which is only available from the PowerDNS project's own repository -- this regresses the stock Debian 13 install failure ('none of the choices are installable')"
+echo "$DEPENDS_FIELD" | grep -q 'bind9-dnsutils' || \
+  fail "control Depends does not require bind9-dnsutils, which provides dig for Software Updates post-upgrade DNS health verification"
+echo "$DEPENDS_FIELD" | grep -q 'sudo' || \
+  fail "control Depends does not require sudo, which the web UI uses for the fixed software-update runner handoff"
 
 mkdir -p "$ROOT/ctl" "$ROOT/data"
 dpkg-deb -e "$DEB" "$ROOT/ctl"

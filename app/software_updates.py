@@ -937,6 +937,15 @@ SERVICES = ("alderpointdns", "alderpointdns-analytics", "named", "dnsdist")
 SQLITE_HEALTH_BUSY_TIMEOUT_MS = 5000
 SQLITE_HEALTH_ATTEMPTS = 6
 SQLITE_HEALTH_RETRY_DELAY_SECONDS = 2
+UPDATER_EXTERNAL_EXECUTABLE_CONTRACT = {
+    "apt-get": "supported Debian/Ubuntu package manager",
+    "dig": "bind9-dnsutils package dependency",
+    "dpkg": "Debian/Ubuntu base package manager",
+    "dpkg-deb": "Debian/Ubuntu base package manager",
+    "dpkg-query": "Debian/Ubuntu base package manager",
+    "systemctl": "systemd service manager on supported appliances",
+    "update-postcheck": "Alderpoint DNS packaged compiler entry point executed with the current Python interpreter",
+}
 
 
 def _service_active(unit: str) -> bool:
@@ -954,49 +963,41 @@ def _sqlite_quick_check_busy(output: str) -> bool:
 
 def _database_quick_check() -> dict[str, Any]:
     path = str(DB_PATH)
-    command = ["sqlite3", "-cmd", f".timeout {SQLITE_HEALTH_BUSY_TIMEOUT_MS}", path, "PRAGMA quick_check;"]
     last_failure: dict[str, Any] | None = None
     for attempt in range(1, SQLITE_HEALTH_ATTEMPTS + 1):
+        conn: sqlite3.Connection | None = None
         try:
-            proc = run(command, check=False, timeout=30)
-        except subprocess.TimeoutExpired:
-            last_failure = {
-                "ok": False,
-                "path": path,
-                "attempts": attempt,
-                "error_type": "timeout",
-                "message": "SQLite quick_check timed out.",
-            }
-        except (OSError, FileNotFoundError) as exc:
+            conn = sqlite3.connect(path, timeout=SQLITE_HEALTH_BUSY_TIMEOUT_MS / 1000)
+            conn.execute(f"PRAGMA busy_timeout={SQLITE_HEALTH_BUSY_TIMEOUT_MS}")
+            rows = conn.execute("PRAGMA quick_check").fetchall()
+        except sqlite3.OperationalError as exc:
+            message = redact(str(exc))[:1000]
+            error_type = "database_busy" if _sqlite_quick_check_busy(message) else "sqlite_error"
+            last_failure = {"ok": False, "path": path, "attempts": attempt, "error_type": error_type, "message": message}
+        except sqlite3.DatabaseError as exc:
             return {
                 "ok": False,
                 "path": path,
                 "attempts": attempt,
-                "error_type": "execution_error",
-                "message": redact(str(exc))[:400],
+                "error_type": "sqlite_error",
+                "message": redact(str(exc))[:1000],
             }
         else:
-            output = (proc.stdout or "").strip()
-            if proc.returncode == 0 and output == "ok":
+            values = [str(row[0]) for row in rows if row and row[0] is not None]
+            output = "\n".join(values).strip()
+            if output == "ok":
                 return {"ok": True, "path": path, "attempts": attempt, "result": "ok"}
-            if proc.returncode == 0:
-                return {
-                    "ok": False,
-                    "path": path,
-                    "attempts": attempt,
-                    "error_type": "integrity_check_failed",
-                    "result": redact(output)[:1000],
-                }
-            error_type = "database_busy" if _sqlite_quick_check_busy(output) else "sqlite_error"
-            last_failure = {
+            return {
                 "ok": False,
                 "path": path,
                 "attempts": attempt,
-                "error_type": error_type,
-                "returncode": proc.returncode,
-                "message": redact(output)[:1000] or f"sqlite3 exited with status {proc.returncode}",
+                "error_type": "integrity_check_failed",
+                "result": redact(output)[:1000] or "PRAGMA quick_check returned no rows.",
             }
-        if attempt < SQLITE_HEALTH_ATTEMPTS and last_failure and last_failure.get("error_type") in {"database_busy", "timeout"}:
+        finally:
+            if conn is not None:
+                conn.close()
+        if attempt < SQLITE_HEALTH_ATTEMPTS and last_failure and last_failure.get("error_type") == "database_busy":
             time.sleep(SQLITE_HEALTH_RETRY_DELAY_SECONDS)
             continue
         break

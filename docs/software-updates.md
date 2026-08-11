@@ -183,12 +183,21 @@ When the repository is later made public, no credential is required and
 8. Post-upgrade health check: all four services active, `PRAGMA
    quick_check`, ordinary DNS resolution, the web app's own `/healthz`
    responding locally, and the installed dpkg version matching what was
-   expected. The SQLite check uses a bounded busy timeout/retry window so
-   service-start contention does not get mistaken for corruption, and its
-   stored diagnostic distinguishes lock/busy/timeouts, execution errors,
-   and genuine quick_check failures. A failed health check fails health
-   verification (the pre-upgrade backup is retained) -- Software Updates
-   does not claim automatic package rollback.
+   expected. The SQLite check uses Python's stdlib `sqlite3` module
+   directly against the production DB path -- not the optional external
+   `sqlite3` CLI -- with a bounded busy timeout/retry window so
+   service-start contention does not get mistaken for corruption. Its
+   stored diagnostic distinguishes lock/busy conditions, SQLite errors,
+   and genuine non-`ok` quick_check results. A failed health check fails
+   health verification (the pre-upgrade backup is retained) -- Software
+   Updates does not claim automatic package rollback.
+
+RC #3 live testing proved that the earlier opaque `database_quick_check_ok:
+false` symptom can be caused by a missing external `sqlite3` executable:
+the fresh structured postcheck reported `[Errno 2] No such file or
+directory: 'sqlite3'`. That finding did not prove historical database
+corruption or contention. The health check no longer depends on that
+undeclared executable.
 
 ## Manual `.deb` upload
 

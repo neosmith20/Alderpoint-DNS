@@ -22,6 +22,10 @@ set during final public release publication, not during RC preparation.
 - Post-upgrade health verification now runs in a fresh installed-code
   process after apt succeeds, so bridge updates do not reuse health-check
   modules imported by the pre-upgrade updater runner.
+- Post-upgrade database health now runs `PRAGMA quick_check` through
+  Python's stdlib `sqlite3` module instead of requiring the optional
+  external `sqlite3` command-line tool, preserving structured diagnostics
+  for lock/busy, SQLite errors, and genuine non-`ok` quick_check results.
 - The one-time bridge update from v1.0.0/v1.0.1 may still require a page
   refresh afterward because those already-loaded frontends do not contain
   the v1.0.2 live-progress renderer.

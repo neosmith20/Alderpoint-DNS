@@ -364,6 +364,11 @@ class AptSimulationTest(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class HealthCheckTest(unittest.TestCase):
+    def _temporary_db_path(self) -> Path:
+        tmp = Path(tempfile.mkdtemp(prefix="alderpointdns-health-test-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        return tmp / "alderpointdns.db"
+
     def test_all_healthy(self) -> None:
         with mock.patch.object(su, "_service_active", return_value=True), \
              mock.patch.object(su, "_database_quick_check", return_value={"ok": True, "path": "/tmp/test.db", "result": "ok"}), \
@@ -394,35 +399,67 @@ class HealthCheckTest(unittest.TestCase):
         self.assertFalse(result["database_quick_check_ok"])
         self.assertEqual(result["database_quick_check"]["error_type"], "integrity_check_failed")
 
+    def test_quick_check_healthy_database_uses_python_sqlite(self) -> None:
+        db_path = self._temporary_db_path()
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE health_probe(id INTEGER PRIMARY KEY)")
+        conn.commit()
+        conn.close()
+        with mock.patch.object(su, "DB_PATH", db_path), \
+             mock.patch.object(su, "run", side_effect=AssertionError("quick_check must not spawn sqlite3 CLI")):
+            result = su._database_quick_check()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["path"], str(db_path))
+        self.assertEqual(result["attempts"], 1)
+        self.assertEqual(result["result"], "ok")
+
     def test_quick_check_retries_transient_database_busy(self) -> None:
-        calls = [
-            subprocess.CompletedProcess(["sqlite3"], 5, "Error: database is locked"),
-            subprocess.CompletedProcess(["sqlite3"], 0, "ok\n"),
-        ]
-        with mock.patch.object(su, "run", side_effect=calls) as run_mock, \
+        conn_mock = mock.Mock()
+        conn_mock.execute.side_effect = [None, mock.Mock(fetchall=mock.Mock(return_value=[("ok",)]))]
+        with mock.patch.object(su.sqlite3, "connect", side_effect=[sqlite3.OperationalError("database is locked"), conn_mock]) as connect_mock, \
              mock.patch.object(su.time, "sleep") as sleep_mock:
             result = su._database_quick_check()
         self.assertTrue(result["ok"])
         self.assertEqual(result["attempts"], 2)
-        self.assertEqual(run_mock.call_count, 2)
+        self.assertEqual(connect_mock.call_count, 2)
         sleep_mock.assert_called_once_with(su.SQLITE_HEALTH_RETRY_DELAY_SECONDS)
+        conn_mock.close.assert_called_once()
 
     def test_quick_check_database_busy_reports_diagnostic_after_retries(self) -> None:
-        busy = subprocess.CompletedProcess(["sqlite3"], 5, "Error: database is locked")
-        with mock.patch.object(su, "run", return_value=busy), \
-             mock.patch.object(su.time, "sleep"):
+        with mock.patch.object(su, "SQLITE_HEALTH_ATTEMPTS", 2), \
+             mock.patch.object(su.sqlite3, "connect", side_effect=sqlite3.OperationalError("database is locked")), \
+             mock.patch.object(su.time, "sleep") as sleep_mock:
             result = su._database_quick_check()
         self.assertFalse(result["ok"])
+        self.assertEqual(result["attempts"], 2)
         self.assertEqual(result["error_type"], "database_busy")
         self.assertIn("database is locked", result["message"])
+        sleep_mock.assert_called_once_with(su.SQLITE_HEALTH_RETRY_DELAY_SECONDS)
 
     def test_quick_check_genuine_corruption_fails_closed_without_retry(self) -> None:
-        corrupt = subprocess.CompletedProcess(["sqlite3"], 0, "*** in database main ***\nPage 1 is never used")
-        with mock.patch.object(su, "run", return_value=corrupt) as run_mock:
+        conn_mock = mock.Mock()
+        conn_mock.execute.side_effect = [
+            None,
+            mock.Mock(fetchall=mock.Mock(return_value=[("*** in database main ***",), ("Page 1 is never used",)])),
+        ]
+        with mock.patch.object(su.sqlite3, "connect", return_value=conn_mock) as connect_mock, \
+             mock.patch.object(su.time, "sleep") as sleep_mock:
             result = su._database_quick_check()
         self.assertFalse(result["ok"])
         self.assertEqual(result["error_type"], "integrity_check_failed")
-        self.assertEqual(run_mock.call_count, 1)
+        self.assertIn("Page 1 is never used", result["result"])
+        self.assertEqual(connect_mock.call_count, 1)
+        sleep_mock.assert_not_called()
+        conn_mock.close.assert_called_once()
+
+    def test_quick_check_is_independent_of_missing_path_executables(self) -> None:
+        db_path = self._temporary_db_path()
+        sqlite3.connect(db_path).close()
+        with mock.patch.object(su, "DB_PATH", db_path), \
+             mock.patch.dict(os.environ, {"PATH": ""}), \
+             mock.patch.object(su, "run", side_effect=AssertionError("Python sqlite quick_check must not use subprocesses")):
+            result = su._database_quick_check()
+        self.assertTrue(result["ok"])
 
     def test_fresh_postcheck_spawns_installed_cli_and_parses_structured_result(self) -> None:
         health = {
@@ -708,6 +745,13 @@ class UpdateRunnerSystemdSemanticsTest(unittest.TestCase):
             alderpointdns_compiler.update_run(mock.Mock())
         print_mock.assert_called()
 
+    def test_update_run_unexpected_crash_still_exits_nonzero(self) -> None:
+        from app import alderpointdns_compiler
+
+        with mock.patch.object(alderpointdns_compiler.software_updates, "run_pending_job", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                alderpointdns_compiler.update_run(mock.Mock())
+
     def test_update_postcheck_cli_prints_structured_health_json(self) -> None:
         from app import alderpointdns_compiler
 
@@ -721,6 +765,20 @@ class UpdateRunnerSystemdSemanticsTest(unittest.TestCase):
             alderpointdns_compiler.update_postcheck(mock.Mock(expected_deb_version="1.0.2-1"))
         self.assertEqual(json.loads(print_mock.call_args.args[0])["application_version"], "1.0.2")
         self.assertNotIn("old-version diagnostic", print_mock.call_args.args[0])
+
+
+class UpdaterExecutableContractTest(unittest.TestCase):
+    def test_postcheck_database_health_has_no_external_sqlite3_contract(self) -> None:
+        self.assertNotIn("sqlite3", su.UPDATER_EXTERNAL_EXECUTABLE_CONTRACT)
+        source = (ROOT / "app" / "software_updates.py").read_text()
+        self.assertNotIn('["sqlite3"', source)
+
+    def test_updater_external_executables_are_accounted_for(self) -> None:
+        expected = {"apt-get", "dig", "dpkg", "dpkg-deb", "dpkg-query", "systemctl", "update-postcheck"}
+        self.assertEqual(set(su.UPDATER_EXTERNAL_EXECUTABLE_CONTRACT), expected)
+        depends = (ROOT / "packaging" / "debian" / "control").read_text()
+        self.assertIn("bind9-dnsutils", depends)  # provides dig for postcheck DNS resolution
+        self.assertIn("sudo", depends)  # required by the web-to-systemd update runner handoff
 
 
 class ReapAbandonedJobsTest(SoftwareUpdatesTestBase):
