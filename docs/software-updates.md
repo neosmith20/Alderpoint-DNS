@@ -51,9 +51,13 @@ Because `alderpointdns-software-update.service` is an independent unit,
 `alderpointdns.service` restarting mid-install does not interrupt it. The
 browser reconnects (or the administrator reloads the page later) and reads
 job state from the database -- never from the process that started it. The
-Software Updates page auto-refreshes its job panel every 3 seconds while a
-job is in a non-terminal phase (via the same `data-refresh-url` fragment
-mechanism `/system/logs` already uses).
+Software Updates page polls
+`/system/administration/software-updates/job/status` about every 3 seconds
+while open. That endpoint reads only durable local job state and installed
+version state; it never starts another update check, download, install, or
+GitHub request. Polling continues after a transient web-service restart
+because the browser retries and re-renders the same stored job when the
+service is reachable again.
 
 ### Abandoned-job recovery
 
@@ -92,9 +96,21 @@ defaulting to the project's own repo).
   winner must be strictly newer than the resolved installed version
   (`backup.version_source_status()["resolved"]`) -- never a downgrade,
   never "the same version".
-- Exactly one compatible `.deb` asset (`alderpointdns_<ver>_<all|amd64>.deb`)
-  and exactly one `SHA256SUMS` asset are required; zero or more than one of
-  either is rejected as missing/ambiguous.
+- Exactly one `SHA256SUMS` asset is required.
+- The updater accepts Alderpoint DNS `.deb` assets named
+  `alderpointdns_<deb-version>_<all|amd64>.deb`; the special
+  `alderpointdns_latest_all.deb` filename is treated as an alias/fallback,
+  not as an independent competing package when an exact versioned package
+  exists.
+- When the release tag implies an expected Debian package version (for
+  example `v1.0.2` -> `1.0.2-1`), the updater prefers the exact matching
+  versioned package. If no versioned package is present, it may use
+  `alderpointdns_latest_all.deb`, but the later checksum and package-version
+  validation still has to prove the selected package matches the candidate
+  release.
+- Multiple genuinely compatible versioned packages for the same expected
+  version still fail closed as ambiguous. The updater never simply picks the
+  first `.deb` returned by GitHub.
 
 ## Private repository credential
 

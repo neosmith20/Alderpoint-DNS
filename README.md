@@ -7,9 +7,10 @@ application on top. dnsdist is the client-facing DNS frontend; BIND is a
 localhost-only validating cache/forwarder; filtering policy is compiled into
 a BIND RPZ zone and reloaded through a staged, validated deployment path.
 
-> **Status: stable.** This is **v1.0.0**, Alderpoint DNS's first stable
-> release. It is functional and acceptance-tested, but several features are
-> intentionally partial or narrowly scoped by design. See
+> **Status: stable release line.** This source tree is preparing
+> **v1.0.2**. The current public stable release is published through GitHub
+> Releases. Alderpoint DNS is functional and acceptance-tested, but several
+> features are intentionally partial or narrowly scoped by design. See
 > [Known limitations](#known-limitations) below and
 > `docs/known-limitations.md` and `docs/hardening-review.md` for the honest
 > current state before you rely on it for anything important.
@@ -93,8 +94,9 @@ curl -fL -o alderpointdns.deb https://github.com/neosmith20/Alderpoint-DNS/relea
 ```
 
 This one command always installs the current latest stable release — the
-`alderpointdns_latest_all.deb` asset is byte-identical to that release's
-versioned package (e.g. `alderpointdns_1.0.0-1_all.deb`), just without a
+`alderpointdns_latest_all.deb` asset is the stable, permanent latest-release
+download name. For normal releases it is byte-identical to that release's
+versioned package (e.g. `alderpointdns_1.0.x-1_all.deb`), just without a
 version number in the filename, so the command never needs updating.
 `apt install` resolves and installs BIND, dnsdist, and every other
 dependency from Debian's own repositories; nothing is piped from the

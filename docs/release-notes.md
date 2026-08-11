@@ -4,7 +4,43 @@ These notes describe what changed in each release. See
 `docs/known-limitations.md` for the current honest state of the project.
 Everything below `v1.0.0` was a beta-cycle build.
 
-## v1.0.0 (unreleased)
+## v1.0.2 (unreleased)
+
+A targeted Software Updates bugfix release:
+
+- Fixed update installs failing when a GitHub release contains both the
+  versioned `.deb` package and the `alderpointdns_latest_all.deb` alias.
+- The updater now prefers the exact versioned package for the candidate
+  release and treats `alderpointdns_latest_all.deb` as fallback only.
+- Checksum, package metadata, version, architecture, newer-than-installed,
+  and apt-simulation validation remain unchanged.
+- Genuinely ambiguous versioned package sets still fail closed.
+- The Software Updates page now polls durable local job state while open, so
+  browsers show update phases/messages and reconnect to stored job progress
+  after transient web-service restarts instead of appearing frozen.
+
+Public v1.0.2 is also a one-time bridge release for unmodified v1.0.0
+appliances. See `docs/packaging.md` before publishing its GitHub release
+assets: public v1.0.2 intentionally uses a latest-only `.deb` asset layout.
+
+## v1.0.1
+
+A targeted upstream DNS reliability bugfix release:
+
+- Fixed managed-upstream resolver deployments so upstream reconciliation runs
+  before cache-option deployment can be misled by stale live upstream state.
+- Backup restore now reconciles managed upstream resolvers when restored data
+  or generated runtime/base files may have changed.
+- Replication explicitly excludes managed upstream resolvers, which remain
+  appliance-local.
+- DNS Settings upstream changes use scoped upstream deployment with serialized
+  restart pacing, reducing UI stalls and avoiding dnsdist start-rate limits.
+- Last-enabled-upstream validation now rejects invalid zero-enabled desired
+  state before committing it to the database.
+- Direct upstream health telemetry now performs independent plain/DoH probes
+  and the DNS Settings page refreshes local stored telemetry while open.
+
+## v1.0.0
 
 Alderpoint DNS's first stable release. Highlights since the beta.4/beta.5
 line, by area (see `CHANGELOG.md` for the full detailed log):

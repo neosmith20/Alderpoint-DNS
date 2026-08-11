@@ -2,7 +2,43 @@
 
 All notable changes to Alderpoint DNS are documented in this file.
 
-## v1.0.1 (unreleased)
+## v1.0.2 (unreleased)
+
+A targeted Software Updates bugfix and one-time bridge release. The date is
+set during final public release publication, not during RC preparation.
+
+- Fixed Software Updates failing when a GitHub release contains both the
+  canonical versioned `.deb` and `alderpointdns_latest_all.deb`.
+- The updater now prefers the exact versioned package for the candidate
+  release and treats `alderpointdns_latest_all.deb` as fallback only.
+- Integrity validation remains unchanged: the selected package is still
+  verified through `SHA256SUMS`, `dpkg-deb` package metadata, release-version
+  correspondence, architecture checks, newer-than-installed checks, and apt
+  simulation before installation.
+- Genuinely ambiguous versioned package sets still fail closed.
+- Added live local update-job status polling to the Software Updates page.
+  Open browsers now show update phases/messages from durable job state and
+  reconnect to the same stored job state after transient web-service restarts.
+
+### v1.0.2 public bridge-release asset rule
+
+Public v1.0.2 exists partly to let unmodified v1.0.0 appliances upgrade
+through **System > Software Updates**. The v1.0.0 updater accepts a release
+only when it sees exactly one compatible Alderpoint DNS `.deb` asset.
+
+Therefore the **PUBLIC v1.0.2 GitHub release MUST contain exactly one `.deb`
+asset**:
+
+- `alderpointdns_latest_all.deb`
+- `SHA256SUMS`
+
+Do **not** attach `alderpointdns_1.0.2-1_all.deb` to the public v1.0.2 GitHub
+release. The private/local RC artifact may still use the normal versioned
+filename. After v1.0.2, normal public releases may return to publishing both
+the versioned `.deb` and `alderpointdns_latest_all.deb`, because v1.0.2
+contains the corrected selector.
+
+## v1.0.1
 
 A targeted bugfix release. The date above is set to the actual publication
 date as part of the final release-publication step, not before.
@@ -183,7 +219,7 @@ date as part of the final release-publication step, not before.
   dnsdist, verifying restart count, DB/runtime parity, deployment history
   truthfulness, and DNS availability together.
 
-## v1.0.0 (unreleased)
+## v1.0.0
 
 The first stable release. The date above is set to the actual publication
 date as part of the final release-publication step, not before -- see
