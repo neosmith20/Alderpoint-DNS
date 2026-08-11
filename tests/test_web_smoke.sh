@@ -289,7 +289,7 @@ context = {
     "cert": {"state": "present", "detail": "/etc/alderpointdns/certs/alderpointdns-lab.crt"},
     "proxy_backend": "enabled",
     "client_address_test": {"state": "Configured", "detail": "PROXYv2 forwarding configured; BIND backend listener 127.0.0.1:5354 (tcp+udp) is up"},
-    "upstream_resolvers": [{"id": 1, "name": "Cloudflare DoH", "protocol": "doh", "address": long_domain, "port": 443, "doh_path": "/dns-query", "tls_hostname": long_domain, "bootstrap_ips": "1.1.1.1, 1.0.0.1", "enabled": 1, "last_status": "healthy", "last_latency_ms": 4.2, "last_message": "resolved through active upstream set"}],
+    "upstream_resolvers": [{"id": 1, "name": "Cloudflare DoH", "protocol": "doh", "address": long_domain, "port": 443, "doh_path": "/dns-query", "tls_hostname": long_domain, "bootstrap_ips": "1.1.1.1, 1.0.0.1", "enabled": 1, "last_status": "healthy", "last_latency_ms": 4.2, "last_message": "dnsdist marked this upstream reachable", "display_status": "healthy", "display_latency_ms": 4.2, "display_message": "dnsdist marked this upstream reachable"}],
     "upstream_deployment": {"status": "deployed", "message": "deployed 1 enabled upstream resolver(s)"},
     "upstream_error": None,
 }

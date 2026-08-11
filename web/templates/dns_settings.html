@@ -73,9 +73,9 @@
                 <label>Bootstrap IPs <textarea form="upstreamEdit{{ resolver.id }}" name="bootstrap_ips" rows="2">{{ resolver.bootstrap_ips }}</textarea></label>
             </td>
             <td>
-              {{ ui.status_badge(resolver.last_status|title, "healthy" if resolver.last_status == "healthy" else "down" if resolver.last_status == "failed" else "unavailable") }}
-              {% if resolver.last_latency_ms is not none %}<span class="secondary muted">{{ "%.1f"|format(resolver.last_latency_ms) }} ms</span>{% endif %}
-              {% if resolver.last_message %}<span class="secondary muted wrap-anywhere">{{ resolver.last_message }}</span>{% endif %}
+              {{ ui.status_badge(resolver.display_status|title, "healthy" if resolver.display_status == "healthy" else "down" if resolver.display_status == "failed" else "neutral" if resolver.display_status == "disabled" else "unavailable") }}
+              {% if resolver.display_latency_ms is not none %}<span class="secondary muted">{{ "%.1f"|format(resolver.display_latency_ms) }} ms</span>{% else %}<span class="secondary muted">No data yet</span>{% endif %}
+              {% if resolver.display_message %}<span class="secondary muted wrap-anywhere">{{ resolver.display_message }}</span>{% endif %}
             </td>
             <td class="actions-col">
                 <div class="actions">

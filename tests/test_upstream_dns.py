@@ -160,6 +160,76 @@ class UpstreamDNSTest(unittest.TestCase):
         self.assertNotIn("1.1.1.1:443", dnsdist)
         self.assertEqual(upstream_dns.last_deployment()["status"], "deployed")
 
+    def test_deploy_records_real_backend_latency_not_pool_check_duration(self) -> None:
+        upstream_dns.add_resolver({"name": "Cloudflare DoH", "protocol": "doh", "address": "https://cloudflare-dns.com/dns-query", "bootstrap_ips": "1.1.1.1", "enabled": "1"})
+
+        def latency_run(command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+            if command[:2] == ["dnsdist", "-e"]:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    "\n".join(
+                        [
+                            "0   Quad9                9.9.9.9:53                                      up     0.0       0          1          1          9       0   0.0   4.2     -           0 alderpointdns_upstreams",
+                            "1   Quad9-secondary      149.112.112.112:53                              up     0.0       0          2          1          3       0   0.0   8.4     -           0 alderpointdns_upstreams",
+                            "2   Cloudflare-DoH       104.16.248.249:443                              up     0.0       0          3          1          5       0   0.0     -  19.3           0 alderpointdns_upstreams",
+                        ]
+                    )
+                    + "\n",
+                )
+            return self.fake_run(command, check)
+
+        with mock.patch.object(upstream_dns, "run", latency_run):
+            upstream_dns.deploy_upstreams()
+
+        rows = {row["name"]: row for row in upstream_dns.resolvers()}
+        self.assertEqual(rows["Imported upstream 1"]["last_latency_ms"], 4.2)
+        self.assertEqual(rows["Imported upstream 2"]["last_latency_ms"], 8.4)
+        self.assertEqual(rows["Cloudflare DoH"]["last_latency_ms"], 19.3)
+        self.assertNotEqual(rows["Imported upstream 1"]["last_latency_ms"], rows["Imported upstream 2"]["last_latency_ms"])
+        self.assertNotEqual(rows["Cloudflare DoH"]["last_latency_ms"], rows["Imported upstream 1"]["last_latency_ms"])
+
+    def test_doh_backend_with_no_tcp_latency_sample_keeps_latency_empty(self) -> None:
+        with sqlite3.connect(upstream_dns.DB_PATH) as conn:
+            conn.execute("DELETE FROM upstream_resolvers")
+            conn.execute(
+                "INSERT INTO upstream_resolvers(name, protocol, address, port, doh_path, tls_hostname, bootstrap_ips, enabled, position, created_at, updated_at) "
+                "VALUES ('Idle DoH', 'doh', 'cloudflare-dns.com', 443, '/dns-query', 'cloudflare-dns.com', '1.1.1.1', 1, 1, 'now', 'now')"
+            )
+            conn.commit()
+
+        def no_sample_run(command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+            if command[:2] == ["dnsdist", "-e"]:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    "0   Idle-DoH             104.16.248.249:443                              up     0.0       0          1          1          0       0   0.0     -     -           0 alderpointdns_upstreams\n",
+                )
+            return self.fake_run(command, check)
+
+        with mock.patch.object(upstream_dns, "run", no_sample_run):
+            upstream_dns.deploy_upstreams()
+
+        row = upstream_dns.resolvers()[0]
+        self.assertEqual(row["last_status"], "healthy")
+        self.assertIsNone(row["last_latency_ms"])
+
+    def test_disabled_resolver_display_state_does_not_show_stale_health_or_latency(self) -> None:
+        resolver_id = upstream_dns.resolvers()[0]["id"]
+        with sqlite3.connect(upstream_dns.DB_PATH) as conn:
+            conn.execute(
+                "UPDATE upstream_resolvers SET enabled=0, last_status='healthy', last_message='resolved through active upstream set', last_latency_ms=1286.7 WHERE id=?",
+                (resolver_id,),
+            )
+            conn.commit()
+
+        row = upstream_dns.display_resolvers()[0]
+        self.assertEqual(row["display_status"], "disabled")
+        self.assertEqual(row["display_message"], "Disabled")
+        self.assertIsNone(row["display_latency_ms"])
+        self.assertEqual(row["last_status"], "healthy")
+        self.assertEqual(row["last_latency_ms"], 1286.7)
+
     def test_mixed_plain_and_unresolvable_doh_deploys_plain_and_marks_doh_failed(self) -> None:
         upstream_dns.add_resolver({"name": "Broken DoH", "protocol": "doh", "address": "https://broken.example/dns-query", "bootstrap_ips": "1.1.1.1", "enabled": "1"})
 

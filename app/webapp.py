@@ -2267,7 +2267,7 @@ def dns_settings(request: Request, _: sqlite3.Row = Depends(current_admin)):
         cert=cert_status(),
         proxy_backend="enabled" if proxy_backend else "not enabled",
         client_address_test=client_address_test,
-        upstream_resolvers=upstream_dns.resolvers(),
+        upstream_resolvers=upstream_dns.display_resolvers(),
         upstream_deployment=upstream_dns.last_deployment(),
         upstream_error=None,
     )

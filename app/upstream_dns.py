@@ -252,6 +252,20 @@ def enabled_resolvers(conn: sqlite3.Connection | None = None) -> list[dict[str, 
     return [row for row in resolvers(conn) if row["enabled"]]
 
 
+def display_resolvers(conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
+    rows = resolvers(conn)
+    for row in rows:
+        if not row["enabled"]:
+            row["display_status"] = "disabled"
+            row["display_message"] = "Disabled"
+            row["display_latency_ms"] = None
+        else:
+            row["display_status"] = row.get("last_status", "unknown")
+            row["display_message"] = row.get("last_message", "")
+            row["display_latency_ms"] = row.get("last_latency_ms")
+    return rows
+
+
 def add_resolver(values: dict[str, Any]) -> int:
     data = validate_resolver(values, require_enabled_set=True)
     with connect() as conn:
@@ -546,8 +560,18 @@ def _capture_service_diagnostics(unit: str, lines: int = 60) -> str:
         return ""
 
 
-def _backend_up_states() -> dict[str, bool]:
-    """Best-effort per-backend up/down state straight from dnsdist's own
+def _parse_backend_metric(value: str) -> float | None:
+    value = str(value or "").strip()
+    if not value or value == "-":
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def _backend_snapshots() -> dict[str, dict[str, Any]]:
+    """Best-effort per-backend state straight from dnsdist's own
     console (`showServers()`), keyed by the exact "host:port" string
     `_address_for_dnsdist()` renders for each row -- so it can be matched
     directly against the enabled resolver set.
@@ -563,21 +587,45 @@ def _backend_up_states() -> dict[str, bool]:
 
     Returns {} if the console can't be reached -- callers must treat that
     as "state unknown", never as "everything is up": marking a row healthy
-    on missing data would silently reintroduce the same false-positive."""
+    on missing data would silently reintroduce the same false-positive.
+
+    dnsdist's Lat column is the backend's forwarded UDP query latency; TCP
+    is the forwarded TCP/TLS/HTTPS backend latency. DoT/DoH upstreams use the
+    TCP/TLS path, so their per-resolver latency must come from TCP, not from
+    a pool-level deployment health-check timer."""
     try:
         result = run(["dnsdist", "-e", "showServers()"], check=False)
     except Exception:
         return {}
     if result.returncode != 0:
         return {}
-    states: dict[str, bool] = {}
+    states: dict[str, dict[str, Any]] = {}
     for line in result.stdout.splitlines():
         parts = line.split()
-        if len(parts) < 4 or not parts[0].isdigit():
+        if len(parts) < 14 or not parts[0].isdigit():
             continue
         address, state = parts[2], parts[3]
-        states[address] = state.strip().lower() == "up"
+        try:
+            queries = int(parts[8])
+        except ValueError:
+            queries = 0
+        states[address] = {
+            "up": state.strip().lower() == "up",
+            "queries": queries,
+            "lat_ms": _parse_backend_metric(parts[11]),
+            "tcp_ms": _parse_backend_metric(parts[12]),
+        }
     return states
+
+
+def _backend_up_states() -> dict[str, bool]:
+    return {address: bool(snapshot["up"]) for address, snapshot in _backend_snapshots().items()}
+
+
+def _latency_for_resolver(row: dict[str, Any], snapshot: dict[str, Any]) -> float | None:
+    if row["protocol"] in {"dot", "doh"}:
+        return snapshot.get("tcp_ms")
+    return snapshot.get("lat_ms") if snapshot.get("lat_ms") is not None else snapshot.get("tcp_ms")
 
 
 def _live_upstream_pool_snapshot() -> list[dict[str, str]] | None:
@@ -745,7 +793,6 @@ def deploy_upstreams(conn: sqlite3.Connection | None = None) -> int:
             run(["systemctl", "restart", "dnsdist"])
             activation_mode = "restart"
         run(["rndc", "reconfig"])
-        start = time.monotonic()
         # This check must prove the *newly staged* upstream set can actually
         # resolve, not merely that BIND has some old cached answer for
         # TEST_DOMAIN lying around from before this deploy. A live incident
@@ -774,7 +821,6 @@ def deploy_upstreams(conn: sqlite3.Connection | None = None) -> int:
             if time.monotonic() >= deadline:
                 break
             time.sleep(POST_DEPLOY_CHECK_RETRY_INTERVAL_SECONDS)
-        latency_ms = (time.monotonic() - start) * 1000.0
         if result.returncode != 0 or "status: NOERROR" not in result.stdout or "\tA\t" not in result.stdout:
             raise RuntimeError(
                 "post-deploy upstream resolution failed: none of the currently enabled "
@@ -787,7 +833,7 @@ def deploy_upstreams(conn: sqlite3.Connection | None = None) -> int:
                 "UPDATE upstream_resolvers SET last_status='failed', last_message=?, last_checked_at=? WHERE id=?",
                 (failed_message[:400], ts, failed_row["id"]),
             )
-        backend_states = _backend_up_states()
+        backend_states = _backend_snapshots()
         down_count = len(render_failures)
         for row in dnsdist_rows:
             address = _address_for_dnsdist(row)
@@ -795,17 +841,20 @@ def deploy_upstreams(conn: sqlite3.Connection | None = None) -> int:
             # showServers() output) is treated as "no claim either way" --
             # never as healthy -- so a probe failure can't manufacture a
             # false-positive the way the blanket update it replaced could.
-            is_up = backend_states.get(address)
-            if is_up is False:
+            snapshot = backend_states.get(address)
+            if snapshot is None:
+                continue
+            if snapshot.get("up") is False:
                 down_count += 1
                 db.execute(
                     "UPDATE upstream_resolvers SET last_status='failed', last_message=?, last_checked_at=? WHERE id=?",
                     ("dnsdist marked this upstream unreachable; other enabled upstreams are handling traffic", ts, row["id"]),
                 )
-            elif is_up is True:
+            elif snapshot.get("up") is True:
+                backend_latency_ms = _latency_for_resolver(row, snapshot)
                 db.execute(
-                    "UPDATE upstream_resolvers SET last_status='healthy', last_message='resolved through active upstream set', last_latency_ms=?, last_checked_at=? WHERE id=?",
-                    (latency_ms, ts, row["id"]),
+                    "UPDATE upstream_resolvers SET last_status='healthy', last_message='dnsdist marked this upstream reachable', last_latency_ms=?, last_checked_at=? WHERE id=?",
+                    (backend_latency_ms, ts, row["id"]),
                 )
             # else: state unknown -- leave the row's last_status untouched
             # rather than guess.
