@@ -106,6 +106,13 @@ class UpstreamScopedDeployTest(unittest.TestCase):
 
         self.patches = [
             mock.patch.object(webapp, "global_service_status", lambda: {"label": "Active", "tone": "healthy", "detail": "test"}),
+            mock.patch.object(webapp, "dnsdist_version_info", lambda: {"ok": True, "version": "dnsdist test", "features": "", "feature_set": set()}),
+            mock.patch.object(webapp, "proxy_backend_enabled", lambda: True),
+            mock.patch.object(webapp, "client_address_preservation_status", lambda: {"state": "Configured", "detail": "test"}),
+            mock.patch.object(webapp, "protocol_statuses", lambda: []),
+            mock.patch.object(webapp, "cert_status", lambda: {"state": "present", "detail": "test"}),
+            mock.patch.object(webapp.encryption, "dnsdist_capabilities", lambda: {"doh": True, "dot": True, "doq": False, "doh3": False, "dnscrypt": False}),
+            mock.patch.object(webapp, "dns_allow_all_enabled", lambda: False),
         ]
         for patcher in self.patches:
             patcher.start()
@@ -177,6 +184,34 @@ class UpstreamScopedDeployTest(unittest.TestCase):
         with sqlite3.connect(webapp.DB_PATH) as conn:
             row = conn.execute("SELECT id FROM upstream_resolvers WHERE name=?", (name,)).fetchone()
         return row[0]
+
+    def test_dns_settings_exposes_upstream_telemetry_hooks_by_provider_id(self) -> None:
+        cloudflare_id = self._resolver_id("Cloudflare")
+        response = self.client.get("/dns-settings")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('data-upstream-telemetry-url="/dns-settings/upstreams/telemetry"', response.text)
+        self.assertIn('data-upstream-telemetry-interval-ms="5000"', response.text)
+        self.assertIn(f'data-upstream-resolver-id="{cloudflare_id}"', response.text)
+        self.assertIn("data-upstream-health", response.text)
+
+    def test_upstream_telemetry_endpoint_returns_stored_rows_without_external_probe(self) -> None:
+        cloudflare_id = self._resolver_id("Cloudflare")
+        quad9_id = self._resolver_id("Quad9")
+        upstream_dns.record_probe_result(cloudflare_id, ok=True, latency_ms=23.4)
+
+        with mock.patch.object(upstream_dns, "probe_resolver") as probe, \
+             mock.patch.object(upstream_dns, "probe_and_record") as probe_record:
+            response = self.client.get("/dns-settings/upstreams/telemetry")
+
+        self.assertEqual(response.status_code, 200)
+        probe.assert_not_called()
+        probe_record.assert_not_called()
+        rows = {row["id"]: row for row in response.json()["resolvers"]}
+        self.assertEqual(rows[cloudflare_id]["status"], "healthy")
+        self.assertEqual(rows[cloudflare_id]["latency_ms"], 23.4)
+        self.assertEqual(rows[quad9_id]["status"], "disabled")
+        self.assertIsNone(rows[quad9_id]["latency_ms"])
 
     # -- 7. scoped path: unrelated subsystems are never touched --------
 

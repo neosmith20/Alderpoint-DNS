@@ -2278,6 +2278,7 @@ def dns_settings(request: Request, _: sqlite3.Row = Depends(current_admin)):
         upstream_resolvers=upstream_dns.display_resolvers(),
         upstream_deployment=upstream_dns.last_deployment(),
         upstream_error=None,
+        upstream_telemetry_poll_ms=int(upstream_dns.UPSTREAM_TELEMETRY_POLL_SECONDS * 1000),
     )
 
 
@@ -2287,6 +2288,11 @@ def dns_settings_error(request: Request, message: str, status_code: int = 400) -
     body = response.body.decode()
     body = body.replace('<section class="grid">', f'<div class="alert error">{message}</div>\n<section class="grid">', 1)
     return HTMLResponse(body, status_code=status_code)
+
+
+@app.get("/dns-settings/upstreams/telemetry")
+def upstream_telemetry(_: sqlite3.Row = Depends(current_admin)):
+    return JSONResponse({"resolvers": upstream_dns.probe_telemetry()})
 
 
 @app.post("/dns-settings/upstreams/add")

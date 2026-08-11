@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Regression coverage for the v1.0.1 RC #3 blocker found during live
 packaged-appliance acceptance on dns1: disabling the last enabled upstream
-resolver through the UI returned "at least one upstream resolver must be
-enabled" as expected, but `upstream_dns.set_enabled(resolver_id, False)`
+resolver through the UI returned "At least one upstream resolver must be
+enabled." as expected, but `upstream_dns.set_enabled(resolver_id, False)`
 had already *committed* the all-disabled desired state before
 `deploy_upstreams()` ever ran and rejected it. deploy_upstreams()'s own
 check only ever protected the *runtime* dnsdist/BIND config (it always
@@ -100,7 +100,7 @@ class LastEnabledGuardUnitTest(unittest.TestCase):
         only_id = rows[0]["id"]
         with self.assertRaises(upstream_dns.UpstreamDNSError) as ctx:
             upstream_dns.set_enabled(only_id, False)
-        self.assertIn("at least one upstream resolver must be enabled", str(ctx.exception))
+        self.assertEqual(str(ctx.exception), "At least one upstream resolver must be enabled.")
         # DB must still show it enabled -- the mutation must never have committed.
         self.assertTrue(upstream_dns.resolvers()[0]["enabled"])
 
@@ -298,7 +298,7 @@ class LastEnabledGuardWebTest(unittest.TestCase):
             data={"csrf": self.csrf, "enabled": "0"},
         )
         self.assertEqual(resp.status_code, 400)
-        self.assertIn("at least one upstream resolver must be enabled", resp.text)
+        self.assertIn("At least one upstream resolver must be enabled.", resp.text)
         # Truthful UI/DB state: the resolver is still enabled.
         self.assertTrue(upstream_dns.resolvers()[0]["enabled"])
 
@@ -309,7 +309,7 @@ class LastEnabledGuardWebTest(unittest.TestCase):
             data={"csrf": self.csrf},
         )
         self.assertEqual(resp.status_code, 400)
-        self.assertIn("at least one upstream resolver must be enabled", resp.text)
+        self.assertIn("At least one upstream resolver must be enabled.", resp.text)
         self.assertEqual(len(upstream_dns.resolvers()), 1)
 
     def test_editing_the_last_enabled_resolver_to_disabled_is_rejected_and_never_reaches_sudo(self) -> None:
@@ -322,7 +322,7 @@ class LastEnabledGuardWebTest(unittest.TestCase):
             },
         )
         self.assertEqual(resp.status_code, 400)
-        self.assertIn("at least one upstream resolver must be enabled", resp.text)
+        self.assertIn("At least one upstream resolver must be enabled.", resp.text)
         self.assertTrue(upstream_dns.resolvers()[0]["enabled"])
 
 

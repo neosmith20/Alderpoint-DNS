@@ -144,7 +144,7 @@ before_conf=$(cat /var/lib/alderpointdns/compiled/dnsdist/upstream-forwarder.con
 if "$COMPILER" upstream-deploy >/tmp/alderpointdns-zero-upstream.out 2>&1; then
   fail "zero enabled resolvers: upstream-deploy unexpectedly succeeded"
 fi
-grep -q "at least one upstream resolver must be enabled" /tmp/alderpointdns-zero-upstream.out || fail "zero enabled resolvers: rejection message missing"
+grep -q "At least one upstream resolver must be enabled." /tmp/alderpointdns-zero-upstream.out || fail "zero enabled resolvers: rejection message missing"
 after_conf=$(cat /var/lib/alderpointdns/compiled/dnsdist/upstream-forwarder.conf 2>/dev/null || echo "")
 [ "$before_conf" = "$after_conf" ] || fail "zero enabled resolvers: runtime dnsdist config changed despite rejection"
 systemctl is-active --quiet dnsdist || fail "zero enabled resolvers: dnsdist is not active after a rejected deploy"

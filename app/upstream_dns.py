@@ -59,6 +59,7 @@ POST_DEPLOY_CHECK_TIMEOUT_SECONDS = 5.0
 POST_DEPLOY_CHECK_RETRY_INTERVAL_SECONDS = 0.5
 UPSTREAM_PROBE_INTERVAL_SECONDS = 30.0
 UPSTREAM_PROBE_MIN_SPACING_SECONDS = 5.0
+UPSTREAM_TELEMETRY_POLL_SECONDS = 5.0
 UPSTREAM_PROBE_TIMEOUT_SECONDS = 4.0
 UPSTREAM_PROBE_FAILURE_THRESHOLD = 3
 PROTOCOLS = {"plain", "dot", "doh"}
@@ -299,6 +300,25 @@ def display_resolvers(conn: sqlite3.Connection | None = None) -> list[dict[str, 
     return rows
 
 
+def probe_telemetry(conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in display_resolvers(conn):
+        status = row["display_status"]
+        out.append(
+            {
+                "id": int(row["id"]),
+                "enabled": bool(row["enabled"]),
+                "status": status,
+                "label": "Unhealthy" if status == "failed" else status.title(),
+                "tone": "healthy" if status == "healthy" else "down" if status == "failed" else "neutral" if status == "disabled" else "unavailable",
+                "message": "No data" if status == "disabled" and not row.get("display_message") else row.get("display_message", ""),
+                "latency_ms": row.get("display_latency_ms"),
+                "checked_at": row.get("probe_checked_at"),
+            }
+        )
+    return out
+
+
 def _reset_probe_state(conn: sqlite3.Connection, resolver_id: int, *, enabled: bool) -> None:
     if enabled:
         conn.execute(
@@ -343,7 +363,7 @@ def add_resolver(values: dict[str, Any]) -> int:
         return int(cur.lastrowid)
 
 
-LAST_ENABLED_MESSAGE = "at least one upstream resolver must be enabled"
+LAST_ENABLED_MESSAGE = "At least one upstream resolver must be enabled."
 
 
 def _would_leave_zero_enabled(conn: sqlite3.Connection, resolver_id: int, *, disabling: bool, deleting: bool = False) -> bool:
@@ -668,8 +688,8 @@ def _extract_dns_addresses(packet: bytes, query_id: int, qtype: int) -> list[str
     return addresses
 
 
-def _probe_plain_dns(address: str, port: int, *, timeout: float = UPSTREAM_PROBE_TIMEOUT_SECONDS, qtype: int = 1) -> tuple[float, bytes, int]:
-    qid, packet = _build_dns_query(TEST_DOMAIN, qtype)
+def _probe_plain_dns(address: str, port: int, *, timeout: float = UPSTREAM_PROBE_TIMEOUT_SECONDS, qtype: int = 1, qname: str = TEST_DOMAIN) -> tuple[float, bytes, int]:
+    qid, packet = _build_dns_query(qname, qtype)
     started = time.monotonic()
     family = socket.AF_INET6 if ":" in address else socket.AF_INET
     with socket.socket(family, socket.SOCK_DGRAM) as sock:
@@ -718,7 +738,7 @@ def _bootstrap_resolve_for_probe(row: dict[str, Any], *, timeout: float = UPSTRE
     for qtype in (1, 28):
         for resolver in bootstrap:
             try:
-                _, response, qid = _probe_plain_dns(resolver, 53, timeout=timeout, qtype=qtype)
+                _, response, qid = _probe_plain_dns(resolver, 53, timeout=timeout, qtype=qtype, qname=address)
                 addresses = _extract_dns_addresses(response, qid, qtype)
                 if addresses:
                     return addresses[0]
@@ -770,10 +790,27 @@ def _read_http_response(sock: ssl.SSLSocket, timeout: float) -> tuple[int, bytes
     return status, body
 
 
+def doh_probe_request_trace(row: dict[str, Any], endpoint_ip: str | None = None) -> dict[str, Any]:
+    host_header = str(row.get("tls_hostname") or row["address"])
+    port = int(row["port"])
+    default_port = port == 443
+    return {
+        "tcp_destination": f"{endpoint_ip or '<bootstrap-resolved-ip>'}:{port}",
+        "tls_sni": host_header,
+        "http_authority": host_header if default_port else f"{host_header}:{port}",
+        "http_method": "POST",
+        "http_path": "<redacted>",
+        "accept": "application/dns-message",
+        "content_type": "application/dns-message",
+        "body": "DNS wire-format query",
+    }
+
+
 def _probe_doh(row: dict[str, Any], *, timeout: float = UPSTREAM_PROBE_TIMEOUT_SECONDS) -> float:
     endpoint_ip = _bootstrap_resolve_for_probe(row, timeout=timeout)
     host_header = str(row.get("tls_hostname") or row["address"])
     port = int(row["port"])
+    authority = host_header if port == 443 else f"{host_header}:{port}"
     path = str(row.get("doh_path") or "/dns-query")
     qid, packet = _build_dns_query(TEST_DOMAIN, 1)
     started = time.monotonic()
@@ -785,7 +822,7 @@ def _probe_doh(row: dict[str, Any], *, timeout: float = UPSTREAM_PROBE_TIMEOUT_S
         with context.wrap_socket(raw, server_hostname=host_header) as tls_sock:
             request = (
                 f"POST {path} HTTP/1.1\r\n"
-                f"Host: {host_header}\r\n"
+                f"Host: {authority}\r\n"
                 "Accept: application/dns-message\r\n"
                 "Content-Type: application/dns-message\r\n"
                 f"Content-Length: {len(packet)}\r\n"

@@ -266,6 +266,22 @@ class UpstreamDNSTest(unittest.TestCase):
         self.assertEqual(displayed[rows[1]["id"]]["display_latency_ms"], 22.2)
         self.assertNotEqual(displayed[rows[0]["id"]]["display_latency_ms"], displayed[rows[1]["id"]]["display_latency_ms"])
 
+    def test_probe_telemetry_reports_rows_by_provider_id_without_probing(self) -> None:
+        rows = upstream_dns.resolvers()
+        upstream_dns.record_probe_result(rows[0]["id"], ok=True, latency_ms=11.1)
+        upstream_dns.set_enabled(rows[1]["id"], False)
+
+        with mock.patch.object(upstream_dns, "probe_resolver") as probe:
+            telemetry = {row["id"]: row for row in upstream_dns.probe_telemetry()}
+
+        probe.assert_not_called()
+        self.assertEqual(telemetry[rows[0]["id"]]["status"], "healthy")
+        self.assertEqual(telemetry[rows[0]["id"]]["label"], "Healthy")
+        self.assertEqual(telemetry[rows[0]["id"]]["latency_ms"], 11.1)
+        self.assertEqual(telemetry[rows[1]["id"]]["status"], "disabled")
+        self.assertEqual(telemetry[rows[1]["id"]]["label"], "Disabled")
+        self.assertIsNone(telemetry[rows[1]["id"]]["latency_ms"])
+
     def test_probe_failure_threshold_and_recovery(self) -> None:
         resolver_id = upstream_dns.resolvers()[0]["id"]
         upstream_dns.record_probe_result(resolver_id, ok=False, message="timeout")
@@ -432,14 +448,98 @@ class UpstreamDNSTest(unittest.TestCase):
         response += b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 60, 4) + bytes([203, 0, 113, 99])
         calls: list[tuple[str, int]] = []
 
-        def fake_plain(address: str, port: int, *, timeout: float = 4.0, qtype: int = 1):
-            calls.append((address, qtype))
+        def fake_plain(address: str, port: int, *, timeout: float = 4.0, qtype: int = 1, qname: str = upstream_dns.TEST_DOMAIN):
+            calls.append((address, qtype, qname))
             return 1.0, response, qid
 
         with mock.patch.object(upstream_dns, "_probe_plain_dns", fake_plain):
             self.assertEqual(upstream_dns._bootstrap_resolve_for_probe(row), "203.0.113.99")
 
-        self.assertEqual(calls, [("198.51.100.1", 1)])
+        self.assertEqual(calls, [("198.51.100.1", 1, "dns.example")])
+
+    def test_doh_direct_probe_request_uses_resolved_ip_authority_path_and_dns_message_headers(self) -> None:
+        row = {
+            "protocol": "doh",
+            "address": "arbitrary.example",
+            "port": 443,
+            "tls_hostname": "arbitrary.example",
+            "doh_path": "/private-doh-token",
+            "bootstrap_ips": "198.51.100.1",
+        }
+        sent: list[bytes] = []
+        connected: list[tuple[str, int]] = []
+        wrapped: list[str] = []
+        qid, packet = upstream_dns._build_dns_query("cloudflare.com", 1, query_id=0xBEEF)
+
+        class FakeTLSSocket:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback) -> None:
+                return None
+
+            def sendall(self, data: bytes) -> None:
+                sent.append(data)
+
+        class FakeRawSocket:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback) -> None:
+                return None
+
+            def settimeout(self, timeout: float) -> None:
+                pass
+
+            def connect(self, address: tuple[str, int]) -> None:
+                connected.append(address)
+
+        class FakeSSLContext:
+            def wrap_socket(self, raw, server_hostname: str):
+                wrapped.append(server_hostname)
+                return FakeTLSSocket()
+
+        with mock.patch.object(upstream_dns, "_bootstrap_resolve_for_probe", return_value="203.0.113.44"), \
+             mock.patch.object(upstream_dns, "_build_dns_query", return_value=(qid, packet)), \
+             mock.patch.object(upstream_dns.socket, "socket", FakeRawSocket), \
+             mock.patch.object(upstream_dns.ssl, "create_default_context", return_value=FakeSSLContext()), \
+             mock.patch.object(upstream_dns, "_read_http_response", return_value=(200, packet)), \
+             mock.patch.object(upstream_dns, "_validate_dns_response") as validate:
+            upstream_dns._probe_doh(row)
+
+        self.assertEqual(connected, [("203.0.113.44", 443)])
+        self.assertEqual(wrapped, ["arbitrary.example"])
+        request = sent[0]
+        headers, body = request.split(b"\r\n\r\n", 1)
+        self.assertIn(b"POST /private-doh-token HTTP/1.1", headers)
+        self.assertIn(b"Host: arbitrary.example", headers)
+        self.assertIn(b"Accept: application/dns-message", headers)
+        self.assertIn(b"Content-Type: application/dns-message", headers)
+        self.assertEqual(body, packet)
+        validate.assert_called_once_with(packet, qid)
+
+    def test_doh_probe_trace_redacts_path_and_reports_generic_authority(self) -> None:
+        trace = upstream_dns.doh_probe_request_trace(
+            {
+                "protocol": "doh",
+                "address": "resolver.example",
+                "port": 8443,
+                "tls_hostname": "resolver.example",
+                "doh_path": "/dns-query/super-secret-token",
+            },
+            endpoint_ip="203.0.113.44",
+        )
+        self.assertEqual(trace["tcp_destination"], "203.0.113.44:8443")
+        self.assertEqual(trace["tls_sni"], "resolver.example")
+        self.assertEqual(trace["http_authority"], "resolver.example:8443")
+        self.assertEqual(trace["http_path"], "<redacted>")
+        self.assertNotIn("super-secret-token", str(trace))
+        self.assertEqual(trace["accept"], "application/dns-message")
+        self.assertEqual(trace["content_type"], "application/dns-message")
+
 
     def test_private_doh_path_is_redacted_from_probe_failure_messages(self) -> None:
         resolver_id = upstream_dns.add_resolver(
