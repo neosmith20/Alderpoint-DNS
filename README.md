@@ -87,13 +87,24 @@ Per `docs/supported-systems.md` and `docs/hardware-requirements.md`:
 
 ## Quick start
 
-Install the latest stable release directly from GitHub Releases:
+Install the latest stable release directly from GitHub Releases.
+
+### Already running as root
+
+Use this on a root shell (for example, after `su -`). Minimal Debian installs
+may not include `sudo` by default:
+
+```sh
+curl -fL -o alderpointdns.deb https://github.com/neosmith20/Alderpoint-DNS/releases/latest/download/alderpointdns_latest_all.deb && apt update && apt install -y ./alderpointdns.deb
+```
+
+### Using a sudo-enabled administrator account
 
 ```sh
 curl -fL -o alderpointdns.deb https://github.com/neosmith20/Alderpoint-DNS/releases/latest/download/alderpointdns_latest_all.deb && sudo apt update && sudo apt install -y ./alderpointdns.deb
 ```
 
-This one command always installs the current latest stable release -- the
+Both commands always install the current latest stable release -- the
 `alderpointdns_latest_all.deb` asset is the stable, permanent latest-release
 download name. Public v1.0.2 is a one-time bridge release, so its GitHub
 release intentionally publishes exactly two assets:
@@ -104,7 +115,7 @@ latest-release download URL.
 
 For later normal releases, `alderpointdns_latest_all.deb` may again be
 published alongside and byte-identical to that release's versioned package,
-just without a version number in the filename, so the command never needs
+just without a version number in the filename, so these commands never need
 updating. `apt install` resolves and installs BIND, dnsdist, and every other
 dependency from Debian's own repositories; nothing is piped from the network
 into a root shell unreviewed.
