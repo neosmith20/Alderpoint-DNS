@@ -59,6 +59,21 @@ GitHub request. Polling continues after a transient web-service restart
 because the browser retries and re-renders the same stored job when the
 service is reachable again.
 
+### v1.0.0 bridge-upgrade UI limitation
+
+v1.0.2 is a one-time bridge release for appliances still running v1.0.0.
+Those appliances can start the update through **System > Software Updates**,
+but the browser tab that initiated the update is still running the v1.0.0
+frontend. It does not contain the v1.0.2 durable JSON job-status polling
+renderer, so that first bridge update may not show live phase progress in
+the already-open tab while the package install restarts the web service.
+Allow the update a few minutes to finish, then refresh the page to read the
+stored job state and installed version.
+
+Once v1.0.2 is installed, future updates use the v1.0.2+ live-progress UI:
+the page polls local job state, reconnects after transient web-service
+restarts, and resumes rendering the same durable update job.
+
 ### Abandoned-job recovery
 
 If the runner itself dies (host reboot, OOM, `systemctl stop`) while a job
@@ -162,9 +177,12 @@ When the repository is later made public, no credential is required and
 8. Post-upgrade health check: all four services active, `PRAGMA
    quick_check`, ordinary DNS resolution, the web app's own `/healthz`
    responding locally, and the installed dpkg version matching what was
-   expected. A failed health check fails the job (the pre-upgrade backup
-   is retained) -- Software Updates does not claim automatic package
-   rollback.
+   expected. The SQLite check uses a bounded busy timeout/retry window so
+   service-start contention does not get mistaken for corruption, and its
+   stored diagnostic distinguishes lock/busy/timeouts, execution errors,
+   and genuine quick_check failures. A failed health check fails health
+   verification (the pre-upgrade backup is retained) -- Software Updates
+   does not claim automatic package rollback.
 
 ## Manual `.deb` upload
 

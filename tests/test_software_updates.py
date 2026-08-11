@@ -18,6 +18,7 @@ import json
 import os
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -365,7 +366,7 @@ class AptSimulationTest(unittest.TestCase):
 class HealthCheckTest(unittest.TestCase):
     def test_all_healthy(self) -> None:
         with mock.patch.object(su, "_service_active", return_value=True), \
-             mock.patch.object(su, "_quick_check_ok", return_value=True), \
+             mock.patch.object(su, "_database_quick_check", return_value={"ok": True, "path": "/tmp/test.db", "result": "ok"}), \
              mock.patch.object(su, "_resolution_ok", return_value=True), \
              mock.patch.object(su, "_webapp_healthz_ok", return_value=True), \
              mock.patch.object(su, "installed_package_version", return_value="0.5.0~dev1-1"), \
@@ -375,7 +376,7 @@ class HealthCheckTest(unittest.TestCase):
 
     def test_service_failure_marks_unhealthy(self) -> None:
         with mock.patch.object(su, "_service_active", side_effect=lambda u: u != "named"), \
-             mock.patch.object(su, "_quick_check_ok", return_value=True), \
+             mock.patch.object(su, "_database_quick_check", return_value={"ok": True, "path": "/tmp/test.db", "result": "ok"}), \
              mock.patch.object(su, "_resolution_ok", return_value=True), \
              mock.patch.object(su, "_webapp_healthz_ok", return_value=True):
             result = su.post_upgrade_health_check()
@@ -383,13 +384,45 @@ class HealthCheckTest(unittest.TestCase):
         self.assertFalse(result["services"]["named"])
 
     def test_quick_check_failure_marks_unhealthy(self) -> None:
+        db_check = {"ok": False, "path": "/tmp/test.db", "error_type": "integrity_check_failed", "result": "row 1 missing"}
         with mock.patch.object(su, "_service_active", return_value=True), \
-             mock.patch.object(su, "_quick_check_ok", return_value=False), \
+             mock.patch.object(su, "_database_quick_check", return_value=db_check), \
              mock.patch.object(su, "_resolution_ok", return_value=True), \
              mock.patch.object(su, "_webapp_healthz_ok", return_value=True):
             result = su.post_upgrade_health_check()
         self.assertFalse(result["ok"])
         self.assertFalse(result["database_quick_check_ok"])
+        self.assertEqual(result["database_quick_check"]["error_type"], "integrity_check_failed")
+
+    def test_quick_check_retries_transient_database_busy(self) -> None:
+        calls = [
+            subprocess.CompletedProcess(["sqlite3"], 5, "Error: database is locked"),
+            subprocess.CompletedProcess(["sqlite3"], 0, "ok\n"),
+        ]
+        with mock.patch.object(su, "run", side_effect=calls) as run_mock, \
+             mock.patch.object(su.time, "sleep") as sleep_mock:
+            result = su._database_quick_check()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["attempts"], 2)
+        self.assertEqual(run_mock.call_count, 2)
+        sleep_mock.assert_called_once_with(su.SQLITE_HEALTH_RETRY_DELAY_SECONDS)
+
+    def test_quick_check_database_busy_reports_diagnostic_after_retries(self) -> None:
+        busy = subprocess.CompletedProcess(["sqlite3"], 5, "Error: database is locked")
+        with mock.patch.object(su, "run", return_value=busy), \
+             mock.patch.object(su.time, "sleep"):
+            result = su._database_quick_check()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_type"], "database_busy")
+        self.assertIn("database is locked", result["message"])
+
+    def test_quick_check_genuine_corruption_fails_closed_without_retry(self) -> None:
+        corrupt = subprocess.CompletedProcess(["sqlite3"], 0, "*** in database main ***\nPage 1 is never used")
+        with mock.patch.object(su, "run", return_value=corrupt) as run_mock:
+            result = su._database_quick_check()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_type"], "integrity_check_failed")
+        self.assertEqual(run_mock.call_count, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -427,7 +460,7 @@ class JobRunTest(SoftwareUpdatesTestBase):
             mock.patch.object(su, "inspect_deb", return_value={"Package": "alderpointdns", "Version": "0.5.0-1", "Architecture": "all"}),
             mock.patch.object(su, "installed_package_version", return_value="0.4.0~beta6-1"),
             mock.patch.object(su, "simulate_install", return_value="Inst alderpointdns"),
-            mock.patch.object(su, "post_upgrade_health_check", return_value={"ok": True, "services_ok": True, "database_quick_check_ok": True, "dns_resolution_ok": True, "webapp_responding": True}),
+            mock.patch.object(su, "post_upgrade_health_check", return_value={"ok": True, "services_ok": True, "database_quick_check_ok": True, "dns_resolution_ok": True, "webapp_responding": True, "installed_version_matches_expected": True}),
         ]
 
     def test_backup_failure_blocks_install(self) -> None:
@@ -506,7 +539,25 @@ class JobRunTest(SoftwareUpdatesTestBase):
             mock.patch.object(backup_module, "create_backup", return_value=backup_path),
             mock.patch.object(backup_module, "last_backup", return_value={"id": 9}),
             mock.patch.object(su, "run", side_effect=_real_dpkg_passthrough(__import__("subprocess").CompletedProcess(["apt-get"], 0, "ok"))),
-            mock.patch.object(su, "post_upgrade_health_check", return_value={"ok": False, "database_quick_check_ok": False}),
+            mock.patch.object(
+                su,
+                "post_upgrade_health_check",
+                return_value={
+                    "ok": False,
+                    "services_ok": True,
+                    "database_quick_check_ok": False,
+                    "database_quick_check": {
+                        "ok": False,
+                        "error_type": "database_busy",
+                        "message": "Error: database is locked",
+                    },
+                    "dns_resolution_ok": True,
+                    "webapp_responding": True,
+                    "installed_dpkg_version": "0.5.0-1",
+                    "application_version": "0.5.0",
+                    "installed_version_matches_expected": True,
+                },
+            ),
         ]
         for p in patches:
             p.start()
@@ -516,10 +567,52 @@ class JobRunTest(SoftwareUpdatesTestBase):
             for p in patches:
                 p.stop()
         self.assertEqual(result["phase"], "failed")
+        self.assertEqual(result["result"], "installed_health_failed")
+        self.assertIn("Update installed, but post-upgrade health verification failed", result["error"])
+        self.assertIn("database quick_check failed", result["error"])
         self.assertTrue(Path(result["backup_path"]).exists())
+
+        status = su.job_status_payload()
+        self.assertEqual(status["job"]["status_label"], "Update installed, but post-upgrade health verification failed")
+        self.assertEqual(status["job"]["status_tone"], "warning")
+        self.assertIn("database quick_check failed", status["job"]["health_summary"])
 
     def test_no_pending_job_is_a_noop(self) -> None:
         self.assertIsNone(su.run_pending_job())
+
+    def test_postupgrade_health_failure_before_expected_install_stays_plain_failure(self) -> None:
+        (self.tmp / "fake.deb").write_bytes(b"deb")
+        su.create_github_job(self.release, requested_by="admin")
+        backup_path = self.tmp / "fake-backup.tar.gz"
+        backup_path.write_bytes(b"backup")
+        patches = self._common_patches() + [
+            mock.patch.object(backup_module, "create_backup", return_value=backup_path),
+            mock.patch.object(backup_module, "last_backup", return_value={"id": 10}),
+            mock.patch.object(su, "run", side_effect=_real_dpkg_passthrough(subprocess.CompletedProcess(["apt-get"], 0, "ok"))),
+            mock.patch.object(
+                su,
+                "post_upgrade_health_check",
+                return_value={
+                    "ok": False,
+                    "services_ok": True,
+                    "database_quick_check_ok": True,
+                    "dns_resolution_ok": True,
+                    "webapp_responding": True,
+                    "installed_dpkg_version": "0.4.0~beta6-1",
+                    "installed_version_matches_expected": False,
+                },
+            ),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            result = su.run_pending_job()
+        finally:
+            for p in patches:
+                p.stop()
+        self.assertEqual(result["phase"], "failed")
+        self.assertEqual(result["result"], "failed")
+        self.assertIn("installed package version does not match expected", result["error"])
 
     def test_version_mismatch_blocks_install(self) -> None:
         su.create_github_job(self.release, requested_by="admin")
@@ -1116,6 +1209,8 @@ class SoftwareUpdatesHttpTest(unittest.TestCase):
         self.assertEqual(data["job"]["phase"], "downloading")
         self.assertTrue(data["job"]["active"])
         self.assertIn("Downloading", data["job"]["display_message"])
+        self.assertEqual(data["job"]["status_label"], "downloading")
+        self.assertEqual(data["job"]["status_tone"], "neutral")
         self.assertEqual(data["job"]["events"][-1]["message"], "downloading 9.9.9 from GitHub")
 
     def test_wrong_csrf_rejected(self) -> None:

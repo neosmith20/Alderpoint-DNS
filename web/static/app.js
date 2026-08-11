@@ -218,9 +218,7 @@
       section.dataset.phaseActive = job.active ? '1' : '0';
       const head = node('div', 'panel__head');
       head.appendChild(node('h2', '', `Update Job #${job.id}`));
-      if (job.phase === 'completed') head.appendChild(badge('Update successful', 'healthy'));
-      else if (job.phase === 'failed') head.appendChild(badge('Update failed', 'down'));
-      else head.appendChild(badge(job.phase || 'pending', 'neutral'));
+      head.appendChild(badge(job.status_label || job.phase || 'pending', job.status_tone || 'neutral'));
       section.appendChild(head);
 
       const summary = node('p', 'muted');
@@ -252,6 +250,11 @@
         const error = node('div', 'alert error', job.error);
         error.setAttribute('role', 'alert');
         section.appendChild(error);
+      }
+      if (job.health_summary) {
+        const health = node('div', 'alert error', `Health verification: ${job.health_summary}`);
+        health.setAttribute('role', 'alert');
+        section.appendChild(health);
       }
       if (job.phase === 'completed') {
         const success = node('div', 'alert', 'Update successful. The pre-upgrade backup above was retained for recovery.');

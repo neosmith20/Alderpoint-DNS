@@ -933,6 +933,9 @@ def validate_candidate_package(deb_path: Path, expected_version: str | None) -> 
 # ---------------------------------------------------------------------------
 
 SERVICES = ("alderpointdns", "alderpointdns-analytics", "named", "dnsdist")
+SQLITE_HEALTH_BUSY_TIMEOUT_MS = 5000
+SQLITE_HEALTH_ATTEMPTS = 6
+SQLITE_HEALTH_RETRY_DELAY_SECONDS = 2
 
 
 def _service_active(unit: str) -> bool:
@@ -943,12 +946,154 @@ def _service_active(unit: str) -> bool:
     return proc.stdout.strip() == "active"
 
 
+def _sqlite_quick_check_busy(output: str) -> bool:
+    lowered = output.lower()
+    return "database is locked" in lowered or "database is busy" in lowered or "database locked" in lowered
+
+
+def _database_quick_check() -> dict[str, Any]:
+    path = str(DB_PATH)
+    command = ["sqlite3", "-cmd", f".timeout {SQLITE_HEALTH_BUSY_TIMEOUT_MS}", path, "PRAGMA quick_check;"]
+    last_failure: dict[str, Any] | None = None
+    for attempt in range(1, SQLITE_HEALTH_ATTEMPTS + 1):
+        try:
+            proc = run(command, check=False, timeout=30)
+        except subprocess.TimeoutExpired:
+            last_failure = {
+                "ok": False,
+                "path": path,
+                "attempts": attempt,
+                "error_type": "timeout",
+                "message": "SQLite quick_check timed out.",
+            }
+        except (OSError, FileNotFoundError) as exc:
+            return {
+                "ok": False,
+                "path": path,
+                "attempts": attempt,
+                "error_type": "execution_error",
+                "message": redact(str(exc))[:400],
+            }
+        else:
+            output = (proc.stdout or "").strip()
+            if proc.returncode == 0 and output == "ok":
+                return {"ok": True, "path": path, "attempts": attempt, "result": "ok"}
+            if proc.returncode == 0:
+                return {
+                    "ok": False,
+                    "path": path,
+                    "attempts": attempt,
+                    "error_type": "integrity_check_failed",
+                    "result": redact(output)[:1000],
+                }
+            error_type = "database_busy" if _sqlite_quick_check_busy(output) else "sqlite_error"
+            last_failure = {
+                "ok": False,
+                "path": path,
+                "attempts": attempt,
+                "error_type": error_type,
+                "returncode": proc.returncode,
+                "message": redact(output)[:1000] or f"sqlite3 exited with status {proc.returncode}",
+            }
+        if attempt < SQLITE_HEALTH_ATTEMPTS and last_failure and last_failure.get("error_type") in {"database_busy", "timeout"}:
+            time.sleep(SQLITE_HEALTH_RETRY_DELAY_SECONDS)
+            continue
+        break
+    return last_failure or {
+        "ok": False,
+        "path": path,
+        "attempts": SQLITE_HEALTH_ATTEMPTS,
+        "error_type": "unknown",
+        "message": "SQLite quick_check did not produce a result.",
+    }
+
+
 def _quick_check_ok() -> bool:
+    return bool(_database_quick_check().get("ok"))
+
+
+def _health_failure_summary(health: dict[str, Any]) -> str:
+    failures: list[str] = []
+    services = health.get("services")
+    if isinstance(services, dict):
+        failed_services = [unit for unit, active in services.items() if not active]
+        if failed_services:
+            failures.append("inactive services: " + ", ".join(failed_services))
+    if not health.get("database_quick_check_ok", True):
+        db_check = health.get("database_quick_check")
+        if isinstance(db_check, dict):
+            detail = db_check.get("message") or db_check.get("result") or db_check.get("error_type") or "failed"
+            failures.append(f"database quick_check failed ({detail})")
+        else:
+            failures.append("database quick_check failed")
+    if not health.get("dns_resolution_ok", True):
+        failures.append("DNS resolution failed")
+    if not health.get("webapp_responding", True):
+        failures.append("web app health endpoint did not respond")
+    if health.get("installed_version_matches_expected") is False:
+        failures.append(
+            "installed package version does not match expected "
+            f"({health.get('installed_dpkg_version') or 'unknown'} installed)"
+        )
+    return "; ".join(failures) or "post-upgrade health verification failed"
+
+
+def _installed_but_health_failed(health: dict[str, Any]) -> bool:
+    return bool(health and health.get("ok") is False and health.get("installed_version_matches_expected") is True)
+
+
+def _job_diagnostics(job: dict[str, Any]) -> dict[str, Any]:
     try:
-        proc = run(["sqlite3", str(DB_PATH), "PRAGMA quick_check;"], check=False, timeout=30)
-    except (OSError, FileNotFoundError):
-        return False
-    return proc.returncode == 0 and proc.stdout.strip() == "ok"
+        return json.loads(job.get("diagnostics_json") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+
+
+def _job_installed_but_health_failed(job: dict[str, Any]) -> bool:
+    if job.get("result") == "installed_health_failed":
+        return True
+    diagnostics = _job_diagnostics(job)
+    health = diagnostics.get("post_upgrade_health")
+    return isinstance(health, dict) and _installed_but_health_failed(health)
+
+
+def _job_health_summary(job: dict[str, Any]) -> str:
+    diagnostics = _job_diagnostics(job)
+    health = diagnostics.get("post_upgrade_health")
+    return _health_failure_summary(health) if isinstance(health, dict) and not health.get("ok", True) else ""
+
+
+def _job_status_label(job: dict[str, Any]) -> str:
+    if _job_installed_but_health_failed(job):
+        return "Update installed, but post-upgrade health verification failed"
+    phase = str(job.get("phase") or "")
+    if phase == "completed":
+        return "Update successful"
+    if phase == "failed":
+        return "Update failed"
+    return phase or "pending"
+
+
+def _job_status_tone(job: dict[str, Any]) -> str:
+    if _job_installed_but_health_failed(job):
+        return "warning"
+    phase = str(job.get("phase") or "")
+    if phase == "completed":
+        return "healthy"
+    if phase == "failed":
+        return "down"
+    return "neutral"
+
+
+def _job_view(job: dict[str, Any], events: list[sqlite3.Row] | None = None) -> dict[str, Any]:
+    view = dict(job)
+    events = events or []
+    view["active"] = view.get("phase") not in ("completed", "failed")
+    view["status_label"] = _job_status_label(view)
+    view["status_tone"] = _job_status_tone(view)
+    view["health_summary"] = _job_health_summary(view)
+    view["display_message"] = _job_display_message(view, events)
+    return view
 
 
 def _resolution_ok() -> bool:
@@ -975,10 +1120,12 @@ def _webapp_healthz_ok() -> bool:
 def post_upgrade_health_check(expected_deb_version: str | None = None) -> dict[str, Any]:
     services = {unit: _service_active(unit) for unit in SERVICES}
     installed = installed_package_version()
+    database_quick_check = _database_quick_check()
     result: dict[str, Any] = {
         "services": services,
         "services_ok": all(services.values()),
-        "database_quick_check_ok": _quick_check_ok(),
+        "database_quick_check_ok": bool(database_quick_check.get("ok")),
+        "database_quick_check": database_quick_check,
         "dns_resolution_ok": _resolution_ok(),
         "webapp_responding": _webapp_healthz_ok(),
         "installed_dpkg_version": installed,
@@ -1116,20 +1263,24 @@ def job_status_payload(conn: sqlite3.Connection | None = None) -> dict[str, Any]
             return payload
         events = job_events(row["id"], db)
         job = dict(row)
+        job_view = _job_view(job, events)
         payload["job"] = {
-            "id": job["id"],
-            "operation": job["operation"],
-            "requested_at": job["requested_at"],
-            "requested_by": job["requested_by"],
-            "current_version": job["current_version"],
-            "candidate_version": job["candidate_version"],
-            "backup_path": job["backup_path"],
-            "phase": job["phase"],
-            "result": job["result"],
-            "error": job["error"],
-            "completed_at": job["completed_at"],
-            "active": job["phase"] not in ("completed", "failed"),
-            "display_message": _job_display_message(job, events),
+            "id": job_view["id"],
+            "operation": job_view["operation"],
+            "requested_at": job_view["requested_at"],
+            "requested_by": job_view["requested_by"],
+            "current_version": job_view["current_version"],
+            "candidate_version": job_view["candidate_version"],
+            "backup_path": job_view["backup_path"],
+            "phase": job_view["phase"],
+            "result": job_view["result"],
+            "error": job_view["error"],
+            "completed_at": job_view["completed_at"],
+            "active": job_view["active"],
+            "display_message": job_view["display_message"],
+            "status_label": job_view["status_label"],
+            "status_tone": job_view["status_tone"],
+            "health_summary": job_view["health_summary"],
             "events": [
                 {"ts": event["ts"], "phase": event["phase"], "message": event["message"]}
                 for event in events
@@ -1398,11 +1549,23 @@ def _run_job(db: sqlite3.Connection, job: dict[str, Any]) -> None:
     health = post_upgrade_health_check(expected_deb_version=candidate_deb_version)
     _diagnostics_merge(db, job_id, {"post_upgrade_health": health})
     if not health["ok"]:
+        health_summary = _health_failure_summary(health)
+        if _installed_but_health_failed(health):
+            result = "installed_health_failed"
+            error = (
+                f"Update installed, but post-upgrade health verification failed: {health_summary}. "
+                f"Pre-upgrade backup retained at {backup_path}."
+            )
+            event_message = "update installed, but post-upgrade health verification failed; pre-upgrade backup was retained"
+        else:
+            result = "failed"
+            error = f"post-upgrade health check failed: {health_summary}; details: {json.dumps(health, default=str)}"
+            event_message = "post-upgrade health check failed; pre-upgrade backup was retained"
         db.execute(
-            "UPDATE software_update_jobs SET phase='failed', result='failed', error=?, completed_at=? WHERE id=?",
-            (f"post-upgrade health check failed: {json.dumps(health, default=str)}", now(), job_id),
+            "UPDATE software_update_jobs SET phase='failed', result=?, error=?, completed_at=? WHERE id=?",
+            (result, error, now(), job_id),
         )
-        _record_event(db, job_id, "failed", "post-upgrade health check failed; pre-upgrade backup was retained")
+        _record_event(db, job_id, "failed", event_message)
         db.commit()
         return
 
@@ -1520,6 +1683,7 @@ def update_status(conn: sqlite3.Connection | None = None) -> dict[str, Any]:
         except json.JSONDecodeError:
             latest = {}
         job = latest_job(db)
+        events = job_events(job["id"], db) if job else []
         auto_check_enabled = _truthy(cfg.get("auto_check_enabled", "1"))
         return {
             "settings": cfg,
@@ -1527,8 +1691,8 @@ def update_status(conn: sqlite3.Connection | None = None) -> dict[str, Any]:
             "credential": credential_status(),
             "latest_release": latest or None,
             "update_available": bool(latest),
-            "job": dict(job) if job else None,
-            "job_events": job_events(job["id"], db) if job else [],
+            "job": _job_view(dict(job), events) if job else None,
+            "job_events": events,
             "check_interval_hours": _clamped_check_interval_hours(cfg),
             # Only queried when checking is actually on -- a disabled
             # schedule must not display a next-check time at all, matching
