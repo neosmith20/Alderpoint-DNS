@@ -136,12 +136,16 @@ hide newly added records.
 The DNS Settings page includes an Upstream Resolvers section. It displays the
 current managed resolver set and supports add, edit, enable/disable, reorder,
 and delete operations for UDP/TCP DNS, DNS-over-TLS, and DNS-over-HTTPS
-upstreams. Changes save through targeted async forms and the normal privileged
-deployment path. BIND remains the recursive resolver; for managed upstreams it
-forwards to a loopback dnsdist upstream pool that can speak plain DNS, DoT, or
-DoH to the selected resolvers. Deployments validate dnsdist and BIND config,
-restart/reload services, run a functional DNS query, record resolver health
-and latency, and roll back generated files if activation fails.
+upstreams. Changes save through targeted async forms and a scoped upstream-only
+deployment path (not the full blocklist/RPZ deploy pipeline -- upstream
+resolver state has no effect on it). BIND remains the recursive resolver; for
+managed upstreams it forwards to a loopback dnsdist upstream pool that can
+speak plain DNS, DoT, or DoH to the selected resolvers. Each upstream
+deployment validates dnsdist and BIND config, restarts/reloads services, runs
+a functional DNS query, records resolver health and latency, and rolls back
+generated files if activation fails -- serialized, appliance-wide, against
+every other runtime deployment (full or scoped) by the same deploy lock, so
+two can never race the same live config files.
 
 The Cache page (`/dns-cache`) exposes BIND's existing recursive-cache tuning
 (max size, positive/negative min/max TTL, recursive clients, prefetch,

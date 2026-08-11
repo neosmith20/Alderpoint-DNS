@@ -29,7 +29,7 @@
   </article>
 </section>
 
-<section class="panel stack">
+<section class="panel stack" data-upstream-telemetry-url="/dns-settings/upstreams/telemetry" data-upstream-telemetry-interval-ms="{{ upstream_telemetry_poll_ms }}">
   <div class="panel__head">
     <div>
       <h2>Upstream Resolvers</h2>
@@ -49,7 +49,7 @@
       <thead><tr><th>Name</th><th>Protocol</th><th>Resolver</th><th>Bootstrap / TLS</th><th>Health</th><th class="actions-col">Actions</th></tr></thead>
       <tbody>
         {% for resolver in upstream_resolvers %}
-          <tr>
+          <tr data-upstream-resolver-id="{{ resolver.id }}">
             <td>
               <label>Name <input form="upstreamEdit{{ resolver.id }}" name="name" value="{{ resolver.name }}" required></label>
             </td>
@@ -72,10 +72,11 @@
                 <label>TLS hostname <input form="upstreamEdit{{ resolver.id }}" name="tls_hostname" value="{{ resolver.tls_hostname }}"></label>
                 <label>Bootstrap IPs <textarea form="upstreamEdit{{ resolver.id }}" name="bootstrap_ips" rows="2">{{ resolver.bootstrap_ips }}</textarea></label>
             </td>
-            <td>
-              {{ ui.status_badge(resolver.last_status|title, "healthy" if resolver.last_status == "healthy" else "down" if resolver.last_status == "failed" else "unavailable") }}
-              {% if resolver.last_latency_ms is not none %}<span class="secondary muted">{{ "%.1f"|format(resolver.last_latency_ms) }} ms</span>{% endif %}
-              {% if resolver.last_message %}<span class="secondary muted wrap-anywhere">{{ resolver.last_message }}</span>{% endif %}
+            <td data-upstream-health>
+              {{ ui.status_badge("Unhealthy" if resolver.display_status == "failed" else resolver.display_status|title, "healthy" if resolver.display_status == "healthy" else "down" if resolver.display_status == "failed" else "neutral" if resolver.display_status == "disabled" else "unavailable") }}
+              <span class="secondary muted" data-upstream-latency>{% if resolver.display_latency_ms is not none %}{{ "%.1f"|format(resolver.display_latency_ms) }} ms{% else %}No data yet{% endif %}</span>
+              <span class="secondary muted" data-upstream-checked {% if not resolver.probe_checked_at %}hidden{% endif %}>{% if resolver.probe_checked_at %}checked {{ resolver.probe_checked_at|local_time }}{% endif %}</span>
+              <span class="secondary muted wrap-anywhere" data-upstream-message {% if not resolver.display_message %}hidden{% endif %}>{{ resolver.display_message }}</span>
             </td>
             <td class="actions-col">
                 <div class="actions">

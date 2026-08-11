@@ -2,6 +2,186 @@
 
 All notable changes to Alderpoint DNS are documented in this file.
 
+## v1.0.1 (2026-08-11)
+
+A targeted bugfix release.
+
+- Fixed a live-incident-derived bug where managed upstream DNS resolvers
+  could silently diverge between the database and the live dnsdist/BIND
+  config: `deploy()` ran the cache-options deployment stage before the
+  upstream-resolvers deployment stage, so a stale/dead live upstream
+  config could fail the cache stage's own health check and abort the
+  whole deploy before the upstream stage -- which would have fixed it --
+  ever ran. An ordinary upstream resolver edit through the UI could then
+  commit to the database with no corresponding `upstream_deployments`
+  record and no live effect, while the operator saw a misleading
+  cache-related error. Upstream resolvers now deploy first.
+- Restoring a backup now reconciles managed upstream resolvers against
+  the live config whenever a restore could have changed either the
+  database rows or the generated runtime/base config files that must
+  match them, closing a restore-time divergence gap surfaced by the same
+  incident.
+- Replicated configuration now explicitly, defensively excludes managed
+  upstream resolvers (they were already never replicated in practice) --
+  upstream resolvers are appliance-local by design.
+- Fixed a second live-incident-derived bug found during v1.0.1 RC
+  acceptance: normal UI use -- toggling several upstream resolvers before
+  each one's request had finished -- spawned multiple concurrent full
+  `deploy()` pipelines. An OS-level lock already existed and prevented any
+  actual runtime-file corruption, but had no visibility from the web
+  layer, so overlapping requests each queued their own full 20-90s
+  pipeline run: "database is locked", "post-deploy upstream resolution
+  failed", repeated dnsdist restarts, and a UI that looked hung. The same
+  lock previously only covered the full pipeline and `protection-enable-reuse`;
+  the narrower single-stage cache/upstream/encryption CLI deploys -- which
+  write the same live BIND/dnsdist files -- acquired no lock at all
+  standing alone and could have raced a concurrent full deploy. Fixed by:
+  (1) extending the shared deploy lock to those narrower deploys, and (2)
+  adding an in-process coordinator in the web app that serializes and
+  coalesces overlapping deploy requests into at most one extra trailing
+  run instead of one queued run per click, with a clear "already in
+  progress" response instead of a raw SQLite error for a caller that times
+  out waiting.
+- Upstream resolver add/edit/toggle/move/delete no longer invoke the full
+  blocklist/RPZ deploy pipeline at all -- they now call
+  `upstream_dns.deploy_upstreams()`'s own scoped deployment path directly,
+  which already owned its own validation, restart/reload, health check,
+  and last-good rollback/history end to end. Nothing else in the pipeline
+  depends on upstream resolver state. On the reference lab appliance this
+  took a single upstream toggle from ~8.8s (full deploy --no-download) to
+  ~1.3s (scoped upstream-deploy); on a real appliance with a full-size
+  blocklist, full deploys have been observed taking 20-90s.
+- Fixed a packaging defect surfaced by live RC acceptance immediately after
+  the fix above: the newly-added scoped `upstream-deploy` sudo invocation
+  had no matching entry in `packaging/sudoers-alderpointdns`, so the
+  `alderpointdns` service account could not run it non-interactively --
+  clicking Disable (or any other upstream add/edit/toggle/move/delete
+  action) on a packaged install failed with "sudo: a terminal is required
+  to read the password; ... sudo: a password is required". Every other
+  scoped/single-stage deploy command the web app calls (cache-deploy,
+  cache-flush, encryption-deploy, etc.) was already correctly granted; only
+  `upstream-deploy` was missing, because it was newly wired into the web
+  layer rather than newly added to the compiler. Added the single missing
+  NOPASSWD entry -- explicit, exact-match, no wildcards or broadened scope --
+  and added `tests/test_sudoers_policy.py`, which (1) statically checks
+  every literal `sudo .../alderpointdns_compiler.py <subcommand>` call in
+  `app/webapp.py` against `packaging/sudoers-alderpointdns` so a future
+  missing grant fails a test instead of live acceptance, and (2), on a real
+  packaged install, uses `sudo -n -l` (an authorization check only, no
+  privileged execution) as the real `alderpointdns` account to prove the
+  *installed* policy matches too -- now part of the acceptance suite.
+- Fixed a third live-incident-derived bug found during v1.0.1 RC acceptance:
+  disabling the last enabled upstream resolver correctly showed "at least
+  one upstream resolver must be enabled" (`upstream_dns.deploy_upstreams()`
+  refuses to ever promote a zero-upstream config to the live runtime), but
+  `set_enabled(resolver_id, False)` had already *committed* the
+  all-disabled desired state to the database before `deploy_upstreams()`
+  ever ran and rejected it. The runtime config stayed correct, but the
+  database no longer matched it, and no future deploy of any kind (scoped
+  or full) could ever succeed again without an admin re-enabling a resolver
+  by hand first. `set_enabled()`, `delete_resolver()`, and
+  `update_resolver()` now check, in the same transaction and before the
+  mutating statement runs, whether the change they're about to commit would
+  leave zero enabled resolvers, and refuse to commit it if so -- the
+  invalid desired state can no longer be written at all, not merely
+  rejected downstream. `deploy_upstreams()`'s own check remains as defense
+  in depth for callers that mutate the table directly (backup restore,
+  replication, the CLI). A related `systemctl restart dnsdist` failure
+  reported from the same live session, seen only with a DoH-only enabled
+  upstream set, could not be reproduced against this appliance's own
+  network conditions after live investigation (an unreachable/firewalled
+  DoH backend was confirmed, separately, to fail safely: dnsdist starts
+  normally and simply marks that backend down); `deploy_upstreams()` now
+  captures a `journalctl -u dnsdist` snapshot into the deployment's stored
+  `validation_output` at the moment any deploy failure triggers a rollback,
+  so a future occurrence is diagnosable from deployment history alone,
+  without needing appliance shell access before the journal rotates. Added
+  `tests/test_upstream_last_enabled_guard.py` (unit- and web-route-level:
+  the guard rejects before any DB commit and before any `sudo` invocation
+  is ever reached) and `tests/test_upstream_enabled_set_combinations.sh`
+  (live-service acceptance coverage proving dnsdist actually starts and
+  resolves for one/multiple plain, one/multiple DoH, and mixed plain+DoH
+  enabled sets, and that an attempted zero-enabled deploy leaves the live
+  runtime and DB state unchanged).
+- Fixed the `systemctl restart dnsdist` failure from the same live session
+  for real: dns1's own upstream_deployments history and dnsdist journal
+  showed dnsdist repeatedly restarting *successfully* during a burst of
+  ordinary sequential upstream UI changes, closely enough together to trip
+  systemd's own start-rate crash-loop protection (`start-limit-hit`) --
+  not a DoH-specific config defect. That protection is intentional and is
+  left untouched. Instead, `app/webapp.py`'s upstream deploy coordinator
+  now paces its own intentional restarts at least 3 seconds apart
+  (comfortably under systemd's default 5-per-10s limit with margin); a
+  rapid burst of clicks converges to the fewest actual restarts needed to
+  reach the final desired state instead of one restart per click, and an
+  isolated click is never delayed. Verified live: a burst of 10 rapid
+  sequential calls against the real coordinator/dnsdist produced 3 actual
+  restarts, no `start-limit-hit`, and a healthy, resolving service
+  afterward (`tests/test_upstream_restart_rate_limiting.sh`, also covered
+  at the coordinator level in `tests/test_deploy_coordinator.py`).
+- Fixed a related correctness gap surfaced investigating the same session:
+  `deploy_upstreams()`'s post-deploy functional check queried BIND, which
+  could still answer from its own resolver cache -- a leftover answer from
+  a prior, genuinely good deploy -- without ever actually asking the
+  newly-staged upstream chain anything, so a deploy could be recorded
+  'deployed' even though every enabled upstream was actually unreachable.
+  The check now issues `rndc flushname` immediately before every
+  resolution attempt, forcing a genuine cache miss every time, with a
+  short bounded retry to tolerate dnsdist's own asynchronous backend
+  health check not having completed its first round yet. Separately, a
+  successful deploy used to blanket-mark every enabled resolver row
+  `last_status='healthy'` off that one pool-level check, even when
+  `firstAvailable` routing meant only some of them actually carried
+  traffic; `deploy_upstreams()` now reads dnsdist's own per-backend
+  up/down state (`showServers()`) and records each row's *own* truthful
+  status, so a down DoH backend sitting alongside working plain resolvers
+  shows as down in the database/UI instead of falsely healthy, while the
+  overall deploy still succeeds (a single down backend has never required
+  dnsdist itself to fail, and still doesn't). Added
+  `tests/test_upstream_dns.py::test_post_deploy_check_forces_fresh_resolution_not_stale_cache`
+  (proves an all-unreachable upstream set cannot inherit a prior deploy's
+  cached success).
+- Corrected the restart-rate-limit fix once dns1's *actual* dnsdist.service
+  policy was confirmed: `StartLimitIntervalUSec=1min`, `StartLimitBurst=5`
+  -- not systemd's generic 10s/5 default the first pass assumed. A 3s
+  pacing interval was not safe against a 60s window (six restarts 3s apart
+  still all land inside it), and simply widening the interval to 15-16s
+  would have made every ordinary sequential upstream change wait that long
+  for no functional reason, while leaving the deeper problem -- one
+  dnsdist restart per desired-state change -- in place. Investigated
+  whether dnsdist supports changing its backend set without a restart: it
+  does, officially, over its own console (`newServer()`/`rmServer()`, the
+  same Lua functions the static startup config uses -- dnsdist calls
+  itself a "DNS Loadbalancer" and ships this mechanism for exactly this).
+  `upstream_dns.deploy_upstreams()` now applies an ordinary upstream
+  add/edit/toggle/move/delete to the already-running dnsdist over that
+  console -- clearing and re-adding the full desired backend set as a
+  single console round trip, typically sub-millisecond, with no frontend
+  socket interruption -- instead of restarting the process at all. The
+  static config files are still rendered, validated, and staged exactly as
+  before (so a future real restart, e.g. a reboot or package upgrade,
+  loads the identical state), and a real restart remains the fallback
+  whenever live reconciliation isn't possible or doesn't verifiably
+  succeed (console unreachable, the very first upstream deploy ever on a
+  fresh install, or a post-check mismatch) -- itself still protected by
+  the deploy coordinator's restart-rate pacing, now correctly scaled to
+  dns1's real policy (16s spacing, keeping 5 restarts spread over more
+  than 64s) and, after fixing a real bug caught while retesting, applied
+  *only* when a run's own output confirms it actually restarted dnsdist --
+  an earlier version of this fix paced every deploy unconditionally and
+  turned 8 ordinary sequential toggles into a 123-second wait even though
+  none of them ever restarted anything. Verified live: 8 genuine
+  sequential upstream changes now complete in ~13 seconds total with 0
+  dnsdist restarts, no `start-limit-hit`, truthful DB/runtime/deployment
+  history throughout, and DNS available the whole time. Added
+  `tests/test_deploy_coordinator.py::test_restart_fallback_pacing_alone_stays_under_dns1s_actual_start_limit`
+  (replicates systemd's own start-limit algorithm against dns1's real
+  60s/5 policy) and rewrote `tests/test_upstream_restart_rate_limiting.sh`
+  to drive more than 5 genuine sequential desired-state changes (not
+  idempotent re-deploys) through the real production coordinator and real
+  dnsdist, verifying restart count, DB/runtime parity, deployment history
+  truthfulness, and DNS availability together.
+
 ## v1.0.0 (2026-08-09)
 
 The first stable release. See `docs/release-notes.md` for the equivalent
@@ -407,107 +587,6 @@ compatibility expectations instead of beta-era churn.
   Backup & Restore -- each already has its own direct System/Operations
   submenu entry one level away -- while keeping its actual purpose
   (administrator password change, session management) unchanged.
-- Fixed restored TLS/DNSCrypt private keys and dnsdist/Alderpoint runtime
-  secrets landing with the wrong ownership after a restore (e.g. a
-  restored certificate key as `root:root 0640` instead of
-  `root:_dnsdist`), which passed `dnsdist --check-config` but then failed
-  at runtime with a real permission error -- archive-embedded ownership
-  can never be trusted across appliances (Python's `tarfile.extractall`
-  always extracts as the extracting process's own uid/gid regardless of
-  what the archive claims). Restore now normalizes every runtime-owned
-  path by name against a fixed policy table (private keys stay
-  `root:_dnsdist 0640`, the CA key and DNSCrypt provider key stay
-  `root:root 0600`, certs `root:_dnsdist 0644`, Alderpoint secrets
-  `root:alderpointdns 0640`), applied on both the forward restore and
-  rollback path, and actually proves the runtime user can read each
-  restored secret (`sudo -u <user> -g <user> -- test -r <path>`) before
-  declaring the restore healthy -- not just that its syntax validates.
-- Fixed `restore_history.validation_output` persisting rendered BIND
-  configuration -- including live RNDC/TSIG secret key material --
-  whenever a restore's post-checks captured `named-checkconf`/
-  `rndc`-adjacent output. Restore history (and the equivalent DNS Cache/
-  Upstream DNS/Local DNS deployment history) now sanitizes secret-shaped
-  content before persisting, reusing the same redaction patterns already
-  applied to System Status's Recent Logs.
-- Fixed a fresh install's initial default-blocklist deployment reporting
-  `initial_deploy=failed` on a transient DNS-resolution hiccup moments
-  after apt itself had just succeeded -- not a real network
-  misconfiguration. Fresh install now retries the initial deploy with
-  bounded backoff, still seeds the three curated default sources exactly
-  once (never re-seeded on upgrade), and reports a truthful, actionable
-  recovery hint (Security > Blocklists > Update All Now) if connectivity
-  genuinely isn't available yet, instead of silently leaving Protection
-  in an unclear state.
-- Fixed a restore worker being killed mid-run by its own `app_config`
-  component restarting `alderpointdns.service` -- the worker used to run
-  as a direct child of the web request that started it, inside that same
-  service's cgroup, so the intentional restart tore it down along with
-  everything else, sometimes after the database had already been
-  promoted but before post-checks or a final status could be recorded
-  (`status=interrupted`, `promoted_at` set). Restore now runs as its own
-  independent systemd unit (`alderpointdns-backup-restore.service`,
-  started via `systemctl start --no-block`, mirroring Software Updates'
-  already-established install-runner pattern) with its own cgroup, so it
-  survives any of `alderpointdns`/`alderpointdns-analytics`/`named`/
-  `dnsdist` being restarted along the way and always reaches a truthful
-  final status.
-- Fixed Blocklists' "Last automatic update" banner showing a stale
-  automatic-run failure (e.g. a transient DNS resolution error) worded as
-  an ongoing problem long after the affected source had since updated
-  successfully -- "Update All Now" and per-source updates intentionally
-  never overwrite that banner, which only ever reflects the last
-  *timer*-triggered run. The banner still shows the historical error and
-  its timestamp (nothing is erased) but is no longer rendered as a
-  current failure once nothing currently enabled is actually unhealthy.
-  Per-source warning/failure reasons are now also shown inline in the
-  sources table itself, not only via a tooltip or the row's edit panel,
-  so the reason is visible on touch devices too.
-- Fixed the browser being left on a misleading, apparently-empty page
-  after a restore that touches app config/session data: such a restore
-  replaces the live sessions table (and can rotate the session-signing
-  secret) when it restarts `alderpointdns.service`, which silently broke
-  every subsequent in-page action because the browser's `fetch()`-driven
-  requests were quietly following the resulting redirect to the login
-  page and rendering its HTML as if it were a normal response. The
-  restore status card now polls in place, surviving the restart, and
-  explicitly navigates the browser to a login page carrying a clear
-  "Restore completed -- sign in again" message the moment it detects the
-  session was actually invalidated, instead of leaving that half-broken
-  state on screen.
-- Fixed an intermittent `sqlite3.OperationalError: database is locked`
-  that could surface from `init_analytics_db()` -- called on essentially
-  every analytics read/write -- when it raced a concurrent writer (most
-  often the analytics writer thread's own batched query-event writes)
-  shortly after `alderpointdns`/`alderpointdns-analytics` restart close
-  together, as they do during a real restore or software update. Unlike
-  the writer thread's own writes, this call previously relied solely on
-  the connection's `busy_timeout` with no application-level retry; it now
-  retries with backoff the same way the writer thread's writes already
-  did.
-- Fixed the curated fresh-install "HaGeZi Multi Normal" blocklist
-  (also present in the broader built-in public source catalog) pointing
-  at a raw.githubusercontent.com mirror that now 404s; both now use
-  HaGeZi's own documented primary jsDelivr link for the same list. Added
-  `scripts/release-preflight-check-curated-sources.py`, a manual,
-  network-requiring release step (deliberately not part of the normal
-  test suite) that verifies all three curated default source URLs are
-  actually reachable before a release ships.
-- Fixed a browser continuing to execute a stale cached `app.js`/`app.css`
-  after installing a newer Alderpoint DNS package at the same URL/IP --
-  the served files were correct, but their URL never changed across an
-  upgrade, so a normal page load had no reason to refetch them. Static
-  asset URLs are now fingerprinted from the actual shipped file contents
-  (`/static/app.js?v=<hash>`); the versioned URL is served with a
-  long-lived, immutable `Cache-Control`, while the bare unversioned path
-  keeps ordinary conditional-GET caching, so a real content change is
-  always picked up on the next page load with no hard refresh required.
-- Fixed the Dashboard's Top Blocked Domains, Query Types, Response Codes,
-  and Protocol Usage panels reaching the Query Log with no filter/context
-  applied. Every row now links directly into the Query Log pre-filtered
-  to that exact domain/QTYPE/response code/protocol (reusing the Query
-  Log's own existing filter parameters, not a second implementation of
-  it); Top Blocked Domains' "View All" link stays scoped to blocked
-  queries.
 
 ## v0.4.0-beta.5 (2026-07-31)
 

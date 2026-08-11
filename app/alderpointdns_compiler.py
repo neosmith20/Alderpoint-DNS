@@ -1245,9 +1245,7 @@ def reusable_protection_policy_available(conn: sqlite3.Connection) -> tuple[bool
 
 def protection_enable_reuse(_: argparse.Namespace | None = None) -> None:
     init_db()
-    DEPLOY_LOCK.parent.mkdir(parents=True, exist_ok=True)
-    with DEPLOY_LOCK.open("w") as lock_handle:
-        fcntl.flock(lock_handle, fcntl.LOCK_EX)
+    with deploy_lock():
         conn = connect()
         try:
             ok, reason = reusable_protection_policy_available(conn)
@@ -1532,11 +1530,74 @@ def dnsdist_conf_migrate() -> str:
     return "; ".join(parts)
 
 
-def deploy(download: bool = True, trigger: str | None = None, fail_on_source_errors: bool = False) -> int:
-    init_db()
+@contextlib.contextmanager
+def deploy_lock():
+    """The single global appliance-wide mutex guarding every entry point that
+    writes live BIND/dnsdist runtime configuration: the full deploy()
+    pipeline, protection-enable-reuse, and each of the narrower single-stage
+    CLI deploys that also touch that same runtime config outside a full
+    deploy() run (cache-deploy, cache-flush, upstream-deploy, encryption-deploy).
+
+    v1.0.1 RC acceptance found that real UI use -- an administrator toggling
+    several upstream resolvers in quick succession, each one submitted as its
+    own request before the previous had finished -- spawned multiple
+    concurrent `alderpointdns_compiler.py deploy --no-download` processes.
+    This lock is why that never actually corrupted or split-brained the
+    runtime files or last-good backups: only one holder ever mutates BIND's
+    RPZ/forwarders, dnsdist's upstream/cache/encryption config, or their
+    last-good backups at a time, and every other invocation -- from the web
+    app, cron timers, or a manual sudo'd CLI call -- blocks here until its
+    turn rather than racing. It does NOT by itself fix the UX problems that
+    incident also exposed (an admin's request blocking for as long as
+    however many pipelines were already queued ahead of it, with no
+    indication a deployment was already in progress) -- see
+    webapp._DeployCoordinator for that half of the fix.
+
+    Must not be acquired twice by the same call stack: deploy() and
+    protection_enable_reuse() acquire it themselves and are never called
+    from within another holder's critical section, and the narrower
+    single-stage deploys below acquire it only at their own CLI entry point,
+    never when invoked as a plain Python call from inside deploy()'s own
+    already-locked body (deploy() calls upstream_dns.deploy_upstreams(conn)
+    etc. directly, not through this lock, for exactly that reason) --
+    flock() is per open-file-description, so a second acquire from the same
+    process before the first is released would deadlock against itself.
+    """
     DEPLOY_LOCK.parent.mkdir(parents=True, exist_ok=True)
     with DEPLOY_LOCK.open("w") as lock_handle:
         fcntl.flock(lock_handle, fcntl.LOCK_EX)
+        yield
+
+
+def _locked(fn):
+    """Runs a narrower, single-stage runtime deploy (dns_cache/upstream_dns/
+    encryption's own deploy_*) under deploy_lock(), for standalone CLI/webapp
+    invocations that -- unlike calls from inside deploy()'s own body -- have
+    no other holder of the lock on their call stack."""
+    with deploy_lock():
+        return fn()
+
+
+def _run_upstream_deploy_for_cli(args) -> None:
+    """Prints the deployment id *and* its own truthful message -- not just
+    the id `upstream-deploy` used to print alone -- so the webapp's
+    upstream deploy coordinator can tell, from this subprocess's own
+    stdout, whether this particular deploy actually restarted dnsdist or
+    applied live over its console (see upstream_dns.deploy_upstreams()'s
+    _console_reconcile() docstring). That distinction is what lets the
+    coordinator's restart-rate pacing apply only when a restart really
+    happened, instead of throttling every ordinary sequential upstream
+    change to one every min_interval_seconds regardless of whether
+    anything was ever actually restarted."""
+    deployment_id = _locked(upstream_dns.deploy_upstreams)
+    row = upstream_dns.last_deployment()
+    message = row["message"] if row else ""
+    print(f"{deployment_id} {message}")
+
+
+def deploy(download: bool = True, trigger: str | None = None, fail_on_source_errors: bool = False) -> int:
+    init_db()
+    with deploy_lock():
         conn = connect()
         try:
             started = now()
@@ -1604,10 +1665,31 @@ def deploy(download: bool = True, trigger: str | None = None, fail_on_source_err
                 # validation work below.
                 conn.commit()
                 local_dns.deploy_zones(conn)
+                # Upstream forwarders must be (re)deployed before cache
+                # options: dns_cache.deploy_cache_options()'s own post-deploy
+                # health check resolves a live domain through BIND :5353,
+                # which forwards through dnsdist's managed upstream listener
+                # (:5355) -- i.e. it transitively depends on the upstream
+                # forwarder chain already being current. Deploying upstream
+                # second used to let a stale/dead upstream runtime config
+                # (e.g. from an earlier failed edit, or resolvers that have
+                # since gone down) fail the *cache* stage's health check
+                # before upstream_dns.deploy_upstreams() ever ran -- which
+                # aborted the whole pipeline right there, so a just-saved,
+                # perfectly valid upstream_resolvers.enabled change was
+                # never actually applied, never recorded in
+                # upstream_deployments (success or failure), and the
+                # operator saw a misleading "cache options" error while the
+                # database and the live dnsdist config silently diverged.
+                # Deploying upstream first means every full deploy always
+                # attempts to reconcile the live upstream config with the
+                # database first, so its own success/failure is always
+                # attempted and recorded, and any later stage's health
+                # check observes the freshly applied upstream state.
+                upstream_dns.deploy_upstreams(conn)
                 cache_options_snapshot = dns_cache.CACHE_OPTIONS_CONF.read_text() if dns_cache.CACHE_OPTIONS_CONF.exists() else None
                 dns_cache.deploy_cache_options(conn)
                 cache_deployed_this_run = True
-                upstream_dns.deploy_upstreams(conn)
                 # Restarts dnsdist only when the custom-rule dnsdist-layer
                 # files actually changed; rolls its own files back and
                 # re-raises on failure.
@@ -2147,14 +2229,28 @@ def main(argv: list[str] | None = None) -> int:
     protection_reuse_parser.set_defaults(func=protection_enable_reuse)
     local_dep = sub.add_parser("local-dns-deploy")
     local_dep.set_defaults(func=lambda args: print(local_dns.deploy_zones()))
+    # cache-deploy, cache-flush, upstream-deploy, and encryption-deploy are
+    # each a narrower, single-stage sibling of a step deploy() also runs
+    # inside its own already-held deploy_lock() -- and each writes to the
+    # same live BIND/dnsdist runtime files deploy() does (cache-options.conf,
+    # named.conf.options, the dnsdist/BIND upstream-forwarder confs,
+    # dnsdist.conf's encryption listeners). Standalone, they used to run
+    # with no locking at all: a cache-only or upstream-only change from the
+    # web app could race a concurrent full deploy() at the OS-process level
+    # and clobber the same files it was also writing. Acquiring the same
+    # deploy_lock() here closes that gap without touching the functions
+    # themselves (which are also called, conn already open, from *inside*
+    # deploy()'s own already-locked body -- acquiring it there too would
+    # self-deadlock, which is exactly why it's only acquired at this CLI
+    # boundary, never inside dns_cache/upstream_dns/encryption themselves).
     cache_dep = sub.add_parser("cache-deploy")
-    cache_dep.set_defaults(func=lambda args: print(dns_cache.deploy_cache_options()))
+    cache_dep.set_defaults(func=lambda args: print(_locked(dns_cache.deploy_cache_options)))
     cache_flush = sub.add_parser("cache-flush")
-    cache_flush.set_defaults(func=lambda args: print(dns_cache.process_pending_flush()))
+    cache_flush.set_defaults(func=lambda args: print(_locked(dns_cache.process_pending_flush)))
     upstream_dep = sub.add_parser("upstream-deploy")
-    upstream_dep.set_defaults(func=lambda args: print(upstream_dns.deploy_upstreams()))
+    upstream_dep.set_defaults(func=_run_upstream_deploy_for_cli)
     encryption_dep = sub.add_parser("encryption-deploy")
-    encryption_dep.set_defaults(func=lambda args: print(encryption.deploy_encryption()))
+    encryption_dep.set_defaults(func=lambda args: print(_locked(encryption.deploy_encryption)))
     dnsdist_conf_migrate_parser = sub.add_parser(
         "dnsdist-conf-migrate",
         help="idempotently apply dnsdist.conf managed-block migrations (e.g. doh-altsvc) without restarting dnsdist",

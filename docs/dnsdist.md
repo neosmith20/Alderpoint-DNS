@@ -79,6 +79,39 @@ systemctl status dnsdist --no-pager
 /opt/alderpointdns/tests/test_dnsdist_frontend.sh
 ```
 
+### Managed upstream resolvers and the dnsdist console (1.9.x vs 2.1.x)
+
+`app.upstream_dns.deploy_upstreams()` applies ordinary managed-upstream-resolver
+changes (add/edit/toggle/move/delete) to the *already-running* dnsdist over
+its console (`newServer()`/`rmServer()`/`showServers()`) instead of
+restarting the process — see `_console_reconcile()`'s docstring in
+`app/upstream_dns.py` for the full rationale (it exists to avoid tripping
+`dnsdist.service`'s systemd start-rate protection during a burst of
+sequential UI changes).
+
+This was live-verified against **both** supported dnsdist builds:
+
+- **1.9.16-0+deb13u1** (`dnsdist (>= 1.9.0)`, the default Debian-archive
+  package this project's own packaging `Depends:` on and the one a normal
+  install gets with no extra repository — see above) — the exact version
+  running in production on the appliance that originally surfaced the
+  restart-rate defect.
+- **2.1.x** (`trixie-dnsdist-21`, the opt-in `install-enhanced-dnsdist`
+  build).
+
+`showServers()`'s output format, `newServer()`'s accepted options (`address`,
+`name`, `pool`, `checkName`, `checkType`, `mustResolve`, `order`, and the
+`tls`/`validateCertificates`/`subjectName`/`dohPath` options used for
+DoT/DoH backends), and `rmServer()` all behave identically across both
+versions for Alderpoint's usage. For hostname-based DoT/DoH upstreams,
+Alderpoint resolves the hostname through the configured bootstrap DNS
+resolvers during deployment and gives dnsdist the resolved endpoint IP in
+`address`; `subjectName` remains the configured hostname so TLS SNI,
+certificate validation, and DoH Host semantics stay correct. No DoQ/DoH3-only
+or otherwise 2.1-only console feature is used anywhere in the
+upstream-reconciliation path, so this mechanism needs no capability detection
+of its own (unlike the DoQ/DoH3 *frontend* listeners above, which do).
+
 ### Runtime status model (Encryption Settings / `/dns-settings`)
 
 Each protocol's row in the Protocol Status table (`app/webapp.py`'s

@@ -4,6 +4,40 @@ These notes describe what changed in each release. See
 `docs/known-limitations.md` for the current honest state of the project.
 Everything below `v1.0.0` was a beta-cycle build.
 
+## v1.0.1 (2026-08-11)
+
+Alderpoint DNS v1.0.1 is a bugfix release focused on upstream DNS
+reliability, deployment behavior, and backup/restore consistency.
+
+- Managed upstream resolver changes now deploy through the scoped upstream
+  path instead of the full blocklist/RPZ pipeline, reducing unnecessary
+  work and avoiding unrelated deployment stages for simple upstream edits.
+- Overlapping DNS Settings changes are serialized and coalesced so a burst
+  of upstream add/edit/toggle/move/delete actions does not queue multiple
+  redundant deployments or surface raw database-lock errors.
+- Upstream resolver deployment now applies ordinary backend changes to the
+  running dnsdist process through its console where possible, avoiding
+  unnecessary dnsdist restarts while still keeping the generated startup
+  configuration in sync.
+- Post-deploy upstream checks now force fresh DNS resolution rather than
+  accepting stale cached answers, and per-upstream status is recorded from
+  each backend's actual state instead of assuming every enabled resolver is
+  healthy when the overall pool can answer.
+- DNS Settings now shows direct per-provider health telemetry and refreshes
+  it locally while the page is open, without causing extra external DNS or
+  DoH probes.
+- Direct DoH health probes now resolve the configured DoH hostname through
+  bootstrap DNS and send the correct TLS SNI, HTTP Host/authority,
+  configured DoH path, and `application/dns-message` request headers.
+- Disabling, deleting, or editing the last enabled upstream resolver is
+  rejected before the invalid all-disabled state can be committed.
+- Backup restore now reconciles managed upstream resolver state with the
+  generated runtime configuration when a restore can affect either side,
+  and replicated configuration explicitly leaves upstream resolvers
+  appliance-local.
+- The packaged sudoers policy now includes the required scoped
+  `upstream-deploy` grant used by DNS Settings upstream actions.
+
 ## v1.0.0 (2026-08-09)
 
 Alderpoint DNS's first stable release. Highlights since the beta.4/beta.5
@@ -53,31 +87,6 @@ line, by area (see `CHANGELOG.md` for the full detailed log):
   `scripts/upgrade.sh` or in-app Software Updates) preserves all
   configuration and data; schema migrations are idempotent and
   interprocess-lock-protected.
-- **Upgrade path from beta**: a real `0.4.0~beta6-1` -> `1.0.0-1`
-  in-place upgrade on a disposable Debian appliance surfaced
-  `alderpointdns.service` failing to start (`status=226/NAMESPACE`) on
-  any host missing one of the three supported networking-backend
-  directories (`/etc/netplan` in particular is Ubuntu-centric); fixed so
-  the service starts correctly regardless of which backend(s) a given
-  host actually has installed.
-- **Release-hardening fixes found via live appliance acceptance
-  testing**: restored TLS/DNSCrypt private keys and runtime secrets now
-  land with correct ownership (and restore proves the runtime user can
-  actually read them, not just that the config validates); restore
-  history no longer persists secret-bearing rendered configuration; a
-  fresh install retries an initial deploy through a transient network
-  hiccup instead of reporting a false failure; a restore's own worker now
-  survives `alderpointdns`/`alderpointdns-analytics`/`named`/`dnsdist`
-  being restarted mid-run (its own independent systemd unit, not a child
-  of the web request); the browser is sent to a clear re-login screen
-  instead of a misleading blank page when a restore invalidates the
-  current session; an intermittent `database is locked` error from the
-  analytics subsystem is fixed; the curated default HaGeZi Multi Normal
-  blocklist URL was updated after its previous mirror stopped resolving;
-  a browser no longer keeps executing a stale cached `app.js`/`app.css`
-  after an in-place upgrade; and the Dashboard's blocked-domains/query-
-  type/response-code/protocol panels now drill into the Query Log
-  pre-filtered to the exact value clicked.
 
 ## 0.4.0-beta.4 (unreleased beta update)
 

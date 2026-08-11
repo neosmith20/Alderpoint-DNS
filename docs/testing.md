@@ -288,6 +288,23 @@ excerpts, checks that the bundle contains schema/summary metadata without
 secret-like content, and builds/inspects a local test `.deb` with
 `scripts/build-deb.sh`.
 
+The sudoers privilege-boundary suite (`tests/test_sudoers_policy.py`) closes
+the gap that let a real RC ship with a missing NOPASSWD grant: every literal
+`sudo .../alderpointdns_compiler.py <subcommand>` invocation
+`app/webapp.py` can make is extracted from source and checked, statically,
+against `packaging/sudoers-alderpointdns`, failing the moment a new scoped
+deploy route is wired up without its matching entry -- and asserts the
+policy stays narrow (no `ALL`, no wildcard/glob commands, no bare
+interpreter or shell grant). On a real packaged install (skipped otherwise:
+it needs the `alderpointdns` service account and an installed
+`/etc/sudoers.d/alderpointdns`), it also runs `sudo -n -l` as that real
+unprivileged account for each of those same commands -- a permission check
+only, never an actual privileged execution -- so it exercises the *live*
+installed policy the same way the web app does, not just the packaging
+source tree. This is the check that would have caught the dns1 "sudo: a
+password is required" defect (a missing `upstream-deploy` grant) before it
+reached live acceptance; see `CHANGELOG.md`.
+
 The release hygiene suite (`tests/test_release_hygiene.sh`) is a permanent
 gate run as part of release verification. It scans tracked files and
 filenames for stale references matching a prohibited-name pattern, supplied

@@ -127,6 +127,61 @@
     window.setInterval(refreshStatus, 15000);
   }
 
+  const upstreamTelemetryPanel = document.querySelector('[data-upstream-telemetry-url]');
+  if (upstreamTelemetryPanel) {
+    const ageLabel = (isoValue) => {
+      if (!isoValue) return '';
+      const checked = Date.parse(isoValue);
+      if (!Number.isFinite(checked)) return '';
+      const seconds = Math.max(0, Math.round((Date.now() - checked) / 1000));
+      if (seconds < 60) return `checked ${seconds}s ago`;
+      const minutes = Math.round(seconds / 60);
+      if (minutes < 60) return `checked ${minutes}m ago`;
+      return `checked ${Math.round(minutes / 60)}h ago`;
+    };
+    const setBadge = (cell, label, tone) => {
+      let badge = cell.querySelector('.status-badge');
+      if (!badge) {
+        badge = document.createElement('span');
+        badge.className = 'status-badge';
+        cell.prepend(badge);
+      }
+      badge.className = `status-badge status-badge--${tone || 'unavailable'}`;
+      badge.textContent = label || 'Unknown';
+    };
+    const refreshUpstreamTelemetry = async () => {
+      const panel = document.querySelector('[data-upstream-telemetry-url]');
+      if (!panel) return;
+      try {
+        const response = await fetch(panel.dataset.upstreamTelemetryUrl, { headers: { 'X-Requested-With': 'AlderpointDNSUpstreamTelemetry' } });
+        if (!response.ok) return;
+        const data = await response.json();
+        (data.resolvers || []).forEach((resolver) => {
+          const row = document.querySelector(`[data-upstream-resolver-id="${resolver.id}"]`);
+          const cell = row && row.querySelector('[data-upstream-health]');
+          if (!cell) return;
+          setBadge(cell, resolver.label, resolver.tone);
+          const latency = cell.querySelector('[data-upstream-latency]');
+          const checked = cell.querySelector('[data-upstream-checked]');
+          const message = cell.querySelector('[data-upstream-message]');
+          if (latency) latency.textContent = resolver.latency_ms == null ? 'No data yet' : `${Number(resolver.latency_ms).toFixed(1)} ms`;
+          if (checked) {
+            const text = ageLabel(resolver.checked_at);
+            checked.textContent = text;
+            checked.hidden = !text;
+          }
+          if (message) {
+            message.textContent = resolver.message || '';
+            message.hidden = !resolver.message;
+          }
+        });
+      } catch (_) {}
+    };
+    const intervalMs = Math.max(1000, Number(upstreamTelemetryPanel.dataset.upstreamTelemetryIntervalMs || 5000));
+    refreshUpstreamTelemetry();
+    window.setInterval(refreshUpstreamTelemetry, intervalMs);
+  }
+
   const rangeLinks = document.querySelectorAll('[data-range-link]');
   if (rangeLinks.length) {
     const params = new URLSearchParams(window.location.search);

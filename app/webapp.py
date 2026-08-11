@@ -10,6 +10,8 @@ import secrets
 import sqlite3
 import subprocess
 import sys
+import threading
+import time
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -140,6 +142,14 @@ def _replication_autostart() -> None:
     # Deliberately best-effort (replication.autostart() never raises): a
     # replication bug must never prevent alderpointdns.service from starting.
     replication.autostart()
+
+
+@app.on_event("startup")
+def _upstream_probe_autostart() -> None:
+    # Lightweight direct upstream probes are background telemetry only:
+    # they read configured resolver rows and update probe_* fields, but
+    # never mutate dnsdist's runtime configuration or restart services.
+    upstream_dns.start_upstream_probe_scheduler()
 
 
 @app.on_event("startup")
@@ -513,6 +523,147 @@ def compiler_status() -> dict[str, Any]:
     return {"sources": sources, "rules": rules, "deployment": deployment}
 
 
+class _DeployCoordinator:
+    """Ensures at most one caller in this process is ever actually spawning
+    a given runtime-mutating alderpointdns_compiler.py subcommand at a time,
+    and coalesces bursts of callers that arrive while one is already
+    in flight into a single trailing re-run instead of one queued run per
+    caller.
+
+    Root cause this exists for (v1.0.1 RC acceptance): every DNS Settings
+    control -- upstream add/edit/toggle/move/delete among them -- invoked
+    `subprocess.run(["sudo", ".../alderpointdns_compiler.py", "deploy", ...])`
+    directly and synchronously from its own request-handling thread.
+    FastAPI/Starlette runs sync route handlers in a threadpool, so an
+    administrator clicking several checkboxes before the first click's
+    request had even returned span up that many *concurrent* subprocesses.
+    alderpointdns_compiler.deploy_lock() (an flock()) already guarantees
+    those subprocesses never actually mutate runtime config at the same
+    time -- which is why the incident never corrupted anything -- but each
+    extra one still queues up and re-runs the *entire* pipeline it was
+    given, back to back, for as long as clicks kept arriving: exactly the
+    "extremely slow" UI and pile of "database is locked" / HTTP 400 /
+    repeated dnsdist restarts the incident reported.
+
+    A coordinator instance owns exactly one underlying operation (e.g. the
+    full deploy, or the scoped upstream-only deploy). The first caller to
+    arrive actually runs it; every caller that arrives while that run is
+    still in flight does not spawn a second subprocess at all -- it marks
+    the run as needing one more pass and waits (bounded) for that pass,
+    which then reflects everyone's latest saved state in a single pipeline
+    execution rather than one per click. Different coordinators (e.g. the
+    full-deploy one and the upstream-only one) can each have a run in
+    flight at once from this process's point of view; alderpointdns_compiler's
+    own deploy_lock() is still the cross-process, cross-pipeline-kind
+    backstop that serializes those against each other and against any
+    other invocation (cron timers, a manual sudo'd CLI call, package
+    upgrade) -- this class only removes the *redundant, pile-up* case, it
+    does not replace that lock.
+    """
+
+    def __init__(self, run_once, wait_timeout: float = 180.0, busy_message: str = "a deployment is already in progress; your change was saved and will be applied automatically once it finishes", min_interval_seconds: float = 0.0, should_pace=None):
+        self._run_once = run_once
+        self._wait_timeout = wait_timeout
+        self._busy_message = busy_message
+        # See the "restart-rate limiting" note below `run()` for why this
+        # exists and how it interacts with coalescing.
+        self._min_interval_seconds = min_interval_seconds
+        # should_pace(result: tuple[int, str]) -> bool: decides whether a
+        # completed run counts toward the min_interval_seconds cooldown at
+        # all. Defaults to "every run counts" (unconditional pacing), which
+        # is correct for a coordinator whose underlying operation always
+        # does the one rate-limited thing it exists to pace. It is NOT
+        # correct once an operation can satisfy the same request two
+        # different ways with very different costs -- see
+        # _upstream_deploy_coordinator, where most runs apply live over
+        # dnsdist's console (no restart, nothing to pace) and only a rare
+        # fallback actually restarts dnsdist (the thing that must be
+        # paced). Pacing every run unconditionally there would throttle
+        # ordinary sequential clicks to one every min_interval_seconds
+        # even when no restart ever happened -- an earlier version of this
+        # fix did exactly that and turned 8 ordinary sequential toggles
+        # into a 123-second wait for nothing.
+        self._should_pace = should_pace or (lambda result: True)
+        self._cv = threading.Condition()
+        self._in_flight = False
+        self._coalesced = False
+        self._round = 0
+        self._result: tuple[int, str] | None = None
+        self._error: BaseException | None = None
+        self._last_finished: float | None = None
+
+    def run(self) -> tuple[int, str]:
+        with self._cv:
+            if self._in_flight:
+                self._coalesced = True
+                target_round = self._round + 1
+                deadline = time.monotonic() + self._wait_timeout
+                while self._round < target_round:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RuntimeError(self._busy_message)
+                    self._cv.wait(remaining)
+                if self._error is not None:
+                    raise self._error
+                return self._result
+            self._in_flight = True
+
+        while True:
+            # Restart-rate limiting (v1.0.1 RC #3 continuation): a burst of
+            # ordinary, *sequential* UI clicks -- each one returning before
+            # the next arrives, so nothing above is ever "in flight" to
+            # coalesce against -- previously still triggered one full
+            # `systemctl restart dnsdist` per click. Live dns1 acceptance
+            # showed five clicks in under ten seconds is enough to trip
+            # systemd's StartLimitBurst on dnsdist.service (a real, intended
+            # crash-loop protection this code must never weaken or bypass --
+            # see docs/testing.md). Instead, when `min_interval_seconds` is
+            # set, every actual `run_once()` call (the first one included)
+            # is spaced at least that far apart from the previous one's
+            # completion; a caller arriving before that spacing has elapsed
+            # is *already* holding `_in_flight`, so any further caller in
+            # the meantime coalesces the normal way above -- this sleep
+            # doesn't add a new queue, it just gives coalescing a wider
+            # window to catch a fast sequential burst in, converging it to
+            # one restart every `min_interval_seconds` instead of one per
+            # click. It never delays a truly isolated click by more than
+            # `min_interval_seconds`, and never delays the very first click
+            # after an idle period at all. Critically, `_last_finished` is
+            # only set below when `_should_pace(result)` says this
+            # particular run actually did the rate-limited thing -- a run
+            # that didn't (e.g. applied live over dnsdist's console, no
+            # restart at all) leaves it untouched, so it never starts a
+            # cooldown the next call would have to wait out.
+            if self._min_interval_seconds and self._last_finished is not None:
+                remaining_cooldown = self._min_interval_seconds - (time.monotonic() - self._last_finished)
+                if remaining_cooldown > 0:
+                    time.sleep(remaining_cooldown)
+            result: tuple[int, str] | None = None
+            error: BaseException | None = None
+            try:
+                result = self._run_once()
+            except BaseException as exc:  # pragma: no cover - run() -> subprocess.run doesn't normally raise
+                error = exc
+            with self._cv:
+                self._round += 1
+                self._result = result
+                self._error = error
+                # Conservative on error: if run_once() raised, we can't
+                # know whether a restart happened before the failure, so
+                # this round still counts toward the cooldown.
+                if error is not None or self._should_pace(result):
+                    self._last_finished = time.monotonic()
+                run_again = self._coalesced
+                self._coalesced = False
+                if not run_again:
+                    self._in_flight = False
+                self._cv.notify_all()
+            if not run_again:
+                if error is not None:
+                    raise error
+                return result
+
+
 def deploy_no_download() -> tuple[int, str]:
     return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "deploy", "--no-download"])
 
@@ -521,24 +672,99 @@ def protection_enable_reuse() -> tuple[int, str]:
     return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "protection-enable-reuse"])
 
 
+_deploy_coordinator = _DeployCoordinator(lambda: deploy_no_download())
+
+
 def deploy_no_download_or_raise() -> None:
-    code, out = deploy_no_download()
+    code, out = _deploy_coordinator.run()
     if code != 0:
         raise RuntimeError(out.strip() or "deployment failed")
+
+
+def upstream_deploy() -> tuple[int, str]:
+    return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "upstream-deploy"])
+
+
+# min_interval_seconds=16.0: this is now only a defense-in-depth backstop,
+# not the primary fix -- app.upstream_dns.deploy_upstreams() applies
+# ordinary upstream changes to the already-running dnsdist over its
+# console (see _console_reconcile()'s docstring), so a normal add/edit/
+# toggle/move/delete never restarts dnsdist at all and this spacing is
+# almost never actually waited on. It only matters for the rare case where
+# every deploy in a burst falls back to a real restart (console
+# unreachable, or the very first upstream deploy ever on a fresh install,
+# which still needs one restart to wire up routing). dns1's *actual*
+# installed dnsdist.service policy is StartLimitBurst=5 within a 60s
+# window (not systemd's 10s default) -- 5 restarts spaced 16s apart span
+# 64s, so 16s spacing guarantees an all-restart fallback burst can never
+# fit 5 restarts inside any rolling 60s window, with real margin either
+# side of the boundary. An isolated click (the overwhelmingly common case,
+# and the only one that matters for UX) is never delayed by this at all
+# since it always takes the console path.
+def _upstream_deploy_used_a_restart(result: tuple[int, str]) -> bool:
+    """True unless this deploy's own subprocess output says, in so many
+    words, that it applied live without restarting dnsdist (see
+    _run_upstream_deploy_for_cli() in alderpointdns_compiler.py and
+    upstream_dns.deploy_upstreams()'s _console_reconcile() docstring).
+    Conservative by construction: a failed run, an unparseable/unexpected
+    output, or an explicit restart all count as "yes, pace this" -- only a
+    confirmed non-restart success skips pacing."""
+    code, out = result
+    return not (code == 0 and "no dnsdist restart" in out)
+
+
+_upstream_deploy_coordinator = _DeployCoordinator(lambda: upstream_deploy(), min_interval_seconds=16.0, should_pace=_upstream_deploy_used_a_restart)
+
+
+def upstream_deploy_or_raise() -> None:
+    """Deploys only the managed-upstream-resolver stage
+    (upstream_dns.deploy_upstreams): render/stage/promote the dnsdist and
+    BIND upstream-forwarder config, validate it, restart dnsdist, reload
+    BIND, and run its own post-deploy functional DNS check (dig through
+    BIND, which forwards through the freshly-deployed upstream chain) --
+    without redownloading/recompiling the blocklist RPZ, redeploying local
+    DNS zones, BIND cache tuning, or the custom-rules dnsdist layer. None of
+    those subsystems' own health checks or generated files depend on which
+    upstream resolvers are enabled (only the reverse was ever true -- see
+    the deploy-ordering fix's comment in alderpointdns_compiler.deploy()),
+    and upstream_dns.deploy_upstreams() already owns its own last-good
+    rollback and upstream_deployments history end to end. Routing ordinary
+    upstream add/edit/toggle/move/delete through the entire
+    alderpointdns_compiler.py deploy pipeline was needless cost inherited
+    from the generic settings-save convention, not a real dependency --
+    identified investigating the v1.0.1 RC concurrency incident, where it
+    meant a single checkbox click could take 20-90 seconds and legitimately
+    overlap with someone else's unrelated blocklist/local-DNS/cache change.
+
+    Also rate-limited (see _upstream_deploy_coordinator's
+    min_interval_seconds): a burst of ordinary sequential clicks converges
+    to the fewest dnsdist restarts needed to reach the final desired state,
+    instead of one restart per click -- found necessary when a real burst
+    of upstream toggles on dns1 restarted dnsdist often enough, quickly
+    enough, to trip systemd's own StartLimitBurst crash-loop protection."""
+    code, out = _upstream_deploy_coordinator.run()
+    if code != 0:
+        raise RuntimeError(out.strip() or "upstream deployment failed")
 
 
 def cache_flush_apply() -> tuple[int, str]:
     return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "cache-flush"])
 
 
+_cache_flush_coordinator = _DeployCoordinator(lambda: cache_flush_apply(), busy_message="a cache flush is already in progress; please try again shortly")
+
+
 def cache_flush_apply_or_raise() -> None:
-    code, out = cache_flush_apply()
+    code, out = _cache_flush_coordinator.run()
     if code != 0:
         raise RuntimeError(out.strip() or "cache flush failed")
 
 
 def cache_options_deploy() -> tuple[int, str]:
     return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "cache-deploy"])
+
+
+_cache_options_coordinator = _DeployCoordinator(lambda: cache_options_deploy(), busy_message="a cache deployment is already in progress; your change was saved and will be applied automatically once it finishes")
 
 
 def cache_options_deploy_or_raise() -> None:
@@ -548,7 +774,7 @@ def cache_options_deploy_or_raise() -> None:
     never redownload, recompile, and re-validate the entire filtering policy --
     doing so wasted time and made a transient live-domain hiccup in the
     filtering postcheck falsely block an unrelated cache setting change."""
-    code, out = cache_options_deploy()
+    code, out = _cache_options_coordinator.run()
     if code != 0:
         raise RuntimeError(out.strip() or "cache deployment failed")
 
@@ -2049,9 +2275,10 @@ def dns_settings(request: Request, _: sqlite3.Row = Depends(current_admin)):
         cert=cert_status(),
         proxy_backend="enabled" if proxy_backend else "not enabled",
         client_address_test=client_address_test,
-        upstream_resolvers=upstream_dns.resolvers(),
+        upstream_resolvers=upstream_dns.display_resolvers(),
         upstream_deployment=upstream_dns.last_deployment(),
         upstream_error=None,
+        upstream_telemetry_poll_ms=int(upstream_dns.UPSTREAM_TELEMETRY_POLL_SECONDS * 1000),
     )
 
 
@@ -2061,6 +2288,11 @@ def dns_settings_error(request: Request, message: str, status_code: int = 400) -
     body = response.body.decode()
     body = body.replace('<section class="grid">', f'<div class="alert error">{message}</div>\n<section class="grid">', 1)
     return HTMLResponse(body, status_code=status_code)
+
+
+@app.get("/dns-settings/upstreams/telemetry")
+def upstream_telemetry(_: sqlite3.Row = Depends(current_admin)):
+    return JSONResponse({"resolvers": upstream_dns.probe_telemetry()})
 
 
 @app.post("/dns-settings/upstreams/add")
@@ -2080,7 +2312,7 @@ def upstream_add(
     check_csrf(request, csrf)
     try:
         upstream_dns.add_resolver({"name": name, "protocol": protocol, "address": address, "port": port, "doh_path": doh_path, "tls_hostname": tls_hostname, "bootstrap_ips": bootstrap_ips, "enabled": enabled})
-        deploy_no_download_or_raise()
+        upstream_deploy_or_raise()
     except Exception as exc:
         return dns_settings_error(request, str(exc))
     return redirect("/dns-settings")
@@ -2104,7 +2336,7 @@ def upstream_edit(
     check_csrf(request, csrf)
     try:
         upstream_dns.update_resolver(resolver_id, {"name": name, "protocol": protocol, "address": address, "port": port, "doh_path": doh_path, "tls_hostname": tls_hostname, "bootstrap_ips": bootstrap_ips, "enabled": enabled})
-        deploy_no_download_or_raise()
+        upstream_deploy_or_raise()
     except Exception as exc:
         return dns_settings_error(request, str(exc))
     return redirect("/dns-settings")
@@ -2115,7 +2347,7 @@ def upstream_toggle(request: Request, resolver_id: int, csrf: str = Form(...), e
     check_csrf(request, csrf)
     try:
         upstream_dns.set_enabled(resolver_id, enabled == "1")
-        deploy_no_download_or_raise()
+        upstream_deploy_or_raise()
     except Exception as exc:
         return dns_settings_error(request, str(exc))
     return redirect("/dns-settings")
@@ -2126,7 +2358,7 @@ def upstream_move(request: Request, resolver_id: int, csrf: str = Form(...), dir
     check_csrf(request, csrf)
     try:
         upstream_dns.move_resolver(resolver_id, direction)
-        deploy_no_download_or_raise()
+        upstream_deploy_or_raise()
     except Exception as exc:
         return dns_settings_error(request, str(exc))
     return redirect("/dns-settings")
@@ -2137,7 +2369,7 @@ def upstream_delete(request: Request, resolver_id: int, csrf: str = Form(...), _
     check_csrf(request, csrf)
     try:
         upstream_dns.delete_resolver(resolver_id)
-        deploy_no_download_or_raise()
+        upstream_deploy_or_raise()
     except Exception as exc:
         return dns_settings_error(request, str(exc))
     return redirect("/dns-settings")

@@ -698,6 +698,16 @@ NEVER_REPLICATED_TABLES = {
     "dns_cache_flushes", "encryption_deployments", "import_jobs",
     "replication_settings", "replication_enrollments", "replication_replicas",
     "replication_generations", "replication_sync_history",
+    # Managed upstream DNS resolvers are appliance-local by design: dns1 and
+    # dns2 can (and, in the incident this denylist entry documents, did)
+    # legitimately need different upstream resolvers, and each appliance's
+    # own app.upstream_dns.deploy_upstreams() already keeps its own
+    # upstream_resolvers rows and its own live dnsdist config reconciled.
+    # Replicating this table would let a primary silently override a
+    # replica's independently-managed upstream resolvers -- explicitly
+    # listed here (not just "not in REPLICABLE_TABLES") so this stays true
+    # even if someone adds it to REPLICABLE_TABLES by mistake later.
+    "upstream_resolvers", "upstream_deployments",
 }
 
 
