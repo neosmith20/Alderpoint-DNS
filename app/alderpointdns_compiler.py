@@ -8,6 +8,7 @@ import contextlib
 import datetime as dt
 import fcntl
 import hashlib
+import io
 import ipaddress
 import json
 import os
@@ -2094,8 +2095,13 @@ def update_run(_: argparse.Namespace) -> None:
         print("no pending update job")
         return
     print(json.dumps(result, default=str))
-    if result.get("result") == "failed":
-        raise SystemExit(1)
+
+
+def update_postcheck(args: argparse.Namespace) -> None:
+    noise = io.StringIO()
+    with contextlib.redirect_stdout(noise), contextlib.redirect_stderr(noise):
+        result = software_updates.post_upgrade_health_check_json(expected_deb_version=args.expected_deb_version)
+    print(result)
 
 
 def filter_schedule_deploy(_: argparse.Namespace) -> None:
@@ -2273,6 +2279,9 @@ def main(argv: list[str] | None = None) -> int:
     update_check_parser.set_defaults(func=update_check)
     update_run_parser = sub.add_parser("update-run")
     update_run_parser.set_defaults(func=update_run)
+    update_postcheck_parser = sub.add_parser("update-postcheck")
+    update_postcheck_parser.add_argument("--expected-deb-version")
+    update_postcheck_parser.set_defaults(func=update_postcheck)
     update_check_schedule_parser = sub.add_parser("update-check-schedule-deploy")
     update_check_schedule_parser.set_defaults(func=update_check_schedule_deploy)
     network_rollback_check_parser = sub.add_parser("network-rollback-check")

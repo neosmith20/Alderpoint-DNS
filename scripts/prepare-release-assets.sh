@@ -23,6 +23,12 @@ produces the exact set of assets a GitHub Release should publish:
 
 This script does not publish anything -- it only prepares local files for
 whoever runs the actual `gh release create`/upload step.
+
+BRIDGE RELEASE WARNING: public v1.0.2 is a one-time bridge release for
+unmodified v1.0.0 appliances. Its PUBLIC GitHub release must upload exactly
+one .deb asset, alderpointdns_latest_all.deb, plus SHA256SUMS. Do not upload
+the versioned alderpointdns_1.0.2-1_all.deb asset publicly for v1.0.2. After
+v1.0.2, normal public releases may return to the three-asset layout above.
 EOF
 }
 
@@ -43,6 +49,10 @@ mkdir -p "$OUTPUT_DIR"
 VERSIONED_DEB="$("$SCRIPT_DIR/build-deb.sh" --output-dir "$OUTPUT_DIR")"
 VERSIONED_NAME="$(basename "$VERSIONED_DEB")"
 LATEST_DEB="$OUTPUT_DIR/alderpointdns_latest_all.deb"
+
+if [ "$(cat "$SCRIPT_DIR/../VERSION")" = "1.0.2" ]; then
+  echo "prepare-release-assets.sh: WARNING: public v1.0.2 must upload alderpointdns_latest_all.deb and SHA256SUMS only; do not upload $VERSIONED_NAME publicly" >&2
+fi
 
 # A plain byte-for-byte copy, not a symlink and not a second build:
 # a symlink wouldn't survive being uploaded as an independent GitHub

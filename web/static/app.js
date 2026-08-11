@@ -182,6 +182,149 @@
     window.setInterval(refreshUpstreamTelemetry, intervalMs);
   }
 
+  const softwareUpdateJobPanel = document.querySelector('[data-job-status-url]');
+  if (softwareUpdateJobPanel) {
+    const localTime = (isoValue) => {
+      if (!isoValue) return '';
+      const millis = Date.parse(isoValue);
+      if (!Number.isFinite(millis)) return isoValue;
+      return new Date(millis).toLocaleString();
+    };
+    const node = (tag, className, text) => {
+      const element = document.createElement(tag);
+      if (className) element.className = className;
+      if (text !== undefined && text !== null) element.textContent = text;
+      return element;
+    };
+    const badge = (label, tone) => {
+      const element = node('span', `status-badge status-badge--${tone}`, label);
+      return element;
+    };
+    const renderNoJob = (panel) => {
+      const section = node('section', 'panel stack');
+      const head = node('div', 'panel__head');
+      head.appendChild(node('h2', '', 'Update Job'));
+      section.appendChild(head);
+      section.appendChild(node('p', 'muted', 'No update has been started yet.'));
+      panel.replaceChildren(section);
+    };
+    const guardUpdateActions = (disabled) => {
+      document.querySelectorAll(
+        'form[action$="/system/administration/software-updates/install"] button, ' +
+        'form[action$="/system/administration/software-updates/upload"] button'
+      ).forEach((button) => {
+        button.disabled = disabled;
+      });
+    };
+    const renderPendingUpdate = (operation) => {
+      const panel = document.querySelector('[data-job-status-url]');
+      if (!panel) return;
+      const section = node('section', 'panel stack');
+      section.dataset.phaseActive = '1';
+      const head = node('div', 'panel__head');
+      head.appendChild(node('h2', '', 'Update Job'));
+      head.appendChild(badge('Update in progress...', 'neutral'));
+      section.appendChild(head);
+      const live = node('p', 'muted');
+      live.setAttribute('role', 'status');
+      live.setAttribute('aria-live', 'polite');
+      const spinner = node('span', 'btn-spinner');
+      spinner.setAttribute('aria-hidden', 'true');
+      live.append(spinner, ` ${operation === 'manual' ? 'Manual update' : 'Update'} in progress... The page will update automatically.`);
+      section.appendChild(live);
+      section.appendChild(node('p', 'muted', 'Do not start another update while this job is active.'));
+      panel.replaceChildren(section);
+      guardUpdateActions(true);
+    };
+    const renderJob = (panel, payload) => {
+      const job = payload.job;
+      if (!job) {
+        renderNoJob(panel);
+        return;
+      }
+      guardUpdateActions(Boolean(job.active));
+      const section = node('section', 'panel stack');
+      section.dataset.phaseActive = job.active ? '1' : '0';
+      const head = node('div', 'panel__head');
+      head.appendChild(node('h2', '', `Update Job #${job.id}`));
+      head.appendChild(badge(job.status_label || job.phase || 'pending', job.status_tone || 'neutral'));
+      section.appendChild(head);
+
+      const summary = node('p', 'muted');
+      summary.append(
+        `${(job.operation || 'github').charAt(0).toUpperCase()}${(job.operation || 'github').slice(1)} update requested by `,
+        node('span', 'mono', job.requested_by || 'unknown'),
+        ` at ${localTime(job.requested_at)}.`
+      );
+      section.appendChild(summary);
+
+      const versions = node('p');
+      versions.append('Current version: ', node('span', 'mono', job.current_version || 'unknown'), ' -> Candidate: ', node('span', 'mono', job.candidate_version || 'pending'));
+      section.appendChild(versions);
+
+      const live = node('p', 'muted', job.display_message || '');
+      live.setAttribute('role', 'status');
+      live.setAttribute('aria-live', 'polite');
+      section.appendChild(live);
+
+      if (payload.installed_version) {
+        section.appendChild(node('p', 'muted', `Installed version now: ${payload.installed_version}`));
+      }
+      if (job.backup_path) {
+        const backup = node('p');
+        backup.append('Pre-upgrade backup: ', node('span', 'mono', job.backup_path), ' (retained regardless of update outcome)');
+        section.appendChild(backup);
+      }
+      if (job.phase === 'failed' && job.error) {
+        const error = node('div', 'alert error', job.error);
+        error.setAttribute('role', 'alert');
+        section.appendChild(error);
+      }
+      if (job.health_summary) {
+        const health = node('div', 'alert error', `Health verification: ${job.health_summary}`);
+        health.setAttribute('role', 'alert');
+        section.appendChild(health);
+      }
+      if (job.phase === 'completed') {
+        const success = node('div', 'alert', 'Update successful. The pre-upgrade backup above was retained for recovery.');
+        success.setAttribute('role', 'status');
+        section.appendChild(success);
+      }
+
+      const wrap = node('div', 'table-wrap');
+      const table = node('table');
+      const thead = node('thead');
+      const headerRow = node('tr');
+      ['Time', 'Phase', 'Message'].forEach((heading) => headerRow.appendChild(node('th', '', heading)));
+      thead.appendChild(headerRow);
+      const tbody = node('tbody');
+      (job.events || []).forEach((event) => {
+        const row = node('tr');
+        row.appendChild(node('td', 'mono', localTime(event.ts)));
+        row.appendChild(node('td', 'mono', event.phase || ''));
+        row.appendChild(node('td', '', event.message || ''));
+        tbody.appendChild(row);
+      });
+      table.append(thead, tbody);
+      wrap.appendChild(table);
+      section.appendChild(wrap);
+      panel.replaceChildren(section);
+    };
+    const refreshSoftwareUpdateJob = async () => {
+      const panel = document.querySelector('[data-job-status-url]');
+      if (!panel) return;
+      try {
+        const response = await fetch(panel.dataset.jobStatusUrl, { headers: { 'X-Requested-With': 'AlderpointDNSSoftwareUpdateJob' } });
+        if (!response.ok) return;
+        renderJob(panel, await response.json());
+      } catch (_) {}
+    };
+    const intervalMs = Math.max(2000, Number(softwareUpdateJobPanel.dataset.jobStatusIntervalMs || 3000));
+    refreshSoftwareUpdateJob();
+    window.setInterval(refreshSoftwareUpdateJob, intervalMs);
+    window.AlderpointDNSSoftwareUpdatePending = renderPendingUpdate;
+  }
+
   const rangeLinks = document.querySelectorAll('[data-range-link]');
   if (rangeLinks.length) {
     const params = new URLSearchParams(window.location.search);
@@ -357,6 +500,13 @@
     }
     event.preventDefault();
     if (button) startPending(button);
+    const action = new URL(form.action, window.location.href).pathname;
+    if (
+      (action === '/system/administration/software-updates/install' || action === '/system/administration/software-updates/upload') &&
+      typeof window.AlderpointDNSSoftwareUpdatePending === 'function'
+    ) {
+      window.AlderpointDNSSoftwareUpdatePending(action.endsWith('/upload') ? 'manual' : 'github');
+    }
     try {
       const response = await fetch(form.action, {
         method: form.method || 'POST',

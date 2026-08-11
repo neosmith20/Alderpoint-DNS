@@ -4,41 +4,43 @@ These notes describe what changed in each release. See
 `docs/known-limitations.md` for the current honest state of the project.
 Everything below `v1.0.0` was a beta-cycle build.
 
-## v1.0.1 (2026-08-11)
+## v1.0.2 (unreleased)
 
-Alderpoint DNS v1.0.1 is a bugfix release focused on upstream DNS
-reliability, deployment behavior, and backup/restore consistency.
+A targeted Software Updates bugfix release:
 
-- Managed upstream resolver changes now deploy through the scoped upstream
-  path instead of the full blocklist/RPZ pipeline, reducing unnecessary
-  work and avoiding unrelated deployment stages for simple upstream edits.
-- Overlapping DNS Settings changes are serialized and coalesced so a burst
-  of upstream add/edit/toggle/move/delete actions does not queue multiple
-  redundant deployments or surface raw database-lock errors.
-- Upstream resolver deployment now applies ordinary backend changes to the
-  running dnsdist process through its console where possible, avoiding
-  unnecessary dnsdist restarts while still keeping the generated startup
-  configuration in sync.
-- Post-deploy upstream checks now force fresh DNS resolution rather than
-  accepting stale cached answers, and per-upstream status is recorded from
-  each backend's actual state instead of assuming every enabled resolver is
-  healthy when the overall pool can answer.
-- DNS Settings now shows direct per-provider health telemetry and refreshes
-  it locally while the page is open, without causing extra external DNS or
-  DoH probes.
-- Direct DoH health probes now resolve the configured DoH hostname through
-  bootstrap DNS and send the correct TLS SNI, HTTP Host/authority,
-  configured DoH path, and `application/dns-message` request headers.
-- Disabling, deleting, or editing the last enabled upstream resolver is
-  rejected before the invalid all-disabled state can be committed.
-- Backup restore now reconciles managed upstream resolver state with the
-  generated runtime configuration when a restore can affect either side,
-  and replicated configuration explicitly leaves upstream resolvers
+- Fixed update installs failing when a GitHub release contains both the
+  versioned `.deb` package and the `alderpointdns_latest_all.deb` alias.
+- The updater now prefers the exact versioned package for the candidate
+  release and treats `alderpointdns_latest_all.deb` as fallback only.
+- Checksum, package metadata, version, architecture, newer-than-installed,
+  and apt-simulation validation remain unchanged.
+- Genuinely ambiguous versioned package sets still fail closed.
+- The Software Updates page now polls durable local job state while open, so
+  browsers show update phases/messages and reconnect to stored job progress
+  after transient web-service restarts instead of appearing frozen.
+
+Public v1.0.2 is also a one-time bridge release for unmodified v1.0.0
+appliances. See `docs/packaging.md` before publishing its GitHub release
+assets: public v1.0.2 intentionally uses a latest-only `.deb` asset layout.
+
+## v1.0.1
+
+A targeted upstream DNS reliability bugfix release:
+
+- Fixed managed-upstream resolver deployments so upstream reconciliation runs
+  before cache-option deployment can be misled by stale live upstream state.
+- Backup restore now reconciles managed upstream resolvers when restored data
+  or generated runtime/base files may have changed.
+- Replication explicitly excludes managed upstream resolvers, which remain
   appliance-local.
-- The packaged sudoers policy now includes the required scoped
-  `upstream-deploy` grant used by DNS Settings upstream actions.
+- DNS Settings upstream changes use scoped upstream deployment with serialized
+  restart pacing, reducing UI stalls and avoiding dnsdist start-rate limits.
+- Last-enabled-upstream validation now rejects invalid zero-enabled desired
+  state before committing it to the database.
+- Direct upstream health telemetry now performs independent plain/DoH probes
+  and the DNS Settings page refreshes local stored telemetry while open.
 
-## v1.0.0 (2026-08-09)
+## v1.0.0
 
 Alderpoint DNS's first stable release. Highlights since the beta.4/beta.5
 line, by area (see `CHANGELOG.md` for the full detailed log):

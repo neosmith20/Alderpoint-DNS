@@ -3,19 +3,16 @@
 <section class="panel stack" data-phase-active="{{ '1' if job.phase not in ('completed', 'failed') else '0' }}">
   <div class="panel__head">
     <h2>Update Job #{{ job.id }}</h2>
-    {% if job.phase == 'completed' %}
-      {{ ui.status_badge("Update successful", "healthy") }}
-    {% elif job.phase == 'failed' %}
-      {{ ui.status_badge("Update failed", "down") }}
-    {% else %}
-      {{ ui.status_badge(job.phase, "neutral") }}
-    {% endif %}
+    {{ ui.status_badge(job.status_label or job.phase, job.status_tone or "neutral") }}
   </div>
   <p class="muted">{{ job.operation | capitalize }} update requested by <span class="mono">{{ job.requested_by or "unknown" }}</span> at {{ job.requested_at | local_time }}.</p>
   <p>Current version: <span class="mono">{{ job.current_version }}</span> &rarr; Candidate: <span class="mono">{{ job.candidate_version or "pending" }}</span></p>
   {% if job.backup_path %}<p>Pre-upgrade backup: <span class="mono">{{ job.backup_path }}</span> (retained regardless of update outcome)</p>{% endif %}
   {% if job.phase == 'failed' and job.error %}
     <div class="alert error" role="alert">{{ job.error }}</div>
+  {% endif %}
+  {% if job.health_summary %}
+    <div class="alert error" role="alert">Health verification: {{ job.health_summary }}</div>
   {% endif %}
   {% if job.phase == 'completed' %}
     <div class="alert" role="status">Update successful. The pre-upgrade backup above was retained for recovery.</div>

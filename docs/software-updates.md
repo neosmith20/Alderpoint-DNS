@@ -30,8 +30,13 @@ validates a request and writes a row to `software_update_jobs`.
   alderpointdns-software-update.service` to hand the work to a wholly
   independent systemd unit (its own cgroup, owned by PID 1), which execs
   `alderpointdns_compiler.py update-run` as root and survives
-  `alderpointdns.service` being restarted or killed out from under it. The
-  web request returns immediately; the browser polls durable job state.
+  `alderpointdns.service` being restarted or killed out from under it.
+  After `apt` installs the new package, that long-lived runner executes
+  `alderpointdns_compiler.py update-postcheck` in a fresh Python process
+  so post-upgrade health verification imports and reports the newly
+  installed Alderpoint DNS code, not modules loaded before installation.
+  The web request returns immediately; the browser polls durable job
+  state.
 
 Both entry points are fixed, argument-free sudoers lines -- no arbitrary
 command, path, or URL from the web process is ever passed to `sudo`.
@@ -51,9 +56,29 @@ Because `alderpointdns-software-update.service` is an independent unit,
 `alderpointdns.service` restarting mid-install does not interrupt it. The
 browser reconnects (or the administrator reloads the page later) and reads
 job state from the database -- never from the process that started it. The
-Software Updates page auto-refreshes its job panel every 3 seconds while a
-job is in a non-terminal phase (via the same `data-refresh-url` fragment
-mechanism `/system/logs` already uses).
+Software Updates page polls
+`/system/administration/software-updates/job/status` about every 3 seconds
+while open. That endpoint reads only durable local job state and installed
+version state; it never starts another update check, download, install, or
+GitHub request. Polling continues after a transient web-service restart
+because the browser retries and re-renders the same stored job when the
+service is reachable again.
+
+### v1.0.0/v1.0.1 bridge-upgrade UI limitation
+
+v1.0.2 is a one-time bridge release for appliances still running v1.0.0
+or v1.0.1.
+Those appliances can start the update through **System > Software Updates**,
+but the browser tab that initiated the update is still running the old
+frontend. It does not contain the v1.0.2 live-progress renderer, so that
+first bridge update may stay on Pending while the package install runs and
+restarts the web service. Click Install once, do not repeatedly click, allow
+the update several minutes to finish, then refresh the Software Updates page
+if it remains on Pending to read the stored job state and installed version.
+
+Once v1.0.2 is installed, future updates use the v1.0.2+ live-progress UI:
+the page polls local job state, reconnects after transient web-service
+restarts, and resumes rendering the same durable update job.
 
 ### Abandoned-job recovery
 
@@ -92,9 +117,21 @@ defaulting to the project's own repo).
   winner must be strictly newer than the resolved installed version
   (`backup.version_source_status()["resolved"]`) -- never a downgrade,
   never "the same version".
-- Exactly one compatible `.deb` asset (`alderpointdns_<ver>_<all|amd64>.deb`)
-  and exactly one `SHA256SUMS` asset are required; zero or more than one of
-  either is rejected as missing/ambiguous.
+- Exactly one `SHA256SUMS` asset is required.
+- The updater accepts Alderpoint DNS `.deb` assets named
+  `alderpointdns_<deb-version>_<all|amd64>.deb`; the special
+  `alderpointdns_latest_all.deb` filename is treated as an alias/fallback,
+  not as an independent competing package when an exact versioned package
+  exists.
+- When the release tag implies an expected Debian package version (for
+  example `v1.0.2` -> `1.0.2-1`), the updater prefers the exact matching
+  versioned package. If no versioned package is present, it may use
+  `alderpointdns_latest_all.deb`, but the later checksum and package-version
+  validation still has to prove the selected package matches the candidate
+  release.
+- Multiple genuinely compatible versioned packages for the same expected
+  version still fail closed as ambiguous. The updater never simply picks the
+  first `.deb` returned by GitHub.
 
 ## Private repository credential
 
@@ -146,9 +183,28 @@ When the repository is later made public, no credential is required and
 8. Post-upgrade health check: all four services active, `PRAGMA
    quick_check`, ordinary DNS resolution, the web app's own `/healthz`
    responding locally, and the installed dpkg version matching what was
-   expected. A failed health check fails the job (the pre-upgrade backup
-   is retained) -- Software Updates does not claim automatic package
-   rollback.
+   expected. The SQLite check uses Python's stdlib `sqlite3` module
+   directly against the production DB path -- not the optional external
+   `sqlite3` CLI -- with a bounded busy timeout/retry window so
+   service-start contention does not get mistaken for corruption. Its
+   stored diagnostic distinguishes lock/busy conditions, SQLite errors,
+   and genuine non-`ok` quick_check results. A failed health check fails
+   health verification (the pre-upgrade backup is retained) -- Software
+   Updates does not claim automatic package rollback.
+
+RC #3 live testing proved that the earlier opaque `database_quick_check_ok:
+false` symptom can be caused by a missing external `sqlite3` executable:
+the fresh structured postcheck reported `[Errno 2] No such file or
+directory: 'sqlite3'`. That finding did not prove historical database
+corruption or contention. The health check no longer depends on that
+undeclared executable.
+
+For bridge compatibility, the v1.0.2 package still depends on Debian's
+`sqlite3` package. This is not a current v1.0.2 runtime/postcheck
+requirement. It exists so a v1.0.0/v1.0.1 update-run process that started
+before apt installed v1.0.2 can finish its old external-CLI quick_check
+after apt returns. Keep this dependency while any supported direct upgrade
+path can originate from v1.0.0 or v1.0.1.
 
 ## Manual `.deb` upload
 

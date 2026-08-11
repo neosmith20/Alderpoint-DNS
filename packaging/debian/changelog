@@ -1,3 +1,19 @@
+alderpointdns (1.0.2-1) unstable; urgency=medium
+
+  * Fixed Software Updates failing when a GitHub release contains both the
+    canonical versioned .deb and the alderpointdns_latest_all.deb alias.
+    The updater now prefers the exact versioned package for the candidate
+    release and treats the latest alias as fallback only. SHA-256,
+    package-name, version, architecture, and apt-simulation validation are
+    unchanged, and genuinely ambiguous versioned package sets still fail
+    closed.
+  * Added durable live update-job polling to the Software Updates page.
+    Open browsers now show the current update phase/message from local
+    stored job state and reconnect to that state after transient
+    alderpointdns web-service restarts instead of appearing frozen.
+
+ -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Tue, 11 Aug 2026 00:00:00 -0600
+
 alderpointdns (1.0.1-1) unstable; urgency=medium
 
   * Fixed a live-incident-derived upstream DNS resolver bug: deploy()

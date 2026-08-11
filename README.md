@@ -7,9 +7,10 @@ application on top. dnsdist is the client-facing DNS frontend; BIND is a
 localhost-only validating cache/forwarder; filtering policy is compiled into
 a BIND RPZ zone and reloaded through a staged, validated deployment path.
 
-> **Status: stable.** This is **v1.0.0**, Alderpoint DNS's first stable
-> release. It is functional and acceptance-tested, but several features are
-> intentionally partial or narrowly scoped by design. See
+> **Status: stable release line.** The current public stable release is
+> **v1.0.2**, published through GitHub Releases. Alderpoint DNS is
+> functional and acceptance-tested, but several
+> features are intentionally partial or narrowly scoped by design. See
 > [Known limitations](#known-limitations) below and
 > `docs/known-limitations.md` and `docs/hardening-review.md` for the honest
 > current state before you rely on it for anything important.
@@ -86,30 +87,27 @@ Per `docs/supported-systems.md` and `docs/hardware-requirements.md`:
 
 ## Quick start
 
-Install the latest stable release directly from GitHub Releases.
-
-### Already running as root
-
-Use this on a root shell (for example, after `su -`). Minimal Debian installs
-may not include `sudo` by default:
+Install the latest stable release directly from GitHub Releases:
 
 ```sh
-curl -fL -o alderpointdns.deb https://github.com/neosmith20/Alderpoint-DNS/releases/latest/download/alderpointdns_latest_all.deb && apt update && apt install -y ./alderpointdns.deb
+curl -fL -o alderpointdns.deb https://github.com/neosmith20/Alderpoint-DNS/releases/latest/download/alderpointdns_latest_all.deb && sudo apt update && sudo apt install ./alderpointdns.deb
 ```
 
-### Using a sudo-enabled administrator account
+This one command always installs the current latest stable release -- the
+`alderpointdns_latest_all.deb` asset is the stable, permanent latest-release
+download name. Public v1.0.2 is a one-time bridge release, so its GitHub
+release intentionally publishes exactly two assets:
+`alderpointdns_latest_all.deb` and `SHA256SUMS`. It does not publish a
+versioned v1.0.2 `.deb` asset. This lets older v1.0.0 updater logic see
+exactly one compatible Alderpoint DNS package while preserving the normal
+latest-release download URL.
 
-```sh
-curl -fL -o alderpointdns.deb https://github.com/neosmith20/Alderpoint-DNS/releases/latest/download/alderpointdns_latest_all.deb && sudo apt update && sudo apt install -y ./alderpointdns.deb
-```
-
-Both commands install the current latest stable release — the
-`alderpointdns_latest_all.deb` asset is byte-identical to that release's
-versioned package (e.g. `alderpointdns_1.0.0-1_all.deb`), just without a
-version number in the filename, so the commands never need updating.
-`apt install` resolves and installs BIND, dnsdist, and every other
-dependency from Debian's own repositories; nothing is piped from the
-network into a root shell unreviewed.
+For later normal releases, `alderpointdns_latest_all.deb` may again be
+published alongside and byte-identical to that release's versioned package,
+just without a version number in the filename, so the command never needs
+updating. `apt install` resolves and installs BIND, dnsdist, and every other
+dependency from Debian's own repositories; nothing is piped from the network
+into a root shell unreviewed.
 
 Every release also publishes a `SHA256SUMS` file alongside the `.deb`
 assets. To verify the download before installing (optional, but
@@ -128,10 +126,8 @@ It does not mean the install failed.
 
 Installing creates a dedicated `alderpointdns` service account, generates
 local secrets, initializes the database, deploys generated DNS
-configuration, and enables services. The web admin UI is available at
-`http://<server-ip>:3000`. No default administrator account exists — after
-installation, open `http://<server-ip>:3000/setup` to create the first
-administrator account.
+configuration, and enables services. No default administrator account
+exists — create the first one through the web UI's `/setup` page.
 
 To install from a reviewed local source tree instead (e.g. for
 development), see `docs/install.md`. Once installed, use **System >

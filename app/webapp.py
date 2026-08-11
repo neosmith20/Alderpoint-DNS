@@ -3353,6 +3353,11 @@ def software_updates_job_partial(request: Request, _: sqlite3.Row = Depends(curr
     return render(request, "system_software_updates_job.html", **context)
 
 
+@app.get("/system/administration/software-updates/job/status", response_class=JSONResponse)
+def software_updates_job_status(_: sqlite3.Row = Depends(current_admin)):
+    return JSONResponse(software_updates.job_status_payload())
+
+
 def software_updates_error(request: Request, message: str) -> HTMLResponse:
     context = software_updates_context(request)
     context["error"] = message
