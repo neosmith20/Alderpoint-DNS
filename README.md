@@ -90,7 +90,7 @@ Per `docs/supported-systems.md` and `docs/hardware-requirements.md`:
 Install the latest stable release directly from GitHub Releases:
 
 ```sh
-curl -fL -o alderpointdns.deb https://github.com/neosmith20/Alderpoint-DNS/releases/latest/download/alderpointdns_latest_all.deb && sudo apt update && sudo apt install ./alderpointdns.deb
+curl -fL -o alderpointdns.deb https://github.com/neosmith20/Alderpoint-DNS/releases/latest/download/alderpointdns_latest_all.deb && sudo apt install -y ./alderpointdns.deb
 ```
 
 This one command always installs the current latest stable release -- the
