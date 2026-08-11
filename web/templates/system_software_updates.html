@@ -139,24 +139,7 @@
   </p>
 </section>
 
-<div id="jobStatusPanel" data-refresh-url="/system/administration/software-updates/job">
+<div id="jobStatusPanel" data-refresh-url="/system/administration/software-updates/job" data-job-status-url="/system/administration/software-updates/job/status" data-job-status-interval-ms="3000">
   {% include "system_software_updates_job.html" %}
 </div>
-{% if job and job.phase not in ('completed', 'failed') %}
-<script>
-  (function () {
-    var target = document.getElementById('jobStatusPanel');
-    var url = target.dataset.refreshUrl;
-    var timer = setInterval(function () {
-      fetch(url, { headers: { 'X-Requested-With': 'AlderpointDNSAutoRefresh' } }).then(function (response) {
-        return response.ok ? response.text() : null;
-      }).then(function (html) {
-        if (html === null) return;
-        target.innerHTML = html;
-        if (!/data-phase-active="1"/.test(html)) clearInterval(timer);
-      });
-    }, 3000);
-  })();
-</script>
-{% endif %}
 {% endblock %}

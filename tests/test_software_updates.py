@@ -102,10 +102,11 @@ class VersionComparisonTest(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 def _release(tag: str, prerelease: bool = False, draft: bool = False, assets: list[dict] | None = None) -> dict:
+    deb_version = su.source_version_to_deb_form(tag)
     return {
         "tag_name": tag, "name": tag, "prerelease": prerelease, "draft": draft,
         "assets": assets if assets is not None else [
-            {"name": f"alderpointdns_{tag.lstrip('v').replace('.', '')}-1_all.deb", "url": "https://api.example.invalid/asset/deb"},
+            {"name": f"alderpointdns_{deb_version}_all.deb", "url": "https://api.example.invalid/asset/deb"},
             {"name": "SHA256SUMS", "url": "https://api.example.invalid/asset/sums"},
         ],
         "html_url": f"https://example.invalid/releases/{tag}", "published_at": "2026-01-01T00:00:00Z", "body": "notes",
@@ -159,14 +160,41 @@ class AssetSelectionTest(unittest.TestCase):
         self.assertTrue(deb["name"].endswith(".deb"))
         self.assertEqual(sums["name"], "SHA256SUMS")
 
+    def test_published_v101_assets_select_exact_versioned_deb_not_latest_alias(self) -> None:
+        assets = [
+            {"name": "alderpointdns_1.0.1-1_all.deb", "url": "https://api.example.invalid/asset/versioned"},
+            {"name": "alderpointdns_latest_all.deb", "url": "https://api.example.invalid/asset/latest"},
+            {"name": "SHA256SUMS", "url": "https://api.example.invalid/asset/sums"},
+        ]
+        deb, sums = su.select_release_assets(_release("v1.0.1", assets=assets))
+        self.assertEqual(deb["name"], "alderpointdns_1.0.1-1_all.deb")
+        self.assertEqual(sums["name"], "SHA256SUMS")
+
+    def test_latest_alias_is_fallback_when_no_versioned_package_is_present(self) -> None:
+        assets = [
+            {"name": "alderpointdns_latest_all.deb", "url": "https://api.example.invalid/asset/latest"},
+            {"name": "SHA256SUMS", "url": "https://api.example.invalid/asset/sums"},
+        ]
+        deb, _ = su.select_release_assets(_release("v1.0.1", assets=assets))
+        self.assertEqual(deb["name"], "alderpointdns_latest_all.deb")
+
+    def test_wrong_versioned_package_plus_latest_alias_fails_closed(self) -> None:
+        assets = [
+            {"name": "alderpointdns_1.0.0-1_all.deb", "url": "https://api.example.invalid/asset/wrong"},
+            {"name": "alderpointdns_latest_all.deb", "url": "https://api.example.invalid/asset/latest"},
+            {"name": "SHA256SUMS", "url": "https://api.example.invalid/asset/sums"},
+        ]
+        with self.assertRaises(su.SoftwareUpdateError):
+            su.select_release_assets(_release("v1.0.1", assets=assets))
+
     def test_missing_deb_asset_rejected(self) -> None:
         with self.assertRaises(su.SoftwareUpdateError):
             su.select_release_assets(_release("0.5.0", assets=[{"name": "SHA256SUMS", "url": "x"}]))
 
     def test_multiple_deb_assets_ambiguous(self) -> None:
         assets = [
-            {"name": "alderpointdns_050-1_all.deb", "url": "x"},
-            {"name": "alderpointdns_050-1_amd64.deb", "url": "x"},
+            {"name": "alderpointdns_0.5.0-1_all.deb", "url": "x"},
+            {"name": "alderpointdns_0.5.0-1_amd64.deb", "url": "x"},
             {"name": "SHA256SUMS", "url": "x"},
         ]
         with self.assertRaises(su.SoftwareUpdateError):
@@ -279,6 +307,34 @@ class ChecksumTest(SoftwareUpdatesTestBase):
             path, sha = su.stage_release(release, None)
         self.assertEqual(sha, digest)
         self.assertTrue(path.exists())
+
+    def test_stage_release_with_published_v101_asset_set_downloads_versioned_package(self) -> None:
+        release = _release("v1.0.1", assets=[
+            {"name": "alderpointdns_1.0.1-1_all.deb", "url": "https://api.example.invalid/asset/versioned"},
+            {"name": "alderpointdns_latest_all.deb", "url": "https://api.example.invalid/asset/latest"},
+            {"name": "SHA256SUMS", "url": "https://api.example.invalid/asset/sums"},
+        ])
+        content = b"accepted v1.0.1 package bytes"
+        digest = hashlib.sha256(content).hexdigest()
+        downloaded: list[str] = []
+
+        def fake_download(asset, dest, token):
+            downloaded.append(asset["name"])
+            if asset["name"] == "alderpointdns_1.0.1-1_all.deb":
+                dest.write_bytes(content)
+            elif asset["name"] == "SHA256SUMS":
+                dest.write_text(
+                    f"{digest}  alderpointdns_1.0.1-1_all.deb\n"
+                    f"{digest}  alderpointdns_latest_all.deb\n"
+                )
+            else:
+                raise AssertionError("latest alias should not be downloaded when the exact versioned package exists")
+
+        with mock.patch.object(su, "_download_asset", side_effect=fake_download):
+            path, sha = su.stage_release(release, None)
+        self.assertEqual(path.name, "alderpointdns_1.0.1-1_all.deb")
+        self.assertEqual(sha, digest)
+        self.assertEqual(downloaded, ["alderpointdns_1.0.1-1_all.deb", "SHA256SUMS"])
 
 
 class AptSimulationTest(unittest.TestCase):
@@ -931,6 +987,8 @@ class SoftwareUpdatesHttpTest(unittest.TestCase):
         from app import alderpointdns_compiler, custom_rules, local_dns, replication, upstream_dns, webapp
 
         self.webapp = webapp
+        self.old_startup_hooks = list(webapp.app.router.on_startup)
+        webapp.app.router.on_startup.clear()
         self.tmp = Path(tempfile.mkdtemp(prefix="alderpointdns-su-http-"))
         self.old_paths = {
             "webapp_db": webapp.DB_PATH,
@@ -972,7 +1030,11 @@ class SoftwareUpdatesHttpTest(unittest.TestCase):
             mock.patch.object(webapp, "software_updates_start_install_runner", lambda: (0, str(su.run_pending_job()))),
             mock.patch.object(webapp, "software_updates_check_schedule_apply", lambda: (0, "ok")),
             mock.patch.object(webapp, "global_service_status", lambda: {"label": "Active", "tone": "healthy", "detail": "test"}),
+            mock.patch.object(webapp, "init_db", lambda: None),
+            mock.patch.object(su, "next_check_at", lambda: None),
             mock.patch.object(replication, "autostart", lambda: None),
+            mock.patch.object(upstream_dns, "start_upstream_probe_scheduler", lambda: None),
+            mock.patch.object(backup_module, "reap_abandoned_restores", lambda: []),
             mock.patch.object(webapp, "TEMPLATES", Jinja2Templates(directory=str(ROOT / "web" / "templates"))),
         ]
         for patcher in self.patches:
@@ -993,6 +1055,7 @@ class SoftwareUpdatesHttpTest(unittest.TestCase):
             patcher.stop()
         from app import alderpointdns_compiler, custom_rules, local_dns, upstream_dns
 
+        self.webapp.app.router.on_startup[:] = self.old_startup_hooks
         self.webapp.DB_PATH = self.old_paths["webapp_db"]
         su.DB_PATH = self.old_paths["su_db"]
         su.STAGED_DIR = self.old_paths["su_staged"]
@@ -1032,6 +1095,28 @@ class SoftwareUpdatesHttpTest(unittest.TestCase):
         response = self._authed_client().get("/system/administration/software-updates")
         self.assertEqual(response.status_code, 200)
         self.assertIn("Software Updates", response.text)
+        self.assertIn('data-job-status-url="/system/administration/software-updates/job/status"', response.text)
+
+    def test_job_status_endpoint_reads_local_job_state_without_update_check(self) -> None:
+        job_id = su.create_github_job(_release("9.9.9"), requested_by="admin")
+        conn = su.connect()
+        pid, ticks, boot_id = backup_module._worker_identity()
+        conn.execute(
+            "UPDATE software_update_jobs SET worker_pid=?, worker_start_ticks=?, worker_boot_id=?, started_at=? WHERE id=?",
+            (pid, ticks, boot_id, su.now(), job_id),
+        )
+        su._set_phase(conn, job_id, "downloading", "downloading 9.9.9 from GitHub")
+        conn.close()
+        with mock.patch.object(su, "run_check", side_effect=AssertionError("polling must not run update checks")), \
+             mock.patch.object(su, "list_releases", side_effect=AssertionError("polling must not contact GitHub")):
+            response = self._authed_client().get("/system/administration/software-updates/job/status")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["job"]["id"], job_id)
+        self.assertEqual(data["job"]["phase"], "downloading")
+        self.assertTrue(data["job"]["active"])
+        self.assertIn("Downloading", data["job"]["display_message"])
+        self.assertEqual(data["job"]["events"][-1]["message"], "downloading 9.9.9 from GitHub")
 
     def test_wrong_csrf_rejected(self) -> None:
         response = self._authed_client().post("/system/administration/software-updates/check", data={"csrf": "wrong-token"})

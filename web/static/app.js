@@ -182,6 +182,116 @@
     window.setInterval(refreshUpstreamTelemetry, intervalMs);
   }
 
+  const softwareUpdateJobPanel = document.querySelector('[data-job-status-url]');
+  if (softwareUpdateJobPanel) {
+    const localTime = (isoValue) => {
+      if (!isoValue) return '';
+      const millis = Date.parse(isoValue);
+      if (!Number.isFinite(millis)) return isoValue;
+      return new Date(millis).toLocaleString();
+    };
+    const node = (tag, className, text) => {
+      const element = document.createElement(tag);
+      if (className) element.className = className;
+      if (text !== undefined && text !== null) element.textContent = text;
+      return element;
+    };
+    const badge = (label, tone) => {
+      const element = node('span', `status-badge status-badge--${tone}`, label);
+      return element;
+    };
+    const renderNoJob = (panel) => {
+      const section = node('section', 'panel stack');
+      const head = node('div', 'panel__head');
+      head.appendChild(node('h2', '', 'Update Job'));
+      section.appendChild(head);
+      section.appendChild(node('p', 'muted', 'No update has been started yet.'));
+      panel.replaceChildren(section);
+    };
+    const renderJob = (panel, payload) => {
+      const job = payload.job;
+      if (!job) {
+        renderNoJob(panel);
+        return;
+      }
+      const section = node('section', 'panel stack');
+      section.dataset.phaseActive = job.active ? '1' : '0';
+      const head = node('div', 'panel__head');
+      head.appendChild(node('h2', '', `Update Job #${job.id}`));
+      if (job.phase === 'completed') head.appendChild(badge('Update successful', 'healthy'));
+      else if (job.phase === 'failed') head.appendChild(badge('Update failed', 'down'));
+      else head.appendChild(badge(job.phase || 'pending', 'neutral'));
+      section.appendChild(head);
+
+      const summary = node('p', 'muted');
+      summary.append(
+        `${(job.operation || 'github').charAt(0).toUpperCase()}${(job.operation || 'github').slice(1)} update requested by `,
+        node('span', 'mono', job.requested_by || 'unknown'),
+        ` at ${localTime(job.requested_at)}.`
+      );
+      section.appendChild(summary);
+
+      const versions = node('p');
+      versions.append('Current version: ', node('span', 'mono', job.current_version || 'unknown'), ' -> Candidate: ', node('span', 'mono', job.candidate_version || 'pending'));
+      section.appendChild(versions);
+
+      const live = node('p', 'muted', job.display_message || '');
+      live.setAttribute('role', 'status');
+      live.setAttribute('aria-live', 'polite');
+      section.appendChild(live);
+
+      if (payload.installed_version) {
+        section.appendChild(node('p', 'muted', `Installed version now: ${payload.installed_version}`));
+      }
+      if (job.backup_path) {
+        const backup = node('p');
+        backup.append('Pre-upgrade backup: ', node('span', 'mono', job.backup_path), ' (retained regardless of update outcome)');
+        section.appendChild(backup);
+      }
+      if (job.phase === 'failed' && job.error) {
+        const error = node('div', 'alert error', job.error);
+        error.setAttribute('role', 'alert');
+        section.appendChild(error);
+      }
+      if (job.phase === 'completed') {
+        const success = node('div', 'alert', 'Update successful. The pre-upgrade backup above was retained for recovery.');
+        success.setAttribute('role', 'status');
+        section.appendChild(success);
+      }
+
+      const wrap = node('div', 'table-wrap');
+      const table = node('table');
+      const thead = node('thead');
+      const headerRow = node('tr');
+      ['Time', 'Phase', 'Message'].forEach((heading) => headerRow.appendChild(node('th', '', heading)));
+      thead.appendChild(headerRow);
+      const tbody = node('tbody');
+      (job.events || []).forEach((event) => {
+        const row = node('tr');
+        row.appendChild(node('td', 'mono', localTime(event.ts)));
+        row.appendChild(node('td', 'mono', event.phase || ''));
+        row.appendChild(node('td', '', event.message || ''));
+        tbody.appendChild(row);
+      });
+      table.append(thead, tbody);
+      wrap.appendChild(table);
+      section.appendChild(wrap);
+      panel.replaceChildren(section);
+    };
+    const refreshSoftwareUpdateJob = async () => {
+      const panel = document.querySelector('[data-job-status-url]');
+      if (!panel) return;
+      try {
+        const response = await fetch(panel.dataset.jobStatusUrl, { headers: { 'X-Requested-With': 'AlderpointDNSSoftwareUpdateJob' } });
+        if (!response.ok) return;
+        renderJob(panel, await response.json());
+      } catch (_) {}
+    };
+    const intervalMs = Math.max(2000, Number(softwareUpdateJobPanel.dataset.jobStatusIntervalMs || 3000));
+    refreshSoftwareUpdateJob();
+    window.setInterval(refreshSoftwareUpdateJob, intervalMs);
+  }
+
   const rangeLinks = document.querySelectorAll('[data-range-link]');
   if (rangeLinks.length) {
     const params = new URLSearchParams(window.location.search);

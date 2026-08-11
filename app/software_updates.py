@@ -115,6 +115,20 @@ PHASES = (
     "simulating", "installing", "restarting", "postcheck", "completed", "failed",
 )
 
+PHASE_DISPLAY_MESSAGES = {
+    "pending": "Starting update...",
+    "checking": "Checking...",
+    "downloading": "Downloading...",
+    "validating": "Verifying package...",
+    "backing_up": "Creating pre-upgrade backup...",
+    "simulating": "Simulating upgrade...",
+    "installing": "Installing...",
+    "restarting": "Restarting services...",
+    "postcheck": "Running post-upgrade health checks...",
+    "completed": "Completed.",
+    "failed": "Failed.",
+}
+
 # Phases from "installing" onward are the ones where apt-get may have
 # actually started mutating installed package state -- see
 # reap_abandoned_jobs()'s differing message for a job found stuck in one of
@@ -640,21 +654,63 @@ def list_releases(repo: str, token: str | None) -> list[dict[str, Any]]:
     return data
 
 
-_DEB_ASSET_RE = re.compile(r"^alderpointdns_[^_]+_(all|amd64)\.deb$")
+_DEB_ASSET_RE = re.compile(r"^alderpointdns_(?P<version>[^_]+)_(?P<arch>all|amd64)\.deb$")
 
 
-def select_release_assets(release: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Requires exactly one compatible .deb asset and exactly one
-    SHA256SUMS asset; anything else (zero, or more than one, of either) is
-    rejected as ambiguous/missing rather than guessed at."""
+def _deb_asset_version(asset: dict[str, Any]) -> str | None:
+    match = _DEB_ASSET_RE.match(str(asset.get("name", "")))
+    return match["version"] if match else None
+
+
+def _expected_deb_asset_version(release: dict[str, Any]) -> str | None:
+    tag_version = _release_semver(release)
+    return source_version_to_deb_form(tag_version) if tag_version is not None else None
+
+
+def select_release_assets(release: dict[str, Any], expected_deb_version: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Selects one Alderpoint .deb asset and one SHA256SUMS asset.
+
+    Alderpoint releases may contain both the canonical versioned package
+    (alderpointdns_<dpkg-version>_<arch>.deb) and a byte-identical
+    alderpointdns_latest_all.deb alias. Prefer the exact versioned package
+    for the release, use the latest alias only as a fallback, and still
+    reject genuinely ambiguous versioned packages rather than guessing.
+    """
     assets = release.get("assets") or []
     debs = [a for a in assets if isinstance(a, dict) and _DEB_ASSET_RE.match(str(a.get("name", "")))]
     sums = [a for a in assets if isinstance(a, dict) and a.get("name") == "SHA256SUMS"]
-    if len(debs) != 1:
-        raise SoftwareUpdateError(f"expected exactly one compatible Alderpoint DNS .deb asset, found {len(debs)}")
     if len(sums) != 1:
         raise SoftwareUpdateError(f"expected exactly one SHA256SUMS asset, found {len(sums)}")
-    return debs[0], sums[0]
+    if not debs:
+        raise SoftwareUpdateError("expected one compatible Alderpoint DNS .deb asset, found 0")
+
+    expected = expected_deb_version or _expected_deb_asset_version(release)
+    versioned = [asset for asset in debs if _deb_asset_version(asset) != "latest"]
+    aliases = [asset for asset in debs if _deb_asset_version(asset) == "latest"]
+
+    selected: dict[str, Any] | None = None
+    if expected:
+        exact = [asset for asset in versioned if _deb_asset_version(asset) == expected]
+        if len(exact) > 1:
+            names = sorted(str(asset.get("name", "")) for asset in exact)
+            raise SoftwareUpdateError(f"ambiguous Alderpoint DNS .deb assets for version {expected!r}: {names}")
+        if exact:
+            selected = exact[0]
+        elif versioned:
+            names = sorted(str(asset.get("name", "")) for asset in versioned)
+            raise SoftwareUpdateError(f"expected Alderpoint DNS package asset for version {expected!r}, found {names}")
+    else:
+        if len(versioned) > 1:
+            names = sorted(str(asset.get("name", "")) for asset in versioned)
+            raise SoftwareUpdateError(f"ambiguous Alderpoint DNS .deb assets: {names}")
+        if versioned:
+            selected = versioned[0]
+
+    if selected is None:
+        if len(aliases) != 1:
+            raise SoftwareUpdateError(f"expected one compatible Alderpoint DNS .deb asset, found {len(debs)}")
+        selected = aliases[0]
+    return selected, sums[0]
 
 
 def _release_semver(release: dict[str, Any]) -> str | None:
@@ -1018,6 +1074,68 @@ def job_events(job_id: int, conn: sqlite3.Connection | None = None) -> list[sqli
     try:
         init_db(db)
         return list(db.execute("SELECT * FROM software_update_events WHERE job_id=? ORDER BY id", (job_id,)))
+    finally:
+        if close:
+            db.close()
+
+
+def _job_display_message(job: dict[str, Any], events: list[sqlite3.Row]) -> str:
+    phase = str(job.get("phase") or "")
+    if phase == "failed" and job.get("error"):
+        return str(job["error"])
+    if phase == "downloading" and job.get("candidate_version"):
+        return f"Downloading v{job['candidate_version']}..."
+    if events:
+        message = str(events[-1]["message"] or "").strip()
+        if message:
+            return message[0].upper() + message[1:] if message[0].islower() else message
+    return PHASE_DISPLAY_MESSAGES.get(phase, phase or "Unknown")
+
+
+def job_status_payload(conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+    """Small local polling payload for the Software Updates page.
+
+    This reads only durable local state; it never runs an update check,
+    download, install, or GitHub request. It intentionally avoids
+    update_status() so polling does not also query timer metadata every
+    few seconds.
+    """
+    close = conn is None
+    db = conn or connect()
+    try:
+        init_db(db)
+        reap_abandoned_jobs(db)
+        version_status = installed_version_status()
+        row = latest_job(db)
+        payload: dict[str, Any] = {
+            "installed_version": version_status.get("resolved", ""),
+            "installed_dpkg_version": version_status.get("dpkg_version", ""),
+            "job": None,
+        }
+        if row is None:
+            return payload
+        events = job_events(row["id"], db)
+        job = dict(row)
+        payload["job"] = {
+            "id": job["id"],
+            "operation": job["operation"],
+            "requested_at": job["requested_at"],
+            "requested_by": job["requested_by"],
+            "current_version": job["current_version"],
+            "candidate_version": job["candidate_version"],
+            "backup_path": job["backup_path"],
+            "phase": job["phase"],
+            "result": job["result"],
+            "error": job["error"],
+            "completed_at": job["completed_at"],
+            "active": job["phase"] not in ("completed", "failed"),
+            "display_message": _job_display_message(job, events),
+            "events": [
+                {"ts": event["ts"], "phase": event["phase"], "message": event["message"]}
+                for event in events
+            ],
+        }
+        return payload
     finally:
         if close:
             db.close()
