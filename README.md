@@ -7,9 +7,9 @@ application on top. dnsdist is the client-facing DNS frontend; BIND is a
 localhost-only validating cache/forwarder; filtering policy is compiled into
 a BIND RPZ zone and reloaded through a staged, validated deployment path.
 
-> **Status: stable release line.** This source tree is preparing
-> **v1.0.2**. The current public stable release is published through GitHub
-> Releases. Alderpoint DNS is functional and acceptance-tested, but several
+> **Status: stable release line.** The current public stable release is
+> **v1.0.2**, published through GitHub Releases. Alderpoint DNS is
+> functional and acceptance-tested, but several
 > features are intentionally partial or narrowly scoped by design. See
 > [Known limitations](#known-limitations) below and
 > `docs/known-limitations.md` and `docs/hardening-review.md` for the honest
@@ -93,14 +93,21 @@ Install the latest stable release directly from GitHub Releases:
 curl -fL -o alderpointdns.deb https://github.com/neosmith20/Alderpoint-DNS/releases/latest/download/alderpointdns_latest_all.deb && sudo apt update && sudo apt install ./alderpointdns.deb
 ```
 
-This one command always installs the current latest stable release — the
+This one command always installs the current latest stable release -- the
 `alderpointdns_latest_all.deb` asset is the stable, permanent latest-release
-download name. For normal releases it is byte-identical to that release's
-versioned package (e.g. `alderpointdns_1.0.x-1_all.deb`), just without a
-version number in the filename, so the command never needs updating.
-`apt install` resolves and installs BIND, dnsdist, and every other
-dependency from Debian's own repositories; nothing is piped from the
-network into a root shell unreviewed.
+download name. Public v1.0.2 is a one-time bridge release, so its GitHub
+release intentionally publishes exactly two assets:
+`alderpointdns_latest_all.deb` and `SHA256SUMS`. It does not publish a
+versioned v1.0.2 `.deb` asset. This lets older v1.0.0 updater logic see
+exactly one compatible Alderpoint DNS package while preserving the normal
+latest-release download URL.
+
+For later normal releases, `alderpointdns_latest_all.deb` may again be
+published alongside and byte-identical to that release's versioned package,
+just without a version number in the filename, so the command never needs
+updating. `apt install` resolves and installs BIND, dnsdist, and every other
+dependency from Debian's own repositories; nothing is piped from the network
+into a root shell unreviewed.
 
 Every release also publishes a `SHA256SUMS` file alongside the `.deb`
 assets. To verify the download before installing (optional, but
