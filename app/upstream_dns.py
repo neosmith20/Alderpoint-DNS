@@ -8,9 +8,13 @@ import ipaddress
 import os
 import re
 import shutil
+import socket
+import ssl
 import sqlite3
+import struct
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -53,8 +57,14 @@ TEST_DOMAIN = "cloudflare.com"
 # failing case.
 POST_DEPLOY_CHECK_TIMEOUT_SECONDS = 5.0
 POST_DEPLOY_CHECK_RETRY_INTERVAL_SECONDS = 0.5
+UPSTREAM_PROBE_INTERVAL_SECONDS = 30.0
+UPSTREAM_PROBE_TIMEOUT_SECONDS = 4.0
+UPSTREAM_PROBE_FAILURE_THRESHOLD = 3
 PROTOCOLS = {"plain", "dot", "doh"}
 DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+_probe_thread: threading.Thread | None = None
+_probe_stop_event: threading.Event | None = None
+_probe_thread_lock = threading.Lock()
 
 
 class UpstreamDNSError(ValueError):
@@ -113,6 +123,7 @@ def init_db(conn: sqlite3.Connection | None = None) -> None:
             );
             """
         )
+        _ensure_probe_columns(db)
         if not db.execute("SELECT 1 FROM upstream_resolvers LIMIT 1").fetchone():
             seed_from_named_options(db)
         if close:
@@ -120,6 +131,27 @@ def init_db(conn: sqlite3.Connection | None = None) -> None:
     finally:
         if close:
             db.close()
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    columns: set[str] = set()
+    for row in conn.execute(f"PRAGMA table_info({table})"):
+        columns.add(row["name"] if isinstance(row, sqlite3.Row) else row[1])
+    return columns
+
+
+def _ensure_probe_columns(conn: sqlite3.Connection) -> None:
+    columns = _table_columns(conn, "upstream_resolvers")
+    migrations = {
+        "probe_status": "ALTER TABLE upstream_resolvers ADD COLUMN probe_status TEXT NOT NULL DEFAULT 'checking'",
+        "probe_message": "ALTER TABLE upstream_resolvers ADD COLUMN probe_message TEXT NOT NULL DEFAULT ''",
+        "probe_latency_ms": "ALTER TABLE upstream_resolvers ADD COLUMN probe_latency_ms REAL",
+        "probe_checked_at": "ALTER TABLE upstream_resolvers ADD COLUMN probe_checked_at TEXT",
+        "probe_failure_count": "ALTER TABLE upstream_resolvers ADD COLUMN probe_failure_count INTEGER NOT NULL DEFAULT 0",
+    }
+    for column, statement in migrations.items():
+        if column not in columns:
+            conn.execute(statement)
 
 
 def _host_is_ip(value: str) -> bool:
@@ -260,10 +292,31 @@ def display_resolvers(conn: sqlite3.Connection | None = None) -> list[dict[str, 
             row["display_message"] = "Disabled"
             row["display_latency_ms"] = None
         else:
-            row["display_status"] = row.get("last_status", "unknown")
-            row["display_message"] = row.get("last_message", "")
-            row["display_latency_ms"] = row.get("last_latency_ms")
+            row["display_status"] = row.get("probe_status") or "checking"
+            row["display_message"] = row.get("probe_message") or ("No completed direct probe yet" if row["display_status"] == "checking" else "")
+            row["display_latency_ms"] = row.get("probe_latency_ms")
     return rows
+
+
+def _reset_probe_state(conn: sqlite3.Connection, resolver_id: int, *, enabled: bool) -> None:
+    if enabled:
+        conn.execute(
+            """
+            UPDATE upstream_resolvers
+            SET probe_status='checking', probe_message='', probe_latency_ms=NULL, probe_checked_at=NULL, probe_failure_count=0
+            WHERE id=?
+            """,
+            (resolver_id,),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE upstream_resolvers
+            SET probe_status='disabled', probe_message='Disabled', probe_latency_ms=NULL, probe_checked_at=NULL, probe_failure_count=0
+            WHERE id=?
+            """,
+            (resolver_id,),
+        )
 
 
 def add_resolver(values: dict[str, Any]) -> int:
@@ -274,10 +327,16 @@ def add_resolver(values: dict[str, Any]) -> int:
         ts = now()
         cur = conn.execute(
             """
-            INSERT INTO upstream_resolvers(name, protocol, address, port, doh_path, tls_hostname, bootstrap_ips, enabled, position, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO upstream_resolvers(
+                name, protocol, address, port, doh_path, tls_hostname, bootstrap_ips,
+                enabled, position, probe_status, probe_message, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (data["name"], data["protocol"], data["address"], data["port"], data["doh_path"], data["tls_hostname"], data["bootstrap_ips"], int(data["enabled"]), pos, ts, ts),
+            (
+                data["name"], data["protocol"], data["address"], data["port"], data["doh_path"], data["tls_hostname"], data["bootstrap_ips"],
+                int(data["enabled"]), pos, "checking" if int(data["enabled"]) else "disabled", "" if int(data["enabled"]) else "Disabled", ts, ts,
+            ),
         )
         conn.commit()
         return int(cur.lastrowid)
@@ -326,6 +385,7 @@ def update_resolver(resolver_id: int, values: dict[str, Any]) -> None:
             """,
             (data["name"], data["protocol"], data["address"], data["port"], data["doh_path"], data["tls_hostname"], data["bootstrap_ips"], int(data["enabled"]), now(), resolver_id),
         )
+        _reset_probe_state(conn, resolver_id, enabled=bool(int(data["enabled"])))
         conn.commit()
 
 
@@ -346,6 +406,7 @@ def set_enabled(resolver_id: int, enabled: bool) -> None:
         if _would_leave_zero_enabled(conn, resolver_id, disabling=not enabled):
             raise UpstreamDNSError(LAST_ENABLED_MESSAGE)
         conn.execute("UPDATE upstream_resolvers SET enabled=?, updated_at=? WHERE id=?", (1 if enabled else 0, now(), resolver_id))
+        _reset_probe_state(conn, resolver_id, enabled=enabled)
         conn.commit()
 
 
@@ -539,7 +600,293 @@ def _write_staged(path: Path, text: str) -> Path:
 
 
 def _safe_message(text: str) -> str:
-    return re.sub(r"https://([^/?#]+)[^\\s'\"]*", r"https://\\1/...", text)
+    return re.sub(r"https://([^/?#]+)[^\s'\"]*", r"https://\1/...", text)
+
+
+def _redact_probe_message(text: str) -> str:
+    text = _safe_message(_sanitize_secrets(str(text)))
+    return re.sub(r"(/dns-query)[^\s'\"]*", r"\1/...", text)
+
+
+def _build_dns_query(qname: str = TEST_DOMAIN, qtype: int = 1, query_id: int | None = None) -> tuple[int, bytes]:
+    qid = int(time.monotonic_ns() if query_id is None else query_id) & 0xFFFF
+    labels = b"".join(bytes([len(part)]) + part.encode("ascii") for part in qname.rstrip(".").split("."))
+    packet = struct.pack("!HHHHHH", qid, 0x0100, 1, 0, 0, 0) + labels + b"\x00" + struct.pack("!HH", qtype, 1)
+    return qid, packet
+
+
+def _skip_dns_name(packet: bytes, offset: int) -> int:
+    while True:
+        if offset >= len(packet):
+            raise UpstreamDNSError("truncated DNS response")
+        length = packet[offset]
+        if length & 0xC0 == 0xC0:
+            return offset + 2
+        if length == 0:
+            return offset + 1
+        offset += 1 + length
+
+
+def _validate_dns_response(packet: bytes, query_id: int, *, require_answer: bool = True) -> None:
+    if len(packet) < 12:
+        raise UpstreamDNSError("truncated DNS response")
+    rid, flags, qdcount, ancount, _, _ = struct.unpack("!HHHHHH", packet[:12])
+    if rid != query_id:
+        raise UpstreamDNSError("mismatched DNS response")
+    if not flags & 0x8000:
+        raise UpstreamDNSError("DNS response bit was not set")
+    rcode = flags & 0x000F
+    if rcode != 0:
+        raise UpstreamDNSError(f"DNS response rcode {rcode}")
+    if require_answer and ancount < 1:
+        raise UpstreamDNSError("DNS response contained no answers")
+    offset = 12
+    for _ in range(qdcount):
+        offset = _skip_dns_name(packet, offset) + 4
+        if offset > len(packet):
+            raise UpstreamDNSError("truncated DNS question")
+
+
+def _extract_dns_addresses(packet: bytes, query_id: int, qtype: int) -> list[str]:
+    _validate_dns_response(packet, query_id, require_answer=False)
+    _, _, qdcount, ancount, _, _ = struct.unpack("!HHHHHH", packet[:12])
+    offset = 12
+    for _ in range(qdcount):
+        offset = _skip_dns_name(packet, offset) + 4
+    addresses: list[str] = []
+    for _ in range(ancount):
+        offset = _skip_dns_name(packet, offset)
+        if offset + 10 > len(packet):
+            raise UpstreamDNSError("truncated DNS answer")
+        rtype, _, _, rdlength = struct.unpack("!HHIH", packet[offset : offset + 10])
+        offset += 10
+        rdata = packet[offset : offset + rdlength]
+        offset += rdlength
+        if rtype == qtype and ((qtype == 1 and rdlength == 4) or (qtype == 28 and rdlength == 16)):
+            addresses.append(str(ipaddress.ip_address(rdata)))
+    return addresses
+
+
+def _probe_plain_dns(address: str, port: int, *, timeout: float = UPSTREAM_PROBE_TIMEOUT_SECONDS, qtype: int = 1) -> tuple[float, bytes, int]:
+    qid, packet = _build_dns_query(TEST_DOMAIN, qtype)
+    started = time.monotonic()
+    family = socket.AF_INET6 if ":" in address else socket.AF_INET
+    with socket.socket(family, socket.SOCK_DGRAM) as sock:
+        sock.settimeout(timeout)
+        sock.sendto(packet, (address, int(port)))
+        response, _ = sock.recvfrom(4096)
+    latency_ms = (time.monotonic() - started) * 1000.0
+    _validate_dns_response(response, qid)
+    return latency_ms, response, qid
+
+
+def _probe_dot(row: dict[str, Any], *, timeout: float = UPSTREAM_PROBE_TIMEOUT_SECONDS) -> float:
+    host = str(row["address"])
+    port = int(row["port"])
+    tls_hostname = str(row.get("tls_hostname") or host)
+    qid, packet = _build_dns_query(TEST_DOMAIN, 1)
+    started = time.monotonic()
+    context = ssl.create_default_context()
+    with socket.create_connection((host, port), timeout=timeout) as raw:
+        raw.settimeout(timeout)
+        with context.wrap_socket(raw, server_hostname=tls_hostname) as tls_sock:
+            tls_sock.sendall(struct.pack("!H", len(packet)) + packet)
+            header = tls_sock.recv(2)
+            if len(header) != 2:
+                raise UpstreamDNSError("truncated DoT response")
+            length = struct.unpack("!H", header)[0]
+            chunks = bytearray()
+            while len(chunks) < length:
+                chunk = tls_sock.recv(length - len(chunks))
+                if not chunk:
+                    break
+                chunks.extend(chunk)
+    latency_ms = (time.monotonic() - started) * 1000.0
+    _validate_dns_response(bytes(chunks), qid)
+    return latency_ms
+
+
+def _bootstrap_resolve_for_probe(row: dict[str, Any], *, timeout: float = UPSTREAM_PROBE_TIMEOUT_SECONDS) -> str:
+    address = str(row["address"])
+    if _host_is_ip(address):
+        return address
+    bootstrap = _bootstrap_ips(row)
+    if not bootstrap:
+        raise UpstreamDNSError(f"{row['protocol'].upper()} resolver hostname requires at least one bootstrap IP")
+    errors: list[str] = []
+    for qtype in (1, 28):
+        for resolver in bootstrap:
+            try:
+                _, response, qid = _probe_plain_dns(resolver, 53, timeout=timeout, qtype=qtype)
+                addresses = _extract_dns_addresses(response, qid, qtype)
+                if addresses:
+                    return addresses[0]
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{resolver}: {_redact_probe_message(exc)}")
+    detail = "; ".join(errors[:3]) if errors else "no A or AAAA address returned"
+    raise UpstreamDNSError(f"bootstrap resolution failed for {address}: {detail}")
+
+
+def _read_http_response(sock: ssl.SSLSocket, timeout: float) -> tuple[int, bytes]:
+    sock.settimeout(timeout)
+    data = bytearray()
+    while b"\r\n\r\n" not in data:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        data.extend(chunk)
+        if len(data) > 65536:
+            raise UpstreamDNSError("DoH response headers too large")
+    header, _, body = bytes(data).partition(b"\r\n\r\n")
+    if not header:
+        raise UpstreamDNSError("empty DoH response")
+    status_line = header.splitlines()[0].decode("iso-8859-1", "replace")
+    try:
+        status = int(status_line.split()[1])
+    except (IndexError, ValueError):
+        raise UpstreamDNSError("invalid DoH HTTP response") from None
+    content_length: int | None = None
+    for raw_line in header.splitlines()[1:]:
+        line = raw_line.decode("iso-8859-1", "replace")
+        if line.lower().startswith("content-length:"):
+            try:
+                content_length = int(line.split(":", 1)[1].strip())
+            except ValueError:
+                content_length = None
+    if content_length is not None:
+        while len(body) < content_length:
+            chunk = sock.recv(content_length - len(body))
+            if not chunk:
+                break
+            body += chunk
+        body = body[:content_length]
+    else:
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            body += chunk
+    return status, body
+
+
+def _probe_doh(row: dict[str, Any], *, timeout: float = UPSTREAM_PROBE_TIMEOUT_SECONDS) -> float:
+    endpoint_ip = _bootstrap_resolve_for_probe(row, timeout=timeout)
+    host_header = str(row.get("tls_hostname") or row["address"])
+    port = int(row["port"])
+    path = str(row.get("doh_path") or "/dns-query")
+    qid, packet = _build_dns_query(TEST_DOMAIN, 1)
+    started = time.monotonic()
+    context = ssl.create_default_context()
+    family = socket.AF_INET6 if ":" in endpoint_ip else socket.AF_INET
+    with socket.socket(family, socket.SOCK_STREAM) as raw:
+        raw.settimeout(timeout)
+        raw.connect((endpoint_ip, port))
+        with context.wrap_socket(raw, server_hostname=host_header) as tls_sock:
+            request = (
+                f"POST {path} HTTP/1.1\r\n"
+                f"Host: {host_header}\r\n"
+                "Accept: application/dns-message\r\n"
+                "Content-Type: application/dns-message\r\n"
+                f"Content-Length: {len(packet)}\r\n"
+                "Connection: close\r\n\r\n"
+            ).encode("ascii") + packet
+            tls_sock.sendall(request)
+            status, body = _read_http_response(tls_sock, timeout)
+    latency_ms = (time.monotonic() - started) * 1000.0
+    if status < 200 or status >= 300:
+        raise UpstreamDNSError(f"DoH HTTP status {status}")
+    _validate_dns_response(body, qid)
+    return latency_ms
+
+
+def probe_resolver(row: dict[str, Any], *, timeout: float = UPSTREAM_PROBE_TIMEOUT_SECONDS) -> float:
+    if row["protocol"] == "plain":
+        latency_ms, _, _ = _probe_plain_dns(str(row["address"]), int(row["port"]), timeout=timeout)
+        return latency_ms
+    if row["protocol"] == "dot":
+        return _probe_dot(row, timeout=timeout)
+    if row["protocol"] == "doh":
+        return _probe_doh(row, timeout=timeout)
+    raise UpstreamDNSError("unsupported resolver protocol")
+
+
+def record_probe_result(resolver_id: int, *, ok: bool, latency_ms: float | None = None, message: str = "", conn: sqlite3.Connection | None = None) -> None:
+    close = conn is None
+    db = conn or connect()
+    init_db(db)
+    try:
+        ts = now()
+        if ok:
+            db.execute(
+                """
+                UPDATE upstream_resolvers
+                SET probe_status='healthy', probe_message='Direct probe succeeded', probe_latency_ms=?, probe_checked_at=?, probe_failure_count=0
+                WHERE id=? AND enabled=1
+                """,
+                (latency_ms, ts, resolver_id),
+            )
+        else:
+            row = db.execute("SELECT probe_failure_count FROM upstream_resolvers WHERE id=? AND enabled=1", (resolver_id,)).fetchone()
+            if row is None:
+                return
+            failures = int(row["probe_failure_count"] if isinstance(row, sqlite3.Row) else row[0]) + 1
+            status = "failed" if failures >= UPSTREAM_PROBE_FAILURE_THRESHOLD else "checking"
+            display_message = _redact_probe_message(message)[:400]
+            if status == "checking":
+                display_message = f"Probe failed {failures}/{UPSTREAM_PROBE_FAILURE_THRESHOLD}; waiting for confirmation"
+            db.execute(
+                """
+                UPDATE upstream_resolvers
+                SET probe_status=?, probe_message=?, probe_latency_ms=NULL, probe_checked_at=?, probe_failure_count=?
+                WHERE id=? AND enabled=1
+                """,
+                (status, display_message, ts, failures, resolver_id),
+            )
+        db.commit()
+    finally:
+        if close:
+            db.close()
+
+
+def probe_and_record(row: dict[str, Any], *, timeout: float = UPSTREAM_PROBE_TIMEOUT_SECONDS) -> None:
+    try:
+        latency = probe_resolver(row, timeout=timeout)
+        record_probe_result(int(row["id"]), ok=True, latency_ms=latency)
+    except Exception as exc:  # noqa: BLE001
+        record_probe_result(int(row["id"]), ok=False, message=str(exc))
+
+
+def probe_spacing_seconds(provider_count: int, *, interval: float = UPSTREAM_PROBE_INTERVAL_SECONDS) -> float:
+    if provider_count <= 0:
+        return interval
+    return max(0.5, interval / provider_count)
+
+
+def upstream_probe_loop(stop_event: threading.Event, *, interval: float = UPSTREAM_PROBE_INTERVAL_SECONDS, timeout: float = UPSTREAM_PROBE_TIMEOUT_SECONDS) -> None:
+    cursor = 0
+    while not stop_event.is_set():
+        try:
+            rows = enabled_resolvers()
+            if not rows:
+                stop_event.wait(interval)
+                continue
+            rows = sorted(rows, key=lambda row: (int(row.get("position") or 0), int(row["id"])))
+            row = rows[cursor % len(rows)]
+            cursor += 1
+            probe_and_record(row, timeout=timeout)
+            stop_event.wait(probe_spacing_seconds(len(rows), interval=interval))
+        except Exception:
+            stop_event.wait(5.0)
+
+
+def start_upstream_probe_scheduler() -> None:
+    global _probe_stop_event, _probe_thread
+    with _probe_thread_lock:
+        if _probe_thread and _probe_thread.is_alive():
+            return
+        _probe_stop_event = threading.Event()
+        _probe_thread = threading.Thread(target=upstream_probe_loop, args=(_probe_stop_event,), name="upstream-health-probes", daemon=True)
+        _probe_thread.start()
 
 
 def _capture_service_diagnostics(unit: str, lines: int = 60) -> str:

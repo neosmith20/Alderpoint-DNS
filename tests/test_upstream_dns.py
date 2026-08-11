@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
+import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -229,6 +231,173 @@ class UpstreamDNSTest(unittest.TestCase):
         self.assertIsNone(row["display_latency_ms"])
         self.assertEqual(row["last_status"], "healthy")
         self.assertEqual(row["last_latency_ms"], 1286.7)
+
+    def test_enabled_display_uses_probe_state_not_stale_deploy_or_dnsdist_traffic_latency(self) -> None:
+        resolver_id = upstream_dns.resolvers()[0]["id"]
+        with sqlite3.connect(upstream_dns.DB_PATH) as conn:
+            conn.execute(
+                """
+                UPDATE upstream_resolvers
+                SET enabled=1,
+                    last_status='healthy',
+                    last_message='dnsdist marked this upstream reachable',
+                    last_latency_ms=1286.7,
+                    probe_status='checking',
+                    probe_message='',
+                    probe_latency_ms=NULL
+                WHERE id=?
+                """,
+                (resolver_id,),
+            )
+            conn.commit()
+
+        row = upstream_dns.display_resolvers()[0]
+        self.assertEqual(row["display_status"], "checking")
+        self.assertEqual(row["display_message"], "No completed direct probe yet")
+        self.assertIsNone(row["display_latency_ms"])
+
+    def test_probe_results_are_isolated_per_provider(self) -> None:
+        rows = upstream_dns.resolvers()
+        upstream_dns.record_probe_result(rows[0]["id"], ok=True, latency_ms=11.1)
+        upstream_dns.record_probe_result(rows[1]["id"], ok=True, latency_ms=22.2)
+
+        displayed = {row["id"]: row for row in upstream_dns.display_resolvers()}
+        self.assertEqual(displayed[rows[0]["id"]]["display_latency_ms"], 11.1)
+        self.assertEqual(displayed[rows[1]["id"]]["display_latency_ms"], 22.2)
+        self.assertNotEqual(displayed[rows[0]["id"]]["display_latency_ms"], displayed[rows[1]["id"]]["display_latency_ms"])
+
+    def test_probe_failure_threshold_and_recovery(self) -> None:
+        resolver_id = upstream_dns.resolvers()[0]["id"]
+        upstream_dns.record_probe_result(resolver_id, ok=False, message="timeout")
+        row = upstream_dns.display_resolvers()[0]
+        self.assertEqual(row["display_status"], "checking")
+        self.assertIsNone(row["display_latency_ms"])
+
+        upstream_dns.record_probe_result(resolver_id, ok=False, message="timeout")
+        upstream_dns.record_probe_result(resolver_id, ok=False, message="timeout")
+        row = upstream_dns.display_resolvers()[0]
+        self.assertEqual(row["display_status"], "failed")
+        self.assertIn("timeout", row["display_message"])
+        self.assertIsNone(row["display_latency_ms"])
+
+        upstream_dns.record_probe_result(resolver_id, ok=True, latency_ms=7.5)
+        row = upstream_dns.display_resolvers()[0]
+        self.assertEqual(row["display_status"], "healthy")
+        self.assertEqual(row["display_latency_ms"], 7.5)
+
+    def test_lifecycle_resets_probe_state_for_enable_disable_add_edit(self) -> None:
+        resolver_id = upstream_dns.resolvers()[0]["id"]
+        upstream_dns.record_probe_result(resolver_id, ok=True, latency_ms=9.1)
+        upstream_dns.set_enabled(resolver_id, False)
+        row = upstream_dns.display_resolvers()[0]
+        self.assertEqual(row["display_status"], "disabled")
+        self.assertIsNone(row["display_latency_ms"])
+
+        upstream_dns.set_enabled(resolver_id, True)
+        row = upstream_dns.display_resolvers()[0]
+        self.assertEqual(row["display_status"], "checking")
+        self.assertIsNone(row["display_latency_ms"])
+
+        upstream_dns.record_probe_result(resolver_id, ok=True, latency_ms=9.1)
+        upstream_dns.update_resolver(resolver_id, {"name": "Edited arbitrary", "protocol": "plain", "address": "8.8.4.4", "port": "53", "enabled": "1"})
+        row = upstream_dns.display_resolvers()[0]
+        self.assertEqual(row["display_status"], "checking")
+        self.assertIsNone(row["display_latency_ms"])
+
+        added = upstream_dns.add_resolver({"name": "Arbitrary custom", "protocol": "plain", "address": "203.0.113.53", "port": "53", "enabled": "1"})
+        rows = {row["id"]: row for row in upstream_dns.display_resolvers()}
+        self.assertEqual(rows[added]["display_status"], "checking")
+        upstream_dns.delete_resolver(added)
+        self.assertNotIn(added, {row["id"] for row in upstream_dns.resolvers()})
+
+    def test_probe_scheduler_dynamically_enumerates_and_staggers_enabled_rows(self) -> None:
+        sequence = [
+            [
+                {"id": 1, "name": "alpha", "protocol": "plain", "address": "203.0.113.10", "port": 53, "position": 1, "enabled": 1},
+                {"id": 2, "name": "beta", "protocol": "plain", "address": "203.0.113.11", "port": 53, "position": 2, "enabled": 1},
+                {"id": 3, "name": "gamma", "protocol": "plain", "address": "203.0.113.12", "port": 53, "position": 3, "enabled": 1},
+            ],
+            [
+                {"id": 2, "name": "beta", "protocol": "plain", "address": "203.0.113.11", "port": 53, "position": 2, "enabled": 1},
+                {"id": 4, "name": "new arbitrary", "protocol": "plain", "address": "198.51.100.44", "port": 53, "position": 4, "enabled": 1},
+            ],
+        ]
+        waits: list[float] = []
+        probed: list[int] = []
+
+        class StopAfterThree(threading.Event):
+            def wait(self, timeout: float | None = None) -> bool:  # type: ignore[override]
+                waits.append(float(timeout or 0))
+                if len(waits) >= 3:
+                    self.set()
+                return self.is_set()
+
+        def dynamic_rows() -> list[dict[str, object]]:
+            return sequence[0] if len(probed) < 1 else sequence[1]
+
+        with mock.patch.object(upstream_dns, "enabled_resolvers", dynamic_rows), \
+             mock.patch.object(upstream_dns, "probe_and_record", lambda row, timeout=4.0: probed.append(int(row["id"]))):
+            upstream_dns.upstream_probe_loop(StopAfterThree(), interval=30.0)
+
+        self.assertEqual(probed, [1, 4, 2])
+        self.assertEqual(waits[:3], [10.0, 15.0, 15.0])
+
+    def test_probe_spacing_targets_thirty_seconds_per_provider(self) -> None:
+        self.assertEqual(upstream_dns.probe_spacing_seconds(1), 30.0)
+        self.assertEqual(upstream_dns.probe_spacing_seconds(3), 10.0)
+        self.assertEqual(upstream_dns.probe_spacing_seconds(6), 5.0)
+
+    def test_probe_protocol_dispatch_uses_direct_protocol_implementation(self) -> None:
+        rows = {
+            "plain": {"id": 1, "protocol": "plain", "address": "203.0.113.1", "port": 53},
+            "dot": {"id": 2, "protocol": "dot", "address": "dns.example", "port": 853, "tls_hostname": "dns.example"},
+            "doh": {"id": 3, "protocol": "doh", "address": "dns.example", "port": 443, "tls_hostname": "dns.example", "doh_path": "/dns-query/secret", "bootstrap_ips": "198.51.100.1"},
+        }
+        with mock.patch.object(upstream_dns, "_probe_plain_dns", return_value=(1.0, b"", 1)) as plain, \
+             mock.patch.object(upstream_dns, "_probe_dot", return_value=2.0) as dot, \
+             mock.patch.object(upstream_dns, "_probe_doh", return_value=3.0) as doh:
+            self.assertEqual(upstream_dns.probe_resolver(rows["plain"]), 1.0)
+            self.assertEqual(upstream_dns.probe_resolver(rows["dot"]), 2.0)
+            self.assertEqual(upstream_dns.probe_resolver(rows["doh"]), 3.0)
+        plain.assert_called_once()
+        dot.assert_called_once_with(rows["dot"], timeout=upstream_dns.UPSTREAM_PROBE_TIMEOUT_SECONDS)
+        doh.assert_called_once_with(rows["doh"], timeout=upstream_dns.UPSTREAM_PROBE_TIMEOUT_SECONDS)
+
+    def test_doh_bootstrap_ips_are_only_used_for_hostname_resolution(self) -> None:
+        row = {"protocol": "doh", "address": "dns.example", "bootstrap_ips": "198.51.100.1, 198.51.100.2"}
+        qid, query = upstream_dns._build_dns_query(upstream_dns.TEST_DOMAIN, 1, query_id=0x1234)
+        response = struct.pack("!HHHHHH", qid, 0x8180, 1, 1, 0, 0)
+        response += query[12:]
+        response += b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 60, 4) + bytes([203, 0, 113, 99])
+        calls: list[tuple[str, int]] = []
+
+        def fake_plain(address: str, port: int, *, timeout: float = 4.0, qtype: int = 1):
+            calls.append((address, qtype))
+            return 1.0, response, qid
+
+        with mock.patch.object(upstream_dns, "_probe_plain_dns", fake_plain):
+            self.assertEqual(upstream_dns._bootstrap_resolve_for_probe(row), "203.0.113.99")
+
+        self.assertEqual(calls, [("198.51.100.1", 1)])
+
+    def test_private_doh_path_is_redacted_from_probe_failure_messages(self) -> None:
+        resolver_id = upstream_dns.add_resolver(
+            {
+                "name": "Private DoH",
+                "protocol": "doh",
+                "address": "dns.example",
+                "port": "443",
+                "doh_path": "/dns-query/super-secret-token",
+                "tls_hostname": "dns.example",
+                "bootstrap_ips": "198.51.100.1",
+                "enabled": "1",
+            }
+        )
+        for _ in range(upstream_dns.UPSTREAM_PROBE_FAILURE_THRESHOLD):
+            upstream_dns.record_probe_result(resolver_id, ok=False, message="POST /dns-query/super-secret-token failed")
+        row = {row["id"]: row for row in upstream_dns.display_resolvers()}[resolver_id]
+        self.assertNotIn("super-secret-token", row["display_message"])
+        self.assertIn("/dns-query/...", row["display_message"])
 
     def test_mixed_plain_and_unresolvable_doh_deploys_plain_and_marks_doh_failed(self) -> None:
         upstream_dns.add_resolver({"name": "Broken DoH", "protocol": "doh", "address": "https://broken.example/dns-query", "bootstrap_ips": "1.1.1.1", "enabled": "1"})

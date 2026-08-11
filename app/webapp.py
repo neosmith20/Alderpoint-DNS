@@ -145,6 +145,14 @@ def _replication_autostart() -> None:
 
 
 @app.on_event("startup")
+def _upstream_probe_autostart() -> None:
+    # Lightweight direct upstream probes are background telemetry only:
+    # they read configured resolver rows and update probe_* fields, but
+    # never mutate dnsdist's runtime configuration or restart services.
+    upstream_dns.start_upstream_probe_scheduler()
+
+
+@app.on_event("startup")
 def _reap_abandoned_restores() -> None:
     # A restore that was mid-flight when this process (or the whole host)
     # died would otherwise sit at status='running' forever -- this is
