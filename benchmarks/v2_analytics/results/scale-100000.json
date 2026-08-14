@@ -1,0 +1,263 @@
+{
+  "scale": 100000,
+  "results": [
+    {
+      "backend": "sqlite_wal",
+      "scale": 100000,
+      "batch_size": 5000,
+      "ingest_seconds": 3.122,
+      "ingest_rows_per_sec": 32031.0,
+      "disk_bytes": 24343096,
+      "disk_mb": 23.22,
+      "bytes_per_row": 243.43,
+      "peak_rss_mb": 22.4,
+      "retention_delete_seconds": 0.3969,
+      "query_timings_ms": {
+        "last_5m": {
+          "cold_ms": 0.076,
+          "warm_ms": 0.009
+        },
+        "last_1h": {
+          "cold_ms": 0.024,
+          "warm_ms": 0.017
+        },
+        "last_24h": {
+          "cold_ms": 0.291,
+          "warm_ms": 0.276
+        },
+        "last_7d": {
+          "cold_ms": 2.081,
+          "warm_ms": 1.817
+        },
+        "recent_page": {
+          "cold_ms": 0.29,
+          "warm_ms": 0.154
+        },
+        "search_exact_domain": {
+          "cold_ms": 0.326,
+          "warm_ms": 0.253
+        },
+        "search_domain_suffix": {
+          "cold_ms": 11.868,
+          "warm_ms": 11.832
+        },
+        "by_client": {
+          "cold_ms": 0.031,
+          "warm_ms": 0.005
+        },
+        "by_protocol": {
+          "cold_ms": 39.104,
+          "warm_ms": 38.439
+        },
+        "by_qtype": {
+          "cold_ms": 39.384,
+          "warm_ms": 40.504
+        },
+        "blocked_only": {
+          "cold_ms": 10.545,
+          "warm_ms": 9.822
+        },
+        "top_domains": {
+          "cold_ms": 9.564,
+          "warm_ms": 9.645
+        },
+        "top_blocked_domains": {
+          "cold_ms": 81.48,
+          "warm_ms": 81.212
+        },
+        "top_clients": {
+          "cold_ms": 10.634,
+          "warm_ms": 10.449
+        },
+        "top_upstreams": {
+          "cold_ms": 46.748,
+          "warm_ms": 40.731
+        },
+        "rcode_distribution": {
+          "cold_ms": 39.545,
+          "warm_ms": 39.43
+        },
+        "latency_percentiles": {
+          "cold_ms": 17.087,
+          "warm_ms": 16.785
+        },
+        "time_series_counts": {
+          "cold_ms": 30.389,
+          "warm_ms": 31.256
+        }
+      }
+    },
+    {
+      "backend": "jsonl_gzip",
+      "scale": 100000,
+      "batch_size": 5000,
+      "ingest_seconds": 1.184,
+      "ingest_rows_per_sec": 84442.3,
+      "disk_bytes": 2553565,
+      "disk_mb": 2.44,
+      "bytes_per_row": 25.54,
+      "peak_rss_mb": 185.8,
+      "retention_delete_seconds": 0.0005,
+      "query_timings_ms": {
+        "last_5m": {
+          "cold_ms": 540.421,
+          "warm_ms": 16.288
+        },
+        "last_1h": {
+          "cold_ms": 16.715,
+          "warm_ms": 16.653
+        },
+        "last_24h": {
+          "cold_ms": 16.989,
+          "warm_ms": 16.606
+        },
+        "last_7d": {
+          "cold_ms": 18.145,
+          "warm_ms": 17.992
+        },
+        "recent_page": {
+          "cold_ms": 42.472,
+          "warm_ms": 38.897
+        },
+        "search_exact_domain": {
+          "cold_ms": 18.607,
+          "warm_ms": 18.073
+        },
+        "search_domain_suffix": {
+          "cold_ms": 20.32,
+          "warm_ms": 20.024
+        },
+        "by_client": {
+          "cold_ms": 18.323,
+          "warm_ms": 18.259
+        },
+        "by_protocol": {
+          "cold_ms": 32.49,
+          "warm_ms": 31.23
+        },
+        "by_qtype": {
+          "cold_ms": 29.562,
+          "warm_ms": 28.422
+        },
+        "blocked_only": {
+          "cold_ms": 13.6,
+          "warm_ms": 13.627
+        },
+        "top_domains": {
+          "cold_ms": 34.684,
+          "warm_ms": 32.134
+        },
+        "top_blocked_domains": {
+          "cold_ms": 15.903,
+          "warm_ms": 15.856
+        },
+        "top_clients": {
+          "cold_ms": 29.002,
+          "warm_ms": 27.189
+        },
+        "top_upstreams": {
+          "cold_ms": 29.208,
+          "warm_ms": 27.304
+        },
+        "rcode_distribution": {
+          "cold_ms": 31.184,
+          "warm_ms": 29.513
+        },
+        "latency_percentiles": {
+          "cold_ms": 35.414,
+          "warm_ms": 35.375
+        },
+        "time_series_counts": {
+          "cold_ms": 35.171,
+          "warm_ms": 37.29
+        }
+      }
+    },
+    {
+      "backend": "parquet_zstd_duckdb",
+      "scale": 100000,
+      "batch_size": 5000,
+      "ingest_seconds": 0.663,
+      "ingest_rows_per_sec": 150848.4,
+      "disk_bytes": 1758650,
+      "disk_mb": 1.68,
+      "bytes_per_row": 17.59,
+      "peak_rss_mb": 185.8,
+      "retention_delete_seconds": 0.0003,
+      "query_timings_ms": {
+        "last_5m": {
+          "cold_ms": 73.157,
+          "warm_ms": 2.461
+        },
+        "last_1h": {
+          "cold_ms": 2.422,
+          "warm_ms": 2.4
+        },
+        "last_24h": {
+          "cold_ms": 2.418,
+          "warm_ms": 2.246
+        },
+        "last_7d": {
+          "cold_ms": 2.243,
+          "warm_ms": 2.255
+        },
+        "recent_page": {
+          "cold_ms": 13.423,
+          "warm_ms": 10.937
+        },
+        "search_exact_domain": {
+          "cold_ms": 2.478,
+          "warm_ms": 3.482
+        },
+        "search_domain_suffix": {
+          "cold_ms": 2.878,
+          "warm_ms": 2.292
+        },
+        "by_client": {
+          "cold_ms": 1.771,
+          "warm_ms": 1.784
+        },
+        "by_protocol": {
+          "cold_ms": 2.542,
+          "warm_ms": 2.195
+        },
+        "by_qtype": {
+          "cold_ms": 2.23,
+          "warm_ms": 2.935
+        },
+        "blocked_only": {
+          "cold_ms": 1.816,
+          "warm_ms": 1.674
+        },
+        "top_domains": {
+          "cold_ms": 3.179,
+          "warm_ms": 3.094
+        },
+        "top_blocked_domains": {
+          "cold_ms": 3.114,
+          "warm_ms": 6.169
+        },
+        "top_clients": {
+          "cold_ms": 3.631,
+          "warm_ms": 2.756
+        },
+        "top_upstreams": {
+          "cold_ms": 2.745,
+          "warm_ms": 6.223
+        },
+        "rcode_distribution": {
+          "cold_ms": 2.853,
+          "warm_ms": 2.494
+        },
+        "latency_percentiles": {
+          "cold_ms": 10.445,
+          "warm_ms": 8.443
+        },
+        "time_series_counts": {
+          "cold_ms": 4.814,
+          "warm_ms": 3.999
+        }
+      }
+    }
+  ]
+}

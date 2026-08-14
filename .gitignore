@@ -62,3 +62,8 @@ test-output/
 
 .claude/
 vendor-runtime/
+
+# V2 Workstream 1: disposable dev/benchmark artifacts, never committed
+dev/
+benchmarks/v2_analytics/data/
+benchmarks/v2_analytics/results/*.json.tmp
