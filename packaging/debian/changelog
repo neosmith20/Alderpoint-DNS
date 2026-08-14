@@ -31,6 +31,20 @@ alderpointdns (1.1.1-1) unstable; urgency=medium
     in this release's supported Starlette version, so no upload route was
     actually broken -- but it removed a real landmine and eliminated an
     ambiguous package name from every fresh install going forward.
+  * Fixed a clean-install blocker: the package's postinst installs the
+    vendored python-multipart wheel via `python3 -m pip`, but the
+    package did not depend on python3-pip -- a stock Debian 13 install
+    resolved dependencies and unpacked, then failed outright in postinst
+    because pip did not exist. Now correctly depends on python3-pip.
+  * Fixed a fresh-install bug (found proving the pip fix above end to end
+    against a genuinely clean Debian 13 container): postinst's
+    dnsdist.conf managed-block migration step unconditionally initializes
+    app/clients.py's own database tables as a side effect, which -- if it
+    ran before the fresh-install blocklist-seeding step, as it
+    unconditionally did -- made every fresh install look like an
+    established, non-fresh database and silently skipped seeding the
+    default blocklists and the initial filtering deploy. Reordered so
+    fresh-install detection always runs first.
 
  -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Fri, 14 Aug 2026 11:35:00 +0000
 

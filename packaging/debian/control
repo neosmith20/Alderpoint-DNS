@@ -11,8 +11,19 @@ Architecture: all
 Depends: bind9, bind9-dnsutils, curl, dnsdist (>= 1.9.0), gnupg, jq,
  knot-dnsutils, openssl, python3-aioquic, python3-argon2, python3-dnspython,
  python3-fastapi, python3-httpx, python3-itsdangerous, python3-jinja2,
- python3-python-multipart, python3-openpyxl, python3-yaml, sqlite3, sudo,
- uvicorn, ${misc:Depends}, ${python3:Depends}
+ python3-pip, python3-python-multipart, python3-openpyxl, python3-yaml,
+ sqlite3, sudo, uvicorn, ${misc:Depends}, ${python3:Depends}
+# python3-pip is required at *install/upgrade* time, not just runtime:
+# postinst's vendor-deps-sync step (sync_vendored_python_deps() in
+# app/alderpointdns_compiler.py) runs `python3 -B -m pip install
+# --no-index --find-links vendor/ --target vendor-runtime/ ...` to install
+# the pinned python-multipart 0.0.31 wheel ahead of whatever Debian's own
+# archive carries. Without this Depends, a stock Debian 13 install
+# resolves the package's other dependencies fine, dpkg unpacks the
+# files, and postinst then fails outright because `python3 -m pip`
+# does not exist -- caught by tests/test_clean_install_container.sh
+# against a genuinely clean container, not by any unit test (every
+# in-repo unit test runs on a dev machine that already has pip).
 # python3-multipart is a DIFFERENT, unrelated Debian package (Andrew
 # Dunham's "multipart", currently 1.2.1) that happens to also install as
 # `import multipart` -- not the FastAPI-ecosystem "python-multipart"

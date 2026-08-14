@@ -215,6 +215,94 @@ class MultipartPackageCollisionTest(unittest.TestCase):
             self.assertIn(pkg, build_depends_line, f"scripts/build-deb.sh missing {pkg}")
 
 
+class DependencyManifestSyncTest(unittest.TestCase):
+    """General-purpose guard against the exact class of defect that
+    shipped both the python3-multipart-vs-python3-python-multipart bug
+    and the missing-python3-pip clean-install blocker: this project
+    defines its Debian dependency set in three independently-maintained
+    places (packaging/debian/control's Depends field, scripts/
+    build-deb.sh's own hand-written DEBIAN/control heredoc, and
+    requirements-debian.txt, read by scripts/install.sh for the
+    source-install path) with no single source of truth enforcing they
+    agree. Rather than hand-listing individual package names to check
+    (which only catches drift in packages someone remembered to add a
+    test for), this compares the full dependency sets so ANY future
+    addition/removal that isn't applied everywhere fails immediately."""
+
+    _VERSION_CONSTRAINT_RE = re.compile(r"\s*\([^)]*\)")
+    # requirements-debian.txt is also used by scripts/install.sh's
+    # source-install path, which additionally needs python3-venv to
+    # create the install venv -- postinst's vendor-deps-sync installs
+    # straight into vendor-runtime/ via `pip install --target` against
+    # the system interpreter and never creates or needs a venv, so
+    # python3-venv is legitimately absent from the packaged Depends.
+    # This is the ONLY documented, intentional difference between the
+    # three manifests; anything else must match exactly.
+    _SOURCE_INSTALL_ONLY = {"python3-venv"}
+
+    def _depends_package_names(self, depends_field_body: str) -> set[str]:
+        names: set[str] = set()
+        for entry in depends_field_body.split(","):
+            entry = self._VERSION_CONSTRAINT_RE.sub("", entry).strip()
+            if not entry or entry.startswith("${"):
+                continue
+            names.add(entry)
+        return names
+
+    def _control_depends(self) -> set[str]:
+        control = (ROOT / "packaging" / "debian" / "control").read_text()
+        match = re.search(r"^Depends:(.*?)(?=^\S|\Z)", control, re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(match, "Depends field not found in packaging/debian/control")
+        return self._depends_package_names(match.group(1))
+
+    def _build_deb_depends(self) -> set[str]:
+        build_deb = (ROOT / "scripts" / "build-deb.sh").read_text()
+        depends_line = next(line for line in build_deb.splitlines() if line.startswith("Depends:"))
+        return self._depends_package_names(depends_line[len("Depends:"):])
+
+    def _requirements_debian_packages(self) -> set[str]:
+        return {
+            line.strip()
+            for line in (ROOT / "requirements-debian.txt").read_text().splitlines()
+            if line.strip()
+        }
+
+    def test_control_and_build_deb_depends_are_identical(self) -> None:
+        control_depends = self._control_depends()
+        build_deb_depends = self._build_deb_depends()
+        self.assertEqual(
+            control_depends, build_deb_depends,
+            f"packaging/debian/control and scripts/build-deb.sh Depends diverge -- "
+            f"only in control: {sorted(control_depends - build_deb_depends)}, "
+            f"only in build-deb.sh: {sorted(build_deb_depends - control_depends)}",
+        )
+
+    def test_requirements_debian_matches_packaged_depends(self) -> None:
+        control_depends = self._control_depends()
+        requirements = self._requirements_debian_packages()
+        self.assertEqual(
+            requirements - self._SOURCE_INSTALL_ONLY, control_depends,
+            f"requirements-debian.txt (minus documented source-install-only packages "
+            f"{sorted(self._SOURCE_INSTALL_ONLY)}) and packaging/debian/control Depends diverge -- "
+            f"only in requirements-debian.txt: {sorted(requirements - self._SOURCE_INSTALL_ONLY - control_depends)}, "
+            f"only in control: {sorted(control_depends - requirements)}",
+        )
+
+    def test_python3_pip_required_for_vendor_deps_sync(self) -> None:
+        """The concrete blocker this class of test exists to catch: a
+        stock Debian 13 install resolves the .deb's dependencies, dpkg
+        unpacks the files, postinst calls vendor-deps-sync (see
+        VendorDependencyPackagingTest.test_postinst_does_not_swallow_vendor_sync_failures
+        for postinst's own invocation of it), and only THEN does
+        sync_vendored_python_deps() discover `python3 -m pip` doesn't
+        exist -- a failure invisible to every unit test run on a dev
+        machine that already has pip installed."""
+        compiler = (ROOT / "app" / "alderpointdns_compiler.py").read_text()
+        self.assertIn('"-m", "pip", "install"', compiler)
+        self.assertIn("python3-pip", self._control_depends())
+        self.assertIn("python3-pip", self._build_deb_depends())
+
+
 class VendorDependencySyncTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="alderpointdns-vendor-sync-"))
@@ -392,18 +480,19 @@ class FreshInstallInitOrderingTest(unittest.TestCase):
     disposable Debian 13 VM: zero rows in `sources` after install until
     this ordering fix."""
 
-    def _assert_fresh_install_init_precedes_analytics_init_db(self, text: str, label: str) -> None:
+    def _first_invocation_line(self, text: str, needle: str) -> int | None:
         # Match only the actual invocation lines, not comment prose that
-        # happens to mention either command by name.
-        fresh_idx = analytics_idx = None
+        # happens to mention the command by name.
         for lineno, line in enumerate(text.splitlines()):
-            stripped = line.strip()
-            if stripped.startswith("#"):
+            if line.strip().startswith("#"):
                 continue
-            if fresh_idx is None and "alderpointdns_compiler.py fresh-install-init" in line:
-                fresh_idx = lineno
-            if analytics_idx is None and "analytics.py init-db" in line:
-                analytics_idx = lineno
+            if needle in line:
+                return lineno
+        return None
+
+    def _assert_fresh_install_init_precedes_analytics_init_db(self, text: str, label: str) -> None:
+        fresh_idx = self._first_invocation_line(text, "alderpointdns_compiler.py fresh-install-init")
+        analytics_idx = self._first_invocation_line(text, "analytics.py init-db")
         self.assertIsNotNone(fresh_idx, f"{label} does not call fresh-install-init")
         self.assertIsNotNone(analytics_idx, f"{label} does not call analytics.py init-db")
         self.assertLess(
@@ -416,6 +505,32 @@ class FreshInstallInitOrderingTest(unittest.TestCase):
     def test_postinst_ordering(self) -> None:
         text = (ROOT / "packaging" / "debian" / "postinst").read_text()
         self._assert_fresh_install_init_precedes_analytics_init_db(text, "postinst")
+
+    def test_postinst_fresh_install_init_precedes_dnsdist_conf_migrate(self) -> None:
+        """Same class of bug, a different module: app/clients.py's
+        ensure_access_data_files() (called from dnsdist-conf-migrate)
+        unconditionally calls clients.py's own, separate init_db() --
+        real CREATE TABLE IF NOT EXISTS DDL against the shared database
+        file. If dnsdist-conf-migrate runs before fresh-install-init,
+        has_established_database_state() sees a non-empty database on
+        EVERY fresh install (not a rare race -- this ran unconditionally
+        every time) and silently skips the default blocklist seed and
+        initial deploy. Confirmed with a real
+        tests/test_clean_install_container.sh run against a genuinely
+        clean Debian 13 container: fresh_install=0 every time, and
+        /var/lib/alderpointdns/compiled/bind/alderpointdns.rpz was never
+        created, until this ordering fix."""
+        text = (ROOT / "packaging" / "debian" / "postinst").read_text()
+        fresh_idx = self._first_invocation_line(text, "alderpointdns_compiler.py fresh-install-init")
+        migrate_idx = self._first_invocation_line(text, "alderpointdns_compiler.py dnsdist-conf-migrate")
+        self.assertIsNotNone(fresh_idx, "postinst does not call fresh-install-init")
+        self.assertIsNotNone(migrate_idx, "postinst does not call dnsdist-conf-migrate")
+        self.assertLess(
+            fresh_idx,
+            migrate_idx,
+            "postinst calls dnsdist-conf-migrate before fresh-install-init, which "
+            "silently defeats fresh-install detection (see test docstring)",
+        )
 
     def test_install_sh_ordering(self) -> None:
         text = (ROOT / "scripts" / "install.sh").read_text()

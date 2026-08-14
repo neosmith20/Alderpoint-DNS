@@ -117,9 +117,62 @@ echo "dnsdist restarted ${restart_count} time(s) during 8 genuine sequential des
 [ "$restart_count" -lt 5 ] || fail "8 changes produced ${restart_count} restarts -- not safely under dns1's real StartLimitBurst=5"
 
 echo "== verifying DB desired state matches live runtime state =="
-db_enabled_addresses="$(sqlite3 -cmd ".timeout 5000" "$DB" "SELECT address || ':' || port FROM upstream_resolvers WHERE enabled=1 ORDER BY address;")"
-live_addresses="$(dnsdist -e "showServers()" | awk '$NF == "alderpointdns_upstreams" {print $3}' | sort)"
-[ "$(echo "$db_enabled_addresses" | sort)" = "$live_addresses" ] || fail "DB enabled resolver set does not match dnsdist's live pool: DB=[$db_enabled_addresses] live=[$live_addresses]"
+# Regression (fixed test oracle, not runtime behavior): a hostname-based
+# encrypted (DoT/DoH) resolver is intentionally deployed to dnsdist as its
+# *resolved* backend IP (dnsdist 1.9's newServer(address=...) takes a
+# literal ip:port; see app/upstream_dns.py's _resolve_backend_address()),
+# while the configured hostname is retained separately as `subjectName`
+# for TLS SNI/certificate-subject and DoH Host validation
+# (_new_server_statement()). Comparing the DB's configured
+# hostname:port string directly against dnsdist's live ip:port
+# (`showServers()`) is therefore invalid for any hostname-based resolver
+# -- it would compare e.g. "cloudflare-dns.com:443" against
+# "104.16.132.229:443" and always fail even though the deployment is
+# completely correct. It must also not hardcode one specific resolved IP
+# (Cloudflare's addresses are not permanent/singular), so this recomputes
+# each enabled row's expected dnsdist backend address via the
+# application's own resolution function -- the exact same one
+# _console_reconcile() itself uses to self-verify a deploy succeeded --
+# rather than re-implementing hostname resolution in shell.
+python3 -B - <<'PY' || fail "DB enabled resolver set does not match dnsdist's live pool"
+import subprocess
+import sys
+
+sys.path.insert(0, "/opt/alderpointdns")
+from app import upstream_dns  # noqa: E402
+
+rows = upstream_dns.enabled_resolvers()
+prepared = upstream_dns.prepare_dnsdist_rows(rows)
+expected = sorted(upstream_dns._address_for_dnsdist(row) for row in prepared)
+
+proc = subprocess.run(["dnsdist", "-e", "showServers()"], capture_output=True, text=True, check=True)
+live = sorted(
+    line.split()[2]
+    for line in proc.stdout.splitlines()
+    if line.split() and line.split()[-1] == "alderpointdns_upstreams"
+)
+
+print(f"expected (resolved) backend addresses: {expected}")
+print(f"live dnsdist backend addresses:         {live}")
+if expected != live:
+    print("MISMATCH", file=sys.stderr)
+    sys.exit(1)
+
+# The configured hostname/TLS identity itself -- never a resolved IP --
+# remains the authoritative subjectName dnsdist validates against, for
+# every encrypted (DoT/DoH) enabled resolver.
+for row in rows:
+    if row["protocol"] in ("dot", "doh"):
+        expected_subject = row["tls_hostname"] or row["address"]
+        rendered = upstream_dns._new_server_statement(
+            next(p for p in prepared if p["id"] == row["id"])
+        )
+        needle = f'subjectName="{expected_subject}"'
+        if needle not in rendered:
+            print(f"resolver {row['id']} ({row['name']}): expected {needle!r} in {rendered!r}", file=sys.stderr)
+            sys.exit(1)
+print("configured hostname/TLS subject identity verified for all encrypted enabled resolvers")
+PY
 
 echo "== verifying deployment history is truthful =="
 sqlite3 -cmd ".timeout 5000" "$DB" "SELECT status, message FROM upstream_deployments ORDER BY id DESC LIMIT 1;" | grep -q '^deployed|' || fail "most recent deployment history entry is not truthfully 'deployed'"

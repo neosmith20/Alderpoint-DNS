@@ -2,6 +2,7 @@ bind9
 bind9-dnsutils
 curl
 dnsdist
+gnupg
 jq
 knot-dnsutils
 openssl
@@ -17,5 +18,6 @@ python3-openpyxl
 python3-pip
 python3-venv
 python3-yaml
+sqlite3
 sudo
 uvicorn

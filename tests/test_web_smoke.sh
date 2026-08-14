@@ -194,17 +194,61 @@ if "setInterval(() => window.location.reload()" in js:
     raise SystemExit("query log auto-refresh still reloads the full page")
 if "data-async-form" not in template or "AlderpointDNSAsyncForm" not in js or "showToast" not in js or ".toast" not in css:
     raise SystemExit("Local DNS async form and toast behavior is missing")
-# Regression: an always-on-the-page contextual warning (backup.html's
+# Regression (v1.1.1): the generic async-form handler used to search the
+# whole returned page for `.alert.error:not([data-static-notice])`, which
+# excluded only always-on-the-page STATIC contextual warnings (backup.html's
 # "including private keys..." text, system_network.html's "changing this
-# server's IP..." text) shares the .alert.error styling a real submission
-# error uses, but is not conditioned on that submission's outcome. Without
-# excluding data-static-notice elements, a *successful* async submission on
-# either page had its static warning text mistaken for the response's error
-# and shown -- then auto-dismissed after 3.6s -- as an "error" toast instead
-# of the real success message, which is exactly what made that long security
-# warning read as if it "auto-dismissed too quickly".
-if "data-static-notice" not in js or ":not([data-static-notice])" not in js:
-    raise SystemExit("async-form error detection does not exclude static contextual notices")
+# server's IP..." text) but not DYNAMIC unrelated content that shares the
+# same .alert.error styling -- e.g. an old, terminal Update Job's stored
+# error rendered further down the same page. A successful, unrelated async
+# submission (a fresh Check for Updates, say) could have that old job's
+# error mistaken for the current request's own failure and shown -- then
+# auto-dismissed after 3.6s -- as an "error" toast instead of the real
+# success message. Fixed by replacing the whole selector with an explicit,
+# deliberate response contract: only the element the server marks
+# data-form-error is ever treated as this submission's own error, set only
+# by the route handler that processed this exact request (see e.g.
+# software_updates_error() in app/webapp.py). See PART 2 (historical
+# update-error UX) of the v1.1.1 updater work for the full field scenario
+# this reproduces and fixes.
+if "data-form-error" not in js or "querySelector('[data-form-error]')" not in js:
+    raise SystemExit("async-form error detection does not use the explicit data-form-error contract")
+if ".alert.error:not([data-static-notice])" in js:
+    raise SystemExit("async-form error detection still uses the old broad selector that could match unrelated historical/static page content")
+# Every data-async-form page's own top-of-page, per-request error block
+# must carry the marker -- this is the server side of the same contract;
+# an unmarked block would make the JS-side fix above a no-op for that page.
+for form_page, error_var in (
+    ("administration.html", "error"),
+    ("backup.html", "error"),
+    ("blocklists.html", "category_error"),
+    ("dns_cache.html", "error"),
+    ("dns_settings.html", "upstream_error"),
+    ("encryption.html", "error"),
+    ("import_migration.html", "error"),
+    ("local_dns.html", "error"),
+    ("notifications.html", "error"),
+    ("replication.html", "error"),
+    ("system_network.html", "error"),
+    ("system_software_updates.html", "error"),
+):
+    page_text = Path(f"/opt/alderpointdns/web/templates/{form_page}").read_text()
+    if f"{{{{ {error_var} }}}}" not in page_text or "data-form-error" not in page_text:
+        raise SystemExit(f"{form_page}'s current-request error block is missing its data-form-error marker")
+# A terminal Update Job's own stored error (historical or current) must
+# NOT carry data-form-error -- it is never this request's own outcome,
+# only ever background job state. If this ever regresses, the async-form
+# handler above would start mistaking job history for request errors again.
+job_partial = Path("/opt/alderpointdns/web/templates/system_software_updates_job.html").read_text()
+if "data-form-error" in job_partial:
+    raise SystemExit("system_software_updates_job.html must not mark job error/health content as data-form-error -- it is background job state, never this request's own outcome")
+# Historical (superseded-by-a-later-check) terminal jobs must be labeled
+# as such, not presented with the same weight as a current failure.
+if "Previous Update Job" not in job_partial or "job.historical" not in job_partial:
+    raise SystemExit("historical Update Job labeling is missing from system_software_updates_job.html")
+# Static contextual warnings (never conditioned on any submission's
+# outcome) keep their own, separate marker -- unrelated to the
+# data-form-error contract above, but still real content that must render.
 backup_template = Path("/opt/alderpointdns/web/templates/backup.html").read_text()
 if 'data-static-notice="1"' not in backup_template:
     raise SystemExit("backup.html's private-key warning is missing its data-static-notice marker")

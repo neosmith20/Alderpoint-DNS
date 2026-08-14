@@ -19,6 +19,11 @@ not during RC preparation.
   the newly installed version.
 - Fixed the package dependency on the wrong, unrelated "python3-multipart"
   package; now correctly depends on python3-python-multipart.
+- Fixed a clean-install blocker: the package now correctly depends on
+  python3-pip, which postinst's vendored-dependency installation step
+  requires.
+- Fixed a fresh-install bug where the default blocklists and initial
+  filtering deploy were silently skipped on every clean install.
 
 ## v1.1.0
 
