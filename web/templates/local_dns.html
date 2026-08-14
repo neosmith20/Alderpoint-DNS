@@ -6,7 +6,7 @@
 {{ ui.page_header("Local DNS", "Authoritative internal hostnames, reverse DNS, rewrites, and client display aliases.", '<a class="button secondary" href="/local-dns/export">Export CSV</a>') }}
 
 {% if error %}
-  <div class="alert error" role="alert">{{ error }}</div>
+  <div class="alert error" role="alert" data-form-error="1">{{ error }}</div>
 {% endif %}
 
 <section class="grid">

@@ -5,7 +5,7 @@
 {{ ui.page_header("Import and Migration", "Migrate from AdGuard Home, Pi-hole, hosts files, BIND zones, CSV/XLSX, or a Alderpoint DNS-native JSON export.") }}
 
 {% if error %}
-  <div class="alert error" role="alert">{{ error }}</div>
+  <div class="alert error" role="alert" data-form-error="1">{{ error }}</div>
 {% endif %}
 
 {% if applied_counts %}

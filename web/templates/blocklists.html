@@ -4,7 +4,7 @@
 {{ ui.page_header("Blocklists", "Manage external policy sources and categories.") }}
 
 {% if category_error %}
-  <div class="alert error" role="alert">{{ category_error }}</div>
+  <div class="alert error" role="alert" data-form-error="1">{{ category_error }}</div>
 {% endif %}
 
 {% set fs = filter_schedule|default({}, true) %}

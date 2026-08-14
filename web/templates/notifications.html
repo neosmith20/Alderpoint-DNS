@@ -5,7 +5,7 @@
 {{ ui.page_header("Notifications", "Provider-neutral alerting: SMTP email, generic webhooks, and webhook presets for chat/paging services.") }}
 
 {% if error %}
-  <div class="alert error" role="alert">{{ error }}</div>
+  <div class="alert error" role="alert" data-form-error="1">{{ error }}</div>
 {% endif %}
 
 <section class="panel stack">

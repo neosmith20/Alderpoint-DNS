@@ -2,17 +2,38 @@
 {% if job %}
 <section class="panel stack" data-phase-active="{{ '1' if job.phase not in ('completed', 'failed') else '0' }}">
   <div class="panel__head">
-    <h2>Update Job #{{ job.id }}</h2>
+    <h2>{{ "Previous Update Job #" ~ job.id if job.historical else "Update Job #" ~ job.id }}</h2>
     {{ ui.status_badge(job.status_label or job.phase, job.status_tone or "neutral") }}
   </div>
-  <p class="muted">{{ job.operation | capitalize }} update requested by <span class="mono">{{ job.requested_by or "unknown" }}</span> at {{ job.requested_at | local_time }}.</p>
+  {% if job.historical %}
+    {# A terminal job becomes "historical" once a newer administrator
+       action (a later successful Check for Updates) has happened since it
+       finished -- see _job_is_historical() in app/software_updates.py.
+       This is what a user must instantly understand as "this error is
+       from a previous update attempt", not the outcome of anything they
+       just did: a clear "Previous" label, the completion date/time up
+       front, and failure detail collapsed by default (still fully
+       inspectable) rather than presented with the same prominence as a
+       fresh failure. #}
+    <p class="muted">{{ job.operation | capitalize }} update requested by <span class="mono">{{ job.requested_by or "unknown" }}</span> at {{ job.requested_at | local_time }} &mdash; finished {{ job.completed_at | local_time if job.completed_at else "unknown" }}.</p>
+  {% else %}
+    <p class="muted">{{ job.operation | capitalize }} update requested by <span class="mono">{{ job.requested_by or "unknown" }}</span> at {{ job.requested_at | local_time }}.</p>
+  {% endif %}
   <p>Current version: <span class="mono">{{ job.current_version }}</span> &rarr; Candidate: <span class="mono">{{ job.candidate_version or "pending" }}</span></p>
   {% if job.backup_path %}<p>Pre-upgrade backup: <span class="mono">{{ job.backup_path }}</span> (retained regardless of update outcome)</p>{% endif %}
-  {% if job.phase == 'failed' and job.error %}
-    <div class="alert error" role="alert">{{ job.error }}</div>
-  {% endif %}
-  {% if job.health_summary %}
-    <div class="alert error" role="alert">Health verification: {{ job.health_summary }}</div>
+  {% if job.historical and job.phase == 'failed' and (job.error or job.health_summary) %}
+    <details>
+      <summary>Previous update attempt failed on {{ job.completed_at | local_time if job.completed_at else "an earlier date" }} &mdash; details</summary>
+      {% if job.error %}<div class="alert error" role="alert">{{ job.error }}</div>{% endif %}
+      {% if job.health_summary %}<div class="alert error" role="alert">Health verification: {{ job.health_summary }}</div>{% endif %}
+    </details>
+  {% else %}
+    {% if job.phase == 'failed' and job.error %}
+      <div class="alert error" role="alert">{{ job.error }}</div>
+    {% endif %}
+    {% if job.health_summary %}
+      <div class="alert error" role="alert">Health verification: {{ job.health_summary }}</div>
+    {% endif %}
   {% endif %}
   {% if job.phase == 'completed' %}
     <div class="alert" role="status">Update successful. The pre-upgrade backup above was retained for recovery.</div>

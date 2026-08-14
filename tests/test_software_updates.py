@@ -436,6 +436,116 @@ class HealthCheckTest(unittest.TestCase):
         self.assertIn("database is locked", result["message"])
         sleep_mock.assert_called_once_with(su.SQLITE_HEALTH_RETRY_DELAY_SECONDS)
 
+    def _table_locked_error(self) -> sqlite3.OperationalError:
+        """Builds a real (not hand-authored) SQLITE_LOCKED exception so the
+        classifier is exercised against sqlite3's actual sqlite_errorcode/
+        sqlite_errorname attributes, not a guess at what they contain."""
+        tmp = Path(tempfile.mkdtemp(prefix="alderpointdns-locked-test-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        path = tmp / "shared.db"
+        uri = f"file:{path}?cache=shared"
+        holder = sqlite3.connect(uri, uri=True)
+        holder.execute("CREATE TABLE t (id INTEGER)")
+        holder.commit()
+        self.addCleanup(holder.close)
+        contender = sqlite3.connect(uri, uri=True, timeout=0.1)
+        self.addCleanup(contender.close)
+        holder.execute("BEGIN IMMEDIATE")
+        holder.execute("INSERT INTO t VALUES (1)")
+        try:
+            contender.execute("PRAGMA busy_timeout=100")
+            contender.execute("SELECT * FROM t")
+        except sqlite3.OperationalError as exc:
+            return exc
+        raise AssertionError("expected a real SQLITE_LOCKED exception from shared-cache contention")
+
+    def test_quick_check_retries_transient_table_lock(self) -> None:
+        """'database table is locked' (SQLITE_LOCKED) must be retried just
+        like plain SQLITE_BUSY -- it is the same class of transient
+        in-process contention, not corruption, and the original substring
+        matcher ("database is locked"/"database is busy"/"database locked")
+        did not match this message at all, silently treating it as a
+        terminal sqlite_error with zero retries."""
+        locked_exc = self._table_locked_error()
+        self.assertIn("table is locked", str(locked_exc))
+        conn_mock = mock.Mock()
+        conn_mock.execute.side_effect = [None, mock.Mock(fetchall=mock.Mock(return_value=[("ok",)]))]
+        with mock.patch.object(su.sqlite3, "connect", side_effect=[locked_exc, conn_mock]), \
+             mock.patch.object(su.time, "sleep") as sleep_mock:
+            result = su._database_quick_check()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["attempts"], 2)
+        sleep_mock.assert_called_once_with(su.SQLITE_HEALTH_RETRY_DELAY_SECONDS)
+
+    def test_quick_check_classifies_real_table_lock_via_structured_errorcode(self) -> None:
+        locked_exc = self._table_locked_error()
+        error_type, message = su._classify_sqlite_operational_error(locked_exc)
+        self.assertEqual(error_type, "database_locked")
+        self.assertIn("table is locked", message)
+
+    def test_quick_check_table_lock_reports_diagnostic_after_retries(self) -> None:
+        with mock.patch.object(su, "SQLITE_HEALTH_ATTEMPTS", 2), \
+             mock.patch.object(su.sqlite3, "connect", side_effect=sqlite3.OperationalError("database table is locked: t")), \
+             mock.patch.object(su.time, "sleep") as sleep_mock:
+            result = su._database_quick_check()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["attempts"], 2)
+        self.assertEqual(result["error_type"], "database_locked")
+        sleep_mock.assert_called_once_with(su.SQLITE_HEALTH_RETRY_DELAY_SECONDS)
+
+    def test_quick_check_lock_clears_within_stabilization_window_succeeds(self) -> None:
+        """A lock that persists through several attempts but clears before
+        SQLITE_HEALTH_ATTEMPTS is exhausted must report overall success --
+        the retries were necessary, but the final, authoritative result is
+        that the database is healthy."""
+        ok_conn = mock.Mock()
+        ok_conn.execute.side_effect = [None, mock.Mock(fetchall=mock.Mock(return_value=[("ok",)]))]
+        with mock.patch.object(su, "SQLITE_HEALTH_ATTEMPTS", 5), \
+             mock.patch.object(
+                 su.sqlite3, "connect",
+                 side_effect=[
+                     sqlite3.OperationalError("database is locked"),
+                     sqlite3.OperationalError("database table is locked: t"),
+                     sqlite3.OperationalError("database is locked"),
+                     ok_conn,
+                 ],
+             ), \
+             mock.patch.object(su.time, "sleep") as sleep_mock:
+            result = su._database_quick_check()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["attempts"], 4)
+        self.assertEqual(sleep_mock.call_count, 3)
+
+    def test_quick_check_unrelated_operational_error_is_not_retried(self) -> None:
+        """A structured sqlite_errorname that is neither SQLITE_BUSY nor
+        SQLITE_LOCKED must not be retried as if it were transient -- only
+        the message-fallback path (no structured info available) should
+        ever fall back to substring guessing."""
+        exc = sqlite3.OperationalError("unable to open database file")
+        with mock.patch.object(su.sqlite3, "connect", side_effect=exc), \
+             mock.patch.object(su.time, "sleep") as sleep_mock:
+            result = su._database_quick_check()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_type"], "sqlite_error")
+        self.assertEqual(result["attempts"], 1)
+        sleep_mock.assert_not_called()
+
+    def test_classify_real_unrelated_structured_error_is_not_transient(self) -> None:
+        """A real OperationalError carrying a structured error code that is
+        neither SQLITE_BUSY nor SQLITE_LOCKED (e.g. a bad PRAGMA/statement)
+        must classify as sqlite_error via the structured branch, not fall
+        through to message substring guessing."""
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        try:
+            conn.execute("SELECT * FROM no_such_table")
+        except sqlite3.OperationalError as exc:
+            self.assertTrue(str(getattr(exc, "sqlite_errorname", "")))
+            error_type, _ = su._classify_sqlite_operational_error(exc)
+            self.assertEqual(error_type, "sqlite_error")
+        else:
+            raise AssertionError("expected OperationalError")
+
     def test_quick_check_genuine_corruption_fails_closed_without_retry(self) -> None:
         conn_mock = mock.Mock()
         conn_mock.execute.side_effect = [
@@ -451,6 +561,29 @@ class HealthCheckTest(unittest.TestCase):
         self.assertEqual(connect_mock.call_count, 1)
         sleep_mock.assert_not_called()
         conn_mock.close.assert_called_once()
+
+    def test_quick_check_real_disposable_corrupt_database_fails(self) -> None:
+        """Real corruption on a real (disposable, never the live appliance
+        database) file, not a mocked PRAGMA result -- proves genuine
+        integrity failures are still rejected end-to-end."""
+        db_path = self._temporary_db_path()
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
+        conn.executemany("INSERT INTO t VALUES (?, ?)", [(i, "x" * 64) for i in range(200)])
+        conn.commit()
+        conn.close()
+        # Corrupt the file in place: overwrite bytes well past the header
+        # so the page structure itself is damaged, not just unparsable
+        # metadata.
+        with open(db_path, "r+b") as fh:
+            fh.seek(4096)
+            fh.write(b"\xff" * 512)
+        with mock.patch.object(su, "DB_PATH", db_path), \
+             mock.patch.object(su.time, "sleep") as sleep_mock:
+            result = su._database_quick_check()
+        self.assertFalse(result["ok"])
+        self.assertIn(result["error_type"], ("integrity_check_failed", "sqlite_error"))
+        sleep_mock.assert_not_called()
 
     def test_quick_check_is_independent_of_missing_path_executables(self) -> None:
         db_path = self._temporary_db_path()
@@ -1251,8 +1384,11 @@ class CheckSchedulingTest(SoftwareUpdatesTestBase):
 
 
 class SoftwareUpdatesFrontendStaticTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.js = (ROOT / "web" / "static" / "app.js").read_text()
+
     def test_install_submission_renders_immediate_pending_state_before_poll_response(self) -> None:
-        js = (ROOT / "web" / "static" / "app.js").read_text()
+        js = self.js
         self.assertIn("AlderpointDNSSoftwareUpdatePending", js)
         self.assertIn("Update in progress...", js)
         self.assertIn("The page will update automatically.", js)
@@ -1260,6 +1396,51 @@ class SoftwareUpdatesFrontendStaticTest(unittest.TestCase):
         self.assertIn("/system/administration/software-updates/install", js)
         self.assertIn("/system/administration/software-updates/upload", js)
         self.assertIn("guardUpdateActions(true)", js)
+
+    def test_generic_async_form_error_selector_uses_explicit_contract(self) -> None:
+        """The generic data-async-form handler must key off the explicit
+        [data-form-error] response contract, never a broad class selector
+        that could also match unrelated historical/static content
+        elsewhere on the page (the exact dns2 field bug -- see
+        HISTORICAL_ERROR_ROOT_CAUSE in the completion report)."""
+        js = self.js
+        self.assertIn("doc.querySelector('[data-form-error]')", js)
+        self.assertNotIn(".alert.error:not([data-static-notice])", js)
+
+    def test_completed_tracked_job_reloads_exactly_once(self) -> None:
+        js = self.js
+        self.assertIn('window.location.reload()', js)
+        self.assertIn('Update complete. Reloading...', js)
+        self.assertIn('reloadTriggered', js)
+
+    def test_old_completed_job_on_page_open_is_not_tracked(self) -> None:
+        js = self.js
+        # trackedJobId is only ever assigned from an *active* job (or the
+        # server-rendered seed, itself only populated for an active job --
+        # see data-tracked-job-id in system_software_updates.html) -- never
+        # unconditionally from whatever job happens to be latest.
+        self.assertIn('trackedJobId = job.id', js)
+        self.assertIn("if (job.active)", js)
+
+    def test_service_restart_reconnect_messaging_present(self) -> None:
+        js = self.js
+        self.assertIn('Restarting Alderpoint DNS...', js)
+        self.assertIn('Waiting for the web service to come back...', js)
+        self.assertIn('POLL_BACKOFF_MAX_MS', js)
+
+    def test_failed_tracked_job_never_reloads(self) -> None:
+        js = self.js
+        self.assertIn("job.phase === 'failed'", js)
+        self.assertIn('Update failed. See details below.', js)
+
+    def test_check_for_updates_guarded_alongside_install_and_upload(self) -> None:
+        js = self.js
+        self.assertIn('/system/administration/software-updates/check', js)
+
+    def test_historical_job_labeling_present(self) -> None:
+        js = self.js
+        self.assertIn('Previous Update Job #', js)
+        self.assertIn('job.historical', js)
 
 
 # ---------------------------------------------------------------------------
@@ -1406,6 +1587,62 @@ class SoftwareUpdatesHttpTest(unittest.TestCase):
         self.assertEqual(data["job"]["status_label"], "downloading")
         self.assertEqual(data["job"]["status_tone"], "neutral")
         self.assertEqual(data["job"]["events"][-1]["message"], "downloading 9.9.9 from GitHub")
+
+    def test_check_route_success_after_old_failed_job_does_not_render_it_as_current_error(self) -> None:
+        """Reproduces the exact dns2 field scenario end to end over real
+        HTTP responses (not unit-level mocks of the classifier): an old,
+        terminal, failed manual Update Job exists; the administrator then
+        runs a fresh, successful Check for Updates. The response the
+        browser actually receives must carry no [data-form-error] node at
+        all (this is what app.js's async-form handler keys off of), and
+        the old job must render as clearly historical."""
+        job_id = su.create_github_job(_release("1.0.2"), requested_by="admin")
+        conn = su.connect()
+        su._set_phase(conn, job_id, "failed", "installing")
+        conn.execute(
+            "UPDATE software_update_jobs SET phase='failed', result='failed', error=?, completed_at=? WHERE id=?",
+            ("candidate version '1.0.2-1' is the same as the installed version; refusing a no-op reinstall via the updater", "2026-08-11T06:06:03+00:00", job_id),
+        )
+        conn.commit()
+        conn.close()
+
+        with mock.patch.object(su, "list_releases", return_value=[_release("1.1.0")]), \
+             mock.patch.object(su, "_read_github_token", return_value=None), \
+             mock.patch.object(su, "installed_version_status", return_value={"resolved": "1.0.2", "dpkg_version": "1.0.2-1", "mismatch": False, "dpkg_managed": True, "source": "version_file"}):
+            response = self._authed_client().post(
+                "/system/administration/software-updates/check", data={"csrf": self.csrf}
+            )
+        self.assertEqual(response.status_code, 200)
+        html = response.text
+        self.assertNotIn("data-form-error", html)
+        self.assertIn("Previous Update Job #", html)
+        self.assertIn("no-op reinstall", html)  # still inspectable, just not the current-request error
+        self.assertIn("1.1.0", html)  # Latest Version correctly reflects the fresh check
+
+        status = su.update_status()
+        self.assertTrue(status["update_available"])
+        self.assertTrue(status["job"]["historical"])
+
+    def test_current_failed_job_stays_prominent_not_collapsed(self) -> None:
+        """A job that failed and has NOT been superseded by a newer check
+        (the ordinary case right after an install attempt fails) must
+        never be treated as historical: no "Previous" label, no
+        <details> collapse -- it is still the most relevant thing on the
+        page."""
+        job_id = su.create_github_job(_release("1.0.2"), requested_by="admin")
+        conn = su.connect()
+        su._set_phase(conn, job_id, "failed", "installing")
+        conn.execute(
+            "UPDATE software_update_jobs SET phase='failed', result='failed', error=? WHERE id=?",
+            ("apt-get install failed", job_id),
+        )
+        conn.commit()
+        conn.close()
+        html = self._authed_client().get("/system/administration/software-updates").text
+        self.assertNotIn("Previous Update Job #", html)
+        self.assertIn(f"Update Job #{job_id}", html)
+        self.assertNotIn("<details>", html)
+        self.assertIn("apt-get install failed", html)
 
     def test_wrong_csrf_rejected(self) -> None:
         response = self._authed_client().post("/system/administration/software-updates/check", data={"csrf": "wrong-token"})

@@ -4,7 +4,7 @@
 {{ ui.page_header("DNS Settings", "Listener, protocol, certificate, and client-address validation status.") }}
 
 {% if upstream_error %}
-  <div class="alert error">{{ upstream_error }}</div>
+  <div class="alert error" data-form-error="1">{{ upstream_error }}</div>
 {% endif %}
 
 <section class="grid">

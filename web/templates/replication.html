@@ -5,7 +5,7 @@
 {{ ui.page_header("Replication", "One-way primary-to-replica configuration sync over mutual TLS.") }}
 
 {% if error %}
-  <div class="alert error" role="alert">{{ error }}</div>
+  <div class="alert error" role="alert" data-form-error="1">{{ error }}</div>
 {% endif %}
 
 <section class="grid">

@@ -1,3 +1,31 @@
+alderpointdns (1.1.1-1) unstable; urgency=medium
+
+  * Fixed false post-upgrade SQLite health-check failures caused by
+    transient database contention/startup timing (a "database table is
+    locked" condition was previously misclassified as a hard failure with
+    zero retries instead of the same transient, retryable condition as
+    plain SQLITE_BUSY), while retaining real integrity failure detection.
+  * Software Updates now clearly distinguishes previous update failures
+    from current checks/actions: a terminal Update Job superseded by a
+    later successful Check for Updates is labeled "Previous Update Job"
+    with its completion date and collapsed failure detail, and the
+    generic async-form error handler now keys off an explicit
+    [data-form-error] response marker instead of a broad selector that
+    could pick up unrelated historical page content.
+  * Update installation now provides persistent live progress through
+    download, backup, install, restart, and health-check phases, shown
+    prominently near the update controls, not just in a job panel that
+    may be below the viewport.
+  * The browser reconnects automatically (with bounded backoff) after
+    Alderpoint's service restart mid-update, instead of silently going
+    stale or looking like a failure.
+  * Completed updates automatically reload the Software Updates page into
+    the newly installed version -- exactly once, only for the update this
+    browser tab actually tracked, never for a merely pre-existing
+    completed job.
+
+ -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Fri, 14 Aug 2026 11:35:00 +0000
+
 alderpointdns (1.1.0-1) unstable; urgency=medium
 
   * Added Clients & Access: persistent named clients with multiple

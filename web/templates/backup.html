@@ -5,7 +5,7 @@
 {{ ui.page_header("Backup and Restore", "Versioned, checksummed backup archives with a preview-first, staged, and automatically-rolled-back restore path.") }}
 
 {% if error %}
-  <div class="alert error" role="alert">{{ error }}</div>
+  <div class="alert error" role="alert" data-form-error="1">{{ error }}</div>
 {% endif %}
 
 {% if auto_download_url %}

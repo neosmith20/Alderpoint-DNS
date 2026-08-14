@@ -5,8 +5,26 @@
 {{ ui.page_header("Software Updates", "Check for and install newer Alderpoint DNS releases. A mandatory pre-upgrade backup is taken before every install.") }}
 
 {% if error %}
-  <div class="alert error" role="alert">{{ error }}</div>
+  <div class="alert error" role="alert" data-form-error="1">{{ error }}</div>
 {% endif %}
+
+{# Prominent, always-above-the-fold update-progress banner. Rendered
+   server-side from durable job state so a manual page reload mid-update
+   shows the right thing immediately (no flash of "nothing happening"
+   while JS makes its first poll) -- see PART 3 (Software Update UX) of
+   the v1.1.1 updater work: app.js takes over live updates of this same
+   element (text, spinner, reconnect state) once the page has loaded, but
+   never removes it merely because a poll failed. #}
+<div id="updateStatusBanner" class="panel stack" role="status" aria-live="polite"
+     aria-busy="{{ 'true' if job and job.active else 'false' }}"
+     data-tracked-job-id="{{ job.id if job and job.active else '' }}"
+     {% if not (job and job.active) %}hidden{% endif %}>
+  <div class="panel__head">
+    <span class="btn-spinner" aria-hidden="true"></span>
+    <strong data-update-status-text>{{ job.display_message if job and job.active else '' }}</strong>
+  </div>
+  <p class="muted">Do not close this page or start another update while this job is active. The page will reload automatically once the update completes.</p>
+</div>
 
 {% if version_status.mismatch %}
   <div class="alert error" role="alert">

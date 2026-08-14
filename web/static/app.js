@@ -184,6 +184,49 @@
 
   const softwareUpdateJobPanel = document.querySelector('[data-job-status-url]');
   if (softwareUpdateJobPanel) {
+    // Tracks the job THIS browser tab has actually watched go active, so
+    // completion triggers exactly one automatic reload -- never for a job
+    // that merely happens to already be completed/failed when the page is
+    // opened (see item 18: opening the page on old history must not
+    // reload). Reconstructed automatically on every page load (including
+    // a manual reload mid-update, item 20): the very first poll below
+    // observes job.active and sets this, in-memory, no persistence needed
+    // across a real navigation -- only across the temporary web-service
+    // restart poll failures within the same page load, which never
+    // navigate away.
+    let trackedJobId = null;
+    {
+      // Seed from the server-rendered banner (data-tracked-job-id, set
+      // from durable job state -- see system_software_updates.html) so a
+      // manual reload mid-update, or a poll that fails before ever
+      // succeeding once (e.g. loaded right as the service restarts),
+      // still shows the reconnecting message instead of silently doing
+      // nothing until the first successful poll.
+      const seedBanner = document.getElementById('updateStatusBanner');
+      const seedId = seedBanner && seedBanner.dataset.trackedJobId;
+      if (seedId) trackedJobId = Number(seedId);
+    }
+    let reloadTriggered = false;
+    let consecutiveFailures = 0;
+    const POLL_INTERVAL_MS = Math.max(2000, Number(softwareUpdateJobPanel.dataset.jobStatusIntervalMs || 3000));
+    const POLL_BACKOFF_MAX_MS = 8000;
+    let pollTimer = null;
+
+    // Looked up fresh on every call, never cached: the generic
+    // data-async-form handler replaces the whole <main> (including this
+    // banner) with the server's own re-render after every async
+    // submission on this page, which would silently detach a cached
+    // reference and leave later updates writing into a node no longer in
+    // the DOM.
+    const setBanner = (text, { busy = true, hidden = false } = {}) => {
+      const statusBanner = document.getElementById('updateStatusBanner');
+      if (!statusBanner) return;
+      const textEl = statusBanner.querySelector('[data-update-status-text]');
+      if (textEl) textEl.textContent = text;
+      statusBanner.hidden = hidden;
+      statusBanner.setAttribute('aria-busy', busy ? 'true' : 'false');
+    };
+
     const localTime = (isoValue) => {
       if (!isoValue) return '';
       const millis = Date.parse(isoValue);
@@ -209,9 +252,19 @@
       panel.replaceChildren(section);
     };
     const guardUpdateActions = (disabled) => {
+      // Backend concurrency rules (a single durable job row, checked
+      // server-side) are what actually prevent overlapping installs --
+      // this is UX-only, to stop an admin from firing a second request
+      // that the backend would just reject anyway. Check for Updates is
+      // included: it is ordinarily safe to run concurrently (read-only
+      // release discovery), but while a package install/restart is in
+      // flight it is confusing at best (the page it redirects back to may
+      // itself be mid-restart) and gains the admin nothing over waiting
+      // for the active job to finish.
       document.querySelectorAll(
         'form[action$="/system/administration/software-updates/install"] button, ' +
-        'form[action$="/system/administration/software-updates/upload"] button'
+        'form[action$="/system/administration/software-updates/upload"] button, ' +
+        'form[action$="/system/administration/software-updates/check"] button'
       ).forEach((button) => {
         button.disabled = disabled;
       });
@@ -235,18 +288,51 @@
       section.appendChild(node('p', 'muted', 'Do not start another update while this job is active.'));
       panel.replaceChildren(section);
       guardUpdateActions(true);
+      // Persistent, above-the-fold feedback the instant the button is
+      // clicked -- must survive the generic data-async-form handler
+      // replacing <main> a moment later with the install/upload POST's
+      // own response (which already contains this same banner, now
+      // server-rendered from the freshly created job, so there is no gap
+      // in coverage between this synthetic state and the first real poll).
+      setBanner('Starting update...', { busy: true, hidden: false });
     };
     const renderJob = (panel, payload) => {
       const job = payload.job;
       if (!job) {
         renderNoJob(panel);
+        setBanner('', { busy: false, hidden: true });
         return;
       }
       guardUpdateActions(Boolean(job.active));
+      if (job.active) {
+        // Any job currently active is, by definition, the one to watch --
+        // there is only ever one at a time (backend concurrency rules are
+        // authoritative; this is UX only). Recording it here is what lets
+        // completion trigger a reload even when this page load did not
+        // originate the click (another admin/tab started it, or this is a
+        // manual reload mid-update -- item 20).
+        trackedJobId = job.id;
+        setBanner(job.display_message || 'Update in progress...', { busy: true, hidden: false });
+      } else if (trackedJobId === job.id) {
+        if (job.phase === 'completed' && !reloadTriggered) {
+          reloadTriggered = true;
+          setBanner('Update complete. Reloading...', { busy: true, hidden: false });
+          window.setTimeout(() => window.location.reload(), 600);
+        } else if (job.phase === 'failed') {
+          // Stays visible (not hidden) so a failure is never missed by a
+          // user who never scrolled down to the full job panel -- but
+          // never looks like completion: no spinner, no reload, and the
+          // wording is unambiguous.
+          setBanner('Update failed. See details below.', { busy: false, hidden: false });
+          trackedJobId = null;
+        }
+      } else {
+        setBanner('', { busy: false, hidden: true });
+      }
       const section = node('section', 'panel stack');
       section.dataset.phaseActive = job.active ? '1' : '0';
       const head = node('div', 'panel__head');
-      head.appendChild(node('h2', '', `Update Job #${job.id}`));
+      head.appendChild(node('h2', '', job.historical ? `Previous Update Job #${job.id}` : `Update Job #${job.id}`));
       head.appendChild(badge(job.status_label || job.phase || 'pending', job.status_tone || 'neutral'));
       section.appendChild(head);
 
@@ -254,7 +340,8 @@
       summary.append(
         `${(job.operation || 'github').charAt(0).toUpperCase()}${(job.operation || 'github').slice(1)} update requested by `,
         node('span', 'mono', job.requested_by || 'unknown'),
-        ` at ${localTime(job.requested_at)}.`
+        ` at ${localTime(job.requested_at)}.`,
+        ...(job.historical ? [` Finished ${localTime(job.completed_at) || 'unknown'}.`] : [])
       );
       section.appendChild(summary);
 
@@ -275,15 +362,38 @@
         backup.append('Pre-upgrade backup: ', node('span', 'mono', job.backup_path), ' (retained regardless of update outcome)');
         section.appendChild(backup);
       }
-      if (job.phase === 'failed' && job.error) {
-        const error = node('div', 'alert error', job.error);
-        error.setAttribute('role', 'alert');
-        section.appendChild(error);
-      }
-      if (job.health_summary) {
-        const health = node('div', 'alert error', `Health verification: ${job.health_summary}`);
-        health.setAttribute('role', 'alert');
-        section.appendChild(health);
+      // A historical (superseded by a newer Check for Updates) failure is
+      // collapsed under <details> by default, matching
+      // system_software_updates_job.html's server-rendered version --
+      // still fully inspectable, but not presented with the same visual
+      // weight as a fresh, current failure (item 11).
+      if (job.historical && job.phase === 'failed' && (job.error || job.health_summary)) {
+        const details = document.createElement('details');
+        const summaryEl = document.createElement('summary');
+        summaryEl.textContent = `Previous update attempt failed on ${localTime(job.completed_at) || 'an earlier date'} -- details`;
+        details.appendChild(summaryEl);
+        if (job.error) {
+          const error = node('div', 'alert error', job.error);
+          error.setAttribute('role', 'alert');
+          details.appendChild(error);
+        }
+        if (job.health_summary) {
+          const health = node('div', 'alert error', `Health verification: ${job.health_summary}`);
+          health.setAttribute('role', 'alert');
+          details.appendChild(health);
+        }
+        section.appendChild(details);
+      } else {
+        if (job.phase === 'failed' && job.error) {
+          const error = node('div', 'alert error', job.error);
+          error.setAttribute('role', 'alert');
+          section.appendChild(error);
+        }
+        if (job.health_summary) {
+          const health = node('div', 'alert error', `Health verification: ${job.health_summary}`);
+          health.setAttribute('role', 'alert');
+          section.appendChild(health);
+        }
       }
       if (job.phase === 'completed') {
         const success = node('div', 'alert', 'Update successful. The pre-upgrade backup above was retained for recovery.');
@@ -310,19 +420,52 @@
       section.appendChild(wrap);
       panel.replaceChildren(section);
     };
+    // The updater intentionally restarts alderpointdns.service partway
+    // through an install, so polling WILL fail for a few seconds around
+    // that restart -- expected, not an error. While a job is tracked as
+    // active, a failed poll must not erase progress, declare failure, or
+    // stop polling; it shows a reconnecting message and keeps trying
+    // (bounded exponential backoff) until the webapp answers again, then
+    // resumes the normal interval.
     const refreshSoftwareUpdateJob = async () => {
       const panel = document.querySelector('[data-job-status-url]');
-      if (!panel) return;
+      if (!panel) {
+        pollTimer = window.setTimeout(refreshSoftwareUpdateJob, POLL_INTERVAL_MS);
+        return;
+      }
       try {
         const response = await fetch(panel.dataset.jobStatusUrl, { headers: { 'X-Requested-With': 'AlderpointDNSSoftwareUpdateJob' } });
-        if (!response.ok) return;
-        renderJob(panel, await response.json());
-      } catch (_) {}
+        if (!response.ok) throw new Error(`job status HTTP ${response.status}`);
+        const payload = await response.json();
+        consecutiveFailures = 0;
+        renderJob(panel, payload);
+      } catch (_) {
+        consecutiveFailures += 1;
+        if (trackedJobId !== null) {
+          setBanner('Restarting Alderpoint DNS... Waiting for the web service to come back...', { busy: true, hidden: false });
+        }
+        // Job panel content is deliberately left untouched here -- it
+        // still shows the last successfully polled phase, which is more
+        // informative than blanking it while we wait to reconnect.
+      }
+      if (!reloadTriggered) {
+        const delay = trackedJobId !== null && consecutiveFailures > 0
+          ? Math.min(POLL_BACKOFF_MAX_MS, POLL_INTERVAL_MS * Math.pow(1.5, Math.min(consecutiveFailures, 6)))
+          : POLL_INTERVAL_MS;
+        pollTimer = window.setTimeout(refreshSoftwareUpdateJob, delay);
+      }
     };
-    const intervalMs = Math.max(2000, Number(softwareUpdateJobPanel.dataset.jobStatusIntervalMs || 3000));
     refreshSoftwareUpdateJob();
-    window.setInterval(refreshSoftwareUpdateJob, intervalMs);
     window.AlderpointDNSSoftwareUpdatePending = renderPendingUpdate;
+    // Lets the async-form submit handler force an immediate poll right
+    // after it swaps in the install/upload response's freshly rendered
+    // <main>, instead of leaving the newly (re)rendered "Download &
+    // Install Update"/"Check for Updates" buttons enabled-looking for up
+    // to one whole poll interval before guardUpdateActions() catches up.
+    window.AlderpointDNSSoftwareUpdateForceRefresh = () => {
+      if (pollTimer !== null) window.clearTimeout(pollTimer);
+      refreshSoftwareUpdateJob();
+    };
   }
 
   const rangeLinks = document.querySelectorAll('[data-range-link]');
@@ -524,18 +667,29 @@
           if (url.origin === window.location.origin) window.history.replaceState({}, '', url.pathname + url.search);
         }
         triggerAutoDownload(main);
+        if (
+          (action === '/system/administration/software-updates/install' || action === '/system/administration/software-updates/upload') &&
+          typeof window.AlderpointDNSSoftwareUpdateForceRefresh === 'function'
+        ) {
+          window.AlderpointDNSSoftwareUpdateForceRefresh();
+        }
       }
-      // :not([data-static-notice]) excludes always-on-the-page contextual
-      // warnings (e.g. backup.html's "including private keys..." text,
-      // system_network.html's "changing this server's IP may disconnect
-      // you" text) that carry the same .alert.error styling as a real
-      // flash error but are not conditioned on this submission's outcome
-      // -- without it, a plain *successful* submission on a page that
-      // happens to render one of those elsewhere in `main` would have its
-      // static warning text mistaken for this response's error and shown
-      // (then auto-dismissed) as an "error" toast instead of the actual
-      // success message.
-      const error = doc.querySelector('.alert.error:not([data-static-notice])');
+      // [data-form-error] is a deliberate, explicit response contract: the
+      // server marks ONLY the alert that reflects THIS submission's own
+      // outcome with data-form-error, set by the route handler that
+      // processed this exact request (see e.g. software_updates_error() in
+      // app/webapp.py). Every page's <main> can also contain unrelated
+      // .alert.error content that happens to share the same styling but
+      // is NOT about this submission -- static contextual warnings (e.g.
+      // backup.html's "including private keys..." text), and dynamic but
+      // historical content such as a previous, already-terminal Update Job
+      // or import job's stored error/failure message. A broad
+      // `.alert.error` search previously picked up that unrelated content
+      // too: a successful Check for Updates that redirected back to a page
+      // still showing an old failed Update Job panel would surface the old
+      // job's error as if this check had failed. Only the explicit marker
+      // is trusted here -- do not widen this back to a class selector.
+      const error = doc.querySelector('[data-form-error]');
       if (error) showToast(error.textContent.trim() || 'Local DNS change failed.', 'error');
       else if (response.ok) showToast(form.dataset.successMessage || 'Saved.', 'success');
       else showToast('Local DNS change failed.', 'error');
