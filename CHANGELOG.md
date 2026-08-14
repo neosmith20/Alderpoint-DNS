@@ -17,6 +17,8 @@ not during RC preparation.
 - Browser reconnects automatically after Alderpoint's service restart.
 - Completed updates automatically reload the Software Updates page into
   the newly installed version.
+- Fixed the package dependency on the wrong, unrelated "python3-multipart"
+  package; now correctly depends on python3-python-multipart.
 
 ## v1.1.0
 

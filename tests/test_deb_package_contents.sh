@@ -31,6 +31,10 @@ echo "$DEPENDS_FIELD" | grep -q 'sqlite3' || \
   fail "control Depends does not require sqlite3, which is a v1.0.0/v1.0.1 bridge shim for old in-memory update runners that still invoke the sqlite3 CLI after installing v1.0.2"
 echo "$DEPENDS_FIELD" | grep -q 'sudo' || \
   fail "control Depends does not require sudo, which the web UI uses for the fixed software-update runner handoff"
+echo "$DEPENDS_FIELD" | grep -q 'python3-python-multipart' || \
+  fail "control Depends does not require python3-python-multipart -- the correct FastAPI-ecosystem package; requiring the wrong, unrelated 'python3-multipart' (Andrew Dunham's package, also import name 'multipart') risks the vendored python-multipart's own back-compat shim silently preferring the wrong, incompatible implementation"
+echo "$DEPENDS_FIELD" | grep -qE '(^|, )python3-multipart(,|$)' && \
+  fail "control Depends requires the wrong 'python3-multipart' package (should be python3-python-multipart)"
 
 mkdir -p "$ROOT/ctl" "$ROOT/data"
 dpkg-deb -e "$DEB" "$ROOT/ctl"

@@ -23,6 +23,14 @@ alderpointdns (1.1.1-1) unstable; urgency=medium
     the newly installed version -- exactly once, only for the update this
     browser tab actually tracked, never for a merely pre-existing
     completed job.
+  * Fixed the package Depends on the wrong "python3-multipart" (an
+    unrelated Debian package that also installs as `import multipart`,
+    not the FastAPI-ecosystem python-multipart this application needs):
+    now correctly depends on python3-python-multipart. This was a latent
+    defect -- Starlette's own import order already avoided the collision
+    in this release's supported Starlette version, so no upload route was
+    actually broken -- but it removed a real landmine and eliminated an
+    ambiguous package name from every fresh install going forward.
 
  -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Fri, 14 Aug 2026 11:35:00 +0000
 

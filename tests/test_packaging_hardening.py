@@ -151,6 +151,70 @@ class VendorDependencyPackagingTest(unittest.TestCase):
                 self.assertIn(f"packaging/{unit}", text, f"{script} does not install {unit}")
 
 
+class MultipartPackageCollisionTest(unittest.TestCase):
+    """Debian's `python3-multipart` is a DIFFERENT, unrelated package
+    (Andrew Dunham's "multipart", currently 1.2.1) that happens to also
+    install as `import multipart` -- not the FastAPI-ecosystem
+    "python-multipart" dependency this application actually needs
+    (Debian package python3-python-multipart, vendored at a newer pinned
+    version). If both are installed, python-multipart's own back-compat
+    shim (multipart/__init__.py) scans sys.path for a bare multipart.py
+    and can silently prefer whichever one it finds first -- which may be
+    the wrong, incompatible one. See app/software_updates.py's
+    SQLITE_HEALTH_* neighbors for the unrelated SQLite-side fix this
+    release also carries; this is the equivalent hardening for the
+    multipart dependency name."""
+
+    def _control_field_body(self, text: str, field: str) -> str:
+        pattern = re.compile(rf"^{field}:(.*?)(?=^\S|\Z)", re.MULTILINE | re.DOTALL)
+        match = pattern.search(text)
+        self.assertIsNotNone(match, f"{field} field not found")
+        return match.group(1)
+
+    def test_source_control_depends_on_correct_multipart_package(self) -> None:
+        control = (ROOT / "packaging" / "debian" / "control").read_text()
+        depends = self._control_field_body(control, "Depends")
+        self.assertIn("python3-python-multipart", depends)
+        self.assertNotRegex(depends, r"(?<!-)\bpython3-multipart\b")
+        # NOT a real `Conflicts: python3-multipart` field:
+        # python3-python-multipart itself declares `Provides:
+        # python3-multipart` (a documented Debian package-rename
+        # transition), so a Conflicts on that name also conflicts with
+        # the correct package and makes this package entirely
+        # uninstallable on stock Debian 13 -- confirmed via a real
+        # `dpkg -i` during this fix, not by inspection. (The explanatory
+        # comment above the Description field is allowed to mention the
+        # string for posterity; only an actual field line is checked
+        # here.)
+        self.assertNotIn("\nConflicts: python3-multipart", control)
+
+    def test_build_deb_script_depends_on_correct_multipart_package(self) -> None:
+        build_deb = (ROOT / "scripts" / "build-deb.sh").read_text()
+        depends_line = next(line for line in build_deb.splitlines() if line.startswith("Depends:"))
+        self.assertIn("python3-python-multipart", depends_line)
+        self.assertNotRegex(depends_line, r"(?<!-)\bpython3-multipart\b")
+        self.assertNotIn("Conflicts: python3-multipart", build_deb)
+
+    def test_requirements_debian_lists_correct_multipart_package(self) -> None:
+        requirements = (ROOT / "requirements-debian.txt").read_text().splitlines()
+        self.assertIn("python3-python-multipart", requirements)
+        self.assertNotIn("python3-multipart", requirements)
+
+    def test_built_package_control_matches_source_control(self) -> None:
+        """Guards against exactly the drift that let this bug persist:
+        scripts/build-deb.sh generates its own DEBIAN/control by hand
+        rather than reading packaging/debian/control, so the two can
+        silently diverge. Both must agree on Depends/Conflicts for
+        anything security- or correctness-relevant."""
+        control = (ROOT / "packaging" / "debian" / "control").read_text()
+        build_deb = (ROOT / "scripts" / "build-deb.sh").read_text()
+        control_depends = self._control_field_body(control, "Depends")
+        build_depends_line = next(line for line in build_deb.splitlines() if line.startswith("Depends:"))
+        for pkg in ("python3-python-multipart", "python3-fastapi", "python3-jinja2", "sqlite3", "sudo", "uvicorn"):
+            self.assertIn(pkg, control_depends, f"packaging/debian/control missing {pkg}")
+            self.assertIn(pkg, build_depends_line, f"scripts/build-deb.sh missing {pkg}")
+
+
 class VendorDependencySyncTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="alderpointdns-vendor-sync-"))
