@@ -135,6 +135,7 @@ def generate_dnsdist_config_from_profiles(
     acl_networks: list[NetworkScope],
     default_profile,  # policy_store.UpstreamProfileRecord
     domain_routing: "list[tuple[str, object]] | None" = None,
+    ecs_policy=None,  # app.v2.ecs_policy.EcsPolicy, optional
 ) -> str:
     """Compiles real ``policy_store.UpstreamProfileRecord``s (§7-9) into a
     dnsdist config: the default profile's endpoints become the unnamed
@@ -165,9 +166,28 @@ def generate_dnsdist_config_from_profiles(
     if acl_networks:
         lines.append("")
 
+    use_ecs = False
+    if ecs_policy is not None:
+        from app.v2.ecs_policy import render_dnsdist_directives, server_uses_client_subnet
+
+        directives = render_dnsdist_directives(ecs_policy)
+        if directives:
+            lines.append(f"-- ECS policy: {ecs_policy.mode}")
+            lines.extend(directives)
+            lines.append("")
+        use_ecs = server_uses_client_subnet(ecs_policy)
+
+    def _server_line(address: str, pool: str | None) -> str:
+        kwargs = f"address={_lua_string(address)}"
+        if pool:
+            kwargs += f", pool={_lua_string(pool)}"
+        if use_ecs:
+            kwargs += ", useClientSubnet=true"
+        return f"newServer({{{kwargs}}})"
+
     lines.append(f"-- default upstream profile: {default_profile.upstream_profile_id}")
     for ep in default_profile.endpoints:
-        lines.append(f'newServer({{address={_lua_string(ep.address)}}})')
+        lines.append(_server_line(ep.address, None))
     lines.append(f"setServerPolicy({_STRATEGY_TO_DNSDIST_POLICY[default_profile.strategy]})")
     lines.append("")
 
@@ -180,9 +200,7 @@ def generate_dnsdist_config_from_profiles(
         pool_name = f"route_{profile.upstream_profile_id}"
         lines.append(f"-- domain routing pool for {suffix_domain}: {profile.upstream_profile_id}")
         for ep in profile.endpoints:
-            lines.append(
-                f'newServer({{address={_lua_string(ep.address)}, pool={_lua_string(pool_name)}}})'
-            )
+            lines.append(_server_line(ep.address, pool_name))
         trigger = suffix_domain if suffix_domain.endswith(".") else suffix_domain + "."
         lines.append(
             f'addAction(SuffixMatchNodeRule({{{_lua_string(trigger)}}}), PoolAction({_lua_string(pool_name)}))'
