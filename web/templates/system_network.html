@@ -5,7 +5,7 @@
 {{ ui.page_header("Network Configuration", "This server's own network interface (DHCP/static IP, gateway) -- separate from DNS upstream/resolver settings.") }}
 
 {% if error %}
-  <div class="alert error" role="alert">{{ error }}</div>
+  <div class="alert error" role="alert" data-form-error="1">{{ error }}</div>
 {% endif %}
 
 {% if pending %}

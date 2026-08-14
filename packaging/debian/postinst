@@ -211,18 +211,22 @@ case "$1" in
       exit 1
     fi
     echo "alderpointdns: vendor dependency sync: $vendor_deps_sync_output"
-    if ! dnsdist_conf_migrate_output="$(PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py dnsdist-conf-migrate)"; then
-      echo "alderpointdns: dnsdist.conf managed-block migration failed; aborting install." >&2
-      exit 1
-    fi
-    echo "alderpointdns: dnsdist.conf migration: $dnsdist_conf_migrate_output"
-    # Validated on every configure (not just first install): even when the
-    # template above isn't rewritten on an upgrade, a bad or hand-edited
-    # /etc/dnsdist/dnsdist.conf should never be silently restarted into.
-    if ! dnsdist --check-config -C /etc/dnsdist/dnsdist.conf; then
-      echo "alderpointdns: /etc/dnsdist/dnsdist.conf failed validation; aborting install." >&2
-      exit 1
-    fi
+    # NOT dnsdist-conf-migrate here (deliberately moved below, after
+    # fresh-install-init/analytics.py init-db -- see the comment there):
+    # it calls into app/clients.py's ensure_access_data_files(), which
+    # unconditionally calls clients.py's own, separate init_db() to make
+    # sure its data-file-rendering read has a schema to query. clients.py's
+    # init_db() is real CREATE TABLE IF NOT EXISTS DDL against the shared
+    # database file, so running it here -- before fresh-install-init's own
+    # freshness check -- made has_established_database_state() see an
+    # already-non-empty database on every single fresh install (not a rare
+    # race: this ran unconditionally, every time), silently skipping the
+    # default blocklist seed and initial deploy exactly like the
+    # analytics.py ordering bug below, just via a different module. Found
+    # running the real tests/test_clean_install_container.sh against a
+    # genuinely clean Debian 13 container: fresh_install=0 on every run,
+    # and /var/lib/alderpointdns/compiled/bind/alderpointdns.rpz was never
+    # created.
 
     # systemd-resolved's stub DNS listener is enabled by default on
     # Debian 12/13 and Ubuntu and binds specific loopback aliases
@@ -373,6 +377,23 @@ RESOLVCONFEOF
     # as fresh-install-init left it; this call itself is an idempotent
     # no-op either way once the schema already exists.
     PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/analytics.py init-db
+    # Also deliberately after fresh-install-init/analytics.py init-db, for
+    # exactly the same reason -- see the comment moved from this call's
+    # original, earlier position above. Must still run before the final
+    # `systemctl restart named dnsdist` below so a migrated/validated
+    # /etc/dnsdist/dnsdist.conf is in place before that restart picks it up.
+    if ! dnsdist_conf_migrate_output="$(PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py dnsdist-conf-migrate)"; then
+      echo "alderpointdns: dnsdist.conf managed-block migration failed; aborting install." >&2
+      exit 1
+    fi
+    echo "alderpointdns: dnsdist.conf migration: $dnsdist_conf_migrate_output"
+    # Validated on every configure (not just first install): even when the
+    # template above isn't rewritten on an upgrade, a bad or hand-edited
+    # /etc/dnsdist/dnsdist.conf should never be silently restarted into.
+    if ! dnsdist --check-config -C /etc/dnsdist/dnsdist.conf; then
+      echo "alderpointdns: /etc/dnsdist/dnsdist.conf failed validation; aborting install." >&2
+      exit 1
+    fi
     # The database (created above by fresh-install-init on a new install,
     # or migrated there on an existing install, running as root in this
     # postinst) is the one thing under /var/lib/alderpointdns that both

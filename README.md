@@ -8,7 +8,7 @@ localhost-only validating cache/forwarder; filtering policy is compiled into
 a BIND RPZ zone and reloaded through a staged, validated deployment path.
 
 > **Status: stable release line.** The current public stable release is
-> **v1.1.0**, published through GitHub Releases. Alderpoint DNS is
+> **v1.1.1**, published through GitHub Releases. Alderpoint DNS is
 > functional and acceptance-tested, but several
 > features are intentionally partial or narrowly scoped by design. See
 > [Known limitations](#known-limitations) below and

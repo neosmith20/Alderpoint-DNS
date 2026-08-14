@@ -956,9 +956,55 @@ def _service_active(unit: str) -> bool:
     return proc.stdout.strip() == "active"
 
 
-def _sqlite_quick_check_busy(output: str) -> bool:
-    lowered = output.lower()
-    return "database is locked" in lowered or "database is busy" in lowered or "database locked" in lowered
+# Transient lock/contention conditions that should be retried rather than
+# treated as a hard failure. SQLite reports these two distinct families:
+#
+#   SQLITE_BUSY   ("database is locked")        -- another connection holds
+#                                                   a write lock (e.g. a
+#                                                   checkpoint, a migration,
+#                                                   an analytics writer).
+#   SQLITE_LOCKED ("database table is locked")   -- a conflicting lock from
+#                                                   *within the same process*
+#                                                   (shared cache) or a
+#                                                   table-level conflict.
+#
+# Both are ordinary, expected side effects of services restarting/writing
+# around a package upgrade, not evidence of corruption, and both must be
+# retried identically. Real corruption is reported by `PRAGMA quick_check`
+# returning non-"ok" rows (see the `integrity_check_failed` branch below),
+# never by raising one of these exceptions.
+_SQLITE_RETRYABLE_ERROR_TYPES = ("database_busy", "database_locked")
+
+
+def _classify_sqlite_operational_error(exc: sqlite3.OperationalError) -> tuple[str, str]:
+    """Classify an OperationalError from PRAGMA quick_check.
+
+    Prefers the structured `sqlite_errorcode`/`sqlite_errorname` attributes
+    that Python's sqlite3 module exposes (Python 3.11+, available on all
+    Alderpoint-supported interpreters) since they identify the exact SQLite
+    result code regardless of message wording/localization. Falls back to
+    substring matching on the exception message for interpreters/drivers
+    that don't populate those attributes.
+
+    Returns (error_type, message).
+    """
+    message = redact(str(exc))[:1000]
+    errorname = str(getattr(exc, "sqlite_errorname", "") or "")
+    if errorname.startswith("SQLITE_BUSY"):
+        return "database_busy", message
+    if errorname.startswith("SQLITE_LOCKED"):
+        return "database_locked", message
+    if errorname:
+        # We got a structured result code and it is neither BUSY nor
+        # LOCKED -- do not fall through to fuzzy message matching, which
+        # could misclassify an unrelated operational error as transient.
+        return "sqlite_error", message
+    lowered = message.lower()
+    if "table is locked" in lowered:
+        return "database_locked", message
+    if "database is locked" in lowered or "database is busy" in lowered or "database locked" in lowered:
+        return "database_busy", message
+    return "sqlite_error", message
 
 
 def _database_quick_check() -> dict[str, Any]:
@@ -971,8 +1017,7 @@ def _database_quick_check() -> dict[str, Any]:
             conn.execute(f"PRAGMA busy_timeout={SQLITE_HEALTH_BUSY_TIMEOUT_MS}")
             rows = conn.execute("PRAGMA quick_check").fetchall()
         except sqlite3.OperationalError as exc:
-            message = redact(str(exc))[:1000]
-            error_type = "database_busy" if _sqlite_quick_check_busy(message) else "sqlite_error"
+            error_type, message = _classify_sqlite_operational_error(exc)
             last_failure = {"ok": False, "path": path, "attempts": attempt, "error_type": error_type, "message": message}
         except sqlite3.DatabaseError as exc:
             return {
@@ -997,7 +1042,7 @@ def _database_quick_check() -> dict[str, Any]:
         finally:
             if conn is not None:
                 conn.close()
-        if attempt < SQLITE_HEALTH_ATTEMPTS and last_failure and last_failure.get("error_type") == "database_busy":
+        if attempt < SQLITE_HEALTH_ATTEMPTS and last_failure and last_failure.get("error_type") in _SQLITE_RETRYABLE_ERROR_TYPES:
             time.sleep(SQLITE_HEALTH_RETRY_DELAY_SECONDS)
             continue
         break
@@ -1087,7 +1132,30 @@ def _job_status_tone(job: dict[str, Any]) -> str:
     return "neutral"
 
 
-def _job_view(job: dict[str, Any], events: list[sqlite3.Row] | None = None) -> dict[str, Any]:
+def _job_is_historical(job: dict[str, Any], last_checked_at: str | None) -> bool:
+    """A terminal (completed/failed) job is "historical" once a newer
+    administrator action has happened since it finished -- concretely, a
+    later successful Check for Updates. Timestamps are all
+    `now()`-formatted (UTC, fixed-offset ISO 8601), so plain string
+    comparison is chronological.
+
+    This is what turns a real field scenario -- an old failed manual
+    Update Job, still the only row in software_update_jobs, sitting
+    untouched while a fresh, successful Check for Updates later discovers
+    a newer release -- into "Previous Update Job #4, failed on <date>"
+    instead of a current-looking failure. A job with no newer check since
+    it finished (e.g. an install that just failed moments ago) is never
+    historical: it is still the most relevant thing on the page."""
+    phase = job.get("phase")
+    if phase not in ("completed", "failed"):
+        return False
+    completed_at = job.get("completed_at")
+    if not completed_at or not last_checked_at:
+        return False
+    return last_checked_at > completed_at
+
+
+def _job_view(job: dict[str, Any], events: list[sqlite3.Row] | None = None, last_checked_at: str | None = None) -> dict[str, Any]:
     view = dict(job)
     events = events or []
     view["active"] = view.get("phase") not in ("completed", "failed")
@@ -1095,6 +1163,7 @@ def _job_view(job: dict[str, Any], events: list[sqlite3.Row] | None = None) -> d
     view["status_tone"] = _job_status_tone(view)
     view["health_summary"] = _job_health_summary(view)
     view["display_message"] = _job_display_message(view, events)
+    view["historical"] = _job_is_historical(view, last_checked_at)
     return view
 
 
@@ -1330,7 +1399,7 @@ def job_status_payload(conn: sqlite3.Connection | None = None) -> dict[str, Any]
             return payload
         events = job_events(row["id"], db)
         job = dict(row)
-        job_view = _job_view(job, events)
+        job_view = _job_view(job, events, last_checked_at=settings(db).get("last_checked_at"))
         payload["job"] = {
             "id": job_view["id"],
             "operation": job_view["operation"],
@@ -1348,6 +1417,7 @@ def job_status_payload(conn: sqlite3.Connection | None = None) -> dict[str, Any]
             "status_label": job_view["status_label"],
             "status_tone": job_view["status_tone"],
             "health_summary": job_view["health_summary"],
+            "historical": job_view["historical"],
             "events": [
                 {"ts": event["ts"], "phase": event["phase"], "message": event["message"]}
                 for event in events
@@ -1758,7 +1828,7 @@ def update_status(conn: sqlite3.Connection | None = None) -> dict[str, Any]:
             "credential": credential_status(),
             "latest_release": latest or None,
             "update_available": bool(latest),
-            "job": _job_view(dict(job), events) if job else None,
+            "job": _job_view(dict(job), events, last_checked_at=cfg.get("last_checked_at")) if job else None,
             "job_events": events,
             "check_interval_hours": _clamped_check_interval_hours(cfg),
             # Only queried when checking is actually on -- a disabled

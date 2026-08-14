@@ -5,7 +5,7 @@
 {{ ui.page_header("Encryption", "Encrypted DNS transports, TLS certificates, and client connection information.") }}
 
 {% if error %}
-  <div class="alert error" role="alert">{{ error }}</div>
+  <div class="alert error" role="alert" data-form-error="1">{{ error }}</div>
 {% endif %}
 
 <section class="grid">

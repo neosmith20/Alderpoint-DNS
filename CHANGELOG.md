@@ -2,6 +2,31 @@
 
 All notable changes to Alderpoint DNS are documented in this file.
 
+## v1.1.1
+
+A patch release. The date is set during final public release publication,
+not during RC preparation.
+
+- Fixed false post-upgrade SQLite health-check failures caused by transient
+  database contention/startup timing, while retaining real integrity
+  failure detection.
+- Software Updates now clearly distinguishes previous update failures from
+  current checks/actions.
+- Update installation now provides persistent live progress through
+  download, backup, install, restart, and health-check phases.
+- Browser reconnects automatically after Alderpoint's service restart.
+- Completed updates automatically reload the Software Updates page into
+  the newly installed version.
+- Fixed the package dependency on the wrong, unrelated "python3-multipart"
+  package; now correctly depends on python3-python-multipart.
+- Fixed a clean-install blocker: the package now correctly depends on
+  python3-pip, which postinst's vendored-dependency installation step
+  requires.
+- Fixed a fresh-install bug where the default blocklists and initial
+  filtering deploy were silently skipped on every clean install.
+- Fixed the Software Updates active-update banner staying visible after a
+  hard refresh when no update was actually active.
+
 ## v1.1.0
 
 A feature release. The date is set during final public release publication,

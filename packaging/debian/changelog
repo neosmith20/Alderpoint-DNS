@@ -1,3 +1,63 @@
+alderpointdns (1.1.1-1) unstable; urgency=medium
+
+  * Fixed false post-upgrade SQLite health-check failures caused by
+    transient database contention/startup timing (a "database table is
+    locked" condition was previously misclassified as a hard failure with
+    zero retries instead of the same transient, retryable condition as
+    plain SQLITE_BUSY), while retaining real integrity failure detection.
+  * Software Updates now clearly distinguishes previous update failures
+    from current checks/actions: a terminal Update Job superseded by a
+    later successful Check for Updates is labeled "Previous Update Job"
+    with its completion date and collapsed failure detail, and the
+    generic async-form error handler now keys off an explicit
+    [data-form-error] response marker instead of a broad selector that
+    could pick up unrelated historical page content.
+  * Update installation now provides persistent live progress through
+    download, backup, install, restart, and health-check phases, shown
+    prominently near the update controls, not just in a job panel that
+    may be below the viewport.
+  * The browser reconnects automatically (with bounded backoff) after
+    Alderpoint's service restart mid-update, instead of silently going
+    stale or looking like a failure.
+  * Completed updates automatically reload the Software Updates page into
+    the newly installed version -- exactly once, only for the update this
+    browser tab actually tracked, never for a merely pre-existing
+    completed job.
+  * Fixed the package Depends on the wrong "python3-multipart" (an
+    unrelated Debian package that also installs as `import multipart`,
+    not the FastAPI-ecosystem python-multipart this application needs):
+    now correctly depends on python3-python-multipart. This was a latent
+    defect -- Starlette's own import order already avoided the collision
+    in this release's supported Starlette version, so no upload route was
+    actually broken -- but it removed a real landmine and eliminated an
+    ambiguous package name from every fresh install going forward.
+  * Fixed a clean-install blocker: the package's postinst installs the
+    vendored python-multipart wheel via `python3 -m pip`, but the
+    package did not depend on python3-pip -- a stock Debian 13 install
+    resolved dependencies and unpacked, then failed outright in postinst
+    because pip did not exist. Now correctly depends on python3-pip.
+  * Fixed a fresh-install bug (found proving the pip fix above end to end
+    against a genuinely clean Debian 13 container): postinst's
+    dnsdist.conf managed-block migration step unconditionally initializes
+    app/clients.py's own database tables as a side effect, which -- if it
+    ran before the fresh-install blocklist-seeding step, as it
+    unconditionally did -- made every fresh install look like an
+    established, non-fresh database and silently skipped seeding the
+    default blocklists and the initial filtering deploy. Reordered so
+    fresh-install detection always runs first.
+  * Fixed the Software Updates page's active-update banner/spinner
+    staying visually visible after a hard refresh even when no update was
+    active (e.g. the latest job was a terminal, historical failure). Root
+    cause was CSS, not server or JavaScript logic: the banner's own
+    `.stack` class sets `display: grid`, and any author stylesheet
+    declaration of `display` always overrides the browser's default
+    `[hidden] { display: none }`, regardless of whether the `hidden`
+    attribute is correctly present. Added an explicit
+    `#updateStatusBanner[hidden] { display: none; }` override, matching
+    the same defensive pattern already used elsewhere in this stylesheet.
+
+ -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Fri, 14 Aug 2026 11:35:00 +0000
+
 alderpointdns (1.1.0-1) unstable; urgency=medium
 
   * Added Clients & Access: persistent named clients with multiple

@@ -11,8 +11,43 @@ Architecture: all
 Depends: bind9, bind9-dnsutils, curl, dnsdist (>= 1.9.0), gnupg, jq,
  knot-dnsutils, openssl, python3-aioquic, python3-argon2, python3-dnspython,
  python3-fastapi, python3-httpx, python3-itsdangerous, python3-jinja2,
- python3-multipart, python3-openpyxl, python3-yaml, sqlite3, sudo, uvicorn,
- ${misc:Depends}, ${python3:Depends}
+ python3-pip, python3-python-multipart, python3-openpyxl, python3-yaml,
+ sqlite3, sudo, uvicorn, ${misc:Depends}, ${python3:Depends}
+# python3-pip is required at *install/upgrade* time, not just runtime:
+# postinst's vendor-deps-sync step (sync_vendored_python_deps() in
+# app/alderpointdns_compiler.py) runs `python3 -B -m pip install
+# --no-index --find-links vendor/ --target vendor-runtime/ ...` to install
+# the pinned python-multipart 0.0.31 wheel ahead of whatever Debian's own
+# archive carries. Without this Depends, a stock Debian 13 install
+# resolves the package's other dependencies fine, dpkg unpacks the
+# files, and postinst then fails outright because `python3 -m pip`
+# does not exist -- caught by tests/test_clean_install_container.sh
+# against a genuinely clean container, not by any unit test (every
+# in-repo unit test runs on a dev machine that already has pip).
+# python3-multipart is a DIFFERENT, unrelated Debian package (Andrew
+# Dunham's "multipart", currently 1.2.1) that happens to also install as
+# `import multipart` -- not the FastAPI-ecosystem "python-multipart"
+# dependency this application actually needs (Debian package
+# python3-python-multipart, PyPI python-multipart, vendored at a newer
+# pinned version -- see app/alderpointdns_compiler.py's
+# sync_vendored_python_deps()). If both are ever installed side by side,
+# python-multipart's own back-compat shim (multipart/__init__.py) can
+# silently prefer whichever bare multipart.py it finds first on
+# sys.path, which may be the wrong, incompatible one. Depending on the
+# correct package name is the actual fix for fresh installs. Do NOT add
+# `Conflicts: python3-multipart` here: python3-python-multipart itself
+# declares `Provides: python3-multipart` (a documented Debian rename
+# transition), so a Conflicts on that name also conflicts with the
+# correct package and makes this package entirely uninstallable --
+# confirmed the hard way via a real `dpkg -i` against Debian 13 during
+# this fix ("alderpointdns conflicts with python3-multipart /
+# python3-python-multipart provides python3-multipart and is present").
+# An install that already has the wrong package present is unaffected
+# either way: Starlette tries `import python_multipart as multipart`
+# first and only falls back to the ambiguous `import multipart` if that
+# fails, and the vendored python_multipart wheel above is always present,
+# so the fallback path (where the wrong package could actually matter) is
+# never reached in practice.
 Description: Private DNS filtering and administration appliance
  Alderpoint DNS combines BIND, dnsdist, local DNS records, filtering policy,
  analytics, backup/restore, replication, and encrypted DNS listener controls

@@ -4,6 +4,51 @@ These notes describe what changed in each release. See
 `docs/known-limitations.md` for the current honest state of the project.
 Everything below `v1.0.0` was a beta-cycle build.
 
+## v1.1.1
+
+A patch/reliability release focused on Software Updates and clean-install
+correctness. No intentional DNS-policy behavior change from v1.1.0.
+
+- **Fixed false post-upgrade SQLite health-check failures.** A transient
+  database lock/busy condition during a package upgrade's post-install
+  health check (startup timing, a brief writer overlap) was being
+  misclassified as a hard failure in one code path, reporting a
+  successful upgrade as failed. Both SQLite's `SQLITE_BUSY` and
+  `SQLITE_LOCKED` conditions are now retried identically; genuine
+  database corruption/integrity failures still fail closed, with no
+  weakening of that detection.
+- **Historical update failures no longer masquerade as current errors.**
+  Software Updates now distinguishes a terminal Update Job that has been
+  superseded by a later successful Check for Updates ("Previous Update
+  Job") from the outcome of the action an administrator just took. The
+  generic async-form error handler now keys off an explicit,
+  server-marked response contract instead of a broad page-wide search
+  that could pick up unrelated historical content.
+- **Durable update progress, reconnect, and reload.** Installing an
+  update now shows a persistent, prominent progress banner through
+  download, backup, install, restart, and health-check phases; the
+  browser reconnects automatically (with bounded backoff) through
+  Alderpoint's own mid-update service restart instead of appearing
+  frozen or failed; and a completed update the browser was actively
+  tracking reloads the page exactly once into the newly installed
+  version -- never for a job that merely already existed when the page
+  was opened.
+- **Fixed the inactive-update banner staying visible.** The active-update
+  spinner/warning could remain visible after a hard refresh even when no
+  update was actually running, because a stylesheet rule for the
+  banner's layout was silently overriding the browser's default
+  hidden-element behavior. The banner is now correctly hidden whenever
+  no update is active.
+- **Clean stock Debian 13 install fixes.** The package now correctly
+  depends on `python3-pip` (required by the vendored-dependency
+  installation step at install/upgrade time) and on the correct
+  `python3-python-multipart` package (a same-named but unrelated Debian
+  package could previously satisfy the dependency instead). A fresh
+  install's default-blocklist seeding and initial filtering deploy could
+  also be silently skipped due to a postinst step ordering issue; fixed.
+  Package dependency manifests (control file, build tooling, and the
+  source-install requirements list) are now kept in sync.
+
 ## v1.1.0
 
 A feature release, built on the v1.0.2 bridge/bugfix release below.
