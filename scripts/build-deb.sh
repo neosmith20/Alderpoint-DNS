@@ -80,8 +80,9 @@ chmod 0755 "$PKG/DEBIAN/postinst" "$PKG/DEBIAN/prerm" "$PKG/DEBIAN/postrm"
 # so nothing under tests/ is a runtime dependency of the installed product.
 tar -C "$SOURCE_DIR" \
   --exclude .git --exclude __pycache__ --exclude '*.pyc' --exclude venv \
+  --exclude vendor-runtime \
   --exclude scripts/benchmark_filtering.py --exclude docs/performance-baseline.md \
-  -cf - app docs packaging scripts web VERSION requirements.txt requirements-debian.txt | \
+  -cf - app docs packaging scripts vendor web VERSION requirements.txt requirements-debian.txt | \
   tar -C "$PKG/opt/alderpointdns" -xf -
 
 cp "$SOURCE_DIR/scripts/alderpointdns-diagnostics" "$PKG/usr/sbin/alderpointdns-diagnostics"

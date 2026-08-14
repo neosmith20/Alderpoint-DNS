@@ -14,8 +14,9 @@ fail() {
 
 ROOT="$(mktemp -d /tmp/alderpointdns-deb-contents-test.XXXXXX)"
 trap 'rm -rf "$ROOT"' EXIT
+PROJECT_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
-DEB="$(/opt/alderpointdns/scripts/build-deb.sh --output-dir "$ROOT")"
+DEB="$("$PROJECT_ROOT/scripts/build-deb.sh" --output-dir "$ROOT")"
 test -f "$DEB" || fail "test deb package was not created"
 
 dpkg-deb --info "$DEB" | grep -q "Package: alderpointdns" || fail "deb metadata is invalid"
@@ -332,5 +333,17 @@ test -d "$ROOT/data/opt/alderpointdns/benchmarks" && \
 test -f "$ROOT/data/opt/alderpointdns/app/webapp.py" || fail "built package is missing app/webapp.py"
 test -f "$ROOT/data/opt/alderpointdns/docs/known-limitations.md" || fail "built package is missing docs/known-limitations.md"
 test -f "$ROOT/data/opt/alderpointdns/scripts/install.sh" || fail "built package is missing scripts/install.sh"
+test -f "$ROOT/data/opt/alderpointdns/vendor/python_multipart-0.0.31-py3-none-any.whl" || \
+  fail "built package is missing the vendored python-multipart 0.0.31 wheel; fresh/offline installs would fall back to Debian's older python3-multipart"
+test -d "$ROOT/data/opt/alderpointdns/vendor-runtime" && \
+  fail "built package ships generated vendor-runtime contents; vendor-runtime must be created by vendor-deps-sync at install/upgrade time, not committed or packaged as source"
+find "$ROOT/data/opt/alderpointdns" -path '*/__pycache__*' -print -quit | grep -q . && \
+  fail "built package ships Python bytecode/cache files"
+find "$ROOT/data/opt/alderpointdns" -path '*/.cache/pip*' -print -quit | grep -q . && \
+  fail "built package ships pip cache files"
+grep -q 'vendor-deps-sync || true' "$POSTINST" && \
+  fail "postinst swallows vendor-deps-sync failures; a broken vendored dependency install must abort rather than reporting success"
+grep -q 'vendor dependency sync:' "$POSTINST" || \
+  fail "postinst does not report successful vendored dependency synchronization"
 
 echo "deb package content tests passed"

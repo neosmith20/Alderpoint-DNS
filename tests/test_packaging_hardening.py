@@ -10,13 +10,17 @@ class of bug.
 from __future__ import annotations
 
 import re
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from app import alderpointdns_compiler as compiler  # noqa: E402
 from app import network_config as nc  # noqa: E402
 from app import backup  # noqa: E402
 
@@ -121,6 +125,88 @@ class PostinstServiceRestartTest(unittest.TestCase):
     def test_named_and_dnsdist_are_also_unconditionally_restarted(self) -> None:
         # The pattern this test suite is holding alderpointdns/analytics to.
         self.assertIn("systemctl restart named dnsdist", self.postinst)
+
+
+class VendorDependencyPackagingTest(unittest.TestCase):
+    def test_postinst_does_not_swallow_vendor_sync_failures(self) -> None:
+        postinst = (ROOT / "packaging" / "debian" / "postinst").read_text()
+        self.assertIn("vendor-deps-sync", postinst)
+        self.assertNotIn("vendor-deps-sync || true", postinst)
+        self.assertIn("vendored Python dependency sync failed; aborting install", postinst)
+
+    def test_build_deb_includes_vendor_but_excludes_generated_runtime(self) -> None:
+        build_deb = (ROOT / "scripts" / "build-deb.sh").read_text()
+        self.assertIn("-cf - app docs packaging scripts vendor web VERSION requirements.txt requirements-debian.txt", build_deb)
+        self.assertIn("--exclude vendor-runtime", build_deb)
+
+    def test_service_pythonpath_uses_root_owned_vendor_runtime_first(self) -> None:
+        for service in ("alderpointdns.service", "alderpointdns-analytics.service", "alderpointdns-notify.service"):
+            unit = (ROOT / "packaging" / service).read_text()
+            self.assertIn("Environment=PYTHONPATH=/opt/alderpointdns/vendor-runtime:/opt/alderpointdns", unit)
+
+    def test_source_install_and_upgrade_deploy_all_pythonpath_units(self) -> None:
+        for script in ("scripts/install.sh", "scripts/upgrade.sh"):
+            text = (ROOT / script).read_text()
+            for unit in ("alderpointdns.service", "alderpointdns-analytics.service", "alderpointdns-notify.service"):
+                self.assertIn(f"packaging/{unit}", text, f"{script} does not install {unit}")
+
+
+class VendorDependencySyncTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="alderpointdns-vendor-sync-"))
+        self.vendor = self.tmp / "vendor"
+        self.runtime = self.tmp / "vendor-runtime"
+        self.vendor.mkdir()
+        shutil.copy(ROOT / "vendor" / "python_multipart-0.0.31-py3-none-any.whl", self.vendor)
+        self.requirements = self.tmp / "requirements.txt"
+        self.requirements.write_text("python-multipart==0.0.31\n")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _patch_paths(self):
+        return mock.patch.multiple(
+            compiler,
+            VENDOR_DIR=self.vendor,
+            VENDOR_RUNTIME_DIR=self.runtime,
+            VENDOR_REQUIREMENTS_PATH=self.requirements,
+        )
+
+    def test_sync_installs_offline_and_cleans_stale_runtime_files(self) -> None:
+        (self.runtime / "multipart").mkdir(parents=True)
+        stale = self.runtime / "multipart" / "stale.py"
+        stale.write_text("stale")
+        (self.runtime / "python_multipart-0.0.20.dist-info").mkdir()
+        (self.runtime / "python_multipart-0.0.20.dist-info" / "METADATA").write_text("old")
+        with self._patch_paths():
+            message = compiler.sync_vendored_python_deps()
+        self.assertIn("python-multipart==0.0.31", message)
+        self.assertFalse(stale.exists())
+        self.assertFalse((self.runtime / "python_multipart-0.0.20.dist-info").exists())
+        self.assertTrue((self.runtime / "python_multipart").is_dir())
+        self.assertTrue((self.runtime / "python_multipart-0.0.31.dist-info" / "METADATA").is_file())
+        self.assertEqual(oct(self.runtime.stat().st_mode)[-3:], "755")
+
+    def test_sync_is_idempotent(self) -> None:
+        with self._patch_paths():
+            first = compiler.sync_vendored_python_deps()
+            second = compiler.sync_vendored_python_deps()
+        self.assertIn("python-multipart==0.0.31", first)
+        self.assertIn("python-multipart==0.0.31", second)
+        self.assertEqual(len(list(self.runtime.glob("python_multipart-*.dist-info"))), 1)
+
+    def test_sync_rejects_corrupted_wheel_hash(self) -> None:
+        wheel = self.vendor / "python_multipart-0.0.31-py3-none-any.whl"
+        with wheel.open("ab") as handle:
+            handle.write(b"corruption")
+        with self._patch_paths():
+            with self.assertRaisesRegex(RuntimeError, "SHA-256 mismatch"):
+                compiler.sync_vendored_python_deps()
+
+    def test_sync_propagates_pip_failure(self) -> None:
+        with self._patch_paths(), mock.patch.object(compiler, "run", side_effect=RuntimeError("pip failed")):
+            with self.assertRaisesRegex(RuntimeError, "pip failed"):
+                compiler.sync_vendored_python_deps()
 
 
 class PostinstBindBootstrapPlaceholdersTest(unittest.TestCase):

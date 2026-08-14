@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
+import csv
 import datetime as dt
+import email
 import fcntl
 import hashlib
 import io
@@ -23,6 +26,7 @@ import time
 import traceback
 import urllib.error
 import urllib.request
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -1508,6 +1512,83 @@ def wait_until(predicate, timeout: int = 50) -> bool:
 
 VENDOR_DIR = Path("/opt/alderpointdns/vendor")
 VENDOR_RUNTIME_DIR = Path("/opt/alderpointdns/vendor-runtime")
+VENDOR_REQUIREMENTS_PATH = Path("/opt/alderpointdns/requirements.txt")
+VENDOR_WHEEL_SHA256 = {
+    "python_multipart-0.0.31-py3-none-any.whl": "8408153d68a9773291fc1da39a8b85a50044bddbabd2dd72e9229776b7b15e28",
+}
+
+
+def _normalize_dist_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _verify_vendor_wheel(wheel: Path, dist_name: str, pinned_version: str) -> set[str]:
+    expected_hash = VENDOR_WHEEL_SHA256.get(wheel.name)
+    if not expected_hash:
+        raise RuntimeError(f"vendored wheel {wheel.name} has no pinned SHA-256")
+    actual_hash = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    if actual_hash != expected_hash:
+        raise RuntimeError(f"vendored wheel {wheel.name} SHA-256 mismatch: expected {expected_hash}, got {actual_hash}")
+
+    with zipfile.ZipFile(wheel) as zf:
+        metadata_name = f"{wheel.stem.split('-')[0]}-{pinned_version}.dist-info/METADATA"
+        metadata_candidates = [name for name in zf.namelist() if name.endswith(".dist-info/METADATA")]
+        if metadata_name not in zf.namelist() and len(metadata_candidates) == 1:
+            metadata_name = metadata_candidates[0]
+        metadata = email.message_from_bytes(zf.read(metadata_name))
+        wheel_name = _normalize_dist_name(metadata.get("Name", ""))
+        wheel_version = metadata.get("Version", "")
+        if wheel_name != dist_name or wheel_version != pinned_version:
+            raise RuntimeError(f"vendored wheel {wheel.name} metadata is {wheel_name}=={wheel_version}, expected {dist_name}=={pinned_version}")
+
+        record_name = metadata_name.rsplit("/", 1)[0] + "/RECORD"
+        record_rows = zf.read(record_name).decode().splitlines()
+        for parts in csv.reader(record_rows):
+            if len(parts) < 3:
+                raise RuntimeError(f"vendored wheel {wheel.name} has malformed RECORD entry: {parts!r}")
+            path, digest, size = parts[0], parts[1], parts[2]
+            data = zf.read(path)
+            if size and int(size) != len(data):
+                raise RuntimeError(f"vendored wheel {wheel.name} RECORD size mismatch for {path}")
+            if digest:
+                algo, _, b64_digest = digest.partition("=")
+                actual_digest = base64.urlsafe_b64encode(hashlib.new(algo, data).digest()).rstrip(b"=").decode()
+                if actual_digest != b64_digest:
+                    raise RuntimeError(f"vendored wheel {wheel.name} RECORD digest mismatch for {path}")
+
+        top_level: set[str] = set()
+        for name in zf.namelist():
+            first = name.split("/", 1)[0]
+            if first and not first.endswith(".dist-info"):
+                top_level.add(first)
+        return top_level
+
+
+def _remove_existing_vendor_runtime_files(dist_name: str, import_roots: set[str]) -> None:
+    if not VENDOR_RUNTIME_DIR.exists():
+        return
+    for root in import_roots:
+        candidate = VENDOR_RUNTIME_DIR / root
+        if candidate.is_dir():
+            shutil.rmtree(candidate)
+        elif candidate.exists():
+            candidate.unlink()
+    dist_prefix = dist_name.replace("-", "_")
+    for candidate in VENDOR_RUNTIME_DIR.glob(f"{dist_prefix}-*.dist-info"):
+        if candidate.is_dir():
+            shutil.rmtree(candidate)
+        elif candidate.exists():
+            candidate.unlink()
+
+
+def _normalize_vendor_runtime_permissions() -> None:
+    if not VENDOR_RUNTIME_DIR.exists():
+        return
+    for path in [VENDOR_RUNTIME_DIR, *VENDOR_RUNTIME_DIR.rglob("*")]:
+        if path.is_dir():
+            path.chmod(0o755)
+        else:
+            path.chmod(0o644)
 
 
 def sync_vendored_python_deps() -> str:
@@ -1536,7 +1617,7 @@ def sync_vendored_python_deps() -> str:
     wheels = sorted(VENDOR_DIR.glob("*.whl"))
     if not wheels:
         return "no vendored dependency updates needed (vendor/ is empty)"
-    requirements_path = Path("/opt/alderpointdns/requirements.txt")
+    requirements_path = VENDOR_REQUIREMENTS_PATH
     if not requirements_path.exists():
         requirements_path = Path(__file__).resolve().parent.parent / "requirements.txt"
     pins: dict[str, str] = {}
@@ -1548,19 +1629,23 @@ def sync_vendored_python_deps() -> str:
     installed: list[str] = []
     for wheel in wheels:
         # Wheel filename: {name}-{version}-{python tag}-{abi tag}-{platform tag}.whl
-        dist_name = wheel.name.split("-")[0].replace("_", "-").lower()
+        dist_name = _normalize_dist_name(wheel.name.split("-")[0])
         pinned_version = pins.get(dist_name)
         if not pinned_version:
             continue
+        import_roots = _verify_vendor_wheel(wheel, dist_name, pinned_version)
         spec = f"{dist_name}=={pinned_version}"
         VENDOR_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        _remove_existing_vendor_runtime_files(dist_name, import_roots)
         run([
-            "python3", "-m", "pip", "install",
+            "python3", "-B", "-m", "pip", "install",
             "--no-index", "--find-links", str(VENDOR_DIR),
             "--target", str(VENDOR_RUNTIME_DIR),
             "--upgrade",
+            "--no-compile",
             spec,
         ])
+        _normalize_vendor_runtime_permissions()
         installed.append(spec)
     if not installed:
         return "no vendored dependency updates needed (no vendored wheel matches a requirements.txt pin)"

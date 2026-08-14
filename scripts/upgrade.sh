@@ -150,6 +150,8 @@ install_units() {
   run install -D -m 0644 "$SOURCE_DIR/packaging/alderpointdns-backup.timer" "$(root_path /etc/systemd/system/alderpointdns-backup.timer)"
   run install -D -m 0644 "$SOURCE_DIR/packaging/alderpointdns-filter-update.service" "$(root_path /etc/systemd/system/alderpointdns-filter-update.service)"
   run install -D -m 0644 "$SOURCE_DIR/packaging/alderpointdns-filter-update.timer" "$(root_path /etc/systemd/system/alderpointdns-filter-update.timer)"
+  run install -D -m 0644 "$SOURCE_DIR/packaging/alderpointdns-notify.service" "$(root_path /etc/systemd/system/alderpointdns-notify.service)"
+  run install -D -m 0644 "$SOURCE_DIR/packaging/alderpointdns-notify.timer" "$(root_path /etc/systemd/system/alderpointdns-notify.timer)"
   run install -D -m 0440 "$SOURCE_DIR/packaging/sudoers-alderpointdns" "$(root_path /etc/sudoers.d/alderpointdns)"
   # On a normal upgrade these units already exist and are already enabled,
   # so this is a no-op.

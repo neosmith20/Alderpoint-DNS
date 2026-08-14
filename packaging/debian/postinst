@@ -206,7 +206,11 @@ case "$1" in
     # carries (see app/alderpointdns_compiler.py's
     # sync_vendored_python_deps() docstring). A no-op whenever nothing
     # under vendor/ applies.
-    PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py vendor-deps-sync || true
+    if ! vendor_deps_sync_output="$(PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py vendor-deps-sync)"; then
+      echo "alderpointdns: vendored Python dependency sync failed; aborting install." >&2
+      exit 1
+    fi
+    echo "alderpointdns: vendor dependency sync: $vendor_deps_sync_output"
     if ! dnsdist_conf_migrate_output="$(PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py dnsdist-conf-migrate)"; then
       echo "alderpointdns: dnsdist.conf managed-block migration failed; aborting install." >&2
       exit 1
