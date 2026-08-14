@@ -13,6 +13,19 @@ to record the Workstream 1 decisions — including the new RAM-first DNS cache /
 profile / Tier A-B recovery requirement below — as durable project requirements, not
 conversation-only context. No runtime/source behavior changed in that commit; documentation only.
 
+**Workstream 2 (runtime storage integration):** turned the frozen shapes above into real,
+production-shaped (not yet live-wired) implementations — real Parquet writer with segment
+validation, a partition-pruning DuckDB reader (the gate 1 proof that was outstanding after
+Workstream 1), real filesystem-based retention, an isolated aggregate SQLite WAL runtime, config
+filesystem hardening (ownership contract, symlink rejection), a secret-store foundation, durable
+(crash-survivable) migration state, the effective-cache-profile compiler, and a Tier B prewarm
+prototype — plus a Tier A feasibility assessment recommending it be deferred. See
+`docs/v2/handoff-workstream-2.md`'s "Workstream 2 delivered" section for the full list and
+`docs/v2/v1-performance-baseline.md` / `docs/v2/hardware-memory-profile-results.md` /
+`docs/v2/tier-a-feasibility.md` for the new supporting evidence. None of this is wired into the live
+v1.1.1 runtime — every module lives under `app/v2/`, tested only against disposable tempdir/dev
+paths.
+
 ## Storage ownership (confirmed)
 
 | Store | Path | Contents | Status |

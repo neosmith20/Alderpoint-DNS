@@ -1,14 +1,20 @@
-# V2 Workstream 2 — Recommended Scope
+# V2 Workstream 2 — Delivered Scope + Original Handoff (historical)
 
-**Status:** Handoff from Workstream 1 (`v2/architecture-storage-foundation` branch, started at
-`381851f91fa75cb4274d10450383cb9f024e4b61`), amended after the Dex architecture gate review and its
-remediation (branch reviewed at `eec4198`, remediation on top of it — see
-`docs/v2/architecture-map.md` "Architecture gate remediation" for the full writeup), and further
-amended after Dex Gate #1 passed ("ALDERPOINT DNS V2 WORKSTREAM 1 ARCHITECTURE VERIFIED AND READY
-FOR WORKSTREAM 2") with an architecture-lock-in documentation commit adding the RAM-first DNS
-cache / effective cache profile / Tier A-B recovery requirement (gates 9-13 below). Workstream 2
-must not begin runtime wiring until the mandatory gates below are read; several of them are
-release-gate-level, not optional cleanup.
+**Status: Workstream 2 is now complete.** This document originally shipped as the Workstream 1 ->
+Workstream 2 handoff (recommended scope, gates 1-13). That content is kept below as the historical
+record of what was asked for. **See `docs/v2/handoff-workstream-3.md` for the current, forward-
+looking handoff** — what Workstream 2 actually delivered, what's still a prototype vs. real-wired,
+and the recommended Workstream 3 scope. The gates below are cross-referenced from there as
+addressed/still-open rather than repeated.
+
+**Original status note (Workstream 1 -> 2 handoff):** Handoff from Workstream 1
+(`v2/architecture-storage-foundation` branch, started at `381851f91fa75cb4274d10450383cb9f024e4b61`),
+amended after the Dex architecture gate review and its remediation (branch reviewed at `eec4198`,
+remediation on top of it — see `docs/v2/architecture-map.md` "Architecture gate remediation" for the
+full writeup), and further amended after Dex Gate #1 passed ("ALDERPOINT DNS V2 WORKSTREAM 1
+ARCHITECTURE VERIFIED AND READY FOR WORKSTREAM 2") with an architecture-lock-in documentation commit
+adding the RAM-first DNS cache / effective cache profile / Tier A-B recovery requirement (gates
+9-13 below).
 
 ## What Workstream 1 + remediation delivered (don't redo this)
 
