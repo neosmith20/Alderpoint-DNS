@@ -14,6 +14,7 @@ The goal is not to clone AdGuard Home internally. It is to preserve the useful D
 - A small transactional control database remains for bounded relational state such as users, sessions, clients, policies, jobs, audit data, and replication metadata.
 - Password storage becomes an explicit Argon2id security contract with unique salts, benchmarked parameters, rehash-on-upgrade, and evaluation of a separately stored root-only pepper.
 - Runtime policy is compiled into native dnsdist/BIND structures rather than looked up from a management database per DNS query.
+- The DNS cache stays RAM-first: dnsdist and BIND answer from memory, policy-aware so clients only share a cache when their filtering/routing outcome would actually be identical, with disk persistence used only as a crash-resilient warm-start optimization that never becomes the authoritative cache and never delays DNS becoming available at boot.
 - Native HTTPS administration is mandatory.
 - V1 -> V2 migration must be previewable, backed up, validated, recoverable, and boring.
 

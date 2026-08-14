@@ -185,6 +185,36 @@ Choose by benchmark.
 
 The aggregate store must remain bounded and cheap to rebuild where practical.
 
+### 3.6 DNS cache architecture (RAM-first)
+
+The primary DNS cache is a RAM-first hot path: client -> dnsdist packet cache -> compiled policy ->
+BIND recursive cache -> upstream only on miss. The cache hot path must never synchronously depend
+on disk, SQLite, control.db, the aggregate store, DuckDB, Parquet, FastAPI, the web UI, or the
+analytics/audit subsystems.
+
+Cached answers may only be shared between clients when the policy properties that can affect the
+returned answer are compatible ("effective cache profile") — filtering policy, SafeSearch,
+parental/service-blocking state, blocking response mode, upstream/routing profile, ECS state, and
+similar answer-producing policy. Do not cache per individual client, and do not use one
+unrestricted global cache when policy differences could change the answer.
+
+Disk persistence of cache/warm-state is a recovery optimization only, never the authoritative
+cache:
+
+- **Tier A (optional) — direct restore**, only for entries provably still valid (remaining TTL,
+  not the original TTL; DNSSEC state; cache-profile generation; routing/upstream context). If
+  validity can't be proven, don't restore it.
+- **Tier B — popularity-based prewarm**, replaying recently/frequently used names through the
+  normal resolution path after startup to obtain fresh TTLs and current policy, populating RAM
+  naturally. Asynchronous, background, rate-limited, bounded, safe after unclean power loss.
+
+DNS availability comes first at boot: dnsdist/BIND become operational and clients can resolve
+immediately; any cache recovery/prewarm work happens in the background afterward, never as a
+startup gate. Failure of persistent cache/warm-state storage must degrade only to a cold cache —
+never to a DNS outage, startup failure, or failure propagating into control.db/analytics. See
+`docs/v2-adguard-parity-matrix.md` for why this is an Alderpoint-specific enhancement, not an
+AdGuard-parity requirement.
+
 ---
 
 ## 4. Unified V2 Policy Engine
@@ -417,6 +447,11 @@ Minimum test profiles:
 - normal: 2 vCPU / 2 GiB
 - high-query synthetic load
 
+The 512 MiB low-end profile above is V1's historical figure and is retained here unchanged; it is
+not yet re-confirmed as the V2 minimum. V2's actual supported minimum (candidates: 1 GiB or 2 GiB)
+will be set from full-appliance benchmarks — all components resident together, not any one
+component measured alone — before publication, not assumed from the V1 number.
+
 Measure:
 
 - DNS latency with analytics enabled/disabled
@@ -430,6 +465,10 @@ Measure:
 - retention cleanup cost
 - CPU/RAM during blocklist compile
 - migration duration on large V1 dataset
+- cache recovery after simulated abrupt power loss: time until DNS is available, cache-hit latency
+  p50/p95/p99, upstream query volume, and time to reach ~50%/90%/99% of prior working-set
+  effectiveness, comparing cold-cache, Tier B prewarm, and (if implemented) Tier A+B — using
+  realistic repeated-client/domain traffic, not random synthetic names
 
 Performance target principle:
 

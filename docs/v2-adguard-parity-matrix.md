@@ -41,6 +41,17 @@
 | DHCP server | Intentionally absent | **DO NOT IMPLEMENT** | OUT OF SCOPE |
 | Router/firewall/NAT | Absent | **DO NOT IMPLEMENT** | OUT OF SCOPE |
 
+## Alderpoint beyond parity
+
+- **RAM-first DNS cache with policy-aware sharing and crash-resilient warm-start recovery.** dnsdist
+  and BIND answer from RAM on the hot path, sharing a cached answer between clients only when their
+  filtering/routing outcome is equivalent ("effective cache profile"). Disk persistence is a
+  recovery optimization only (never the authoritative cache): a validated direct-restore tier for
+  entries provably still valid, plus a background popularity-based prewarm tier that always
+  re-resolves through the normal policy/DNSSEC path. DNS availability never waits on cache recovery.
+  This is not an AdGuard-parity requirement — it is an Alderpoint-specific performance/resilience
+  architecture decision. See `docs/v2-architecture-plan.md` §3.6.
+
 ## Mandatory architectural gates
 
 - Raw query history must not share the control database.
