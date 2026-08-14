@@ -489,6 +489,17 @@ class DohClientIdPathRoutingTest(ClientsTestBase):
         self.assertIn("/dns-query/" + "b" * 64, lines)
         conn.close()
 
+    def test_clientid_referenced_only_by_a_bare_access_rule_is_still_routed(self) -> None:
+        # Regression test: a ClientID used directly in an access rule
+        # (add_access_rule kind='clientid', no persistent client attached)
+        # must still get its DoH path registered, or the frontend 404s it
+        # before the rule can ever be evaluated.
+        clients.add_access_rule("deny", "clientid", "d" * 48)
+        conn = clients.connect()
+        text = clients.render_doh_clientid_paths(conn)
+        self.assertIn("/dns-query/" + "d" * 48, text.splitlines())
+        conn.close()
+
     def test_no_clientids_renders_empty(self) -> None:
         conn = clients.connect()
         self.assertEqual(clients.render_doh_clientid_paths(conn), "")

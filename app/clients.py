@@ -737,7 +737,11 @@ def render_doh_clientid_paths(conn: sqlite3.Connection) -> str:
     from app import encryption
 
     doh_path = encryption.settings(conn).get("doh_path", "/dns-query") or "/dns-query"
-    values = [row["value"] for row in conn.execute("SELECT DISTINCT value FROM client_identifiers WHERE kind='clientid'")]
+    values = {row["value"] for row in conn.execute("SELECT DISTINCT value FROM client_identifiers WHERE kind='clientid'")}
+    # A ClientID can also appear directly in an access rule without ever
+    # being attached to a persistent client (add_access_rule("deny",
+    # "clientid", ...) with no client_id) -- those need routing too.
+    values.update(row["value"] for row in conn.execute("SELECT DISTINCT value FROM access_rules WHERE kind='clientid' AND value IS NOT NULL"))
     paths = sorted({clientid_doh_path(doh_path, v) for v in values})
     return "\n".join(_check_line_safe(p) for p in paths) + ("\n" if paths else "")
 
