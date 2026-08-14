@@ -1,3 +1,28 @@
+alderpointdns (1.1.0-1) unstable; urgency=medium
+
+  * Added Clients & Access: persistent named clients with multiple
+    identifiers (IPv4/IPv6/CIDR/ClientID), strong 192-bit/256-bit
+    cryptographically generated ClientIDs, and DNS-level allow/deny access
+    policy enforced natively at dnsdist across every protocol (UDP/TCP/
+    DoT/DoH/DoQ). Includes AdGuard Home client/access migration, native
+    export/import, backup/restore, and replication coverage.
+  * Bumped the vendored python-multipart dependency to 0.0.31 with a
+    hardened, hash-verified vendored-runtime sync mechanism, independent
+    of whatever version Debian's own package archive provides.
+  * Fixed encryption deployment failure reporting: a failed certificate/
+    key or dnsdist deployment is no longer reported to the administrator
+    as a success. The previous working certificate/key and dnsdist
+    configuration are preserved via rollback on a failed deployment.
+  * Fixed a cross-device-link failure during encryption deployment's
+    certificate/key promotion under the service's sandboxed mount
+    namespace.
+  * Fixed postinst silently reverting a live server's encryption
+    configuration (e.g. previously-enabled DoQ/DoH3) to the packaged
+    fresh-install default on every package upgrade, by only bootstrapping
+    that default when no administrator-configured drop-in already exists.
+
+ -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Fri, 14 Aug 2026 00:00:00 -0600
+
 alderpointdns (1.0.2-1) unstable; urgency=medium
 
   * Fixed Software Updates failing when a GitHub release contains both the

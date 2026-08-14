@@ -12,6 +12,8 @@ Current configuration:
 - BIND dnsdist backend: `127.0.0.1:5354` with PROXYv2
 - BIND recovery/health listener: `127.0.0.1:5353`
 - BIND RPZ: `/var/lib/alderpointdns/compiled/bind/alderpointdns.rpz`
+- Clients & Access policy: `/var/lib/alderpointdns/compiled/dnsdist/access-policy.conf`
+  (see `docs/clients-and-access.md`)
 - Local DNS include: `/var/lib/alderpointdns/compiled/bind/local-zones.conf`
 - Local DNS default domain: `home.arpa`
 - BIND cache tuning include: `/var/lib/alderpointdns/compiled/bind/cache-options.conf`

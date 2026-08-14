@@ -335,15 +335,47 @@ def update_settings(values: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 def _write_owned(path: Path, content: bytes, mode: int) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_bytes(content)
-    tmp.chmod(mode)
-    os.replace(tmp, path)
+    _atomic_write_bytes(path, content, mode)
     try:
         shutil.chown(path, user="root", group="_dnsdist")
     except (LookupError, PermissionError, OSError):
         pass
+
+
+def _atomic_write_bytes(path: Path, content: bytes, mode: int = 0o644) -> None:
+    """Write a complete replacement in path's own directory and promote it
+    with os.replace(). The destination directory matters under the web
+    service's systemd mount namespace: /var/lib/alderpointdns and
+    /etc/systemd/system are separate writable bind mounts there, so a temp
+    file staged under /var/lib can fail with EXDEV when promoted into /etc
+    even though the direct root CLI sees both paths on the same ext4
+    filesystem."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp.chmod(mode)
+        os.replace(tmp, path)
+        try:
+            dir_fd = os.open(path.parent, os.O_DIRECTORY)
+        except OSError:
+            dir_fd = None
+        if dir_fd is not None:
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def generate_self_signed(hostname: str, extra_sans: list[str] | None = None, days: int = 825) -> None:
@@ -491,7 +523,21 @@ def resolve_active_cert_paths(cfg: dict[str, str]) -> tuple[Path, Path]:
 
 
 def cert_info(cert_path: Path) -> dict[str, Any]:
-    if not cert_path.exists():
+    try:
+        exists = cert_path.exists()
+    except OSError:
+        # cert_mode "existing_path" lets an admin point at an arbitrary
+        # filesystem path (e.g. root-only cert material outside
+        # /etc/alderpointdns/certs, which is the whole reason that mode
+        # exists). This function is called both from the privileged
+        # deploy step (root, always readable) and directly from the
+        # unprivileged web process for the encryption page's own status
+        # display and its error-page re-render -- the latter is not
+        # guaranteed read access to whatever the admin typed in, so a
+        # permission error here must degrade to "not available", not
+        # crash the whole page with an unhandled 500.
+        return {"available": False}
+    if not exists:
         return {"available": False}
     subject = run(["openssl", "x509", "-in", str(cert_path), "-noout", "-subject"], check=False).stdout.strip()
     issuer = run(["openssl", "x509", "-in", str(cert_path), "-noout", "-issuer"], check=False).stdout.strip()
@@ -758,6 +804,15 @@ def ensure_doh_altsvc_migration(template_path: Path) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 
 def render_env_override(cfg: dict[str, str]) -> str:
+    # Not cfg['cert_path']/cfg['key_path'] directly: those two DB fields
+    # only mean anything when cert_mode is "existing_path" -- switching
+    # cert_mode back to "self_signed"/"local_ca"/"uploaded" does not clear
+    # them, so reading them unconditionally here would still point dnsdist
+    # at a stale (or no-longer-relevant) filesystem path from a previous
+    # existing-path configuration. resolve_active_cert_paths() is the same
+    # cert_mode-aware resolution cert_info()/deploy_encryption() already use
+    # to find the certificate that's actually supposed to be active.
+    cert_path, key_path = resolve_active_cert_paths(cfg)
     lines = [
         "[Service]",
         "Environment=ALDERPOINTDNS_DNS_PLAIN=1",
@@ -768,8 +823,8 @@ def render_env_override(cfg: dict[str, str]) -> str:
         f"Environment=ALDERPOINTDNS_DNS_DOQ={cfg['doq_enabled']}",
         f"Environment=ALDERPOINTDNS_DNS_DOH3={cfg['doh3_enabled']}",
         f"Environment=ALDERPOINTDNS_DNS_DNSCRYPT={cfg['dnscrypt_enabled']}",
-        f"Environment=ALDERPOINTDNS_TLS_CERT={cfg['cert_path']}",
-        f"Environment=ALDERPOINTDNS_TLS_KEY={cfg['key_path']}",
+        f"Environment=ALDERPOINTDNS_TLS_CERT={cert_path}",
+        f"Environment=ALDERPOINTDNS_TLS_KEY={key_path}",
         f"Environment=ALDERPOINTDNS_DOH_PATH={cfg['doh_path']}",
         f"Environment=ALDERPOINTDNS_DOH_PORT={cfg['doh_port']}",
         f"Environment=ALDERPOINTDNS_DOH3_PORT={cfg['doh3_port']}",
@@ -891,6 +946,10 @@ def deploy_encryption(conn: sqlite3.Connection | None = None, template_path: Pat
     message = ""
     protocol_tests: dict[str, str] = {}
     env_backup: Path | None = None
+    cert_backup: Path | None = None
+    key_backup: Path | None = None
+    cert_backup_target: Path | None = None
+    key_backup_target: Path | None = None
     conf_changed = False
     cert_material_changed = False
     try:
@@ -904,6 +963,24 @@ def deploy_encryption(conn: sqlite3.Connection | None = None, template_path: Pat
         # back every other protocol along with it.
         cfg, warnings = enforce_capabilities(cfg, suffix=" for this deployment")
         pending_action = cfg.get("pending_cert_action", "none")
+        # generate_self_signed/issue_from_local_ca/accept_pending_upload()
+        # below promote new certificate/key material onto disk
+        # unconditionally, *before* the dnsdist restart + live protocol
+        # tests further down that can still fail this deployment. Without
+        # backing up whatever they are about to overwrite, a bad upload or
+        # a newly-generated cert dnsdist won't actually serve (e.g. a SAN
+        # mismatch only a live TLS handshake in test_protocols() catches)
+        # would already have clobbered the last known-good cert/key by the
+        # time deployment is discovered to have failed -- leaving no
+        # working certificate to roll back to, even though the dnsdist
+        # config env override rollback below still succeeds on its own.
+        if pending_action in ("generate_self_signed", "generate_local_ca") or cfg.get("cert_mode") == "uploaded":
+            cert_backup_target, key_backup_target = resolve_active_cert_paths(cfg)
+            if cert_backup_target.exists() and key_backup_target.exists():
+                cert_backup = BACKUP_DIR / f"cert-{deployment_id}.last-good.crt"
+                key_backup = BACKUP_DIR / f"cert-{deployment_id}.last-good.key"
+                shutil.copy2(cert_backup_target, cert_backup)
+                shutil.copy2(key_backup_target, key_backup)
         if pending_action == "generate_self_signed":
             generate_self_signed(cfg["server_hostname"], [cfg.get("bootstrap_ip", "")])
             cert_material_changed = True
@@ -950,10 +1027,7 @@ def deploy_encryption(conn: sqlite3.Connection | None = None, template_path: Pat
             if DNSDIST_ENV_OVERRIDE.exists():
                 env_backup = BACKUP_DIR / f"dnsdist-encryption.conf.last-good.{int(time.time())}"
                 shutil.copy2(DNSDIST_ENV_OVERRIDE, env_backup)
-            staged = STAGING_DIR / f"alderpointdns-encryption-{deployment_id}.conf"
-            staged.write_text(new_env_text)
-            DNSDIST_ENV_OVERRIDE.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(staged, DNSDIST_ENV_OVERRIDE)
+            _atomic_write_bytes(DNSDIST_ENV_OVERRIDE, new_env_text.encode(), 0o644)
             run(["systemctl", "daemon-reload"])
             check_env = {**os.environ, **_env_from_override(new_env_text)}
             run(["dnsdist", "--check-config", "-C", str(DNSDIST_CONF)], env=check_env)
@@ -970,9 +1044,21 @@ def deploy_encryption(conn: sqlite3.Connection | None = None, template_path: Pat
                 message = f"{message}; {'; '.join(warnings)}"
     except Exception as exc:
         message = str(exc)
+        if cert_backup is not None and key_backup is not None and cert_backup_target is not None and key_backup_target is not None:
+            # Restore whatever certificate/key material was known-good
+            # before this deployment attempted to promote new material,
+            # regardless of whether the dnsdist config env override below
+            # also needs rolling back -- a bad cert can fail deployment
+            # (e.g. a live protocol test) even when the rendered env text
+            # itself is unchanged from the last deploy.
+            try:
+                shutil.copy2(cert_backup, cert_backup_target)
+                shutil.copy2(key_backup, key_backup_target)
+            except Exception as cert_rollback_exc:
+                message = f"{message}; certificate/key rollback failed: {cert_rollback_exc}"
         if env_backup is not None:
             try:
-                shutil.copy2(env_backup, DNSDIST_ENV_OVERRIDE)
+                _atomic_write_bytes(DNSDIST_ENV_OVERRIDE, env_backup.read_bytes(), 0o644)
                 run(["systemctl", "daemon-reload"], check=False)
                 run(["systemctl", "restart", "dnsdist"], check=False)
                 if _wait_active("dnsdist", timeout=15):
@@ -983,6 +1069,13 @@ def deploy_encryption(conn: sqlite3.Connection | None = None, template_path: Pat
             except Exception as rollback_exc:
                 status = "rollback_failed"
                 message = f"{message}; rollback failed: {rollback_exc}"
+        elif cert_backup is not None:
+            # Certificate material was rolled back but the dnsdist config
+            # env override was never touched this deployment (cert-only
+            # failure, e.g. protocol test failure with an unchanged env) --
+            # dnsdist is already running the restored, known-good cert, no
+            # restart is needed to reflect that.
+            status = "rolled_back"
         raise
     finally:
         db.execute(

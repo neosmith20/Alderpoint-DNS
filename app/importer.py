@@ -30,7 +30,7 @@ from typing import Any
 
 import yaml
 
-from app import custom_rules, local_dns, upstream_dns
+from app import clients, custom_rules, local_dns, upstream_dns
 
 DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
 IMPORT_UPLOAD_DIR = Path("/var/lib/alderpointdns/imports")
@@ -581,12 +581,43 @@ def export_alderpointdns_native(conn: sqlite3.Connection | None = None) -> str:
         upstream_dns.init_db(db)
         _init_filter_tables(db)
         custom_rules.init_db(db)
+        clients.init_db(db)
+        native_clients = []
+        for client_row in db.execute("SELECT id, name, description, enabled FROM clients ORDER BY id"):
+            identifiers = [
+                {"kind": row["kind"], "value": row["value"]}
+                for row in db.execute("SELECT kind, value FROM client_identifiers WHERE client_id=? ORDER BY id", (client_row["id"],))
+            ]
+            native_clients.append({
+                "name": client_row["name"],
+                "description": client_row["description"],
+                "enabled": bool(client_row["enabled"]),
+                "identifiers": identifiers,
+            })
+        access_rules_rows = db.execute(
+            """
+            SELECT access_rules.action, access_rules.kind, access_rules.value, clients.name AS client_name
+            FROM access_rules LEFT JOIN clients ON clients.id = access_rules.client_id
+            ORDER BY access_rules.id
+            """
+        ).fetchall()
+        default_policy_row = db.execute("SELECT default_policy FROM access_settings WHERE id=1").fetchone()
         payload = {
             "format": "alderpointdns-native",
-            "version": 1,
+            # v2 adds "clients" (full multi-identifier persistent client
+            # model) and "access_policy" (default policy + allow/deny
+            # rules) alongside the pre-existing v1 fields, which are kept
+            # for backward compatibility -- an older Alderpoint DNS build
+            # reading a v2 export still finds every v1 key it expects.
+            "version": 2,
             "created_at": now(),
             "local_dns_records": [dict(row) for row in db.execute("SELECT fqdn, record_type, value, ttl, comment, enabled FROM local_dns_records ORDER BY fqdn, record_type, value")],
             "client_aliases": [dict(row) for row in db.execute("SELECT cidr, display_name, description FROM client_aliases ORDER BY cidr")],
+            "clients": native_clients,
+            "access_policy": {
+                "default_policy": default_policy_row["default_policy"] if default_policy_row else "allow",
+                "rules": [dict(row) for row in access_rules_rows],
+            },
             "custom_rules": [dict(row) for row in db.execute("SELECT domain, action, enabled, comment FROM custom_rules ORDER BY domain, action")],
             "custom_filter_rules": [
                 dict(row)
@@ -628,6 +659,31 @@ def parse_alderpointdns_native_json(text: str) -> dict[str, Any]:
                 "origin": "custom_filter_rules",
                 "comment": str(row.get("comment", "")),
             })
+    clients_full = []
+    for row in data.get("clients", []) or []:
+        if not isinstance(row, dict) or not row.get("name"):
+            continue
+        identifiers = []
+        for ident in row.get("identifiers", []) or []:
+            if isinstance(ident, dict) and ident.get("kind") and ident.get("value"):
+                identifiers.append({"kind": ident["kind"], "value": ident["value"]})
+        clients_full.append({
+            "name": row["name"],
+            "description": row.get("description", ""),
+            "identifiers": identifiers,
+            "weak_clientids": [],
+            "unrecognized": [],
+            "enabled": bool(row.get("enabled", True)),
+        })
+    access_policy = data.get("access_policy") if isinstance(data.get("access_policy"), dict) else {}
+    access_allowed = []
+    access_denied = []
+    for rule in access_policy.get("rules", []) or []:
+        if not isinstance(rule, dict):
+            continue
+        entry = {"kind": rule.get("kind", ""), "value": rule.get("value") or "", "raw": rule.get("value") or "", "client_name": rule.get("client_name")}
+        (access_allowed if rule.get("action") == "allow" else access_denied).append(entry)
+
     return {
         "blocklist_sources": [row for row in data.get("blocklist_sources", []) if isinstance(row, dict)],
         "allowlist_unsupported": [],
@@ -641,6 +697,10 @@ def parse_alderpointdns_native_json(text: str) -> dict[str, Any]:
             for row in data.get("client_aliases", [])
             if isinstance(row, dict)
         ],
+        "clients_full": clients_full,
+        "access_default_policy": access_policy.get("default_policy") if access_policy.get("default_policy") in {"allow", "deny"} else None,
+        "access_allowed": access_allowed,
+        "access_denied": access_denied,
         "client_scoped": [],
         "upstream_resolvers": [row for row in data.get("upstream_resolvers", []) if isinstance(row, dict)],
         "untranslatable": [],
@@ -690,6 +750,7 @@ MIGRATION_CATEGORIES: dict[str, str] = {
     "local_dns": "Local DNS records",
     "upstreams": "Upstream resolvers",
     "client_scoped": "Client-scoped items",
+    "clients_access": "Clients & Access",
     "comments": "Comments",
     "duplicates": "Duplicates within the import",
     "invalid": "Invalid entries",
@@ -1013,8 +1074,17 @@ def build_migration_plan(translation: dict[str, Any], default_domain: str | None
         )
         item["_upstream_key"] = list(key)
 
-    # Client aliases and client-scoped findings.
-    for index, client in enumerate(translation.get("clients_as_aliases", [])):
+    # Legacy display-only client aliases. Only surfaced when this
+    # translation has no richer clients_full data (native-JSON v1 imports,
+    # or a hypothetical future source with no ClientID/multi-identifier
+    # concept) -- AdGuard imports always populate clients_full, which is
+    # the enforced, runtime-effective successor to this. Without this
+    # guard, an AdGuard client would be imported twice: once as a rich
+    # new-model client, and again via this legacy path's own
+    # client_aliases row, which the new-model migration in
+    # app.clients.init_db() would then auto-promote into a *second*,
+    # duplicate clients-table row the next time anything touched the DB.
+    for index, client in enumerate(translation.get("clients_as_aliases", []) if not translation.get("clients_full") else []):
         raw = client if isinstance(client, dict) else {}
         name = str(raw.get("display_name", "")).strip()
         cidr = str(raw.get("cidr_or_ip", "")).strip()
@@ -1042,6 +1112,55 @@ def build_migration_plan(translation: dict[str, Any], default_domain: str | None
             apply=("alias", index),
         )
         item["_alias_cidr"] = network
+
+    # New-model persistent clients (name + every identifier, including
+    # strong ClientIDs) -- this is the enforced, runtime-effective
+    # successor to the display-only "client alias" item above. Weak
+    # (sub-192-bit) ClientIDs found on the client are reported inline as
+    # part of the item's warning, never activated.
+    for index, client in enumerate(translation.get("clients_full", [])):
+        name = str(client.get("name", "")).strip()
+        identifiers = client.get("identifiers", [])
+        weak = client.get("weak_clientids", [])
+        unrecognized = client.get("unrecognized", [])
+        if not name or not identifiers:
+            continue
+        summary = ", ".join(f"{i['kind']}={i['value']}" for i in identifiers)
+        warning_bits = []
+        if weak:
+            warning_bits.append(
+                f"{len(weak)} ClientID(s) below Alderpoint's 192-bit minimum were found and are NOT imported as active "
+                "ClientIDs (generate a new strong ClientID for this client after import if encrypted-DNS identification is needed)"
+            )
+        if unrecognized:
+            warning_bits.append(f"{len(unrecognized)} unrecognized identifier(s) were not imported: {', '.join(unrecognized)}")
+        add(
+            "clients_access",
+            source=f"{name} ({summary})",
+            detected="persistent client",
+            destination="Clients & Access",
+            normalized=summary,
+            warning="; ".join(warning_bits),
+            apply=("client", index),
+        )
+    for index, rule in enumerate(translation.get("access_allowed", [])):
+        add(
+            "clients_access",
+            source=f"{rule.get('raw', rule.get('value', ''))}",
+            detected=f"allowed client ({rule.get('kind', '')})",
+            destination="Clients & Access (Allowed)",
+            normalized=str(rule.get("value", "")),
+            apply=("access_allow", index),
+        )
+    for index, rule in enumerate(translation.get("access_denied", [])):
+        add(
+            "clients_access",
+            source=f"{rule.get('raw', rule.get('value', ''))}",
+            detected=f"denied client ({rule.get('kind', '')})",
+            destination="Clients & Access (Denied)",
+            normalized=str(rule.get("value", "")),
+            apply=("access_deny", index),
+        )
     for finding in translation.get("client_scoped", []):
         add(
             "client_scoped",
@@ -1610,6 +1729,7 @@ def _rollback_migration_job(job: dict[str, Any]) -> int:
         local_dns.init_db(conn)
         upstream_dns.init_db(conn)
         custom_rules.init_db(conn)
+        clients.init_db(conn)
         with conn:
             removed += conn.execute("DELETE FROM custom_filter_rules WHERE import_job_id=?", (job_id,)).rowcount
             record_ids = [int(value) for value in info.get("local_dns_ids", [])]
@@ -1634,10 +1754,31 @@ def _rollback_migration_job(job: dict[str, Any]) -> int:
                     "UPDATE client_aliases SET display_name=?, description=?, updated_at=? WHERE cidr=?",
                     (row.get("display_name", ""), row.get("description", ""), now(), row.get("cidr", "")),
                 )
+            client_ids = [int(value) for value in info.get("clients_added", [])]
+            access_rules_touched = bool(client_ids) or bool(info.get("access_rules_added"))
+            if client_ids:
+                placeholders = ",".join("?" for _ in client_ids)
+                removed += conn.execute(f"DELETE FROM access_rules WHERE client_id IN ({placeholders})", client_ids).rowcount
+                removed += conn.execute(f"DELETE FROM client_identifiers WHERE client_id IN ({placeholders})", client_ids).rowcount
+                removed += conn.execute(f"DELETE FROM clients WHERE id IN ({placeholders})", client_ids).rowcount
+            access_rule_ids = [int(value) for value in info.get("access_rules_added", [])]
+            if access_rule_ids:
+                placeholders = ",".join("?" for _ in access_rule_ids)
+                removed += conn.execute(f"DELETE FROM access_rules WHERE id IN ({placeholders})", access_rule_ids).rowcount
+            previous_access_policy = info.get("access_default_policy_before")
+            if previous_access_policy in {"allow", "deny"}:
+                conn.execute("UPDATE access_settings SET default_policy=?, updated_at=? WHERE id=1", (previous_access_policy, now()))
+                access_rules_touched = True
             conn.execute(
                 "UPDATE import_jobs SET status='rolled_back', finished_at=?, message=? WHERE id=?",
                 (now(), f"rolled back: removed {removed} imported object(s)", job_id),
             )
+    if access_rules_touched:
+        # Redeploy after the DELETEs above have committed, so dnsdist stops
+        # enforcing rules for clients/rules this rollback just removed
+        # instead of continuing to apply the last-deployed (now-stale)
+        # policy until some unrelated future change happens to redeploy it.
+        clients.deploy_access_layer()
     return removed
 
 
@@ -1738,6 +1879,33 @@ def _map_source_category(name: str, url: str) -> str:
         if any(keyword in haystack for keyword in keywords):
             return category
     return "ads_trackers"
+
+
+def _classify_adguard_identifier(raw: str) -> tuple[str, str]:
+    """Classifies one AdGuard client/allowed/disallowed identifier string.
+    Returns (kind, value) where kind is one of: 'ipv4','ipv4_cidr','ipv6',
+    'ipv6_cidr' (import as an Alderpoint identifier as-is), 'clientid'
+    (already meets Alderpoint's 192-bit minimum -- import as a strong
+    Alderpoint ClientID), 'clientid_weak' (hex, but under the 192-bit/48-hex
+    minimum -- AdGuard accepts much shorter ClientIDs than Alderpoint does;
+    preserved as an inactive finding, never activated -- see
+    docs/clients-and-access.md), or 'unrecognized' (kept as a finding, not
+    imported as anything active)."""
+    text = str(raw).strip()
+    if not text:
+        return "unrecognized", text
+    if all(c in "0123456789abcdefABCDEF" for c in text) and "." not in text and ":" not in text and "/" not in text:
+        if len(text) >= clients.CLIENTID_MIN_HEX_LEN:
+            try:
+                return "clientid", clients.validate_clientid(text)
+            except clients.ClientIDError:
+                return "unrecognized", text
+        return "clientid_weak", text.lower()
+    try:
+        kind, value = clients.normalize_identifier(text)
+        return kind, value
+    except clients.ClientsError:
+        return "unrecognized", text
 
 
 def _translate_adguard_config(data: dict[str, Any], internal_domain: str | None = None) -> dict[str, Any]:
@@ -1909,6 +2077,7 @@ def _translate_adguard_config(data: dict[str, Any], internal_domain: str | None 
             })
 
     clients_as_aliases = []
+    clients_full = []
     client_scoped = []
     for client in persistent_clients:
         if not isinstance(client, dict):
@@ -1918,9 +2087,52 @@ def _translate_adguard_config(data: dict[str, Any], internal_domain: str | None 
         cidr_or_ip = next((i for i in ids if _looks_like_ip_or_cidr(i)), "")
         if name and cidr_or_ip:
             clients_as_aliases.append({"display_name": name, "cidr_or_ip": cidr_or_ip, "all_ids": ids})
+        if name:
+            identifiers = []
+            weak_clientids = []
+            unrecognized = []
+            for raw_id in ids:
+                kind, value = _classify_adguard_identifier(str(raw_id))
+                if kind == "clientid_weak":
+                    weak_clientids.append(value)
+                elif kind == "unrecognized":
+                    unrecognized.append(str(raw_id))
+                else:
+                    identifiers.append({"kind": kind, "value": value})
+            if identifiers or weak_clientids:
+                clients_full.append({
+                    "name": name,
+                    "description": "imported from AdGuard Home",
+                    "identifiers": identifiers,
+                    "weak_clientids": weak_clientids,
+                    "unrecognized": unrecognized,
+                })
         for feature in ("filtering_enabled", "safe_search", "blocked_services", "upstreams", "ignore_querylog", "ignore_statistics"):
             if client.get(feature) not in (None, False, {}):
                 client_scoped.append(f"{name or cidr_or_ip}: {feature} has no Alderpoint DNS per-client equivalent yet (schema exists, not enforced at runtime)")
+
+    # AdGuard's global allowed_clients/disallowed_clients (dns.allowed_clients
+    # / dns.disallowed_clients): the source semantics are preserved exactly
+    # -- an AdGuard entry becomes one Alderpoint access rule of the same
+    # kind, never broadened into a wider range or merged with anything else.
+    access_allowed = []
+    access_denied = []
+    for raw_id in dns_block.get("allowed_clients", []) or []:
+        kind, value = _classify_adguard_identifier(str(raw_id))
+        if kind in ("ipv4", "ipv4_cidr", "ipv6", "ipv6_cidr", "clientid"):
+            access_allowed.append({"kind": kind, "value": value, "raw": str(raw_id)})
+        elif kind == "clientid_weak":
+            client_scoped.append(f"allowed_clients entry {raw_id!r}: ClientID is below Alderpoint's 192-bit minimum, not imported as an active allow rule")
+        else:
+            client_scoped.append(f"allowed_clients entry {raw_id!r}: not a recognized IPv4/IPv6/CIDR/ClientID value")
+    for raw_id in dns_block.get("disallowed_clients", []) or []:
+        kind, value = _classify_adguard_identifier(str(raw_id))
+        if kind in ("ipv4", "ipv4_cidr", "ipv6", "ipv6_cidr", "clientid"):
+            access_denied.append({"kind": kind, "value": value, "raw": str(raw_id)})
+        elif kind == "clientid_weak":
+            client_scoped.append(f"disallowed_clients entry {raw_id!r}: ClientID is below Alderpoint's 192-bit minimum, not imported as an active deny rule")
+        else:
+            client_scoped.append(f"disallowed_clients entry {raw_id!r}: not a recognized IPv4/IPv6/CIDR/ClientID value")
 
     untranslatable = []
     upstream_resolvers = []
@@ -1944,6 +2156,9 @@ def _translate_adguard_config(data: dict[str, Any], internal_domain: str | None 
         "unsupported_rules": unsupported_rules,
         "rewrites_as_local_dns": rewrites_as_local_dns,
         "clients_as_aliases": clients_as_aliases,
+        "clients_full": clients_full,
+        "access_allowed": access_allowed,
+        "access_denied": access_denied,
         "client_scoped": client_scoped,
         "upstream_resolvers": upstream_resolvers,
         "untranslatable": untranslatable,
@@ -2069,6 +2284,79 @@ def _apply_alias_item(conn: sqlite3.Connection, client: dict[str, Any], source_l
     return "added"
 
 
+def _apply_client_full_item(conn: sqlite3.Connection, client: dict[str, Any], source_label: str, rollback_info: dict[str, Any]) -> tuple[int, int]:
+    """Creates a new persistent client with every identifier from the
+    import (always a new client -- this migration path does not attempt
+    to merge into an existing same-named client, to keep apply/rollback
+    unambiguous; an operator can merge manually afterward if desired).
+    Returns (client_id, identifiers_created)."""
+    name = str(client.get("name", "")).strip()
+    if not name:
+        raise ImportError_("client name is required")
+    ts = now()
+    cur = conn.execute(
+        "INSERT INTO clients(name, description, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        (name, client.get("description") or f"imported from {source_label}", 1 if client.get("enabled", True) else 0, ts, ts),
+    )
+    client_id = cur.lastrowid
+    created = 0
+    for identifier in client.get("identifiers", []):
+        kind, value = identifier.get("kind"), identifier.get("value")
+        if not kind or not value:
+            continue
+        already = conn.execute("SELECT 1 FROM client_identifiers WHERE kind=? AND value=?", (kind, value)).fetchone()
+        if already:
+            continue
+        conn.execute(
+            "INSERT INTO client_identifiers(client_id, kind, value, created_at) VALUES (?, ?, ?, ?)",
+            (client_id, kind, value, ts),
+        )
+        created += 1
+    rollback_info["clients_added"].append(client_id)
+    return client_id, created
+
+
+def _client_id_by_unique_name(conn: sqlite3.Connection, name: str) -> int:
+    rows = conn.execute("SELECT id FROM clients WHERE name=? ORDER BY id", (name,)).fetchall()
+    if not rows:
+        raise ImportError_(f"client rule references missing client {name!r}")
+    if len(rows) > 1:
+        raise ImportError_(
+            f"client rule references ambiguous client name {name!r}; rename duplicates before importing client-scoped access rules"
+        )
+    return int(rows[0]["id"])
+
+
+def _apply_access_rule_item(conn: sqlite3.Connection, action: str, rule: dict[str, Any], rollback_info: dict[str, Any]) -> int | None:
+    """Creates one allow/deny access rule from an imported IPv4/IPv6/CIDR/
+    ClientID value, preserving the source kind exactly (never broadened to
+    a wider range). Returns the new rule id, or None if it already exists
+    (treated as a duplicate, not an error)."""
+    kind, value = rule.get("kind"), rule.get("value")
+    client_id = None
+    if kind == "client":
+        client_name = str(rule.get("client_name") or "").strip()
+        if not client_name:
+            return None
+        client_id = _client_id_by_unique_name(conn, client_name)
+        value = None
+    elif kind not in ("ipv4", "ipv4_cidr", "ipv6", "ipv6_cidr", "clientid") or not value:
+        return None
+    existing = conn.execute(
+        "SELECT id FROM access_rules WHERE action=? AND kind=? AND value IS ? AND client_id IS ?",
+        (action, kind, value, client_id),
+    ).fetchone()
+    if existing:
+        return None
+    ts = now()
+    cur = conn.execute(
+        "INSERT INTO access_rules(action, kind, value, client_id, created_at) VALUES (?, ?, ?, ?, ?)",
+        (action, kind, value, client_id, ts),
+    )
+    rollback_info["access_rules_added"].append(cur.lastrowid)
+    return cur.lastrowid
+
+
 _DESELECTION_SHORT_NAMES: dict[str, str] = {
     "blocklists": "Blocklist",
     "custom_blocks": "Custom block rule",
@@ -2153,6 +2441,14 @@ def _component_breakdown(counts: dict[str, Any], deselection_notes: list[str]) -
         lines.append(f"Upstream resolvers: {counts['upstream_resolvers']} created")
     if counts.get("client_aliases"):
         lines.append(f"Client aliases: {counts['client_aliases']} created")
+    if counts.get("clients_created"):
+        lines.append(
+            f"Clients & Access: {counts['clients_created']} persistent client(s), "
+            f"{counts.get('client_identifiers_created', 0)} identifier(s), "
+            f"{counts.get('access_rules_created', 0)} access rule(s) created"
+        )
+    elif counts.get("access_rules_created"):
+        lines.append(f"Clients & Access: {counts['access_rules_created']} access rule(s) created")
     unsupported_total = counts.get("invalid_kept_inactive", 0) + counts.get("unsupported_kept_inactive", 0)
     lines.append(f"Unsupported: {unsupported_total}")
     lines.append(f"Deselected: {counts.get('user_deselected', 0)}")
@@ -2200,6 +2496,10 @@ def apply_migration_job(
     sources_list = list(translation.get("blocklist_sources", []))
     resolvers_list = list(translation.get("upstream_resolvers", []))
     aliases_list = list(translation.get("clients_as_aliases", []))
+    clients_full_list = list(translation.get("clients_full", []))
+    access_allowed_list = list(translation.get("access_allowed", []))
+    access_denied_list = list(translation.get("access_denied", []))
+    access_default_policy = translation.get("access_default_policy")
 
     counts = {
         "blocklists_added": 0,
@@ -2214,6 +2514,10 @@ def apply_migration_job(
         "local_dns_warnings": 0,
         "upstream_resolvers": 0,
         "client_aliases": 0,
+        "clients_created": 0,
+        "client_identifiers_created": 0,
+        "access_rules_created": 0,
+        "access_default_policy_changed": 0,
         "duplicates_skipped": 0,
         "invalid_kept_inactive": 0,
         "unsupported_kept_inactive": 0,
@@ -2227,6 +2531,9 @@ def apply_migration_job(
         "aliases_added": [],
         "aliases_updated": [],
         "upstream_ids": [],
+        "clients_added": [],
+        "access_rules_added": [],
+        "access_default_policy_before": None,
     }
     failures: list[dict[str, str]] = []
     backup_path = create_pre_import_backup(strict=True)
@@ -2246,9 +2553,19 @@ def apply_migration_job(
         local_dns.init_db(conn)
         upstream_dns.init_db(conn)
         custom_rules.init_db(conn)
+        clients.init_db(conn)
+        current_access_policy_row = conn.execute("SELECT default_policy FROM access_settings WHERE id=1").fetchone()
+        current_access_policy = current_access_policy_row["default_policy"] if current_access_policy_row else "allow"
         conn.commit()
+        access_layer_touched = False
         try:
             with conn:
+                if access_default_policy in {"allow", "deny"} and access_default_policy != current_access_policy:
+                    stage = "Clients & Access default policy"
+                    rollback_info["access_default_policy_before"] = current_access_policy
+                    conn.execute("UPDATE access_settings SET default_policy=?, updated_at=? WHERE id=1", (access_default_policy, now()))
+                    counts["access_default_policy_changed"] = 1
+                    access_layer_touched = True
                 for item in items:
                     if not item["apply"] or item["key"] not in selected_keys:
                         continue
@@ -2319,6 +2636,42 @@ def apply_migration_job(
                         stage = f"client alias {client.get('display_name', '')}"
                         _apply_alias_item(conn, client, source_label, rollback_info)
                         counts["client_aliases"] += 1
+                    elif kind == "client":
+                        client = clients_full_list[index]
+                        stage = f"persistent client {client.get('name', '')}"
+                        _, identifiers_created = _apply_client_full_item(conn, client, source_label, rollback_info)
+                        counts["clients_created"] += 1
+                        counts["client_identifiers_created"] += identifiers_created
+                        access_layer_touched = access_layer_touched or bool(
+                            [i for i in client.get("identifiers", []) if i.get("kind") == "clientid"]
+                        )
+                    elif kind == "access_allow":
+                        rule = access_allowed_list[index]
+                        stage = f"allowed client {rule.get('raw', rule.get('value', ''))}"
+                        rule_id = _apply_access_rule_item(conn, "allow", rule, rollback_info)
+                        if rule_id:
+                            counts["access_rules_created"] += 1
+                            access_layer_touched = True
+                        else:
+                            counts["duplicates_skipped"] += 1
+                    elif kind == "access_deny":
+                        rule = access_denied_list[index]
+                        stage = f"denied client {rule.get('raw', rule.get('value', ''))}"
+                        rule_id = _apply_access_rule_item(conn, "deny", rule, rollback_info)
+                        if rule_id:
+                            counts["access_rules_created"] += 1
+                            access_layer_touched = True
+                        else:
+                            counts["duplicates_skipped"] += 1
+            if access_layer_touched:
+                # Deploys after the transaction above has committed, so this
+                # reads the just-applied clients/identifiers/rules. A
+                # deployment failure here (e.g. dnsdist --check-config
+                # rejects something) is caught by the same except below and
+                # fails the whole job -- deploy_access_layer() itself never
+                # leaves a broken config active (see app/clients.py).
+                stage = "deploying Clients & Access policy to dnsdist"
+                clients.deploy_access_layer(conn)
         except Exception as exc:
             counts["failed"] = 1
             failures.append({"stage": stage, "error": str(exc)})
@@ -2338,7 +2691,7 @@ def apply_migration_job(
             counts["blocklists_added"] + counts["blocklists_updated"] + counts["block_rules"] + counts["allow_rules"]
             + counts["rewrite_rules"] + counts["regex_rules"] + counts["comments"] + counts["invalid_kept_inactive"]
             + counts["unsupported_kept_inactive"] + counts["local_dns_records"] + counts["upstream_resolvers"]
-            + counts["client_aliases"]
+            + counts["client_aliases"] + counts["clients_created"] + counts["access_rules_created"]
         )
         notes = _deselection_notes(plan, deselected)
         result_label = _migration_result_label(counts)

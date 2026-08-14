@@ -201,6 +201,16 @@ case "$1" in
     # migration validates and backs up before touching anything and is a
     # no-op once already applied, so this is safe and cheap on every
     # install/upgrade, not just when there's actually something to migrate.
+    # Idempotently installs any vendor/*.whl into vendor-runtime/ for a
+    # requirements.txt pin ahead of what Debian's own package archive
+    # carries (see app/alderpointdns_compiler.py's
+    # sync_vendored_python_deps() docstring). A no-op whenever nothing
+    # under vendor/ applies.
+    if ! vendor_deps_sync_output="$(PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py vendor-deps-sync)"; then
+      echo "alderpointdns: vendored Python dependency sync failed; aborting install." >&2
+      exit 1
+    fi
+    echo "alderpointdns: vendor dependency sync: $vendor_deps_sync_output"
     if ! dnsdist_conf_migrate_output="$(PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py dnsdist-conf-migrate)"; then
       echo "alderpointdns: dnsdist.conf managed-block migration failed; aborting install." >&2
       exit 1
@@ -266,7 +276,27 @@ RESOLVCONFEOF
     fi
 
     install -d -m 0755 /etc/systemd/system/dnsdist.service.d
-    install -m 0644 /opt/alderpointdns/packaging/dnsdist.service.d/alderpointdns.conf /etc/systemd/system/dnsdist.service.d/alderpointdns.conf
+    # Only bootstrap the packaged *default* env-override drop-in when one
+    # isn't already present. On a real install this file isn't static
+    # packaging content: app/encryption.py's render_env_override() rewrites
+    # it from the live Encryption Settings (DoH/DoT/DoQ/DoH3/DNSCrypt
+    # enabled state, listen addresses, ports, and the active
+    # certificate/key paths) every time an administrator saves/deploys
+    # encryption configuration. Unconditionally overwriting it here on
+    # every package upgrade -- as this used to do -- silently reverted a
+    # live server's actual encryption configuration (e.g. DoQ/DoH3 an
+    # administrator had turned on) back to the packaged fresh-install
+    # defaults on every `apt install`/upgrade, without changing the
+    # database those settings are supposedly read from: the Encryption
+    # Settings page would keep reporting the admin's real configuration
+    # while dnsdist quietly ran with the wrong one until the next manual
+    # re-save. Found live testing a real `apt install ./alderpointdns.deb`
+    # upgrade with DoQ/DoH3 already enabled. A fresh install has no prior
+    # drop-in to preserve, so it still gets the safe packaged default
+    # (everything but plain/DoH/DoT off) exactly as before.
+    if [ ! -e /etc/systemd/system/dnsdist.service.d/alderpointdns.conf ]; then
+      install -m 0644 /opt/alderpointdns/packaging/dnsdist.service.d/alderpointdns.conf /etc/systemd/system/dnsdist.service.d/alderpointdns.conf
+    fi
     # NOT analytics.py init-db here (deliberately moved below,
     # after fresh-install-init): analytics.py's own init-db subcommand
     # calls alderpointdns_compiler.py's init_db() unconditionally, which

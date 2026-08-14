@@ -12,7 +12,7 @@ StartLimitBurst=5
 User=alderpointdns
 Group=alderpointdns
 WorkingDirectory=/opt/alderpointdns
-Environment=PYTHONPATH=/opt/alderpointdns
+Environment=PYTHONPATH=/opt/alderpointdns/vendor-runtime:/opt/alderpointdns
 ExecStart=/opt/alderpointdns/app/analytics.py run
 Restart=on-failure
 RestartSec=3

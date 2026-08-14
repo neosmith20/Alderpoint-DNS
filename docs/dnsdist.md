@@ -258,3 +258,12 @@ independent sockets and must both be opened if both transports are in use.
 Certificate trust requirements are the same as DoH/DoT: clients must trust
 the certificate `alderpointdns-lab.crt` (or your uploaded/CA-issued
 certificate) presents.
+
+## Clients & Access enforcement
+
+Per-client/per-network DNS allow/deny policy (see
+`docs/clients-and-access.md`) is compiled into native dnsdist rules
+(`NetmaskGroupRule`, `SNIRule`, `HTTPPathRule`) and evaluated before
+upstream routing and custom filtering rules, immediately after the
+NOTIFY/UPDATE/AXFR/IXFR abuse-protection block. A denied client gets
+`REFUSED` on every protocol (UDP/TCP/DoT/DoH/DoQ/DoH3) identically.

@@ -204,6 +204,14 @@ TABLE_COMPONENT_MAP = {
     "local_dns_records": "local_dns_zones",
     "local_dns_settings": "local_dns_zones",
     "client_aliases": "client_aliases",
+    # Clients & Access shares the existing "client_aliases" backup
+    # component rather than introducing a new toggle: it is the same
+    # category of data (persistent client identity/network mapping), just
+    # in the newer normalized schema. See app/clients.py.
+    "clients": "client_aliases",
+    "client_identifiers": "client_aliases",
+    "access_settings": "client_aliases",
+    "access_rules": "client_aliases",
     "admins": "user_auth_data",
     "login_attempts": "user_auth_data",
     "sessions": "user_auth_data",

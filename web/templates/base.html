@@ -19,7 +19,7 @@
 <body>
   {% if admin %}
     {% set path = request.url.path %}
-    {% set dns_active = path in ["/query-log", "/clients", "/local-dns", "/dns-settings", "/dns-cache"] %}
+    {% set dns_active = path in ["/query-log", "/clients", "/local-dns", "/dns-settings", "/dns-cache"] or path.startswith("/clients-access") %}
     {% set security_active = path in ["/custom-rules", "/blocklists"] or path.startswith("/encryption") %}
     {% set operations_active = path.startswith("/import") or path == "/replication" or path.startswith("/backup") %}
     {% set system_active = path.startswith("/statistics-settings") or path.startswith("/system") %}
@@ -97,6 +97,7 @@
           {% call nav_section("dns", "DNS", dns_active, "dns") %}
             <a class="nav-subitem{% if path == '/query-log' %} is-active{% endif %}" href="/query-log" {% if path == "/query-log" %}aria-current="page"{% endif %}>Query Log</a>
             <a class="nav-subitem{% if path == '/clients' %} is-active{% endif %}" href="/clients" {% if path == "/clients" %}aria-current="page"{% endif %}>Clients</a>
+            <a class="nav-subitem{% if path.startswith('/clients-access') %} is-active{% endif %}" href="/clients-access" {% if path.startswith("/clients-access") %}aria-current="page"{% endif %}>Clients &amp; Access</a>
             <a class="nav-subitem{% if path == '/local-dns' %} is-active{% endif %}" href="/local-dns" {% if path == "/local-dns" %}aria-current="page"{% endif %}>Local DNS</a>
             <a class="nav-subitem{% if path == '/dns-settings' %} is-active{% endif %}" href="/dns-settings" {% if path == "/dns-settings" %}aria-current="page"{% endif %}>DNS Settings</a>
             <a class="nav-subitem{% if path == '/dns-cache' %} is-active{% endif %}" href="/dns-cache" {% if path == "/dns-cache" %}aria-current="page"{% endif %}>Cache</a>

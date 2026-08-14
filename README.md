@@ -8,7 +8,7 @@ localhost-only validating cache/forwarder; filtering policy is compiled into
 a BIND RPZ zone and reloaded through a staged, validated deployment path.
 
 > **Status: stable release line.** The current public stable release is
-> **v1.0.2**, published through GitHub Releases. Alderpoint DNS is
+> **v1.1.0**, published through GitHub Releases. Alderpoint DNS is
 > functional and acceptance-tested, but several
 > features are intentionally partial or narrowly scoped by design. See
 > [Known limitations](#known-limitations) below and
@@ -38,6 +38,10 @@ requires a separate license — see `LICENSE` and
   the official PowerDNS repository build that does), plus managed upstream
   resolvers over plain DNS, DoT, and DoH. See `docs/dnsdist.md` and
   `docs/configuration.md`.
+- **Clients & Access.** Persistent named clients with multiple identifiers
+  (IPv4/IPv6/CIDR/ClientID), strong 192-bit/256-bit ClientIDs, and DNS-level
+  allow/deny policy enforced natively at dnsdist across every protocol
+  (UDP/TCP/DoT/DoH/DoQ/DoH3). See `docs/clients-and-access.md`.
 - **Replication.** One-way primary-to-replica configuration sync with hashed,
   one-time, revocable enrollment tokens and mTLS client authentication.
   Promotion is manual by design; automatic failover and bidirectional conflict
@@ -106,17 +110,12 @@ curl -fL -o alderpointdns.deb https://github.com/neosmith20/Alderpoint-DNS/relea
 
 Both commands always install the current latest stable release -- the
 `alderpointdns_latest_all.deb` asset is the stable, permanent latest-release
-download name. Public v1.0.2 is a one-time bridge release, so its GitHub
-release intentionally publishes exactly two assets:
-`alderpointdns_latest_all.deb` and `SHA256SUMS`. It does not publish a
-versioned v1.0.2 `.deb` asset. This lets older v1.0.0 updater logic see
-exactly one compatible Alderpoint DNS package while preserving the normal
-latest-release download URL.
-
-For later normal releases, `alderpointdns_latest_all.deb` may again be
-published alongside and byte-identical to that release's versioned package,
-just without a version number in the filename, so these commands never need
-updating. `apt install` resolves and installs BIND, dnsdist, and every other
+download name, byte-identical to that release's versioned `.deb`, so these
+commands never need updating. Public v1.0.2 was a one-time bridge release
+for unmodified v1.0.0 appliances and published only that alias asset (see
+`docs/packaging.md`); v1.1.0 and later releases publish both the versioned
+package and the `alderpointdns_latest_all.deb` alias alongside `SHA256SUMS`.
+`apt install` resolves and installs BIND, dnsdist, and every other
 dependency from Debian's own repositories; nothing is piped from the network
 into a root shell unreviewed.
 
@@ -190,6 +189,7 @@ satisfied.
 - Architecture: `docs/architecture.md`
 - Filtering and custom rules: `docs/filtering.md`
 - Migration from AdGuard Home / Pi-hole: `docs/migration.md`
+- Clients & Access: `docs/clients-and-access.md`
 - Backup and recovery: `docs/backup-recovery.md`
 - Network Configuration: `docs/network-configuration.md`
 - Replication: `docs/replication-promotion.md`

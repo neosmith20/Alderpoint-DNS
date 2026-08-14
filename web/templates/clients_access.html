@@ -1,0 +1,222 @@
+{% extends "base.html" %}
+{% import "components.html" as ui %}
+{% block title %}Clients & Access - Alderpoint DNS{% endblock %}
+{% block content %}
+{{ ui.page_header("Clients & Access", "Persistent named clients, strong ClientIDs, and DNS allow/deny policy -- enforced at dnsdist, before BIND ever sees the query.") }}
+
+{% if error %}
+  <div class="alert error" role="alert">{{ error }}</div>
+{% endif %}
+
+{% if generated_clientid %}
+  <div class="alert" role="alert">
+    <strong>New {{ generated_bits }}-bit ClientID generated and assigned.</strong> Copy it now -- it is not stored anywhere else in this UI and Alderpoint does not log it.
+    <div class="mono" style="word-break:break-all; margin-top:.5em;">{{ generated_clientid }}</div>
+    {% if generated_bits == 256 %}
+      <p class="muted">DNS-safe label for DoT/DoQ hostname transports (same 256 bits, Base32-encoded so it fits a 63-character DNS label):<br>
+      <span class="mono">{{ generated_clientid | dns_safe_label }}.clientid.alderpointdns.local</span></p>
+    {% endif %}
+  </div>
+{% endif %}
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Default Access Policy</h2>{{ ui.status_badge("Default " ~ (default_policy | capitalize), "healthy" if default_policy == "allow" else "warning") }}</div>
+  <p>Precedence is always: an explicit <strong>Deny</strong> wins over an explicit <strong>Allow</strong>, which wins over this default. Loopback (127.0.0.1 / ::1) is always exempt from a Default Deny automatically, so Alderpoint's own health checks are never locked out -- an explicit Deny rule against loopback, if you deliberately add one, still applies.</p>
+  <form method="post" action="/clients-access/policy" class="stack">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="grid compact">
+      <label>Default policy
+        <select name="default_policy">
+          <option value="allow" {% if default_policy == "allow" %}selected{% endif %}>Allow (block only explicitly denied clients)</option>
+          <option value="deny" {% if default_policy == "deny" %}selected{% endif %}>Deny (allow only explicitly allowed clients)</option>
+        </select>
+      </label>
+    </div>
+    <label class="row">
+      <input type="checkbox" name="confirm" value="1">
+      Switching to <strong>Default Deny</strong> can block every client on the network that is not explicitly allowed below. I have reviewed the Allowed entries and want to proceed. (Only required when selecting Deny.)
+    </label>
+    <div class="form-actions">
+      <button data-pending-label="Saving and deploying…">Save policy</button>
+    </div>
+  </form>
+</section>
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Access Rules</h2></div>
+  <p class="muted">Rules can target a raw IPv4/IPv6 address or CIDR, a strong ClientID, or a persistent client below (which expands to all of that client's identifiers while it is enabled).</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Action</th><th>Kind</th><th>Target</th><th></th></tr></thead>
+      <tbody>
+        {% for rule in rules %}
+          <tr>
+            <td>{{ ui.status_badge(rule.action | capitalize, "danger" if rule.action == "deny" else "healthy") }}</td>
+            <td>{{ rule.kind }}</td>
+            <td class="mono">{{ rule.client_name if rule.kind == "client" else rule.value }}{% if rule.kind == "client" and not rule.client_enabled %} (client disabled){% endif %}</td>
+            <td>
+              <form method="post" action="/clients-access/rules/{{ rule.id }}/delete" data-confirm="Remove this access rule?">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <button class="secondary small">Remove</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="4" class="muted">No explicit allow/deny rules yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <form method="post" action="/clients-access/rules" class="grid compact">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Action
+      <select name="action">
+        <option value="allow">Allow</option>
+        <option value="deny">Deny</option>
+      </select>
+    </label>
+    <label>Kind
+      <select name="kind">
+        <option value="ipv4">IPv4 address</option>
+        <option value="ipv4_cidr">IPv4 CIDR</option>
+        <option value="ipv6">IPv6 address</option>
+        <option value="ipv6_cidr">IPv6 CIDR</option>
+        <option value="clientid">ClientID (48 or 64 hex)</option>
+        <option value="client">Persistent client</option>
+      </select>
+    </label>
+    <label>Value (ignored for "Persistent client")
+      <input name="value" autocomplete="off" placeholder="192.168.32.0/24, 2001:db8::/64, or a ClientID">
+    </label>
+    <label>Persistent client (only for "Persistent client")
+      <select name="client_id">
+        <option value="">-- none --</option>
+        {% for client in clients %}
+          <option value="{{ client.id }}">{{ client.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <div class="form-actions">
+      <button data-pending-label="Saving and deploying…">Add rule</button>
+    </div>
+  </form>
+</section>
+
+<section class="panel stack">
+  <div class="panel__head"><h2>Persistent Clients</h2></div>
+  <p class="muted">A single client can hold several identifiers (multiple IPs/CIDRs, and a ClientID for encrypted DNS) instead of creating duplicate entries per device/protocol.</p>
+
+  {% for client in clients %}
+    <div class="card stack">
+      <div class="panel__head">
+        <h3>{{ client.name }} {{ ui.status_badge("Enabled" if client.enabled else "Disabled", "healthy" if client.enabled else "neutral") }}</h3>
+        <div class="actions">
+          <form method="post" action="/clients-access/clients/{{ client.id }}/toggle" style="display:inline">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="enabled" value="{{ 0 if client.enabled else 1 }}">
+            <button class="secondary small">{{ "Disable" if client.enabled else "Enable" }}</button>
+          </form>
+          <form method="post" action="/clients-access/clients/{{ client.id }}/delete" style="display:inline" data-confirm="Delete client {{ client.name }} and all its identifiers/access rules?">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button class="secondary small">Delete</button>
+          </form>
+        </div>
+      </div>
+      {% if client.description %}<p class="muted">{{ client.description }}</p>{% endif %}
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Kind</th><th>Value</th><th>Effective DNS access</th><th></th></tr></thead>
+          <tbody>
+            {% for entry in client.effective %}
+              <tr>
+                <td>{{ entry.identifier.kind }}</td>
+                <td class="mono">
+                  {{ entry.identifier.value }}
+                  {% if entry.identifier.kind == "clientid" %}
+                    ({{ 192 if entry.identifier.value|length == 48 else 256 }}-bit)
+                  {% endif %}
+                </td>
+                <td>{{ ui.status_badge("Allowed" if entry.decision.allowed else "Denied", "healthy" if entry.decision.allowed else "danger") }} <span class="muted">{{ entry.decision.reason }}</span></td>
+                <td>
+                  <form method="post" action="/clients-access/identifiers/{{ entry.identifier.id }}/delete" data-confirm="Remove this identifier?">
+                    <input type="hidden" name="csrf" value="{{ csrf }}">
+                    <button class="secondary small">Remove</button>
+                  </form>
+                </td>
+              </tr>
+            {% else %}
+              <tr><td colspan="4" class="muted">No identifiers yet.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <form method="post" action="/clients-access/clients/{{ client.id }}/identifiers" class="grid compact">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <label>Add identifier (IPv4/IPv6/CIDR/ClientID)
+          <input name="value" autocomplete="off">
+        </label>
+        <div class="form-actions">
+          <button data-pending-label="Adding…">Add</button>
+        </div>
+      </form>
+      <form method="post" action="/clients-access/clients/{{ client.id }}/identifiers" class="actions">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="generate_bits" value="192">
+        <button class="secondary small">Generate 192-bit ClientID</button>
+      </form>
+      <form method="post" action="/clients-access/clients/{{ client.id }}/identifiers" class="actions">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="generate_bits" value="256">
+        <button class="small">Generate 256-bit ClientID -- Recommended</button>
+      </form>
+      <form method="post" action="/clients-access/clients/{{ client.id }}/edit" class="grid compact">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <label>Name
+          <input name="name" value="{{ client.name }}" required>
+        </label>
+        <label>Description
+          <input name="description" value="{{ client.description }}">
+        </label>
+        <input type="hidden" name="enabled" value="{{ 1 if client.enabled else 0 }}">
+        <div class="form-actions">
+          <button class="secondary small" data-pending-label="Saving…">Save name/description</button>
+        </div>
+      </form>
+    </div>
+  {% else %}
+    <p class="muted">No persistent clients yet.</p>
+  {% endfor %}
+
+  <form method="post" action="/clients-access/clients" class="stack">
+    <div class="panel__head"><h3>Add Client</h3></div>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Name
+      <input name="name" required autocomplete="off">
+    </label>
+    <label>Description
+      <input name="description" autocomplete="off">
+    </label>
+    <label>Identifiers (one per line: IPv4, IPv4 CIDR, IPv6, IPv6 CIDR, or ClientID -- optional, more can be added after creation)
+      <textarea name="identifiers" rows="3" placeholder="192.168.32.47&#10;192.168.32.0/28&#10;2001:db8::47"></textarea>
+    </label>
+    <div class="form-actions">
+      <button data-pending-label="Creating…">Add client</button>
+    </div>
+  </form>
+</section>
+
+<section class="panel stack">
+  <div class="panel__head"><h2>About ClientIDs</h2></div>
+  <p class="muted">
+    A ClientID is a strong random identifier (192-bit / 48 hex minimum, 256-bit / 64 hex recommended), generated
+    with a cryptographically secure source and never accepted below the 192-bit minimum -- Alderpoint does not
+    support 128-bit/32-hex or other short/weak ClientIDs. It identifies a client on encrypted-DNS transports
+    (DoT/DoQ via TLS SNI, DoH via the request path); this dnsdist build (2.1.1) supports SNI-based matching for
+    DoT/DoQ and path-based matching for DoH. A ClientID is <strong>identification, not authentication</strong>:
+    its length makes it extremely hard to guess, but anyone who learns the exact value can present it too -- there
+    is no certificate or signature involved. A 256-bit ClientID does not fit a single DNS hostname label (63
+    characters), so DoT/DoQ transports use a lossless Base32-encoded label instead of the raw hex; DoH's path
+    has no such limit, so it always carries the full 64-hex value.
+  </p>
+</section>
+{% endblock %}

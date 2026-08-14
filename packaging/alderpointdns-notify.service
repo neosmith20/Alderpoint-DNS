@@ -7,7 +7,7 @@ Type=oneshot
 User=alderpointdns
 Group=alderpointdns
 WorkingDirectory=/opt/alderpointdns
-Environment=PYTHONPATH=/opt/alderpointdns
+Environment=PYTHONPATH=/opt/alderpointdns/vendor-runtime:/opt/alderpointdns
 ExecStart=/opt/alderpointdns/app/notify_check.py
 NoNewPrivileges=true
 PrivateTmp=true

@@ -52,3 +52,11 @@ for trusted, standard, IoT, and restricted networks; category keys for malware,
 ads and trackers, adult content, IoT telemetry, SafeSearch, and custom policy;
 and a `network_policies` table that can bind CIDRs to profiles once actual
 client networks are supplied.
+
+Clients & Access (`docs/clients-and-access.md`) is the one piece of
+per-client policy that *is* fully enforced at runtime today: persistent
+named clients (with IPv4/IPv6/CIDR/ClientID identifiers) and DNS-level
+allow/deny rules, compiled into native dnsdist rules and applied before
+upstream routing or custom filtering. It is deliberately separate from the
+`network_policies`/profile-category model above, which governs content
+filtering categories, not DNS access itself.

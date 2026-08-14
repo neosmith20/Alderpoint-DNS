@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
+import csv
 import datetime as dt
+import email
 import fcntl
 import hashlib
 import io
@@ -23,14 +26,15 @@ import time
 import traceback
 import urllib.error
 import urllib.request
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 try:
-    from app import backup, custom_rules, dns_cache, encryption, filter_schedule, local_dns, network_config, replication, service_logs, software_updates, upstream_dns
+    from app import backup, clients, custom_rules, dns_cache, encryption, filter_schedule, local_dns, network_config, replication, service_logs, software_updates, upstream_dns
 except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from app import backup, custom_rules, dns_cache, encryption, filter_schedule, local_dns, network_config, replication, service_logs, software_updates, upstream_dns
+    from app import backup, clients, custom_rules, dns_cache, encryption, filter_schedule, local_dns, network_config, replication, service_logs, software_updates, upstream_dns
 
 
 DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
@@ -249,7 +253,7 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition
         conn.execute(f'ALTER TABLE {table} ADD COLUMN "{column}" {definition}')
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 PARSER_CACHE_VERSION = "2026-08-09-v1-parser-fastpath"
 POLICY_CACHE_VERSION = "2026-08-09-v1-policy-manifest"
 PROTECTION_REUSE_UNAVAILABLE = 2
@@ -509,6 +513,7 @@ def _apply_schema(conn: sqlite3.Connection, *, seed_defaults: bool = False) -> N
     local_dns.init_db(conn)
     filter_schedule.init_db(conn)
     custom_rules.init_db(conn)
+    clients.init_db(conn)
 
 
 def init_db(*, seed_defaults: bool = False) -> bool:
@@ -1505,6 +1510,148 @@ def wait_until(predicate, timeout: int = 50) -> bool:
     return predicate()
 
 
+VENDOR_DIR = Path("/opt/alderpointdns/vendor")
+VENDOR_RUNTIME_DIR = Path("/opt/alderpointdns/vendor-runtime")
+VENDOR_REQUIREMENTS_PATH = Path("/opt/alderpointdns/requirements.txt")
+VENDOR_WHEEL_SHA256 = {
+    "python_multipart-0.0.31-py3-none-any.whl": "8408153d68a9773291fc1da39a8b85a50044bddbabd2dd72e9229776b7b15e28",
+}
+
+
+def _normalize_dist_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _verify_vendor_wheel(wheel: Path, dist_name: str, pinned_version: str) -> set[str]:
+    expected_hash = VENDOR_WHEEL_SHA256.get(wheel.name)
+    if not expected_hash:
+        raise RuntimeError(f"vendored wheel {wheel.name} has no pinned SHA-256")
+    actual_hash = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    if actual_hash != expected_hash:
+        raise RuntimeError(f"vendored wheel {wheel.name} SHA-256 mismatch: expected {expected_hash}, got {actual_hash}")
+
+    with zipfile.ZipFile(wheel) as zf:
+        metadata_name = f"{wheel.stem.split('-')[0]}-{pinned_version}.dist-info/METADATA"
+        metadata_candidates = [name for name in zf.namelist() if name.endswith(".dist-info/METADATA")]
+        if metadata_name not in zf.namelist() and len(metadata_candidates) == 1:
+            metadata_name = metadata_candidates[0]
+        metadata = email.message_from_bytes(zf.read(metadata_name))
+        wheel_name = _normalize_dist_name(metadata.get("Name", ""))
+        wheel_version = metadata.get("Version", "")
+        if wheel_name != dist_name or wheel_version != pinned_version:
+            raise RuntimeError(f"vendored wheel {wheel.name} metadata is {wheel_name}=={wheel_version}, expected {dist_name}=={pinned_version}")
+
+        record_name = metadata_name.rsplit("/", 1)[0] + "/RECORD"
+        record_rows = zf.read(record_name).decode().splitlines()
+        for parts in csv.reader(record_rows):
+            if len(parts) < 3:
+                raise RuntimeError(f"vendored wheel {wheel.name} has malformed RECORD entry: {parts!r}")
+            path, digest, size = parts[0], parts[1], parts[2]
+            data = zf.read(path)
+            if size and int(size) != len(data):
+                raise RuntimeError(f"vendored wheel {wheel.name} RECORD size mismatch for {path}")
+            if digest:
+                algo, _, b64_digest = digest.partition("=")
+                actual_digest = base64.urlsafe_b64encode(hashlib.new(algo, data).digest()).rstrip(b"=").decode()
+                if actual_digest != b64_digest:
+                    raise RuntimeError(f"vendored wheel {wheel.name} RECORD digest mismatch for {path}")
+
+        top_level: set[str] = set()
+        for name in zf.namelist():
+            first = name.split("/", 1)[0]
+            if first and not first.endswith(".dist-info"):
+                top_level.add(first)
+        return top_level
+
+
+def _remove_existing_vendor_runtime_files(dist_name: str, import_roots: set[str]) -> None:
+    if not VENDOR_RUNTIME_DIR.exists():
+        return
+    for root in import_roots:
+        candidate = VENDOR_RUNTIME_DIR / root
+        if candidate.is_dir():
+            shutil.rmtree(candidate)
+        elif candidate.exists():
+            candidate.unlink()
+    dist_prefix = dist_name.replace("-", "_")
+    for candidate in VENDOR_RUNTIME_DIR.glob(f"{dist_prefix}-*.dist-info"):
+        if candidate.is_dir():
+            shutil.rmtree(candidate)
+        elif candidate.exists():
+            candidate.unlink()
+
+
+def _normalize_vendor_runtime_permissions() -> None:
+    if not VENDOR_RUNTIME_DIR.exists():
+        return
+    for path in [VENDOR_RUNTIME_DIR, *VENDOR_RUNTIME_DIR.rglob("*")]:
+        if path.is_dir():
+            path.chmod(0o755)
+        else:
+            path.chmod(0o644)
+
+
+def sync_vendored_python_deps() -> str:
+    """Installs any requirements.txt-pinned package for which a wheel is
+    vendored under vendor/ into vendor-runtime/, via `pip install --target`
+    (never into the system/dpkg-managed site-packages -- --target writes to
+    an Alderpoint-owned directory only, so this can never conflict with or
+    drift dpkg's own tracking of the Debian-packaged version of the same
+    library). Alderpoint's systemd units put vendor-runtime first on
+    PYTHONPATH, so a vendored package wins the import over the Debian
+    package, without ever touching or uninstalling it.
+
+    This exists because Debian's own package archive does not always carry
+    the exact upstream version requirements.txt pins (as of this change,
+    Debian trixie's python3-python-multipart tops out at 0.0.20, and even
+    unstable/forky only has 0.0.26 -- nowhere in Debian ships 0.0.31). This
+    is the supported mechanism for that gap: `--no-index --find-links`
+    against the vendored wheel only, so it never needs network access at
+    deploy time, and it's a no-op (returns "no vendored dependency updates
+    needed") wherever nothing under vendor/ applies.
+
+    Idempotent and cheap to call on every install/upgrade, matching
+    dnsdist_conf_migrate()'s own convention."""
+    if not VENDOR_DIR.is_dir():
+        return "no vendored dependency updates needed (no vendor/ directory)"
+    wheels = sorted(VENDOR_DIR.glob("*.whl"))
+    if not wheels:
+        return "no vendored dependency updates needed (vendor/ is empty)"
+    requirements_path = VENDOR_REQUIREMENTS_PATH
+    if not requirements_path.exists():
+        requirements_path = Path(__file__).resolve().parent.parent / "requirements.txt"
+    pins: dict[str, str] = {}
+    for line in requirements_path.read_text().splitlines():
+        line = line.strip()
+        if "==" in line and not line.startswith("#"):
+            name, _, version = line.partition("==")
+            pins[name.strip().lower().replace("_", "-")] = version.strip()
+    installed: list[str] = []
+    for wheel in wheels:
+        # Wheel filename: {name}-{version}-{python tag}-{abi tag}-{platform tag}.whl
+        dist_name = _normalize_dist_name(wheel.name.split("-")[0])
+        pinned_version = pins.get(dist_name)
+        if not pinned_version:
+            continue
+        import_roots = _verify_vendor_wheel(wheel, dist_name, pinned_version)
+        spec = f"{dist_name}=={pinned_version}"
+        VENDOR_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        _remove_existing_vendor_runtime_files(dist_name, import_roots)
+        run([
+            "python3", "-B", "-m", "pip", "install",
+            "--no-index", "--find-links", str(VENDOR_DIR),
+            "--target", str(VENDOR_RUNTIME_DIR),
+            "--upgrade",
+            "--no-compile",
+            spec,
+        ])
+        _normalize_vendor_runtime_permissions()
+        installed.append(spec)
+    if not installed:
+        return "no vendored dependency updates needed (no vendored wheel matches a requirements.txt pin)"
+    return "vendored dependency updates applied: " + ", ".join(installed)
+
+
 def dnsdist_conf_migrate() -> str:
     """Run every currently-defined dnsdist.conf managed-block migration
     (base parameterization, then doh-altsvc) idempotently, without
@@ -1526,6 +1673,12 @@ def dnsdist_conf_migrate() -> str:
         parts.append(altsvc_message)
     elif altsvc_message:
         parts.append(altsvc_message)
+    if clients.ensure_doh_clientid_paths_migration():
+        parts.append("DoH ClientID path routing added")
+    if clients.ensure_dnsdist_access_include():
+        parts.append("Clients & Access dofile include added")
+    if clients.ensure_access_data_files():
+        parts.append("Clients & Access data files written")
     if not parts:
         parts.append("no dnsdist.conf migrations were needed; already up to date")
     return "; ".join(parts)
@@ -2257,11 +2410,18 @@ def main(argv: list[str] | None = None) -> int:
     upstream_dep.set_defaults(func=_run_upstream_deploy_for_cli)
     encryption_dep = sub.add_parser("encryption-deploy")
     encryption_dep.set_defaults(func=lambda args: print(_locked(encryption.deploy_encryption)))
+    access_policy_dep = sub.add_parser("access-policy-deploy")
+    access_policy_dep.set_defaults(func=lambda args: print(_locked(clients.deploy_access_layer)))
     dnsdist_conf_migrate_parser = sub.add_parser(
         "dnsdist-conf-migrate",
         help="idempotently apply dnsdist.conf managed-block migrations (e.g. doh-altsvc) without restarting dnsdist",
     )
     dnsdist_conf_migrate_parser.set_defaults(func=lambda args: print(dnsdist_conf_migrate()))
+    vendor_sync_parser = sub.add_parser(
+        "vendor-deps-sync",
+        help="idempotently install any vendor/*.whl into vendor-runtime/ for packages requirements.txt pins ahead of what Debian packages",
+    )
+    vendor_sync_parser.set_defaults(func=lambda args: print(sync_vendored_python_deps()))
     backup_create_parser = sub.add_parser("backup-create")
     backup_create_parser.set_defaults(func=backup_create)
     backup_restore_parser = sub.add_parser("backup-restore")

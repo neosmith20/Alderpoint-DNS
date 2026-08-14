@@ -2,6 +2,74 @@
 
 All notable changes to Alderpoint DNS are documented in this file.
 
+## v1.1.0
+
+A feature release. The date is set during final public release publication,
+not during RC preparation.
+
+- Added Clients & Access: persistent named clients with multiple identifiers
+  (IPv4/IPv6/CIDR/ClientID), strong 192-bit/256-bit ClientIDs (never below
+  192-bit), and DNS-level allow/deny access policy enforced natively at
+  dnsdist (`NetmaskGroupRule` for IP/CIDR, `SNIRule`/`HTTPPathRule` for
+  ClientID on DoT/DoQ/DoH) with deny-always-wins precedence. See
+  `docs/clients-and-access.md`.
+- AdGuard Home migration now maps persistent clients (every identifier, not
+  just the first) and allowed_clients/disallowed_clients into Clients &
+  Access; ClientIDs below the 192-bit minimum are preserved as an inactive
+  finding, never silently activated; duplicate migration runs no longer
+  create a second, redundant client for the same source identity.
+- Native export format bumped to v2 (adds `clients`/`access_policy`,
+  v1 fields kept for compatibility); backup/restore and replication cover
+  the new tables.
+- Migrates existing `client_aliases` rows into the new model idempotently;
+  the legacy table remains for backward compatibility, and a since-deleted
+  migrated client no longer resurrects a zombie alias row on a later import.
+- Fixed DoH ClientID identification so every ClientID used only in a bare
+  access rule (not already registered some other way) gets its own DoH path
+  registered on the frontend, and corrected privileged deploy calls for
+  Clients & Access to run through the same sudo-bounded boundary as every
+  other deployment path instead of in-process. Native import/export now
+  preserves access policy on round-trip.
+- Analytics resolves client addresses to persistent-client names
+  (most-specific network match), gated so it never runs on
+  anonymized/truncated addresses.
+- Bumped the vendored `python-multipart` dependency to 0.0.31 and hardened
+  the vendored-runtime sync mechanism: the packaged wheel is hash-verified
+  before install, `vendor-deps-sync` is idempotent and safe to run on every
+  package install/upgrade, and the running web service resolves the module
+  from `/opt/alderpointdns/vendor-runtime` ahead of any older copy Debian's
+  own package archive might provide.
+- Fixed encryption deployment failure reporting: every `/encryption/*`
+  mutation route (settings, self-signed, local CA, certificate upload,
+  existing-path certificate) previously discarded the privileged deploy
+  step's return code and redirected as success regardless of outcome. A
+  failed deployment (dnsdist restart failure, a live protocol test failure,
+  a bad certificate/key pair) is now reported to the administrator as a
+  failure, the previous working certificate/key and dnsdist configuration
+  are preserved via rollback, and the admin audit log reflects the true
+  outcome.
+- Fixed a package-upgrade bug found during v1.1.0 release validation:
+  `postinst` unconditionally overwrote
+  `/etc/systemd/system/dnsdist.service.d/alderpointdns.conf` -- the
+  systemd env-override drop-in `app/encryption.py`'s
+  `render_env_override()` actually manages from live Encryption Settings
+  (DoH/DoT/DoQ/DoH3/DNSCrypt enabled state, listen addresses, ports,
+  active cert/key paths) -- with the packaged fresh-install default on
+  every install, including upgrades. A live server with, for example,
+  DoQ/DoH3 already enabled silently lost that configuration (reverted to
+  the packaged default) on every package upgrade, with the database and
+  Encryption Settings page still reporting the administrator's real,
+  unchanged configuration throughout. `postinst` now only bootstraps the
+  packaged default when no drop-in already exists, preserving whatever an
+  existing installation's own encryption deployment already wrote.
+- Fixed atomic certificate/key promotion during encryption deployment: the
+  privileged deploy step could fail with "Invalid cross-device link" when
+  promoting newly staged certificate/key material into place under
+  `alderpointdns.service`'s sandboxed mount namespace, even though the
+  underlying filesystem was the same device. Promotion now falls back to a
+  copy-and-replace when an atomic rename isn't possible across the sandbox's
+  separate bind mounts.
+
 ## v1.0.2 (unreleased)
 
 A targeted Software Updates bugfix and one-time bridge release. The date is

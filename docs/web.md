@@ -32,6 +32,12 @@ borders, text, accent, success, warning, danger, blocked, malware, adult
 category, spacing, radius, and shadows. Runtime JavaScript is local-only in
 `web/static/app.js`; public CDNs are not used.
 
+The "Clients & Access" nav item (under DNS, alongside Query Log/Clients/
+Local DNS) is its own dedicated admin area -- not folded into Local DNS
+despite historically-related client-alias plumbing living there -- for
+persistent clients, ClientID generation, and DNS allow/deny policy. See
+`docs/clients-and-access.md`.
+
 The dashboard is organized around DNS-appliance information hierarchy:
 
 - Protection state and protection enable/disable action with confirmation.

@@ -7,6 +7,7 @@ web opt/alderpointdns/
 VERSION opt/alderpointdns/
 requirements.txt opt/alderpointdns/
 requirements-debian.txt opt/alderpointdns/
+vendor opt/alderpointdns/
 packaging/alderpointdns.service lib/systemd/system/
 packaging/alderpointdns-analytics.service lib/systemd/system/
 packaging/alderpointdns-backup.service lib/systemd/system/

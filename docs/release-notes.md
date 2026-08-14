@@ -4,6 +4,43 @@ These notes describe what changed in each release. See
 `docs/known-limitations.md` for the current honest state of the project.
 Everything below `v1.0.0` was a beta-cycle build.
 
+## v1.1.0
+
+A feature release, built on the v1.0.2 bridge/bugfix release below.
+
+- **Clients & Access.** Persistent named clients with multiple identifiers
+  per client (IPv4 addresses, IPv4 CIDRs, IPv6 addresses, IPv6 CIDRs, and
+  ClientIDs), a Default Allow/Default Deny policy, and explicit Allow/Deny
+  rules with deny-over-allow precedence, enforced natively at dnsdist across
+  every protocol (plain DNS, DoT, DoH, DoQ). Includes AdGuard Home client
+  and access-policy migration, native export/import, backup/restore
+  coverage, replication coverage, and admin audit logging. See
+  `docs/clients-and-access.md`.
+- **Strong ClientIDs.** Cryptographically secure 192-bit (48-hex) and
+  256-bit (64-hex) ClientIDs, with a DNS-safe Base32 representation for
+  256-bit IDs carried in hostname-label-based transports (DoH/DoT/DoQ). A
+  ClientID identifies a client to Alderpoint's access policy; it is not a
+  cryptographic authentication credential.
+- **python-multipart 0.0.31.** The multipart form-parsing dependency used
+  for file uploads is now vendored at 0.0.31 through a hardened,
+  hash-verified runtime sync mechanism, independent of whatever version
+  Debian's own package archive currently provides.
+- **Encryption reliability fixes.** A failed certificate/key or dnsdist
+  deployment is no longer reported to the administrator as a success; the
+  previous working certificate/key and dnsdist configuration are preserved
+  via rollback whenever a deployment fails, a certificate/key promotion
+  failure across the service's sandboxed filesystem boundary is fixed, and
+  a package upgrade no longer silently reverts a live server's encryption
+  configuration (e.g. previously-enabled DoQ/DoH3) back to the fresh-install
+  default.
+- **Other fixes found during review:** DoH ClientID path registration for
+  ClientIDs used only in a bare access rule; AdGuard migration no longer
+  creates a duplicate client for the same source identity; Clients & Access
+  deployment now runs through the same privileged sudo boundary as every
+  other deployment path; native import/export preserves access policy on
+  round-trip; a deleted migrated client no longer resurrects a zombie alias
+  row on a later import.
+
 ## v1.0.2 (unreleased)
 
 A targeted Software Updates bugfix release:

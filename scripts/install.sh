@@ -151,6 +151,8 @@ install_config() {
   run install -D -m 0644 "$SOURCE_DIR/packaging/alderpointdns-backup.timer" "$(root_path /etc/systemd/system/alderpointdns-backup.timer)"
   run install -D -m 0644 "$SOURCE_DIR/packaging/alderpointdns-filter-update.service" "$(root_path /etc/systemd/system/alderpointdns-filter-update.service)"
   run install -D -m 0644 "$SOURCE_DIR/packaging/alderpointdns-filter-update.timer" "$(root_path /etc/systemd/system/alderpointdns-filter-update.timer)"
+  run install -D -m 0644 "$SOURCE_DIR/packaging/alderpointdns-notify.service" "$(root_path /etc/systemd/system/alderpointdns-notify.service)"
+  run install -D -m 0644 "$SOURCE_DIR/packaging/alderpointdns-notify.timer" "$(root_path /etc/systemd/system/alderpointdns-notify.timer)"
   run install -D -m 0440 "$SOURCE_DIR/packaging/sudoers-alderpointdns" "$(root_path /etc/sudoers.d/alderpointdns)"
   run install -D -m 0644 "$SOURCE_DIR/packaging/logrotate-alderpointdns" "$(root_path /etc/logrotate.d/alderpointdns)"
   run install -D -m 0644 "$SOURCE_DIR/packaging/named.conf.options" "$(root_path /etc/bind/named.conf.options)"
@@ -213,6 +215,14 @@ initialize() {
     # Idempotent either way (CREATE TABLE IF NOT EXISTS) once the schema
     # already exists from fresh-install-init above.
     PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/analytics.py init-db
+    # Idempotently installs any vendor/*.whl into vendor-runtime/ for a
+    # requirements.txt pin ahead of what Debian's own package archive
+    # carries (see app/alderpointdns_compiler.py's
+    # sync_vendored_python_deps() docstring). A no-op whenever nothing
+    # under vendor/ applies. Must run before the service is started so its
+    # PYTHONPATH (which puts vendor-runtime first) picks this up on the
+    # very first start.
+    PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py vendor-deps-sync
     # Narrowly the database (created above by fresh-install-init, running as root),
     # not a blanket recursive chown of /var/lib/alderpointdns: backups/
     # imports/staging are already alderpointdns-owned from create_layout()
