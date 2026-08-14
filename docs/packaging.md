@@ -40,11 +40,11 @@ Local test package build:
 
 ```sh
 ./scripts/build-deb.sh --output-dir /tmp
-dpkg-deb --info /tmp/alderpointdns_1.0.2-1_all.deb
+dpkg-deb --info /tmp/alderpointdns_1.1.0-1_all.deb
 ```
 
 The `.deb` filename and package `Version:` field are derived from the
-semver-style `VERSION` file (`1.0.2`) by `build-deb.sh`; a pre-release
+semver-style `VERSION` file (`1.1.0`) by `build-deb.sh`; a pre-release
 `VERSION` (e.g. `1.1.0-beta.1`) would use the Debian pre-release convention
 (`~betaN-1`) instead -- not the raw `VERSION` contents either way. See
 `docs/versioning.md`.

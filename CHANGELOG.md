@@ -2,7 +2,10 @@
 
 All notable changes to Alderpoint DNS are documented in this file.
 
-## Unreleased (next-release/backup-restore-and-network-config)
+## v1.1.0
+
+A feature release. The date is set during final public release publication,
+not during RC preparation.
 
 - Added Clients & Access: persistent named clients with multiple identifiers
   (IPv4/IPv6/CIDR/ClientID), strong 192-bit/256-bit ClientIDs (never below
@@ -13,15 +16,45 @@ All notable changes to Alderpoint DNS are documented in this file.
 - AdGuard Home migration now maps persistent clients (every identifier, not
   just the first) and allowed_clients/disallowed_clients into Clients &
   Access; ClientIDs below the 192-bit minimum are preserved as an inactive
-  finding, never silently activated.
-- Analytics resolves client addresses to persistent-client names
-  (most-specific network match), gated so it never runs on
-  anonymized/truncated addresses.
+  finding, never silently activated; duplicate migration runs no longer
+  create a second, redundant client for the same source identity.
 - Native export format bumped to v2 (adds `clients`/`access_policy`,
   v1 fields kept for compatibility); backup/restore and replication cover
   the new tables.
 - Migrates existing `client_aliases` rows into the new model idempotently;
-  the legacy table remains for backward compatibility.
+  the legacy table remains for backward compatibility, and a since-deleted
+  migrated client no longer resurrects a zombie alias row on a later import.
+- Fixed DoH ClientID identification so every ClientID used only in a bare
+  access rule (not already registered some other way) gets its own DoH path
+  registered on the frontend, and corrected privileged deploy calls for
+  Clients & Access to run through the same sudo-bounded boundary as every
+  other deployment path instead of in-process. Native import/export now
+  preserves access policy on round-trip.
+- Analytics resolves client addresses to persistent-client names
+  (most-specific network match), gated so it never runs on
+  anonymized/truncated addresses.
+- Bumped the vendored `python-multipart` dependency to 0.0.31 and hardened
+  the vendored-runtime sync mechanism: the packaged wheel is hash-verified
+  before install, `vendor-deps-sync` is idempotent and safe to run on every
+  package install/upgrade, and the running web service resolves the module
+  from `/opt/alderpointdns/vendor-runtime` ahead of any older copy Debian's
+  own package archive might provide.
+- Fixed encryption deployment failure reporting: every `/encryption/*`
+  mutation route (settings, self-signed, local CA, certificate upload,
+  existing-path certificate) previously discarded the privileged deploy
+  step's return code and redirected as success regardless of outcome. A
+  failed deployment (dnsdist restart failure, a live protocol test failure,
+  a bad certificate/key pair) is now reported to the administrator as a
+  failure, the previous working certificate/key and dnsdist configuration
+  are preserved via rollback, and the admin audit log reflects the true
+  outcome.
+- Fixed atomic certificate/key promotion during encryption deployment: the
+  privileged deploy step could fail with "Invalid cross-device link" when
+  promoting newly staged certificate/key material into place under
+  `alderpointdns.service`'s sandboxed mount namespace, even though the
+  underlying filesystem was the same device. Promotion now falls back to a
+  copy-and-replace when an atomic rename isn't possible across the sandbox's
+  separate bind mounts.
 
 ## v1.0.2 (unreleased)
 
