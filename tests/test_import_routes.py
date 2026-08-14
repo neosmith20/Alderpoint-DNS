@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 warnings.simplefilter("ignore", ResourceWarning)
 
-from app import alderpointdns_compiler, custom_rules, importer, local_dns, upstream_dns, webapp  # noqa: E402
+from app import alderpointdns_compiler, clients, custom_rules, importer, local_dns, upstream_dns, webapp  # noqa: E402
 
 FIXTURES = ROOT / "tests" / "fixtures"
 PIHOLE_FIXTURE = (FIXTURES / "pihole_export.txt").read_text()
@@ -54,6 +54,7 @@ class ImportRouteTest(unittest.TestCase):
             "upstream_dns_db": upstream_dns.DB_PATH,
             "compiler_db": alderpointdns_compiler.DB_PATH,
             "custom_rules_db": custom_rules.DB_PATH,
+            "clients_db": clients.DB_PATH,
             "import_dir": importer.IMPORT_UPLOAD_DIR,
         }
         db_path = self.tmp / "alderpointdns.db"
@@ -63,6 +64,7 @@ class ImportRouteTest(unittest.TestCase):
         upstream_dns.DB_PATH = db_path
         alderpointdns_compiler.DB_PATH = db_path
         custom_rules.DB_PATH = db_path
+        clients.DB_PATH = db_path
         importer.IMPORT_UPLOAD_DIR = self.tmp / "imports"
         local_dns.init_db()
         upstream_dns.init_db()
@@ -92,6 +94,7 @@ class ImportRouteTest(unittest.TestCase):
         upstream_dns.DB_PATH = self.old_paths["upstream_dns_db"]
         alderpointdns_compiler.DB_PATH = self.old_paths["compiler_db"]
         custom_rules.DB_PATH = self.old_paths["custom_rules_db"]
+        clients.DB_PATH = self.old_paths["clients_db"]
         importer.IMPORT_UPLOAD_DIR = self.old_paths["import_dir"]
         import shutil
 
@@ -182,7 +185,10 @@ class ImportRouteTest(unittest.TestCase):
         self.assertEqual(counts["block_rules"], 1)
         self.assertEqual(counts["allow_rules"], 1)
         self.assertEqual(counts["local_dns_records"], 1)
-        self.assertEqual(counts["client_aliases"], 1)
+        # Clients & Access supersedes the old display-only alias path for
+        # AdGuard imports -- see tests/test_importer.py's matching note.
+        self.assertEqual(counts["client_aliases"], 0)
+        self.assertEqual(counts["clients_created"], 1)
         self.assertEqual(counts["upstream_resolvers"], 1)
         with sqlite3.connect(importer.DB_PATH) as conn:
             db_counts = {
@@ -191,9 +197,10 @@ class ImportRouteTest(unittest.TestCase):
                 "rules": conn.execute("SELECT count(*) FROM custom_filter_rules WHERE import_job_id=?", (job_id,)).fetchone()[0],
                 "records": conn.execute("SELECT count(*) FROM local_dns_records").fetchone()[0],
                 "aliases": conn.execute("SELECT count(*) FROM client_aliases").fetchone()[0],
+                "clients": conn.execute("SELECT count(*) FROM clients").fetchone()[0],
                 "upstreams": conn.execute("SELECT count(*) FROM upstream_resolvers WHERE address='dns.example' AND doh_path='/dns-query'").fetchone()[0],
             }
-        self.assertEqual(db_counts, {"sources": 1, "legacy_rules": 0, "rules": 2, "records": 1, "aliases": 1, "upstreams": 1})
+        self.assertEqual(db_counts, {"sources": 1, "legacy_rules": 0, "rules": 2, "records": 1, "aliases": 0, "clients": 1, "upstreams": 1})
         with self.assertRaises(importer.ImportError_):
             importer.apply_migration_job(job_id)
         self.assertEqual(importer.get_job(job_id)["status"], "applied")
@@ -279,19 +286,23 @@ class ImportRouteTest(unittest.TestCase):
         self.assertFalse(any(importer.IMPORT_UPLOAD_DIR.glob("*")) if importer.IMPORT_UPLOAD_DIR.exists() else False)
 
     def test_failed_application_rolls_back_cleanly(self) -> None:
+        # AdGuard persistent clients now apply through _apply_client_full_item
+        # (Clients & Access), not the legacy _apply_alias_item path -- see
+        # tests/test_importer.py's matching note.
         job_id = self._create_migration_job()
-        with mock.patch.object(importer, "_apply_alias_item", side_effect=RuntimeError("injected failure")):
+        with mock.patch.object(importer, "_apply_client_full_item", side_effect=RuntimeError("injected failure")):
             with self.assertRaises(ValueError):
                 importer.apply_migration_job(job_id)
         job = importer.get_job(job_id)
         self.assertEqual(job["status"], "failed")
-        self.assertIn("client alias", job["message"])
+        self.assertIn("persistent client", job["message"])
         with sqlite3.connect(importer.DB_PATH) as conn:
             self.assertEqual(conn.execute("SELECT count(*) FROM sources").fetchone()[0], 0)
             self.assertEqual(conn.execute("SELECT count(*) FROM custom_rules").fetchone()[0], 0)
             self.assertEqual(conn.execute("SELECT count(*) FROM custom_filter_rules").fetchone()[0], 0)
             self.assertEqual(conn.execute("SELECT count(*) FROM local_dns_records").fetchone()[0], 0)
             self.assertEqual(conn.execute("SELECT count(*) FROM client_aliases").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT count(*) FROM clients").fetchone()[0], 0)
 
     def test_migration_rollback_after_apply(self) -> None:
         job_id = self._create_migration_job()
@@ -396,6 +407,7 @@ class ImportUploadHttpTest(unittest.TestCase):
             "upstream_dns_db": upstream_dns.DB_PATH,
             "compiler_db": alderpointdns_compiler.DB_PATH,
             "custom_rules_db": custom_rules.DB_PATH,
+            "clients_db": clients.DB_PATH,
             "import_dir": importer.IMPORT_UPLOAD_DIR,
         }
         db_path = self.tmp / "alderpointdns.db"
@@ -405,6 +417,7 @@ class ImportUploadHttpTest(unittest.TestCase):
         upstream_dns.DB_PATH = db_path
         alderpointdns_compiler.DB_PATH = db_path
         custom_rules.DB_PATH = db_path
+        clients.DB_PATH = db_path
         importer.IMPORT_UPLOAD_DIR = self.tmp / "imports"
         local_dns.init_db()
         upstream_dns.init_db()
@@ -457,6 +470,7 @@ class ImportUploadHttpTest(unittest.TestCase):
         upstream_dns.DB_PATH = self.old_paths["upstream_dns_db"]
         alderpointdns_compiler.DB_PATH = self.old_paths["compiler_db"]
         custom_rules.DB_PATH = self.old_paths["custom_rules_db"]
+        clients.DB_PATH = self.old_paths["clients_db"]
         importer.IMPORT_UPLOAD_DIR = self.old_paths["import_dir"]
         import shutil
 
