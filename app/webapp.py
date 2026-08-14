@@ -783,6 +783,16 @@ def encryption_deploy_apply() -> tuple[int, str]:
     return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "encryption-deploy"])
 
 
+def access_policy_deploy_apply() -> tuple[int, str]:
+    """The web process runs unprivileged (user `alderpointdns`) and cannot
+    write /var/lib/alderpointdns/compiled/dnsdist/*, write
+    /etc/dnsdist/dnsdist.conf, or `systemctl restart dnsdist` itself -- all
+    of which app.clients.deploy_access_layer() needs to do. Like every
+    other privileged deploy path in this app, it runs as root through the
+    narrow sudoers allowlist (packaging/sudoers-alderpointdns) instead."""
+    return run(["sudo", "/opt/alderpointdns/app/alderpointdns_compiler.py", "access-policy-deploy"])
+
+
 def dnsdist_stats() -> dict[str, Any]:
     try:
         creds = Path("/etc/alderpointdns/dnsdist-web.creds").read_text().strip()
@@ -2018,10 +2028,9 @@ def _deploy_access_or_error(request: Request, success_redirect: str) -> HTMLResp
     stale policy (the DB row the caller just wrote is NOT rolled back --
     same convention as local_dns's deploy_no_download(), so the object
     exists and can be retried/fixed without re-entering it)."""
-    try:
-        clients_model.deploy_access_layer()
-    except Exception as exc:  # noqa: BLE001 - surfaced verbatim to the admin
-        return clients_access_error(request, f"saved, but deploying to dnsdist failed: {exc}")
+    code, out = access_policy_deploy_apply()
+    if code != 0:
+        return clients_access_error(request, f"saved, but deploying to dnsdist failed: {out.strip()}")
     return redirect(success_redirect)
 
 
@@ -2157,10 +2166,9 @@ def clients_access_add_identifier(
                 audit_log(conn, admin["id"], admin["username"], "identifier_added", True, ip, f"client_id={client_id}")
     except clients_model.ClientsError as exc:
         return clients_access_error(request, str(exc))
-    try:
-        clients_model.deploy_access_layer()
-    except Exception as exc:  # noqa: BLE001
-        return clients_access_error(request, f"saved, but deploying to dnsdist failed: {exc}", generated_clientid=generated)
+    code, out = access_policy_deploy_apply()
+    if code != 0:
+        return clients_access_error(request, f"saved, but deploying to dnsdist failed: {out.strip()}", generated_clientid=generated)
     if generated:
         context = clients_access_context()
         context.update({"error": None, "generated_clientid": generated, "generated_bits": len(generated) * 4})

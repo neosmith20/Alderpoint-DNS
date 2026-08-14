@@ -863,9 +863,13 @@ class WebRoutesTest(unittest.TestCase):
         clients.init_db()
         self.client = TestClient(webapp.app)
         self.client.cookies.set("alderpointdns_session", webapp.serializer.dumps({"sid": "sid"}))
-        # Never actually shell out to dnsdist/systemctl from an HTTP test.
+        # The real webapp routes deploy through `sudo alderpointdns_compiler.py
+        # access-policy-deploy` (the unprivileged web process can't write the
+        # compiled dnsdist files or restart dnsdist itself) -- mock webapp's
+        # own subprocess helper, not clients.run, so this test exercises the
+        # same code path the live app uses without actually shelling out.
         self._run_patcher = mock.patch.object(
-            clients, "run", return_value=subprocess.CompletedProcess(["x"], 0, "ok", "")
+            webapp, "run", return_value=(0, "ok")
         )
         self._run_patcher.start()
 

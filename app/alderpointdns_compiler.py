@@ -2264,6 +2264,8 @@ def main(argv: list[str] | None = None) -> int:
     upstream_dep.set_defaults(func=_run_upstream_deploy_for_cli)
     encryption_dep = sub.add_parser("encryption-deploy")
     encryption_dep.set_defaults(func=lambda args: print(_locked(encryption.deploy_encryption)))
+    access_policy_dep = sub.add_parser("access-policy-deploy")
+    access_policy_dep.set_defaults(func=lambda args: print(_locked(clients.deploy_access_layer)))
     dnsdist_conf_migrate_parser = sub.add_parser(
         "dnsdist-conf-migrate",
         help="idempotently apply dnsdist.conf managed-block migrations (e.g. doh-altsvc) without restarting dnsdist",
