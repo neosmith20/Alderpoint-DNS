@@ -1073,8 +1073,17 @@ def build_migration_plan(translation: dict[str, Any], default_domain: str | None
         )
         item["_upstream_key"] = list(key)
 
-    # Client aliases and client-scoped findings.
-    for index, client in enumerate(translation.get("clients_as_aliases", [])):
+    # Legacy display-only client aliases. Only surfaced when this
+    # translation has no richer clients_full data (native-JSON v1 imports,
+    # or a hypothetical future source with no ClientID/multi-identifier
+    # concept) -- AdGuard imports always populate clients_full, which is
+    # the enforced, runtime-effective successor to this. Without this
+    # guard, an AdGuard client would be imported twice: once as a rich
+    # new-model client, and again via this legacy path's own
+    # client_aliases row, which the new-model migration in
+    # app.clients.init_db() would then auto-promote into a *second*,
+    # duplicate clients-table row the next time anything touched the DB.
+    for index, client in enumerate(translation.get("clients_as_aliases", []) if not translation.get("clients_full") else []):
         raw = client if isinstance(client, dict) else {}
         name = str(raw.get("display_name", "")).strip()
         cidr = str(raw.get("cidr_or_ip", "")).strip()

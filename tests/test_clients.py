@@ -937,5 +937,125 @@ class WebRoutesTest(unittest.TestCase):
         self.assertIsNotNone(row)
 
 
+class FullMigrationJobPipelineTest(unittest.TestCase):
+    """End-to-end test of the actual job preview -> apply -> rollback
+    pipeline (create_migration_job / apply_migration_job /
+    _rollback_migration_job), not just the underlying apply-item helper
+    functions -- covers the _plan_items/build_migration_plan wiring for
+    the new 'client'/'access_allow'/'access_deny' item kinds."""
+
+    def setUp(self) -> None:
+        from app import alderpointdns_compiler as compiler
+        from app import custom_rules, importer, local_dns, upstream_dns
+
+        self.importer = importer
+        self.tmp = Path(tempfile.mkdtemp(prefix="alderpointdns-migration-e2e-"))
+        self.old = {
+            "importer_db": importer.DB_PATH, "local_dns_db": local_dns.DB_PATH,
+            "upstream_dns_db": upstream_dns.DB_PATH, "compiler_db": compiler.DB_PATH,
+            "custom_rules_db": custom_rules.DB_PATH, "clients_db": clients.DB_PATH,
+            "upload_dir": importer.IMPORT_UPLOAD_DIR,
+        }
+        db_path = self.tmp / "alderpointdns.db"
+        importer.DB_PATH = db_path
+        local_dns.DB_PATH = db_path
+        upstream_dns.DB_PATH = db_path
+        compiler.DB_PATH = db_path
+        custom_rules.DB_PATH = db_path
+        clients.DB_PATH = db_path
+        clients.COMPILED_DNSDIST_DIR = self.tmp / "compiled" / "dnsdist"
+        clients.BACKUP_DIR = self.tmp / "backups"
+        clients.STAGING_DIR = self.tmp / "staging"
+        clients.DNSDIST_CONF = self.tmp / "dnsdist.conf"
+        importer.IMPORT_UPLOAD_DIR = self.tmp / "imports"
+        self._backup_patcher = mock.patch.object(
+            importer.subprocess, "run",
+            return_value=subprocess.CompletedProcess(importer.PRE_IMPORT_BACKUP_COMMAND, 0, "backup_path=/tmp/pre-import-backup.tar\n", ""),
+        )
+        self._backup_patcher.start()
+        self._deploy_patcher = mock.patch.object(
+            clients, "run", return_value=subprocess.CompletedProcess(["x"], 0, "ok", "")
+        )
+        self._deploy_patcher.start()
+        local_dns.STAGING_DIR = self.tmp / "local-staging"
+        local_dns.BACKUP_DIR = self.tmp / "local-backups"
+        local_dns.COMPILED_DIR = self.tmp / "compiled" / "bind"
+        local_dns.LOCAL_ZONE_DIR = local_dns.COMPILED_DIR / "local"
+        local_dns.LOCAL_ZONES_CONF = local_dns.COMPILED_DIR / "local-zones.conf"
+        local_dns.NAMED_LOCAL_CONF = self.tmp / "named.conf.local"
+        local_dns.STAGING_DIR.mkdir(parents=True)
+        local_dns.NAMED_LOCAL_CONF.write_text(
+            'acl "alderpointdns_clients" { localhost; };\nzone "alderpointdns.rpz" { type primary; file "alderpointdns.rpz"; };\n'
+        )
+        local_dns.init_db()
+        upstream_dns.init_db()
+        compiler.init_db()
+        importer.init_db()
+        custom_rules.init_db()
+        clients.init_db()
+
+    def tearDown(self) -> None:
+        self._backup_patcher.stop()
+        self._deploy_patcher.stop()
+        self.importer.DB_PATH = self.old["importer_db"]
+        self.importer.IMPORT_UPLOAD_DIR = self.old["upload_dir"]
+        clients.DB_PATH = self.old["clients_db"]
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_preview_apply_rollback_idempotence(self) -> None:
+        from app.importer import _translate_adguard_config
+
+        data = {
+            "clients": {
+                "persistent": [
+                    {"name": "Kid Tablet", "ids": ["192.168.5.50", "a" * 48]},
+                ]
+            },
+            "dns": {"allowed_clients": ["10.5.5.5"], "disallowed_clients": ["10.5.5.6"]},
+        }
+        translation = _translate_adguard_config(data)
+        job_id = self.importer.create_migration_job("adguard_yaml", "test-adguard", translation)
+
+        # Preview: prove the new item kinds surface (not silently dropped).
+        plan = self.importer.build_migration_plan(translation)
+        preview_keys = [item["key"] for item in self.importer._plan_items(plan)]
+        client_items = [k for k in preview_keys if k.startswith("clients_access:")]
+        self.assertEqual(len(client_items), 3)  # 1 client + 1 allow + 1 deny
+
+        result = self.importer.apply_migration_job(job_id)
+        self.assertEqual(result["counts"]["clients_created"], 1)
+        self.assertEqual(result["counts"]["access_rules_created"], 2)
+
+        created_client = clients.list_clients()[0]
+        self.assertEqual(created_client["name"], "Kid Tablet")
+        self.assertEqual(len(created_client["identifiers"]), 2)  # the IP and the strong ClientID
+        self.assertEqual({i["kind"] for i in created_client["identifiers"]}, {"ipv4", "clientid"})
+        rules = clients.list_access_rules()
+        self.assertEqual(len(rules), 2)
+
+        # Rollback: prove it removes exactly what apply created.
+        job = self.importer.get_job(job_id)
+        removed = self.importer._rollback_migration_job(job)
+        self.assertGreater(removed, 0)
+        self.assertEqual(clients.list_clients(), [])
+        self.assertEqual(clients.list_access_rules(), [])
+
+    def test_weak_clientid_on_imported_client_never_becomes_active(self) -> None:
+        from app.importer import _translate_adguard_config
+
+        data = {"clients": {"persistent": [{"name": "Weak Device", "ids": ["192.168.9.9", "deadbeef"]}]}}
+        translation = _translate_adguard_config(data)
+        job_id = self.importer.create_migration_job("adguard_yaml", "test-adguard-weak", translation)
+        result = self.importer.apply_migration_job(job_id)
+        self.assertEqual(result["counts"]["clients_created"], 1)
+        client = clients.list_clients()[0]
+        # Only the IP identifier was imported; the weak 8-hex ClientID
+        # never became an active identifier anywhere.
+        kinds = {i["kind"] for i in client["identifiers"]}
+        self.assertEqual(kinds, {"ipv4"})
+        for rule in clients.list_access_rules():
+            self.assertNotEqual(rule.get("value"), "deadbeef")
+
+
 if __name__ == "__main__":
     unittest.main()

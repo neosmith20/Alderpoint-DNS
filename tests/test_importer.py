@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 warnings.simplefilter("ignore", ResourceWarning)
 
-from app import alderpointdns_compiler, backup, custom_rules, importer, local_dns, upstream_dns  # noqa: E402
+from app import alderpointdns_compiler, backup, clients, custom_rules, importer, local_dns, upstream_dns  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 ADGUARD_FIXTURE = (FIXTURES / "adguard_home.yaml").read_text()
@@ -34,12 +34,14 @@ class ImporterTest(unittest.TestCase):
         self.old_upstream_dns_db_path = upstream_dns.DB_PATH
         self.old_compiler_db_path = alderpointdns_compiler.DB_PATH
         self.old_custom_rules_db_path = custom_rules.DB_PATH
+        self.old_clients_db_path = clients.DB_PATH
         self.old_upload_dir = importer.IMPORT_UPLOAD_DIR
         importer.DB_PATH = self.tmp / "alderpointdns.db"
         local_dns.DB_PATH = importer.DB_PATH
         upstream_dns.DB_PATH = importer.DB_PATH
         alderpointdns_compiler.DB_PATH = importer.DB_PATH
         custom_rules.DB_PATH = importer.DB_PATH
+        clients.DB_PATH = importer.DB_PATH
         # create_pre_import_backup() runs the privileged
         # `sudo alderpointdns_compiler.py backup-create` command; stub the
         # single subprocess.run call site so tests never invoke real sudo.
@@ -71,6 +73,7 @@ class ImporterTest(unittest.TestCase):
         upstream_dns.DB_PATH = self.old_upstream_dns_db_path
         alderpointdns_compiler.DB_PATH = self.old_compiler_db_path
         custom_rules.DB_PATH = self.old_custom_rules_db_path
+        clients.DB_PATH = self.old_clients_db_path
         self._backup_patcher.stop()
         importer.IMPORT_UPLOAD_DIR = self.old_upload_dir
         import shutil
@@ -968,7 +971,18 @@ class ImporterTest(unittest.TestCase):
         self.assertEqual(counts["unsupported_kept_inactive"], 4)
         self.assertEqual(counts["local_dns_records"], 4)
         self.assertEqual(counts["upstream_resolvers"], 2)
-        self.assertEqual(counts["client_aliases"], 2)
+        # Clients & Access supersedes the old display-only "client alias"
+        # import path: an AdGuard persistent client now becomes a real
+        # enforced persistent client (with its identifier(s)), not a
+        # display-only alias -- see app.importer._classify_adguard_identifier
+        # and the clients_full plan-item wiring in build_migration_plan().
+        self.assertEqual(counts["client_aliases"], 0)
+        self.assertEqual(counts["clients_created"], 2)
+        self.assertEqual(counts["client_identifiers_created"], 2)
+        with self.connect() as conn:
+            conn.row_factory = sqlite3.Row
+            names = {row["name"] for row in conn.execute("SELECT name FROM clients")}
+            self.assertEqual(names, {"Phone", "Laptop"})
         with self.connect() as conn:
             rows = conn.execute("SELECT * FROM custom_filter_rules").fetchall()
             self.assertTrue(all(row["source_system"] == "adguard" for row in rows))
@@ -976,7 +990,11 @@ class ImporterTest(unittest.TestCase):
             self.assertEqual(important["priority"], custom_rules.IMPORTANT_PRIORITY)
             hosts_alias = conn.execute("SELECT comment FROM custom_filter_rules WHERE domain='nas-alias.example'").fetchone()
             self.assertEqual(hosts_alias["comment"], "media box")
-            self.assertEqual(local_dns.alias_for_client("192.168.1.77"), "Phone")
+            # Client-name resolution for analytics now goes through the new
+            # persistent-client model (app.clients.resolve_client_name),
+            # which local_dns.alias_for_client() is a fallback for -- see
+            # the note above about clients_created superseding client_aliases.
+            self.assertEqual(clients.resolve_client_name("192.168.1.77"), "Phone")
 
     # -- idempotent re-import (against an install that already has the data) -
 
@@ -1165,12 +1183,14 @@ class RealPreImportBackupTest(unittest.TestCase):
         self.old_upstream_dns_db_path = upstream_dns.DB_PATH
         self.old_compiler_db_path = alderpointdns_compiler.DB_PATH
         self.old_custom_rules_db_path = custom_rules.DB_PATH
+        self.old_clients_db_path = clients.DB_PATH
         self.old_upload_dir = importer.IMPORT_UPLOAD_DIR
         importer.DB_PATH = self.tmp / "alderpointdns.db"
         local_dns.DB_PATH = importer.DB_PATH
         upstream_dns.DB_PATH = importer.DB_PATH
         alderpointdns_compiler.DB_PATH = importer.DB_PATH
         custom_rules.DB_PATH = importer.DB_PATH
+        clients.DB_PATH = importer.DB_PATH
         importer.IMPORT_UPLOAD_DIR = self.tmp / "imports"
         local_dns.STAGING_DIR = self.tmp / "staging"
         local_dns.BACKUP_DIR = self.tmp / "backups"
@@ -1228,6 +1248,7 @@ class RealPreImportBackupTest(unittest.TestCase):
         upstream_dns.DB_PATH = self.old_upstream_dns_db_path
         alderpointdns_compiler.DB_PATH = self.old_compiler_db_path
         custom_rules.DB_PATH = self.old_custom_rules_db_path
+        clients.DB_PATH = self.old_clients_db_path
         importer.IMPORT_UPLOAD_DIR = self.old_upload_dir
         shutil.rmtree(self.tmp, ignore_errors=True)
 
