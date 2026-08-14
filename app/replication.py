@@ -672,7 +672,17 @@ REPLICABLE_TABLES: dict[str, tuple[str, ...]] = {
     "network_policies": ("cidr", "profile_key", "description", "enabled"),
     "local_dns_records": ("name", "fqdn", "record_type", "value", "ttl", "comment", "enabled", "auto_ptr", "created_at", "updated_at"),
     "client_aliases": ("cidr", "display_name", "description", "created_at", "updated_at"),
+    "access_settings": ("default_policy", "updated_at"),
 }
+# clients/client_identifiers/access_rules are deliberately NOT in
+# REPLICABLE_TABLES: that mechanism copies columns verbatim, but
+# client_identifiers.client_id and access_rules.client_id are surrogate
+# AUTOINCREMENT foreign keys into `clients` that are meaningless once
+# copied onto a replica with its own independent autoincrement sequence.
+# See _build_clients_access_section()/_apply_clients_access_section()
+# below, which re-key by client *name* instead (nested JSON, not a flat
+# table), exactly like the local_dns_settings/dns_cache_settings/
+# encryption_settings key/value tables already get bespoke handling here.
 # local_dns_settings and dns_cache_settings are key/value tables; only these
 # specific keys are replicable. server_hostname/server_ip are node identity
 # and listen-address data and are explicitly never replicated.
@@ -761,7 +771,96 @@ def build_payload(conn: sqlite3.Connection, include_encryption_settings: bool = 
         if encryption.CA_CERT_PATH.exists():
             sections["ca_certificate_pem"] = encryption.CA_CERT_PATH.read_text()
 
+    if _table_exists(conn, "clients") and _table_exists(conn, "client_identifiers"):
+        sections["clients"] = _build_clients_section(conn)
+    if _table_exists(conn, "access_rules"):
+        sections["client_access_rules"] = _build_access_rules_section(conn)
+
     return sections
+
+
+def _build_clients_section(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Persistent clients + their identifiers, nested by name rather than
+    flat-table-replicated by surrogate id -- see the comment above
+    REPLICABLE_TABLES for why. ClientIDs replicate at full strength/
+    canonical form (they are configuration, like everything else here)."""
+    result = []
+    for client in conn.execute("SELECT id, name, description, enabled FROM clients ORDER BY id"):
+        identifiers = [
+            {"kind": row["kind"], "value": row["value"]}
+            for row in conn.execute(
+                "SELECT kind, value FROM client_identifiers WHERE client_id=? ORDER BY id", (client["id"],)
+            )
+        ]
+        result.append({
+            "name": client["name"],
+            "description": client["description"],
+            "enabled": bool(client["enabled"]),
+            "identifiers": identifiers,
+        })
+    return result
+
+
+def _build_access_rules_section(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Access rules referencing a persistent client are keyed by that
+    client's name (resolved via join), not its surrogate id -- the
+    corresponding apply side re-resolves the name to whatever id that
+    client gets on the replica."""
+    rows = conn.execute(
+        """
+        SELECT access_rules.action, access_rules.kind, access_rules.value, clients.name AS client_name
+        FROM access_rules LEFT JOIN clients ON clients.id = access_rules.client_id
+        ORDER BY access_rules.id
+        """
+    )
+    return [dict(row) for row in rows]
+
+
+def _apply_clients_access_sections(db: sqlite3.Connection, clients_section: list[dict[str, Any]] | None, access_rules_section: list[dict[str, Any]] | None) -> None:
+    """Replica-side apply for _build_clients_section()/
+    _build_access_rules_section(): full replace, same v1 "replica tables
+    are fully primary-owned" design as _apply_sections() above. A
+    'client'-kind access rule whose referenced client name is missing from
+    this same payload is defensively dropped rather than left dangling."""
+    if clients_section is None and access_rules_section is None:
+        return
+    if not _table_exists(db, "clients") or not _table_exists(db, "client_identifiers"):
+        return
+    ts = now()
+    db.execute("DELETE FROM access_rules")
+    db.execute("DELETE FROM client_identifiers")
+    db.execute("DELETE FROM clients")
+    name_to_id: dict[str, int] = {}
+    for client in clients_section or []:
+        name = str(client.get("name") or "").strip()
+        if not name:
+            continue
+        cur = db.execute(
+            "INSERT INTO clients(name, description, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            (name, client.get("description") or "", 1 if client.get("enabled") else 0, ts, ts),
+        )
+        client_id = cur.lastrowid
+        name_to_id[name] = client_id
+        for identifier in client.get("identifiers") or []:
+            kind, value = identifier.get("kind"), identifier.get("value")
+            if not kind or not value:
+                continue
+            db.execute(
+                "INSERT OR IGNORE INTO client_identifiers(client_id, kind, value, created_at) VALUES (?, ?, ?, ?)",
+                (client_id, kind, value, ts),
+            )
+    if _table_exists(db, "access_rules"):
+        for rule in access_rules_section or []:
+            kind = rule.get("kind")
+            client_id = None
+            if kind == "client":
+                client_id = name_to_id.get(str(rule.get("client_name") or ""))
+                if client_id is None:
+                    continue
+            db.execute(
+                "INSERT INTO access_rules(action, kind, value, client_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                (rule.get("action"), kind, rule.get("value"), client_id, ts),
+            )
 
 
 def canonical_json(data: Any) -> str:
@@ -1207,6 +1306,7 @@ def _restore_snapshot(db: sqlite3.Connection, snapshot: dict[str, Any]) -> None:
     _replace_settings_subset(db, "local_dns_settings", REPLICABLE_LOCAL_DNS_SETTING_KEYS, snapshot.get("local_dns_settings", {}))
     _replace_settings_subset(db, "dns_cache_settings", REPLICABLE_CACHE_SETTING_KEYS, snapshot.get("dns_cache_settings", {}))
     _replace_settings_subset(db, "encryption_settings", REPLICABLE_ENCRYPTION_SETTING_KEYS, snapshot.get("encryption_settings", {}))
+    _apply_clients_access_sections(db, snapshot.get("clients"), snapshot.get("client_access_rules"))
     db.commit()
 
 
@@ -1233,6 +1333,7 @@ def _apply_sections(db: sqlite3.Connection, sections: dict[str, Any]) -> None:
     _replace_settings_subset(db, "local_dns_settings", REPLICABLE_LOCAL_DNS_SETTING_KEYS, sections.get("local_dns_settings", {}))
     _replace_settings_subset(db, "dns_cache_settings", REPLICABLE_CACHE_SETTING_KEYS, sections.get("dns_cache_settings", {}))
     _replace_settings_subset(db, "encryption_settings", REPLICABLE_ENCRYPTION_SETTING_KEYS, sections.get("encryption_settings", {}))
+    _apply_clients_access_sections(db, sections.get("clients"), sections.get("client_access_rules"))
     db.commit()
 
 

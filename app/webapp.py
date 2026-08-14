@@ -23,7 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
-from app import analytics, auth, backup, custom_rules as custom_rules_model, dns_cache, encryption, filter_schedule, importer, local_dns, network_config, notifications, replication, software_updates, upstream_dns
+from app import analytics, auth, backup, clients as clients_model, custom_rules as custom_rules_model, dns_cache, encryption, filter_schedule, importer, local_dns, network_config, notifications, replication, software_updates, upstream_dns
 from app import blocklist_categories
 from app import service_logs
 from app.alderpointdns_compiler import (
@@ -1091,6 +1091,7 @@ def render(request: Request, template: str, status_code: int = 200, **context: A
     # (e.g. to point at an isolated directory), which would otherwise
     # start without the local_time filter registered.
     TEMPLATES.env.filters.setdefault("local_time", format_local_datetime)
+    TEMPLATES.env.filters.setdefault("dns_safe_label", clients_model.clientid_dns_label)
     TEMPLATES.env.globals.setdefault("static_url", static_url)
     session = signed_session(request)
     new_anonymous_session = not session
@@ -1985,6 +1986,233 @@ def local_dns_import_apply(request: Request, csrf: str = Form(...), csv_text: st
 @app.get("/local-dns/export")
 def local_dns_export(_: sqlite3.Row = Depends(current_admin)):
     return PlainTextResponse(local_dns.csv_export(), media_type="text/csv")
+
+
+def clients_access_context() -> dict[str, Any]:
+    rules = clients_model.list_access_rules()
+    clients_list = clients_model.list_clients()
+    clients_by_id = {c["id"]: c for c in clients_list}
+    default_policy = clients_model.get_default_policy()
+    for client in clients_list:
+        client["effective"] = clients_model.effective_access_for_client(client, rules, clients_by_id, default_policy)
+    return {
+        "clients": clients_list,
+        "rules": rules,
+        "default_policy": default_policy,
+        "clientid_min_hex": clients_model.CLIENTID_MIN_HEX_LEN,
+        "clientid_max_hex": clients_model.CLIENTID_MAX_HEX_LEN,
+    }
+
+
+def clients_access_error(request: Request, message: str, status_code: int = 400, **extra: Any) -> HTMLResponse:
+    context = clients_access_context()
+    context.update({"error": message, "generated_clientid": None})
+    context.update(extra)
+    return render(request, "clients_access.html", **context, status_code=status_code)
+
+
+def _deploy_access_or_error(request: Request, success_redirect: str) -> HTMLResponse:
+    """Shared tail for every Clients & Access mutation route: deploy the
+    freshly-written database state to dnsdist, and if that fails, surface
+    the failure to the admin instead of silently leaving dnsdist on a
+    stale policy (the DB row the caller just wrote is NOT rolled back --
+    same convention as local_dns's deploy_no_download(), so the object
+    exists and can be retried/fixed without re-entering it)."""
+    try:
+        clients_model.deploy_access_layer()
+    except Exception as exc:  # noqa: BLE001 - surfaced verbatim to the admin
+        return clients_access_error(request, f"saved, but deploying to dnsdist failed: {exc}")
+    return redirect(success_redirect)
+
+
+@app.get("/clients-access", response_class=HTMLResponse)
+def clients_access_page(request: Request, _: sqlite3.Row = Depends(current_admin)):
+    context = clients_access_context()
+    context.update({"error": None, "generated_clientid": None})
+    return render(request, "clients_access.html", **context)
+
+
+@app.post("/clients-access/policy")
+def clients_access_policy_post(
+    request: Request,
+    csrf: str = Form(...),
+    default_policy: str = Form(...),
+    confirm: str = Form("0"),
+    admin: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    ip = request.client.host if request.client else None
+    if default_policy == "deny" and confirm != "1":
+        return clients_access_error(
+            request,
+            "Switching to Default Deny requires explicit confirmation -- review the Allowed entries below, "
+            "then check the confirmation box and submit again. Loopback (127.0.0.1/::1) stays reachable "
+            "automatically so Alderpoint's own health checks are not locked out; nothing else is.",
+        )
+    try:
+        clients_model.set_default_policy(default_policy)
+    except clients_model.ClientsError as exc:
+        return clients_access_error(request, str(exc))
+    with db() as conn:
+        audit_log(conn, admin["id"], admin["username"], "access_default_policy_changed", True, ip, f"policy={default_policy}")
+    return _deploy_access_or_error(request, "/clients-access")
+
+
+@app.post("/clients-access/clients")
+def clients_access_create_client(
+    request: Request,
+    csrf: str = Form(...),
+    name: str = Form(...),
+    description: str = Form(""),
+    identifiers: str = Form(""),
+    admin: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    ip = request.client.host if request.client else None
+    raw_identifiers = [line.strip() for line in identifiers.splitlines() if line.strip()]
+    try:
+        client_id = clients_model.create_client(name, description, raw_identifiers)
+    except clients_model.ClientsError as exc:
+        return clients_access_error(request, str(exc))
+    with db() as conn:
+        audit_log(conn, admin["id"], admin["username"], "client_created", True, ip, f"name={name.strip()[:80]} identifiers={len(raw_identifiers)}")
+    return _deploy_access_or_error(request, "/clients-access")
+
+
+@app.post("/clients-access/clients/{client_id}/edit")
+def clients_access_edit_client(
+    request: Request,
+    client_id: int,
+    csrf: str = Form(...),
+    name: str = Form(...),
+    description: str = Form(""),
+    enabled: str = Form("1"),
+    admin: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    ip = request.client.host if request.client else None
+    try:
+        clients_model.update_client(client_id, name, description, enabled == "1")
+    except clients_model.ClientsError as exc:
+        return clients_access_error(request, str(exc))
+    with db() as conn:
+        audit_log(conn, admin["id"], admin["username"], "client_updated", True, ip, f"client_id={client_id}")
+    return _deploy_access_or_error(request, "/clients-access")
+
+
+@app.post("/clients-access/clients/{client_id}/toggle")
+def clients_access_toggle_client(
+    request: Request, client_id: int, csrf: str = Form(...), enabled: str = Form(...), admin: sqlite3.Row = Depends(current_admin)
+):
+    check_csrf(request, csrf)
+    ip = request.client.host if request.client else None
+    try:
+        clients_model.set_client_enabled(client_id, enabled == "1")
+    except clients_model.ClientsError as exc:
+        return clients_access_error(request, str(exc))
+    with db() as conn:
+        action = "client_enabled" if enabled == "1" else "client_disabled"
+        audit_log(conn, admin["id"], admin["username"], action, True, ip, f"client_id={client_id}")
+    return _deploy_access_or_error(request, "/clients-access")
+
+
+@app.post("/clients-access/clients/{client_id}/delete")
+def clients_access_delete_client(request: Request, client_id: int, csrf: str = Form(...), admin: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    ip = request.client.host if request.client else None
+    try:
+        clients_model.delete_client(client_id)
+    except clients_model.ClientsError as exc:
+        return clients_access_error(request, str(exc))
+    with db() as conn:
+        audit_log(conn, admin["id"], admin["username"], "client_deleted", True, ip, f"client_id={client_id}")
+    return _deploy_access_or_error(request, "/clients-access")
+
+
+@app.post("/clients-access/clients/{client_id}/identifiers")
+def clients_access_add_identifier(
+    request: Request,
+    client_id: int,
+    csrf: str = Form(...),
+    value: str = Form(""),
+    generate_bits: str = Form(""),
+    admin: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    ip = request.client.host if request.client else None
+    generated: str | None = None
+    try:
+        if generate_bits:
+            bits = int(generate_bits)
+            generated = clients_model.generate_clientid(bits)
+            clients_model.add_identifier(client_id, generated)
+            # The value itself is shown once in the response page below for
+            # the admin to copy -- never written to the audit log or any
+            # other log, only the fact that one was generated/assigned.
+            with db() as conn:
+                audit_log(conn, admin["id"], admin["username"], "clientid_generated", True, ip, f"client_id={client_id} bits={bits}")
+        else:
+            clients_model.add_identifier(client_id, value)
+            with db() as conn:
+                audit_log(conn, admin["id"], admin["username"], "identifier_added", True, ip, f"client_id={client_id}")
+    except clients_model.ClientsError as exc:
+        return clients_access_error(request, str(exc))
+    try:
+        clients_model.deploy_access_layer()
+    except Exception as exc:  # noqa: BLE001
+        return clients_access_error(request, f"saved, but deploying to dnsdist failed: {exc}", generated_clientid=generated)
+    if generated:
+        context = clients_access_context()
+        context.update({"error": None, "generated_clientid": generated, "generated_bits": len(generated) * 4})
+        return render(request, "clients_access.html", **context)
+    return redirect("/clients-access")
+
+
+@app.post("/clients-access/identifiers/{identifier_id}/delete")
+def clients_access_delete_identifier(request: Request, identifier_id: int, csrf: str = Form(...), admin: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    ip = request.client.host if request.client else None
+    try:
+        clients_model.remove_identifier(identifier_id)
+    except clients_model.ClientsError as exc:
+        return clients_access_error(request, str(exc))
+    with db() as conn:
+        audit_log(conn, admin["id"], admin["username"], "identifier_removed", True, ip, f"identifier_id={identifier_id}")
+    return _deploy_access_or_error(request, "/clients-access")
+
+
+@app.post("/clients-access/rules")
+def clients_access_add_rule(
+    request: Request,
+    csrf: str = Form(...),
+    action: str = Form(...),
+    kind: str = Form(...),
+    value: str = Form(""),
+    client_id: str = Form(""),
+    admin: sqlite3.Row = Depends(current_admin),
+):
+    check_csrf(request, csrf)
+    ip = request.client.host if request.client else None
+    try:
+        rule_id = clients_model.add_access_rule(action, kind, value or None, int(client_id) if client_id else None)
+    except clients_model.ClientsError as exc:
+        return clients_access_error(request, str(exc))
+    with db() as conn:
+        audit_log(conn, admin["id"], admin["username"], "access_rule_added", True, ip, f"rule_id={rule_id} action={action} kind={kind}")
+    return _deploy_access_or_error(request, "/clients-access")
+
+
+@app.post("/clients-access/rules/{rule_id}/delete")
+def clients_access_delete_rule(request: Request, rule_id: int, csrf: str = Form(...), admin: sqlite3.Row = Depends(current_admin)):
+    check_csrf(request, csrf)
+    ip = request.client.host if request.client else None
+    try:
+        clients_model.remove_access_rule(rule_id)
+    except clients_model.ClientsError as exc:
+        return clients_access_error(request, str(exc))
+    with db() as conn:
+        audit_log(conn, admin["id"], admin["username"], "access_rule_removed", True, ip, f"rule_id={rule_id}")
+    return _deploy_access_or_error(request, "/clients-access")
 
 
 def dns_cache_context() -> dict[str, Any]:

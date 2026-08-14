@@ -1256,6 +1256,8 @@ def clients_data(range_key: str = "24h", limit: int = 200) -> dict[str, Any]:
     client that isn't in the dashboard's top-10 slice."""
     init_analytics_db()
     since = utc_now() - range_seconds(range_key)
+    cfg = settings()
+    privacy_mode = cfg.get("privacy_mode", "full")
     with connect() as conn:
         rows_raw = conn.execute(
             """
@@ -1272,12 +1274,26 @@ def clients_data(range_key: str = "24h", limit: int = 200) -> dict[str, Any]:
             """,
             (since, limit),
         ).fetchall()
-    clients = []
+    clients_list = []
     for row in rows_raw:
         item = dict(row)
-        item["label"] = local_dns.alias_for_client(item["raw_client"]) or item["raw_client"]
+        # Persistent-client name resolution only ever runs on the
+        # unmodified real address (privacy_mode == "full"); an
+        # anonymized/truncated client value is never fed back through
+        # name resolution, or that would defeat the whole point of
+        # anonymizing it. See app/clients.py's resolve_client_name().
+        label = None
+        if privacy_mode == "full":
+            try:
+                from app import clients as clients_module
+
+                label = clients_module.resolve_client_name(item["raw_client"])
+            except Exception:  # noqa: BLE001 - labeling must never break the page
+                label = None
+        item["label"] = label or item["raw_client"]
         item["blocked_percent"] = (item["blocked"] / item["value"] * 100) if item["value"] else 0
-        clients.append(item)
+        clients_list.append(item)
+    clients = clients_list
     total = sum(item["value"] for item in clients)
     return {"range": range_key, "clients": clients, "total": total}
 

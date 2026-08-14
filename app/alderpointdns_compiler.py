@@ -27,10 +27,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 try:
-    from app import backup, custom_rules, dns_cache, encryption, filter_schedule, local_dns, network_config, replication, service_logs, software_updates, upstream_dns
+    from app import backup, clients, custom_rules, dns_cache, encryption, filter_schedule, local_dns, network_config, replication, service_logs, software_updates, upstream_dns
 except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from app import backup, custom_rules, dns_cache, encryption, filter_schedule, local_dns, network_config, replication, service_logs, software_updates, upstream_dns
+    from app import backup, clients, custom_rules, dns_cache, encryption, filter_schedule, local_dns, network_config, replication, service_logs, software_updates, upstream_dns
 
 
 DB_PATH = Path("/var/lib/alderpointdns/alderpointdns.db")
@@ -249,7 +249,7 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition
         conn.execute(f'ALTER TABLE {table} ADD COLUMN "{column}" {definition}')
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 PARSER_CACHE_VERSION = "2026-08-09-v1-parser-fastpath"
 POLICY_CACHE_VERSION = "2026-08-09-v1-policy-manifest"
 PROTECTION_REUSE_UNAVAILABLE = 2
@@ -509,6 +509,7 @@ def _apply_schema(conn: sqlite3.Connection, *, seed_defaults: bool = False) -> N
     local_dns.init_db(conn)
     filter_schedule.init_db(conn)
     custom_rules.init_db(conn)
+    clients.init_db(conn)
 
 
 def init_db(*, seed_defaults: bool = False) -> bool:
@@ -1526,6 +1527,10 @@ def dnsdist_conf_migrate() -> str:
         parts.append(altsvc_message)
     elif altsvc_message:
         parts.append(altsvc_message)
+    if clients.ensure_dnsdist_access_include():
+        parts.append("Clients & Access dofile include added")
+    if clients.ensure_access_data_files():
+        parts.append("Clients & Access data files written")
     if not parts:
         parts.append("no dnsdist.conf migrations were needed; already up to date")
     return "; ".join(parts)
