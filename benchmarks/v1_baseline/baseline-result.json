@@ -1,0 +1,77 @@
+{
+  "captured_at": "2026-08-14T11:18:11-0600",
+  "dns_uncached": {
+    "n_ok": 80,
+    "n_requested": 80,
+    "min": 47.981,
+    "p50": 63.434,
+    "p95": 91.218,
+    "p99": 131.435,
+    "max": 131.435,
+    "mean": 70.018
+  },
+  "dns_cached": {
+    "n_ok": 80,
+    "n_requested": 80,
+    "domain": "example.com",
+    "min": 10.593,
+    "p50": 11.96,
+    "p95": 13.258,
+    "p99": 14.174,
+    "max": 14.174,
+    "mean": 12.03
+  },
+  "dns_qps_5s": {
+    "sent": 8039,
+    "received": 8036,
+    "qps_sent": 1607.8,
+    "qps_received": 1607.2
+  },
+  "resources": {
+    "alderpointdns.service": {
+      "MainPID": "484165",
+      "MemoryCurrent": "63320064",
+      "ActiveState": "active"
+    },
+    "alderpointdns-analytics.service": {
+      "MainPID": "484161",
+      "MemoryCurrent": "81641472",
+      "ActiveState": "active"
+    },
+    "dnsdist.service": {
+      "MainPID": "484087",
+      "MemoryCurrent": "20025344",
+      "ActiveState": "active"
+    },
+    "bind9.service": {
+      "MainPID": "484067",
+      "MemoryCurrent": "251969536",
+      "ActiveState": "active"
+    },
+    "named.service": {
+      "MainPID": "484067",
+      "MemoryCurrent": "251969536",
+      "ActiveState": "active"
+    },
+    "ps_snapshot": [
+      " 484067 255612 0.0 named",
+      " 484087 41616  0.1 dnsdist",
+      " 484161 89464  1.4 python3",
+      " 484165 80716  0.1 uvicorn",
+      " 518667 13928  2.2 python3"
+    ],
+    "free": "               total        used        free      shared  buff/cache   available\nMem:      4111773696  1430073344  1501392896    19460096  1501814784  2681700352\nSwap:     2780819456   223973376  2556846080\n"
+  },
+  "storage": {
+    "db_bytes": 28676096,
+    "var_lib_alderpointdns_du": "12037345645\t/var/lib/alderpointdns",
+    "disk_df": "Filesystem       1B-blocks        Used   Available Use% Mounted on\n/dev/sda1      49781313536 35800993792 11418386432  76% /"
+  },
+  "db_analytics": {
+    "query_events_count": 23977,
+    "query_events_count_query_ms": 2.01,
+    "analytics_events_count": 1,
+    "analytics_events_count_query_ms": 0.03,
+    "recent_page_query_ms": 0.18
+  }
+}
