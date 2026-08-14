@@ -364,6 +364,23 @@ class AccessRuleCRUDTest(ClientsTestBase):
 
 
 class MigrationFromClientAliasesTest(ClientsTestBase):
+    def _create_legacy_alias(self, cidr: str, name: str, description: str = "") -> None:
+        conn = clients.connect()
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS client_aliases (
+                id INTEGER PRIMARY KEY, cidr TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO client_aliases(cidr, display_name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            (cidr, name, description, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+        )
+        conn.commit()
+        conn.close()
+
     def test_migrates_legacy_client_aliases_idempotently(self) -> None:
         conn = clients.connect()
         conn.executescript(
@@ -408,6 +425,61 @@ class MigrationFromClientAliasesTest(ClientsTestBase):
         conn.commit()
         clients.init_db(conn)
         self.assertEqual(conn.execute("SELECT count(*) FROM clients").fetchone()[0], 1)
+
+    def test_delete_migrated_client_does_not_resurrect_on_repeated_init(self) -> None:
+        self._create_legacy_alias("172.16.43.88/32", "ImportTestClient", "imported from AdGuard Home")
+        clients.init_db()
+        client_id = clients.list_clients()[0]["id"]
+
+        clients.delete_client(client_id)
+        for _ in range(3):
+            clients.init_db()
+
+        conn = clients.connect()
+        self.assertEqual(conn.execute("SELECT count(*) FROM clients WHERE name='ImportTestClient'").fetchone()[0], 0)
+        self.assertEqual(conn.execute("SELECT count(*) FROM client_identifiers WHERE value='172.16.43.88/32'").fetchone()[0], 0)
+        self.assertEqual(conn.execute("SELECT count(*) FROM client_aliases WHERE cidr='172.16.43.88/32'").fetchone()[0], 0)
+        conn.close()
+
+    def test_delete_final_identifier_from_migrated_client_does_not_create_zombie_state(self) -> None:
+        self._create_legacy_alias("172.16.43.101/32", "Alderpoint DNS", "Alderpoint DNS appliance")
+        clients.init_db()
+        client = clients.list_clients()[0]
+        identifier_id = client["identifiers"][0]["id"]
+
+        clients.remove_identifier(identifier_id)
+        clients.init_db()
+
+        client_after = clients.get_client(client["id"])
+        self.assertIsNotNone(client_after)
+        self.assertEqual(client_after["identifiers"], [])
+        conn = clients.connect()
+        self.assertEqual(conn.execute("SELECT count(*) FROM client_identifiers WHERE value='172.16.43.101/32'").fetchone()[0], 0)
+        self.assertEqual(conn.execute("SELECT count(*) FROM client_aliases WHERE cidr='172.16.43.101/32'").fetchone()[0], 0)
+        conn.close()
+
+    def test_unrelated_legacy_aliases_remain_and_unmigrated_aliases_still_migrate(self) -> None:
+        self._create_legacy_alias("10.10.10.10/32", "Delete Me")
+        self._create_legacy_alias("10.10.10.11/32", "Keep Me")
+        clients.init_db()
+        delete_id = next(c["id"] for c in clients.list_clients() if c["name"] == "Delete Me")
+
+        clients.delete_client(delete_id)
+        clients.init_db()
+
+        names = {c["name"] for c in clients.list_clients()}
+        self.assertNotIn("Delete Me", names)
+        self.assertIn("Keep Me", names)
+        conn = clients.connect()
+        self.assertEqual(conn.execute("SELECT count(*) FROM client_aliases WHERE cidr='10.10.10.10/32'").fetchone()[0], 0)
+        self.assertEqual(conn.execute("SELECT count(*) FROM client_aliases WHERE cidr='10.10.10.11/32'").fetchone()[0], 1)
+        conn.execute(
+            "INSERT INTO client_aliases(cidr, display_name, description, created_at, updated_at) VALUES ('10.10.10.12/32','Late Alias','','t','t')"
+        )
+        conn.commit()
+        conn.close()
+        clients.init_db()
+        self.assertIn("Late Alias", {c["name"] for c in clients.list_clients()})
 
 
 class DnsdistRenderingSafetyTest(ClientsTestBase):
@@ -610,10 +682,12 @@ class AnalyticsPrivacyTest(ClientsTestBase):
         """Regression test for the privacy requirement: clients_data() must
         never call resolve_client_name() on truncated/anonymized values."""
         from app import analytics
+        from app import alderpointdns_compiler as compiler
 
-        old_db, old_secret = analytics.DB_PATH, analytics.SECRET_FILE
+        old_db, old_secret, old_compiler_db = analytics.DB_PATH, analytics.SECRET_FILE, compiler.DB_PATH
         tmp_db = self.tmp / "analytics.db"
         analytics.DB_PATH = tmp_db
+        compiler.DB_PATH = tmp_db
         analytics.SECRET_FILE = self.tmp / "secret"
         analytics.SECRET_FILE.write_text("test-secret")
         try:
@@ -629,14 +703,16 @@ class AnalyticsPrivacyTest(ClientsTestBase):
                 analytics.clients_data("24h")
                 spy.assert_not_called()
         finally:
-            analytics.DB_PATH, analytics.SECRET_FILE = old_db, old_secret
+            analytics.DB_PATH, analytics.SECRET_FILE, compiler.DB_PATH = old_db, old_secret, old_compiler_db
 
     def test_analytics_resolves_when_privacy_mode_full(self) -> None:
         from app import analytics
+        from app import alderpointdns_compiler as compiler
 
-        old_db, old_secret = analytics.DB_PATH, analytics.SECRET_FILE
+        old_db, old_secret, old_compiler_db = analytics.DB_PATH, analytics.SECRET_FILE, compiler.DB_PATH
         tmp_db = self.tmp / "analytics2.db"
         analytics.DB_PATH = tmp_db
+        compiler.DB_PATH = tmp_db
         analytics.SECRET_FILE = self.tmp / "secret2"
         analytics.SECRET_FILE.write_text("test-secret")
         try:
@@ -652,7 +728,7 @@ class AnalyticsPrivacyTest(ClientsTestBase):
             labels = [c["label"] for c in result["clients"]]
             self.assertIn("TV", labels)
         finally:
-            analytics.DB_PATH, analytics.SECRET_FILE = old_db, old_secret
+            analytics.DB_PATH, analytics.SECRET_FILE, compiler.DB_PATH = old_db, old_secret, old_compiler_db
 
 
 class AdGuardMigrationMappingTest(unittest.TestCase):
@@ -731,6 +807,7 @@ class NativeExportImportRoundTripTest(ClientsTestBase):
         client_id = clients.create_client("Living Room TV", "a tv", ["192.168.32.47", "192.168.32.0/28"])
         cid = clients.generate_clientid(256)
         clients.add_identifier(client_id, cid)
+        clients.set_client_enabled(client_id, False)
         clients.set_default_policy("deny")
         clients.add_access_rule("allow", "ipv4", "10.0.0.5")
         clients.add_access_rule("deny", "client", client_id=client_id)
@@ -741,9 +818,11 @@ class NativeExportImportRoundTripTest(ClientsTestBase):
         self.assertEqual(len(translation["clients_full"]), 1)
         client = translation["clients_full"][0]
         self.assertEqual(client["name"], "Living Room TV")
+        self.assertFalse(client["enabled"])
         values = {i["value"] for i in client["identifiers"]}
         self.assertIn("192.168.32.47", values)
         self.assertIn(cid, values)  # full 256-bit ClientID preserved, not truncated
+        self.assertEqual(translation["access_default_policy"], "deny")
 
         self.assertEqual(len(translation["access_allowed"]), 1)
         self.assertEqual(translation["access_allowed"][0]["value"], "10.0.0.5")
@@ -794,6 +873,33 @@ class AdGuardApplyItemsTest(ClientsTestBase):
         # not create a second row.
         again = _apply_access_rule_item(conn, "deny", rule, rollback_info)
         self.assertIsNone(again)
+        conn.close()
+
+    def test_apply_access_rule_item_preserves_client_scoped_rule(self) -> None:
+        from app.importer import _apply_access_rule_item
+
+        client_id = clients.create_client("Scoped", identifiers=["10.2.2.2"])
+        conn = clients.connect()
+        rollback_info = {"access_rules_added": []}
+        rule_id = _apply_access_rule_item(conn, "deny", {"kind": "client", "client_name": "Scoped"}, rollback_info)
+        conn.commit()
+        self.assertIsNotNone(rule_id)
+        row = conn.execute("SELECT kind, value, client_id FROM access_rules WHERE id=?", (rule_id,)).fetchone()
+        self.assertEqual(row["kind"], "client")
+        self.assertIsNone(row["value"])
+        self.assertEqual(row["client_id"], client_id)
+        duplicate = _apply_access_rule_item(conn, "deny", {"kind": "client", "client_name": "Scoped"}, rollback_info)
+        self.assertIsNone(duplicate)
+        conn.close()
+
+    def test_apply_access_rule_item_rejects_ambiguous_client_name(self) -> None:
+        from app.importer import ImportError_, _apply_access_rule_item
+
+        clients.create_client("Duplicate", identifiers=["10.3.3.1"])
+        clients.create_client("Duplicate", identifiers=["10.3.3.2"])
+        conn = clients.connect()
+        with self.assertRaises(ImportError_):
+            _apply_access_rule_item(conn, "deny", {"kind": "client", "client_name": "Duplicate"}, {"access_rules_added": []})
         conn.close()
 
     def test_rollback_removes_created_client_and_cascades(self) -> None:
@@ -1059,6 +1165,46 @@ class FullMigrationJobPipelineTest(unittest.TestCase):
         self.assertEqual(kinds, {"ipv4"})
         for rule in clients.list_access_rules():
             self.assertNotEqual(rule.get("value"), "deadbeef")
+
+    def test_native_import_apply_preserves_default_policy_disabled_client_and_client_rule(self) -> None:
+        translation = {
+            "blocklist_sources": [],
+            "allowlist_unsupported": [],
+            "custom_rules": [],
+            "custom_allow": [],
+            "custom_block": [],
+            "unsupported_rules": [],
+            "rewrites_as_local_dns": [],
+            "clients_as_aliases": [],
+            "clients_full": [
+                {
+                    "name": "Imported TV",
+                    "description": "native import",
+                    "enabled": False,
+                    "identifiers": [{"kind": "ipv4", "value": "192.168.44.44"}],
+                    "weak_clientids": [],
+                    "unrecognized": [],
+                }
+            ],
+            "access_default_policy": "deny",
+            "access_allowed": [],
+            "access_denied": [{"kind": "client", "value": "", "raw": "", "client_name": "Imported TV"}],
+            "client_scoped": [],
+            "upstream_resolvers": [],
+            "untranslatable": [],
+        }
+        job_id = self.importer.create_migration_job("alderpointdns_json", "native", translation)
+        result = self.importer.apply_migration_job(job_id)
+
+        self.assertEqual(result["counts"]["clients_created"], 1)
+        self.assertEqual(result["counts"]["access_default_policy_changed"], 1)
+        self.assertEqual(clients.get_default_policy(), "deny")
+        imported = clients.list_clients()[0]
+        self.assertEqual(imported["name"], "Imported TV")
+        self.assertFalse(imported["enabled"])
+        rule = clients.list_access_rules()[0]
+        self.assertEqual(rule["kind"], "client")
+        self.assertEqual(rule["client_id"], imported["id"])
 
 
 if __name__ == "__main__":

@@ -233,6 +233,39 @@ def identifier_network(kind: IdentifierKind, value: str) -> ipaddress.IPv4Networ
     return None
 
 
+def _legacy_alias_cidr(kind: str, value: str) -> str | None:
+    if kind not in ("ipv4", "ipv4_cidr", "ipv6", "ipv6_cidr"):
+        return None
+    try:
+        return str(ipaddress.ip_network(value, strict=False))
+    except ValueError:
+        return None
+
+
+def _delete_legacy_aliases_for_identifiers(db: sqlite3.Connection, identifiers: Iterable[sqlite3.Row | dict[str, Any]]) -> int:
+    """Retire legacy client_aliases rows for normalized identifiers an
+    administrator deliberately deleted. client_aliases was the migration
+    source for v1.0.2-era display aliases; once that alias has become a
+    normalized persistent client/identifier, keeping it after the
+    normalized object is deleted makes init_db() recreate a zombie client.
+    Only matching legacy rows are removed; unrelated aliases remain intact
+    and still migrate normally."""
+    has_table = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='client_aliases'"
+    ).fetchone()
+    if not has_table:
+        return 0
+    removed = 0
+    seen: set[str] = set()
+    for identifier in identifiers:
+        cidr = _legacy_alias_cidr(identifier["kind"], identifier["value"])
+        if not cidr or cidr in seen:
+            continue
+        seen.add(cidr)
+        removed += db.execute("DELETE FROM client_aliases WHERE cidr=?", (cidr,)).rowcount
+    return removed
+
+
 # ---------------------------------------------------------------------------
 # ClientID: generation, validation, DNS-safe encoding
 # ---------------------------------------------------------------------------
@@ -428,6 +461,8 @@ def delete_client(client_id: int) -> None:
     with connect() as db:
         init_db(db)
         with db:
+            identifiers = db.execute("SELECT kind, value FROM client_identifiers WHERE client_id=?", (client_id,)).fetchall()
+            _delete_legacy_aliases_for_identifiers(db, identifiers)
             db.execute("DELETE FROM access_rules WHERE kind='client' AND client_id=?", (client_id,))
             db.execute("DELETE FROM client_identifiers WHERE client_id=?", (client_id,))
             cur = db.execute("DELETE FROM clients WHERE id=?", (client_id,))
@@ -463,9 +498,10 @@ def remove_identifier(identifier_id: int) -> None:
     with connect() as db:
         init_db(db)
         with db:
-            row = db.execute("SELECT client_id FROM client_identifiers WHERE id=?", (identifier_id,)).fetchone()
+            row = db.execute("SELECT client_id, kind, value FROM client_identifiers WHERE id=?", (identifier_id,)).fetchone()
             if not row:
                 raise ClientsError("identifier not found")
+            _delete_legacy_aliases_for_identifiers(db, [row])
             db.execute("DELETE FROM client_identifiers WHERE id=?", (identifier_id,))
             db.execute("UPDATE clients SET updated_at=? WHERE id=?", (now(), row["client_id"]))
 

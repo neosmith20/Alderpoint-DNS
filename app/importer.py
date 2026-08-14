@@ -698,6 +698,7 @@ def parse_alderpointdns_native_json(text: str) -> dict[str, Any]:
             if isinstance(row, dict)
         ],
         "clients_full": clients_full,
+        "access_default_policy": access_policy.get("default_policy") if access_policy.get("default_policy") in {"allow", "deny"} else None,
         "access_allowed": access_allowed,
         "access_denied": access_denied,
         "client_scoped": [],
@@ -1764,6 +1765,10 @@ def _rollback_migration_job(job: dict[str, Any]) -> int:
             if access_rule_ids:
                 placeholders = ",".join("?" for _ in access_rule_ids)
                 removed += conn.execute(f"DELETE FROM access_rules WHERE id IN ({placeholders})", access_rule_ids).rowcount
+            previous_access_policy = info.get("access_default_policy_before")
+            if previous_access_policy in {"allow", "deny"}:
+                conn.execute("UPDATE access_settings SET default_policy=?, updated_at=? WHERE id=1", (previous_access_policy, now()))
+                access_rules_touched = True
             conn.execute(
                 "UPDATE import_jobs SET status='rolled_back', finished_at=?, message=? WHERE id=?",
                 (now(), f"rolled back: removed {removed} imported object(s)", job_id),
@@ -2290,8 +2295,8 @@ def _apply_client_full_item(conn: sqlite3.Connection, client: dict[str, Any], so
         raise ImportError_("client name is required")
     ts = now()
     cur = conn.execute(
-        "INSERT INTO clients(name, description, enabled, created_at, updated_at) VALUES (?, ?, 1, ?, ?)",
-        (name, client.get("description") or f"imported from {source_label}", ts, ts),
+        "INSERT INTO clients(name, description, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        (name, client.get("description") or f"imported from {source_label}", 1 if client.get("enabled", True) else 0, ts, ts),
     )
     client_id = cur.lastrowid
     created = 0
@@ -2311,23 +2316,42 @@ def _apply_client_full_item(conn: sqlite3.Connection, client: dict[str, Any], so
     return client_id, created
 
 
+def _client_id_by_unique_name(conn: sqlite3.Connection, name: str) -> int:
+    rows = conn.execute("SELECT id FROM clients WHERE name=? ORDER BY id", (name,)).fetchall()
+    if not rows:
+        raise ImportError_(f"client rule references missing client {name!r}")
+    if len(rows) > 1:
+        raise ImportError_(
+            f"client rule references ambiguous client name {name!r}; rename duplicates before importing client-scoped access rules"
+        )
+    return int(rows[0]["id"])
+
+
 def _apply_access_rule_item(conn: sqlite3.Connection, action: str, rule: dict[str, Any], rollback_info: dict[str, Any]) -> int | None:
     """Creates one allow/deny access rule from an imported IPv4/IPv6/CIDR/
     ClientID value, preserving the source kind exactly (never broadened to
     a wider range). Returns the new rule id, or None if it already exists
     (treated as a duplicate, not an error)."""
     kind, value = rule.get("kind"), rule.get("value")
-    if kind not in ("ipv4", "ipv4_cidr", "ipv6", "ipv6_cidr", "clientid") or not value:
+    client_id = None
+    if kind == "client":
+        client_name = str(rule.get("client_name") or "").strip()
+        if not client_name:
+            return None
+        client_id = _client_id_by_unique_name(conn, client_name)
+        value = None
+    elif kind not in ("ipv4", "ipv4_cidr", "ipv6", "ipv6_cidr", "clientid") or not value:
         return None
     existing = conn.execute(
-        "SELECT id FROM access_rules WHERE action=? AND kind=? AND value=? AND client_id IS NULL", (action, kind, value)
+        "SELECT id FROM access_rules WHERE action=? AND kind=? AND value IS ? AND client_id IS ?",
+        (action, kind, value, client_id),
     ).fetchone()
     if existing:
         return None
     ts = now()
     cur = conn.execute(
-        "INSERT INTO access_rules(action, kind, value, client_id, created_at) VALUES (?, ?, ?, NULL, ?)",
-        (action, kind, value, ts),
+        "INSERT INTO access_rules(action, kind, value, client_id, created_at) VALUES (?, ?, ?, ?, ?)",
+        (action, kind, value, client_id, ts),
     )
     rollback_info["access_rules_added"].append(cur.lastrowid)
     return cur.lastrowid
@@ -2475,6 +2499,7 @@ def apply_migration_job(
     clients_full_list = list(translation.get("clients_full", []))
     access_allowed_list = list(translation.get("access_allowed", []))
     access_denied_list = list(translation.get("access_denied", []))
+    access_default_policy = translation.get("access_default_policy")
 
     counts = {
         "blocklists_added": 0,
@@ -2492,6 +2517,7 @@ def apply_migration_job(
         "clients_created": 0,
         "client_identifiers_created": 0,
         "access_rules_created": 0,
+        "access_default_policy_changed": 0,
         "duplicates_skipped": 0,
         "invalid_kept_inactive": 0,
         "unsupported_kept_inactive": 0,
@@ -2507,6 +2533,7 @@ def apply_migration_job(
         "upstream_ids": [],
         "clients_added": [],
         "access_rules_added": [],
+        "access_default_policy_before": None,
     }
     failures: list[dict[str, str]] = []
     backup_path = create_pre_import_backup(strict=True)
@@ -2527,10 +2554,18 @@ def apply_migration_job(
         upstream_dns.init_db(conn)
         custom_rules.init_db(conn)
         clients.init_db(conn)
+        current_access_policy_row = conn.execute("SELECT default_policy FROM access_settings WHERE id=1").fetchone()
+        current_access_policy = current_access_policy_row["default_policy"] if current_access_policy_row else "allow"
         conn.commit()
         access_layer_touched = False
         try:
             with conn:
+                if access_default_policy in {"allow", "deny"} and access_default_policy != current_access_policy:
+                    stage = "Clients & Access default policy"
+                    rollback_info["access_default_policy_before"] = current_access_policy
+                    conn.execute("UPDATE access_settings SET default_policy=?, updated_at=? WHERE id=1", (access_default_policy, now()))
+                    counts["access_default_policy_changed"] = 1
+                    access_layer_touched = True
                 for item in items:
                     if not item["apply"] or item["key"] not in selected_keys:
                         continue
