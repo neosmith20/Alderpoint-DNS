@@ -2348,6 +2348,41 @@ def encryption_error(request: Request, message: str, status_code: int = 400) -> 
     return render(request, "encryption.html", **context, status_code=status_code)
 
 
+def _deploy_encryption_or_error(request: Request, admin: sqlite3.Row, action: str, detail: str, success_redirect: str = "/encryption") -> Any:
+    """Shared tail for every /encryption/* mutation route: deploy the
+    freshly-staged settings/certificate to dnsdist via the privileged
+    encryption-deploy CLI subcommand, and audit-log + surface the *actual*
+    result -- never redirect to a success page (or stay silent) when
+    encryption_deploy_apply()'s (code, output) says deployment failed. The
+    DB row/staged material the caller already wrote is not itself rolled
+    back here (app.encryption.deploy_encryption() has its own last-known-good
+    rollback for the dnsdist config and any newly promoted cert/key
+    material); this only ensures the admin is told the truth about whether
+    that deployment actually completed. Mirrors
+    _deploy_access_or_error()'s convention for /clients-access/*."""
+    ip = request.client.host if request.client else None
+    code, out = encryption_deploy_apply()
+    output_tail = out.strip()
+    with db() as conn:
+        audit_log(
+            conn,
+            admin["id"],
+            admin["username"],
+            action,
+            code == 0,
+            ip,
+            detail if code == 0 else f"{detail}; deploy failed: {output_tail[-500:]}",
+        )
+    if code != 0:
+        # jinja2 autoescapes {{ error }} in encryption.html, so raw
+        # subprocess/dnsdist output ending up here (which can legitimately
+        # contain '<', '&', etc. from e.g. a dnsdist --check-config Lua
+        # error) can never be interpreted as markup by the browser -- it is
+        # always shown as inert text, not sanitized/stripped here.
+        return encryption_error(request, f"{detail} was saved, but deploying it to dnsdist failed: {output_tail}")
+    return redirect(success_redirect)
+
+
 @app.get("/encryption", response_class=HTMLResponse)
 def encryption_page(request: Request, _: sqlite3.Row = Depends(current_admin)):
     context = encryption_context()
@@ -2375,7 +2410,7 @@ def encryption_settings_post(
     doq_port: int = Form(853),
     dnscrypt_port: int = Form(5443),
     dnscrypt_provider: str = Form("2.dnscrypt-cert.alderpointdns.local"),
-    _: sqlite3.Row = Depends(current_admin),
+    admin: sqlite3.Row = Depends(current_admin),
 ):
     check_csrf(request, csrf)
     try:
@@ -2405,34 +2440,31 @@ def encryption_settings_post(
         # never be persisted as enabled, not just hidden in the UI.
         submitted, _capability_warnings = encryption.enforce_capabilities(submitted)
         encryption.update_settings(submitted)
-        encryption_deploy_apply()
     except Exception as exc:
         return encryption_error(request, str(exc))
-    return redirect("/encryption")
+    return _deploy_encryption_or_error(request, admin, "encryption_settings_changed", f"encryption settings for {server_hostname}")
 
 
 @app.post("/encryption/certificate/self-signed")
-def encryption_cert_self_signed(request: Request, csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+def encryption_cert_self_signed(request: Request, csrf: str = Form(...), admin: sqlite3.Row = Depends(current_admin)):
     check_csrf(request, csrf)
     try:
         encryption.update_settings({**encryption.settings(), "cert_mode": "self_signed"})
         encryption.request_cert_action("generate_self_signed")
-        encryption_deploy_apply()
     except Exception as exc:
         return encryption_error(request, str(exc))
-    return redirect("/encryption")
+    return _deploy_encryption_or_error(request, admin, "encryption_cert_self_signed", "self-signed certificate generation")
 
 
 @app.post("/encryption/certificate/local-ca")
-def encryption_cert_local_ca(request: Request, csrf: str = Form(...), _: sqlite3.Row = Depends(current_admin)):
+def encryption_cert_local_ca(request: Request, csrf: str = Form(...), admin: sqlite3.Row = Depends(current_admin)):
     check_csrf(request, csrf)
     try:
         encryption.update_settings({**encryption.settings(), "cert_mode": "local_ca"})
         encryption.request_cert_action("generate_local_ca")
-        encryption_deploy_apply()
     except Exception as exc:
         return encryption_error(request, str(exc))
-    return redirect("/encryption")
+    return _deploy_encryption_or_error(request, admin, "encryption_cert_local_ca", "local CA certificate issuance")
 
 
 @app.post("/encryption/certificate/upload")
@@ -2441,7 +2473,7 @@ async def encryption_cert_upload(
     csrf: str = Form(...),
     cert_file: UploadFile = File(...),
     key_file: UploadFile = File(...),
-    _: sqlite3.Row = Depends(current_admin),
+    admin: sqlite3.Row = Depends(current_admin),
 ):
     check_csrf(request, csrf)
     try:
@@ -2451,10 +2483,9 @@ async def encryption_cert_upload(
             raise encryption.EncryptionError("both a certificate file and a key file are required")
         encryption.request_cert_upload(cert_bytes, key_bytes)
         encryption.update_settings({**encryption.settings(), "cert_mode": "uploaded"})
-        encryption_deploy_apply()
     except Exception as exc:
         return encryption_error(request, str(exc))
-    return redirect("/encryption")
+    return _deploy_encryption_or_error(request, admin, "encryption_cert_uploaded", "uploaded certificate/key")
 
 
 @app.post("/encryption/certificate/existing-path")
@@ -2463,15 +2494,14 @@ def encryption_cert_existing_path(
     csrf: str = Form(...),
     cert_path: str = Form(...),
     key_path: str = Form(...),
-    _: sqlite3.Row = Depends(current_admin),
+    admin: sqlite3.Row = Depends(current_admin),
 ):
     check_csrf(request, csrf)
     try:
         encryption.update_settings({**encryption.settings(), "cert_mode": "existing_path", "cert_path": cert_path, "key_path": key_path})
-        encryption_deploy_apply()
     except Exception as exc:
         return encryption_error(request, str(exc))
-    return redirect("/encryption")
+    return _deploy_encryption_or_error(request, admin, "encryption_cert_existing_path", f"existing-path certificate {cert_path}")
 
 
 @app.get("/encryption/certificate/download")

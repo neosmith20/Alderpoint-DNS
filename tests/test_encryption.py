@@ -195,6 +195,17 @@ class EncryptionTest(unittest.TestCase):
         info = encryption.cert_info(encryption.CERT_DIR / "does-not-exist.crt")
         self.assertFalse(info["available"])
 
+    def test_cert_info_unreadable_path_degrades_instead_of_raising(self) -> None:
+        """cert_mode "existing_path" lets an admin point at an arbitrary
+        filesystem path; cert_info() is also called directly from the
+        unprivileged web process (encryption_context()), which is not
+        guaranteed read access to it -- a PermissionError here must not
+        propagate as an unhandled exception (found live: it 500'd the
+        encryption page's own failure-report render)."""
+        with mock.patch("pathlib.Path.exists", side_effect=PermissionError("denied")):
+            info = encryption.cert_info(Path("/root/unreadable-by-web-process.crt"))
+        self.assertFalse(info["available"])
+
     # -- dnsdist.conf migration -------------------------------------------
 
     def test_ensure_dnsdist_conf_parameterized_preserves_secrets(self) -> None:
@@ -254,7 +265,27 @@ class EncryptionTest(unittest.TestCase):
         self.assertIn("Environment=ALDERPOINTDNS_DNS_LISTEN_IPV6=::", text)
         self.assertIn("Environment=ALDERPOINTDNS_DNS_DOH=1", text)
         self.assertIn("Environment=ALDERPOINTDNS_DNS_DOT=0", text)
-        self.assertIn(f"Environment=ALDERPOINTDNS_TLS_CERT={cfg['cert_path']}", text)
+        # Not cfg['cert_path'] (DEFAULTS' own baked-in value): cert_mode
+        # "self_signed" here means the *actually* active cert is whatever
+        # resolve_active_cert_paths() resolves it to, which is what must end
+        # up in the rendered env override -- see the next test for why this
+        # distinction matters.
+        self.assertIn(f"Environment=ALDERPOINTDNS_TLS_CERT={encryption.CERT_PATH_DEFAULT}", text)
+
+    def test_render_env_override_ignores_stale_existing_path_fields_in_other_modes(self) -> None:
+        """Regression, found live: cert_path/key_path are only meaningful
+        while cert_mode == "existing_path" -- switching *back* to
+        self_signed/local_ca/uploaded does not clear those two DB fields,
+        so a naive `cfg['cert_path']` read here would keep pointing dnsdist
+        at a stale, unrelated filesystem path from a previous existing-path
+        configuration (observed live: dnsdist refused to start with "Fatal
+        error: ... trying to load the TLS server certificate file" for a
+        path that hadn't been in use for several deployments)."""
+        cfg = dict(encryption.DEFAULTS)
+        cfg.update(cert_mode="self_signed", cert_path="/no/such/stale/existing-path.crt", key_path="/no/such/stale/existing-path.key")
+        text = encryption.render_env_override(cfg)
+        self.assertNotIn("/no/such/stale/existing-path.crt", text)
+        self.assertIn(f"Environment=ALDERPOINTDNS_TLS_CERT={encryption.CERT_PATH_DEFAULT}", text)
 
     # -- deploy staged/validate/backup/atomic/health/rollback -------------
 
@@ -322,6 +353,79 @@ class EncryptionTest(unittest.TestCase):
         deployment = encryption.last_deployment()
         self.assertEqual(deployment["status"], "deployed")
         self.assertIn("DNSCrypt certificate generation failed", deployment["message"])
+
+    def test_deploy_encryption_preserves_previous_self_signed_cert_on_deploy_failure(self) -> None:
+        """A regenerated self-signed cert that dnsdist can't actually serve
+        (protocol test failure) must not leave the last known-good cert/key
+        clobbered -- see deploy_encryption()'s cert_backup/cert_backup_target
+        handling, which mirrors its existing env_backup rollback."""
+        template = self._prepare_template_and_conf()
+        encryption.generate_self_signed("dns.example.com", days=30)
+        with mock.patch.object(encryption, "run", self.fake_run_ok), \
+             mock.patch.object(encryption, "_wait_active", return_value=True), \
+             mock.patch.object(encryption, "test_protocols", return_value={"plain": "ok"}):
+            encryption.deploy_encryption(template_path=template)
+        good_cert = encryption.CERT_PATH_DEFAULT.read_bytes()
+        good_key = encryption.KEY_PATH_DEFAULT.read_bytes()
+
+        encryption.request_cert_action("generate_self_signed")
+        with self.assertRaises(RuntimeError):
+            with mock.patch.object(encryption, "run", self.fake_run_ok), \
+                 mock.patch.object(encryption, "_wait_active", return_value=True), \
+                 mock.patch.object(encryption, "test_protocols", return_value={"plain": "ok", "doh": "failed (timeout)"}):
+                encryption.deploy_encryption(template_path=template)
+        # The regeneration itself already ran and overwrote the files on disk
+        # (that part of the bug is inherent to how openssl req works -- it
+        # can't validate a live TLS handshake before writing); what matters
+        # is that the failed deployment's rollback restores the previous,
+        # actually-working material rather than leaving the new one in place.
+        self.assertEqual(encryption.CERT_PATH_DEFAULT.read_bytes(), good_cert)
+        self.assertEqual(encryption.KEY_PATH_DEFAULT.read_bytes(), good_key)
+        deployment = encryption.last_deployment()
+        self.assertEqual(deployment["status"], "rolled_back")
+
+    def test_deploy_encryption_preserves_previous_uploaded_cert_on_deploy_failure(self) -> None:
+        """Same as above for an uploaded certificate/key pair, and also
+        proves the staged pending-upload files are consumed (not left
+        behind) even though the deployment ultimately fails."""
+        template = self._prepare_template_and_conf()
+        # Two independently generated (but each internally matching)
+        # cert/key pairs to upload in turn.
+        with mock.patch.object(encryption, "run", self.fake_run_ok):
+            encryption.generate_self_signed("cert-a.example.com", days=30)
+        cert_a = encryption.CERT_PATH_DEFAULT.read_bytes()
+        key_a = encryption.KEY_PATH_DEFAULT.read_bytes()
+        with mock.patch.object(encryption, "run", self.fake_run_ok):
+            encryption.generate_self_signed("cert-b.example.com", days=30)
+        cert_b = encryption.CERT_PATH_DEFAULT.read_bytes()
+        key_b = encryption.KEY_PATH_DEFAULT.read_bytes()
+
+        # A successful upload+deploy of pair A establishes it as the active
+        # uploaded certificate.
+        encryption.update_settings({**encryption.settings(), "cert_mode": "uploaded"})
+        encryption.request_cert_upload(cert_a, key_a)
+        with mock.patch.object(encryption, "run", self.fake_run_ok), \
+             mock.patch.object(encryption, "_wait_active", return_value=True), \
+             mock.patch.object(encryption, "test_protocols", return_value={"plain": "ok"}):
+            encryption.deploy_encryption(template_path=template)
+        self.assertEqual(encryption.UPLOADED_CERT_PATH.read_bytes(), cert_a)
+
+        # Uploading pair B, whose deployment then fails its protocol test,
+        # must not leave pair B in place over the last known-good pair A.
+        encryption.request_cert_upload(cert_b, key_b)
+        self.assertTrue(encryption.PENDING_UPLOAD_CERT.exists())
+        with self.assertRaises(RuntimeError):
+            with mock.patch.object(encryption, "run", self.fake_run_ok), \
+                 mock.patch.object(encryption, "_wait_active", return_value=True), \
+                 mock.patch.object(encryption, "test_protocols", return_value={"plain": "ok", "doh": "failed (timeout)"}):
+                encryption.deploy_encryption(template_path=template)
+
+        self.assertFalse(encryption.PENDING_UPLOAD_CERT.exists())
+        self.assertFalse(encryption.PENDING_UPLOAD_KEY.exists())
+        self.assertEqual(encryption.UPLOADED_CERT_PATH.read_bytes(), cert_a)
+        self.assertEqual(encryption.UPLOADED_KEY_PATH.read_bytes(), key_a)
+        deployment = encryption.last_deployment()
+        self.assertEqual(deployment["status"], "rolled_back")
 
     # -- dnsdist capability detection --------------------------------------
 
@@ -478,6 +582,13 @@ class EncryptionWebRouteTests(unittest.TestCase):
         self.old = {
             "e_DB_PATH": encryption.DB_PATH,
             "e_CERT_DIR": encryption.CERT_DIR,
+            "e_CERT_PATH_DEFAULT": encryption.CERT_PATH_DEFAULT,
+            "e_KEY_PATH_DEFAULT": encryption.KEY_PATH_DEFAULT,
+            "e_CA_CERT_PATH": encryption.CA_CERT_PATH,
+            "e_CA_KEY_PATH": encryption.CA_KEY_PATH,
+            "e_CA_SERIAL_PATH": encryption.CA_SERIAL_PATH,
+            "e_UPLOADED_CERT_PATH": encryption.UPLOADED_CERT_PATH,
+            "e_UPLOADED_KEY_PATH": encryption.UPLOADED_KEY_PATH,
             "e_STAGING_DIR": encryption.STAGING_DIR,
             "e_PENDING_UPLOAD_CERT": encryption.PENDING_UPLOAD_CERT,
             "e_PENDING_UPLOAD_KEY": encryption.PENDING_UPLOAD_KEY,
@@ -488,6 +599,23 @@ class EncryptionWebRouteTests(unittest.TestCase):
         encryption.DB_PATH = db_path
         encryption.CERT_DIR = self.tmp / "certs"
         encryption.CERT_DIR.mkdir(parents=True)
+        # CERT_PATH_DEFAULT/KEY_PATH_DEFAULT/CA_*/UPLOADED_* are each bound
+        # to a concrete Path object at module-import time (CERT_DIR / "...")
+        # -- reassigning encryption.CERT_DIR above does NOT retroactively
+        # repoint them. Any test in this class that goes on to actually
+        # write certificate material (not just mock encryption_deploy_apply
+        # and never call the real deploy/generate functions) must have
+        # these repointed too, or it silently writes through to the real
+        # system paths under /etc/alderpointdns/certs -- found live, the
+        # hard way, when an earlier version of this file's certificate
+        # upload test clobbered the actual dev appliance's active TLS cert.
+        encryption.CERT_PATH_DEFAULT = encryption.CERT_DIR / "alderpointdns-lab.crt"
+        encryption.KEY_PATH_DEFAULT = encryption.CERT_DIR / "alderpointdns-lab.key"
+        encryption.CA_CERT_PATH = encryption.CERT_DIR / "alderpointdns-ca.crt"
+        encryption.CA_KEY_PATH = encryption.CERT_DIR / "alderpointdns-ca.key"
+        encryption.CA_SERIAL_PATH = encryption.CERT_DIR / "alderpointdns-ca.srl"
+        encryption.UPLOADED_CERT_PATH = encryption.CERT_DIR / "alderpointdns-uploaded.crt"
+        encryption.UPLOADED_KEY_PATH = encryption.CERT_DIR / "alderpointdns-uploaded.key"
         encryption.STAGING_DIR = self.tmp / "staging"
         encryption.STAGING_DIR.mkdir(parents=True)
         encryption.PENDING_UPLOAD_CERT = encryption.STAGING_DIR / "pending-cert-upload.crt"
@@ -502,6 +630,9 @@ class EncryptionWebRouteTests(unittest.TestCase):
         conn.execute("INSERT INTO admins(username, password_hash, created_at) VALUES ('admin', 'x', 'now')")
         conn.execute(
             "CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, admin_id INTEGER, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, ip TEXT, user_agent TEXT, csrf TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS admin_audit_log (id INTEGER PRIMARY KEY, at TEXT NOT NULL, admin_id INTEGER, username TEXT NOT NULL DEFAULT '', action TEXT NOT NULL, success INTEGER NOT NULL, ip TEXT, detail TEXT NOT NULL DEFAULT '')"
         )
         self.csrf = "test-csrf-token"
         session_id = "test-session-id"
@@ -535,7 +666,12 @@ class EncryptionWebRouteTests(unittest.TestCase):
         from app import alderpointdns_compiler as compiler  # noqa: PLC0415
 
         compiler.DB_PATH = self.old["c_DB_PATH"]
-        for key in ("DB_PATH", "CERT_DIR", "STAGING_DIR", "PENDING_UPLOAD_CERT", "PENDING_UPLOAD_KEY"):
+        for key in (
+            "DB_PATH", "CERT_DIR", "CERT_PATH_DEFAULT", "KEY_PATH_DEFAULT",
+            "CA_CERT_PATH", "CA_KEY_PATH", "CA_SERIAL_PATH",
+            "UPLOADED_CERT_PATH", "UPLOADED_KEY_PATH",
+            "STAGING_DIR", "PENDING_UPLOAD_CERT", "PENDING_UPLOAD_KEY",
+        ):
             setattr(encryption, key, self.old[f"e_{key}"])
         self.shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -587,6 +723,211 @@ class EncryptionWebRouteTests(unittest.TestCase):
         self.assertNotRegex(page.text, r'name="doq_enabled"[^>]*checked')
         self.assertRegex(page.text, r'name="doh3_enabled"[^>]*disabled')
         self.assertNotRegex(page.text, r'name="doh3_enabled"[^>]*checked')
+
+    # -- deployment false-success regression (encryption_deploy_apply()'s
+    # (code, output) return value being ignored by every /encryption/*
+    # mutation route) -----------------------------------------------------
+
+    def _audit_rows(self, action: str) -> list:
+        import sqlite3 as sqlite3_mod
+
+        conn = sqlite3_mod.connect(self.webapp.DB_PATH)
+        try:
+            return conn.execute(
+                "SELECT success, detail FROM admin_audit_log WHERE action=? ORDER BY id", (action,)
+            ).fetchall()
+        finally:
+            conn.close()
+
+    def test_self_signed_deploy_success_redirects_and_audits_success(self) -> None:
+        with mock.patch.object(self.webapp, "encryption_deploy_apply", lambda: (0, "deployed with protocols: {'plain': 'ok'}")):
+            response = self.client.post(
+                "/encryption/certificate/self-signed",
+                data={"csrf": self.csrf},
+                follow_redirects=False,
+            )
+        self.assertEqual(response.status_code, 303)
+        rows = self._audit_rows("encryption_cert_self_signed")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], 1)
+
+    def test_self_signed_deploy_failure_does_not_redirect_or_claim_success(self) -> None:
+        """The core regression: encryption_deploy_apply() returning a
+        non-zero code must never still redirect to /encryption as if the
+        deployment had succeeded."""
+        with mock.patch.object(self.webapp, "encryption_deploy_apply", lambda: (1, "dnsdist did not become active after restart")):
+            response = self.client.post(
+                "/encryption/certificate/self-signed",
+                data={"csrf": self.csrf},
+                follow_redirects=False,
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertNotEqual(response.status_code, 303)
+        self.assertIn("deploying it to dnsdist failed", response.text)
+        self.assertIn("dnsdist did not become active after restart", response.text)
+        self.assertNotIn("alert success", response.text)
+        rows = self._audit_rows("encryption_cert_self_signed")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], 0)
+        self.assertIn("dnsdist did not become active after restart", rows[0][1])
+
+    def test_deploy_failure_output_with_markup_is_escaped_not_executed(self) -> None:
+        malicious_output = "<script>alert(document.cookie)</script>"
+        with mock.patch.object(self.webapp, "encryption_deploy_apply", lambda: (1, malicious_output)):
+            response = self.client.post(
+                "/encryption/certificate/self-signed",
+                data={"csrf": self.csrf},
+                follow_redirects=False,
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertNotIn("<script>alert(document.cookie)</script>", response.text)
+        self.assertIn("&lt;script&gt;", response.text)
+
+    def test_deploy_failure_multiline_output_handled_safely(self) -> None:
+        multiline_output = "dnsdist --check-config failed:\nsyntax error near 'addDOHLocal'\nline 42"
+        with mock.patch.object(self.webapp, "encryption_deploy_apply", lambda: (1, multiline_output)):
+            response = self.client.post(
+                "/encryption/certificate/self-signed",
+                data={"csrf": self.csrf},
+                follow_redirects=False,
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("syntax error near", response.text)
+        self.assertIn("line 42", response.text)
+
+    def test_certificate_upload_deploy_failure_does_not_report_success(self) -> None:
+        """/encryption/certificate/upload specifically -- the route named in
+        the original bug report -- must share the same fix as every other
+        encryption mutation route."""
+        cert, key = self._matching_self_signed_pair()
+        with mock.patch.object(self.webapp, "encryption_deploy_apply", lambda: (1, "protocol test failed for: doh")):
+            response = self.client.post(
+                "/encryption/certificate/upload",
+                data={"csrf": self.csrf},
+                files={
+                    "cert_file": ("uploaded.crt", cert, "application/x-pem-file"),
+                    "key_file": ("uploaded.key", key, "application/x-pem-file"),
+                },
+                follow_redirects=False,
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("deploying it to dnsdist failed", response.text)
+        rows = self._audit_rows("encryption_cert_uploaded")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], 0)
+
+    def test_certificate_upload_deploy_success_redirects(self) -> None:
+        cert, key = self._matching_self_signed_pair()
+        with mock.patch.object(self.webapp, "encryption_deploy_apply", lambda: (0, "deployed with protocols: {'plain': 'ok'}")):
+            response = self.client.post(
+                "/encryption/certificate/upload",
+                data={"csrf": self.csrf},
+                files={
+                    "cert_file": ("uploaded.crt", cert, "application/x-pem-file"),
+                    "key_file": ("uploaded.key", key, "application/x-pem-file"),
+                },
+                follow_redirects=False,
+            )
+        self.assertEqual(response.status_code, 303)
+        rows = self._audit_rows("encryption_cert_uploaded")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], 1)
+
+    def _matching_self_signed_pair(self) -> tuple[bytes, bytes]:
+        with mock.patch.object(encryption, "run", subprocess.run):
+            encryption.generate_self_signed("upload-test.example.com", days=1)
+        return encryption.CERT_PATH_DEFAULT.read_bytes(), encryption.KEY_PATH_DEFAULT.read_bytes()
+
+    def test_all_encryption_deploy_routes_surface_failure_not_success(self) -> None:
+        """Every caller of encryption_deploy_apply() (Step 11: settings,
+        self-signed, local-ca, upload, existing-path) must handle a
+        non-zero return code the same way -- not just the one route named
+        in the original bug report."""
+        cert, key = self._matching_self_signed_pair()
+        routes = [
+            ("/encryption/certificate/self-signed", {"csrf": self.csrf}, None),
+            ("/encryption/certificate/local-ca", {"csrf": self.csrf}, None),
+            (
+                "/encryption/certificate/existing-path",
+                {"csrf": self.csrf, "cert_path": str(encryption.CERT_PATH_DEFAULT), "key_path": str(encryption.KEY_PATH_DEFAULT)},
+                None,
+            ),
+            (
+                "/encryption/certificate/upload",
+                {"csrf": self.csrf},
+                {"cert_file": ("uploaded.crt", cert, "application/x-pem-file"), "key_file": ("uploaded.key", key, "application/x-pem-file")},
+            ),
+            (
+                "/encryption/settings",
+                {
+                    "csrf": self.csrf,
+                    "server_hostname": "dns.example.com",
+                    "bootstrap_ip": "192.168.1.50",
+                    "listen_ipv4": "0.0.0.0",
+                    "listen_ipv6": "::",
+                    "doh_enabled": "1",
+                    "dot_enabled": "1",
+                    "doq_enabled": "0",
+                    "doh3_enabled": "0",
+                    "dnscrypt_enabled": "0",
+                    "doh_path": "/dns-query",
+                    "doh_port": "443",
+                    "doh3_port": "443",
+                    "dot_port": "853",
+                    "doq_port": "853",
+                    "dnscrypt_port": "5443",
+                    "dnscrypt_provider": "2.dnscrypt-cert.example",
+                },
+                None,
+            ),
+        ]
+        for path, data, files in routes:
+            with self.subTest(path=path):
+                with mock.patch.object(self.webapp, "encryption_deploy_apply", lambda: (1, f"simulated failure for {path}")):
+                    response = self.client.post(path, data=data, files=files, follow_redirects=False)
+                self.assertEqual(response.status_code, 400, f"{path} did not surface deploy failure")
+                self.assertIn("deploying it to dnsdist failed", response.text)
+
+    def test_existing_path_deploy_failure_with_unreadable_cert_does_not_500(self) -> None:
+        """Live-found regression: an existing-path certificate the
+        unprivileged web process can't stat (e.g. root-only material
+        outside /etc/alderpointdns/certs) crashed the *failure* re-render
+        itself with an unhandled PermissionError from cert_info(), turning
+        a clean 400 error page into a raw 500 the moment this bug's fix
+        started actually reaching that failure path."""
+        import pathlib
+
+        real_exists = pathlib.Path.exists
+
+        def flaky_exists(self, *a, **kw):
+            if str(self) == "/root/unreadable.crt":
+                raise PermissionError("denied")
+            return real_exists(self, *a, **kw)
+
+        with mock.patch.object(self.webapp, "encryption_deploy_apply", lambda: (1, "certificate and key do not match")), \
+             mock.patch.object(pathlib.Path, "exists", flaky_exists):
+            response = self.client.post(
+                "/encryption/certificate/existing-path",
+                data={"csrf": self.csrf, "cert_path": "/root/unreadable.crt", "key_path": "/root/unreadable.key"},
+                follow_redirects=False,
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("deploying it to dnsdist failed", response.text)
+
+    def test_encryption_deploy_apply_raising_is_not_reported_as_success(self) -> None:
+        """encryption_deploy_apply() itself never raises (run() always
+        returns a (code, output) tuple), but if a caller further down the
+        stack ever did raise, it must propagate as a real error rather than
+        the route silently proceeding to its success redirect -- it must
+        never be swallowed by a bare `except Exception` between the deploy
+        call and the redirect."""
+        with mock.patch.object(self.webapp, "encryption_deploy_apply", side_effect=RuntimeError("unexpected deploy helper crash")):
+            with self.assertRaises(RuntimeError):
+                self.client.post(
+                    "/encryption/certificate/self-signed",
+                    data={"csrf": self.csrf},
+                    follow_redirects=False,
+                )
 
 
 if __name__ == "__main__":
