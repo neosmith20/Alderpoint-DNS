@@ -21,7 +21,7 @@ from __future__ import annotations
 import sqlite3
 from contextlib import closing, contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 CONTROL_SCHEMA_VERSION = 1
 
@@ -186,12 +186,24 @@ def _table_names(conn: sqlite3.Connection) -> set[str]:
     return {r[0] for r in rows}
 
 
+class ForbiddenSchemaError(RuntimeError):
+    """Raised when a migration would leave (or already finds) a forbidden
+    raw-history table in control.db. Distinct from generic RuntimeError so
+    callers/tests can distinguish "invariant violation" from other failures.
+    """
+
+
 def _assert_no_forbidden_tables(conn: sqlite3.Connection) -> None:
+    """Inspect the actual ``sqlite_master`` schema (source of truth — never
+    the migration SQL text) for any table whose name matches a forbidden
+    raw-history fragment. Called both before and after a migration body runs
+    inside the same open transaction; see ``_run_guarded_transaction``.
+    """
     for name in _table_names(conn):
         lowered = name.lower()
         for fragment in _FORBIDDEN_TABLE_NAME_FRAGMENTS:
             if fragment in lowered:
-                raise RuntimeError(
+                raise ForbiddenSchemaError(
                     f"control.db schema guard: table {name!r} looks like raw "
                     "query-history storage, which must never live in "
                     "control.db (see docs/v2/storage-audit.md)"
@@ -211,28 +223,63 @@ def connect(path: str | Path) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+def _run_guarded_transaction(
+    conn: sqlite3.Connection,
+    cur: sqlite3.Cursor,
+    body: "Callable[[sqlite3.Cursor], None]",
+) -> None:
+    """Run ``body`` inside BEGIN/COMMIT with the forbidden-table invariant
+    checked both BEFORE any statement executes and AFTER, all inside the
+    same still-uncommitted transaction. Any invariant violation — pre-
+    existing or introduced by ``body`` — rolls back the entire transaction
+    before the exception propagates, so COMMIT is never reached with a
+    forbidden table present and no earlier mutation from this call survives.
+
+    This is the single choke point both ``initialize`` and
+    ``apply_migration_in_transaction`` go through — the guard cannot be
+    bypassed by calling one entry point instead of the other, and it cannot
+    be bypassed by migration statement ordering (CREATE, ALTER/RENAME, or
+    any other DDL/DML) because the check re-reads ``sqlite_master`` from
+    scratch after ``body`` runs, rather than pattern-matching the SQL text.
+    """
+    cur.execute("BEGIN")
+    try:
+        # Pre-check: refuse to build on top of an already-invalid schema
+        # rather than silently letting a migration "fix" it as a side
+        # effect. If control.db somehow already has a forbidden table, no
+        # further migration should be allowed to proceed until that's
+        # resolved out-of-band.
+        _assert_no_forbidden_tables(conn)
+        body(cur)
+        # Post-check: whatever body() just did — CREATE TABLE, ALTER TABLE
+        # ... RENAME TO, or anything else — must not have left a forbidden
+        # table in the schema. This reads the actual post-execution
+        # sqlite_master state, still inside the open transaction, so it
+        # sees every effect of body() including renames.
+        _assert_no_forbidden_tables(conn)
+        cur.execute("COMMIT")
+    except BaseException:
+        cur.execute("ROLLBACK")
+        raise
+
+
 def initialize(path: str | Path) -> None:
     """Create the schema at ``path`` if not already present, then verify it."""
+
+    def _body(cur: sqlite3.Cursor) -> None:
+        for stmt in _SCHEMA_STATEMENTS:
+            cur.execute(stmt)
+        row = cur.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
+        if row[0] is None:
+            cur.execute(
+                "INSERT INTO schema_migrations(version, applied_at) "
+                "VALUES (?, datetime('now'))",
+                (CONTROL_SCHEMA_VERSION,),
+            )
+
     with connect(path) as conn:
         with closing(conn.cursor()) as cur:
-            cur.execute("BEGIN")
-            try:
-                for stmt in _SCHEMA_STATEMENTS:
-                    cur.execute(stmt)
-                row = cur.execute(
-                    "SELECT MAX(version) FROM schema_migrations"
-                ).fetchone()
-                if row[0] is None:
-                    cur.execute(
-                        "INSERT INTO schema_migrations(version, applied_at) "
-                        "VALUES (?, datetime('now'))",
-                        (CONTROL_SCHEMA_VERSION,),
-                    )
-                cur.execute("COMMIT")
-            except BaseException:
-                cur.execute("ROLLBACK")
-                raise
-        _assert_no_forbidden_tables(conn)
+            _run_guarded_transaction(conn, cur, _body)
         integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
         if integrity != "ok":
             raise RuntimeError(f"control.db integrity_check failed: {integrity}")
@@ -247,21 +294,24 @@ def schema_version(path: str | Path) -> int | None:
 def apply_migration_in_transaction(
     path: str | Path, statements: list[str], new_version: int
 ) -> None:
-    """Apply ``statements`` as one migration transaction; rolls back atomically
-    on any failure, leaving the database exactly as it was before the call.
+    """Apply ``statements`` as one migration transaction.
+
+    Behaves as: BEGIN -> validate current schema invariants -> execute
+    ``statements`` -> validate resulting schema invariants -> bump schema
+    version -> COMMIT. A failure at any point (a SQL error, or either
+    invariant check) rolls back the entire transaction — no partial mutation,
+    no forbidden table, no advanced schema version survives a failed call.
     """
+
+    def _body(cur: sqlite3.Cursor) -> None:
+        for stmt in statements:
+            cur.execute(stmt)
+        cur.execute(
+            "INSERT INTO schema_migrations(version, applied_at) "
+            "VALUES (?, datetime('now'))",
+            (new_version,),
+        )
+
     with connect(path) as conn:
         with closing(conn.cursor()) as cur:
-            cur.execute("BEGIN")
-            try:
-                for stmt in statements:
-                    cur.execute(stmt)
-                cur.execute(
-                    "INSERT INTO schema_migrations(version, applied_at) "
-                    "VALUES (?, datetime('now'))",
-                    (new_version,),
-                )
-                cur.execute("COMMIT")
-            except BaseException:
-                cur.execute("ROLLBACK")
-                raise
+            _run_guarded_transaction(conn, cur, _body)

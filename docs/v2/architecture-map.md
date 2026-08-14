@@ -2,24 +2,39 @@
 
 **Status:** V2 Workstream 1 output, consolidating `docs/v2/storage-audit.md`,
 `docs/v2/failure-domains.md`, and `docs/v2/benchmark-results.md` into the confirmed architecture.
+Amended after the Dex architecture gate review (see "Architecture gate remediation" below) — that
+section is the most current statement of a few decisions (pepper, hardware profiles, notification
+secrets) that changed from this document's first pass.
 
 ## Storage ownership (confirmed)
 
 | Store | Path | Contents | Status |
 |---|---|---|---|
 | Config | `/etc/alderpointdns/alderpointdns.yaml` | Operator desired-state: listeners, upstream strategy, analytics policy, feature toggles | Schema + atomic-write implemented (`app/v2/config.py`), not wired to live path |
-| Control | `/var/lib/alderpointdns/control.db` | Admins, sessions, audit log, clients/identifiers/groups, policies, job history, replication metadata, migration state | Schema-versioned SQLite WAL prototype implemented (`app/v2/control_db.py`), not wired to live path |
-| Raw analytics | `/var/lib/alderpointdns/analytics/queries/YYYY/MM/DD/HH-<segment>.parquet` | Raw per-query history | **Decided: Parquet + Zstd + DuckDB** (see benchmark-results.md) |
+| Control | `/var/lib/alderpointdns/control.db` | Admins, sessions, audit log, clients/identifiers/groups, policies, job history, replication metadata, migration state, notification-provider metadata + secret references (never secret values) | Schema-versioned SQLite WAL prototype implemented (`app/v2/control_db.py`), not wired to live path |
+| Raw analytics | `/var/lib/alderpointdns/analytics/queries/YYYY/MM/DD/HH-<segment>.parquet` | Raw per-query history | **Decided: Parquet + Zstd + DuckDB** (see benchmark-results.md; Zstd default corrected to level 6, see remediation section) |
 | Aggregate analytics | small dedicated SQLite WAL db (path TBD, sibling to control.db, e.g. `/var/lib/alderpointdns/analytics/aggregates.db`) | Minute/hour/day rollup counters | **Decided: dedicated SQLite WAL**, separate file from control.db |
-| Secrets | `/etc/alderpointdns/` root-owned dedicated files (existing v1 pattern) | TLS keys, API creds, (new) Argon2id pepper file | Pattern preserved from v1; pepper file path is new, not yet created |
+| Secrets | `/etc/alderpointdns/` root-owned dedicated files (existing v1 pattern) | TLS keys, API creds; notification-provider secret values (new, scaffold-level decision only, see remediation section) | Pattern preserved from v1. **No Argon2id pepper file** — pepper is deferred, see remediation section (this reverses this document's original recommendation) |
 
 ## Confirmed control-db schema boundary
 
 See `app/v2/control_db.py` for the actual DDL. Enforced by test
-(`tests/v2/test_control_db.py::TestNoQueryHistoryGuard`): no table whose name contains
-`query_event`, `raw_quer`, or `query_log` may exist in control.db. This guard exists specifically
-so a future workstream cannot accidentally reintroduce v1's architecture mistake (raw history
-sharing the control database) while extending the schema.
+(`tests/v2/test_control_db.py::TestNoQueryHistoryGuard`,
+`TestMigrationForbiddenSchemaGuard`): no table whose name contains `query_event`, `raw_quer`, or
+`query_log` may exist in control.db. This guard exists specifically so a future workstream cannot
+accidentally reintroduce v1's architecture mistake (raw history sharing the control database) while
+extending the schema.
+
+**Enforcement point (fixed after Dex architecture review, see below):** the invariant is checked
+inside `_run_guarded_transaction`, the single choke point both `initialize()` and
+`apply_migration_in_transaction()` go through — BEGIN → check invariant on the schema as it stands
+→ run the migration body → check invariant again on the actual post-execution `sqlite_master` state
+→ COMMIT, with ROLLBACK on any failure at any step. Originally (Workstream 1 first pass) the guard
+was only invoked post-hoc after `initialize()`'s own commit and was never called at all from
+`apply_migration_in_transaction()`, so a migration could `CREATE TABLE query_events (...)`, commit
+successfully, and violate the invariant with no error — Dex proved this concretely and it is fixed
+as of this remediation. See `docs/v2/architecture-map.md`'s "Architecture gate remediation" section
+below for the full writeup and adversarial test list.
 
 ## Confirmed config schema
 
@@ -28,7 +43,7 @@ migrator registered — a real version-2 schema change needs an explicit migrato
 `schema_version: 2` will load. Atomic write is temp-file + `fsync` + `os.replace` + parent-directory
 fsync, mode `0640`.
 
-## Argon2id recommendation
+## Argon2id recommendation (evidence retained, not finalized — see Dex remediation below)
 
 Benchmarked on this test server (4 vCPU / 3.8 GiB) via `benchmarks/v2_argon2_bench.py`:
 
@@ -40,39 +55,100 @@ Benchmarked on this test server (4 vCPU / 3.8 GiB) via `benchmarks/v2_argon2_ben
 | 3 | 128 MiB | 2 | 170.9 | 174.6 |
 | 4 | 128 MiB | 2 | 223.7 | 207.9 |
 | 3 | 256 MiB | 4 | 201.6 | 203.0 |
-| **4** | **256 MiB** | **2** | **437.4** | **456.0** |
+| **4** | **256 MiB** | **2** | **437.4** | **456.0** (Dex independently reproduced ~443-449ms) |
 | 5 | 256 MiB | 2 | 573.5 | 536.5 |
 
-**Recommended default (roadmap "normal" 2 vCPU / 2 GiB profile): `time_cost=4, memory_cost=256MiB,
-parallelism=2`** — lands at ~440-460ms per login, inside the target 250-500ms interactive-login
-window, and is what `app/v2/auth_hash.py`'s `DEFAULT_*` constants use.
+`app/v2/auth_hash.py`'s current `DEFAULT_*` constants (`time_cost=4, memory_cost=256MiB,
+parallelism=2`) are **kept as the working evidence base, not declared final**. Dex's review found
+this benchmark measured Argon2id in isolation (a standalone address-space-limited hash operation),
+not under realistic constrained *complete-appliance* memory pressure (OS + BIND + dnsdist +
+FastAPI + analytics writer + aggregate store + DuckDB all resident at once). See "V2 hardware
+target profiles" below for the corrected test matrix this needs to be re-run against before it's
+treated as final, and `docs/v2/handoff-workstream-2.md` for this as an explicit Workstream 2
+prerequisite.
 
-**Open risk:** the roadmap also defines a "low-end" 1 vCPU / 512 MiB performance-gate profile.
-256MiB Argon2id memory cost alone would consume half that box's RAM per concurrent hash operation,
-which is risky if login attempts aren't otherwise rate-limited (v1.1.1 already has a
-`login_attempts` table feeding rate-limiting — this needs to be confirmed as bounding *concurrent*
-hash operations, not just attempt frequency, before shipping this default unconditionally). This
-workstream did not have access to genuinely constrained 1 vCPU / 512 MiB hardware to re-benchmark
-directly; a `systemd-run --scope -p CPUQuota=100% -p MemoryMax=512M` approximation was considered
-but not run in this session. **Recommendation for Workstream 2 or before release:** either verify
-the low-end profile with a lower parameter set (e.g. `time_cost=3, memory_cost=64MiB,
-parallelism=1`, ~85-100ms estimated by extrapolation from the table above) selected per-profile at
-install time, or confirm login concurrency is bounded tightly enough that 256MiB peak is
-acceptable even on the smallest supported hardware.
+## Pepper decision: DEFERRED (Dex architecture review)
 
-**Pepper recommendation: yes**, root-only file under `/etc/alderpointdns/argon2-pepper` (0600,
-root:root), concatenated with the password before hashing (see `app/v2/auth_hash.py`'s `pepper`
-parameter — plumbing exists, wiring into the real admin-login path is a later workstream). Rationale:
-theft of `control.db` alone (e.g. from a backup left somewhere, or a partial compromise that reads
-the DB but not `/etc/alderpointdns`) becomes insufficient to offline-crack admin passwords without
-also obtaining the separate pepper file.
+**Do not implement or default-enable an Argon2id pepper in V2 Workstream 1 or its remediation.**
+This reverses this document's earlier "yes" recommendation — Dex's review is the current decision
+of record.
 
-**Backup/recovery implication (must be explicit, not silently accepted):** the pepper file MUST be
-included in the encrypted backup path alongside other `/etc/alderpointdns` secrets — a backup that
-captures `control.db` but not the pepper makes every admin password permanently unverifiable after
-a restore (there is no way to recompute it). This is a real availability risk trade for a real
-confidentiality gain, not a free win, and needs to be called out in backup/restore documentation
-and in the migration scaffold's `migrate_secrets` stage when it's implemented for real.
+What stays mandatory regardless of the pepper decision:
+
+- Argon2id (not any weaker/faster hash)
+- unique random salt per password (already true, library default via `argon2-cffi`)
+- no plaintext/reversible password storage
+
+What's deferred and why: a pepper is a second secret whose loss independently bricks every admin
+credential, on top of whatever `control.db`/backup/restore/replication/HA guarantees V2 ends up
+providing. Workstream 1 has not yet designed or proven those recovery guarantees (see the
+notification-secret architecture below, which is the same class of problem — "a secret that isn't
+in the ordinary backup path is a confidentiality win and an availability risk at the same time").
+Committing to a pepper before that groundwork exists risks shipping a foot-gun: an admin who loses
+`/etc/alderpointdns/argon2-pepper` without realizing its backup was never captured would have every
+admin account permanently unrecoverable, with no way to detect the gap until the worst possible
+moment (a restore).
+
+**Revisit condition:** pepper may be reconsidered once backup/restore/replication/HA behavior can
+guarantee recovery of every secret it introduces — i.e., once the same due diligence this section
+originally skipped has actually been done. `app/v2/auth_hash.py`'s `pepper` parameter is left in
+place (it's harmless, optional, defaults to `None`) so that groundwork doesn't require an API
+change later, but nothing calls it with a non-`None` value and no pepper file is created by any
+code in this repository.
+
+## V2 hardware target profiles (Dex architecture review)
+
+The historical V1 public documentation lists 512 MiB as minimum test hardware. **That is not the
+V2 engineering target.** Recorded profiles for V2 engineering purposes (private decision — the
+public hardware requirements are unchanged until real runtime benchmarks justify updating them):
+
+| Profile | Status |
+|---|---|
+| 512 MiB | Unsupported stress/torture profile only — not a V2 target |
+| 1 GiB | Candidate minimum, to be tested |
+| 2 GiB | Expected supported minimum, if 1 GiB doesn't retain comfortable operational headroom |
+| 4 GiB | Recommended/reference profile |
+
+The final supported V2 minimum must be set from full-runtime measurements — OS overhead, BIND,
+dnsdist, FastAPI/Python, analytics writer, aggregate store, DuckDB queries, Argon2id, updates/
+migrations, realistic DNS traffic, and memory spikes all resident together, not any one component
+benchmarked alone. If 1 GiB operates comfortably under that full workload it may become the
+minimum; if it only "technically works" while swapping/thrashing with no headroom, 2 GiB becomes
+the minimum instead. This is a Workstream 2 prerequisite (see `docs/v2/handoff-workstream-2.md`) —
+V2 features and Argon2id parameters must not be crippled merely to preserve the old 512 MiB V1
+number, and this workstream does not change the public-facing hardware requirements.
+
+## Notification secret architecture (frozen decision, Dex-confirmed)
+
+`notification_providers.secret` (v1: webhook tokens/API keys for notification delivery, see
+`docs/v2/storage-audit.md`) may **not** move into operator-readable YAML, and may not sit as
+ordinary plaintext in control.db either — both were flagged as open gaps in the original Workstream
+1 audit; Dex confirmed the gap and required the decision be frozen now rather than left for
+Workstream 2 to reinvent.
+
+**Frozen split:**
+
+- **control.db** (`notification_providers` table, unchanged shape from the audit): provider
+  metadata (kind, name, enabled, config_json, test-result bookkeeping) **plus a secret
+  reference/key identifier only** — never the secret value itself.
+- **Dedicated root-controlled secret storage** (exact mechanism not designed in this remediation —
+  scaffold-level decision only): holds the actual secret value, keyed by the reference stored in
+  control.db.
+
+**Future requirements for whoever implements the secret store (Workstream 2+):**
+
+- encrypted, or otherwise appropriately protected, at rest
+- least-privilege access (not readable by the same principal that can read arbitrary control.db
+  rows over the admin API, if that's a meaningfully different privilege boundary once designed)
+- backed up only through the protected/encrypted secret-backup path — never swept up incidentally
+  by a plain control.db copy
+- restore-to-new-appliance support explicitly designed, not assumed
+- replication semantics explicitly designed (replicating a secret store is a different problem than
+  replicating ordinary control-plane rows)
+
+This remediation does **not** implement the secret subsystem — no new table, no new file format, no
+code. The point of this section is that Workstream 2 has one frozen shape to build against instead
+of inventing its own on the day it gets there.
 
 ## Failure domains
 
@@ -91,3 +167,58 @@ small dedicated `analytics.db`" without pinning a path the way it does for `cont
 Parquet directory. This document proposes
 `/var/lib/alderpointdns/analytics/aggregates.db` as a sibling of the raw-history directory; not
 yet implemented, flagged for Workstream 2 to confirm or adjust.
+
+## Architecture gate remediation (Dex review)
+
+Dex independently reviewed branch `v2/architecture-storage-foundation` @ `eec4198` and returned
+**ARCHITECTURE NOT READY** on one release-gate-level blocker, plus several smaller confirmed
+decisions. This section is the record of that review and what changed as a result; treat it as the
+most current statement wherever it overlaps with earlier sections of this document.
+
+**Blocker (fixed): control.db migration invariant not enforced.** `apply_migration_in_transaction()`
+could execute arbitrary migration SQL, commit successfully, and never check the forbidden-table
+invariant — Dex proved this concretely by having a migration `CREATE TABLE query_events (...)` and
+watching it commit. Root cause: the guard (`_assert_no_forbidden_tables`) was only ever called from
+`initialize()`, and even there it ran *after* that function's own commit, not inside the
+transaction. Fix: both `initialize()` and `apply_migration_in_transaction()` now route through a
+single `_run_guarded_transaction()` choke point (`app/v2/control_db.py`) that checks the invariant
+against the live `sqlite_master` schema both before and after the migration body executes, all
+inside one open transaction, rolling back completely on any violation — pre-existing or newly
+introduced, by CREATE, ALTER...RENAME, or any other DDL. Proven by eight adversarial tests
+(`tests/v2/test_control_db.py::TestMigrationForbiddenSchemaGuard`, cases A-H): normal migration
+commits; CREATE of a forbidden table rolls back completely; an allowed mutation immediately
+followed by a forbidden CREATE in the same migration rolls back *both*, not just the forbidden one;
+RENAME-into-forbidden-name is caught (proving the guard isn't a text search over migration SQL, it
+re-reads the actual schema); a failed-SQL migration rolls back with schema version unchanged; a
+database that already has a forbidden table refuses any further migration, including otherwise-
+valid statements in the same call; `initialize()` independently refuses a forbidden schema; and
+control tables with incidentally query-like names (`saved_queries`, `statistics_settings`) are
+correctly *not* flagged, proving the fix didn't turn into an over-broad name-fragment ban.
+
+**Confirmed without change:** overall V2 architecture direction; Parquet+Zstd+DuckDB as the raw-
+history technology (Dex independently reproduced comparable throughput/disk numbers at 100k rows,
+see `docs/v2/benchmark-results.md`); SQLite WAL rejected for raw history, kept for the aggregate
+store; config prototype (`app/v2/config.py`) directionally safe (safe_load, schema validation, temp
+file + fsync + replace + directory fsync, mode 0640).
+
+**Changed by this review:** pepper deferred (was "yes", now "no, not in V2 Workstream 1" — see
+above); hardware target profiles corrected away from the historical 512 MiB V1 minimum (see above);
+notification-secret architecture frozen as control.db-holds-reference /
+dedicated-store-holds-value (was an open gap, now a scaffold-level decision, see above); Parquet
+Zstd default corrected from level 9 to level 6 (see `docs/v2/benchmark-results.md` "Zstd default
+correction"); benchmark harness peak-RSS measurement fixed to be per-backend rather than
+process-cumulative (see `docs/v2/benchmark-results.md` "Benchmark harness memory isolation fix").
+
+**New Workstream 2 gates** (full detail in `docs/v2/handoff-workstream-2.md`): prove partition
+pruning actually limits Parquet file scans for time-bounded queries (not just that the flat-file
+benchmark was fast); durable (not memory-only) migration state with crash/reboot restart and
+idempotent stage continuation; config file ownership/group/parent-directory hardening and symlink
+rejection policy; a safe V1 performance baseline before any runtime-behavior-changing work begins;
+Argon2id re-benchmarked under realistic full-appliance memory pressure at the corrected 1/2/4 GiB
+profiles, not as a standalone hash in isolation.
+
+**Explicitly not this workstream's problem:** Dex reproduced a combined-test-suite hang (the same
+one this session's own regression run hit and worked around by running files individually) even
+with `tests/v2/` excluded — evidence points to a pre-existing V1 test-order/global-state/AnyIO-portal
+issue, not anything V2 introduced. Recorded as technical debt to resolve before release-quality V2
+CI, not addressed in this remediation.

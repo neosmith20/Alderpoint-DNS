@@ -17,6 +17,7 @@ import json
 import os
 import resource
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -113,6 +114,49 @@ def run_one_backend(kind: str, scale: int, batch_size: int, **backend_kwargs) ->
     return result
 
 
+def _run_backend_in_subprocess(
+    kind: str, scale: int, batch: int, row_group_size: int, zstd_level: int
+) -> dict:
+    """Run one backend's full ingest+query+retention pass in its own child
+    process, so its peak-RSS measurement (``resource.getrusage`` inside that
+    process) reflects only that backend — not whatever the previous backend
+    in the same process happened to allocate.
+
+    This is the fix for the benchmark-quality issue Dex's review identified:
+    with all three backends running sequentially in one process,
+    ``ru_maxrss`` is the process's high-water mark since start, so a later
+    backend's reported "peak RSS" could actually be inherited from an
+    earlier backend's larger allocation (observed concretely: JSONL's
+    full-dataset in-memory query scan inflated the figure reported for
+    Parquet+DuckDB, which ran immediately after it and never itself held the
+    whole dataset in Python objects).
+    """
+    cmd = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--single-backend",
+        kind,
+        "--scale",
+        str(scale),
+        "--batch",
+        str(batch),
+        "--row-group-size",
+        str(row_group_size),
+        "--zstd-level",
+        str(zstd_level),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"backend {kind!r} subprocess exited {proc.returncode}\n"
+            f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
+        )
+    # stdout carries exactly one JSON object on its own trailing line;
+    # everything before that (progress prints) is diagnostic only.
+    last_line = next(line for line in reversed(proc.stdout.splitlines()) if line.strip())
+    return json.loads(last_line)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--scale", type=int, required=True)
@@ -123,20 +167,56 @@ def main() -> None:
         default=["sqlite_wal", "jsonl_gzip", "parquet_zstd_duckdb"],
     )
     ap.add_argument("--row-group-size", type=int, default=50_000)
-    ap.add_argument("--zstd-level", type=int, default=9)
+    ap.add_argument("--zstd-level", type=int, default=6)
     ap.add_argument("--out", type=str, default=None)
+    ap.add_argument(
+        "--single-backend",
+        type=str,
+        default=None,
+        help=(
+            "Internal: run exactly one backend in this process and print its "
+            "result JSON to stdout, then exit. Used by the parent process to "
+            "get isolated per-backend peak-RSS measurements via subprocess."
+        ),
+    )
+    ap.add_argument(
+        "--in-process",
+        action="store_true",
+        help=(
+            "Run all backends in one process (the pre-remediation behavior). "
+            "Faster for quick iteration, but peak_rss_mb is process-cumulative "
+            "across backends, not backend-specific. Prefer the default "
+            "(subprocess-isolated) mode when memory figures matter."
+        ),
+    )
     args = ap.parse_args()
 
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
     RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
 
+    if args.single_backend:
+        # Child-process mode: run one backend, print its result as the last
+        # line of stdout, and do nothing else (no results file, no cleanup
+        # of DATA_ROOT as a whole — only this backend's own subdirectory).
+        kwargs = {}
+        if args.single_backend == "parquet_zstd_duckdb":
+            kwargs = {"row_group_size": args.row_group_size, "zstd_level": args.zstd_level}
+        result = run_one_backend(args.single_backend, args.scale, args.batch, **kwargs)
+        print(json.dumps(result))
+        return
+
     results = []
     for kind in args.backends:
         print(f"--- running {kind} @ scale={args.scale} batch={args.batch} ---", file=sys.stderr)
-        kwargs = {}
-        if kind == "parquet_zstd_duckdb":
-            kwargs = {"row_group_size": args.row_group_size, "zstd_level": args.zstd_level}
-        result = run_one_backend(kind, args.scale, args.batch, **kwargs)
+        if args.in_process:
+            kwargs = {}
+            if kind == "parquet_zstd_duckdb":
+                kwargs = {"row_group_size": args.row_group_size, "zstd_level": args.zstd_level}
+            result = run_one_backend(kind, args.scale, args.batch, **kwargs)
+        else:
+            result = _run_backend_in_subprocess(
+                kind, args.scale, args.batch, args.row_group_size, args.zstd_level
+            )
         results.append(result)
         print(json.dumps(result, indent=2), file=sys.stderr)
 

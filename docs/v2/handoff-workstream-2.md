@@ -1,68 +1,145 @@
 # V2 Workstream 2 — Recommended Scope
 
-**Status:** Handoff from Workstream 1 (`v2/architecture-storage-foundation` branch,
-started at `381851f91fa75cb4274d10450383cb9f024e4b61`).
+**Status:** Handoff from Workstream 1 (`v2/architecture-storage-foundation` branch, started at
+`381851f91fa75cb4274d10450383cb9f024e4b61`), amended after the Dex architecture gate review and its
+remediation (branch reviewed at `eec4198`, remediation on top of it — see
+`docs/v2/architecture-map.md` "Architecture gate remediation" for the full writeup). Workstream 2
+must not begin runtime wiring until the mandatory gates below are read; several of them are
+release-gate-level, not optional cleanup.
 
-## What Workstream 1 delivered (don't redo this)
+## What Workstream 1 + remediation delivered (don't redo this)
 
 - Branch `v2/architecture-storage-foundation`, roadmap docs copied into `docs/v2/roadmap-reference/`
 - `docs/v2/storage-audit.md` — full v1 table -> V2 storage classification
 - `docs/v2/failure-domains.md` — frozen failure-domain contract
 - `app/v2/config.py` — YAML desired-state schema + atomic write (schema only, not wired to live path)
-- `app/v2/control_db.py` — control.db schema prototype + migration-transaction primitives (prototype
-  only, not wired to live path)
-- `app/v2/auth_hash.py` — Argon2id wrapper, benchmarked parameters
-  (`time_cost=4, memory_cost=256MiB, parallelism=2`), pepper plumbing (not wired to real login)
+- `app/v2/control_db.py` — control.db schema prototype + migration-transaction primitives, **with
+  the forbidden-raw-history-table invariant now enforced inside the transaction itself** (both
+  `initialize()` and `apply_migration_in_transaction()` route through `_run_guarded_transaction()`,
+  which checks the invariant against the live `sqlite_master` schema before and after the migration
+  body runs, all inside one open transaction) — this was the Dex-identified release-gate blocker,
+  fixed and proven with 8 adversarial tests (`TestMigrationForbiddenSchemaGuard`, cases A-H)
+- `app/v2/auth_hash.py` — Argon2id wrapper, benchmark evidence retained
+  (`time_cost=4, memory_cost=256MiB, parallelism=2`, **not yet finalized** — see gate below), pepper
+  plumbing present but **not enabled by default and not to be enabled without further review** (see
+  gate below)
 - `app/v2/analytics_ingest.py` — bounded queue + segment rotation + atomic promotion prototype
 - `benchmarks/v2_analytics/` — reusable benchmark harness + results; **decision: Parquet+Zstd+DuckDB
-  for raw history, dedicated SQLite WAL for aggregates**
+  for raw history, dedicated SQLite WAL for aggregates** (Dex-confirmed independently); Zstd default
+  corrected to level 6; per-backend memory measurement now subprocess-isolated
 - `app/v2/migration.py` — pipeline state machine scaffold (stages mostly stubbed; state machine
-  itself is real and tested)
-- Test suites: `tests/v2/test_config_schema.py` (17), `tests/v2/test_control_db.py` (8),
+  itself is real and tested); **durable state is a gate below, current implementation is
+  memory-only**
+- `docs/v2/architecture-map.md` — frozen decisions for notification-secret storage split
+  (control.db holds metadata + reference only, dedicated store holds the value) and V2 hardware
+  target profiles (512MiB unsupported / 1GiB candidate / 2GiB expected / 4GiB recommended,
+  replacing the historical V1 512MiB minimum as the V2 engineering target — public docs unchanged)
+- Test suites (post-remediation totals): `tests/v2/test_config_schema.py` (17),
+  `tests/v2/test_control_db.py` (16, was 8 — +8 adversarial guard tests),
   `tests/v2/test_argon2.py` (13), `tests/v2/test_analytics_prototype.py` (14),
   `tests/v2/test_migration_scaffold.py` (10) — see final report for pass/fail status.
 
-## Recommended Workstream 2 scope
+## Mandatory Workstream 2 gates (from the Dex review — do not skip)
+
+These are prerequisites, not nice-to-haves. Each one exists because Workstream 1's prototypes prove
+a shape works in isolation, not that it's safe to run for real.
+
+1. **Parquet partition pruning must be proven, not assumed.** The Workstream 1 benchmark used flat
+   per-batch segment files in one directory to isolate storage-format comparison from directory
+   layout — it says nothing about whether a "last hour" query against the real
+   `YYYY/MM/DD/HH-<segment>.parquet` layout actually skips historical partitions rather than
+   scanning every file. Workstream 2 must ship a reader (Hive-style partition pruning, row-group
+   statistics pruning, or both) and a test proving a bounded recent-time-range query touches only
+   the relevant partition files. This is a mandatory acceptance test, not optional polish.
+2. **Migration state must become durable before runtime wiring.** `app/v2/migration.py`'s
+   `MigrationState` is in-memory only — fine for Workstream 1's state-machine scaffolding, not
+   acceptable once migration can actually run against a real installation. Required before runtime
+   migration wiring: durable stage state (survives process restart), crash/reboot restart,
+   idempotent stage continuation from durable state (not just from an in-memory object a caller
+   happens to still hold), backup integrity verification as an explicit stage, generated-DNS-config
+   validation before commit, a late commit point (already designed — `commit` is the last stage —
+   but must stay late as real stages replace stubs), and confirmation that the V1 source stays
+   untouched through `preview` with the real (not stub) `preview` logic.
+3. **Config filesystem hardening.** `app/v2/config.py` is directionally safe (`yaml.safe_load`,
+   schema validation, temp file + fsync + `os.replace` + parent-directory fsync, mode `0640`) but
+   before real runtime wiring, Workstream 2 must add: an explicit root/helper ownership contract
+   (who writes this file, under what UID), an explicit group-ownership contract (matching the
+   existing `/etc/alderpointdns` convention), hardened parent-directory permissions, and a defined
+   symlink policy for `load_file()` — it currently follows symlinks with no special handling, which
+   is fine for a prototype reading a path only Workstream 1's own code chose, not fine once
+   `/etc/alderpointdns/alderpointdns.yaml` is a real path other privileged code opens.
+4. **A safe V1 performance baseline is a prerequisite, not a nice-to-have**, before Workstream 2
+   changes any authoritative runtime behavior. `docs/performance-baseline.md` (existing v1 doc) does
+   not cover enough — capture, without disruptive stress against the live test appliance: DNS
+   latency, approximate QPS, CPU, RAM, analytics overhead, query-log latency, DB/storage size. This
+   gives Workstream 2 something concrete to avoid regressing.
+5. **Argon2id parameters are not finalized.** Current evidence (`time_cost=4, memory_cost=256MiB,
+   parallelism=2`, ~440-460ms, Dex independently reproduced ~443-449ms) was measured as a standalone
+   hash operation, not under realistic full-appliance memory pressure. Workstream 2 must re-test
+   against the corrected hardware profiles (1 GiB candidate minimum, 2 GiB expected supported
+   minimum, 4 GiB recommended — see `docs/v2/architecture-map.md`) with the *complete* runtime
+   resident (OS + BIND + dnsdist + FastAPI + analytics writer + aggregate store + DuckDB queries +
+   updates/migrations + realistic DNS traffic + memory spikes), not Argon2id in isolation. Do not
+   optimize defaults around the old 512MiB V1 minimum.
+6. **Notification secret subsystem is a frozen shape, not a built system.** `docs/v2/architecture-
+   map.md` freezes control.db-holds-reference / dedicated-store-holds-value, but no code exists yet.
+   Workstream 2 (or later) must actually build the dedicated secret store: encrypted-at-rest,
+   least-privilege access, its own backup path (not swept up by an ordinary control.db copy),
+   restore-to-new-appliance support, and explicitly designed replication semantics.
+7. **Pepper stays deferred.** Do not enable `app/v2/auth_hash.py`'s `pepper` parameter by default or
+   create a pepper file anywhere. Revisit only once backup/restore/replication/HA recovery
+   guarantees exist for every secret V2 introduces — which is downstream of gate 6 above, not
+   independent of it.
+8. **Test-suite shared-state hang is pre-existing V1 technical debt**, not a Workstream 1/2
+   architecture blocker. Dex reproduced a combined-pytest-suite hang even with `tests/v2/` excluded
+   (evidence: first V1 `TestClient` request in a combined run hangs, same test passes standalone,
+   AnyIO portal/event loop idle — a test-order/global-state/runner issue). Resolve before
+   release-quality V2 CI depends on a single combined test run, but do not let it block Workstream 2
+   feature work; per-file test execution (as this workstream's regression checks used) is an
+   acceptable interim workaround.
+
+## Recommended Workstream 2 scope (after the gates above)
 
 Per the original brief's explicit non-goals for Workstream 1 (§18) and the roadmap's Day 2-3 target
 ("Storage/failure-domain redesign... implement winning analytics storage approach"), Workstream 2
-should:
+should, once the gates above are satisfied:
 
 1. **Wire the config/control-db/analytics prototypes into the real runtime**, replacing v1's
-   monolithic `alderpointdns.db` per the storage-audit map — this is the actual "implement" step
-   Workstream 1 deliberately deferred (Workstream 1 built and tested the primitives in isolation
-   under `app/v2/`; nothing in `app/*.py` — the live v1 modules — was touched).
+   monolithic `alderpointdns.db` per the storage-audit map — nothing in `app/*.py` (the live v1
+   modules) has been touched by Workstream 1 or this remediation.
 2. **Implement the Parquet raw-history writer for real** against the analytics ingestion queue,
-   replacing the stub in `app/v2/analytics_ingest.py`'s `SegmentWriter` (currently JSONL, chosen
-   for zero extra deps in the prototype) with the benchmarked Parquet+Zstd+DuckDB path, including
-   the `YYYY/MM/DD/HH-<segment>.parquet` partition layout that wasn't exercised in the flat-file
-   benchmark.
+   replacing the stub in `app/v2/analytics_ingest.py`'s `SegmentWriter` (currently JSONL, chosen for
+   zero extra deps in the prototype) with the benchmarked Parquet+Zstd+DuckDB path, including the
+   partitioned layout and the pruning-proof reader from gate 1.
 3. **Implement the aggregate SQLite store** (`analytics/aggregates.db`, path proposed in
    `docs/v2/architecture-map.md`, not yet built) and its rollup-writer.
-4. **Resolve the two open items flagged in Workstream 1:**
-   - low-end (1 vCPU / 512 MiB) Argon2id parameter re-verification (see
-     `docs/v2/architecture-map.md` "Open risk")
-   - `notification_providers.secret` secret-separation gap identified in `docs/v2/storage-audit.md`
-5. **Begin the unified policy engine** (roadmap §4) using `control_db.py`'s `policies` table as the
+4. **Begin the unified policy engine** (roadmap §4) using `control_db.py`'s `policies` table as the
    starting schema — the precedence model (global -> network -> group -> client -> emergency) is
    documented in the roadmap but not implemented anywhere yet.
-6. **Real `migrate_config`/`migrate_control`/`migrate_clients`/`migrate_secrets` stage logic** in
-   `app/v2/migration.py`, replacing the stubs, following the storage-audit table-by-table map.
-7. Do **not** yet build: SafeSearch, parental controls, service blocking/schedules, per-client
+5. **Real `migrate_config`/`migrate_control`/`migrate_clients`/`migrate_secrets` stage logic** in
+   `app/v2/migration.py`, replacing the stubs, following the storage-audit table-by-table map, built
+   on the durable state machine from gate 2.
+6. Do **not** yet build: SafeSearch, parental controls, service blocking/schedules, per-client
    upstreams, domain routing, fallback DNS, upstream strategies, ECS, native HTTPS UI — those stay
    deferred per the roadmap's Day 4-8 sequencing, after the storage foundation is actually load-
    bearing, not just prototyped.
 
 ## Known open risks to carry forward
 
-- Argon2id low-end hardware parameters unverified (see above).
-- `notification_providers.secret` secret-separation gap (see `docs/v2/storage-audit.md`).
+- Argon2id parameters unverified under realistic constrained full-appliance memory pressure (gate 5).
+- Notification secret subsystem is a frozen design, not built code (gate 6).
+- Pepper deferred pending gate 6/backup-recovery guarantees (gate 7).
 - Aggregate store path (`analytics/aggregates.db`) is a Workstream 1 proposal, not roadmap-pinned —
-  confirm with the roadmap owner or just proceed with it; low risk either way since it's an
-  isolated new path.
-- Parquet row-group-size/Zstd-level were tested at one value each, not grid-searched — acceptable
-  default per benchmark-results.md's reasoning, revisit only if real ingest/query profiles diverge
-  materially from the synthetic benchmark once real traffic is flowing through it.
+  confirm with the roadmap owner or just proceed with it; low risk either way since it's an isolated
+  new path.
+- Parquet row-group-size (50,000, still provisional — 10k/50k/100k were indistinguishable at
+  benchmark scale) and Zstd level (corrected to 6, verified against 3/9 at one dataset size only) —
+  acceptable provisional defaults, revisit if real ingest/query profiles diverge materially from the
+  synthetic benchmark once real traffic is flowing through it.
+- Partition pruning unproven (gate 1) — treat any "Parquet is fast" claim as scoped to the flat-file
+  benchmark until the pruning reader exists and is tested.
+- Migration state durability unimplemented (gate 2) — do not wire real migration execution before it
+  exists.
 - 3M-row benchmark point did not complete in the Workstream 1 session (disk-I/O-bound on shared test
-  hardware); the 100k/1M trend already supports the decision, but if `scale-3000000.json` finishes
-  later, append it to `docs/v2/benchmark-results.md` for completeness.
+  hardware); the 100k/1M trend already supports the raw-history-backend decision and this is not
+  blocking.

@@ -275,7 +275,7 @@ class JsonlBackend:
 class ParquetDuckDbBackend:
     name = "parquet_zstd_duckdb"
 
-    def __init__(self, root: Path, *, row_group_size: int = 50_000, zstd_level: int = 9):
+    def __init__(self, root: Path, *, row_group_size: int = 50_000, zstd_level: int = 6):
         import pyarrow as pa  # noqa: F401  (import here so a missing dep only breaks this backend)
 
         self.root = root

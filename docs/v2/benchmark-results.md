@@ -22,9 +22,13 @@ dedicated SQLite WAL, compressed JSONL.
 - Batch sizes: 5,000 (100k), 10,000 (1M). SQLite ingest is wrapped in one explicit transaction per
   batch (autocommit-per-row was measured separately and is ~18x slower — not a realistic comparison
   point, excluded from these results).
-- Parquet: `row_group_size=50_000`, Zstd level 9, one segment file per ingest batch (a real writer
-  would use larger segments/time-based rotation — see "Parquet tuning" below for the distinction
-  between this benchmark's per-batch segments and the recommended production layout).
+- Parquet: `row_group_size=50_000`, Zstd level 9 at the time the 100k/1M runs below were captured
+  (level 9 was the harness default for that run; the provisional default was corrected to level 6
+  after the fact — see "Zstd default correction" under "Parquet tuning recommendation" below; the
+  ingest/query/disk numbers below are not materially affected, since level 6 vs 9 differs by ~0.2%
+  compressed size at this scale), one segment file per ingest batch (a real writer would use larger
+  segments/time-based rotation — see "Parquet tuning" below for the distinction between this
+  benchmark's per-batch segments and the recommended production layout).
 - Retention test: delete the oldest ~20% of data (SQLite: `DELETE ... WHERE ts < cutoff` — the
   "no giant DELETE" architectural rule explicitly does *not* apply to SQLite the way it does to
   segment-file backends, which is itself part of the finding; JSONL/Parquet: unlink the oldest ~20%
@@ -74,13 +78,22 @@ Query latency (warm, ms) — representative subset:
 | `rcode_distribution` | 416.0 | 289.1 | 8.9 |
 | `time_series_counts` | 318.0 | 361.2 | 24.2 |
 
-\* Peak RSS is process-cumulative (`resource.getrusage`, reset only at process start, not per
-backend) — because all three backends run sequentially in one process, JSONL's and Parquet's
-figures both reflect the high-water mark set by JSONL's full-dataset-into-memory query scan
-(`_load_all()`), not each backend's independent peak. This is a benchmark-methodology limitation,
-not a claim that Parquet+DuckDB itself needs 1.7GB RAM — DuckDB streams from the Parquet files
-rather than loading the whole dataset into Python objects. Flagged as a follow-up fix for the
-harness (run each backend in its own subprocess) rather than reworked in this workstream.
+\* Peak RSS for the 100k/1M tables above was measured with the pre-remediation harness, where all
+three backends ran sequentially in one process — `resource.getrusage` reports the process's
+high-water mark since start, not per-backend, so JSONL's and Parquet's figures both actually
+reflected the peak set by JSONL's full-dataset-into-memory query scan (`_load_all()`), not each
+backend's independent memory use. **Fixed** (Dex review item): `run_benchmark.py` now runs each
+backend in its own subprocess by default (`_run_backend_in_subprocess`), so `peak_rss_mb` is that
+backend's own child-process peak. Validated with a representative 50k-row rerun after the fix,
+which produced three distinct, plausible per-backend figures instead of two backends sharing an
+inflated value: SQLite WAL 22.4MB, JSONL(gzip) 99.4MB, Parquet+DuckDB 122.8MB — Parquet+DuckDB's
+own genuine baseline (duckdb+pyarrow import/runtime overhead) is higher than JSONL's at this small
+scale, which is a legitimate, backend-specific number now rather than an artifact. The committed
+100k/1M tables above were not rerun under the fixed harness (their ingest/disk/query numbers are
+unaffected by this fix — only `peak_rss_mb` was ever wrong); treat their `peak_rss_mb` columns as
+carrying the pre-fix caveat above, and any future rerun will use the corrected subprocess-isolated
+default. A `--in-process` flag preserves the old faster-but-cumulative mode for quick iteration
+where memory figures don't matter.
 
 ## 3M-row run
 
@@ -148,16 +161,39 @@ rule in `docs/v2/storage-audit.md`.
 - **Rotation:** time-based (hourly) rather than purely batch-count-based, to keep segment count and
   size predictable regardless of query volume; a size-based secondary trigger (e.g. rotate early if
   a segment exceeds ~64MB) avoids pathologically large segments during a traffic spike.
-- **Row-group size:** 50,000 rows (tested value) is a reasonable default — large enough to keep
-  Zstd compression effective and row-group-level statistics useful for query pruning, small enough
-  that a single row group isn't the whole segment. Not exhaustively grid-searched in this
-  workstream (single value tested, not benchmark-proven optimal — flagged as a refinement for
-  Workstream 2 if ingest/query profiles diverge from what's modeled here).
-- **Zstd level:** 9 (tested value, a mid-high compression level). Not compared against other levels
-  in this run — flagged as an open refinement, since the disk-size win at level 9 is already large
-  enough (13-15x smaller than SQLite) that further tuning has low expected payoff relative to CPU
-  cost, but wasn't proven optimal by a level-sweep here.
+- **Row-group size:** 50,000 rows (provisional default) is a reasonable starting point — large
+  enough to keep Zstd compression effective and row-group-level statistics useful for query
+  pruning, small enough that a single row group isn't the whole segment. Dex's review noted that
+  10k/50k/100k were indistinguishable at the benchmark's tested scale, so this remains an untuned
+  provisional default, not a benchmark-proven optimum — real-runtime tuning is deferred to
+  Workstream 2 once actual ingest/query profiles are flowing through the system, not guessed
+  further here.
+- **Zstd level: corrected to 6** (was provisionally 9 in the first Workstream 1 pass). Dex's
+  independent review found level 6 compresses to approximately the same size as level 9 at the
+  tested scale while writing faster, and level 3 is only modestly larger. This session verified
+  that finding directly (100k-row table, `pyarrow.parquet.write_table`, `row_group_size=50_000`):
+
+  | Zstd level | write time | bytes/row |
+  |---|---|---|
+  | 3 | 0.066s | 16.97 |
+  | **6** | **0.080s** | **16.43** |
+  | 9 | 0.102s | 16.40 |
+
+  Level 6 gets within 0.03 bytes/row of level 9's compression (a difference of 0.2%) at ~22% less
+  write time, and both comfortably beat level 3 on size for negligible extra cost. `app/v2/`'s
+  benchmark harness default (`ParquetDuckDbBackend.zstd_level`, `run_benchmark.py --zstd-level`)
+  is updated to `6` accordingly. Not an exhaustive level sweep (1-2, 4-5, 7-8, 10+ untested) — if
+  Workstream 2's real-runtime CPU profile makes compression cost meaningfully visible, revisit with
+  a fuller sweep at production scale rather than this single confirmatory check.
 - **Batch size:** 10,000-20,000 records per ingest batch matched the bounded-queue design in
   `app/v2/analytics_ingest.py` reasonably (bounded memory, infrequent enough flushes to keep Zstd
   effective). Exact production default should be tuned against real dnsdist protobuf event rates in
   a later workstream, not guessed further here.
+- **Partition pruning (Workstream 2 acceptance gate, not proven here):** this benchmark used flat
+  per-batch segment files in one directory, which says nothing about whether a "last hour" query
+  against the real `YYYY/MM/DD/HH-<segment>.parquet` layout actually skips scanning historical
+  partitions rather than reading every file and filtering in-memory. DuckDB's `read_parquet()` can
+  prune by directory-derived Hive partitioning or by row-group statistics, but which one V2 actually
+  gets depends on exactly how the reader is written — that reader doesn't exist yet. Workstream 2
+  must include a test proving a bounded recent-time-range query touches only the relevant partition
+  files, not the full history; see `docs/v2/handoff-workstream-2.md`.
