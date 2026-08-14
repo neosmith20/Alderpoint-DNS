@@ -28,8 +28,11 @@ A feature release, built on the v1.0.2 bridge/bugfix release below.
 - **Encryption reliability fixes.** A failed certificate/key or dnsdist
   deployment is no longer reported to the administrator as a success; the
   previous working certificate/key and dnsdist configuration are preserved
-  via rollback whenever a deployment fails, and a certificate/key promotion
-  failure across the service's sandboxed filesystem boundary is fixed.
+  via rollback whenever a deployment fails, a certificate/key promotion
+  failure across the service's sandboxed filesystem boundary is fixed, and
+  a package upgrade no longer silently reverts a live server's encryption
+  configuration (e.g. previously-enabled DoQ/DoH3) back to the fresh-install
+  default.
 - **Other fixes found during review:** DoH ClientID path registration for
   ClientIDs used only in a bare access rule; AdGuard migration no longer
   creates a duplicate client for the same source identity; Clients & Access

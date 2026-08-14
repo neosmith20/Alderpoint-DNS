@@ -48,6 +48,20 @@ not during RC preparation.
   failure, the previous working certificate/key and dnsdist configuration
   are preserved via rollback, and the admin audit log reflects the true
   outcome.
+- Fixed a package-upgrade bug found during v1.1.0 release validation:
+  `postinst` unconditionally overwrote
+  `/etc/systemd/system/dnsdist.service.d/alderpointdns.conf` -- the
+  systemd env-override drop-in `app/encryption.py`'s
+  `render_env_override()` actually manages from live Encryption Settings
+  (DoH/DoT/DoQ/DoH3/DNSCrypt enabled state, listen addresses, ports,
+  active cert/key paths) -- with the packaged fresh-install default on
+  every install, including upgrades. A live server with, for example,
+  DoQ/DoH3 already enabled silently lost that configuration (reverted to
+  the packaged default) on every package upgrade, with the database and
+  Encryption Settings page still reporting the administrator's real,
+  unchanged configuration throughout. `postinst` now only bootstraps the
+  packaged default when no drop-in already exists, preserving whatever an
+  existing installation's own encryption deployment already wrote.
 - Fixed atomic certificate/key promotion during encryption deployment: the
   privileged deploy step could fail with "Invalid cross-device link" when
   promoting newly staged certificate/key material into place under

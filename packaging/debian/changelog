@@ -16,6 +16,10 @@ alderpointdns (1.1.0-1) unstable; urgency=medium
   * Fixed a cross-device-link failure during encryption deployment's
     certificate/key promotion under the service's sandboxed mount
     namespace.
+  * Fixed postinst silently reverting a live server's encryption
+    configuration (e.g. previously-enabled DoQ/DoH3) to the packaged
+    fresh-install default on every package upgrade, by only bootstrapping
+    that default when no administrator-configured drop-in already exists.
 
  -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Fri, 14 Aug 2026 00:00:00 -0600
 

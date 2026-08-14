@@ -241,6 +241,57 @@ class PostinstBindBootstrapPlaceholdersTest(unittest.TestCase):
                 self.fail(f"upstream-forwarders.conf placeholder must not be an empty file: {line!r}")
 
 
+class PostinstEncryptionEnvOverridePreservedOnUpgradeTest(unittest.TestCase):
+    """Regression: postinst used to unconditionally overwrite
+    /etc/systemd/system/dnsdist.service.d/alderpointdns.conf with the
+    packaged fresh-install default on *every* install, including upgrades.
+    That file is not static packaging content on a real system --
+    app.encryption.render_env_override() rewrites it from the live
+    Encryption Settings (DoH/DoT/DoQ/DoH3/DNSCrypt enabled state, listen
+    addresses, ports, active cert/key paths) every time an administrator
+    saves/deploys encryption configuration. Unconditionally overwriting it
+    on upgrade silently reverted a live server's real encryption
+    configuration (e.g. previously-enabled DoQ/DoH3) back to the packaged
+    defaults without changing the database those settings are read from,
+    so the Encryption Settings page kept reporting the admin's real
+    configuration while dnsdist quietly ran a different one until the next
+    manual re-save. Found live testing a real `apt install ./alderpointdns.deb`
+    upgrade with DoQ/DoH3 already enabled: DoQ/DoH3 stopped listening
+    immediately after the package upgrade with no error surfaced anywhere."""
+
+    def setUp(self) -> None:
+        self.postinst = (ROOT / "packaging" / "debian" / "postinst").read_text()
+
+    def test_env_override_install_is_guarded_by_existence_check(self) -> None:
+        lines = self.postinst.splitlines()
+        install_line_idx = None
+        for i, line in enumerate(lines):
+            if (
+                "install -m 0644" in line
+                and "dnsdist.service.d/alderpointdns.conf" in line
+                and "packaging/dnsdist.service.d/alderpointdns.conf" in line
+            ):
+                install_line_idx = i
+                break
+        self.assertIsNotNone(
+            install_line_idx,
+            "expected an `install -m 0644 .../packaging/dnsdist.service.d/alderpointdns.conf "
+            ".../dnsdist.service.d/alderpointdns.conf` line in postinst",
+        )
+        # The install must be guarded by a "does not already exist" check
+        # somewhere in the few preceding lines (an `if [ ! -e ... ]; then`
+        # wrapping it), not run unconditionally on every install/upgrade.
+        preceding = "\n".join(lines[max(0, install_line_idx - 3) : install_line_idx])
+        self.assertIn(
+            "! -e /etc/systemd/system/dnsdist.service.d/alderpointdns.conf",
+            preceding,
+            "the packaged default env-override drop-in must only be installed "
+            "when one is not already present, so a package upgrade preserves "
+            "a live administrator's actual encryption configuration instead "
+            "of silently reverting it to the fresh-install default",
+        )
+
+
 class PostinstSystemdResolvedConflictTest(unittest.TestCase):
     """Regression for dnsdist failing to bind ports 53/5355
     (`Address already in use`) on a completely unmodified, default fresh
