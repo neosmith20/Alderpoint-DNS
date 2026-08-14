@@ -3,7 +3,10 @@
 **Status:** Handoff from Workstream 1 (`v2/architecture-storage-foundation` branch, started at
 `381851f91fa75cb4274d10450383cb9f024e4b61`), amended after the Dex architecture gate review and its
 remediation (branch reviewed at `eec4198`, remediation on top of it — see
-`docs/v2/architecture-map.md` "Architecture gate remediation" for the full writeup). Workstream 2
+`docs/v2/architecture-map.md` "Architecture gate remediation" for the full writeup), and further
+amended after Dex Gate #1 passed ("ALDERPOINT DNS V2 WORKSTREAM 1 ARCHITECTURE VERIFIED AND READY
+FOR WORKSTREAM 2") with an architecture-lock-in documentation commit adding the RAM-first DNS
+cache / effective cache profile / Tier A-B recovery requirement (gates 9-13 below). Workstream 2
 must not begin runtime wiring until the mandatory gates below are read; several of them are
 release-gate-level, not optional cleanup.
 
@@ -97,6 +100,34 @@ a shape works in isolation, not that it's safe to run for real.
    release-quality V2 CI depends on a single combined test run, but do not let it block Workstream 2
    feature work; per-file test execution (as this workstream's regression checks used) is an
    acceptable interim workaround.
+9. **Effective cache profile must become a first-class compiled runtime concept** before any DNS
+   cache-sharing logic ships. See `docs/v2/architecture-map.md` "DNS cache architecture" for the
+   full requirement — clients may only share a cached answer when their filtering/SafeSearch/
+   parental/service-blocking/blocking-response-mode/upstream-routing/ECS/domain-routing state is
+   equivalent. Do not ship one client-per-cache design or one unrestricted global cache; either is a
+   correctness or resource-efficiency defect, not a style choice.
+10. **Cache persistence (Tier A/Tier B) is a new subsystem, not built code.** Same status as the
+    notification secret store (gate 6): the architecture is frozen (`docs/v2/architecture-map.md`),
+    nothing exists yet. Tier B (popularity-based prewarm, always re-resolving through the normal
+    path for fresh TTL/DNSSEC/policy) is the baseline; Tier A (direct restore of provably-still-valid
+    entries) is optional and may be dropped if its risk outweighs measured benefit. Persistent
+    warm-state storage must be its own bounded subsystem (proposed
+    `/var/lib/alderpointdns/cache/`), never Parquet/DuckDB/control.db/UI state repurposed for this.
+11. **Cache failure/startup invariants must hold from the first implementation, not be bolted on
+    later:** DNS availability at boot never waits on cache recovery/prewarm; failure of any
+    persistence-tier component degrades only to a cold cache, never to a DNS outage or failure
+    propagating into control.db/analytics; design for abrupt power loss specifically (periodic
+    async persistence, not graceful-shutdown-only capture).
+12. **DNS cache memory-budget benchmark is required before finalizing cache sizes.** Establish
+    bounded memory budgeting between dnsdist's packet cache, BIND's recursive cache, FastAPI, the
+    analytics writer, DuckDB, the aggregate store, Argon2id transient use, and OS/filesystem cache —
+    do not hard-code final sizes without measuring the full appliance under load first (ties into
+    gate 4's V1 baseline and gate 5's full-appliance Argon2id retest).
+13. **Cache-recovery benchmark gate** (acceptance criteria, not optional polish): simulate abrupt
+    power loss/restart and compare cold cache vs. Tier B prewarm vs. Tier A+B hybrid (if Tier A is
+    implemented) on time-to-DNS-available, cache-hit latency p50/p95/p99, upstream query volume,
+    CPU/RAM/disk overhead, and time to ~50%/90%/99% of prior working-set effectiveness, using
+    realistic repeated-client/domain traffic rather than random synthetic names.
 
 ## Recommended Workstream 2 scope (after the gates above)
 
@@ -143,3 +174,8 @@ should, once the gates above are satisfied:
 - 3M-row benchmark point did not complete in the Workstream 1 session (disk-I/O-bound on shared test
   hardware); the 100k/1M trend already supports the raw-history-backend decision and this is not
   blocking.
+- DNS cache persistence (Tier A/Tier B) and the effective cache profile are frozen architecture
+  decisions, not built code (gates 9-11) — same status as the notification secret store, just
+  locked in later (after Dex Gate #1).
+- Cache memory budgeting and the cache-recovery benchmark (gates 12-13) are unmeasured; do not
+  finalize cache sizes or claim recovery-time numbers until they're run.

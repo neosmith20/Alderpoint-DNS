@@ -6,6 +6,13 @@ Amended after the Dex architecture gate review (see "Architecture gate remediati
 section is the most current statement of a few decisions (pepper, hardware profiles, notification
 secrets) that changed from this document's first pass.
 
+**Architecture lock-in:** after Dex Gate #1 passed ("ALDERPOINT DNS V2 WORKSTREAM 1 ARCHITECTURE
+VERIFIED AND READY FOR WORKSTREAM 2"), this document plus the public roadmap
+(`docs/v2-architecture-plan.md`, `docs/v2-adguard-parity-matrix.md`, `V2_ROADMAP.md`) were updated
+to record the Workstream 1 decisions — including the new RAM-first DNS cache / effective cache
+profile / Tier A-B recovery requirement below — as durable project requirements, not
+conversation-only context. No runtime/source behavior changed in that commit; documentation only.
+
 ## Storage ownership (confirmed)
 
 | Store | Path | Contents | Status |
@@ -158,6 +165,82 @@ analytics ingestion is asynchronous with a bounded queue and explicit oldest-fir
 (`app/v2/analytics_ingest.py::BoundedQueue`); segment writes use temp-name-then-atomic-rename so a
 reader can never observe partial history (`app/v2/analytics_ingest.py::SegmentWriter`,
 `ParquetDuckDbBackend.ingest`); host DNS independence is unchanged from v1.1.1.
+
+## DNS cache architecture: RAM-first, effective cache profile, Tier A/B recovery (owner-locked)
+
+Owner-approved V2 architectural requirement, locked alongside this commit. Copied into the public
+roadmap (`docs/v2-architecture-plan.md` §3.6, `docs/v2-adguard-parity-matrix.md` "Alderpoint beyond
+parity") at summary level; this section is the fuller engineering detail for Workstream 2.
+
+**RAM-first hot path.** Client -> dnsdist RAM packet cache -> compiled runtime policy/routing ->
+BIND RAM recursive cache -> upstream only on miss. The DNS lookup/cache hot path must never
+synchronously depend on disk, SQLite, control.db, the aggregate store, DuckDB, Parquet, FastAPI, the
+web UI, or the analytics/audit subsystems. DNS cache latency takes precedence over analytics
+convenience.
+
+**Effective cache profile — first-class compiled concept.** Cached answers may only be shared
+between clients when the properties that can affect the returned answer are compatible: filtering
+policy, SafeSearch, parental controls, service blocking, blocking response mode, upstream/routing
+profile, fallback/strategy behavior, ECS state, domain-routing rules, and any other answer-producing
+policy. Do not create one cache per individual client (wasteful); do not use one unrestricted global
+cache when policy differences could produce different answers (incorrect). Clients with equivalent
+answer-producing policy share one profile's cache. Must be compiled, deterministic, cheap to
+evaluate, and independent of per-query database lookups — this is a runtime-policy-compiler concern,
+not a database lookup.
+
+**Tier A — safe direct restore (optional).** May directly restore a cached answer after restart only
+when provably correct: absolute expiration time, remaining (not original) TTL, DNSSEC validity/
+state, effective cache-profile generation, resolver/upstream context, domain-routing context, ECS
+context where applicable, negative-caching semantics, and any other validity-affecting metadata. A
+reboot must never reset an entry's original TTL — an entry with 300s original and 40s remaining at
+reboot may be restored with at most ~40s remaining. If validity is uncertain, do not directly
+restore it; fall through to Tier B or normal cold resolution. Tier A is optional for eventual
+production — if its complexity/security/correctness risk outweighs measured benefit, V2 may ship
+Tier B alone.
+
+**Tier B — popularity-based prewarm.** Persists a bounded recent/popular DNS working-set index (name
+identity/popularity, not trusted old answers). After DNS services are available: select recently/
+frequently used names, resolve them through the normal Alderpoint path, obtain fresh TTLs, perform
+normal DNSSEC validation, apply current policy/profile behavior, populate RAM caches naturally.
+Asynchronous, background, rate-limited, bounded, non-blocking, safe after unclean power loss.
+
+**Persistent warm-state storage.** A separate bounded subsystem — not Parquet query history, not
+DuckDB, not control.db raw analytics, not management UI state. Conceptually
+`/var/lib/alderpointdns/cache/` (exact format/path to be benchmarked in Workstream 2). Requirements:
+bounded size, asynchronous updates, coalesced/batched persistence, no per-query fsync, no synchronous
+hot-path disk dependency, atomic/last-known-good snapshots where practical, corruption detection,
+safe cleanup, disposable/non-authoritative. Missing/stale/corrupt/incompatible state must simply
+fall back to a normal cold cache with no effect on DNS functionality.
+
+**Power-loss behavior.** Design for abrupt power loss, not just graceful shutdown. Periodic
+asynchronous persistence during normal operation should mean a crash loses only the last several
+seconds/minutes of warm-state metadata, never DNS correctness.
+
+**Startup order.** DNS availability comes first: dnsdist/BIND become operational and clients can
+resolve immediately; cache recovery/prewarm begins in the background afterward. Never a "restoring
+cache, please wait" gate before DNS is usable. Tier A restore (if implemented) must not make startup
+fragile; Tier B always runs after DNS is already available.
+
+**Cache failure domain.** Persistent cache state is explicitly non-authoritative. Failure of the
+warm-index storage, Tier A state, Tier B state, the cache recovery worker, or the disk cache
+subsystem must degrade only to a cold cache — never a DNS outage, service startup failure,
+management-DB failure, or analytics-failure propagation. Consistent with the existing failure-domain
+contract in `docs/v2/failure-domains.md`.
+
+**Memory priority.** DNS cache is a latency-critical first-class RAM resource. Analytics/query
+operations must not casually starve it. Workstream 2+ should establish bounded memory budgeting
+between dnsdist's packet cache, BIND's recursive cache, FastAPI, the analytics writer, DuckDB, the
+aggregate store, Argon2id's transient use, and OS/filesystem cache. Under memory pressure, optional
+analytics performance should degrade before DNS reliability/latency wherever reasonably possible. No
+hard-coded final cache sizes yet — benchmark them (see gate below).
+
+**Cache recovery benchmark gate (Workstream 2+ acceptance criteria).** Simulate abrupt power loss/
+restart and compare (A) pure cold cache, (B) Tier B popularity prewarm, (C) Tier A+B hybrid if Tier A
+is proven safe enough to implement. Measure: time until DNS is available; cache-hit latency p50/p95/
+p99; upstream query count/volume; CPU/RAM/disk-write overhead; recovery/prewarm network activity;
+time to reach ~50%/90%/99% of prior working-set effectiveness. Use realistic repeated-client/domain
+distributions — random synthetic names can't benefit meaningfully from cache reuse and would
+understate the benefit.
 
 ## Open items / conflicts between docs and implementation evidence
 
