@@ -33,9 +33,18 @@ compiler (proving non-answer-affecting fields never change the cache profile and
 ones always do). Also built a generic stage->validate->promote->rollback runtime-deployment
 abstraction and a dnsdist config-generation prototype validated against the real installed dnsdist
 binary (found and fixed a real `--check-config` positional-argument footgun in the process). This
-was an intentionally partial pass against a much larger requested scope — see
-`docs/v2/handoff-workstream-4.md` for the full delivered/not-delivered breakdown and next-session
-priority order. Still nothing is wired into the live v1.1.1 runtime.
+was an intentionally partial first pass against a much larger requested scope. A subsequent "deep
+continuation" pass in the same branch substantially expanded this: real control.db policy storage
+with round-trip proof, a policy preview/explain service, real BIND/RPZ generation validated against
+the installed `named-checkzone`, real SafeSearch/parental/malware/service filtering decision logic,
+upstream profile storage + domain routing + ECS compiled into real dnsdist config, a real analytics
+ingestion pipeline (normalized event -> Parquet + aggregates + Tier B in one place), an analytics
+query service, notification-provider CRUD wired to the secret store (plaintext-absence proven via
+raw on-disk inspection), Tier B wired to a real isolated dnsdist subprocess end-to-end, and
+fallback-DNS decision logic with a privacy-downgrade guard — 431 `tests/v2/` tests total, 13
+checkpoint commits. See `docs/v2/handoff-workstream-4.md` for the full delivered/blocked/not-reached
+breakdown per queue item and next-session priority order. Still nothing is wired into the live
+v1.1.1 runtime.
 
 ## Storage ownership (confirmed)
 
