@@ -26,6 +26,17 @@ prototype — plus a Tier A feasibility assessment recommending it be deferred. 
 v1.1.1 runtime — every module lives under `app/v2/`, tested only against disposable tempdir/dev
 paths.
 
+**Workstream 3 (partial — policy engine + staged deployment):** built the unified policy hierarchy
+(global -> network -> group -> client -> schedule override), a deterministic side-effect-free
+effective-policy compiler with a full explain trace, and wired it into Workstream 2's cache-profile
+compiler (proving non-answer-affecting fields never change the cache profile and answer-affecting
+ones always do). Also built a generic stage->validate->promote->rollback runtime-deployment
+abstraction and a dnsdist config-generation prototype validated against the real installed dnsdist
+binary (found and fixed a real `--check-config` positional-argument footgun in the process). This
+was an intentionally partial pass against a much larger requested scope — see
+`docs/v2/handoff-workstream-4.md` for the full delivered/not-delivered breakdown and next-session
+priority order. Still nothing is wired into the live v1.1.1 runtime.
+
 ## Storage ownership (confirmed)
 
 | Store | Path | Contents | Status |
