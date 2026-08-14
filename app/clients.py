@@ -57,6 +57,7 @@ DATA_ALLOW_SNI = "access-allow-sni.txt"
 DATA_DENY_SNI = "access-deny-sni.txt"
 DATA_ALLOW_PATH = "access-allow-path.txt"
 DATA_DENY_PATH = "access-deny-path.txt"
+DATA_DOH_CLIENTID_PATHS = "access-doh-clientid-paths.txt"
 
 # Alderpoint's own convention for a DNS-hostname-label carrying a ClientID
 # on DoT/DoQ (SNI-based transports). Not an AdGuard Home compatibility
@@ -719,7 +720,29 @@ def _check_line_safe(entry: str) -> str:
     return entry
 
 
-def render_access_data(rules: list[dict[str, Any]], clients_by_id: dict[int, dict[str, Any]], default_policy: str) -> dict[str, str]:
+def render_doh_clientid_paths(conn: sqlite3.Connection) -> str:
+    """dnsdist's DoH frontend only routes requests whose path is in the
+    fixed list passed to addDOHLocal() at startup -- a request to any other
+    path (including a ClientID-suffixed one HTTPPathRule would otherwise
+    match) is rejected by dnsdist's own HTTP layer with a 404 before any
+    Lua rule ever sees it. So every configured ClientID's DoH path must be
+    registered on the frontend itself, not just matched by our access
+    rules -- this covers every clientid identifier that exists on any
+    client, regardless of whether an access rule currently references it,
+    since the alternative is a DoH connection presenting a perfectly valid
+    ClientID getting a bare 404 instead of being served (under whatever
+    the default policy says) at all. Read by packaging/dnsdist.conf's DoH
+    block at dnsdist startup -- changing the set of ClientIDs therefore
+    requires the dnsdist restart deploy_access_layer() already performs."""
+    from app import encryption
+
+    doh_path = encryption.settings(conn).get("doh_path", "/dns-query") or "/dns-query"
+    values = [row["value"] for row in conn.execute("SELECT DISTINCT value FROM client_identifiers WHERE kind='clientid'")]
+    paths = sorted({clientid_doh_path(doh_path, v) for v in values})
+    return "\n".join(_check_line_safe(p) for p in paths) + ("\n" if paths else "")
+
+
+def render_access_data(rules: list[dict[str, Any]], clients_by_id: dict[int, dict[str, Any]], default_policy: str, doh_base_path: str = "/dns-query") -> dict[str, str]:
     """Plain, line-oriented data files consumed by the static Lua loader
     below -- exactly the same 'never interpolate user text into Lua'
     pattern app/custom_rules.py uses. Every value here has already been
@@ -740,7 +763,7 @@ def render_access_data(rules: list[dict[str, Any]], clients_by_id: dict[int, dic
             (allow_v6 if action == "allow" else deny_v6).append(value)
         elif kind == "clientid":
             sni = clientid_sni_hostname(value)
-            path = clientid_doh_path("/dns-query", value)
+            path = clientid_doh_path(doh_base_path, value)
             (allow_sni if action == "allow" else deny_sni).append(sni)
             (allow_path if action == "allow" else deny_path).append(path)
 
@@ -853,6 +876,49 @@ end
 """
 
 
+DOH_ALTSVC_MARKER_BEGIN = "-- ALDERPOINT-DNS-MANAGED-BLOCK: doh-altsvc BEGIN"
+DOH_ALTSVC_MARKER_END = "-- ALDERPOINT-DNS-MANAGED-BLOCK: doh-altsvc END"
+_DOH_CLIENTID_PATHS_SENTINEL = "access-doh-clientid-paths.txt"
+
+
+def ensure_doh_clientid_paths_migration() -> bool:
+    """Idempotently syncs the doh-altsvc managed block's DoH listener setup
+    to the version that reads ClientID paths dynamically (see
+    render_doh_clientid_paths()) into an existing dnsdist.conf that
+    predates it -- a straight block replace (begin/end markers to
+    begin/end markers) from the current packaging template, the same
+    granularity app/encryption.py's own doh-altsvc migration uses. A
+    no-op once already applied (checked via the sentinel string that only
+    appears in the new block shape) or if the file doesn't have the
+    doh-altsvc block at all yet (that migration owns creating it first)."""
+    if not DNSDIST_CONF.exists():
+        return False
+    current = DNSDIST_CONF.read_text()
+    if DOH_ALTSVC_MARKER_BEGIN not in current or DOH_ALTSVC_MARKER_END not in current:
+        return False
+    if _DOH_CLIENTID_PATHS_SENTINEL in current:
+        return False
+    template = DNSDIST_PACKAGING_CONF.read_text()
+    if DOH_ALTSVC_MARKER_BEGIN not in template or DOH_ALTSVC_MARKER_END not in template:
+        return False
+
+    def _extract_block(text: str) -> str | None:
+        start = text.find(DOH_ALTSVC_MARKER_BEGIN)
+        end = text.find(DOH_ALTSVC_MARKER_END)
+        if start == -1 or end == -1 or end < start:
+            return None
+        return text[start : end + len(DOH_ALTSVC_MARKER_END)]
+
+    old_block = _extract_block(current)
+    new_block = _extract_block(template)
+    if not old_block or not new_block:
+        return False
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(DNSDIST_CONF, BACKUP_DIR / f"dnsdist.conf.pre-doh-clientid-paths.{int(time.time())}")
+    DNSDIST_CONF.write_text(current.replace(old_block, new_block, 1))
+    return True
+
+
 def ensure_dnsdist_access_include() -> bool:
     """Idempotently insert the guarded access-policy dofile include into an
     existing dnsdist.conf that lacks it, immediately after the
@@ -901,6 +967,8 @@ def deploy_access_layer(conn: sqlite3.Connection | None = None) -> dict[str, Any
     re-raising -- the active (last-known-good) configuration is never
     replaced by a config that failed validation. Mirrors
     app/custom_rules.py's deploy_dnsdist_layer() exactly."""
+    from app import encryption
+
     owns = conn is None
     db = conn or connect()
     try:
@@ -908,11 +976,14 @@ def deploy_access_layer(conn: sqlite3.Connection | None = None) -> dict[str, Any
         rules = list_access_rules(db)
         clients_by_id = {c["id"]: c for c in list_clients(db)}
         default_policy = get_default_policy(db)
+        doh_path = encryption.settings(db).get("doh_path", "/dns-query") or "/dns-query"
+        doh_clientid_paths = render_doh_clientid_paths(db)
     finally:
         if owns:
             db.close()
 
-    data_files = render_access_data(rules, clients_by_id, default_policy)
+    data_files = render_access_data(rules, clients_by_id, default_policy, doh_path)
+    data_files[DATA_DOH_CLIENTID_PATHS] = doh_clientid_paths
     final_lua = render_access_lua(COMPILED_DNSDIST_DIR)
     targets: dict[Path, str] = {access_lua_path(): final_lua}
     for name, text in data_files.items():
@@ -966,6 +1037,8 @@ def ensure_access_data_files(conn: sqlite3.Connection | None = None) -> bool:
     'allow' with zero rules, which renders to empty data files and an
     effectively inert Lua include -- no behavior change until an admin
     configures something. Returns True if any file was created/changed."""
+    from app import encryption
+
     owns = conn is None
     db = conn or connect()
     try:
@@ -973,10 +1046,13 @@ def ensure_access_data_files(conn: sqlite3.Connection | None = None) -> bool:
         rules = list_access_rules(db)
         clients_by_id = {c["id"]: c for c in list_clients(db)}
         default_policy = get_default_policy(db)
+        doh_path = encryption.settings(db).get("doh_path", "/dns-query") or "/dns-query"
+        doh_clientid_paths = render_doh_clientid_paths(db)
     finally:
         if owns:
             db.close()
-    data_files = render_access_data(rules, clients_by_id, default_policy)
+    data_files = render_access_data(rules, clients_by_id, default_policy, doh_path)
+    data_files[DATA_DOH_CLIENTID_PATHS] = doh_clientid_paths
     targets = {access_lua_path(): render_access_lua(COMPILED_DNSDIST_DIR)}
     for name, text in data_files.items():
         targets[COMPILED_DNSDIST_DIR / name] = text

@@ -1527,6 +1527,8 @@ def dnsdist_conf_migrate() -> str:
         parts.append(altsvc_message)
     elif altsvc_message:
         parts.append(altsvc_message)
+    if clients.ensure_doh_clientid_paths_migration():
+        parts.append("DoH ClientID path routing added")
     if clients.ensure_dnsdist_access_include():
         parts.append("Clients & Access dofile include added")
     if clients.ensure_access_data_files():

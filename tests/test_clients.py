@@ -470,6 +470,60 @@ class DnsdistRenderingSafetyTest(ClientsTestBase):
             self.assertNotIn("/etc/passwd", text)
 
 
+class DohClientIdPathRoutingTest(ClientsTestBase):
+    """dnsdist's DoH frontend only routes paths registered at startup via
+    addDOHLocal()'s `paths` argument -- a HTTPPathRule for a path outside
+    that list is never reached (dnsdist 404s first). This is the fix for
+    that: every configured ClientID's DoH path must be registered on the
+    frontend itself. See render_doh_clientid_paths() and
+    packaging/dnsdist.conf's doh-altsvc block."""
+
+    def test_renders_one_path_per_configured_clientid(self) -> None:
+        clients.create_client("A", identifiers=["a" * 48])
+        clients.create_client("B", identifiers=["b" * 64])
+        conn = clients.connect()
+        text = clients.render_doh_clientid_paths(conn)
+        lines = [l for l in text.splitlines() if l]
+        self.assertEqual(len(lines), 2)
+        self.assertIn("/dns-query/" + "a" * 48, lines)
+        self.assertIn("/dns-query/" + "b" * 64, lines)
+        conn.close()
+
+    def test_no_clientids_renders_empty(self) -> None:
+        conn = clients.connect()
+        self.assertEqual(clients.render_doh_clientid_paths(conn), "")
+        conn.close()
+
+    def test_deploy_writes_doh_clientid_paths_file(self) -> None:
+        clients.create_client("A", identifiers=["c" * 48])
+        with mock.patch.object(clients, "run", return_value=subprocess.CompletedProcess(["x"], 0, "ok", "")):
+            clients.deploy_access_layer()
+        content = (clients.COMPILED_DNSDIST_DIR / clients.DATA_DOH_CLIENTID_PATHS).read_text()
+        self.assertIn("c" * 48, content)
+
+    def test_migration_block_replace_is_idempotent(self) -> None:
+        packaging_conf = ROOT / "packaging" / "dnsdist.conf"
+        old_template = clients.DNSDIST_PACKAGING_CONF
+        clients.DNSDIST_PACKAGING_CONF = packaging_conf
+        try:
+            # Simulate an existing install whose dnsdist.conf has the
+            # doh-altsvc block but predates the ClientID-path routing fix:
+            # strip the sentinel string back out of a real copy of the
+            # template.
+            template_text = packaging_conf.read_text()
+            pre_fix = template_text.replace(
+                "alderpointdnsDohPaths", "OLD_STYLE_NOT_USED"
+            ).replace(clients._DOH_CLIENTID_PATHS_SENTINEL, "")
+            clients.DNSDIST_CONF.write_text(pre_fix)
+            changed_first = clients.ensure_doh_clientid_paths_migration()
+            self.assertTrue(changed_first)
+            self.assertIn(clients._DOH_CLIENTID_PATHS_SENTINEL, clients.DNSDIST_CONF.read_text())
+            changed_second = clients.ensure_doh_clientid_paths_migration()
+            self.assertFalse(changed_second)
+        finally:
+            clients.DNSDIST_PACKAGING_CONF = old_template
+
+
 class DeployRollbackTest(ClientsTestBase):
     def _fake_run_ok(self, cmd, check=True):
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
