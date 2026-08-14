@@ -335,15 +335,47 @@ def update_settings(values: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 def _write_owned(path: Path, content: bytes, mode: int) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_bytes(content)
-    tmp.chmod(mode)
-    os.replace(tmp, path)
+    _atomic_write_bytes(path, content, mode)
     try:
         shutil.chown(path, user="root", group="_dnsdist")
     except (LookupError, PermissionError, OSError):
         pass
+
+
+def _atomic_write_bytes(path: Path, content: bytes, mode: int = 0o644) -> None:
+    """Write a complete replacement in path's own directory and promote it
+    with os.replace(). The destination directory matters under the web
+    service's systemd mount namespace: /var/lib/alderpointdns and
+    /etc/systemd/system are separate writable bind mounts there, so a temp
+    file staged under /var/lib can fail with EXDEV when promoted into /etc
+    even though the direct root CLI sees both paths on the same ext4
+    filesystem."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp.chmod(mode)
+        os.replace(tmp, path)
+        try:
+            dir_fd = os.open(path.parent, os.O_DIRECTORY)
+        except OSError:
+            dir_fd = None
+        if dir_fd is not None:
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def generate_self_signed(hostname: str, extra_sans: list[str] | None = None, days: int = 825) -> None:
@@ -995,10 +1027,7 @@ def deploy_encryption(conn: sqlite3.Connection | None = None, template_path: Pat
             if DNSDIST_ENV_OVERRIDE.exists():
                 env_backup = BACKUP_DIR / f"dnsdist-encryption.conf.last-good.{int(time.time())}"
                 shutil.copy2(DNSDIST_ENV_OVERRIDE, env_backup)
-            staged = STAGING_DIR / f"alderpointdns-encryption-{deployment_id}.conf"
-            staged.write_text(new_env_text)
-            DNSDIST_ENV_OVERRIDE.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(staged, DNSDIST_ENV_OVERRIDE)
+            _atomic_write_bytes(DNSDIST_ENV_OVERRIDE, new_env_text.encode(), 0o644)
             run(["systemctl", "daemon-reload"])
             check_env = {**os.environ, **_env_from_override(new_env_text)}
             run(["dnsdist", "--check-config", "-C", str(DNSDIST_CONF)], env=check_env)
@@ -1029,7 +1058,7 @@ def deploy_encryption(conn: sqlite3.Connection | None = None, template_path: Pat
                 message = f"{message}; certificate/key rollback failed: {cert_rollback_exc}"
         if env_backup is not None:
             try:
-                shutil.copy2(env_backup, DNSDIST_ENV_OVERRIDE)
+                _atomic_write_bytes(DNSDIST_ENV_OVERRIDE, env_backup.read_bytes(), 0o644)
                 run(["systemctl", "daemon-reload"], check=False)
                 run(["systemctl", "restart", "dnsdist"], check=False)
                 if _wait_active("dnsdist", timeout=15):

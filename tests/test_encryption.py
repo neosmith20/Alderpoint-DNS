@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import errno
+import os
 import subprocess
 import sys
 import tempfile
@@ -321,6 +323,57 @@ class EncryptionTest(unittest.TestCase):
         deployment = encryption.last_deployment()
         self.assertEqual(deployment["status"], "deployed")
         self.assertTrue(encryption.DNSDIST_ENV_OVERRIDE.exists())
+
+    def test_deploy_encryption_env_override_replace_is_same_directory_for_exdev_safety(self) -> None:
+        """Web-triggered sudo children inherit alderpointdns.service's
+        mount namespace, where /var/lib/alderpointdns/staging and
+        /etc/systemd/system/dnsdist.service.d are distinct writable bind
+        mounts. Staging the env override under STAGING_DIR and renaming into
+        /etc therefore fails with EXDEV. The replacement temp file must be
+        created in DNSDIST_ENV_OVERRIDE.parent itself."""
+        template = self._prepare_template_and_conf()
+        encryption.generate_self_signed("dns.example.com", days=30)
+        real_replace = os.replace
+        replace_pairs: list[tuple[Path, Path]] = []
+
+        def exdev_if_cross_parent(src, dst):
+            src_path = Path(src)
+            dst_path = Path(dst)
+            replace_pairs.append((src_path, dst_path))
+            if src_path.parent != dst_path.parent:
+                raise OSError(errno.EXDEV, "Invalid cross-device link", str(src), str(dst))
+            return real_replace(src, dst)
+
+        with mock.patch.object(encryption, "run", self.fake_run_ok), \
+             mock.patch.object(encryption, "_wait_active", return_value=True), \
+             mock.patch.object(encryption, "test_protocols", return_value={"plain": "ok"}), \
+             mock.patch.object(encryption.os, "replace", side_effect=exdev_if_cross_parent):
+            encryption.deploy_encryption(template_path=template)
+        env_replaces = [(src, dst) for src, dst in replace_pairs if dst == encryption.DNSDIST_ENV_OVERRIDE]
+        self.assertEqual(len(env_replaces), 1)
+        self.assertEqual(env_replaces[0][0].parent, encryption.DNSDIST_ENV_OVERRIDE.parent)
+        self.assertEqual(oct(encryption.DNSDIST_ENV_OVERRIDE.stat().st_mode)[-3:], "644")
+
+    def test_atomic_env_write_cleans_temp_after_replace_failure(self) -> None:
+        target = self.tmp / "target-dir" / "alderpointdns.conf"
+        target.parent.mkdir()
+
+        def fail_replace(src, dst):
+            raise OSError(errno.EIO, "simulated replace failure")
+
+        with mock.patch.object(encryption.os, "replace", side_effect=fail_replace):
+            with self.assertRaises(OSError):
+                encryption._atomic_write_bytes(target, b"new content", 0o640)
+        self.assertFalse(target.exists())
+        self.assertEqual(list(target.parent.glob(".alderpointdns.conf.*.tmp")), [])
+
+    def test_atomic_env_write_replaces_existing_file_without_partial_write(self) -> None:
+        target = self.tmp / "target-dir" / "alderpointdns.conf"
+        target.parent.mkdir()
+        target.write_text("old")
+        encryption._atomic_write_bytes(target, b"new", 0o640)
+        self.assertEqual(target.read_text(), "new")
+        self.assertEqual(oct(target.stat().st_mode)[-3:], "640")
 
     def test_deploy_encryption_rolls_back_on_failed_protocol_test(self) -> None:
         template = self._prepare_template_and_conf()
@@ -917,17 +970,19 @@ class EncryptionWebRouteTests(unittest.TestCase):
     def test_encryption_deploy_apply_raising_is_not_reported_as_success(self) -> None:
         """encryption_deploy_apply() itself never raises (run() always
         returns a (code, output) tuple), but if a caller further down the
-        stack ever did raise, it must propagate as a real error rather than
-        the route silently proceeding to its success redirect -- it must
-        never be swallowed by a bare `except Exception` between the deploy
-        call and the redirect."""
+        stack ever did raise, it must be surfaced and audited as a real
+        deployment failure rather than the route silently proceeding to its
+        success redirect or creating an untracked 500."""
         with mock.patch.object(self.webapp, "encryption_deploy_apply", side_effect=RuntimeError("unexpected deploy helper crash")):
-            with self.assertRaises(RuntimeError):
-                self.client.post(
-                    "/encryption/certificate/self-signed",
-                    data={"csrf": self.csrf},
-                    follow_redirects=False,
-                )
+            response = self.client.post(
+                "/encryption/certificate/self-signed",
+                data={"csrf": self.csrf},
+                follow_redirects=False,
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("unexpected deploy helper crash", response.text)
+        rows = self._audit_rows("encryption_cert_self_signed")
+        self.assertEqual(rows[-1][0], 0)
 
 
 if __name__ == "__main__":

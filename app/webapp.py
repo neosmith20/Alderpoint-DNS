@@ -2361,7 +2361,10 @@ def _deploy_encryption_or_error(request: Request, admin: sqlite3.Row, action: st
     that deployment actually completed. Mirrors
     _deploy_access_or_error()'s convention for /clients-access/*."""
     ip = request.client.host if request.client else None
-    code, out = encryption_deploy_apply()
+    try:
+        code, out = encryption_deploy_apply()
+    except Exception as exc:
+        code, out = 1, str(exc)
     output_tail = out.strip()
     with db() as conn:
         audit_log(
