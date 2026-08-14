@@ -2,6 +2,27 @@
 
 All notable changes to Alderpoint DNS are documented in this file.
 
+## Unreleased (next-release/backup-restore-and-network-config)
+
+- Added Clients & Access: persistent named clients with multiple identifiers
+  (IPv4/IPv6/CIDR/ClientID), strong 192-bit/256-bit ClientIDs (never below
+  192-bit), and DNS-level allow/deny access policy enforced natively at
+  dnsdist (`NetmaskGroupRule` for IP/CIDR, `SNIRule`/`HTTPPathRule` for
+  ClientID on DoT/DoQ/DoH) with deny-always-wins precedence. See
+  `docs/clients-and-access.md`.
+- AdGuard Home migration now maps persistent clients (every identifier, not
+  just the first) and allowed_clients/disallowed_clients into Clients &
+  Access; ClientIDs below the 192-bit minimum are preserved as an inactive
+  finding, never silently activated.
+- Analytics resolves client addresses to persistent-client names
+  (most-specific network match), gated so it never runs on
+  anonymized/truncated addresses.
+- Native export format bumped to v2 (adds `clients`/`access_policy`,
+  v1 fields kept for compatibility); backup/restore and replication cover
+  the new tables.
+- Migrates existing `client_aliases` rows into the new model idempotently;
+  the legacy table remains for backward compatibility.
+
 ## v1.0.2 (unreleased)
 
 A targeted Software Updates bugfix and one-time bridge release. The date is

@@ -89,11 +89,17 @@ outcome is reached in a different file/process" rather than a gap.
 | AdGuard feature | Where in AdGuard | Alderpoint DNS equivalent | Implementation location | Status | Missing tests | Notes |
 |---|---|---|---|---|---|---|
 | Auto-discovery via hosts file / rDNS / ARP / WHOIS / DHCP leases | Clients page, background runtime sources | PTR-based display fallback only (no ARP/WHOIS/hosts-file probing) | `app/local_dns.py::ptr_hostname_for_ip` | partial | none dedicated | Alderpoint DNS shows a client's own PTR record if one exists; it does not actively probe ARP tables or WHOIS. |
-| Persistent (manually named) clients | Clients page "Add client" | Client aliases: CIDR/IP → display label | `app/local_dns.py::upsert_alias/alias_for_client`, `web/templates/local_dns.html` | complete | none — `tests/test_local_dns.py::test_analytics_client_aliases` | Aliases are presentation-only labels for dashboard/query-log; they carry no policy (`docs/architecture.md`). This is narrower than AdGuard's "client object," which is also a policy attachment point. |
+| Persistent (manually named) clients | Clients & Access page "Add client" | Named client with multiple identifiers (IPv4/IPv6/CIDR/ClientID) and enforced DNS allow/deny policy | `app/clients.py`, `web/templates/clients_access.html` | complete | `tests/test_clients.py` | A persistent client is now a real policy attachment point (Allow/Deny rules can reference it), not just a display label -- see `docs/clients-and-access.md`. The old `client_aliases`-backed display-only alias (`app/local_dns.py::upsert_alias/alias_for_client`) is superseded for new clients but the legacy table/functions remain for backward compatibility. |
 | Client identification by MAC address | Clients page, requires AdGuard as DHCP server | Not applicable | — | intentionally not applicable | n/a | Alderpoint DNS has no DHCP server (see DHCP row below), so MAC-based identification has no lease table to draw from. |
-| ClientID for encrypted-DNS client identification (DoH/DoT/DoQ path-based ID) | Clients page, DoH/DoT/DoQ URL scheme | Not implemented | — | planned | n/a | dnsdist can support this in principle, but Alderpoint DNS's dnsdist config does not currently parse or route on a ClientID segment. |
+| ClientID for encrypted-DNS client identification (DoH/DoT/DoQ path-based ID) | Clients & Access page, ClientID generator | 192-bit/256-bit ClientIDs enforced via dnsdist `SNIRule` (DoT/DoQ) and `HTTPPathRule` (DoH/DoH3) | `app/clients.py`, `packaging/dnsdist.conf` | complete | `tests/test_clients.py` (live-verified against dnsdist 2.1.1 over real DoT/DoQ/DoH connections) | Alderpoint's own convention (48/64-hex ClientIDs, 192-bit minimum), not an AdGuard-URL-scheme clone; see `docs/clients-and-access.md` for exactly what this dnsdist build supports and the DoH frontend-path caveat. |
 
 ## Per-client filtering, upstream, SafeSearch, blocked services
+
+DNS-level allow/deny access (which clients can query Alderpoint DNS at all,
+per IP/CIDR/ClientID/persistent client) is fully enforced -- see the
+Persistent clients and ClientID rows above and `docs/clients-and-access.md`.
+The rows below are about a different, still-unimplemented axis: per-client
+*content filtering* (which blocklists/rules apply), not DNS access.
 
 | AdGuard feature | Where in AdGuard | Alderpoint DNS equivalent | Implementation location | Status | Missing tests | Notes |
 |---|---|---|---|---|---|---|

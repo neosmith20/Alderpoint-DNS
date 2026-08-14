@@ -38,6 +38,10 @@ requires a separate license — see `LICENSE` and
   the official PowerDNS repository build that does), plus managed upstream
   resolvers over plain DNS, DoT, and DoH. See `docs/dnsdist.md` and
   `docs/configuration.md`.
+- **Clients & Access.** Persistent named clients with multiple identifiers
+  (IPv4/IPv6/CIDR/ClientID), strong 192-bit/256-bit ClientIDs, and DNS-level
+  allow/deny policy enforced natively at dnsdist across every protocol
+  (UDP/TCP/DoT/DoH/DoQ/DoH3). See `docs/clients-and-access.md`.
 - **Replication.** One-way primary-to-replica configuration sync with hashed,
   one-time, revocable enrollment tokens and mTLS client authentication.
   Promotion is manual by design; automatic failover and bidirectional conflict
@@ -190,6 +194,7 @@ satisfied.
 - Architecture: `docs/architecture.md`
 - Filtering and custom rules: `docs/filtering.md`
 - Migration from AdGuard Home / Pi-hole: `docs/migration.md`
+- Clients & Access: `docs/clients-and-access.md`
 - Backup and recovery: `docs/backup-recovery.md`
 - Network Configuration: `docs/network-configuration.md`
 - Replication: `docs/replication-promotion.md`

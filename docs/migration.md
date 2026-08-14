@@ -203,5 +203,14 @@ report. AdGuard API passwords never enter job rows at all.
 - AdGuard domain-specific upstream routing has no Alderpoint DNS equivalent yet.
 - AdGuard allowlist subscriptions are reported for manual review because
   Alderpoint DNS has custom allow rules, not allowlist-subscription objects.
-- Client-scoped rules and Pi-hole group assignments are preserved as explicit
-  inactive findings; there is no per-client or per-group runtime enforcement.
+- AdGuard persistent clients and allowed_clients/disallowed_clients migrate
+  into Alderpoint's Clients & Access model (real, enforced DNS allow/deny
+  policy -- see `docs/clients-and-access.md`), including every identifier on
+  a client, not just the first. An imported ClientID below Alderpoint's
+  192-bit minimum is preserved in the report as an inactive finding and
+  never silently activated as a weaker ClientID.
+- Remaining client-scoped rules (SafeSearch, per-client filtering,
+  per-client upstreams) and Pi-hole group assignments have no Alderpoint
+  DNS equivalent and are preserved as explicit inactive findings; there is
+  no per-client *content-filtering* runtime enforcement (per-client DNS
+  *access* enforcement now exists, see above).
