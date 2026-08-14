@@ -24,6 +24,8 @@ not during RC preparation.
   requires.
 - Fixed a fresh-install bug where the default blocklists and initial
   filtering deploy were silently skipped on every clean install.
+- Fixed the Software Updates active-update banner staying visible after a
+  hard refresh when no update was actually active.
 
 ## v1.1.0
 

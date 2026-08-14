@@ -828,6 +828,23 @@ input[type="checkbox"] { width: auto; min-height: auto; }
 }
 
 .stack { display: grid; gap: 14px; }
+/* An author stylesheet's own `display` declaration on an element always
+   wins over the User-Agent stylesheet's low-priority `[hidden] { display:
+   none }` default, regardless of selector specificity (UA-origin rules
+   are always lower priority than any author rule of equal importance).
+   Concretely: #updateStatusBanner has class="panel stack", and .stack's
+   `display: grid` above silently defeated its `hidden` attribute --
+   server-rendered HTML and JS both correctly set/cleared `hidden`, but
+   the banner stayed visually visible regardless, spinner and "do not
+   close this page" warning included, for every job the backend
+   considered terminal/historical. Found live: a hard refresh against a
+   real historical failed job (job.active=false) still showed the active
+   banner. The same class of bug is already defended against elsewhere in
+   this file for other hidden elements that also carry their own display
+   rule -- see .nav-section__panel[hidden], .row-edit[hidden], and
+   .overflow-menu__panel[hidden] below/above; this was simply missed when
+   #updateStatusBanner (a v1.1.1 addition) was introduced. */
+#updateStatusBanner[hidden] { display: none; }
 .secondary { display: block; margin-top: 5px; }
 .muted { color: var(--muted); }
 .ok { color: var(--success); }

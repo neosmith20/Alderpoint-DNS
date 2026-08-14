@@ -45,6 +45,16 @@ alderpointdns (1.1.1-1) unstable; urgency=medium
     established, non-fresh database and silently skipped seeding the
     default blocklists and the initial filtering deploy. Reordered so
     fresh-install detection always runs first.
+  * Fixed the Software Updates page's active-update banner/spinner
+    staying visually visible after a hard refresh even when no update was
+    active (e.g. the latest job was a terminal, historical failure). Root
+    cause was CSS, not server or JavaScript logic: the banner's own
+    `.stack` class sets `display: grid`, and any author stylesheet
+    declaration of `display` always overrides the browser's default
+    `[hidden] { display: none }`, regardless of whether the `hidden`
+    attribute is correctly present. Added an explicit
+    `#updateStatusBanner[hidden] { display: none; }` override, matching
+    the same defensive pattern already used elsewhere in this stylesheet.
 
  -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Fri, 14 Aug 2026 11:35:00 +0000
 

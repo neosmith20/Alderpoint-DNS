@@ -16,6 +16,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -1773,6 +1774,152 @@ class SoftwareUpdatesHttpTest(unittest.TestCase):
             data={"csrf": self.csrf, "check_interval_hours": "999999"},
         )
         self.assertEqual(response.status_code, 400)
+
+
+class SoftwareUpdateBannerVisibilityTest(SoftwareUpdatesHttpTest):
+    """Owner-reported bug: the #updateStatusBanner active-update spinner/
+    warning stayed visible after a hard refresh even though the latest job
+    was terminal and historical (active=false). Real root cause was CSS,
+    not server/JS logic: .stack's own `display: grid` (web/static/app.css)
+    silently defeats the browser's User-Agent-default `[hidden] { display:
+    none }` for any element that also carries the .stack class, regardless
+    of the `hidden` attribute's true/false state -- confirmed with a real
+    headless-Chromium screenshot before the fix (banner visible despite
+    `hidden` present) and after (banner genuinely hidden). See
+    #updateStatusBanner[hidden] in web/static/app.css for the fix itself
+    and tests/test_web_smoke.sh for the browser-rendered verification;
+    these HTTP-level tests instead prove the server-rendered *attribute*
+    contract (hidden present/absent, aria-busy) is correct for every job
+    state per the six required states (A-F), using the real response the
+    browser receives, not an arbitrary source-string search."""
+
+    def _banner_tag(self, html: str) -> str:
+        match = re.search(r'<div id="updateStatusBanner"[^>]*>', html, re.S)
+        self.assertIsNotNone(match, "updateStatusBanner element not found in response")
+        return match.group(0)
+
+    def _assert_banner_hidden(self, html: str) -> None:
+        tag = self._banner_tag(html)
+        self.assertIn("hidden", tag, f"expected updateStatusBanner to carry the hidden attribute, got: {tag}")
+        self.assertIn('aria-busy="false"', tag)
+
+    def _assert_banner_active(self, html: str) -> None:
+        tag = self._banner_tag(html)
+        self.assertNotIn(" hidden", tag, f"expected updateStatusBanner to NOT carry the hidden attribute, got: {tag}")
+        self.assertIn('aria-busy="true"', tag)
+        self.assertIn("Do not close this page or start another update while this job is active", html)
+
+    def _create_job(self, phase: str, *, historical: bool = False, completed_at: str = "2026-08-14T08:27:05+00:00") -> int:
+        job_id = su.create_github_job(_release("1.0.2"), requested_by="admin")
+        conn = su.connect()
+        if phase in ("completed", "failed"):
+            result = "success" if phase == "completed" else "failed"
+            error = "" if phase == "completed" else "simulated failure for banner-visibility test"
+            conn.execute(
+                "UPDATE software_update_jobs SET phase=?, result=?, error=?, completed_at=? WHERE id=?",
+                (phase, result, error, completed_at, job_id),
+            )
+        else:
+            # A non-terminal phase needs a live-looking worker identity, or
+            # reap_abandoned_jobs() (run on every job_status_payload() call)
+            # correctly treats it as an abandoned/dead runner and force-fails
+            # it -- exactly as it must for a real dead worker, but not what
+            # this test is exercising.
+            pid, ticks, boot_id = backup_module._worker_identity()
+            conn.execute(
+                "UPDATE software_update_jobs SET worker_pid=?, worker_start_ticks=?, worker_boot_id=?, started_at=? WHERE id=?",
+                (pid, ticks, boot_id, su.now(), job_id),
+            )
+            su._set_phase(conn, job_id, phase, f"{phase} in progress")
+        if historical:
+            su._set_setting(conn, "last_checked_at", "2026-08-14T09:00:00+00:00")
+        conn.commit()
+        conn.close()
+        return job_id
+
+    # A. No job exists.
+    def test_no_job_banner_hidden(self) -> None:
+        html = self._authed_client().get("/system/administration/software-updates").text
+        self._assert_banner_hidden(html)
+
+    # B. Historical failed job -- the owner's exact reproduction shape.
+    def test_historical_failed_job_banner_hidden(self) -> None:
+        self._create_job("failed", historical=True)
+        status = su.job_status_payload()
+        self.assertFalse(status["job"]["active"])
+        self.assertTrue(status["job"]["historical"])
+        self.assertEqual(status["job"]["phase"], "failed")
+        html = self._authed_client().get("/system/administration/software-updates").text
+        self._assert_banner_hidden(html)
+        self.assertIn("Previous Update Job #", html)
+
+    # C. Historical completed job.
+    def test_historical_completed_job_banner_hidden(self) -> None:
+        self._create_job("completed", historical=True)
+        html = self._authed_client().get("/system/administration/software-updates").text
+        self._assert_banner_hidden(html)
+        self.assertIn("Previous Update Job #", html)
+
+    # D. Current (non-historical) failed terminal job.
+    def test_current_failed_job_banner_hidden_but_failure_visible(self) -> None:
+        job_id = self._create_job("failed", historical=False)
+        html = self._authed_client().get("/system/administration/software-updates").text
+        self._assert_banner_hidden(html)
+        self.assertNotIn("Previous Update Job #", html)
+        self.assertIn(f"Update Job #{job_id}", html)
+        self.assertIn("simulated failure for banner-visibility test", html)
+
+    # F. Active jobs at every durable phase.
+    def test_active_job_banner_visible_at_every_phase(self) -> None:
+        for phase in ("pending", "checking", "downloading", "validating", "backing_up", "simulating", "installing", "restarting", "postcheck"):
+            with self.subTest(phase=phase):
+                conn = su.connect()
+                conn.execute("DELETE FROM software_update_jobs")
+                conn.commit()
+                conn.close()
+                self._create_job(phase)
+                status = su.job_status_payload()
+                self.assertTrue(status["job"]["active"], f"phase {phase} should be active")
+                html = self._authed_client().get("/system/administration/software-updates").text
+                self._assert_banner_active(html)
+
+    # Owner-reproduction row shape, item 11: failed + result=failed +
+    # completed_at set + historical=true + active=false -> NO active banner.
+    def test_owner_reproduction_row_shape(self) -> None:
+        job_id = su.create_github_job(_release("1.0.2"), requested_by="admin")
+        conn = su.connect()
+        conn.execute(
+            "UPDATE software_update_jobs SET operation='manual', phase='failed', result='failed', "
+            "started_at=?, completed_at=?, worker_pid=106068, error=? WHERE id=?",
+            (
+                "2026-08-14T08:27:05+00:00",
+                "2026-08-14T08:27:05+00:00",
+                "installed VERSION/dpkg version drift detected; refusing to proceed automatically -- file='1.0.2' dpkg='1.0.1-1'",
+                job_id,
+            ),
+        )
+        su._set_setting(conn, "last_checked_at", "2026-08-14T10:08:56+00:00")
+        conn.commit()
+        conn.close()
+        status = su.job_status_payload()
+        self.assertFalse(status["job"]["active"])
+        self.assertTrue(status["job"]["historical"])
+        self.assertEqual(status["job"]["phase"], "failed")
+        html = self._authed_client().get("/system/administration/software-updates").text
+        self._assert_banner_hidden(html)
+        self.assertIn("Previous Update Job #", html)
+        self.assertIn("installed VERSION/dpkg version drift detected", html)
+
+    # Item 12: a manual hard-refresh (a plain GET, no JS involved at all)
+    # must reconstruct correctly from durable state alone.
+    def test_hard_refresh_reconstructs_from_durable_active_false(self) -> None:
+        self._create_job("failed", historical=True)
+        # Two independent GETs -- simulating opening the page, then hard
+        # refreshing it -- must both render the same, correct hidden state;
+        # nothing here depends on any client-side memory between them.
+        for _ in range(2):
+            html = self._authed_client().get("/system/administration/software-updates").text
+            self._assert_banner_hidden(html)
 
 
 if __name__ == "__main__":

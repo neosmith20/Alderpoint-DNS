@@ -807,4 +807,77 @@ if response.status_code != 200 or b'"series"' not in response.body:
     raise SystemExit("chart data endpoint did not return JSON series")
 PY
 
+# Regression: #updateStatusBanner's `hidden` attribute alone is not enough
+# to actually hide it in a real browser -- an author stylesheet's own
+# `display` declaration always wins over the User-Agent stylesheet's
+# low-priority `[hidden] { display: none }` default, and .stack (the class
+# this banner also carries) sets `display: grid`. Server-rendered HTML and
+# JS can both correctly set/clear `hidden` and still produce a banner that
+# stays visually visible regardless -- exactly the real owner-reported bug
+# (a hard refresh against a historical, terminal, job.active=false job
+# still showed the active-update spinner/warning). No source-text search
+# can catch this class of bug; it requires an actual browser's CSS cascade.
+if ! grep -q '#updateStatusBanner\[hidden\]' /opt/alderpointdns/web/static/app.css; then
+  fail "web/static/app.css is missing the #updateStatusBanner[hidden] override -- .stack's own display:grid would silently defeat the hidden attribute again"
+fi
+if command -v chromium >/dev/null 2>&1; then
+  python3 -B - <<'PY' || fail "real-browser #updateStatusBanner CSS verification failed"
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, "/opt/alderpointdns")
+from starlette.requests import Request  # noqa: E402
+from app import software_updates as su  # noqa: E402
+from app import webapp  # noqa: E402
+
+ctx = su.update_status()
+ctx["error"] = None
+ctx["csrf"] = "x"
+ctx["check_interval_choices"] = su.CHECK_INTERVAL_CHOICES
+scope = {"type": "http", "method": "GET", "path": "/system/administration/software-updates", "headers": [], "app": webapp.app, "query_string": b""}
+resp = webapp.TEMPLATES.TemplateResponse(Request(scope), "system_software_updates.html", ctx)
+page_html = resp.body.decode()
+page_html = re.sub(r'href="/static/app\.css\?v=[^"]*"', 'href="app.css"', page_html)
+
+tmpdir = tempfile.mkdtemp(prefix="alderpointdns-banner-css-check-")
+try:
+    Path(tmpdir, "app.css").write_text(Path("/opt/alderpointdns/web/static/app.css").read_text())
+    probe = (
+        "<script>document.addEventListener('DOMContentLoaded', () => {"
+        "const el = document.getElementById('updateStatusBanner');"
+        "const d = el ? getComputedStyle(el).display : 'MISSING';"
+        "document.title = 'RESULT:' + d; });</script>"
+    )
+    Path(tmpdir, "page.html").write_text(page_html.replace("</body>", probe + "</body>"))
+    proc = subprocess.run(
+        ["chromium", "--headless", "--disable-gpu", "--no-sandbox", "--dump-dom",
+         "--virtual-time-budget=2000", f"file://{tmpdir}/page.html"],
+        capture_output=True, text=True, timeout=30,
+    )
+    match = re.search(r"RESULT:(\S+?)</title>", proc.stdout)
+    if not match:
+        print(f"could not read computed display from headless Chromium output: {proc.stdout[:800]!r} {proc.stderr[:800]!r}", file=sys.stderr)
+        sys.exit(1)
+    computed_display = match.group(1)
+    job_active = bool(ctx["job"] and ctx["job"]["active"])
+    print(f"live job.active={job_active}, computed #updateStatusBanner display={computed_display!r}")
+    if not job_active and computed_display != "none":
+        print(
+            f"REAL BROWSER BUG: #updateStatusBanner is visually visible (computed display={computed_display!r}) "
+            f"for the live appliance's actual current job state, which the backend considers inactive "
+            f"(job={ctx['job']!r}) -- this is the exact owner-reported CSS cascade bug",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+finally:
+    shutil.rmtree(tmpdir, ignore_errors=True)
+PY
+else
+  echo "chromium not found on PATH -- skipping real-browser #updateStatusBanner CSS verification (source-level check above still ran)" >&2
+fi
+
 echo "web smoke tests passed"
