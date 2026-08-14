@@ -201,6 +201,12 @@ case "$1" in
     # migration validates and backs up before touching anything and is a
     # no-op once already applied, so this is safe and cheap on every
     # install/upgrade, not just when there's actually something to migrate.
+    # Idempotently installs any vendor/*.whl into vendor-runtime/ for a
+    # requirements.txt pin ahead of what Debian's own package archive
+    # carries (see app/alderpointdns_compiler.py's
+    # sync_vendored_python_deps() docstring). A no-op whenever nothing
+    # under vendor/ applies.
+    PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py vendor-deps-sync || true
     if ! dnsdist_conf_migrate_output="$(PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py dnsdist-conf-migrate)"; then
       echo "alderpointdns: dnsdist.conf managed-block migration failed; aborting install." >&2
       exit 1

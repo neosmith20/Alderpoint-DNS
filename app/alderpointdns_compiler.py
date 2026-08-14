@@ -1506,6 +1506,67 @@ def wait_until(predicate, timeout: int = 50) -> bool:
     return predicate()
 
 
+VENDOR_DIR = Path("/opt/alderpointdns/vendor")
+VENDOR_RUNTIME_DIR = Path("/opt/alderpointdns/vendor-runtime")
+
+
+def sync_vendored_python_deps() -> str:
+    """Installs any requirements.txt-pinned package for which a wheel is
+    vendored under vendor/ into vendor-runtime/, via `pip install --target`
+    (never into the system/dpkg-managed site-packages -- --target writes to
+    an Alderpoint-owned directory only, so this can never conflict with or
+    drift dpkg's own tracking of the Debian-packaged version of the same
+    library). Alderpoint's systemd units put vendor-runtime first on
+    PYTHONPATH, so a vendored package wins the import over the Debian
+    package, without ever touching or uninstalling it.
+
+    This exists because Debian's own package archive does not always carry
+    the exact upstream version requirements.txt pins (as of this change,
+    Debian trixie's python3-python-multipart tops out at 0.0.20, and even
+    unstable/forky only has 0.0.26 -- nowhere in Debian ships 0.0.31). This
+    is the supported mechanism for that gap: `--no-index --find-links`
+    against the vendored wheel only, so it never needs network access at
+    deploy time, and it's a no-op (returns "no vendored dependency updates
+    needed") wherever nothing under vendor/ applies.
+
+    Idempotent and cheap to call on every install/upgrade, matching
+    dnsdist_conf_migrate()'s own convention."""
+    if not VENDOR_DIR.is_dir():
+        return "no vendored dependency updates needed (no vendor/ directory)"
+    wheels = sorted(VENDOR_DIR.glob("*.whl"))
+    if not wheels:
+        return "no vendored dependency updates needed (vendor/ is empty)"
+    requirements_path = Path("/opt/alderpointdns/requirements.txt")
+    if not requirements_path.exists():
+        requirements_path = Path(__file__).resolve().parent.parent / "requirements.txt"
+    pins: dict[str, str] = {}
+    for line in requirements_path.read_text().splitlines():
+        line = line.strip()
+        if "==" in line and not line.startswith("#"):
+            name, _, version = line.partition("==")
+            pins[name.strip().lower().replace("_", "-")] = version.strip()
+    installed: list[str] = []
+    for wheel in wheels:
+        # Wheel filename: {name}-{version}-{python tag}-{abi tag}-{platform tag}.whl
+        dist_name = wheel.name.split("-")[0].replace("_", "-").lower()
+        pinned_version = pins.get(dist_name)
+        if not pinned_version:
+            continue
+        spec = f"{dist_name}=={pinned_version}"
+        VENDOR_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        run([
+            "python3", "-m", "pip", "install",
+            "--no-index", "--find-links", str(VENDOR_DIR),
+            "--target", str(VENDOR_RUNTIME_DIR),
+            "--upgrade",
+            spec,
+        ])
+        installed.append(spec)
+    if not installed:
+        return "no vendored dependency updates needed (no vendored wheel matches a requirements.txt pin)"
+    return "vendored dependency updates applied: " + ", ".join(installed)
+
+
 def dnsdist_conf_migrate() -> str:
     """Run every currently-defined dnsdist.conf managed-block migration
     (base parameterization, then doh-altsvc) idempotently, without
@@ -2271,6 +2332,11 @@ def main(argv: list[str] | None = None) -> int:
         help="idempotently apply dnsdist.conf managed-block migrations (e.g. doh-altsvc) without restarting dnsdist",
     )
     dnsdist_conf_migrate_parser.set_defaults(func=lambda args: print(dnsdist_conf_migrate()))
+    vendor_sync_parser = sub.add_parser(
+        "vendor-deps-sync",
+        help="idempotently install any vendor/*.whl into vendor-runtime/ for packages requirements.txt pins ahead of what Debian packages",
+    )
+    vendor_sync_parser.set_defaults(func=lambda args: print(sync_vendored_python_deps()))
     backup_create_parser = sub.add_parser("backup-create")
     backup_create_parser.set_defaults(func=backup_create)
     backup_restore_parser = sub.add_parser("backup-restore")

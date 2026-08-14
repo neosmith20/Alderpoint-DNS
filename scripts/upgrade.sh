@@ -173,6 +173,14 @@ migrate() {
   if [ "$ROOT" = "/" ]; then
     run /opt/alderpointdns/app/analytics.py init-db
     run /opt/alderpointdns/app/alderpointdns_compiler.py init-db
+    # Idempotently installs any vendor/*.whl into vendor-runtime/ for a
+    # requirements.txt pin ahead of what Debian's own package archive
+    # carries (see app/alderpointdns_compiler.py's
+    # sync_vendored_python_deps() docstring). A no-op whenever nothing
+    # under vendor/ applies. Must run before restart_services() restarts
+    # alderpointdns, so the restart's PYTHONPATH (which puts
+    # vendor-runtime first) actually picks up what this just installed.
+    run /opt/alderpointdns/app/alderpointdns_compiler.py vendor-deps-sync
     # Idempotently apply any dnsdist.conf managed-block migrations (e.g. the
     # doh-altsvc Alt-Svc header block) an upgraded install's on-disk
     # dnsdist.conf predates, without a full re-template that would discard

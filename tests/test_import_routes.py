@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import subprocess
 import sys
@@ -171,6 +172,50 @@ class ImportRouteTest(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertIn("not valid", body)
         self.assertNotIn("int_parsing", body)
+
+    def test_json_validation_error_with_raw_exception_in_ctx_does_not_500(self) -> None:
+        """Regression test for a real bug the python-multipart 0.0.31 bump
+        exposed live: a malformed multipart part (e.g. an RFC 2231
+        filename*= parameter python-multipart's newer parser rejects) can
+        surface as a pydantic RequestValidationError whose errors() list
+        embeds the *raw underlying exception object* under ctx['error'] --
+        exactly what pydantic v2 does for value_error-type errors. Plain
+        `json.dumps(exc.errors())` cannot serialize that object and raises
+        its own TypeError from inside this exception handler, turning an
+        ordinary 422 into a 500. FastAPI's own default handler avoids this
+        by wrapping errors() in jsonable_encoder(); this route's override
+        must do the same."""
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/import/migration/adguard/yaml",
+                "headers": [(b"accept", b"application/json")],
+                "query_string": b"",
+                "server": ("testserver", 80),
+                "scheme": "http",
+                "client": ("127.0.0.1", 12345),
+            }
+        )
+        # Mirrors pydantic v2's actual shape for a value_error: ctx.error is
+        # the real exception instance, not a string.
+        exc = webapp.RequestValidationError([
+            {
+                "type": "value_error",
+                "loc": ("body", "upload"),
+                "msg": "Value error, malformed filename parameter",
+                "input": None,
+                "ctx": {"error": ValueError("malformed filename parameter")},
+            }
+        ])
+        response = asyncio.run(webapp.validation_exception_handler(request, exc))
+        self.assertEqual(response.status_code, 422)
+        body = json.loads(response.body.decode())
+        self.assertIn("malformed filename parameter", body["detail"][0]["msg"])
+        # The key property: this round-tripped through json.loads() at all
+        # (a raw ValueError object would have raised TypeError before ever
+        # reaching this line -- see the docstring above).
+        self.assertIn("error", body["detail"][0]["ctx"])
 
     def test_migration_job_status_preview_apply_duplicate_apply_and_report(self) -> None:
         job_id = self._create_migration_job()

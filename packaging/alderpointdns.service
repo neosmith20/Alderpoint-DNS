@@ -13,7 +13,13 @@ StartLimitBurst=5
 User=alderpointdns
 Group=alderpointdns
 WorkingDirectory=/opt/alderpointdns
-Environment=PYTHONPATH=/opt/alderpointdns
+# vendor-runtime/ (populated by `alderpointdns_compiler.py vendor-deps-sync`,
+# see its docstring) comes first so a requirements.txt pin ahead of what
+# Debian's own package archive carries is what actually gets imported,
+# without ever touching the dpkg-managed system site-packages install of
+# the same library. A no-op path (empty/absent directory) whenever nothing
+# needs the override.
+Environment=PYTHONPATH=/opt/alderpointdns/vendor-runtime:/opt/alderpointdns
 ExecStart=/usr/bin/uvicorn app.webapp:app --host 0.0.0.0 --port 3000
 Restart=on-failure
 RestartSec=3

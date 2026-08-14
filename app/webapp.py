@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Path as PathParam, Request, Response, UploadFile
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -1132,7 +1133,14 @@ def render(request: Request, template: str, status_code: int = 200, **context: A
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     accepts = request.headers.get("accept", "")
     if "text/html" not in accepts:
-        return JSONResponse({"detail": exc.errors()}, status_code=422)
+        # jsonable_encoder, not exc.errors() verbatim: pydantic v2 embeds
+        # the raw underlying exception object in some error dicts' `ctx`
+        # (e.g. a bare ValueError a malformed multipart part's parser
+        # raised), which plain json.dumps cannot serialize -- turning a
+        # normal 422 into a 500 from inside this handler itself. This is
+        # exactly the wrapping FastAPI's own default validation exception
+        # handler applies; this override skipped it.
+        return JSONResponse({"detail": jsonable_encoder(exc.errors())}, status_code=422)
     if request.url.path.startswith("/import"):
         return import_error(
             request,

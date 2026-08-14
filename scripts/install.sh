@@ -213,6 +213,14 @@ initialize() {
     # Idempotent either way (CREATE TABLE IF NOT EXISTS) once the schema
     # already exists from fresh-install-init above.
     PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/analytics.py init-db
+    # Idempotently installs any vendor/*.whl into vendor-runtime/ for a
+    # requirements.txt pin ahead of what Debian's own package archive
+    # carries (see app/alderpointdns_compiler.py's
+    # sync_vendored_python_deps() docstring). A no-op whenever nothing
+    # under vendor/ applies. Must run before the service is started so its
+    # PYTHONPATH (which puts vendor-runtime first) picks this up on the
+    # very first start.
+    PYTHONPATH=/opt/alderpointdns /opt/alderpointdns/app/alderpointdns_compiler.py vendor-deps-sync
     # Narrowly the database (created above by fresh-install-init, running as root),
     # not a blanket recursive chown of /var/lib/alderpointdns: backups/
     # imports/staging are already alderpointdns-owned from create_layout()
