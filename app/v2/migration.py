@@ -31,6 +31,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from app.v2 import migration_state as mstate
+
 STAGES: tuple[str, ...] = (
     "detect",
     "backup",
@@ -130,6 +132,8 @@ def run_migration(
     *,
     resume_state: MigrationState | None = None,
     stop_before: str | None = None,
+    durable_record: "mstate.MigrationRecord | None" = None,
+    state_path: Path | None = None,
 ) -> MigrationState:
     """Run the migration pipeline against a staging copy.
 
@@ -138,9 +142,31 @@ def run_migration(
     already-completed stages are skipped (idempotent restart).
     ``stop_before`` lets tests halt just before a given stage (used to prove
     "failed migration rolls back" without actually reaching commit).
+
+    Durable state (Workstream 2 §12): when both ``durable_record`` and
+    ``state_path`` are given, the record is updated and atomically persisted
+    (``app/v2/migration_state.py``) after *every* stage attempt — success or
+    failure — so a crash immediately after this call returns (or even a
+    crash the caller can't observe, e.g. this process being killed) leaves a
+    readable on-disk record of exactly which stages completed. This is
+    orthogonal to ``resume_state``/``completed_stages`` (the in-memory
+    mechanism from Workstream 1): a caller restarting after a real process
+    crash has no in-memory ``MigrationState`` to pass as ``resume_state`` —
+    it must reconstruct one from the durable record on disk instead (see
+    ``app/v2/migration.py``'s test suite,
+    ``TestDurableStateCrashRestart``, for the full round-trip).
     """
     state = resume_state or MigrationState(source_path=source_path, staging_dir=staging_dir)
     state.failed_stage = None
+
+    if durable_record is not None and state_path is not None:
+        # Persist immediately, before attempting the first stage, so even a
+        # crash before any stage completes (or a stop_before on the very
+        # first pending stage) still leaves a resumable record on disk —
+        # otherwise a crash in that narrow window would have nothing to
+        # reconstruct from.
+        durable_record.status = "running"
+        mstate.save(state_path, durable_record)
 
     for stage in STAGES:
         if stage in state.completed_stages:
@@ -151,15 +177,34 @@ def run_migration(
             _STAGE_FUNCS[stage](state)
         except Exception as exc:
             state.failed_stage = stage
-            if not state.is_past_point_of_no_return():
-                # Before commit, a failure must not leave partial state the
-                # caller has to reason about: staging dir is safe to delete
-                # and retry from scratch, source is untouched (it was never
-                # opened for writing by any stage above).
-                pass
+            if durable_record is not None and state_path is not None:
+                mstate.mark_failed(durable_record, stage, f"{type(exc).__name__}: {exc}")
+                mstate.save(state_path, durable_record)
             raise MigrationError(stage, str(exc)) from exc
         state.completed_stages.append(stage)
-        if stage == POINT_OF_NO_RETURN_STAGE:
+        is_commit_stage = stage == POINT_OF_NO_RETURN_STAGE
+        if is_commit_stage:
             state.committed = True
+        if durable_record is not None and state_path is not None:
+            mstate.mark_stage_completed(durable_record, stage, is_commit_stage=is_commit_stage)
+            if is_commit_stage:
+                mstate.mark_completed(durable_record)
+            mstate.save(state_path, durable_record)
 
+    return state
+
+
+def resume_state_from_durable_record(record: "mstate.MigrationRecord") -> MigrationState:
+    """Reconstruct an in-memory ``MigrationState`` from a durable
+    ``MigrationRecord`` loaded off disk — the bridge a real caller uses after
+    a crash/reboot, when no in-memory state survived: load the record with
+    ``migration_state.load(state_path)``, pass it here, then pass the result
+    as ``run_migration``'s ``resume_state``."""
+    state = MigrationState(
+        source_path=Path(record.source_path),
+        staging_dir=Path(record.staging_dir),
+        completed_stages=list(record.completed_stages),
+        failed_stage=record.failed_stage,
+        committed=record.commit_point_reached,
+    )
     return state

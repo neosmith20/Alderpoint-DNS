@@ -16,7 +16,10 @@ per-table classification this schema is derived from.
 from __future__ import annotations
 
 import contextlib
+import errno
+import grp
 import os
+import pwd
 import tempfile
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -31,13 +34,32 @@ CONFIG_SCHEMA_VERSION = 1
 # File is operator-configuration, not a secret, but should still not be
 # world-writable/readable beyond what's needed. Matches the existing
 # /etc/alderpointdns convention of root:alderpointdns ownership with group
-# read where appropriate; this module only controls the mode bits, not the
-# owning group (that's a deployment-time chown, out of scope here).
+# read where appropriate.
 _CONFIG_FILE_MODE = 0o640
+
+# Workstream 2 §9 ownership/hardening contract: this file and the directory
+# holding it are written by the root-owned deploy helper (matching the
+# existing v1 /etc/alderpointdns pattern, see docs/architecture.md), owned
+# root:alderpointdns, with the parent directory locked down to
+# owner-rwx/group-rx/other-none so an unprivileged process on the box cannot
+# even list what's in there, let alone read/replace the file.
+EXPECTED_OWNER_USER = "root"
+EXPECTED_OWNER_GROUP = "alderpointdns"
+_PARENT_DIR_MODE = 0o750
 
 
 class ConfigValidationError(ValueError):
     """Raised when a loaded or constructed config fails schema validation."""
+
+
+class ConfigSymlinkError(ConfigValidationError):
+    """Raised when a config path (or one in the write path) is a symlink,
+    which this module refuses to follow — see load_file()/atomic_write()."""
+
+
+class ConfigOwnershipError(ConfigValidationError):
+    """Raised by verify_ownership() callers that choose to treat an
+    ownership mismatch as fatal; verify_ownership() itself just reports."""
 
 
 _VALID_LISTENER_PROTOCOLS = frozenset({"udp", "tcp", "dot", "doh", "doq", "doh3"})
@@ -205,8 +227,80 @@ def dumps(cfg: AlderpointV2Config) -> str:
 
 
 def load_file(path: str | os.PathLike) -> AlderpointV2Config:
-    with open(path, "r", encoding="utf-8") as fh:
+    """Load and validate config from ``path``, refusing to follow a symlink.
+
+    Two layers of protection: an explicit ``is_symlink()`` check first (fast,
+    clear error message), then opening with ``O_NOFOLLOW`` as defense in
+    depth against a TOCTOU swap in the window between that check and the
+    actual open — an attacker who can create a symlink at this path but not
+    write the target file could otherwise redirect a privileged reader to an
+    arbitrary file.
+    """
+    path = Path(path)
+    if path.is_symlink():
+        raise ConfigSymlinkError(f"refusing to load {path}: path is a symlink")
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(str(path), flags)
+    except OSError as exc:
+        if hasattr(os, "O_NOFOLLOW") and exc.errno == errno.ELOOP:
+            raise ConfigSymlinkError(
+                f"refusing to load {path}: path became a symlink between check and open"
+            ) from exc
+        raise
+    with os.fdopen(fd, "r", encoding="utf-8") as fh:
         return loads(fh.read())
+
+
+def harden_parent_directory(
+    path: str | os.PathLike,
+    *,
+    owner_user: str = EXPECTED_OWNER_USER,
+    owner_group: str = EXPECTED_OWNER_GROUP,
+) -> None:
+    """Create (if needed) and lock down the parent directory of ``path`` to
+    the ownership/mode contract above. The chown step is best-effort: it
+    requires root privilege and the named accounts to exist, and silently
+    no-ops (does not raise) if either is unavailable — e.g. a developer
+    running tests as an unprivileged user, or a dev environment without the
+    ``alderpointdns`` system account. The mode change is applied
+    unconditionally since it doesn't require those accounts to exist.
+    """
+    parent = Path(path).parent
+    parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(parent, _PARENT_DIR_MODE)
+    try:
+        uid = pwd.getpwnam(owner_user).pw_uid
+        gid = grp.getgrnam(owner_group).gr_gid
+        os.chown(parent, uid, gid)
+    except (KeyError, PermissionError):
+        pass
+
+
+def verify_ownership(
+    path: str | os.PathLike,
+    *,
+    owner_user: str = EXPECTED_OWNER_USER,
+    owner_group: str = EXPECTED_OWNER_GROUP,
+) -> list[str]:
+    """Report (never raise) ownership contract violations for ``path``.
+    Returns an empty list if ``owner_user``/``owner_group`` don't resolve on
+    this system (nothing to check against) or if ownership matches."""
+    try:
+        want_uid = pwd.getpwnam(owner_user).pw_uid
+        want_gid = grp.getgrnam(owner_group).gr_gid
+    except KeyError:
+        return []
+    st = os.stat(path, follow_symlinks=False)
+    errors = []
+    if st.st_uid != want_uid:
+        errors.append(f"{path}: owned by uid {st.st_uid}, expected {owner_user} ({want_uid})")
+    if st.st_gid != want_gid:
+        errors.append(f"{path}: group is gid {st.st_gid}, expected {owner_group} ({want_gid})")
+    return errors
 
 
 def atomic_write(path: str | os.PathLike, cfg: AlderpointV2Config) -> None:
@@ -222,6 +316,13 @@ def atomic_write(path: str | os.PathLike, cfg: AlderpointV2Config) -> None:
         raise ConfigValidationError("; ".join(errors))
 
     path = Path(path)
+    if path.is_symlink():
+        # os.replace() itself would actually be safe here (it retargets the
+        # directory entry, never opening through the symlink), but refusing
+        # outright is the honest policy: a symlink at the canonical config
+        # path is itself a sign something unexpected put it there, and
+        # silently "safely" overwriting it either way hides that.
+        raise ConfigSymlinkError(f"refusing to write {path}: path is a symlink")
     path.parent.mkdir(parents=True, exist_ok=True)
     text = dumps(cfg)
 
