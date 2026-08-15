@@ -20,6 +20,7 @@ work with the actual system ``python3`` (verified directly, not only in
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -78,6 +79,21 @@ def provision_vendor_runtime(
             raise AnalyticsDependencyError(
                 f"pip install into vendor runtime failed: {proc.stdout}\n{proc.stderr}"
             )
+        # tempfile.mkdtemp() creates its directory mode 0700 (owner-only) --
+        # a real defect found via Workstream 4B clean-install testing: the
+        # renamed-into-place target_dir silently inherited that mode,
+        # making the provisioned runtime unreadable (not merely
+        # unwritable) by any non-root service account. Every process that
+        # actually needs these packages (the analytics/schedule/tier-b
+        # workers, the management API) runs as the dedicated service
+        # account, not root -- this broke `import pyarrow`/`import duckdb`
+        # for all of them silently (ModuleNotFoundError looks identical to
+        # "never provisioned"), while a root shell (e.g. manual testing
+        # via `podman exec`) saw no problem at all, which is what let it
+        # go unnoticed until a real systemd-managed non-root process hit
+        # it. World-readable+traversable (0755), matching every other
+        # package-owned, non-secret directory under /opt/alderpointdns-v2.
+        os.chmod(tmp_target, 0o755)
         if target_dir.exists():
             shutil.rmtree(target_dir)
         tmp_target.rename(target_dir)

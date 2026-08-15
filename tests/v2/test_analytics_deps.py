@@ -55,6 +55,23 @@ class TestProvisioning:
     def test_provision_into_fresh_target_succeeds(self, provisioned_target):
         assert provisioned_target.is_dir()
 
+    def test_provisioned_target_directory_is_world_traversable(self, provisioned_target):
+        """Workstream 4B real defect: tempfile.mkdtemp() creates its
+        staging directory mode 0700; the old code renamed it directly into
+        place, so the promoted target_dir silently inherited owner-only
+        permissions -- unreadable (ModuleNotFoundError, indistinguishable
+        from "never provisioned") by any non-root service account, which
+        is every real process that actually needs these packages. A root
+        shell saw no problem, which is exactly how this went unnoticed
+        until a real systemd-managed non-root process hit it during
+        clean-install testing.
+        """
+        import stat
+
+        mode = provisioned_target.stat().st_mode
+        assert mode & stat.S_IROTH, "target_dir must be world-readable"
+        assert mode & stat.S_IXOTH, "target_dir must be world-traversable"
+
     def test_provision_is_idempotent(self, provisioned_target):
         result2 = provision_vendor_runtime(vendor_dir=VENDOR_DIR, target_dir=provisioned_target)
         assert result2.already_satisfied
