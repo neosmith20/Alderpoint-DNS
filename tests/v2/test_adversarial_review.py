@@ -134,21 +134,21 @@ class TestMigrationInputHardening:
     def test_malicious_source_db_with_extra_unexpected_tables_still_detected_correctly(self, tmp_path):
         import sqlite3
 
+        from tests.v2._v1_fixture import build_v1_fixture
+
         source = tmp_path / "src"
-        source.mkdir()
-        db_path = source / "alderpointdns.db"
+        db_path = build_v1_fixture(source / "alderpointdns.db")
         conn = sqlite3.connect(str(db_path))
-        conn.executescript(
-            "CREATE TABLE admins (id INTEGER); CREATE TABLE clients (id INTEGER); "
-            "CREATE TABLE '; DROP TABLE admins; --' (id INTEGER);"
-        )
+        conn.execute("CREATE TABLE '; DROP TABLE admins; --' (id INTEGER)")
         conn.commit()
         conn.close()
         # Must not raise/crash on an oddly-named (but syntactically valid
         # SQLite identifier) table -- sqlite_master enumeration, not string
-        # parsing, is what's used.
+        # parsing, is what's used. A real, schema-complete fixture plus one
+        # adversarially-named extra table must still classify as supported.
         info = detect_source(source)
         assert info.detected_version == "v1.x"
+        assert info.classification in ("supported_complete", "supported_with_optional_gaps")
 
 
 class TestScheduleAndPolicyEdgeCasesUnderAdversarialInput:

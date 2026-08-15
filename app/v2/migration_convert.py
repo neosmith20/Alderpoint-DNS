@@ -28,11 +28,50 @@ from app.v2 import policy_store as pstore
 from app.v2.local_dns_gen import LocalDnsGenError, LocalDnsRecord
 from app.v2.secret_store import SecretStore
 
-SUPPORTED_SOURCE_TABLES = ("admins", "clients")
+# Real schema contract (Gate #2 HIGH finding): every table/column the
+# real migration_convert.py functions below actually SELECT from without
+# a defensive try/except is REQUIRED -- a source missing any of these
+# must be rejected at detection time, before backup/migration proceeds,
+# with a diagnostic naming exactly what's missing. This list was built by
+# grepping every "SELECT ... FROM <table>" in this module, not guessed;
+# it is the real, exhaustive contract, so it stays exhaustive as long as
+# new conversion functions update it alongside their own new queries.
+REQUIRED_TABLES_AND_COLUMNS: dict[str, frozenset[str]] = {
+    "admins": frozenset({"username", "password_hash", "created_at"}),
+    "clients": frozenset({"id", "name", "description", "enabled", "created_at", "updated_at"}),
+    "client_identifiers": frozenset({"client_id", "kind", "value", "created_at"}),
+    "network_policies": frozenset({"cidr", "profile_key", "description", "enabled"}),
+    "local_dns_records": frozenset({"fqdn", "record_type", "value", "ttl", "enabled"}),
+    "custom_rules": frozenset({"domain", "action", "enabled"}),
+    "upstream_resolvers": frozenset(
+        {"name", "protocol", "address", "port", "tls_hostname", "doh_path", "position", "enabled"}
+    ),
+    "notification_providers": frozenset({"kind", "name", "enabled", "config_json", "secret"}),
+}
+
+# Tables the migration logic already tolerates being entirely absent
+# (each read site has its own try/except sqlite3.OperationalError
+# fallback) -- documented here explicitly as "supported with a defined
+# fallback" rather than left implicit, per §5A's classification
+# requirement. A source missing these is still "supported," just with
+# reduced fidelity (no analytics-settings-derived config conversion, no
+# legacy-history archive registration).
+OPTIONAL_TABLES_AND_COLUMNS: dict[str, frozenset[str]] = {
+    "analytics_settings": frozenset({"key", "value"}),
+    "query_events": frozenset({"ts"}),
+}
 
 
 class MigrationConvertError(RuntimeError):
     pass
+
+
+class UnsupportedSourceSchemaError(MigrationConvertError):
+    """Raised specifically for a schema-contract failure (missing
+    required table/column) -- distinguished from a generic
+    MigrationConvertError (e.g. file-not-found, corrupt file) so a caller
+    can tell "wrong/incomplete version" apart from "not a database at
+    all."""
 
 
 # --------------------------------------------------------------------------
@@ -45,11 +84,24 @@ class SourceInfo:
     db_path: Path
     detected_version: str
     table_count: int
+    classification: str  # "supported_complete" | "supported_with_optional_gaps"
+    missing_optional: tuple[str, ...] = ()
+
+
+def _real_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
 def detect_source(source_root: Path) -> SourceInfo:
-    """Real detection: the source db file must exist, open read-only
-    without error, and contain the tables this migrator knows how to read.
+    """Real, exhaustive pre-flight schema validation (§5A-5B): every table
+    and column the real migration conversion functions actually read is
+    checked here, BEFORE backup/migration proceeds -- a source missing
+    ``client_identifiers`` (Dex's exact reproduction: a database with only
+    ``admins``+``clients`` previously passed detection, then failed deep
+    into a later migration stage with a raw traceback) is now rejected
+    right here, with every missing table/column named explicitly, not
+    just the first one encountered.
+
     Never opens the source for writing.
     """
     db_path = Path(source_root) / "alderpointdns.db"
@@ -70,13 +122,38 @@ def detect_source(source_root: Path) -> SourceInfo:
             }
         except sqlite3.DatabaseError as exc:
             raise MigrationConvertError(f"source is not a valid SQLite database: {exc}") from exc
-        missing = [t for t in SUPPORTED_SOURCE_TABLES if t not in tables]
-        if missing:
-            raise MigrationConvertError(
-                f"source database is missing required table(s) {missing} -- "
-                "not a supported Alderpoint DNS v1 database"
+
+        problems: list[str] = []
+        for table, required_cols in REQUIRED_TABLES_AND_COLUMNS.items():
+            if table not in tables:
+                problems.append(f"missing required table: {table}")
+                continue
+            actual_cols = _real_columns(conn, table)
+            missing_cols = required_cols - actual_cols
+            if missing_cols:
+                problems.append(
+                    f"table {table!r} is missing required column(s): {sorted(missing_cols)}"
+                )
+        if problems:
+            raise UnsupportedSourceSchemaError(
+                "source database schema is unsupported/incomplete for migration:\n  "
+                + "\n  ".join(problems)
             )
-        return SourceInfo(db_path=db_path, detected_version="v1.x", table_count=len(tables))
+
+        missing_optional = []
+        for table, required_cols in OPTIONAL_TABLES_AND_COLUMNS.items():
+            if table not in tables:
+                missing_optional.append(table)
+                continue
+            actual_cols = _real_columns(conn, table)
+            if required_cols - actual_cols:
+                missing_optional.append(table)
+
+        classification = "supported_with_optional_gaps" if missing_optional else "supported_complete"
+        return SourceInfo(
+            db_path=db_path, detected_version="v1.x", table_count=len(tables),
+            classification=classification, missing_optional=tuple(missing_optional),
+        )
     finally:
         conn.close()
 
