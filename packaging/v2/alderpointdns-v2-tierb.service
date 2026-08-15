@@ -1,0 +1,35 @@
+[Unit]
+Description=Alderpoint DNS V2 Tier B prewarm worker (private candidate)
+# DNS-first startup order (locked architecture): prewarm only ever
+# replays queries through the *normal* DNS path (app/v2/tier_b_prewarm.py
+# resolve_fn is a plain client resolve, never a bypass) -- it structurally
+# cannot run before DNS is already answering, and a corrupt/missing
+# working-set snapshot degrades to "prewarm attempts nothing this tick,"
+# never a startup failure.
+After=network.target
+
+[Service]
+Type=simple
+User=alderpointdns-v2
+Group=alderpointdns-v2
+ExecStart=/usr/bin/python3 -B /opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_ctl.py tier-b-worker --interval-seconds 300
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=30
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/alderpointdns-v2/tierb /var/log/alderpointdns-v2
+UMask=0027
+CapabilityBoundingSet=
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

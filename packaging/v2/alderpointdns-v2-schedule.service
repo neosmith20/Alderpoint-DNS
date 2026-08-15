@@ -1,0 +1,38 @@
+[Unit]
+Description=Alderpoint DNS V2 schedule transition worker (private candidate)
+# DNS-first startup order (locked architecture): a failed/false recompile
+# tick leaves the previously-promoted compiled runtime untouched
+# (ScheduleTransitionRuntime.tick() returns promotion_succeeded=False
+# without raising, per app/v2/schedule_runtime.py's own contract) -- it
+# never un-promotes a working config, so this worker can never regress an
+# already-answering DNS runtime, only fail to advance it.
+After=network.target
+
+[Service]
+Type=simple
+User=alderpointdns-v2
+Group=alderpointdns-v2
+ExecStart=/usr/bin/python3 -B /opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_ctl.py schedule-worker --interval-seconds 60
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=30
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Needs write access to compiled/ and staging/ (recompiles+promotes the
+# generated dnsdist/RPZ runtime artifacts) in addition to its own state
+# file, unlike the other two workers.
+ReadWritePaths=/var/lib/alderpointdns-v2/compiled /var/lib/alderpointdns-v2/staging /var/lib/alderpointdns-v2/schedule /var/log/alderpointdns-v2
+UMask=0027
+CapabilityBoundingSet=
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

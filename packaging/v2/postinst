@@ -1,0 +1,91 @@
+#!/bin/sh
+set -e
+
+# Alderpoint DNS V2 -- PRIVATE CANDIDATE package lifecycle. Fully separate
+# namespace from the live V1 "alderpointdns" package: own user/group
+# (alderpointdns-v2), own paths (/opt/alderpointdns-v2, /etc/alderpointdns-v2,
+# /var/lib/alderpointdns-v2, /var/log/alderpointdns-v2), own systemd units
+# (alderpointdns-v2-*). Never touches anything V1 owns. Never binds a real
+# DNS port itself -- this package ships no dnsdist/BIND-managing unit (see
+# docs/v2/packaging.md "Why no dnsdist/BIND/API systemd unit").
+
+alderpointdns_v2_wait_active() {
+  svc="$1"
+  i=0
+  while [ "$i" -lt 15 ]; do
+    if systemctl is-active --quiet "$svc"; then
+      return 0
+    fi
+    i=$((i + 1))
+    sleep 1
+  done
+  return 1
+}
+
+case "$1" in
+  configure)
+    if ! getent group alderpointdns-v2 >/dev/null; then
+      addgroup --system alderpointdns-v2
+    fi
+    if ! id alderpointdns-v2 >/dev/null 2>&1; then
+      adduser --system --home /var/lib/alderpointdns-v2 --no-create-home \
+        --ingroup alderpointdns-v2 --disabled-login alderpointdns-v2
+    fi
+
+    # Analytics vendor runtime provisioning (P0-C, Workstream 4A §4):
+    # deterministic, idempotent, no network required (wheels are bundled
+    # under /opt/alderpointdns-v2/vendor/v2-analytics/). Failure here
+    # aborts the install -- an appliance that silently comes up with a
+    # broken analytics backend is exactly the "half-functional install"
+    # this pass's own instructions forbid.
+    if ! /opt/alderpointdns-v2/scripts/provision-v2-analytics-vendor-runtime.sh; then
+      echo "alderpointdns-v2: analytics vendor runtime provisioning failed; aborting install." >&2
+      exit 1
+    fi
+
+    # State/config bootstrap (§5): idempotent, creates only what's
+    # missing, never overwrites existing config/control-db/secrets.
+    if ! PYTHONPATH=/opt/alderpointdns-v2 python3 -B /opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_ctl.py init-state; then
+      echo "alderpointdns-v2: state initialization failed; aborting install." >&2
+      exit 1
+    fi
+
+    # Generate + validate (real dnsdist --check-config / named-checkzone)
+    # the default-install runtime artifacts (§9). Failure here means the
+    # bundled generator or an incompatible installed dnsdist/bind9-utils
+    # produced something invalid -- must not silently proceed.
+    if ! PYTHONPATH=/opt/alderpointdns-v2 python3 -B /opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_ctl.py generate-runtime; then
+      echo "alderpointdns-v2: default runtime generation/validation failed; aborting install." >&2
+      exit 1
+    fi
+
+    # Final ownership pass -- state directory contents may have been
+    # created before the service account existed on a very first install
+    # (init-state's own chown calls are already best-effort/idempotent;
+    # this is redundant defense-in-depth, matching the V1 postinst's own
+    # "always reassert ownership on every configure" pattern).
+    chown -R alderpointdns-v2:alderpointdns-v2 /var/lib/alderpointdns-v2 /var/log/alderpointdns-v2 2>/dev/null || true
+    chown root:alderpointdns-v2 /etc/alderpointdns-v2 2>/dev/null || true
+    if [ -e /etc/alderpointdns-v2/alderpointdns.yaml ]; then
+      chown root:alderpointdns-v2 /etc/alderpointdns-v2/alderpointdns.yaml
+      chmod 0640 /etc/alderpointdns-v2/alderpointdns.yaml
+    fi
+    chmod 0700 /var/lib/alderpointdns-v2/secrets 2>/dev/null || true
+
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl reset-failed alderpointdns-v2-analytics alderpointdns-v2-tierb alderpointdns-v2-schedule >/dev/null 2>&1 || true
+    systemctl enable alderpointdns-v2-analytics alderpointdns-v2-tierb alderpointdns-v2-schedule >/dev/null 2>&1 || true
+    systemctl restart alderpointdns-v2-analytics alderpointdns-v2-tierb alderpointdns-v2-schedule
+
+    for svc in alderpointdns-v2-analytics alderpointdns-v2-tierb alderpointdns-v2-schedule; do
+      if ! alderpointdns_v2_wait_active "$svc"; then
+        echo "alderpointdns-v2: $svc did not reach the active state after installation." >&2
+        echo "alderpointdns-v2: check 'systemctl status $svc' and 'journalctl -u $svc -n 50' for details." >&2
+        exit 1
+      fi
+    done
+    ;;
+esac
+
+#DEBHELPER#
+exit 0

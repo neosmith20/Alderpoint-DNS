@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+
+# Crash-atomic restore recovery (P0-A) runs automatically inside
+# SecretStore.__init__() the next time anything opens the secret store
+# (postinst's init-state, or any worker on its next start) -- nothing
+# extra is required here.
+#
+# No prior alderpointdns-v2 release exists yet (this is the first private
+# candidate), so there is no on-disk layout-version compatibility check to
+# perform here yet. This file exists as the real preinst hook point for
+# when one is needed on a future upgrade, not a placeholder standing in
+# for missing functionality today.
+
+exit 0

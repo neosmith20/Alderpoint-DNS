@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+
+# Stop the three worker services on both ordinary removal and upgrade
+# (dpkg calls prerm remove/upgrade); state/config/secrets themselves are
+# left untouched here -- postrm's `remove` case (not `purge`) is what
+# decides final disposition, per Debian convention and this package's own
+# §17 remove-vs-purge contract (see postrm).
+case "$1" in
+  remove|upgrade|deconfigure)
+    systemctl stop alderpointdns-v2-analytics alderpointdns-v2-tierb alderpointdns-v2-schedule >/dev/null 2>&1 || true
+    ;;
+esac
+
+exit 0
