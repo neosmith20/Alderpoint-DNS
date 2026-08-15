@@ -1,0 +1,256 @@
+"""Workstream 4B: management API integration tests (in-process, via
+FastAPI TestClient -- real TLS handshake proof is a separate real-podman
+test, see docs/v2/clean-install-evidence.md; this file proves route
+logic, auth, CSRF, and session mechanics thoroughly and fast)."""
+
+import importlib
+import os
+import shutil
+import sys
+
+import pytest
+
+
+@pytest.fixture()
+def app_client(tmp_path, monkeypatch):
+    sb = tmp_path
+    monkeypatch.setenv("ALDERPOINTDNS_V2_APP_ROOT", str(sb / "opt"))
+    monkeypatch.setenv("ALDERPOINTDNS_V2_CONFIG_ROOT", str(sb / "etc"))
+    monkeypatch.setenv("ALDERPOINTDNS_V2_STATE_ROOT", str(sb / "var" / "lib"))
+    monkeypatch.setenv("ALDERPOINTDNS_V2_COOKIE_SECURE", "0")  # TestClient has no real TLS
+
+    (sb / "var" / "lib").mkdir(parents=True, exist_ok=True)
+    from app.v2 import control_db, policy_store
+
+    dbpath = str(sb / "var" / "lib" / "control.db")
+    control_db.initialize(dbpath)
+    policy_store.ensure_schema(dbpath)
+
+    # Force a fresh import so module-level path constants pick up the
+    # patched env vars (webapp.py computes them at import time).
+    for mod in list(sys.modules):
+        if mod == "app.v2.webapp":
+            del sys.modules[mod]
+    webapp = importlib.import_module("app.v2.webapp")
+
+    from fastapi.testclient import TestClient
+
+    yield webapp, TestClient(webapp.app)
+
+
+def _setup_and_login(webapp, client, username="admin", password="correcthorsebattery12"):
+    webapp.BOOTSTRAP_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    webapp.BOOTSTRAP_TOKEN_PATH.write_text("tok-abc")
+    r = client.post("/api/setup", json={"setup_token": "tok-abc", "username": username, "password": password})
+    assert r.status_code == 200, r.text
+    r = client.post("/api/login", json={"username": username, "password": password})
+    assert r.status_code == 200, r.text
+    return r.json()["csrf"]
+
+
+class TestSetupBootstrap:
+    def test_setup_required_true_on_fresh_db(self, app_client):
+        webapp, client = app_client
+        assert client.get("/api/setup/status").json()["setup_required"] is True
+
+    def test_wrong_token_rejected(self, app_client):
+        webapp, client = app_client
+        webapp.BOOTSTRAP_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+        webapp.BOOTSTRAP_TOKEN_PATH.write_text("real-token")
+        r = client.post("/api/setup", json={"setup_token": "wrong", "username": "a", "password": "correcthorsebattery12"})
+        assert r.status_code == 403
+
+    def test_token_invalidated_after_success(self, app_client):
+        webapp, client = app_client
+        _setup_and_login(webapp, client)
+        assert not webapp.BOOTSTRAP_TOKEN_PATH.exists()
+
+    def test_setup_rejected_once_already_configured(self, app_client):
+        webapp, client = app_client
+        _setup_and_login(webapp, client)
+        webapp.BOOTSTRAP_TOKEN_PATH.write_text("another-token")
+        r = client.post("/api/setup", json={"setup_token": "another-token", "username": "b", "password": "correcthorsebattery12"})
+        assert r.status_code == 409
+
+    def test_setup_missing_token_file_rejected(self, app_client):
+        webapp, client = app_client
+        r = client.post("/api/setup", json={"setup_token": "anything", "username": "a", "password": "correcthorsebattery12"})
+        assert r.status_code == 409
+
+
+class TestAuthRequired:
+    PROTECTED_GET = ["/api/networks", "/api/clients", "/api/upstreams", "/api/policy/global", "/api/notifications", "/api/system/status", "/api/tls/status"]
+
+    @pytest.mark.parametrize("path", PROTECTED_GET)
+    def test_unauthenticated_get_rejected(self, app_client, path):
+        webapp, client = app_client
+        r = client.get(path)
+        assert r.status_code == 401, path
+
+    def test_unauthenticated_post_rejected(self, app_client):
+        webapp, client = app_client
+        r = client.post("/api/networks", json={"network_id": "x", "cidr": "10.0.0.0/24"})
+        assert r.status_code == 401
+
+
+class TestLoginLogoutSessions:
+    def test_login_wrong_password_rejected(self, app_client):
+        webapp, client = app_client
+        _setup_and_login(webapp, client)
+        r = client.post("/api/login", json={"username": "admin", "password": "wrong"})
+        assert r.status_code == 401
+
+    def test_cookie_flags_httponly_samesite(self, app_client):
+        webapp, client = app_client
+        webapp.BOOTSTRAP_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+        webapp.BOOTSTRAP_TOKEN_PATH.write_text("tok")
+        client.post("/api/setup", json={"setup_token": "tok", "username": "admin", "password": "correcthorsebattery12"})
+        r = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
+        cookie_header = r.headers.get("set-cookie", "")
+        assert "HttpOnly" in cookie_header
+        assert "SameSite=strict" in cookie_header
+
+    def test_logout_invalidates_session(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        r = client.post("/api/logout", headers={"X-CSRF-Token": csrf})
+        assert r.status_code == 200
+        r2 = client.get("/api/networks")
+        assert r2.status_code == 401
+
+    def test_session_rotates_on_each_login(self, app_client):
+        webapp, client = app_client
+        webapp.BOOTSTRAP_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+        webapp.BOOTSTRAP_TOKEN_PATH.write_text("tok")
+        client.post("/api/setup", json={"setup_token": "tok", "username": "admin", "password": "correcthorsebattery12"})
+        r1 = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
+        r2 = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
+        assert r1.json()["csrf"] != r2.json()["csrf"]
+
+
+class TestCsrf:
+    def test_post_without_csrf_token_rejected(self, app_client):
+        webapp, client = app_client
+        _setup_and_login(webapp, client)
+        r = client.post("/api/networks", json={"network_id": "x", "cidr": "10.0.0.0/24"})
+        assert r.status_code == 403
+
+    def test_post_with_wrong_csrf_token_rejected(self, app_client):
+        webapp, client = app_client
+        _setup_and_login(webapp, client)
+        r = client.post("/api/networks", json={"network_id": "x", "cidr": "10.0.0.0/24"}, headers={"X-CSRF-Token": "wrong"})
+        assert r.status_code == 403
+
+    def test_post_with_correct_csrf_token_succeeds(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        r = client.post("/api/networks", json={"network_id": "x", "cidr": "10.0.0.0/24"}, headers={"X-CSRF-Token": csrf})
+        assert r.status_code == 200, r.text
+
+
+class TestLoginRateLimiting:
+    def test_repeated_bad_logins_are_rate_limited(self, app_client):
+        webapp, client = app_client
+        _setup_and_login(webapp, client)
+        results = []
+        for _ in range(webapp._LOGIN_FAILURE_MAX + 3):
+            r = client.post("/api/login", json={"username": "admin", "password": "wrong"})
+            results.append(r.status_code)
+        assert 429 in results, results
+        # Once rate-limited, even the CORRECT password is rejected (fail
+        # closed against brute force), but is recoverable outside the
+        # window -- proven at the unit level (_recent_login_failures uses
+        # a real time-windowed query, not a permanent lock).
+        r = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
+        assert r.status_code == 429
+
+
+class TestSecurityHeaders:
+    def test_security_headers_present(self, app_client):
+        webapp, client = app_client
+        r = client.get("/api/health")
+        assert r.headers.get("x-content-type-options") == "nosniff"
+        assert r.headers.get("x-frame-options") == "DENY"
+        assert "no-store" in r.headers.get("cache-control", "")
+        assert r.headers.get("content-security-policy")
+
+    def test_no_hsts_header_documented_choice(self, app_client):
+        webapp, client = app_client
+        r = client.get("/api/health")
+        assert "strict-transport-security" not in {k.lower() for k in r.headers}
+
+
+class TestErrorHandlingNoLeakage:
+    def test_validation_error_returns_structured_json_not_traceback(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        r = client.post("/api/networks", json={"network_id": "x", "cidr": "not-a-cidr"}, headers={"X-CSRF-Token": csrf})
+        assert r.status_code == 400
+        body = r.json()
+        assert "Traceback" not in str(body)
+        assert body["error"] == "validation_error"
+
+
+class TestPolicyApiReachesRuntime:
+    def test_creating_network_promotes_real_compiled_runtime(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        r = client.post("/api/networks", json={"network_id": "lan", "cidr": "10.0.0.0/24"}, headers={"X-CSRF-Token": csrf})
+        assert r.status_code == 200
+        assert r.json()["runtime"]["promoted"] is True
+        assert webapp.COMPILED_DNSDIST_CONF.exists()
+
+    def test_explain_endpoint_returns_structured_no_secrets(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        client.post("/api/clients", json={"name": "kid-laptop"}, headers={"X-CSRF-Token": csrf})
+        r = client.get("/api/policy/explain", params={"client_id": 1})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["client_id"] == 1
+        assert "password" not in str(body).lower() and "secret" not in str(body).lower()
+
+    def test_explain_endpoint_requires_auth(self, app_client):
+        webapp, client = app_client
+        _setup_and_login(webapp, client)
+        client.cookies.clear()
+        r = client.get("/api/policy/explain", params={"client_id": 1})
+        assert r.status_code == 401
+
+
+class TestTlsStatusApi:
+    def test_tls_status_reports_no_active_cert_when_none_provisioned(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        r = client.get("/api/tls/status")
+        assert r.status_code == 200
+        assert r.json()["active"] is False  # ctl init-state provisions it in the real deployment, not this test
+
+    def test_tls_replace_with_mismatched_pair_rejected(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        from app.v2.tls_cert import generate_self_signed
+
+        cert1, _ = generate_self_signed()
+        _, key2 = generate_self_signed()
+        r = client.post(
+            "/api/tls/replace",
+            json={"certificate_pem": cert1.decode(), "private_key_pem": key2.decode()},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert r.status_code == 400
+
+    def test_tls_replace_with_valid_pair_succeeds(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        from app.v2.tls_cert import generate_self_signed
+
+        cert, key = generate_self_signed()
+        r = client.post(
+            "/api/tls/replace",
+            json={"certificate_pem": cert.decode(), "private_key_pem": key.decode()},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert r.status_code == 200
+        assert r.json()["restart_required"] is True
+        assert webapp.ACTIVE_CERT_PATH.exists()
