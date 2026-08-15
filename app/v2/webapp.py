@@ -1,9 +1,9 @@
-"""Alderpoint DNS V2 management/API service (Workstream 4B).
+"""Alderpoint DNS V2 management/API service.
 
 A real, installed-path-only FastAPI application exposing the already-real
 V2 backend (policy store/compiler/runtime, analytics, secrets,
-notifications, migration) over native HTTPS. JSON API only -- no HTML/UI
-(explicitly out of scope for this pass; see docs/v2/management-plane.md).
+notifications, migration) over native HTTPS, plus the packaged V2
+management UI served from the same origin.
 
 Service boundary (§2): every route here goes through a real service/
 repository layer (policy_store, policy_service, analytics_service,
@@ -25,6 +25,7 @@ scripts/v2/alderpointdns_v2_ctl.py already uses, for testing.
 from __future__ import annotations
 
 import ipaddress
+import json
 import os
 import sqlite3
 import time
@@ -1045,8 +1046,14 @@ def _query_result_to_dict(qr) -> dict:
     return {"rows": qr.rows, "columns": qr.columns, "degraded": qr.degraded, "degraded_reason": qr.degraded_reason}
 
 
+def _forced_analytics_degraded() -> str:
+    return os.environ.get("ALDERPOINTDNS_V2_FORCE_ANALYTICS_DEGRADED", "").strip()
+
+
 @app.get("/api/analytics/recent")
 def analytics_recent(minutes: float = 60.0, admin=Depends(current_admin)):
+    if reason := _forced_analytics_degraded():
+        return {"rows": [], "columns": [], "degraded": True, "degraded_reason": reason}
     svc = _analytics_service()
     try:
         return _query_result_to_dict(svc.recent_query_log(minutes=minutes))
@@ -1054,8 +1061,77 @@ def analytics_recent(minutes: float = 60.0, admin=Depends(current_admin)):
         svc.close()
 
 
+@app.get("/api/analytics/query-log")
+def analytics_query_log(
+    minutes: float = 1440.0,
+    domain: Optional[str] = None,
+    search: Optional[str] = None,
+    client: Optional[str] = None,
+    qtype: Optional[str] = None,
+    protocol: Optional[str] = None,
+    blocked_only: bool = False,
+    rcode: Optional[str] = None,
+    upstream: Optional[str] = None,
+    cache_status: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+    admin=Depends(current_admin),
+):
+    if reason := _forced_analytics_degraded():
+        return {
+            "rows": [],
+            "columns": [],
+            "degraded": True,
+            "degraded_reason": reason,
+            "limit": max(1, min(int(limit), 500)),
+            "offset": max(0, min(int(offset), 100_000)),
+            "filters": {"minutes": minutes, "search": search or ""},
+        }
+    filters: dict[str, Any] = {}
+    for key, value in (
+        ("domain", domain),
+        ("client", client),
+        ("qtype", qtype),
+        ("protocol", protocol),
+        ("rcode", rcode),
+        ("upstream", upstream),
+        ("cache_status", cache_status),
+    ):
+        if value not in (None, ""):
+            filters[key] = str(value)[:256]
+    if blocked_only:
+        filters["blocked"] = True
+    minutes = max(1.0, min(float(minutes), 31 * 24 * 60.0))
+    limit = max(1, min(int(limit), 500))
+    offset = max(0, min(int(offset), 100_000))
+    svc = _analytics_service()
+    try:
+        result = svc.recent_query_log(minutes=minutes, filters=filters, limit=limit, offset=offset)
+    finally:
+        svc.close()
+
+    rows = result.rows
+    # Full-text contains filtering is intentionally post-query and bounded:
+    # the allowlisted equality filters above are applied by DuckDB; this
+    # optional operator search never widens the backend scan.
+    if search:
+        needle = str(search).lower()[:256]
+        rows = [r for r in rows if needle in " ".join(str(v).lower() for v in r)]
+    return {
+        "rows": rows,
+        "columns": result.columns,
+        "degraded": result.degraded,
+        "degraded_reason": result.degraded_reason,
+        "limit": limit,
+        "offset": offset,
+        "filters": {"minutes": minutes, **filters, "search": search or ""},
+    }
+
+
 @app.get("/api/analytics/top-domains")
 def analytics_top_domains(minutes: float = 60.0, limit: int = 20, admin=Depends(current_admin)):
+    if reason := _forced_analytics_degraded():
+        return {"rows": [], "columns": [], "degraded": True, "degraded_reason": reason}
     now = time.time()
     svc = _analytics_service()
     try:
@@ -1098,23 +1174,139 @@ def create_notification(req: NotificationProviderCreate, admin=Depends(current_a
 # --- backup (§30-31) ------------------------------------------------------
 
 
+def _backup_dir() -> Path:
+    path = STATE_DIR / "backups"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _backup_path_from_name(name: str) -> Path:
+    if "/" in name or "\\" in name or name.startswith(".") or not name.endswith(".enc"):
+        raise ApiError(400, "validation_error", "invalid backup name")
+    path = (_backup_dir() / name).resolve()
+    if path.parent != _backup_dir().resolve():
+        raise ApiError(400, "validation_error", "invalid backup name")
+    return path
+
+
+def _backup_key(secrets: SecretStore) -> bytes:
+    from cryptography.fernet import Fernet
+
+    if not secrets.exists(BACKUP_KEY_SECRET_ID):
+        secrets.create(Fernet.generate_key().decode("ascii"), secret_id=BACKUP_KEY_SECRET_ID)
+    return secrets.get(BACKUP_KEY_SECRET_ID).encode("ascii")
+
+
+class SecretRestoreRequest(BaseModel):
+    confirmation: str
+    overwrite: bool = False
+
+
+@app.get("/api/backup/secrets")
+def list_secret_backups(admin=Depends(current_admin)):
+    rows = []
+    for p in sorted(_backup_dir().glob("*.enc"), key=lambda x: x.stat().st_mtime, reverse=True):
+        stat = p.stat()
+        rows.append({
+            "name": p.name,
+            "size_bytes": stat.st_size,
+            "created_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+        })
+    with _db() as conn:
+        jobs = conn.execute(
+            "SELECT id, started_at, finished_at, status, backup_path, detail_json "
+            "FROM restore_jobs ORDER BY id DESC LIMIT 20"
+        ).fetchall()
+    return {
+        "backups": rows,
+        "restore_jobs": [
+            {
+                "id": r[0],
+                "started_at": r[1],
+                "finished_at": r[2],
+                "status": r[3],
+                "backup_name": Path(r[4]).name if r[4] else "",
+                "detail": json.loads(r[5] or "{}"),
+            }
+            for r in jobs
+        ],
+    }
+
+
 @app.post("/api/backup/secrets")
 def create_secret_backup(admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
     check_csrf(admin, x_csrf_token)
     from app.v2 import secret_backup
-    from cryptography.fernet import Fernet
 
     secrets = _secrets()
-    if not secrets.exists(BACKUP_KEY_SECRET_ID):
-        secrets.create(Fernet.generate_key().decode("ascii"), secret_id=BACKUP_KEY_SECRET_ID)
-    key = secrets.get(BACKUP_KEY_SECRET_ID).encode("ascii")
-    backup_dir = STATE_DIR / "backups"
-    backup_dir.mkdir(parents=True, exist_ok=True)
+    key = _backup_key(secrets)
+    backup_dir = _backup_dir()
     backup_path = backup_dir / f"secrets-{int(time.time())}.enc"
     result = secret_backup.create_encrypted_backup(secrets, backup_path, key)
+    with _db() as conn:
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "INSERT INTO backup_jobs(started_at, finished_at, status, path, detail_json) VALUES (?, ?, ?, ?, ?)",
+            (now, now, "succeeded", str(backup_path), json.dumps({"secret_count": result.secret_count})),
+        )
     # §30: no plaintext secret export -- only a count and a server-side
     # path are returned, never contents.
-    return {"status": "created", "secret_count": result.secret_count, "created_at": result.created_at}
+    return {"status": "created", "name": backup_path.name, "secret_count": result.secret_count, "created_at": result.created_at}
+
+
+@app.post("/api/backup/secrets/{name}/validate")
+def validate_secret_backup(name: str, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    from app.v2 import secret_backup
+
+    path = _backup_path_from_name(name)
+    if not path.exists():
+        raise ApiError(404, "not_found", "backup not found")
+    secrets = _secrets()
+    try:
+        count = secret_backup.restore_encrypted_backup(path, _backup_key(secrets), SecretStore(STATE_DIR / "backup-validation-scratch"), overwrite=True)
+    except secret_backup.SecretBackupError as exc:
+        raise ApiError(400, "backup_invalid", str(exc)) from exc
+    scratch = STATE_DIR / "backup-validation-scratch"
+    for child in scratch.glob("*"):
+        child.unlink()
+    return {"status": "valid", "backup_name": name, "secret_count": count, "size_bytes": path.stat().st_size}
+
+
+@app.post("/api/backup/secrets/{name}/restore")
+def restore_secret_backup(name: str, req: SecretRestoreRequest, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    from app.v2 import secret_backup
+
+    if req.confirmation != name:
+        raise ApiError(400, "confirmation_required", "type the exact backup file name to restore")
+    path = _backup_path_from_name(name)
+    if not path.exists():
+        raise ApiError(404, "not_found", "backup not found")
+    started = datetime.now(timezone.utc).isoformat()
+    with _db() as conn:
+        cur = conn.execute(
+            "INSERT INTO restore_jobs(started_at, status, backup_path, detail_json) VALUES (?, ?, ?, ?)",
+            (started, "running", str(path), json.dumps({"overwrite": req.overwrite})),
+        )
+        job_id = cur.lastrowid
+    try:
+        restored = secret_backup.restore_encrypted_backup(path, _backup_key(_secrets()), _secrets(), overwrite=req.overwrite)
+    except secret_backup.SecretBackupError as exc:
+        finished = datetime.now(timezone.utc).isoformat()
+        with _db() as conn:
+            conn.execute(
+                "UPDATE restore_jobs SET finished_at = ?, status = ?, detail_json = ? WHERE id = ?",
+                (finished, "failed", json.dumps({"error": str(exc), "overwrite": req.overwrite}), job_id),
+            )
+        raise ApiError(400, "restore_failed", str(exc)) from exc
+    finished = datetime.now(timezone.utc).isoformat()
+    with _db() as conn:
+        conn.execute(
+            "UPDATE restore_jobs SET finished_at = ?, status = ?, detail_json = ? WHERE id = ?",
+            (finished, "succeeded", json.dumps({"secret_count": restored, "overwrite": req.overwrite}), job_id),
+        )
+    return {"status": "succeeded", "job_id": job_id, "backup_name": name, "secret_count": restored}
 
 
 # --- replication (§4C) ------------------------------------------------------

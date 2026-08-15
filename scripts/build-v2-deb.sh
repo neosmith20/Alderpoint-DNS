@@ -32,7 +32,7 @@ SOURCE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 # appropriate to this branch." 2.0.0~privateN-1: "~" sorts before the
 # final 2.0.0-1 this candidate is a pre-release of, same convention V1's
 # own build-deb.sh already uses for beta/dev/rc tags.
-DEB_VERSION="2.0.0~private4-1"
+DEB_VERSION="2.0.0~private5-1"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -73,9 +73,9 @@ Description: Alderpoint DNS V2 -- PRIVATE RELEASE CANDIDATE (not for production)
  Ships the V2 policy/analytics/migration engine, the analytics vendor
  runtime (pyarrow/duckdb), background services (analytics ingestion, Tier B
  prewarm, schedule transitions, native HTTPS management UI/API, replication,
- discovery, and an observation-only DNS packet ingress on alternate port
- 1053), and self-signed TLS bootstrap. Does NOT ship or manage a live
- authoritative dnsdist/BIND listener -- V2 is not yet authoritative.
+ discovery, an observation-only DNS packet ingress on alternate port 1053),
+ a packaged V2 dnsdist runtime reading only the promoted V2 compiled
+ configuration, and self-signed TLS bootstrap.
  Never install alongside the V1 "alderpointdns" package on the same host
  that package is serving traffic from.
 EOF
@@ -107,6 +107,9 @@ cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-web.service" "$PKG/lib/systemd/sys
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-discovery.service" "$PKG/lib/systemd/system/alderpointdns-v2-discovery.service"
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-dns-observer.service" "$PKG/lib/systemd/system/alderpointdns-v2-dns-observer.service"
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-replication.service" "$PKG/lib/systemd/system/alderpointdns-v2-replication.service"
+cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-dnsdist.service" "$PKG/lib/systemd/system/alderpointdns-v2-dnsdist.service"
+cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-dnsdist-reload.service" "$PKG/lib/systemd/system/alderpointdns-v2-dnsdist-reload.service"
+cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-dnsdist-reload.path" "$PKG/lib/systemd/system/alderpointdns-v2-dnsdist-reload.path"
 
 cp "$SOURCE_DIR/LICENSE" "$PKG/usr/share/doc/alderpointdns-v2/LICENSE"
 cp "$SOURCE_DIR/COPYRIGHT" "$PKG/usr/share/doc/alderpointdns-v2/copyright"

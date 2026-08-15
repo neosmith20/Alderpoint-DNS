@@ -569,10 +569,18 @@ def init_db(conn: sqlite3.Connection | None = None) -> None:
             ("promoted_at", "TEXT"),
         ):
             _ensure_column(db, "restore_history", column, definition)
-        db.executemany(
-            "INSERT OR IGNORE INTO backup_settings(key, value) VALUES (?, ?)",
-            list(SETTINGS_DEFAULTS.items()),
-        )
+        for attempt in range(10):
+            try:
+                db.executemany(
+                    "INSERT OR IGNORE INTO backup_settings(key, value) VALUES (?, ?)",
+                    list(SETTINGS_DEFAULTS.items()),
+                )
+                break
+            except sqlite3.OperationalError as exc:
+                if "database is locked" not in str(exc).lower() or attempt == 9:
+                    raise
+                db.rollback()
+                time.sleep(0.05 * (attempt + 1))
         # Always commit here, even when handed an existing connection: this
         # function is idempotent (CREATE TABLE IF NOT EXISTS / INSERT OR
         # IGNORE) and create_backup/restore_backup go on to open additional
@@ -964,10 +972,18 @@ def select_files(components: dict[str, bool]) -> dict[str, Path]:
 # ---------------------------------------------------------------------------
 
 def _record_backup_history(db: sqlite3.Connection, created_at: str, path: str | None, size_bytes: int, components: dict[str, bool], manifest: dict[str, Any] | None, status: str, message: str) -> int:
-    cursor = db.execute(
-        "INSERT INTO backup_history(created_at, path, size_bytes, components_json, manifest_json, status, message) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (created_at, path, size_bytes, json.dumps(components), json.dumps(manifest or {}), status, message),
-    )
+    for attempt in range(10):
+        try:
+            cursor = db.execute(
+                "INSERT INTO backup_history(created_at, path, size_bytes, components_json, manifest_json, status, message) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (created_at, path, size_bytes, json.dumps(components), json.dumps(manifest or {}), status, message),
+            )
+            break
+        except sqlite3.OperationalError as exc:
+            if "database is locked" not in str(exc).lower() or attempt == 9:
+                raise
+            db.rollback()
+            time.sleep(0.05 * (attempt + 1))
     db.commit()
     return cursor.lastrowid
 

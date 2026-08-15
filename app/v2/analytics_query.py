@@ -215,6 +215,7 @@ class PartitionPruningReader:
         sort_column: str | None = "ts",
         sort_direction: str = "DESC",
         limit: int = DEFAULT_LIMIT,
+        offset: int = 0,
     ) -> QueryResult:
         """Bounded, parameterized time-window query with optional equality
         filters. ``filters`` keys must be in ``_FILTERABLE_COLUMNS``, and
@@ -226,6 +227,7 @@ class PartitionPruningReader:
         column (``SELECT *``); ``sort_column=None`` means unsorted.
         """
         limit = max(1, min(limit, MAX_LIMIT))
+        offset = max(0, min(int(offset), 100_000))
 
         if columns is None:
             projection = "*"
@@ -258,18 +260,18 @@ class PartitionPruningReader:
         sql = f"SELECT {projection} FROM {src} WHERE " + " AND ".join(where)
         if sort_column is not None:
             sql += f" ORDER BY {sort_column} {sort_direction}"
-        sql += f" LIMIT {limit}"
+        sql += f" LIMIT {limit} OFFSET {offset}"
         rows = con.execute(sql, params).fetchall()
         return QueryResult(rows=rows, files_considered=len(files))
 
     def query_recent(
         self, *, minutes: float, filters: dict[str, Any] | None = None,
-        limit: int = DEFAULT_LIMIT, now: float | None = None,
+        limit: int = DEFAULT_LIMIT, offset: int = 0, now: float | None = None,
     ) -> QueryResult:
         import time as _time
 
         now = now if now is not None else _time.time()
-        return self.query_time_window(now - minutes * 60, now, filters=filters, limit=limit)
+        return self.query_time_window(now - minutes * 60, now, filters=filters, limit=limit, offset=offset)
 
     def top_n(
         self, column: str, start_ts: float, end_ts: float, *,

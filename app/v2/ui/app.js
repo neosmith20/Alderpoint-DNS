@@ -225,24 +225,39 @@
 
   async function analytics() {
     const [recent, top] = await Promise.all([
-      api("/api/analytics/recent?minutes=1440").catch((e) => ({ rows: [], degraded: true, degraded_reason: e.message })),
+      api("/api/analytics/query-log?minutes=1440&limit=100").catch((e) => ({ rows: [], degraded: true, degraded_reason: e.message, filters: {} })),
       api("/api/analytics/top-domains?minutes=1440&limit=30").catch((e) => ({ rows: [], degraded: true, degraded_reason: e.message })),
     ]);
     return page("Query Log / Analytics", "Bounded recent query and top-domain views. Degraded analytics does not imply DNS outage.", `
       <button data-refresh>Refresh</button>`, `
       ${recent.degraded ? `<div class="alert warn">Recent query log degraded: ${esc(recent.degraded_reason || "unavailable")}</div>` : ""}
       <div class="grid two">
-        <section class="panel"><div class="panel__head"><h2>Recent Queries</h2><span class="badge">${recent.rows.length} rows</span></div><div class="panel__body">${queryFilters()}${tableFromRows(recent.rows || [], 100)}</div></section>
+        <section class="panel"><div class="panel__head"><h2>Recent Queries</h2><span class="badge">${recent.rows.length} rows</span></div><div class="panel__body">${queryFilters()}<div id="query-active">${activeFilters(recent.filters || {})}</div><div id="query-results">${tableFromRows(recent.rows || [], 100)}</div></div></section>
         <section class="panel"><div class="panel__head"><h2>Top Domains</h2></div><div class="panel__body">${tableFromRows(top.rows || [], 30)}</div></section>
       </div>`);
   }
 
+  function activeFilters(filters) {
+    const entries = Object.entries(filters).filter(([, v]) => v !== "" && v !== null && v !== undefined && v !== false);
+    if (!entries.length) return `<div class="muted">No active filters.</div>`;
+    return `<div class="field-row" style="margin-bottom:10px">${entries.map(([k, v]) => `<span class="badge info">${esc(k)}=${esc(v)}</span>`).join("")}</div>`;
+  }
+
   function queryFilters() {
-    return `<div class="field-row" style="margin-bottom:12px">
-      <label>Search<input data-table-filter placeholder="domain, client, upstream, rcode"></label>
-      <label>Window<select><option>24 hours</option><option>1 hour</option></select></label>
-      <label>Mode<select><option>All</option><option>Blocked only</option><option>Cache hits</option></select></label>
-    </div>`;
+    return `<form data-form="querylog" class="query-filter">
+      <label>Window<select name="minutes"><option value="60">1 hour</option><option value="1440" selected>24 hours</option><option value="10080">7 days</option></select></label>
+      <label>Search<input name="search" placeholder="contains text"></label>
+      <label>Domain<input name="domain" placeholder="example.com"></label>
+      <label>Client<input name="client" placeholder="10.0.0.42"></label>
+      <label>Qtype<input name="qtype" placeholder="A"></label>
+      <label>Protocol<input name="protocol" placeholder="udp"></label>
+      <label>Rcode<input name="rcode" placeholder="0"></label>
+      <label>Upstream<input name="upstream"></label>
+      <label>Cache<select name="cache_status" data-omit-empty="1"><option value="">any</option><option>hit</option><option>miss</option><option>bypass</option></select></label>
+      <label>Limit<input name="limit" value="100" data-number="1"></label>
+      <label><span>Blocked only</span><select name="blocked_only" data-bool="1"><option value="false">no</option><option value="true">yes</option></select></label>
+      <button>Apply filters</button>
+    </form>`;
   }
 
   async function clients() {
@@ -417,12 +432,25 @@
   }
 
   async function backup() {
-    const migration = await api("/api/migration/detect?source_path=/var/lib/alderpointdns/alderpointdns.db").catch((e) => ({ error: e.message }));
+    const [backups, migration] = await Promise.all([
+      api("/api/backup/secrets").catch((e) => ({ backups: [], restore_jobs: [], error: e.message })),
+      api("/api/migration/detect?source_path=/var/lib/alderpointdns/alderpointdns.db").catch((e) => ({ error: e.message })),
+    ]);
     return page("Backup / Restore / Migration", "Safe entry points for backup and migration preview. Opening this page does not start destructive work.", "", `
       <div class="grid two">
-        <section class="panel"><div class="panel__head"><h2>Secret Backup</h2></div><div class="panel__body"><p class="muted">Creates encrypted server-side backup of protected secrets. Secret values are never displayed.</p><button data-backup class="primary">Create secret backup</button></div></section>
+        <section class="panel"><div class="panel__head"><h2>Secret Backup / Restore</h2></div><div class="panel__body"><p class="muted">Creates encrypted server-side backups. Restore requires validation plus exact file-name confirmation. Secret values are never displayed.</p><button data-backup class="primary">Create secret backup</button>${backupTable(backups.backups || [])}${restoreJobs(backups.restore_jobs || [])}</div></section>
         <section class="panel"><div class="panel__head"><h2>Migration Detection</h2></div><div class="panel__body">${migration.error ? `<div class="alert warn">${esc(migration.error)}</div>` : tableFromRows([migration], 1)}<form data-form="migration"><label>Source path<input name="source_path" value="/var/lib/alderpointdns/alderpointdns.db"></label><button>Detect source</button></form><div id="migration-result"></div></div></section>
       </div>`);
+  }
+
+  function backupTable(backups) {
+    if (!backups.length) return `<div class="empty">No encrypted secret backups.</div>`;
+    return `<div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>Name</th><th>Created</th><th>Size</th><th>Restore</th></tr></thead><tbody>${backups.map((b) => `<tr><td class="mono">${esc(b.name)}</td><td>${esc(b.created_at)}</td><td>${esc(b.size_bytes)}</td><td><button data-validate-backup="${esc(b.name)}">Validate</button><form data-form="restore" data-backup-name="${esc(b.name)}" class="field-row"><input name="confirmation" placeholder="type exact file name"><select name="overwrite" data-bool="1"><option value="false">no overwrite</option><option value="true">overwrite</option></select><button class="danger">Restore</button></form></td></tr>`).join("")}</tbody></table></div>`;
+  }
+
+  function restoreJobs(jobs) {
+    if (!jobs.length) return `<div class="muted" style="margin-top:12px">No restore jobs recorded.</div>`;
+    return `<div style="margin-top:12px"><h3>Restore Status</h3>${tableFromRows(jobs, 20)}</div>`;
   }
 
   async function settings() {
@@ -552,6 +580,16 @@
       if (backup) {
         const res = await api("/api/backup/secrets", { method: "POST" });
         toast(`Encrypted backup created for ${res.secret_count} secrets`, "ok");
+        await loadPage("backup");
+        return;
+      }
+      const validate = ev.target.closest("[data-validate-backup]");
+      if (validate) {
+        const name = validate.dataset.validateBackup;
+        const res = await api(`/api/backup/secrets/${encodeURIComponent(name)}/validate`, { method: "POST" });
+        toast(`Backup ${res.backup_name} is valid (${res.secret_count} secrets)`, "ok");
+        await loadPage("backup");
+        return;
       }
     });
 
@@ -590,6 +628,16 @@
       const res = await api(`/api/policy/explain?${q}`);
       document.getElementById("explain-result").innerHTML = `<pre class="mono">${esc(JSON.stringify(res, null, 2))}</pre>`;
       return;
+    } else if (type === "querylog") {
+      const q = new URLSearchParams();
+      for (const [k, v] of Object.entries(body)) {
+        if (v === "" || v === null || v === undefined) continue;
+        q.set(k, String(v));
+      }
+      const res = await api(`/api/analytics/query-log?${q}`);
+      document.getElementById("query-active").innerHTML = activeFilters(res.filters || {});
+      document.getElementById("query-results").innerHTML = tableFromRows(res.rows || [], Number(body.limit || 100));
+      return;
     } else if (type === "service") {
       await api("/api/services", { method: "POST", body: JSON.stringify({ service_id: body.service_id, display_name: body.display_name, category: body.category || "", domains: body.domain ? [{ match_kind: body.match_kind, domain: body.domain }] : [] }) });
     } else if (type === "ruleset") {
@@ -609,6 +657,9 @@
       const res = await api(`/api/migration/detect?source_path=${encodeURIComponent(body.source_path)}`);
       document.getElementById("migration-result").innerHTML = tableFromRows([res], 1);
       return;
+    } else if (type === "restore") {
+      const name = form.dataset.backupName;
+      await api(`/api/backup/secrets/${encodeURIComponent(name)}/restore`, { method: "POST", body: JSON.stringify(body) });
     } else if (type === "tls") {
       await api("/api/tls/replace", { method: "POST", body: JSON.stringify(body) });
     } else if (type === "notification") {

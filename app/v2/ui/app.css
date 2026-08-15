@@ -127,6 +127,7 @@ tr:last-child td { border-bottom: 0; }
 
 form { display: grid; gap: var(--s-3); }
 .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s-3); }
+.query-filter { display: grid; grid-template-columns: repeat(4, minmax(130px, 1fr)); gap: var(--s-3); align-items: end; margin-bottom: var(--s-3); }
 label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; font-weight: 650; }
 input, select, textarea { width: 100%; min-height: 38px; border: 1px solid var(--line-2); background: var(--bg); color: var(--text); border-radius: var(--r-2); padding: 8px 9px; }
 textarea { min-height: 94px; resize: vertical; font-family: var(--mono); font-size: 12px; }
@@ -180,6 +181,6 @@ button:disabled { opacity: .55; cursor: not-allowed; }
   .topbar { display: flex; }
   .page-head, .content { padding-left: var(--s-3); padding-right: var(--s-3); }
   .page-head__row { display: grid; }
-  .form-grid, .grid.two, .grid.three, .grid.four { grid-template-columns: 1fr; }
+  .form-grid, .query-filter, .grid.two, .grid.three, .grid.four { grid-template-columns: 1fr; }
   table { min-width: 560px; }
 }

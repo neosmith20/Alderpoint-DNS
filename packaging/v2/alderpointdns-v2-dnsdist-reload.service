@@ -1,0 +1,7 @@
+[Unit]
+Description=Reload Alderpoint DNS V2 packaged dnsdist after runtime promotion
+After=alderpointdns-v2-dnsdist.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl restart alderpointdns-v2-dnsdist.service

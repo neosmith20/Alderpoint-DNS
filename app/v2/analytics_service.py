@@ -63,10 +63,10 @@ class AnalyticsService:
 
     def recent_query_log(
         self, *, minutes: float = 60.0, filters: Optional[dict[str, Any]] = None,
-        limit: int = 200, now: Optional[float] = None,
+        limit: int = 200, offset: int = 0, now: Optional[float] = None,
     ) -> QueryResult:
         return self._detail(
-            lambda: self._reader.query_recent(minutes=minutes, filters=filters, limit=limit, now=now)
+            lambda: self._reader.query_recent(minutes=minutes, filters=filters, limit=limit, offset=offset, now=now)
         )
 
     def search(
