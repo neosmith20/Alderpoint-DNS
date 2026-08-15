@@ -28,6 +28,7 @@ _ANSWER_AFFECTING_FIELDS = (
     "filtering_profile_id",
     "safesearch_mode",
     "parental_policy_id",
+    "security_policy_id",
     "service_blocking_ruleset_id",
     "blocking_response_mode",
     "upstream_profile_id",
@@ -51,6 +52,7 @@ class PolicyLayer:
     filtering_profile_id: Optional[str] = None
     safesearch_mode: Optional[str] = None
     parental_policy_id: Optional[str] = None
+    security_policy_id: Optional[str] = None
     service_blocking_ruleset_id: Optional[str] = None
     blocking_response_mode: Optional[str] = None
     upstream_profile_id: Optional[str] = None
@@ -69,6 +71,7 @@ _ANSWER_DEFAULTS = {
     "filtering_profile_id": "default",
     "safesearch_mode": "off",
     "parental_policy_id": "none",
+    "security_policy_id": "none",
     "service_blocking_ruleset_id": "none",
     "blocking_response_mode": "nxdomain",
     "upstream_profile_id": "default",

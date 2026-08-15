@@ -72,16 +72,25 @@ def render_rpz_trigger(response: BlockingResponse, rpz_name: str) -> tuple[str, 
     response-policy-zone action vocabulary. ``rpz_name`` is the already-
     normalized (trailing-dot-stripped) trigger name.
 
-    Known limitation, stated honestly rather than faked: RPZ has no native
-    "REFUSED" trigger action — ``rpz-drop`` (silently drop the query,
-    closest available BIND primitive) is used instead. A true REFUSED
-    response for this mode would need to be implemented at the dnsdist
-    layer, which does support it natively; see
-    ``docs/v2/blocking-response-modes.md``.
+    ``refused`` mode is intentionally NOT rendered as a real BIND/RPZ
+    action here — RPZ has no native REFUSED trigger, and substituting
+    ``rpz-drop`` would silently return a different RCODE than the operator
+    configured (a drop is not a REFUSED response; a client sees a timeout,
+    not RCODE 5). The authoritative implementation for ``refused`` lives
+    at the dnsdist layer instead (``app/v2/dnsdist_gen.py``'s
+    ``render_refused_block_rules`` -> real ``RCodeAction(DNSRCode.REFUSED)``,
+    verified end-to-end against the installed dnsdist binary to actually
+    return RCODE REFUSED to the client) since dnsdist sits in front of
+    BIND and answers the query before RPZ would ever see it. Rendering an
+    ``rpz-drop`` fallback here too, as defense-in-depth for the case where
+    BIND is somehow queried directly (bypassing dnsdist), is still
+    reasonable -- it just must never be described as equivalent to
+    REFUSED.
     """
     if response.mode == "nxdomain":
         return (f"{rpz_name} CNAME .", f"*.{rpz_name} CNAME .")
     if response.mode == "refused":
+        # Defense-in-depth only (see docstring) -- drop, not REFUSED.
         return (f"{rpz_name} CNAME rpz-drop.", f"*.{rpz_name} CNAME rpz-drop.")
     if response.mode == "null_ip":
         return (

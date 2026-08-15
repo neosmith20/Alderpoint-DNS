@@ -63,6 +63,7 @@ def generate_dnsdist_config(
     acl_networks: list[NetworkScope],
     upstreams: list[UpstreamServer],
     cache_profile_summary: dict[str, str] | None = None,
+    refused_domains: list[str] | None = None,
 ) -> str:
     """Pure function: same inputs -> byte-identical config text. Only
     accepts already-validated ``NetworkScope``/``UpstreamServer`` value
@@ -97,6 +98,11 @@ def generate_dnsdist_config(
         for srv in servers:
             pool_kw = f', {{pool={_lua_string(pool_name)}}}' if pool_name else ""
             lines.append(f'newServer({{address={_lua_string(srv.address)}{pool_kw}}})')
+        lines.append("")
+
+    refused_lines = render_refused_block_rules(refused_domains or [])
+    if refused_lines:
+        lines.extend(refused_lines)
         lines.append("")
 
     if cache_profile_summary:
@@ -136,17 +142,26 @@ def generate_dnsdist_config_from_profiles(
     default_profile,  # policy_store.UpstreamProfileRecord
     domain_routing: "list[tuple[str, object]] | None" = None,
     ecs_policy=None,  # app.v2.ecs_policy.EcsPolicy, optional
+    refused_domains: list[str] | None = None,
 ) -> str:
     """Compiles real ``policy_store.UpstreamProfileRecord``s (§7-9) into a
     dnsdist config: the default profile's endpoints become the unnamed
     default pool with its strategy applied via ``setServerPolicy``;
     ``domain_routing`` is an optional list of ``(suffix_domain,
     UpstreamProfileRecord)`` pairs, each becoming a named pool plus a
-    ``SuffixMatchNodeRule`` -> ``PoolAction`` routing rule (§9), evaluated
-    in the order given -- callers must pre-sort by specificity themselves
-    (e.g. via ``policy_store.resolve_domain_route``'s precedence logic) if
-    multiple rules could match the same qname, since dnsdist itself applies
-    rules in file order and stops at the first match.
+    ``SuffixMatchNodeRule`` -> ``PoolAction`` routing rule (§9).
+
+    Precedence (P0-C fix): the generator itself enforces most-specific-
+    suffix-wins, deterministically, regardless of the order ``domain_routing``
+    is passed in -- entries are sorted here by suffix length descending
+    (longer/deeper suffix = more specific), tied-broken by the suffix
+    string itself, *before* any Lua is emitted. ``PoolAction`` is a
+    terminal dnsdist rule action (it stops further rule evaluation once
+    matched), so emitting rules most-specific-first in file order is what
+    makes "most specific wins" true at runtime, not just in this function's
+    internal ordering. A duplicate suffix mapped to two different upstream
+    profiles is an explicit conflict and raises rather than silently
+    picking one arbitrarily.
     """
     if default_profile.strategy not in _STRATEGY_TO_DNSDIST_POLICY:
         raise DnsdistGenError(
@@ -191,7 +206,21 @@ def generate_dnsdist_config_from_profiles(
     lines.append(f"setServerPolicy({_STRATEGY_TO_DNSDIST_POLICY[default_profile.strategy]})")
     lines.append("")
 
+    normalized_routes: dict[str, object] = {}
     for suffix_domain, profile in domain_routing or []:
+        key = suffix_domain.strip(".").lower()
+        if key in normalized_routes and normalized_routes[key].upstream_profile_id != profile.upstream_profile_id:
+            raise DnsdistGenError(
+                f"conflicting domain routing rule for {key!r}: both "
+                f"{normalized_routes[key].upstream_profile_id!r} and "
+                f"{profile.upstream_profile_id!r} were specified"
+            )
+        normalized_routes[key] = profile
+
+    # Most-specific-first, deterministic regardless of input order (P0-C).
+    ordered_routes = sorted(normalized_routes.items(), key=lambda kv: (-len(kv[0]), kv[0]))
+
+    for suffix_domain, profile in ordered_routes:
         if profile.strategy not in _STRATEGY_TO_DNSDIST_POLICY:
             raise DnsdistGenError(
                 f"upstream strategy {profile.strategy!r} for domain route {suffix_domain!r} "
@@ -201,13 +230,43 @@ def generate_dnsdist_config_from_profiles(
         lines.append(f"-- domain routing pool for {suffix_domain}: {profile.upstream_profile_id}")
         for ep in profile.endpoints:
             lines.append(_server_line(ep.address, pool_name))
-        trigger = suffix_domain if suffix_domain.endswith(".") else suffix_domain + "."
+        trigger = suffix_domain + "."
         lines.append(
             f'addAction(SuffixMatchNodeRule({{{_lua_string(trigger)}}}), PoolAction({_lua_string(pool_name)}))'
         )
         lines.append("")
 
+    refused_lines = render_refused_block_rules(refused_domains or [])
+    if refused_lines:
+        lines.extend(refused_lines)
+        lines.append("")
+
     return "\n".join(lines) + "\n"
+
+
+def render_refused_block_rules(domains: list[str]) -> tuple[str, ...]:
+    """The authoritative implementation of ``blocking_response.py``'s
+    ``refused`` mode (P0-B fix): a real dnsdist ``RCodeAction`` that
+    actually returns RCODE REFUSED to the client, verified end-to-end
+    against the installed dnsdist 2.1.1 binary (a live isolated instance
+    queried for a REFUSED-mode domain returns RCODE 5; an unrelated domain
+    returns RCODE 0) -- not the RPZ ``rpz-drop`` substitute, which merely
+    drops the query (client sees a timeout, not RCODE REFUSED). All
+    REFUSED-mode domains are batched into one ``SuffixMatchNodeRule`` rule
+    rather than one rule per domain, since dnsdist evaluates its rule chain
+    linearly per query and a long chain of single-domain rules would add
+    unnecessary per-query overhead on the hot path.
+    """
+    if not domains:
+        return ()
+    normalized = sorted(set(d.strip(".").lower() + "." for d in domains if d.strip(".")))
+    if not normalized:
+        return ()
+    domain_list = ", ".join(_lua_string(d) for d in normalized)
+    return (
+        "-- REFUSED blocking-response-mode domains (real RCODE, not rpz-drop)",
+        f"addAction(SuffixMatchNodeRule({{{domain_list}}}), RCodeAction(DNSRCode.REFUSED))",
+    )
 
 
 def dnsdist_check_config_validator(binary: str = "dnsdist") -> Validator:

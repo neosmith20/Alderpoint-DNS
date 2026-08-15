@@ -33,7 +33,17 @@ from dataclasses import asdict, dataclass, field
 # schema change invalidates every previously-cached profile ID at once,
 # which is the correct behavior: old profile IDs computed under a different
 # dimension set are not comparable to new ones.
-CACHE_PROFILE_SCHEMA_VERSION = 1
+# Bumped to 2 in Workstream 3's "final continuation" pass: added
+# `security_policy_id` as its own answer-affecting dimension, separate from
+# `parental_policy_id`, so malware/phishing protection and parental/adult
+# protection are independently-toggleable, independently-identified
+# categories rather than sharing one ruleset field (see
+# app/v2/filtering_decision.py for the full rationale — this was a
+# self-identified review risk from the prior pass, fixed here rather than
+# left for Dex to find). The version bump means every previously-computed
+# profile id is invalidated, which is correct: the dimension set genuinely
+# changed shape.
+CACHE_PROFILE_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -50,6 +60,7 @@ class CachePolicyDimensions:
     filtering_profile_id: str = "default"
     safesearch_mode: str = "off"
     parental_policy_id: str = "none"
+    security_policy_id: str = "none"
     service_blocking_ruleset_id: str = "none"
     blocking_response_mode: str = "nxdomain"
     upstream_profile_id: str = "default"

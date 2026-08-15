@@ -45,6 +45,7 @@ _MIGRATION_V2: list[str] = [
         filtering_profile_id TEXT,
         safesearch_mode TEXT,
         parental_policy_id TEXT,
+        security_policy_id TEXT,
         service_blocking_ruleset_id TEXT,
         blocking_response_mode TEXT,
         upstream_profile_id TEXT,
@@ -175,14 +176,29 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _table_exists(conn, name: str) -> bool:
+    return (
+        conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+        ).fetchone()
+        is not None
+    )
+
+
 def ensure_schema(path: str | Path) -> None:
-    """Idempotent: safe to call every process startup. Only applies the V2
-    migration if it hasn't already been (checked via
-    ``control_db.schema_version``), so re-running never double-applies.
+    """Idempotent: safe to call every process startup. Gates on actual
+    table existence (via ``sqlite_master``), not solely on the shared
+    ``schema_migrations`` version counter -- other modules
+    (``app/v2/notification_store.py``) apply their own migrations against
+    the same control.db using that same counter, so "current version >= N"
+    does not by itself prove *this* module's tables exist if a caller only
+    ever invoked the other module's ``ensure_schema``. Checking real table
+    existence makes this correct regardless of call order.
     """
     control_db.initialize(path)
-    current = control_db.schema_version(path)
-    if current is not None and current < POLICY_STORE_SCHEMA_VERSION:
+    with control_db.connect(path) as conn:
+        already_present = _table_exists(conn, "policy_layers")
+    if not already_present:
         control_db.apply_migration_in_transaction(path, _MIGRATION_V2, POLICY_STORE_SCHEMA_VERSION)
 
 
