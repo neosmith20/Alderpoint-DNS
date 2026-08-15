@@ -211,13 +211,34 @@ class SecretStore:
         no-silent-overwrite policy; pass ``overwrite=True`` for an explicit
         full restore onto a fresh store.
 
-        Validated in two passes so a bad entry never leaves a partial
-        restore behind: every id/conflict check runs first (no I/O), and
-        only if the whole batch passes does any file actually get written.
-        A previous version wrote entries one at a time as it iterated,
-        which meant an invalid id or an unexpected conflict partway
-        through the dict left earlier secrets already committed to disk --
-        a real partial-restore bug, fixed here.
+        True ALL-or-NONE atomicity (Gate #2 HIGH finding: a second-secret
+        *write* failure -- not just a validation failure -- previously
+        left the first restored secret committed, since each secret was
+        written directly to its real path one at a time). Implemented in
+        four phases:
+
+        1. **Validate** (no I/O): every id/conflict check, exactly as
+           before.
+        2. **Stage** (all the real disk I/O, including anything that could
+           fail with e.g. ENOSPC, happens here): every value is written to
+           a hidden staging file in this store's own directory. The REAL
+           secret paths are never touched in this phase -- if writing
+           secret #2 of 5 fails here (disk full, permission race, ...),
+           the store is exactly as it was before this call started,
+           because nothing at a real path has been touched yet.
+        3. **Backup**: for every id that already exists and is about to be
+           overwritten, its current file is atomically renamed aside
+           (cheap -- a rename, not a write, so it essentially cannot fail
+           with ENOSPC).
+        4. **Promote**: every staged file is atomically renamed into its
+           real path (again, renames only, not writes).
+
+        If phase 3 or 4 fails partway (renames can still fail on other
+        grounds -- a permission race, a concurrent external deletion),
+        the store is rolled back to its exact pre-call state: any already-
+        promoted id has its backup renamed back over it, any newly-created
+        (no prior backup) id has its promoted file removed, and all
+        leftover staging/backup files are cleaned up either way.
         """
         for secret_id in secrets:
             _validate_id(secret_id)
@@ -225,8 +246,84 @@ class SecretStore:
                 raise SecretStoreError(
                     f"secret id {secret_id!r} already exists (pass overwrite=True to replace)"
                 )
-        for secret_id, value in secrets.items():
-            if self.exists(secret_id):
-                self.update(secret_id, value)
-            else:
-                self.create(value, secret_id=secret_id)
+        if not secrets:
+            return
+
+        # Phase 2: stage. All real disk writes happen here, to hidden
+        # per-id staging files -- never to a real secret path.
+        staged: dict[str, str] = {}
+        try:
+            for secret_id, value in secrets.items():
+                fd, tmp_name = tempfile.mkstemp(
+                    prefix=f".restore-stage.{secret_id}.", suffix=".tmp", dir=str(self.root)
+                )
+                os.chmod(tmp_name, _SECRET_FILE_MODE)
+                with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+                    tmp.write(value)
+                    tmp.flush()
+                    os.fsync(tmp.fileno())
+                staged[secret_id] = tmp_name
+        except BaseException:
+            for tmp_name in staged.values():
+                try:
+                    os.unlink(tmp_name)
+                except FileNotFoundError:
+                    pass
+            raise
+
+        # Phase 3: back up anything about to be overwritten (renames only).
+        backups: dict[str, str] = {}
+        promoted: list[str] = []
+        try:
+            for secret_id in staged:
+                real_path = self._path_for(secret_id)
+                if real_path.exists():
+                    backup_name = str(self.root / f".restore-backup.{secret_id}")
+                    os.replace(real_path, backup_name)
+                    backups[secret_id] = backup_name
+
+            # Phase 4: promote (renames only).
+            for secret_id, tmp_name in staged.items():
+                os.replace(tmp_name, self._path_for(secret_id))
+                promoted.append(secret_id)
+        except BaseException:
+            # Restore EVERY backed-up id to its exact prior state --
+            # unconditionally, not just the ones that finished promoting.
+            # This is what makes the batch truly all-or-nothing: if any
+            # single secret in the batch fails, an already-promoted
+            # sibling (e.g. secret-a succeeded, secret-b's promote then
+            # failed) must also be rolled back, not left half-applied.
+            # A real bug caught while writing this: an earlier version
+            # only restored ids present in `promoted`, which skipped the
+            # very id whose failed os.replace() call is what triggered
+            # this except block in the first place -- its real path had
+            # already been moved aside in phase 3 but was never restored.
+            for secret_id, backup_name in backups.items():
+                real_path = self._path_for(secret_id)
+                try:
+                    os.replace(backup_name, real_path)
+                except FileNotFoundError:
+                    pass
+            # Any newly-created (no prior backup) id that did get
+            # promoted before the failure must be removed.
+            for secret_id in promoted:
+                if secret_id not in backups:
+                    try:
+                        self._path_for(secret_id).unlink()
+                    except FileNotFoundError:
+                        pass
+            # Clean up any staged (never promoted) temp files.
+            for secret_id, tmp_name in staged.items():
+                if secret_id not in promoted:
+                    try:
+                        os.unlink(tmp_name)
+                    except FileNotFoundError:
+                        pass
+            raise
+        else:
+            # Success: backups are no longer needed.
+            for backup_name in backups.values():
+                try:
+                    os.unlink(backup_name)
+                except FileNotFoundError:
+                    pass
