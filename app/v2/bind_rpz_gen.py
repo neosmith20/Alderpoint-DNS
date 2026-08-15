@@ -7,16 +7,20 @@ validation against the real installed ``named-checkzone`` binary via
 directory or reloads the running ``named``/``bind9`` service — every path
 used in this workstream's tests is an isolated tempdir.
 
-Scope for tonight: one RPZ zone combining domain-blocklist triggers (from
-``app/v2/policy_store.py``'s service definitions and any other qname set a
-caller supplies) with per-trigger blocking-response-mode rendering from
-``app/v2/blocking_response.py``. Precedence: rules are emitted in a fixed,
-deterministic order (allow triggers first via ``PASSTHRU``, then block
-triggers) so an explicit allow always overrides a same-named block --
-matching the "allow overrides" requirement from §12-13. SafeSearch-specific
-CNAME rewrites (§4A) and a from-scratch parallel filtering engine are
-explicitly out of scope for this generator; see
-``docs/v2/handoff-workstream-4.md``.
+**Scope note (Gate #2 Blocker 2 remediation):** this generator produces
+ONE global RPZ zone and is retained ONLY as an optional whole-appliance
+defense-in-depth layer for domains that must be blocked for literally
+every client regardless of effective policy. It is explicitly NOT where
+per-client/per-profile differentiated blocking is enforced -- that real
+per-effective-policy enforcement now happens entirely at the dnsdist
+layer, see ``app/v2/dnsdist_policy_runtime.py`` and
+``docs/v2/policy-runtime-architecture.md`` for the full answer-path
+documentation. Any domain whose blocking/rewrite behavior should differ
+by client/group/network must be expressed as a
+``dnsdist_policy_runtime.ClientPolicyBinding``, never added to this
+global zone. Precedence within this generator: rules are emitted in a
+fixed, deterministic order (allow triggers first via ``PASSTHRU``, then
+block triggers) so an explicit allow always overrides a same-named block.
 """
 
 from __future__ import annotations
