@@ -348,6 +348,20 @@ def _validate_identifier(kind: str, value: str) -> bool:
 
 
 def migrate_clients(backup_db_path: Path, target_control_db: Path) -> dict:
+    """Idempotent by construction (§21/§22 "idempotent stage replay", "no
+    duplicate converted objects" on retry): clears any clients this
+    migration previously wrote into the target before re-inserting from
+    the source. This is safe specifically because ``target_control_db``
+    is disposable staging output owned entirely by this migration run
+    (nothing else writes to it concurrently) -- clearing and rebuilding
+    from the same read-only source on every stage attempt is simpler and
+    more robust than trying to detect exactly how far a prior partial
+    attempt got. A version of this function without the clear step was a
+    real gap found during this session's own review: a crash mid-stage
+    (not just between stages, which the durable-state tests already
+    covered) followed by a stage retry would have inserted every client a
+    second time, since plain ``INSERT`` has no uniqueness guard on name.
+    """
     src = sqlite3.connect(f"file:{backup_db_path}?mode=ro", uri=True)
     warnings: list[str] = []
     clients_migrated = 0
@@ -364,6 +378,8 @@ def migrate_clients(backup_db_path: Path, target_control_db: Path) -> dict:
         src.close()
 
     with control_db.connect(target_control_db) as conn:
+        # Cascades to client_identifiers via ON DELETE CASCADE.
+        conn.execute("DELETE FROM clients")
         id_map: dict[int, int] = {}
         for old_id, name, description, enabled, created_at, updated_at in clients:
             cur = conn.execute(
@@ -429,6 +445,8 @@ def migrate_policies(backup_db_path: Path, target_control_db: Path) -> dict:
         src.close()
 
     with control_db.connect(target_control_db) as conn:
+        # Idempotent retry (§21/§22), same reasoning as migrate_clients.
+        conn.execute("DELETE FROM policy_networks")
         for i, (cidr, profile_key, description, enabled) in enumerate(rows):
             if not enabled:
                 warnings.append(f"skipped disabled network policy {cidr!r}")
@@ -517,6 +535,11 @@ def migrate_upstreams(backup_db_path: Path, target_control_db: Path) -> dict:
             )
         )
     with control_db.connect(target_control_db) as conn:
+        # Idempotent retry (§21/§22): create_upstream_profile() would
+        # otherwise raise a duplicate-id conflict on a second attempt.
+        conn.execute(
+            "DELETE FROM upstream_profiles WHERE upstream_profile_id = 'migrated-default'"
+        )
         pstore.create_upstream_profile(
             conn, "migrated-default", "Migrated Default Upstreams",
             transport=rows[0][1], endpoints=endpoints, strategy="ordered",
@@ -543,6 +566,14 @@ def migrate_notifications(
     migrated = 0
     kind_map = {"webhook": "webhook", "email": "email_smtp", "pushover": "pushover", "slack": "slack"}
     with control_db.connect(target_control_db) as conn:
+        # Idempotent retry (§21/§22): provider ids are deterministic
+        # (migrated-{kind}-{i}), so a retry would otherwise hit a
+        # duplicate-id conflict and fail the whole stage rather than
+        # complete. delete_provider() also removes the referenced secret,
+        # so a retry never leaves an orphaned secret file behind either.
+        for existing in nstore.list_providers(conn):
+            if existing.provider_id.startswith("migrated-"):
+                nstore.delete_provider(conn, secret_store, existing.provider_id)
         for i, (kind, name, enabled, config_json, secret) in enumerate(rows):
             v2_kind = kind_map.get(kind, "webhook")
             try:
