@@ -28,6 +28,7 @@ calls it that way, and no pepper file is created by any code here.
 from __future__ import annotations
 
 import errno
+import json
 import os
 import re
 import tempfile
@@ -38,6 +39,7 @@ from pathlib import Path
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _STORE_DIR_MODE = 0o700
 _SECRET_FILE_MODE = 0o600
+_JOURNAL_NAME = ".restore-journal.json"
 
 
 class SecretStoreError(RuntimeError):
@@ -95,6 +97,14 @@ class SecretStore:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         os.chmod(self.root, _STORE_DIR_MODE)
+        # P0-A (Gate #2 residual, crash atomicity): a prior process may have
+        # been killed (not just raised a Python exception) partway through
+        # import_all()'s backup/promote phases, leaving real secret files
+        # renamed aside to .restore-backup.* with no in-process exception
+        # handler ever running to clean up. Every store open detects and
+        # deterministically resolves an interrupted restore before any
+        # caller can observe a half-applied state.
+        self._recover_interrupted_restore()
 
     def _path_for(self, secret_id: str) -> Path:
         _validate_id(secret_id)
@@ -204,6 +214,122 @@ class SecretStore:
         """
         return {secret_id: self.get(secret_id) for secret_id in self.list_ids()}
 
+    # --- crash-atomic restore journal (P0-A) -------------------------------
+    #
+    # A durable restore journal/state machine (Dex's "OR" option): written
+    # atomically (tempfile + fsync + os.replace, same primitive as
+    # _atomic_write) BEFORE the first real-path mutation of a restore, and
+    # updated atomically once more when every promotion has succeeded. Its
+    # presence on disk is itself the "an interrupted restore exists" signal
+    # -- __init__ checks for it on every store open (not just after an
+    # in-process exception), so a hard kill -9 mid-restore is recovered from
+    # automatically on the next process start, with no manual file surgery.
+    #
+    # Two phases, each independently a crash point:
+    #   "staged"   -- backups may be partially or fully taken, promotion may
+    #                 be partially or fully done, but completion was never
+    #                 confirmed. Recovery ALWAYS rolls back to the old state:
+    #                 for every entry with a recorded backup, force the real
+    #                 path back to that backup's content; for every entry
+    #                 with no prior backup (a brand-new secret id), force the
+    #                 real path to be absent. This is safe and idempotent
+    #                 even if some of those renames already happened, some
+    #                 didn't, or recovery itself is interrupted and re-run.
+    #   "promoted" -- every promotion is confirmed complete; only backup
+    #                 cleanup (and journal deletion) remained. Recovery rolls
+    #                 FORWARD: delete every recorded backup file (if still
+    #                 present) and the journal itself -- never re-applies
+    #                 the old value over an already-committed new one.
+    def _journal_path(self) -> Path:
+        return self.root / _JOURNAL_NAME
+
+    def _write_journal(self, phase: str, entries: dict[str, str | None]) -> None:
+        payload = json.dumps({"phase": phase, "entries": entries}).encode("utf-8")
+        fd, tmp_name = tempfile.mkstemp(prefix=".restore-journal.", suffix=".tmp", dir=str(self.root))
+        try:
+            os.chmod(tmp_name, _SECRET_FILE_MODE)
+            with os.fdopen(fd, "wb") as tmp:
+                tmp.write(payload)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            os.replace(tmp_name, self._journal_path())
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except FileNotFoundError:
+                pass
+            raise
+        dir_fd = os.open(str(self.root), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+
+    def _delete_journal(self) -> None:
+        try:
+            os.unlink(self._journal_path())
+        except FileNotFoundError:
+            pass
+
+    def _recover_interrupted_restore(self) -> None:
+        journal_path = self._journal_path()
+        if not journal_path.exists():
+            return
+        try:
+            journal = json.loads(journal_path.read_text(encoding="utf-8"))
+            phase = journal["phase"]
+            entries: dict[str, str | None] = journal["entries"]
+        except (OSError, ValueError, KeyError):
+            # A corrupt/unreadable journal cannot itself have come from a
+            # torn write (the journal is only ever written via the atomic
+            # tempfile+fsync+os.replace helper above -- the write is either
+            # fully visible or not visible at all). Something else damaged
+            # it post-hoc; the only safe action is to remove the journal
+            # (stale staging/backup files, if any, are inert -- they are
+            # never read by normal get()/list_ids(), which only recognize
+            # names matching the secret-id allowlist pattern) rather than
+            # guess at a rollback/roll-forward plan we cannot verify.
+            self._delete_journal()
+            return
+
+        if phase == "promoted":
+            # Every promotion already succeeded; only cleanup remained.
+            # Roll FORWARD: finish deleting backups, never restore them.
+            for secret_id, backup_name in entries.items():
+                if backup_name is not None:
+                    try:
+                        os.unlink(backup_name)
+                    except FileNotFoundError:
+                        pass
+        else:
+            # phase == "staged": completion was never confirmed. Roll BACK
+            # to the old state unconditionally, regardless of how far
+            # backup/promote actually got.
+            for secret_id, backup_name in entries.items():
+                try:
+                    real_path = self._path_for(secret_id)
+                except InvalidSecretIdError:
+                    continue
+                if backup_name is not None:
+                    try:
+                        os.replace(backup_name, real_path)
+                    except FileNotFoundError:
+                        pass
+                else:
+                    # No prior value -- this id must end up absent, whether
+                    # or not its promotion actually completed.
+                    try:
+                        real_path.unlink()
+                    except FileNotFoundError:
+                        pass
+            # Clean up any leftover staging temp files for this batch.
+            for path in self.root.glob(".restore-stage.*.tmp"):
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+        self._delete_journal()
+
     def import_all(self, secrets: dict[str, str], *, overwrite: bool = False) -> None:
         """Restore-to-new-appliance hook: bulk-load secret_id -> value pairs
         (e.g. from a decrypted backup). ``overwrite=False`` (default) refuses
@@ -271,21 +397,37 @@ class SecretStore:
                     pass
             raise
 
+        # Compute the backup plan up front (existence checks only, no
+        # mutation yet) so the crash-recovery journal below can be written
+        # BEFORE any real secret path is touched -- the journal's presence
+        # is what lets a killed-and-restarted process recover deterministically.
+        plan: dict[str, str | None] = {}
+        for secret_id in staged:
+            real_path = self._path_for(secret_id)
+            plan[secret_id] = (
+                str(self.root / f".restore-backup.{secret_id}") if real_path.exists() else None
+            )
+        self._write_journal("staged", plan)
+
         # Phase 3: back up anything about to be overwritten (renames only).
         backups: dict[str, str] = {}
         promoted: list[str] = []
         try:
-            for secret_id in staged:
-                real_path = self._path_for(secret_id)
-                if real_path.exists():
-                    backup_name = str(self.root / f".restore-backup.{secret_id}")
-                    os.replace(real_path, backup_name)
+            for secret_id, backup_name in plan.items():
+                if backup_name is not None:
+                    os.replace(self._path_for(secret_id), backup_name)
                     backups[secret_id] = backup_name
 
             # Phase 4: promote (renames only).
             for secret_id, tmp_name in staged.items():
                 os.replace(tmp_name, self._path_for(secret_id))
                 promoted.append(secret_id)
+
+            # Every promotion succeeded: flip the journal to "promoted"
+            # (roll-FORWARD-only from here) before starting backup cleanup,
+            # so a kill during cleanup never re-applies an old value over
+            # the now-committed new one.
+            self._write_journal("promoted", plan)
         except BaseException:
             # Restore EVERY backed-up id to its exact prior state --
             # unconditionally, not just the ones that finished promoting.
@@ -319,11 +461,20 @@ class SecretStore:
                         os.unlink(tmp_name)
                     except FileNotFoundError:
                         pass
+            # In-process rollback is now complete and matches what a
+            # crash-recovery replay of this journal would also produce --
+            # safe to remove it.
+            self._delete_journal()
             raise
         else:
-            # Success: backups are no longer needed.
+            # Success: backups are no longer needed. The journal was
+            # already flipped to "promoted" above; if the process were
+            # killed during this cleanup loop, the next store open would
+            # roll FORWARD (finish deleting these same backups) rather
+            # than incorrectly restore committed data.
             for backup_name in backups.values():
                 try:
                     os.unlink(backup_name)
                 except FileNotFoundError:
                     pass
+            self._delete_journal()

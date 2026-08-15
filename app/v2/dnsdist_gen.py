@@ -315,7 +315,17 @@ def render_refused_block_rules(domains: list[str]) -> tuple[str, ...]:
     """
     if not domains:
         return ()
-    normalized = sorted(set(d.strip(".").lower() + "." for d in domains if d.strip(".")))
+    from app.v2.dns_name_validate import InvalidDnsNameError, validate_dns_name
+
+    validated: set[str] = set()
+    for d in domains:
+        if not d.strip("."):
+            continue
+        try:
+            validated.add(validate_dns_name(d))
+        except InvalidDnsNameError as exc:
+            raise DnsdistGenError(f"invalid REFUSED-mode domain {d!r}: {exc}") from exc
+    normalized = sorted(d + "." for d in validated)
     if not normalized:
         return ()
     domain_list = ", ".join(_lua_string(d) for d in normalized)
