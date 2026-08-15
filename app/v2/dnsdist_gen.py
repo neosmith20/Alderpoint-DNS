@@ -192,17 +192,43 @@ def generate_dnsdist_config_from_profiles(
             lines.append("")
         use_ecs = server_uses_client_subnet(ecs_policy)
 
-    def _server_line(address: str, pool: str | None) -> str:
+    def _server_line(address: str, pool: str | None, transport: str = "plain", tls_hostname: str | None = None) -> str:
         kwargs = f"address={_lua_string(address)}"
         if pool:
             kwargs += f", pool={_lua_string(pool)}"
         if use_ecs:
             kwargs += ", useClientSubnet=true"
+        if transport == "dot":
+            # Real verified dnsdist 2.1.1 DoT backend syntax --
+            # `tls="openssl"` + `subjectName=<hostname>` for certificate
+            # validation. Previously this generator silently emitted a
+            # bare address for DoT-transport profiles, which dnsdist then
+            # treated as plain UDP/TCP to that port -- a real bug (a
+          # generated config for a DoT-only upstream would never actually
+            # resolve anything). Found via the migration health-check test
+            # actually querying a migrated DoT upstream end-to-end.
+            kwargs += ', tls="openssl"'
+            if tls_hostname:
+                kwargs += f", subjectName={_lua_string(tls_hostname)}"
+        elif transport == "doh":
+            # No confirmed-working DoH backend key in this installed
+            # dnsdist version's newServer() (dohPath was rejected as an
+            # "Unknown key" during verification) -- rather than guess at
+            # syntax, DoH-transport profiles are honestly generated as a
+            # plain backend with a comment flagging the gap, not silently
+            # claimed to be encrypted when it isn't.
+            pass
         return f"newServer({{{kwargs}}})"
 
     lines.append(f"-- default upstream profile: {default_profile.upstream_profile_id}")
+    if default_profile.transport == "doh":
+        lines.append(
+            "-- WARNING: DoH backend transport requested but this dnsdist version has no "
+            "confirmed working DoH backend directive in this generator -- servers below are "
+            "generated as plain, NOT encrypted. See docs/v2/handoff-workstream-4.md."
+        )
     for ep in default_profile.endpoints:
-        lines.append(_server_line(ep.address, None))
+        lines.append(_server_line(ep.address, None, default_profile.transport, ep.tls_hostname))
     lines.append(f"setServerPolicy({_STRATEGY_TO_DNSDIST_POLICY[default_profile.strategy]})")
     lines.append("")
 
@@ -229,7 +255,7 @@ def generate_dnsdist_config_from_profiles(
         pool_name = f"route_{profile.upstream_profile_id}"
         lines.append(f"-- domain routing pool for {suffix_domain}: {profile.upstream_profile_id}")
         for ep in profile.endpoints:
-            lines.append(_server_line(ep.address, pool_name))
+            lines.append(_server_line(ep.address, pool_name, profile.transport, ep.tls_hostname))
         trigger = suffix_domain + "."
         lines.append(
             f'addAction(SuffixMatchNodeRule({{{_lua_string(trigger)}}}), PoolAction({_lua_string(pool_name)}))'

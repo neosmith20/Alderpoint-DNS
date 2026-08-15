@@ -18,12 +18,13 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app.v2 import migration as mig  # noqa: E402
+from tests.v2._v1_fixture import build_v1_fixture  # noqa: E402
 
 
 def _make_fake_source(td: Path) -> Path:
     source = td / "fake-v1-install"
     source.mkdir()
-    (source / "alderpointdns.db").write_text("pretend this is a sqlite file")
+    build_v1_fixture(source / "alderpointdns.db")
     return source
 
 
@@ -32,11 +33,11 @@ class TestPreviewDoesNotMutateSource(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
             source = _make_fake_source(td)
-            before = (source / "alderpointdns.db").read_text()
+            before = (source / "alderpointdns.db").read_bytes()
 
             state = mig.run_migration(source, td / "staging", stop_before="migrate_config")
 
-            after = (source / "alderpointdns.db").read_text()
+            after = (source / "alderpointdns.db").read_bytes()
             self.assertEqual(before, after)
             self.assertIn("preview", state.completed_stages)
 
@@ -56,7 +57,7 @@ class TestHappyPath(unittest.TestCase):
             td = Path(td)
             source = _make_fake_source(td)
             mig.run_migration(source, td / "staging")
-            backup_copy = td / "staging" / "pre-migration-backup" / "alderpointdns.db"
+            backup_copy = td / "staging" / "pre-migration-backup.db"
             self.assertTrue(backup_copy.exists())
 
 
@@ -78,7 +79,7 @@ class TestFailureRollback(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
             source = _make_fake_source(td)
-            before = (source / "alderpointdns.db").read_text()
+            before = (source / "alderpointdns.db").read_bytes()
 
             with mock.patch.dict(
                 mig._STAGE_FUNCS,
@@ -87,7 +88,7 @@ class TestFailureRollback(unittest.TestCase):
                 with self.assertRaises(mig.MigrationError):
                     mig.run_migration(source, td / "staging")
 
-            after = (source / "alderpointdns.db").read_text()
+            after = (source / "alderpointdns.db").read_bytes()
             self.assertEqual(before, after)
 
     def test_detect_stage_failure_on_missing_source(self):

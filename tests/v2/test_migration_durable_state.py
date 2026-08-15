@@ -19,13 +19,14 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app.v2 import migration as mig  # noqa: E402
+from tests.v2._v1_fixture import build_v1_fixture  # noqa: E402
 from app.v2 import migration_state as mstate  # noqa: E402
 
 
 def _make_fake_source(td: Path) -> Path:
     source = td / "fake-v1-install"
     source.mkdir()
-    (source / "alderpointdns.db").write_text("pretend this is a sqlite file")
+    build_v1_fixture(source / "alderpointdns.db")
     return source
 
 
@@ -148,7 +149,7 @@ class TestCrashRestartAtEachStage(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as td:
                     td = Path(td)
                     source = _make_fake_source(td)
-                    before = (source / "alderpointdns.db").read_text()
+                    before = (source / "alderpointdns.db").read_bytes()
                     state_path = td / "migration_state.json"
                     record = mstate.MigrationRecord.new(
                         source_version="1.1.1", target_version="2.0.0",
@@ -174,7 +175,7 @@ class TestCrashRestartAtEachStage(unittest.TestCase):
                     self.assertTrue(final_state.committed)
                     self.assertEqual(final_state.completed_stages, list(mig.STAGES))
 
-                    after = (source / "alderpointdns.db").read_text()
+                    after = (source / "alderpointdns.db").read_bytes()
                     self.assertEqual(before, after, f"source mutated when restarting at {boundary_stage}")
 
                     final_record = mstate.load(state_path)
