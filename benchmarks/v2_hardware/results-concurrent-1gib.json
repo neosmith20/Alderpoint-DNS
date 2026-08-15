@@ -1,0 +1,11 @@
+{
+  "label": "1gib",
+  "duration_s": 15.0,
+  "dns_queries": 428,
+  "dns_p50_ms": 25.977,
+  "dns_p95_ms": 37.515,
+  "dns_p99_ms": 46.39,
+  "analytics_batches": 45,
+  "argon2_hashes": 16,
+  "policy_compiles": 438265
+}

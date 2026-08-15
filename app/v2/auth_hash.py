@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 
+from app.v2.auth_concurrency import HashConcurrencyLimiter
+
 try:  # argon2-cffi >= 23 renamed InvalidHash -> InvalidHashError
     from argon2.exceptions import InvalidHashError
 except ImportError:  # pragma: no cover - depends on installed argon2-cffi version
@@ -64,11 +66,27 @@ def make_hasher(
 _default_hasher = make_hasher()
 
 
-def hash_password(password: str, *, pepper: str | None = None, hasher: PasswordHasher | None = None) -> str:
-    """Return an encoded Argon2id hash (PHC string, includes salt + params)."""
+def hash_password(
+    password: str,
+    *,
+    pepper: str | None = None,
+    hasher: PasswordHasher | None = None,
+    limiter: "HashConcurrencyLimiter | None" = None,
+) -> str:
+    """Return an encoded Argon2id hash (PHC string, includes salt + params).
+
+    ``limiter`` (``app/v2/auth_concurrency.py``, §38) bounds how many
+    concurrent Argon2id operations may run at once, protecting memory
+    under concurrent-login load; omitted by default (``None``) so existing
+    callers/tests are unaffected -- a real deployment wires one shared
+    limiter instance through every login/hash call site.
+    """
     hasher = hasher or _default_hasher
     material = password if pepper is None else f"{pepper}{password}"
-    return hasher.hash(material)
+    if limiter is None:
+        return hasher.hash(material)
+    with limiter.slot():
+        return hasher.hash(material)
 
 
 @dataclass
@@ -84,14 +102,28 @@ def verify_password(
     *,
     pepper: str | None = None,
     hasher: PasswordHasher | None = None,
+    limiter: "HashConcurrencyLimiter | None" = None,
 ) -> VerifyResult:
     """Verify a password against an encoded hash.
 
     Malformed/foreign hashes fail closed (ok=False, error set) rather than
     raising — callers should not need a try/except around every login check.
+    A saturated ``limiter`` (§38) is deliberately NOT treated the same way:
+    ``TooManyConcurrentHashesError`` propagates rather than being folded
+    into ``VerifyResult(ok=False)``, so a caller can distinguish "wrong
+    password" from "system under load, retry" and respond accordingly
+    (e.g. a 503, not a fake login failure that could confuse a real user
+    or get logged as a suspicious failed-auth attempt it isn't).
     """
     hasher = hasher or _default_hasher
     material = password if pepper is None else f"{pepper}{password}"
+    if limiter is not None:
+        with limiter.slot():
+            return _do_verify(hasher, encoded_hash, material)
+    return _do_verify(hasher, encoded_hash, material)
+
+
+def _do_verify(hasher: PasswordHasher, encoded_hash: str, material: str) -> VerifyResult:
     try:
         hasher.verify(encoded_hash, material)
     except VerifyMismatchError:
