@@ -48,6 +48,9 @@ from app.v2 import config as v2config  # noqa: E402
 from app.v2 import control_db  # noqa: E402
 from app.v2 import dnsdist_gen  # noqa: E402
 from app.v2 import policy_store  # noqa: E402
+from app.v2 import node_identity  # noqa: E402
+from app.v2 import observed_clients  # noqa: E402
+from app.v2 import replication_v2  # noqa: E402
 from app.v2 import schedule_runtime  # noqa: E402
 from app.v2 import secret_store  # noqa: E402
 from app.v2.dnsdist_gen import stage_and_validate_dnsdist_config  # noqa: E402
@@ -90,6 +93,10 @@ COMPILED_DIR = STATE_DIR / "compiled"
 CERTS_DIR = STATE_DIR / "certs"
 ACTIVE_CERT_PATH = CERTS_DIR / "server.crt"
 ACTIVE_KEY_PATH = CERTS_DIR / "server.key"
+REPLICATION_DIR = STATE_DIR / "replication"
+REPLICATION_SERVER_CERT_PATH = REPLICATION_DIR / "server.crt"
+REPLICATION_SERVER_KEY_PATH = REPLICATION_DIR / "server.key"
+REPLICATION_CA_PATH = REPLICATION_DIR / "trust-ca.pem"
 BOOTSTRAP_TOKEN_PATH = STATE_DIR / "bootstrap-setup-token"
 SCHEDULE_STATE_FILE = STATE_DIR / "schedule" / "schedule-transition-state.json"
 
@@ -144,6 +151,7 @@ def cmd_init_state(args: argparse.Namespace) -> int:
     _chown_best_effort(BACKUPS_DIR, 0o750)
     _chown_best_effort(STAGING_DIR, 0o750)
     _chown_best_effort(CERTS_DIR, 0o750)
+    _chown_best_effort(REPLICATION_DIR, 0o750)
     # compiled/ is read by dnsdist/named-equivalent processes (a separate
     # future concern, per app/v2/dnsdist_gen.py's own module docstring on
     # why it's not authoritative yet) -- world-readable-by-group like the
@@ -167,6 +175,12 @@ def cmd_init_state(args: argparse.Namespace) -> int:
 
     control_db.initialize(CONTROL_DB)
     policy_store.ensure_schema(CONTROL_DB)
+    node_identity.ensure_schema(CONTROL_DB)
+    observed_clients.ensure_schema(CONTROL_DB)
+    replication_v2.ensure_schema(CONTROL_DB)
+    with control_db.connect(CONTROL_DB) as conn:
+        ident = node_identity.get_or_create(conn)
+    print(f"node identity ready: {ident.node_id}")
     print(f"control.db ready: {CONTROL_DB} (schema version {control_db.schema_version(CONTROL_DB)})")
 
     store = secret_store.SecretStore(SECRETS_DIR)
@@ -203,6 +217,34 @@ def cmd_init_state(args: argparse.Namespace) -> int:
 
     cmd_ensure_tls_cert(args)
 
+    return 0
+
+
+def cmd_init_replication_cert(args: argparse.Namespace) -> int:
+    """Create a local private CA + node certificate for replication mTLS if
+    absent. Operators may replace these with administrator-managed trust
+    through the API; this bootstrap never overwrites known-good material.
+    """
+    REPLICATION_DIR.mkdir(parents=True, exist_ok=True)
+    if REPLICATION_SERVER_CERT_PATH.exists() and REPLICATION_SERVER_KEY_PATH.exists() and REPLICATION_CA_PATH.exists():
+        print(f"replication TLS material already present: {REPLICATION_DIR}")
+        return 0
+    replication_v2.ensure_schema(CONTROL_DB)
+    with control_db.connect(CONTROL_DB) as conn:
+        ident = node_identity.get_or_create(conn)
+    ca_pem, ca_key_pem = replication_v2.generate_private_ca(f"apdns-v2-ca-{ident.node_id}")
+    cert_pem, key_pem = replication_v2.issue_node_cert(ca_pem, ca_key_pem, ident.node_id, server_name="localhost")
+    fd = os.open(REPLICATION_CA_PATH, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(ca_pem)
+    fd = os.open(REPLICATION_SERVER_CERT_PATH, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(cert_pem)
+    fd = os.open(REPLICATION_SERVER_KEY_PATH, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(key_pem)
+    _chown_best_effort(REPLICATION_DIR, 0o750)
+    print(f"replication TLS material created: node_id={ident.node_id} fingerprint={replication_v2.cert_fingerprint_sha256(cert_pem)}")
     return 0
 
 
@@ -368,6 +410,69 @@ def cmd_analytics_worker(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_discovery_worker(args: argparse.Namespace) -> int:
+    """Drains JSONL DNS-observation inbox files into bounded observed-client
+    state. A DNS-side producer writes tiny records here; failures are
+    recorded and never affect DNS answering.
+    """
+    observed_clients.ensure_schema(CONTROL_DB)
+    inbox = STATE_DIR / "discovery" / "inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+
+    def _drain_once() -> int:
+        processed = 0
+        with control_db.connect(CONTROL_DB) as conn:
+            for f in sorted(inbox.glob("*.jsonl")):
+                try:
+                    observations = []
+                    for line in f.read_text(encoding="utf-8").splitlines():
+                        if not line.strip():
+                            continue
+                        obj = json.loads(line)
+                        observations.append(
+                            observed_clients.Observation(
+                                obj["source_ip"],
+                                obj.get("hostname_candidate", ""),
+                                obj.get("hostname_source", "dns"),
+                                float(obj.get("ts", time.time())),
+                            )
+                        )
+                    processed += observed_clients.apply_observations(conn, observations)
+                    f.unlink()
+                except Exception as exc:  # noqa: BLE001
+                    log.error("failed processing discovery inbox file %s: %s", f, exc)
+                    conn.execute("UPDATE observed_client_stats SET last_error=? WHERE id=1", (str(exc)[:512],))
+        return processed
+
+    if args.once:
+        n = _drain_once()
+        print(f"discovery-worker: processed {n} observations")
+        return 0
+    _run_loop(_drain_once, args.interval_seconds)
+    return 0
+
+
+def cmd_replication_server(args: argparse.Namespace) -> int:
+    cmd_init_replication_cert(args)
+    replication_v2.ensure_schema(CONTROL_DB)
+    httpd = replication_v2.serve(
+        bind=(args.host, args.port),
+        server_cert=REPLICATION_SERVER_CERT_PATH,
+        server_key=REPLICATION_SERVER_KEY_PATH,
+        ca_file=REPLICATION_CA_PATH,
+        control_db_path=CONTROL_DB,
+        secrets_dir=SECRETS_DIR,
+        staging_dir=STAGING_DIR,
+        live_dnsdist_conf_path=COMPILED_DIR / "dnsdist.conf",
+    )
+    print(f"replication-server: listening on {args.host}:{args.port}")
+    try:
+        httpd.serve_forever()
+    finally:
+        httpd.server_close()
+    return 0
+
+
 # --- tier-b-worker ---------------------------------------------------------
 
 
@@ -468,6 +573,7 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("init-state").set_defaults(func=cmd_init_state)
     sub.add_parser("ensure-tls-cert").set_defaults(func=cmd_ensure_tls_cert)
+    sub.add_parser("init-replication-cert").set_defaults(func=cmd_init_replication_cert)
 
     p = sub.add_parser("generate-runtime")
     p.add_argument("--dnsdist-binary", default="dnsdist")
@@ -479,6 +585,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--inject-test-event", action="store_true")
     p.add_argument("--interval-seconds", type=float, default=15.0)
     p.set_defaults(func=cmd_analytics_worker)
+
+    p = sub.add_parser("discovery-worker")
+    p.add_argument("--once", action="store_true")
+    p.add_argument("--interval-seconds", type=float, default=15.0)
+    p.set_defaults(func=cmd_discovery_worker)
+
+    p = sub.add_parser("replication-server")
+    p.add_argument("--host", default="0.0.0.0")
+    p.add_argument("--port", type=int, default=9443)
+    p.set_defaults(func=cmd_replication_server)
 
     p = sub.add_parser("tier-b-worker")
     p.add_argument("--once", action="store_true")

@@ -1,0 +1,355 @@
+"""Bounded observational client discovery for V2.
+
+This is an aggregate observation store, not raw query history. One row per
+source address is retained with caps/expiry; DNS callers enqueue tiny events
+and a worker coalesces them asynchronously.
+"""
+
+from __future__ import annotations
+
+import ipaddress
+import queue
+import re
+import sqlite3
+import threading
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+from app.v2 import control_db
+
+OBSERVED_SCHEMA_VERSION = 5
+DEFAULT_MAX_ENTRIES = 4096
+DEFAULT_EXPIRY_DAYS = 30
+MAX_HOSTNAME_LEN = 253
+
+_MIGRATION: list[str] = [
+    """
+    CREATE TABLE IF NOT EXISTS observed_clients (
+        source_ip TEXT PRIMARY KEY,
+        address_family TEXT NOT NULL CHECK(address_family IN ('ipv4','ipv6')),
+        first_seen TEXT NOT NULL,
+        last_seen TEXT NOT NULL,
+        query_count INTEGER NOT NULL DEFAULT 0,
+        hostname_candidate TEXT NOT NULL DEFAULT '',
+        hostname_source TEXT NOT NULL DEFAULT '',
+        managed_client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL,
+        dismissed INTEGER NOT NULL DEFAULT 0,
+        confidence TEXT NOT NULL DEFAULT 'dns-observed'
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS observed_client_stats (
+        id INTEGER PRIMARY KEY CHECK(id = 1),
+        dropped INTEGER NOT NULL DEFAULT 0,
+        evicted INTEGER NOT NULL DEFAULT 0,
+        coalesced INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT NOT NULL DEFAULT ''
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS observed_client_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    )
+    """,
+]
+
+
+@dataclass(frozen=True)
+class Observation:
+    source_ip: str
+    hostname_candidate: str = ""
+    hostname_source: str = ""
+    ts: float = 0.0
+
+
+class ObservationQueue:
+    def __init__(self, capacity: int = 2048):
+        if capacity <= 0:
+            raise ValueError("capacity must be positive")
+        self.capacity = capacity
+        self._q: queue.Queue[Observation] = queue.Queue(maxsize=capacity)
+        self.dropped = 0
+        self.coalesced = 0
+        self._recent: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def submit(self, source_ip: str, *, hostname_candidate: str = "", hostname_source: str = "") -> bool:
+        obs = Observation(source_ip, hostname_candidate, hostname_source, time.time())
+        with self._lock:
+            last = self._recent.get(source_ip)
+            if last is not None and obs.ts - last < 0.25:
+                self.coalesced += 1
+                return True
+            self._recent[source_ip] = obs.ts
+            if len(self._recent) > self.capacity * 2:
+                cutoff = obs.ts - 60
+                self._recent = {k: v for k, v in self._recent.items() if v >= cutoff}
+        try:
+            self._q.put_nowait(obs)
+            return True
+        except queue.Full:
+            self.dropped += 1
+            return False
+
+    def drain(self, max_items: int = 512) -> list[Observation]:
+        items: list[Observation] = []
+        for _ in range(max_items):
+            try:
+                items.append(self._q.get_nowait())
+            except queue.Empty:
+                break
+        return items
+
+    def __len__(self) -> int:
+        return self._q.qsize()
+
+
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone() is not None
+
+
+def ensure_schema(path: str | Path) -> None:
+    control_db.initialize(path)
+    with control_db.connect(path) as conn:
+        present = _table_exists(conn, "observed_clients")
+    if not present:
+        control_db.apply_migration_in_transaction(path, _MIGRATION, OBSERVED_SCHEMA_VERSION)
+    with control_db.connect(path) as conn:
+        conn.execute("INSERT OR IGNORE INTO observed_client_stats(id) VALUES (1)")
+        conn.execute(
+            "INSERT OR IGNORE INTO observed_client_settings(key, value) VALUES ('max_entries', ?)",
+            (str(DEFAULT_MAX_ENTRIES),),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO observed_client_settings(key, value) VALUES ('expiry_days', ?)",
+            (str(DEFAULT_EXPIRY_DAYS),),
+        )
+
+
+def _now_iso(ts: float | None = None) -> str:
+    return datetime.fromtimestamp(ts if ts else time.time(), tz=timezone.utc).isoformat()
+
+
+def sanitize_hostname(value: str) -> str:
+    value = value.strip().strip(".")
+    value = "".join(ch for ch in value if ch.isprintable() and ch not in "\r\n\t<>\"'`;&|$")
+    value = value[:MAX_HOSTNAME_LEN]
+    if not value:
+        return ""
+    labels = []
+    for label in value.split("."):
+        label = re.sub(r"[^A-Za-z0-9-]", "-", label).strip("-")[:63]
+        if label:
+            labels.append(label.lower())
+    return ".".join(labels)[:MAX_HOSTNAME_LEN]
+
+
+def _managed_client_for_ip(conn: sqlite3.Connection, source_ip: str) -> Optional[int]:
+    ip = ipaddress.ip_address(source_ip)
+    for client_id, kind, value in conn.execute("SELECT client_id, kind, value FROM client_identifiers").fetchall():
+        try:
+            if kind in ("ipv4", "ipv6") and ip == ipaddress.ip_address(value):
+                return client_id
+            if kind in ("ipv4_cidr", "ipv6_cidr") and ip in ipaddress.ip_network(value, strict=False):
+                return client_id
+        except ValueError:
+            continue
+    return None
+
+
+def settings(conn: sqlite3.Connection) -> dict[str, int]:
+    rows = dict(conn.execute("SELECT key, value FROM observed_client_settings").fetchall())
+    return {
+        "max_entries": max(1, min(100000, int(rows.get("max_entries", DEFAULT_MAX_ENTRIES)))),
+        "expiry_days": max(1, min(3650, int(rows.get("expiry_days", DEFAULT_EXPIRY_DAYS)))),
+    }
+
+
+def update_settings(conn: sqlite3.Connection, *, max_entries: int | None = None, expiry_days: int | None = None) -> None:
+    if max_entries is not None:
+        if max_entries < 1 or max_entries > 100000:
+            raise ValueError("max_entries must be between 1 and 100000")
+        conn.execute(
+            "INSERT INTO observed_client_settings(key, value) VALUES ('max_entries', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(max_entries),),
+        )
+    if expiry_days is not None:
+        if expiry_days < 1 or expiry_days > 3650:
+            raise ValueError("expiry_days must be between 1 and 3650")
+        conn.execute(
+            "INSERT INTO observed_client_settings(key, value) VALUES ('expiry_days', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(expiry_days),),
+        )
+
+
+def apply_observations(conn: sqlite3.Connection, observations: list[Observation]) -> int:
+    if not observations:
+        return 0
+    applied = 0
+    for obs in observations[:1024]:
+        ip = ipaddress.ip_address(obs.source_ip)
+        family = "ipv6" if ip.version == 6 else "ipv4"
+        ts = _now_iso(obs.ts)
+        hostname = sanitize_hostname(obs.hostname_candidate)
+        managed_id = _managed_client_for_ip(conn, str(ip))
+        conn.execute(
+            """
+            INSERT INTO observed_clients(
+                source_ip, address_family, first_seen, last_seen, query_count,
+                hostname_candidate, hostname_source, managed_client_id
+            ) VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+            ON CONFLICT(source_ip) DO UPDATE SET
+                last_seen=excluded.last_seen,
+                query_count=query_count + 1,
+                hostname_candidate=CASE WHEN excluded.hostname_candidate != '' THEN excluded.hostname_candidate ELSE hostname_candidate END,
+                hostname_source=CASE WHEN excluded.hostname_candidate != '' THEN excluded.hostname_source ELSE hostname_source END,
+                managed_client_id=COALESCE(excluded.managed_client_id, managed_client_id),
+                dismissed=0
+            """,
+            (str(ip), family, ts, ts, hostname, obs.hostname_source if hostname else "", managed_id),
+        )
+        applied += 1
+    enforce_retention(conn)
+    return applied
+
+
+def enforce_retention(conn: sqlite3.Connection) -> None:
+    cfg = settings(conn)
+    cutoff = _now_iso(time.time() - cfg["expiry_days"] * 86400)
+    cur = conn.execute("DELETE FROM observed_clients WHERE managed_client_id IS NULL AND last_seen < ?", (cutoff,))
+    evicted = cur.rowcount if cur.rowcount else 0
+    count = conn.execute("SELECT count(*) FROM observed_clients").fetchone()[0]
+    over = max(0, count - cfg["max_entries"])
+    if over:
+        rows = conn.execute(
+            "SELECT source_ip FROM observed_clients WHERE managed_client_id IS NULL ORDER BY last_seen ASC LIMIT ?",
+            (over,),
+        ).fetchall()
+        for (source_ip,) in rows:
+            conn.execute("DELETE FROM observed_clients WHERE source_ip=?", (source_ip,))
+        evicted += len(rows)
+    if evicted:
+        conn.execute("UPDATE observed_client_stats SET evicted=evicted+? WHERE id=1", (evicted,))
+
+
+def list_observed(conn: sqlite3.Connection, *, limit: int = 100, offset: int = 0, search: str = "") -> dict:
+    limit = max(1, min(500, limit))
+    offset = max(0, offset)
+    where = ""
+    params: list[object] = []
+    if search:
+        where = "WHERE source_ip LIKE ? OR hostname_candidate LIKE ?"
+        params.extend([f"%{search[:128]}%", f"%{search[:128]}%"])
+    total = conn.execute(f"SELECT count(*) FROM observed_clients {where}", params).fetchone()[0]
+    rows = conn.execute(
+        f"""
+        SELECT source_ip, address_family, first_seen, last_seen, query_count,
+               hostname_candidate, hostname_source, managed_client_id, dismissed, confidence
+        FROM observed_clients {where}
+        ORDER BY last_seen DESC LIMIT ? OFFSET ?
+        """,
+        (*params, limit, offset),
+    ).fetchall()
+    return {
+        "total": total,
+        "observed_clients": [_row_dict(r) for r in rows],
+    }
+
+
+def get_observed(conn: sqlite3.Connection, source_ip: str) -> dict:
+    source_ip = str(ipaddress.ip_address(source_ip))
+    row = conn.execute(
+        """
+        SELECT source_ip, address_family, first_seen, last_seen, query_count,
+               hostname_candidate, hostname_source, managed_client_id, dismissed, confidence
+        FROM observed_clients WHERE source_ip=?
+        """,
+        (source_ip,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"unknown observed client: {source_ip}")
+    return _row_dict(row)
+
+
+def _row_dict(row) -> dict:
+    return {
+        "source_ip": row[0],
+        "address_family": row[1],
+        "first_seen": row[2],
+        "last_seen": row[3],
+        "query_count": row[4],
+        "hostname_candidate": row[5],
+        "hostname_source": row[6],
+        "managed_client_id": row[7],
+        "dismissed": bool(row[8]),
+        "confidence": row[9],
+    }
+
+
+def forget(conn: sqlite3.Connection, source_ip: str) -> None:
+    source_ip = str(ipaddress.ip_address(source_ip))
+    conn.execute("DELETE FROM observed_clients WHERE source_ip=?", (source_ip,))
+
+
+def stats(conn: sqlite3.Connection, *, queue_obj: ObservationQueue | None = None) -> dict:
+    row = conn.execute("SELECT dropped, evicted, coalesced, last_error FROM observed_client_stats WHERE id=1").fetchone()
+    count = conn.execute("SELECT count(*) FROM observed_clients").fetchone()[0]
+    return {
+        "observed_count": count,
+        "dropped": row[0] + (queue_obj.dropped if queue_obj else 0),
+        "evicted": row[1],
+        "coalesced": row[2] + (queue_obj.coalesced if queue_obj else 0),
+        "last_error": row[3],
+        "settings": settings(conn),
+        "queue_depth": len(queue_obj) if queue_obj else 0,
+    }
+
+
+def promote(
+    conn: sqlite3.Connection,
+    source_ip: str,
+    *,
+    display_name: str,
+    groups: list[str] | None = None,
+    policy_override: dict | None = None,
+) -> int:
+    source_ip = str(ipaddress.ip_address(source_ip))
+    observed = get_observed(conn, source_ip)
+    if observed["managed_client_id"] is not None:
+        return int(observed["managed_client_id"])
+    kind = "ipv6" if ipaddress.ip_address(source_ip).version == 6 else "ipv4"
+    now = _now_iso()
+    try:
+        cur = conn.execute(
+            "INSERT INTO clients(name, description, enabled, created_at, updated_at) VALUES (?, ?, 1, ?, ?)",
+            (display_name[:128], "Promoted from observed DNS client discovery", now, now),
+        )
+        client_id = cur.lastrowid
+        conn.execute(
+            "INSERT INTO client_identifiers(client_id, kind, value, created_at) VALUES (?, ?, ?, ?)",
+            (client_id, kind, source_ip, now),
+        )
+    except sqlite3.IntegrityError:
+        existing = _managed_client_for_ip(conn, source_ip)
+        if existing is None:
+            raise
+        client_id = existing
+    for group_id in groups or []:
+        from app.v2 import policy_store
+
+        policy_store.add_client_to_group(conn, client_id, group_id)
+    if policy_override:
+        from app.v2 import policy_store
+        from app.v2.policy_model import PolicyLayer
+
+        policy_store.save_policy_layer(conn, "client", str(client_id), PolicyLayer(**policy_override))
+    conn.execute("UPDATE observed_clients SET managed_client_id=? WHERE source_ip=?", (client_id, source_ip))
+    return int(client_id)

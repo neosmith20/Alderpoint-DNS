@@ -1,0 +1,30 @@
+[Unit]
+Description=Alderpoint DNS V2 mTLS replication service
+After=network.target
+
+[Service]
+Type=simple
+User=alderpointdns-v2
+Group=alderpointdns-v2
+ExecStartPre=/usr/bin/python3 -B /opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_ctl.py init-replication-cert
+ExecStart=/usr/bin/python3 -B /opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_ctl.py replication-server --host 0.0.0.0 --port 9443
+Environment=PYTHONPATH=/opt/alderpointdns-v2/vendor-runtime-v2-analytics:/opt/alderpointdns-v2
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/alderpointdns-v2 /var/log/alderpointdns-v2
+UMask=0027
+CapabilityBoundingSet=
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

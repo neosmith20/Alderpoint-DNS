@@ -32,7 +32,7 @@ SOURCE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 # appropriate to this branch." 2.0.0~privateN-1: "~" sorts before the
 # final 2.0.0-1 this candidate is a pre-release of, same convention V1's
 # own build-deb.sh already uses for beta/dev/rc tags.
-DEB_VERSION="2.0.0~private2-1"
+DEB_VERSION="2.0.0~private3-1"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -103,6 +103,8 @@ cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-analytics.service" "$PKG/lib/syste
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-tierb.service" "$PKG/lib/systemd/system/alderpointdns-v2-tierb.service"
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-schedule.service" "$PKG/lib/systemd/system/alderpointdns-v2-schedule.service"
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-web.service" "$PKG/lib/systemd/system/alderpointdns-v2-web.service"
+cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-discovery.service" "$PKG/lib/systemd/system/alderpointdns-v2-discovery.service"
+cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-replication.service" "$PKG/lib/systemd/system/alderpointdns-v2-replication.service"
 
 cp "$SOURCE_DIR/LICENSE" "$PKG/usr/share/doc/alderpointdns-v2/LICENSE"
 cp "$SOURCE_DIR/COPYRIGHT" "$PKG/usr/share/doc/alderpointdns-v2/copyright"

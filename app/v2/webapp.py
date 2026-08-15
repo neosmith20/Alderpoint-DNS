@@ -41,9 +41,12 @@ from pydantic import BaseModel, Field
 from app.v2 import analytics_deps
 from app.v2 import control_db
 from app.v2 import migration_convert
+from app.v2 import node_identity
 from app.v2 import notification_store
+from app.v2 import observed_clients
 from app.v2 import policy_service
 from app.v2 import policy_store as store
+from app.v2 import replication_v2
 from app.v2 import runtime_compile
 from app.v2 import tls_cert
 from app.v2.analytics_service import AnalyticsService
@@ -162,6 +165,12 @@ def _secrets() -> SecretStore:
     return SecretStore(SECRETS_DIR)
 
 
+def _ensure_extended_schemas() -> None:
+    node_identity.ensure_schema(CONTROL_DB)
+    observed_clients.ensure_schema(CONTROL_DB)
+    replication_v2.ensure_schema(CONTROL_DB)
+
+
 def _client_ip(request: Request) -> str:
     # §8: no X-Forwarded-* trust -- this service has no configured trusted
     # proxy in this pass, so the only client identity ever used is the
@@ -195,6 +204,12 @@ async def _validation_error_handler(request: Request, exc: ValueError):
     return JSONResponse(status_code=400, content={"error": "validation_error", "detail": str(exc)})
 
 
+@app.exception_handler(HTTPException)
+async def _http_exception_handler(request: Request, exc: HTTPException):
+    detail = exc.detail if isinstance(exc.detail, dict) else {"error": "http_error", "detail": str(exc.detail)}
+    return JSONResponse(status_code=exc.status_code, content=detail)
+
+
 @app.exception_handler(RuntimeCompileError)
 async def _runtime_compile_error_handler(request: Request, exc: RuntimeCompileError):
     return JSONResponse(
@@ -205,8 +220,6 @@ async def _runtime_compile_error_handler(request: Request, exc: RuntimeCompileEr
 
 @app.exception_handler(Exception)
 async def _unhandled_exception_handler(request: Request, exc: Exception):
-    if isinstance(exc, HTTPException):
-        raise exc
     # Anything else: a safe, generic 500 -- never the traceback, filesystem
     # paths, SQL text, or crypto material (§36).
     return JSONResponse(status_code=500, content={"error": "internal_error", "detail": "an internal error occurred"})
@@ -427,6 +440,15 @@ def health():
     }
     result["components"]["tier_b"] = {"state_present": TIER_B_STATE_FILE.exists()}
     result["components"]["schedule_worker"] = {"state_present": SCHEDULE_STATE_FILE.exists()}
+    try:
+        _ensure_extended_schemas()
+        with _db() as conn:
+            result["components"]["node_identity"] = {"node_id": node_identity.get_or_create(conn).node_id}
+            result["components"]["client_discovery"] = observed_clients.stats(conn)
+            result["components"]["replication"] = {"peers": len(replication_v2.list_peers(conn))}
+    except Exception as exc:
+        result["components"]["replication_discovery"] = {"status": "unavailable", "detail": str(exc)}
+        result["status"] = "degraded"
     return result
 
 
@@ -544,6 +566,32 @@ def create_client(req: ClientCreate, admin=Depends(current_admin), x_csrf_token:
         )
         client_id = cur.lastrowid
     return {"status": "created", "client_id": client_id}
+
+
+class ClientIdentifierCreate(BaseModel):
+    kind: str
+    value: str
+
+
+@app.post("/api/clients/{client_id}/identifiers")
+def add_client_identifier(client_id: int, req: ClientIdentifierCreate, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    if req.kind not in ("ipv4", "ipv4_cidr", "ipv6", "ipv6_cidr", "clientid"):
+        raise ApiError(400, "validation_error", "invalid identifier kind")
+    if req.kind in ("ipv4", "ipv6"):
+        ipaddress.ip_address(req.value)
+    elif req.kind in ("ipv4_cidr", "ipv6_cidr"):
+        ipaddress.ip_network(req.value, strict=False)
+    now = datetime.now(timezone.utc).isoformat()
+    with _db() as conn:
+        exists = conn.execute("SELECT 1 FROM clients WHERE id=?", (client_id,)).fetchone()
+        if not exists:
+            raise ApiError(404, "not_found", "unknown client")
+        conn.execute(
+            "INSERT INTO client_identifiers(client_id, kind, value, created_at) VALUES (?, ?, ?, ?)",
+            (client_id, req.kind, req.value, now),
+        )
+    return {"status": "created"}
 
 
 @app.get("/api/policy/explain")
@@ -757,6 +805,188 @@ def create_secret_backup(admin=Depends(current_admin), x_csrf_token: Optional[st
     # §30: no plaintext secret export -- only a count and a server-side
     # path are returned, never contents.
     return {"status": "created", "secret_count": result.secret_count, "created_at": result.created_at}
+
+
+# --- replication (§4C) ------------------------------------------------------
+
+
+class NodeIdentityUpdate(BaseModel):
+    display_name: str = Field(max_length=128)
+
+
+@app.get("/api/node-identity")
+def node_identity_status(admin=Depends(current_admin)):
+    _ensure_extended_schemas()
+    with _db() as conn:
+        ident = node_identity.get_or_create(conn)
+    return {
+        "node_id": ident.node_id,
+        "display_name": ident.display_name,
+        "created_at": ident.created_at,
+        "regenerated_at": ident.regenerated_at,
+        "restore_clone_semantics": "backup restore retains node_id; active clones must explicitly regenerate identity before adding replication trust",
+    }
+
+
+@app.put("/api/node-identity/display-name")
+def node_identity_display_name(req: NodeIdentityUpdate, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    _ensure_extended_schemas()
+    with _db() as conn:
+        ident = node_identity.set_display_name(conn, req.display_name)
+    return {"node_id": ident.node_id, "display_name": ident.display_name}
+
+
+class ReplicationPeerUpsert(BaseModel):
+    peer_node_id: str = Field(min_length=1, max_length=128)
+    display_name: str = Field(default="", max_length=128)
+    url: str
+    ca_pem: str
+    expected_cert_sha256: str = Field(min_length=64, max_length=64)
+    client_cert_pem: str = ""
+    client_key_pem: str = ""
+    authorized: bool = True
+    direction: str = "bidirectional"
+
+
+@app.get("/api/replication/peers")
+def replication_peers(admin=Depends(current_admin)):
+    _ensure_extended_schemas()
+    with _db() as conn:
+        peers = [p.public_dict() for p in replication_v2.list_peers(conn)]
+    return {"peers": peers}
+
+
+@app.put("/api/replication/peers/{peer_node_id}")
+def replication_upsert_peer(peer_node_id: str, req: ReplicationPeerUpsert, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    if peer_node_id != req.peer_node_id:
+        raise ApiError(400, "validation_error", "path peer id does not match body")
+    _ensure_extended_schemas()
+    with _db() as conn:
+        replication_v2.upsert_peer(conn, **req.model_dump())
+    return {"status": "saved"}
+
+
+@app.delete("/api/replication/peers/{peer_node_id}")
+def replication_delete_peer(peer_node_id: str, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    _ensure_extended_schemas()
+    with _db() as conn:
+        replication_v2.remove_peer(conn, peer_node_id)
+    return {"status": "removed"}
+
+
+@app.get("/api/replication/health")
+def replication_health(admin=Depends(current_admin)):
+    _ensure_extended_schemas()
+    with _db() as conn:
+        ident = node_identity.get_or_create(conn)
+        peers = [p.public_dict() for p in replication_v2.list_peers(conn)]
+    return {"node_id": ident.node_id, "protocol_version": replication_v2.PROTOCOL_VERSION, "peers": peers}
+
+
+@app.post("/api/replication/peers/{peer_node_id}/sync")
+def replication_sync(peer_node_id: str, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    _ensure_extended_schemas()
+    temp_root = STATE_DIR / "replication" / "tmp"
+    with _db() as conn:
+        result = replication_v2.push_to_peer(conn, _secrets(), peer_node_id, temp_root)
+    return {"status": "ok", "result": result}
+
+
+# --- observed client discovery (§4C) ----------------------------------------
+
+
+class ObserveClientRequest(BaseModel):
+    source_ip: str
+    hostname_candidate: str = ""
+    hostname_source: str = "api-test"
+
+
+@app.post("/api/discovery/observe")
+def discovery_observe(req: ObserveClientRequest, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    _ensure_extended_schemas()
+    # Management-injected observation exists for tests and integrations; real
+    # DNS workers use the same observed_clients.apply_observations path.
+    with _db() as conn:
+        observed_clients.apply_observations(
+            conn,
+            [observed_clients.Observation(req.source_ip, req.hostname_candidate, req.hostname_source, time.time())],
+        )
+    return {"status": "observed"}
+
+
+@app.get("/api/discovery/observed-clients")
+def discovery_list(limit: int = 100, offset: int = 0, search: str = "", admin=Depends(current_admin)):
+    _ensure_extended_schemas()
+    with _db() as conn:
+        return observed_clients.list_observed(conn, limit=limit, offset=offset, search=search)
+
+
+@app.get("/api/discovery/observed-clients/{source_ip}")
+def discovery_detail(source_ip: str, admin=Depends(current_admin)):
+    _ensure_extended_schemas()
+    with _db() as conn:
+        return observed_clients.get_observed(conn, source_ip)
+
+
+@app.delete("/api/discovery/observed-clients/{source_ip}")
+def discovery_forget(source_ip: str, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    _ensure_extended_schemas()
+    with _db() as conn:
+        observed_clients.forget(conn, source_ip)
+    return {"status": "forgotten"}
+
+
+class DiscoverySettingsUpdate(BaseModel):
+    max_entries: Optional[int] = None
+    expiry_days: Optional[int] = None
+
+
+@app.get("/api/discovery/status")
+def discovery_status(admin=Depends(current_admin)):
+    _ensure_extended_schemas()
+    with _db() as conn:
+        return observed_clients.stats(conn)
+
+
+@app.put("/api/discovery/settings")
+def discovery_settings(req: DiscoverySettingsUpdate, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    _ensure_extended_schemas()
+    with _db() as conn:
+        observed_clients.update_settings(conn, max_entries=req.max_entries, expiry_days=req.expiry_days)
+        observed_clients.enforce_retention(conn)
+        return observed_clients.stats(conn)
+
+
+class PromoteObservedRequest(BaseModel):
+    display_name: str = Field(min_length=1, max_length=128)
+    groups: list[str] = []
+    policy_override: dict[str, Any] = {}
+
+
+@app.post("/api/discovery/observed-clients/{source_ip}/promote")
+def discovery_promote(source_ip: str, req: PromoteObservedRequest, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    _ensure_extended_schemas()
+
+    def _mutate(conn):
+        return observed_clients.promote(
+            conn,
+            source_ip,
+            display_name=req.display_name,
+            groups=req.groups,
+            policy_override=req.policy_override or None,
+        )
+
+    holder = {}
+    result = _mutate_and_promote(lambda conn: holder.setdefault("client_id", _mutate(conn)))
+    return {"status": "promoted", "client_id": holder["client_id"], "runtime": {"promoted": result.promoted, "binding_count": result.binding_count}}
 
 
 # --- migration (§32, read-only preview in this pass) ------------------------

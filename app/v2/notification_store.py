@@ -51,8 +51,11 @@ def _now() -> str:
 
 def ensure_schema(path: str | Path) -> None:
     control_db.initialize(path)
-    current = control_db.schema_version(path)
-    if current is not None and current < NOTIFICATION_SCHEMA_VERSION:
+    with control_db.connect(path) as conn:
+        present = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='notification_providers'"
+        ).fetchone() is not None
+    if not present:
         control_db.apply_migration_in_transaction(
             path, _MIGRATION_V3, NOTIFICATION_SCHEMA_VERSION
         )
