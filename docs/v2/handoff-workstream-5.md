@@ -4,10 +4,14 @@
 `docs/v2/gate2-residuals-p0.md`). **Workstream 4A** completed Priority 1 (real installable .deb
 packaging — see `docs/v2/packaging.md` and `docs/v2/clean-install-evidence.md`) and Priority 2
 (the three real background-worker systemd units, hardened, DNS-first ordering proven under
-simultaneous failure injection). Priorities 3–14 (secret replication mTLS, native HTTPS, client
-discovery, management API, UI, migration realism, full-stack hardware/cache benchmarking beyond
-what packaging validated, security pass, CI/test-suite quality, private RC assembly) remain **not**
-implemented.
+simultaneous failure injection). **Workstream 4B** completed Priority 4 (native HTTPS, real
+self-signed bootstrap + user-cert replacement) and the core of Priority 6 (a real management/API
+service covering policy/network/client/upstream/schedule/analytics/notifications, with the
+mandatory HTTPS-API-to-real-DNS end-to-end proof passing) — see `docs/v2/management-plane.md` and
+`docs/v2/clean-install-evidence-4b.md`. Priority 3 (mTLS secret replication), Priority 5 (client
+discovery), Priority 7 (UI — explicitly out of scope for 4B), migration realism beyond detection,
+full-stack hardware/cache benchmarking, a broader adversarial security pass, CI/test-suite quality,
+and private RC assembly remain **not** implemented.
 
 ## Why this is reported honestly as incomplete rather than fabricated
 
