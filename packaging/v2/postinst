@@ -6,8 +6,9 @@ set -e
 # (alderpointdns-v2), own paths (/opt/alderpointdns-v2, /etc/alderpointdns-v2,
 # /var/lib/alderpointdns-v2, /var/log/alderpointdns-v2), own systemd units
 # (alderpointdns-v2-*). Never touches anything V1 owns. Never binds a real
-# DNS port itself -- this package ships no dnsdist/BIND-managing unit (see
-# docs/v2/packaging.md "Why no dnsdist/BIND/API systemd unit").
+# DNS port itself. The package does ship an observation-only UDP ingress on
+# alternate port 1053 for packet-origin discovery; it is not an authoritative
+# dnsdist/BIND-managing unit.
 
 alderpointdns_v2_wait_active() {
   svc="$1"
@@ -73,11 +74,11 @@ case "$1" in
     chmod 0700 /var/lib/alderpointdns-v2/secrets 2>/dev/null || true
 
     systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl reset-failed alderpointdns-v2-analytics alderpointdns-v2-tierb alderpointdns-v2-schedule alderpointdns-v2-web alderpointdns-v2-discovery alderpointdns-v2-replication >/dev/null 2>&1 || true
-    systemctl enable alderpointdns-v2-analytics alderpointdns-v2-tierb alderpointdns-v2-schedule alderpointdns-v2-web alderpointdns-v2-discovery alderpointdns-v2-replication >/dev/null 2>&1 || true
-    systemctl restart alderpointdns-v2-analytics alderpointdns-v2-tierb alderpointdns-v2-schedule alderpointdns-v2-web alderpointdns-v2-discovery alderpointdns-v2-replication
+    systemctl reset-failed alderpointdns-v2-analytics alderpointdns-v2-tierb alderpointdns-v2-schedule alderpointdns-v2-web alderpointdns-v2-discovery alderpointdns-v2-dns-observer alderpointdns-v2-replication >/dev/null 2>&1 || true
+    systemctl enable alderpointdns-v2-analytics alderpointdns-v2-tierb alderpointdns-v2-schedule alderpointdns-v2-web alderpointdns-v2-discovery alderpointdns-v2-dns-observer alderpointdns-v2-replication >/dev/null 2>&1 || true
+    systemctl restart alderpointdns-v2-analytics alderpointdns-v2-tierb alderpointdns-v2-schedule alderpointdns-v2-web alderpointdns-v2-discovery alderpointdns-v2-dns-observer alderpointdns-v2-replication
 
-    for svc in alderpointdns-v2-analytics alderpointdns-v2-tierb alderpointdns-v2-schedule alderpointdns-v2-web alderpointdns-v2-discovery alderpointdns-v2-replication; do
+    for svc in alderpointdns-v2-analytics alderpointdns-v2-tierb alderpointdns-v2-schedule alderpointdns-v2-web alderpointdns-v2-discovery alderpointdns-v2-dns-observer alderpointdns-v2-replication; do
       if ! alderpointdns_v2_wait_active "$svc"; then
         echo "alderpointdns-v2: $svc did not reach the active state after installation." >&2
         echo "alderpointdns-v2: check 'systemctl status $svc' and 'journalctl -u $svc -n 50' for details." >&2

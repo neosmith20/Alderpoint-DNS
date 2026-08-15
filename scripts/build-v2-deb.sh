@@ -71,12 +71,13 @@ Conflicts: alderpointdns
 Description: Alderpoint DNS V2 -- PRIVATE RELEASE CANDIDATE (not for production)
  Private, pre-release Workstream 4A/4B packaging of Alderpoint DNS V2.
  Ships the V2 policy/analytics/migration engine, the analytics vendor
- runtime (pyarrow/duckdb), four background services (analytics ingestion,
- Tier B prewarm, schedule transitions, and a real native-HTTPS management/
- API service), and self-signed TLS bootstrap. Does NOT ship or manage a
- live authoritative dnsdist/BIND listener or a UI -- V2 is not yet
- authoritative. Never install alongside the V1 "alderpointdns" package on
- the same host that package is serving traffic from.
+ runtime (pyarrow/duckdb), background services (analytics ingestion, Tier B
+ prewarm, schedule transitions, native HTTPS management/API, replication,
+ discovery, and an observation-only DNS packet ingress on alternate port
+ 1053), and self-signed TLS bootstrap. Does NOT ship or manage a live
+ authoritative dnsdist/BIND listener or a UI -- V2 is not yet authoritative.
+ Never install alongside the V1 "alderpointdns" package on the same host
+ that package is serving traffic from.
 EOF
 # Conflicts: alderpointdns is deliberate belt-and-suspenders (Workstream
 # 4A safety constraint: "DO NOT INSTALL THE V2 PACKAGE ON THE HOST") --
@@ -104,6 +105,7 @@ cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-tierb.service" "$PKG/lib/systemd/s
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-schedule.service" "$PKG/lib/systemd/system/alderpointdns-v2-schedule.service"
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-web.service" "$PKG/lib/systemd/system/alderpointdns-v2-web.service"
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-discovery.service" "$PKG/lib/systemd/system/alderpointdns-v2-discovery.service"
+cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-dns-observer.service" "$PKG/lib/systemd/system/alderpointdns-v2-dns-observer.service"
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-replication.service" "$PKG/lib/systemd/system/alderpointdns-v2-replication.service"
 
 cp "$SOURCE_DIR/LICENSE" "$PKG/usr/share/doc/alderpointdns-v2/LICENSE"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import http.client
 import http.server
+import ipaddress
 import json
 import os
 import ssl
@@ -150,6 +151,7 @@ def generate_private_ca(common_name: str) -> tuple[str, str]:
         .not_valid_after(datetime.now(timezone.utc) + timedelta(days=3650))
         .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
         .add_extension(x509.KeyUsage(True, False, False, False, False, True, True, False, False), critical=True)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
         .sign(key, hashes.SHA256())
     )
     return (
@@ -169,6 +171,10 @@ def issue_node_cert(ca_pem: str, ca_key_pem: str, node_id: str, *, server_name: 
     ca_key = serialization.load_pem_private_key(ca_key_pem.encode("utf-8"), password=None)
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, node_id)])
+    try:
+        san_name = x509.IPAddress(ipaddress.ip_address(server_name))
+    except ValueError:
+        san_name = x509.DNSName(server_name)
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
@@ -177,11 +183,13 @@ def issue_node_cert(ca_pem: str, ca_key_pem: str, node_id: str, *, server_name: 
         .serial_number(x509.random_serial_number())
         .not_valid_before(datetime.now(timezone.utc) - timedelta(minutes=1))
         .not_valid_after(datetime.now(timezone.utc) + timedelta(days=825))
-        .add_extension(x509.SubjectAlternativeName([x509.DNSName(server_name)]), critical=False)
+        .add_extension(x509.SubjectAlternativeName([san_name]), critical=False)
         .add_extension(
             x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH, ExtendedKeyUsageOID.CLIENT_AUTH]),
             critical=False,
         )
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
+        .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), critical=False)
         .sign(ca_key, hashes.SHA256())
     )
     return (

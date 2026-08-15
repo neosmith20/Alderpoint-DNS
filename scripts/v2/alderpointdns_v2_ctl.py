@@ -32,7 +32,10 @@ import json
 import logging
 import os
 import signal
+import socket
+import struct
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -452,6 +455,142 @@ def cmd_discovery_worker(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_dns_qname(packet: bytes) -> tuple[str, int, int, bytes]:
+    """Return qname/qtype/qclass/original-question for a simple DNS query.
+
+    The observation ingress is intentionally small: it only needs enough DNS
+    parsing to preserve the question in a valid response and optionally carry
+    a bounded hostname candidate into discovery. Malformed packets raise
+    ValueError and still receive a bounded FORMERR response.
+    """
+    if len(packet) < 12:
+        raise ValueError("short dns packet")
+    offset = 12
+    labels: list[str] = []
+    while True:
+        if offset >= len(packet):
+            raise ValueError("unterminated qname")
+        ln = packet[offset]
+        offset += 1
+        if ln == 0:
+            break
+        if ln & 0xC0:
+            raise ValueError("compressed qname not accepted in query")
+        if ln > 63 or offset + ln > len(packet):
+            raise ValueError("invalid qname label")
+        labels.append(packet[offset : offset + ln].decode("ascii", "ignore"))
+        offset += ln
+    if offset + 4 > len(packet):
+        raise ValueError("missing qtype/qclass")
+    qtype, qclass = struct.unpack("!HH", packet[offset : offset + 4])
+    return ".".join(labels), qtype, qclass, packet[12 : offset + 4]
+
+
+def _dns_response(packet: bytes, *, rcode: int = 0) -> bytes:
+    if len(packet) < 2:
+        return b""
+    txid = packet[:2]
+    try:
+        qname, qtype, qclass, question = _parse_dns_qname(packet)
+    except ValueError:
+        flags = 0x8000 | 0x0080 | 1
+        return txid + struct.pack("!HHHHH", flags, 0, 0, 0, 0)
+    flags_in = struct.unpack("!H", packet[2:4])[0] if len(packet) >= 4 else 0
+    flags = 0x8000 | 0x0080 | (flags_in & 0x0100) | (rcode & 0xF)
+    answers = b""
+    ancount = 0
+    if rcode == 0 and qclass == 1 and qtype == 1 and qname:
+        # TEST-NET-1 answer; this observation-only ingress proves a real DNS
+        # packet path without becoming the authoritative runtime.
+        answers = b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 30, 4) + socket.inet_aton("192.0.2.1")
+        ancount = 1
+    header = txid + struct.pack("!HHHHH", flags, 1, ancount, 0, 0)
+    return header + question + answers
+
+
+def _write_observation_batch(inbox: Path, observations: list[observed_clients.Observation]) -> None:
+    if not observations:
+        return
+    inbox.mkdir(parents=True, exist_ok=True)
+    tmp = inbox / f"dns-{int(time.time() * 1000)}-{os.getpid()}-{threading.get_ident()}.jsonl.tmp"
+    final = tmp.with_suffix("")
+    with tmp.open("w", encoding="utf-8") as fh:
+        for obs in observations[:1024]:
+            fh.write(json.dumps({
+                "source_ip": obs.source_ip,
+                "hostname_candidate": obs.hostname_candidate,
+                "hostname_source": obs.hostname_source,
+                "ts": obs.ts,
+            }, separators=(",", ":")) + "\n")
+    os.replace(tmp, final)
+
+
+def cmd_dns_observer(args: argparse.Namespace) -> int:
+    """Observation-only UDP DNS ingress for package-first discovery tests.
+
+    This is deliberately not the future authoritative dnsdist/BIND runtime.
+    It proves the mandatory packet-origin path by accepting real DNS packets,
+    returning bounded DNS responses, and asynchronously handing source-address
+    observations to the existing discovery worker through the JSONL inbox.
+    """
+    queue = observed_clients.ObservationQueue(capacity=args.queue_capacity)
+    inbox = STATE_DIR / "discovery" / "inbox"
+    stop = {"flag": False}
+
+    def _handle_signal(signum, frame):
+        stop["flag"] = True
+
+    def _flush_loop() -> None:
+        while not stop["flag"]:
+            try:
+                _write_observation_batch(inbox, queue.drain(args.flush_batch_size))
+            except Exception:
+                log.exception("dns-observer flush failed")
+            time.sleep(args.flush_interval_seconds)
+        try:
+            _write_observation_batch(inbox, queue.drain(args.queue_capacity))
+        except Exception:
+            log.exception("dns-observer final flush failed")
+
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
+    flusher = threading.Thread(target=_flush_loop, daemon=True)
+    flusher.start()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(0.5)
+    sock.bind((args.host, args.port))
+    print(f"dns-observer: listening on {args.host}:{args.port}")
+    try:
+        while not stop["flag"]:
+            try:
+                packet, addr = sock.recvfrom(args.max_packet_bytes)
+            except socket.timeout:
+                continue
+            except OSError:
+                if stop["flag"]:
+                    break
+                raise
+            source_ip = addr[0]
+            hostname = ""
+            try:
+                hostname, _qtype, _qclass, _question = _parse_dns_qname(packet)
+            except ValueError:
+                pass
+            queue.submit(source_ip, hostname_candidate=hostname, hostname_source="dns-query")
+            response = _dns_response(packet)
+            if response:
+                try:
+                    sock.sendto(response, addr)
+                except OSError:
+                    log.debug("dns-observer response send failed", exc_info=True)
+    finally:
+        stop["flag"] = True
+        sock.close()
+        flusher.join(timeout=2.0)
+    return 0
+
+
 def cmd_replication_server(args: argparse.Namespace) -> int:
     cmd_init_replication_cert(args)
     replication_v2.ensure_schema(CONTROL_DB)
@@ -590,6 +729,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--once", action="store_true")
     p.add_argument("--interval-seconds", type=float, default=15.0)
     p.set_defaults(func=cmd_discovery_worker)
+
+    p = sub.add_parser("dns-observer")
+    p.add_argument("--host", default="0.0.0.0")
+    p.add_argument("--port", type=int, default=1053)
+    p.add_argument("--queue-capacity", type=int, default=2048)
+    p.add_argument("--flush-batch-size", type=int, default=512)
+    p.add_argument("--flush-interval-seconds", type=float, default=0.5)
+    p.add_argument("--max-packet-bytes", type=int, default=4096)
+    p.set_defaults(func=cmd_dns_observer)
 
     p = sub.add_parser("replication-server")
     p.add_argument("--host", default="0.0.0.0")

@@ -1,0 +1,27 @@
+[Unit]
+Description=Alderpoint DNS V2 packet-origin discovery ingress
+Documentation=man:systemd.service(5)
+After=network.target
+
+[Service]
+Type=simple
+User=alderpointdns-v2
+Group=alderpointdns-v2
+WorkingDirectory=/opt/alderpointdns-v2
+Environment=PYTHONPATH=/opt/alderpointdns-v2
+ExecStart=/usr/bin/python3 -B /opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_ctl.py dns-observer --host 0.0.0.0 --port 1053
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/alderpointdns-v2 /var/log/alderpointdns-v2
+ReadOnlyPaths=/opt/alderpointdns-v2 /etc/alderpointdns-v2
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_UNIX
+SystemCallArchitectures=native
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target
