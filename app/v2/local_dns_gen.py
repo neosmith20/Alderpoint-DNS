@@ -38,12 +38,21 @@ class LocalDnsRecord:
     ttl: int = 300
 
     def __post_init__(self) -> None:
+        from app.v2.dns_name_validate import InvalidDnsNameError, validate_dns_name
+
         if self.record_type not in _VALID_TYPES:
             raise LocalDnsGenError(f"invalid record_type: {self.record_type!r}")
-        if not self.fqdn.strip("."):
-            raise LocalDnsGenError("fqdn must not be empty")
+        try:
+            validate_dns_name(self.fqdn)
+        except InvalidDnsNameError as exc:
+            raise LocalDnsGenError(f"invalid fqdn: {exc}") from exc
         if self.ttl <= 0:
             raise LocalDnsGenError(f"ttl must be positive, got {self.ttl}")
+        if self.record_type in ("CNAME", "PTR"):
+            try:
+                validate_dns_name(self.value)
+            except InvalidDnsNameError as exc:
+                raise LocalDnsGenError(f"invalid {self.record_type} target: {exc}") from exc
         if self.record_type == "A":
             try:
                 ipaddress.IPv4Address(self.value)

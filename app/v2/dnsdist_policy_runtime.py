@@ -52,6 +52,7 @@ from typing import Optional
 from app.v2.blocking_response import BlockingResponse
 from app.v2.dnsdist_gen import _lua_string
 from app.v2.dnsdist_cache_policy import DEFAULT_MAX_CACHE_ENTRIES, DEFAULT_MAX_CACHE_TTL_SECONDS
+from app.v2.dns_name_validate import InvalidDnsNameError, validate_dns_name
 from app.v2.ecs_policy import EcsPolicy, render_dnsdist_directives, server_uses_client_subnet
 from app.v2.network_match import NetworkScope
 from app.v2 import safesearch as safesearch_mod
@@ -159,7 +160,11 @@ def compile_multi_policy_dnsdist_config(
                 )
             )
         for suffix, route_endpoints, route_transport, _strategy in binding.domain_routes:
-            route_pool = f"{pool_name}__route_{suffix.strip('.').replace('.', '_')}"
+            try:
+                validated_suffix = validate_dns_name(suffix)
+            except InvalidDnsNameError as exc:
+                raise PolicyRuntimeError(f"invalid domain routing suffix {suffix!r}: {exc}") from exc
+            route_pool = f"{pool_name}__route_{validated_suffix.replace('.', '_')}"
             for ep in route_endpoints:
                 lines.append(
                     _endpoint_server_line(
@@ -189,9 +194,14 @@ def compile_multi_policy_dnsdist_config(
         if binding.safesearch_providers:
             rewrites = safesearch_mod.rewrites_for_providers(list(binding.safesearch_providers))
             for rw in sorted(rewrites, key=lambda r: r.domain):
-                matcher = f'AndRule({{{net_matcher}, QNameRule({_lua_string(rw.domain + ".")})}})'
+                # safesearch.py's provider table is hardcoded, not
+                # caller-supplied -- validated here anyway as defense in
+                # depth, per §7A's "SafeSearch domains" coverage list.
+                validated_domain = validate_dns_name(rw.domain)
+                validated_target = validate_dns_name(rw.cname_target)
+                matcher = f'AndRule({{{net_matcher}, QNameRule({_lua_string(validated_domain + ".")})}})'
                 lines.append(
-                    f'addAction({matcher}, SpoofCNAMEAction({_lua_string(rw.cname_target + ".")}))'
+                    f'addAction({matcher}, SpoofCNAMEAction({_lua_string(validated_target + ".")}))'
                 )
 
         # 2. Block rules -- terminal.
@@ -199,7 +209,10 @@ def compile_multi_policy_dnsdist_config(
             if domain in binding.allowed_domains:
                 continue  # explicit allow always overrides a block (P0-A precedence)
             response = binding.blocked_domains[domain]
-            trigger = domain.strip(".").lower() + "."
+            try:
+                trigger = validate_dns_name(domain) + "."
+            except InvalidDnsNameError as exc:
+                raise PolicyRuntimeError(f"invalid blocked domain {domain!r}: {exc}") from exc
             matcher = f'AndRule({{{net_matcher}, SuffixMatchNodeRule({{{_lua_string(trigger)}}})}})'
             lines.append(f"addAction({matcher}, {_refused_or_spoof_action(response)})")
 
@@ -207,8 +220,12 @@ def compile_multi_policy_dnsdist_config(
         # suffix first (same precedence fix as Blocker/P0-C).
         routes_sorted = sorted(binding.domain_routes, key=lambda r: (-len(r[0].strip(".")), r[0]))
         for suffix, _eps, _transport, _strategy in routes_sorted:
-            route_pool = f"{pool_name}__route_{suffix.strip('.').replace('.', '_')}"
-            trigger = suffix.strip(".").lower() + "."
+            try:
+                validated_suffix = validate_dns_name(suffix)
+            except InvalidDnsNameError as exc:
+                raise PolicyRuntimeError(f"invalid domain routing suffix {suffix!r}: {exc}") from exc
+            route_pool = f"{pool_name}__route_{validated_suffix.replace('.', '_')}"
+            trigger = validated_suffix + "."
             matcher = f'AndRule({{{net_matcher}, SuffixMatchNodeRule({{{_lua_string(trigger)}}})}})'
             lines.append(f'addAction({matcher}, PoolAction({_lua_string(route_pool)}))')
 

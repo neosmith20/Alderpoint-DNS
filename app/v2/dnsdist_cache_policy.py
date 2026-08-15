@@ -90,7 +90,13 @@ def render_client_scoped_block_rules(rules: list[ClientScopedBlockRule]) -> tupl
     """
     lines = []
     for rule in rules:
-        domain_list = ", ".join(_lua_string(d.strip(".").lower() + ".") for d in rule.domains)
+        from app.v2.dns_name_validate import InvalidDnsNameError, validate_dns_name
+
+        try:
+            validated = [validate_dns_name(d) for d in rule.domains]
+        except InvalidDnsNameError as exc:
+            raise ValueError(f"invalid domain in client-scoped block rule: {exc}") from exc
+        domain_list = ", ".join(_lua_string(d + ".") for d in validated)
         matcher = (
             f'AndRule({{NetmaskGroupRule({{{_lua_string(rule.network.cidr)}}}), '
             f'SuffixMatchNodeRule({{{domain_list}}})}})'

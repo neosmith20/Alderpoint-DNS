@@ -264,8 +264,9 @@ def rebuild_range_from_reader(
     while t < end_ts:
         chunk_end = min(t + chunk_seconds, end_ts)
         result = reader.query_time_window(
-            t, chunk_end, columns="ts, protocol, qtype, client, rcode, upstream, domain, blocked, cache_status",
-            order_by=None, limit=1_000_000,
+            t, chunk_end,
+            columns=["ts", "protocol", "qtype", "client", "rcode", "upstream", "domain", "blocked", "cache_status"],
+            sort_column=None, limit=1_000_000,
         )
         if result.rows:
             records = [

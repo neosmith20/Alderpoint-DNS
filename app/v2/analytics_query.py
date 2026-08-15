@@ -47,6 +47,25 @@ _FILTERABLE_COLUMNS = frozenset({
     "cache_status", "cache_profile_id",
 })
 
+# Gate #2 MEDIUM finding: query_time_window() previously accepted a raw
+# ``columns: str`` SQL projection fragment and a raw ``order_by: str`` SQL
+# clause, interpolated directly into the generated query. Nothing in this
+# codebase currently feeds user content into either (AnalyticsService's
+# public methods never pass non-default values; the one internal caller,
+# aggregates_db.rebuild_range_from_reader, only ever passes a fixed
+# hardcoded string), but accepting arbitrary SQL fragments at all is a
+# needless future injection surface -- removed in favor of an explicit
+# allowlisted projection + a sort-column/sort-direction enum below, per
+# the real Parquet segment schema (app/v2/parquet_writer.py's
+# _COLUMN_NAMES).
+_PROJECTABLE_COLUMNS = frozenset({
+    "id", "ts", "client", "client_name", "domain", "qtype", "protocol",
+    "rcode", "latency_ms", "blocked", "block_reason", "upstream",
+    "cache_status", "cache_profile_id",
+})
+_SORTABLE_COLUMNS = frozenset({"ts", "latency_ms", "domain", "client"})
+_SORT_DIRECTIONS = frozenset({"ASC", "DESC"})
+
 
 @dataclass
 class QueryResult:
@@ -192,15 +211,37 @@ class PartitionPruningReader:
         end_ts: float,
         *,
         filters: dict[str, Any] | None = None,
-        columns: str = "*",
-        order_by: str | None = "ts DESC",
+        columns: list[str] | None = None,
+        sort_column: str | None = "ts",
+        sort_direction: str = "DESC",
         limit: int = DEFAULT_LIMIT,
     ) -> QueryResult:
         """Bounded, parameterized time-window query with optional equality
-        filters. ``filters`` keys must be in ``_FILTERABLE_COLUMNS`` (an
-        allowlist, not caller-controlled SQL) — anything else raises
-        ValueError rather than being silently ignored or interpolated."""
+        filters. ``filters`` keys must be in ``_FILTERABLE_COLUMNS``, and
+        ``columns``/``sort_column``/``sort_direction`` must be in
+        ``_PROJECTABLE_COLUMNS``/``_SORTABLE_COLUMNS``/``_SORT_DIRECTIONS``
+        respectively (fixed allowlists/enums, never caller-controlled raw
+        SQL fragments) — anything else raises ValueError rather than being
+        silently ignored or interpolated. ``columns=None`` means every
+        column (``SELECT *``); ``sort_column=None`` means unsorted.
+        """
         limit = max(1, min(limit, MAX_LIMIT))
+
+        if columns is None:
+            projection = "*"
+        else:
+            invalid = [c for c in columns if c not in _PROJECTABLE_COLUMNS]
+            if invalid:
+                raise ValueError(f"unsupported projection column(s): {invalid}")
+            if not columns:
+                raise ValueError("columns, if given, must not be empty")
+            projection = ", ".join(columns)
+
+        if sort_direction not in _SORT_DIRECTIONS:
+            raise ValueError(f"sort_direction must be one of {sorted(_SORT_DIRECTIONS)}")
+        if sort_column is not None and sort_column not in _SORTABLE_COLUMNS:
+            raise ValueError(f"unsupported sort_column: {sort_column!r}")
+
         files = self._files_for_range(start_ts, end_ts)
         if not files:
             return QueryResult(rows=[], files_considered=0)
@@ -214,9 +255,9 @@ class PartitionPruningReader:
                 raise ValueError(f"unsupported filter column: {key!r}")
             where.append(f"{key} = ?")
             params.append(value)
-        sql = f"SELECT {columns} FROM {src} WHERE " + " AND ".join(where)
-        if order_by:
-            sql += f" ORDER BY {order_by}"
+        sql = f"SELECT {projection} FROM {src} WHERE " + " AND ".join(where)
+        if sort_column is not None:
+            sql += f" ORDER BY {sort_column} {sort_direction}"
         sql += f" LIMIT {limit}"
         rows = con.execute(sql, params).fetchall()
         return QueryResult(rows=rows, files_considered=len(files))

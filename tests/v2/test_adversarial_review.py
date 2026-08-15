@@ -88,16 +88,22 @@ class TestPathTraversalAndMaliciousNames:
         # error or unexpected traversal-driven result.
         assert loaded is None
 
-    def test_malicious_domain_with_sql_metacharacters_handled_safely(self, conn):
+    def test_malicious_domain_with_sql_metacharacters_rejected_by_name_validator(self, conn):
+        # A SQL-injection-shaped domain isn't a valid DNS name at all
+        # (spaces, quotes, semicolons) -- the central DNS name validator
+        # (app/v2/dns_name_validate.py, Gate #2 MEDIUM fix) now rejects it
+        # outright, which is a stronger defense than "stored safely via
+        # parameterized queries" (still true, proven below).
         malicious = "'; DROP TABLE service_definitions; --.example"
-        store.create_service(conn, "svc-x", "X", [("exact", malicious)])
-        store.create_service_ruleset(conn, "r1", ["svc-x"])
+        with pytest.raises(store.PolicyStoreError):
+            store.create_service(conn, "svc-x", "X", [("exact", malicious)])
         # Table must still exist and be queryable -- proves parameterized
-        # queries, not string interpolation, were used throughout.
-        result = store.is_domain_service_blocked(conn, "r1", malicious)
-        assert result == "svc-x"
-        still_works = store.is_domain_service_blocked(conn, "r1", "unrelated.example")
-        assert still_works is None
+        # queries, not string interpolation, were used throughout, and
+        # that the rejected insert didn't corrupt anything.
+        store.create_service(conn, "svc-y", "Y", [("exact", "clean.example")])
+        store.create_service_ruleset(conn, "r1", ["svc-y"])
+        result = store.is_domain_service_blocked(conn, "r1", "clean.example")
+        assert result == "svc-y"
 
     def test_malicious_group_name_does_not_break_explain_trace(self, conn):
         from app.v2.policy_model import GroupPolicy
@@ -152,8 +158,19 @@ class TestMigrationInputHardening:
 
 
 class TestScheduleAndPolicyEdgeCasesUnderAdversarialInput:
-    def test_extremely_long_domain_string_handled(self, conn):
+    def test_extremely_long_domain_string_rejected(self, conn):
+        # A 5000-char single label exceeds real DNS limits (63 bytes/
+        # label, 253 bytes/name) -- the central validator now rejects it
+        # at creation time rather than silently accepting an
+        # unrepresentable domain.
         long_domain = "a" * 5000 + ".example"
+        with pytest.raises(store.PolicyStoreError):
+            store.create_service(conn, "svc-long", "Long", [("suffix", long_domain)])
+
+    def test_long_but_valid_domain_accepted(self, conn):
+        # A real-shape long domain (many short labels, each within the
+        # 63-byte limit, whole name within 253 bytes) is still accepted.
+        long_domain = ".".join(["a" * 50] * 4) + ".example"
         store.create_service(conn, "svc-long", "Long", [("suffix", long_domain)])
         store.create_service_ruleset(conn, "r1", ["svc-long"])
         result = store.is_domain_service_blocked(conn, "r1", "x." + long_domain)

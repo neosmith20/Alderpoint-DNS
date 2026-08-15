@@ -252,9 +252,14 @@ def generate_dnsdist_config_from_profiles(
     lines.append(f"setServerPolicy({_STRATEGY_TO_DNSDIST_POLICY[default_profile.strategy]})")
     lines.append("")
 
+    from app.v2.dns_name_validate import InvalidDnsNameError, validate_dns_name
+
     normalized_routes: dict[str, object] = {}
     for suffix_domain, profile in domain_routing or []:
-        key = suffix_domain.strip(".").lower()
+        try:
+            key = validate_dns_name(suffix_domain)
+        except InvalidDnsNameError as exc:
+            raise DnsdistGenError(f"invalid domain routing suffix {suffix_domain!r}: {exc}") from exc
         if key in normalized_routes and normalized_routes[key].upstream_profile_id != profile.upstream_profile_id:
             raise DnsdistGenError(
                 f"conflicting domain routing rule for {key!r}: both "

@@ -45,10 +45,12 @@ class BindRpzGenError(ValueError):
 
 
 def _normalize(domain: str) -> str:
-    d = domain.strip(".").lower()
-    if not d:
-        raise BindRpzGenError("domain must not be empty")
-    return d
+    from app.v2.dns_name_validate import InvalidDnsNameError, validate_dns_name
+
+    try:
+        return validate_dns_name(domain)
+    except InvalidDnsNameError as exc:
+        raise BindRpzGenError(str(exc)) from exc
 
 
 def render_rpz_zone(

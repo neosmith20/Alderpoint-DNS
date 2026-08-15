@@ -468,11 +468,14 @@ def add_domain_routing_rule(
     domain: str,
     upstream_profile_id: str,
 ) -> None:
+    from app.v2.dns_name_validate import InvalidDnsNameError, validate_dns_name
+
     if match_kind not in ("exact", "suffix"):
         raise PolicyStoreError(f"invalid match_kind: {match_kind!r}")
-    domain = domain.strip(".").lower()
-    if not domain:
-        raise PolicyStoreError("domain must not be empty")
+    try:
+        domain = validate_dns_name(domain)
+    except InvalidDnsNameError as exc:
+        raise PolicyStoreError(f"invalid domain: {exc}") from exc
     try:
         conn.execute(
             "INSERT INTO domain_routing_rules (ruleset_id, match_kind, domain, upstream_profile_id, created_at) "
@@ -532,13 +535,19 @@ def create_service(
         )
     except sqlite3.IntegrityError as exc:
         raise PolicyStoreError(f"duplicate service_id: {exc}") from exc
+    from app.v2.dns_name_validate import InvalidDnsNameError, validate_dns_name
+
     row_id = cur.lastrowid
     for match_kind, domain in domains:
         if match_kind not in ("exact", "suffix"):
             raise PolicyStoreError(f"invalid match_kind: {match_kind!r}")
+        try:
+            validated_domain = validate_dns_name(domain)
+        except InvalidDnsNameError as exc:
+            raise PolicyStoreError(f"invalid service domain: {exc}") from exc
         conn.execute(
             "INSERT INTO service_domains (service_row_id, match_kind, domain) VALUES (?, ?, ?)",
-            (row_id, match_kind, domain.strip(".").lower()),
+            (row_id, match_kind, validated_domain),
         )
 
 
