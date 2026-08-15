@@ -1,11 +1,13 @@
 # Alderpoint DNS V2 — Handoff to Workstream 5
 
-**This pass (Workstream 4) completed only Priority 0** (Dex's three Gate #2 residual findings —
-see `docs/v2/gate2-residuals-p0.md`) with real fixes and real proof. Priorities 1–14 of the
-Workstream 4 spec (deployment/packaging, systemd, secret replication mTLS, native HTTPS, client
-discovery, management API, UI, migration realism, full-stack hardware/cache benchmarking, install
-matrix testing, security pass, CI/test-suite quality, private RC assembly) were **not**
-implemented this pass.
+**Workstream 4** completed Priority 0 (Dex's three Gate #2 residual findings — see
+`docs/v2/gate2-residuals-p0.md`). **Workstream 4A** completed Priority 1 (real installable .deb
+packaging — see `docs/v2/packaging.md` and `docs/v2/clean-install-evidence.md`) and Priority 2
+(the three real background-worker systemd units, hardened, DNS-first ordering proven under
+simultaneous failure injection). Priorities 3–14 (secret replication mTLS, native HTTPS, client
+discovery, management API, UI, migration realism, full-stack hardware/cache benchmarking beyond
+what packaging validated, security pass, CI/test-suite quality, private RC assembly) remain **not**
+implemented.
 
 ## Why this is reported honestly as incomplete rather than fabricated
 
