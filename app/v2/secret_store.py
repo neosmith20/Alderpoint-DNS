@@ -209,13 +209,24 @@ class SecretStore:
         (e.g. from a decrypted backup). ``overwrite=False`` (default) refuses
         to clobber an existing secret with the same ID, matching ``create``'s
         no-silent-overwrite policy; pass ``overwrite=True`` for an explicit
-        full restore onto a fresh store."""
+        full restore onto a fresh store.
+
+        Validated in two passes so a bad entry never leaves a partial
+        restore behind: every id/conflict check runs first (no I/O), and
+        only if the whole batch passes does any file actually get written.
+        A previous version wrote entries one at a time as it iterated,
+        which meant an invalid id or an unexpected conflict partway
+        through the dict left earlier secrets already committed to disk --
+        a real partial-restore bug, fixed here.
+        """
+        for secret_id in secrets:
+            _validate_id(secret_id)
+            if self.exists(secret_id) and not overwrite:
+                raise SecretStoreError(
+                    f"secret id {secret_id!r} already exists (pass overwrite=True to replace)"
+                )
         for secret_id, value in secrets.items():
             if self.exists(secret_id):
-                if not overwrite:
-                    raise SecretStoreError(
-                        f"secret id {secret_id!r} already exists (pass overwrite=True to replace)"
-                    )
                 self.update(secret_id, value)
             else:
                 self.create(value, secret_id=secret_id)
