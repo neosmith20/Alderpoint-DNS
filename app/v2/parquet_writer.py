@@ -53,6 +53,9 @@ _COLUMN_NAMES: tuple[str, ...] = (
 
 
 def _pa_schema():
+    from app.v2.analytics_deps import ensure_on_path
+
+    ensure_on_path()
     import pyarrow as pa
 
     return pa.schema([
@@ -87,6 +90,12 @@ class WriterStats:
     dropped_count: int = 0
     flush_failures: int = 0
     last_error: str | None = None
+    # Gate #2 Blocker 3C: distinguishes "the analytics backend itself is
+    # unavailable (pyarrow missing/broken)" from an ordinary per-batch
+    # write failure (disk full, permission error, ...) -- a caller/health
+    # check must be able to tell "raw writer degraded" from "zero events
+    # so far, otherwise healthy" rather than both looking like silence.
+    dependency_unavailable: bool = False
 
 
 def _partition_dir(root: Path, ts: float) -> Path:
@@ -226,8 +235,13 @@ class ParquetSegmentWriter:
         self.stats.flush_failures += 1
         self.stats.last_error = str(exc)
         self.stats.dropped_count += len(records)
+        if isinstance(exc, ImportError):
+            self.stats.dependency_unavailable = True
 
     def _write_and_validate(self, records: list[dict], tmp_path: Path) -> None:
+        from app.v2.analytics_deps import ensure_on_path
+
+        ensure_on_path()
         import pyarrow as pa
         import pyarrow.parquet as pq
 
@@ -261,6 +275,9 @@ def validate_segment(path: Path, *, expected_min_rows: int | None = None) -> Non
     that (writer: reject and count; reader: skip and count, see
     ``app/v2/analytics_query.py``).
     """
+    from app.v2.analytics_deps import ensure_on_path
+
+    ensure_on_path()
     import pyarrow.parquet as pq
 
     try:

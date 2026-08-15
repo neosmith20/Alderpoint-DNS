@@ -53,6 +53,13 @@ class QueryResult:
     rows: list[tuple]
     files_considered: int
     columns: list[str] = field(default_factory=list)
+    # Gate #2 Blocker 3C: True when this result is empty because the
+    # DuckDB backend itself is unavailable, not because there's
+    # legitimately no matching data -- callers (AnalyticsService, an
+    # eventual UI) must be able to tell these apart rather than both
+    # rendering as "no results."
+    degraded: bool = False
+    degraded_reason: str = ""
 
 
 def enumerate_partition_files(root: Path, start_ts: float, end_ts: float) -> list[Path]:
@@ -138,6 +145,9 @@ class PartitionPruningReader:
         self._con = None
 
     def _connect(self):
+        from app.v2.analytics_deps import ensure_on_path
+
+        ensure_on_path()
         import duckdb
 
         if self._con is None:

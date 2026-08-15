@@ -67,3 +67,4 @@ vendor-runtime/
 dev/
 benchmarks/v2_analytics/data/
 benchmarks/v2_analytics/results/*.json.tmp
+vendor-runtime-v2-analytics/

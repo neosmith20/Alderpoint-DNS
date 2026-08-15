@@ -42,6 +42,7 @@ class PipelineStats:
     last_parquet_error: Optional[str] = None
     last_aggregate_error: Optional[str] = None
     last_tier_b_error: Optional[str] = None
+    parquet_dependency_unavailable: bool = False
 
 
 class AnalyticsPipeline:
@@ -99,6 +100,13 @@ class AnalyticsPipeline:
             except Exception as exc:  # noqa: BLE001 - isolation boundary, never propagate
                 self.stats.parquet_failures += 1
                 self.stats.last_parquet_error = str(exc)
+            # ingest() itself never raises (writes happen on a later
+            # flush(), caught internally by the writer) -- surface the
+            # writer's own dependency-unavailable flag here too, so a
+            # pipeline-level caller doesn't have to know to check the
+            # writer object separately (Gate #2 Blocker 3C).
+            if getattr(self.parquet_writer.stats, "dependency_unavailable", False):
+                self.stats.parquet_dependency_unavailable = True
 
         agg_records = []
         for e in events:
