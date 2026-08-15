@@ -1,5 +1,7 @@
 app opt/alderpointdns/
-docs opt/alderpointdns/
+docs/*.md opt/alderpointdns/docs/
+docs/v2/*.md opt/alderpointdns/docs/v2/
+docs/v2/roadmap-reference/*.md opt/alderpointdns/docs/v2/roadmap-reference/
 packaging opt/alderpointdns/
 scripts opt/alderpointdns/
 tests opt/alderpointdns/

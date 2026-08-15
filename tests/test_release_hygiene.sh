@@ -19,13 +19,21 @@ set -eu
 #
 # If PROHIBITED_NAME_PATTERN is unset, the scan is skipped with a clear
 # message rather than silently checking against a baked-in default.
+#
+# Optional:
+#
+#   RELEASE_HYGIENE_ROOT=/path/to/public/export
+#
+# scans a prepared export tree instead of the current checkout. This keeps
+# private-source-only notes out of public exports without baking private terms
+# into this generic public-safe script.
 
 fail() {
   echo "FAIL: $*" >&2
   exit 1
 }
 
-ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+ROOT_DIR="${RELEASE_HYGIENE_ROOT:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}"
 cd "$ROOT_DIR"
 
 if [ -z "${PROHIBITED_NAME_PATTERN:-}" ]; then
@@ -34,10 +42,14 @@ if [ -z "${PROHIBITED_NAME_PATTERN:-}" ]; then
 fi
 
 command -v git >/dev/null 2>&1 || fail "git is required"
-git rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "not inside a git work tree"
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  LIST_FILES="git ls-files -z -- . ':!:.git'"
+else
+  LIST_FILES="find . -type f -print0"
+fi
 
 echo "== scanning tracked file contents for prohibited pattern =="
-CONTENT_MATCHES="$(git ls-files -z -- . ':!:.git' \
+CONTENT_MATCHES="$(eval "$LIST_FILES" \
   | xargs -0 grep -liI -E -e "$PROHIBITED_NAME_PATTERN" 2>/dev/null || true)"
 if [ -n "$CONTENT_MATCHES" ]; then
   echo "tracked files whose content matches PROHIBITED_NAME_PATTERN:" >&2
@@ -47,7 +59,7 @@ fi
 echo "no tracked file contents matched"
 
 echo "== scanning tracked filenames for prohibited pattern =="
-NAME_MATCHES="$(git ls-files -z -- . ':!:.git' \
+NAME_MATCHES="$(eval "$LIST_FILES" \
   | tr '\0' '\n' \
   | grep -i -E -e "$PROHIBITED_NAME_PATTERN" || true)"
 if [ -n "$NAME_MATCHES" ]; then

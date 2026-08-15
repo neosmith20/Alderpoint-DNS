@@ -35,6 +35,9 @@ installed two-node evidence.
 ## Known Limits / Next Workstream
 
 - The V2 API is JSON-only; no V2 UI has been added.
+- Before any large-scale V2 UI work, read the private internal-only design
+  guidance at `docs/v2/internal/ui-design-guidance.md`. Do not redesign the UI
+  until a coherent Alderpoint design system is established.
 - Discovery has a packaged inbox worker and API injection path; direct dnsdist
   production event emission should be connected when the authoritative V2 DNS
   listener becomes packaged.
@@ -44,3 +47,6 @@ installed two-node evidence.
 - Full `tests/v2` in this sandbox still has environment-sensitive failures for
   socket/chown/dnsdist-start tests. Run the full suite in a less restricted CI
   environment before public release gating.
+- Public export/release preparation must exclude `docs/v2/internal/` and run the
+  generic release hygiene scan against the exported tree with the private scrub
+  patterns listed in `docs/v2/internal/ui-design-guidance.md`.
