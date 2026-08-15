@@ -119,7 +119,8 @@ _MIGRATION_V2: list[str] = [
         tls_hostname TEXT,
         priority INTEGER NOT NULL DEFAULT 0,
         weight INTEGER NOT NULL DEFAULT 1,
-        secret_ref TEXT
+        secret_ref TEXT,
+        doh_path TEXT
     )
     """,
     """
@@ -372,6 +373,7 @@ class UpstreamEndpointRecord:
     priority: int
     weight: int
     secret_ref: Optional[str]
+    doh_path: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -398,6 +400,22 @@ def create_upstream_profile(
     for ep in endpoints:
         if ep.secret_ref is not None and not ep.secret_ref:
             raise PolicyStoreError("secret_ref must not be an empty string")
+        if transport == "doh":
+            # DoH backend certificate validation requires a real TLS
+            # hostname (SNI + subjectName cert check) -- an encrypted-
+            # transport profile with no way to validate the peer
+            # certificate is not meaningfully "encrypted upstream intent"
+            # and must be rejected at profile-creation time, not silently
+            # accepted and downgraded later at config-generation time.
+            if not ep.tls_hostname:
+                raise PolicyStoreError(
+                    f"DoH endpoint {ep.address!r} requires tls_hostname for certificate "
+                    "validation -- refusing to create a DoH profile with no way to verify "
+                    "the peer certificate"
+                )
+            path = ep.doh_path or "/dns-query"
+            if not path.startswith("/") or "\n" in path or "\r" in path or " " in path:
+                raise PolicyStoreError(f"invalid doh_path: {path!r}")
     try:
         cur = conn.execute(
             "INSERT INTO upstream_profiles (upstream_profile_id, name, transport, strategy, created_at) "
@@ -408,11 +426,14 @@ def create_upstream_profile(
         raise PolicyStoreError(f"duplicate upstream_profile_id: {exc}") from exc
     row_id = cur.lastrowid
     for ep in endpoints:
+        doh_path = ep.doh_path if transport == "doh" else None
+        if doh_path is None and transport == "doh":
+            doh_path = "/dns-query"
         conn.execute(
             "INSERT INTO upstream_endpoints "
-            "(upstream_profile_row_id, address, tls_hostname, priority, weight, secret_ref) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (row_id, ep.address, ep.tls_hostname, ep.priority, ep.weight, ep.secret_ref),
+            "(upstream_profile_row_id, address, tls_hostname, priority, weight, secret_ref, doh_path) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (row_id, ep.address, ep.tls_hostname, ep.priority, ep.weight, ep.secret_ref, doh_path),
         )
 
 
@@ -427,7 +448,7 @@ def load_upstream_profile(
         return None
     row_id, name, transport, strategy = row
     ep_rows = conn.execute(
-        "SELECT address, tls_hostname, priority, weight, secret_ref FROM upstream_endpoints "
+        "SELECT address, tls_hostname, priority, weight, secret_ref, doh_path FROM upstream_endpoints "
         "WHERE upstream_profile_row_id = ? ORDER BY priority ASC, address ASC",
         (row_id,),
     ).fetchall()

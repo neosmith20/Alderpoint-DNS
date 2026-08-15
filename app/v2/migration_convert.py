@@ -511,10 +511,19 @@ def migrate_filtering(backup_db_path: Path) -> dict:
 
 
 def migrate_upstreams(backup_db_path: Path, target_control_db: Path) -> dict:
+    """Real doh_path column from V1's schema is carried through (Gate #2
+    Blocker 1). If a DoH-transport source resolver has no tls_hostname
+    (V1's schema allows an empty string there), the profile is NOT
+    migrated with a silently-downgraded plain/unverified transport --
+    it's skipped entirely with an explicit warning naming the resolver,
+    so an operator must deliberately reconfigure it post-migration rather
+    than unknowingly end up sending DNS queries in the clear (or to an
+    unverified TLS peer) where they previously expected DoH.
+    """
     src = sqlite3.connect(f"file:{backup_db_path}?mode=ro", uri=True)
     try:
         rows = src.execute(
-            "SELECT name, protocol, address, port, tls_hostname, position "
+            "SELECT name, protocol, address, port, tls_hostname, doh_path, position "
             "FROM upstream_resolvers WHERE enabled = 1 ORDER BY position ASC"
         ).fetchall()
     finally:
@@ -523,8 +532,23 @@ def migrate_upstreams(backup_db_path: Path, target_control_db: Path) -> dict:
     if not rows:
         return {"migrated": 0, "warnings": ["no enabled upstream resolvers found in source"]}
 
+    warnings: list[str] = []
+    transport = rows[0][1]
     endpoints = []
-    for i, (name, protocol, address, port, tls_hostname, position) in enumerate(rows):
+    for name, protocol, address, port, tls_hostname, doh_path, position in rows:
+        if protocol != transport:
+            warnings.append(
+                f"resolver {name!r} has protocol {protocol!r} differing from the profile's "
+                f"transport {transport!r} -- mixed-transport profiles are not supported, skipped"
+            )
+            continue
+        if transport == "doh" and not tls_hostname:
+            warnings.append(
+                f"resolver {name!r} is configured for DoH but has no TLS hostname in the "
+                "source -- refusing to migrate it as an unverified/downgraded transport; "
+                "reconfigure this upstream manually after migration"
+            )
+            continue
         endpoints.append(
             pstore.UpstreamEndpointRecord(
                 address=f"{address}:{port}",
@@ -532,8 +556,13 @@ def migrate_upstreams(backup_db_path: Path, target_control_db: Path) -> dict:
                 priority=position,
                 weight=1,
                 secret_ref=None,
+                doh_path=(doh_path or None) if transport == "doh" else None,
             )
         )
+
+    if not endpoints:
+        return {"migrated": 0, "warnings": warnings + ["no migratable upstream endpoints after validation"]}
+
     with control_db.connect(target_control_db) as conn:
         # Idempotent retry (§21/§22): create_upstream_profile() would
         # otherwise raise a duplicate-id conflict on a second attempt.
@@ -542,9 +571,9 @@ def migrate_upstreams(backup_db_path: Path, target_control_db: Path) -> dict:
         )
         pstore.create_upstream_profile(
             conn, "migrated-default", "Migrated Default Upstreams",
-            transport=rows[0][1], endpoints=endpoints, strategy="ordered",
+            transport=transport, endpoints=endpoints, strategy="ordered",
         )
-    return {"migrated": len(rows), "warnings": []}
+    return {"migrated": len(endpoints), "warnings": warnings}
 
 
 # --------------------------------------------------------------------------
