@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import signal
 import sys
 import time
@@ -87,6 +88,9 @@ BACKUPS_DIR = STATE_DIR / "backups"
 STAGING_DIR = STATE_DIR / "staging"
 COMPILED_DIR = STATE_DIR / "compiled"
 CERTS_DIR = STATE_DIR / "certs"
+ACTIVE_CERT_PATH = CERTS_DIR / "server.crt"
+ACTIVE_KEY_PATH = CERTS_DIR / "server.key"
+BOOTSTRAP_TOKEN_PATH = STATE_DIR / "bootstrap-setup-token"
 SCHEDULE_STATE_FILE = STATE_DIR / "schedule" / "schedule-transition-state.json"
 
 SERVICE_USER = "alderpointdns-v2"
@@ -109,24 +113,27 @@ def _import_optional_generators():
 # --- init-state --------------------------------------------------------
 
 
+def _chown_best_effort(path: Path, mode: int) -> None:
+    import grp
+    import pwd
+
+    path.mkdir(parents=True, exist_ok=True)
+    os.chmod(path, mode)
+    try:
+        uid = pwd.getpwnam(SERVICE_USER).pw_uid
+        gid = grp.getgrnam(SERVICE_GROUP).gr_gid
+        os.chown(path, uid, gid)
+    except KeyError:
+        pass  # dev/test environment without the real service account
+
+
 def cmd_init_state(args: argparse.Namespace) -> int:
     """Idempotent fresh-install / every-boot state bootstrap (§5). Safe to
     call on every package configure and every service start -- creates
     only what's missing, never overwrites existing state, never touches
     the secret store's own values."""
     import grp
-    import os
     import pwd
-
-    def _chown_best_effort(path: Path, mode: int) -> None:
-        path.mkdir(parents=True, exist_ok=True)
-        os.chmod(path, mode)
-        try:
-            uid = pwd.getpwnam(SERVICE_USER).pw_uid
-            gid = grp.getgrnam(SERVICE_GROUP).gr_gid
-            os.chown(path, uid, gid)
-        except KeyError:
-            pass  # dev/test environment without the real service account
 
     _chown_best_effort(STATE_DIR, 0o750)
     _chown_best_effort(ANALYTICS_PARQUET_DIR, 0o750)
@@ -167,6 +174,63 @@ def cmd_init_state(args: argparse.Namespace) -> int:
 
     _chown_best_effort(SECRETS_DIR, 0o700)  # SecretStore.__init__ already set 0700; reasserted for clarity
 
+    # First-admin bootstrap token (§11): generated once, only while no
+    # admin account exists yet. Deliberately NEVER printed to stdout
+    # (postinst output can end up in a world-readable apt/dpkg log) --
+    # only the fact that a token file was written, at a root-only 0600
+    # path the operator must read themselves (e.g. `sudo cat`).
+    with control_db.connect(CONTROL_DB) as conn:
+        admin_count = conn.execute("SELECT count(*) FROM admins").fetchone()[0]
+    if admin_count == 0 and not BOOTSTRAP_TOKEN_PATH.exists():
+        import secrets as _secrets_mod
+
+        token = _secrets_mod.token_urlsafe(32)
+        fd = os.open(str(BOOTSTRAP_TOKEN_PATH), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(token)
+        _chown_best_effort(BOOTSTRAP_TOKEN_PATH.parent, 0o750)
+        try:
+            import pwd as _pwd, grp as _grp
+
+            os.chown(BOOTSTRAP_TOKEN_PATH, _pwd.getpwnam(SERVICE_USER).pw_uid, _grp.getgrnam(SERVICE_GROUP).gr_gid)
+        except KeyError:
+            pass
+        print(f"first-admin bootstrap setup token written to {BOOTSTRAP_TOKEN_PATH} (root-only, 0600) -- read it there to complete initial setup, it is never printed here")
+    elif admin_count == 0:
+        print(f"bootstrap setup token already present at {BOOTSTRAP_TOKEN_PATH}")
+    else:
+        print("an admin account already exists; no bootstrap token needed")
+
+    cmd_ensure_tls_cert(args)
+
+    return 0
+
+
+def cmd_ensure_tls_cert(args: argparse.Namespace) -> int:
+    """Split out from init-state (Workstream 4B real clean-install defect
+    fix): the web service unit's own ExecStartPre re-asserts TLS bootstrap
+    on every start as a self-heal, but it only needs write access to
+    CERTS_DIR (under STATE_DIR) -- unlike full init-state, it must NOT
+    also touch CONFIG_DIR (/etc/alderpointdns-v2), which is outside that
+    unit's ReadWritePaths= under ProtectSystem=strict and would otherwise
+    fail every single start with a real "Read-only file system" error
+    (found running this exact clean-install test; see
+    docs/v2/clean-install-evidence.md).
+    """
+    from app.v2 import tls_cert
+
+    info = tls_cert.ensure_bootstrap_cert(ACTIVE_CERT_PATH, ACTIVE_KEY_PATH)
+    _chown_best_effort(CERTS_DIR, 0o750)
+    try:
+        import pwd as _pwd, grp as _grp
+
+        uid = _pwd.getpwnam(SERVICE_USER).pw_uid
+        gid = _grp.getgrnam(SERVICE_GROUP).gr_gid
+        os.chown(ACTIVE_CERT_PATH, uid, gid)
+        os.chown(ACTIVE_KEY_PATH, uid, gid)
+    except KeyError:
+        pass
+    print(f"TLS certificate ready: subject={info.subject!r} valid_until={info.not_valid_after}")
     return 0
 
 
@@ -403,6 +467,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("init-state").set_defaults(func=cmd_init_state)
+    sub.add_parser("ensure-tls-cert").set_defaults(func=cmd_ensure_tls_cert)
 
     p = sub.add_parser("generate-runtime")
     p.add_argument("--dnsdist-binary", default="dnsdist")

@@ -32,7 +32,7 @@ SOURCE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 # appropriate to this branch." 2.0.0~privateN-1: "~" sorts before the
 # final 2.0.0-1 this candidate is a pre-release of, same convention V1's
 # own build-deb.sh already uses for beta/dev/rc tags.
-DEB_VERSION="2.0.0~private1-1"
+DEB_VERSION="2.0.0~private2-1"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -66,14 +66,15 @@ Section: net
 Priority: optional
 Architecture: all
 Maintainer: Alderpoint DNS Maintainers <maintainers@example.invalid>
-Depends: dnsdist (>= 1.9.0), bind9-utils, python3 (>= 3.11), python3-argon2, python3-cryptography, python3-yaml, python3-pip, sqlite3
+Depends: dnsdist (>= 1.9.0), bind9-utils, python3 (>= 3.11), python3-argon2, python3-cryptography, python3-yaml, python3-pip, python3-fastapi, python3-itsdangerous, python3-pydantic, uvicorn, sqlite3
 Conflicts: alderpointdns
 Description: Alderpoint DNS V2 -- PRIVATE RELEASE CANDIDATE (not for production)
- Private, pre-release Workstream 4A packaging of Alderpoint DNS V2. Ships
- the V2 policy/analytics/migration engine, the analytics vendor runtime
- (pyarrow/duckdb), and three background workers (analytics ingestion,
- Tier B prewarm, schedule transitions). Does NOT ship or manage a live
- dnsdist/BIND listener or a management API/UI -- V2 is not yet
+ Private, pre-release Workstream 4A/4B packaging of Alderpoint DNS V2.
+ Ships the V2 policy/analytics/migration engine, the analytics vendor
+ runtime (pyarrow/duckdb), four background services (analytics ingestion,
+ Tier B prewarm, schedule transitions, and a real native-HTTPS management/
+ API service), and self-signed TLS bootstrap. Does NOT ship or manage a
+ live authoritative dnsdist/BIND listener or a UI -- V2 is not yet
  authoritative. Never install alongside the V1 "alderpointdns" package on
  the same host that package is serving traffic from.
 EOF
@@ -101,6 +102,7 @@ chmod 0755 "$PKG/opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_ctl.py" "$PKG/
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-analytics.service" "$PKG/lib/systemd/system/alderpointdns-v2-analytics.service"
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-tierb.service" "$PKG/lib/systemd/system/alderpointdns-v2-tierb.service"
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-schedule.service" "$PKG/lib/systemd/system/alderpointdns-v2-schedule.service"
+cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-web.service" "$PKG/lib/systemd/system/alderpointdns-v2-web.service"
 
 cp "$SOURCE_DIR/LICENSE" "$PKG/usr/share/doc/alderpointdns-v2/LICENSE"
 cp "$SOURCE_DIR/COPYRIGHT" "$PKG/usr/share/doc/alderpointdns-v2/copyright"

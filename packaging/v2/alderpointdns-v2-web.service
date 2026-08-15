@@ -1,0 +1,57 @@
+[Unit]
+Description=Alderpoint DNS V2 management/API service (private candidate, native HTTPS)
+# DNS-first startup order (locked architecture): this unit is NOT a
+# dependency of any DNS-serving process in either direction. If this
+# service fails to start entirely, compiled DNS (generated separately by
+# `alderpointdns-v2-ctl generate-runtime`, run once at postinst and again
+# by alderpointdns-v2-schedule.service on transitions) is completely
+# unaffected -- nothing about DNS answering depends on this process being
+# up.
+After=network.target
+
+[Service]
+Type=simple
+User=alderpointdns-v2
+Group=alderpointdns-v2
+# ExecStartPre re-asserts the TLS bootstrap on every start (not just
+# install) -- idempotent (ensure_bootstrap_cert only regenerates if the
+# active pair is absent/invalid), so this is a no-op on every normal
+# start and a real self-heal if certificate material was ever lost
+# without a full reinstall. Deliberately calls `ensure-tls-cert`, NOT the
+# broader `init-state` -- init-state also touches /etc/alderpointdns-v2,
+# which is outside this unit's ReadWritePaths= under ProtectSystem=strict
+# and would fail every start with a real permission error (found via
+# clean-install testing; see docs/v2/clean-install-evidence.md).
+ExecStartPre=/usr/bin/python3 -B /opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_ctl.py ensure-tls-cert
+ExecStart=/usr/bin/uvicorn app.v2.webapp:app --app-dir /opt/alderpointdns-v2 --host 0.0.0.0 --port 8443 --ssl-certfile /var/lib/alderpointdns-v2/certs/server.crt --ssl-keyfile /var/lib/alderpointdns-v2/certs/server.key
+Environment=PYTHONPATH=/opt/alderpointdns-v2/vendor-runtime-v2-analytics:/opt/alderpointdns-v2
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=15
+
+# Hardening (§38). Documented exceptions:
+#  - NoNewPrivileges=true is safe here (unlike V1's webapp unit, which
+#    needs sudo escalation for privileged compiler subcommands): this
+#    service never shells out to a privileged helper, it only reads/
+#    writes its own state directories directly as alderpointdns-v2.
+#  - ReadWritePaths covers control.db, secrets, analytics, staging,
+#    compiled runtime, certs, and backups -- everything a management API
+#    request can legitimately mutate. /opt/alderpointdns-v2 itself is
+#    read-only at runtime (ProtectSystem=strict default): this process
+#    never modifies its own installed code.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/alderpointdns-v2 /var/log/alderpointdns-v2
+UMask=0027
+CapabilityBoundingSet=
+MemoryMax=768M
+
+[Install]
+WantedBy=multi-user.target
