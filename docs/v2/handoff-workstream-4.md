@@ -1,118 +1,144 @@
-# V2 Workstream 3 — Handoff (deep continuation pass)
+# V2 Workstream 3 — Handoff (deep continuation + final continuation passes)
 
-**Status:** Substantially expanded, still not exhaustive against the owner's full 54-section brief.
-This document now covers two passes: an initial slice (policy engine + staged deployment
-abstraction) and a subsequent "deep continuation" pass explicitly instructed not to stop after one
-coherent slice. The continuation pass implemented 9 further independently-committed areas (13
-checkpoint commits total across both passes) with 431 tests passing (up from 285 at the end of the
-first pass, up from 218 at the end of Workstream 2). What follows is the full delivered/not-delivered
-breakdown, current as of this document's last update.
+**Status:** Three passes recorded in this document: an initial slice (policy engine + staged
+deployment), a "deep continuation" pass (control.db storage, BIND/RPZ, filtering, upstream/ECS,
+analytics pipeline, notification CRUD, Tier B wiring), and a "final continuation" pass covering
+the three self-identified review risks plus Priorities 1-6 of a large mandatory-implementation
+queue (real migration, secret backup/restore/replication, schedule runtime, dnsdist cache-profile
+integration, cache benchmarking, full concurrent hardware test, Argon2 concurrency protection, and
+dedicated adversarial/failure-domain passes). Test count: 218 (Workstream 2) → 285 → 431 → **566**
+(24 checkpoint commits total across all three passes on this branch).
 
-## What this document's two passes delivered
+## What the final continuation pass delivered
 
-| Area | Module | Status |
-|---|---|---|
-| Unified policy hierarchy | `app/v2/policy_model.py` | Global/network/group/client, deterministic multi-group conflict resolution (priority + group_id tie-break), field validation. |
-| Network-scoped matching | `app/v2/network_match.py` | CIDR, most-specific-wins, IPv4+IPv6, no per-query lookup. |
-| Schedule evaluation | `app/v2/schedule_policy.py` | DST-safe wall-clock windows, overnight ranges, multi-window OR semantics. |
-| Effective policy compiler | `app/v2/policy_compiler.py` | Deterministic, side-effect-free, full explain trace. |
-| Cache-profile integration | same module | Non-answer fields never affect the compiled profile; answer-affecting fields always do. |
-| Staged deployment abstraction | `app/v2/runtime_staging.py` | Generic stage->validate->promote->health-check->rollback, backend-agnostic. |
-| dnsdist config generation | `app/v2/dnsdist_gen.py` | Listeners/ACL/upstream pools/strategies/domain routing/ECS, validated against the real installed dnsdist 2.1.1 binary. |
-| **Control.db policy storage** | `app/v2/policy_store.py` | Real relational tables (schema v2) for every policy dimension, no JSON blobs; round-trip proven identical to in-memory fixtures. |
-| **Policy preview/explain service** | `app/v2/policy_service.py` | Control.db-backed `compile_effective_policy_from_store` + secret-free structured explanation. |
-| **Real BIND/RPZ generation** | `app/v2/bind_rpz_gen.py`, `app/v2/blocking_response.py` | RPZ zone generation validated against the real installed `named-checkzone` binary; explicit-allow-overrides-block precedence; all four blocking response modes rendered (documented RPZ REFUSED limitation). |
-| **Real filtering decision logic** | `app/v2/filtering_decision.py`, `app/v2/safesearch.py` | SafeSearch (4 real providers, honest unsupported-provider rejection), parental + malware/service blocking sharing one curated ruleset mechanism, deterministic precedence, diagnostic reason codes. |
-| **Upstream profiles + domain routing** | `app/v2/policy_store.py`, `app/v2/dnsdist_gen.py` | Real storage + compilation into dnsdist pools/`SuffixMatchNodeRule`, 3 of 5 requested strategies mapped to verified native dnsdist policies (`parallel_first_success` explicitly rejected as unsupported by the installed version rather than faked). |
-| **ECS privacy controls** | `app/v2/ecs_policy.py` | All 3 modes compiled to real dnsdist directives, verified against the real binary. |
-| **Real analytics ingestion pipeline** | `app/v2/query_event.py`, `app/v2/analytics_pipeline.py` | One normalized event feeding Parquet + aggregates + Tier B in one place, bounded queue, per-sink failure isolation, query-log/statistics exclusion semantics proven independent. |
-| **Analytics query service** | `app/v2/analytics_service.py` | Bounded named methods over both real backends; partition-pruning re-proven through the service layer. |
-| **Notification-provider CRUD** | `app/v2/notification_store.py` | control.db metadata + secret-store-backed credentials; plaintext-absence proven via raw on-disk byte inspection, not just API behavior. |
-| **Tier B real worker wiring** | `app/v2/tier_b_worker.py` | Real raw-UDP resolve_fn replayed through an actually-running, fully isolated, disposable dnsdist subprocess — genuine end-to-end resolution, not a mock. |
-| **Fallback DNS** | `app/v2/fallback_dns.py` | Pure decision logic with an explicit encrypted-to-plaintext downgrade guard. |
-| **Failure-domain proofs (new code)** | `tests/v2/test_workstream3_failure_domains.py` | Structural + behavioral proof the compiler/generators have no control.db/secret/analytics dependency. |
+**P0 — three self-identified review risks, all fixed:**
+- Parental (adult) and malware/phishing (security) protection are now fully independent
+  answer-affecting policy dimensions (`parental_policy_id`/`security_policy_id`, both real
+  `CachePolicyDimensions` fields, cache-profile schema bumped v1→v2), independent toggles,
+  independent diagnostics, proven by dedicated tests that toggling one never affects the other.
+- REFUSED blocking mode now returns a real RCODE REFUSED at the dnsdist layer
+  (`RCodeAction(DNSRCode.REFUSED)`), verified end-to-end against the real installed binary (a live
+  isolated instance actually returns RCODE 5). RPZ's `rpz-drop` substitute is now explicitly
+  documented as defense-in-depth only, never claimed equivalent.
+- Domain-routing precedence is now enforced by the generator itself (sorted by specificity,
+  deterministic regardless of caller input order, conflicting duplicates rejected), not left to
+  caller pre-sorting.
+- **Real bug found while fixing this:** a pre-existing schema-migration ordering bug in
+  `policy_store.py` (gating on a shared version counter instead of actual table existence) meant
+  `policy_store.ensure_schema()` could silently skip creating its own tables if
+  `notification_store.ensure_schema()` ran first. Fixed, with a dedicated regression test.
 
-**Test totals:** `tests/v2/` grew from 218 (Workstream 2) -> 285 (first pass) -> **431** (continuation
-pass, 146 further new tests). V1 regression surface expanded from 8 files/279 tests to **13
-files/619 tests**, all passing. Two real bugs were found and fixed while wiring real external
-binaries: dnsdist's `--check-config` silently validating the wrong (live default) file without an
-explicit `-C`, and dnsdist detaching/orphaning itself as a subprocess without `--supervised`.
+**Priority 1 — real V1→V2 migration (the largest item):** every one of the 13 pipeline stages now
+does real work against disposable copies (never the live source): real detection, a transactionally
+consistent backup (SQLite's own backup API) with checksum+row-count manifest+integrity-check+a real
+disposable-restore proof, a real read-only preview report, real conversions for config/admins
+(argon2id hashes reused, unrecognized formats flagged for rehash)/clients+identifiers/network
+policies/local DNS/filtering rules/upstream resolvers (real DoT backend syntax, a real bug found and
+fixed there)/notification providers+secrets, a legacy-analytics-archive registration that never
+bulk-copies raw history, real dnsdist+RPZ+local-zone runtime generation validated against the real
+binaries, and a real isolated-instance health check that sends an actual DNS query. Crash/restart
+proven at every one of the 13 stage boundaries using the real (not stub) stage logic — this required
+fixing a second real gap (the durable-state mechanism only tracked stage-completion bookkeeping, not
+stage *outputs*, which real stages now depend on; fixed by making dependent stages re-derive their
+inputs from what's already durably on disk). A **third** real gap was found and fixed in this same
+pass: stage retry idempotency (§21-22) — several stages had no duplicate-object guard for a genuine
+mid-stage-crash-then-retry scenario (as opposed to the boundary-only crashes the earlier tests
+covered); fixed for every affected stage with dedicated regression tests.
 
-## Implementation queue classification (per the continuation brief's §41 requirement)
+**Priority 2 — secret backup/restore/replication:** encrypted-at-rest backup/restore
+(`cryptography.fernet.Fernet`, an existing audited dependency, not home-grown crypto), restore
+proven against a completely separate `SecretStore` instance, wrong-key/tampered-ciphertext both
+rejected distinctly. A real partial-restore atomicity bug was found and fixed in
+`SecretStore.import_all` itself (two-phase validate-then-write). Replication: authenticated +
+encrypted + generation-versioned envelope construction and conflict resolution, proven against
+isolated primary/secondary fixtures — **explicitly not** wired to the existing V1 replication
+subsystem's real mTLS network transport, stated as a concrete scope boundary (a substantial
+existing subsystem, not a missing capability in this module's own logic).
 
-Classified against the continuation brief's numbered queue (1-38, skipping the meta-instructions):
+**Priority 3 — schedule transition runtime:** a real state machine (`ScheduleTransitionRuntime`)
+that recompiles/stages/validates/promotes only when the active schedule set actually changes, never
+trusts persisted state as a restart-time decision input (always recomputes from wall clock),
+integration-tested against the real policy compiler + cache-profile compiler + `runtime_staging.py`
+pipeline, proving a schedule boundary genuinely changes the compiled cache profile and the staged
+config. Deliberately not run as an actual background OS process during testing (would itself be an
+unauthorized long-running process on the shared host) — every test uses explicit fake-clock
+injection instead.
 
-| # | Item | Status |
-|---|---|---|
-| 1 | Real control.db policy storage | **DONE** |
-| 2 | Policy preview/explainability service | **DONE** |
-| 3 | Real BIND/RPZ generation | **DONE** (generation+validation; no reload/rndc wiring, by design — never promotes over live V1) |
-| 4A | SafeSearch | **DONE** (4 real providers; honestly narrow, not exhaustive) |
-| 4B | Parental/adult blocking | **DONE** (via shared curated-ruleset mechanism) |
-| 4C | Malware/phishing | **DONE** (same mechanism, `category="security"` — see `filtering_decision.py` docstring for why this design choice was made instead of a new cache-profile dimension) |
-| 4D | Service blocking | **DONE** |
-| 5 | Schedule transition runtime | **NOT REACHED** — schedule *evaluation* (Workstream 3 pass 1) and *storage* (this pass) both exist; the recompile-on-transition scheduler itself (detecting "next_transition passed, recompile+restage+revalidate now") was not built this session. Reason: needs a real always-running process/timer loop to drive it, which doesn't fit this session's "isolated test artifacts, no persistent isolated service" scope — building one safely (without it becoming an unauthorized long-running V2 process on the shared host) needs an explicit decision about where that process would live. |
-| 6 | Blocking response modes | **DONE** |
-| 7 | Upstream profile storage + runtime | **DONE** |
-| 8 | Policy-scoped upstream routing | **DONE** (storage + compiler resolve to a profile id; end-to-end EffectivePolicy -> dnsdist pool wiring for network/group/client scoping specifically was proven at the storage/compiler level, not re-demonstrated as a fourth dnsdist-generation integration test — reasonable to treat as covered by items 1+7+9's tests together) |
-| 9 | Domain-specific upstream routing | **DONE** |
-| 10 | Fallback DNS | **DONE** (pure decision logic + privacy-downgrade guard; not wired to a real health-check signal source, since none exists yet) |
-| 11 | Upstream strategies | **PARTIAL** — 3 of 5 requested (ordered/failover/load_balanced) mapped to verified real dnsdist policies; `fastest` and true `parallel_first_success` have no native stock-dnsdist equivalent in 2.1.1 and are explicitly rejected rather than faked. **BLOCKED** for those two specifically: would require custom Lua fan-out logic this session did not have time to write and validate against the real binary. |
-| 12 | ECS privacy controls | **DONE** |
-| 13 | Real analytics ingestion | **DONE** (pipeline is real and tested; not fed by any live/test DNS traffic source, since none exists yet — same gap as Workstream 2) |
-| 14 | Normalized query event | **DONE** |
-| 15 | Analytics query service | **DONE** |
-| 16 | Query-log/statistics exclusion | **DONE** |
-| 17 | Secret store -> notification providers | **DONE** |
-| 18 | Secret backup/restore | **NOT REACHED** — Workstream 2's `secret_store.py` already has `export_all`/`import_all` hooks; a *protected* (encrypted-at-rest-in-the-backup-artifact) wrapper around them plus integrity/checksum and atomic-restore-with-rollback was not built this session. Reason: ran out of session budget after 13 checkpoints; this is a self-contained, boundable next task, not architecturally blocked. |
-| 19 | Secret replication | **NOT REACHED** — needs the existing V1 replication/mTLS protocol studied and extended, which is a substantial standalone investigation this session didn't reach. Not architecturally blocked, just not started. |
-| 20-22 | Real migration stages, preview, failure injection | **NOT REACHED** — each of the ~18 real per-stage migrations listed in §20 is independently substantial (real data conversion against realistic V1 fixtures, not stubs); attempting a shallow pass across all of them was judged worse than not touching migration this session, consistent with "do not replace depth with shallow placeholder scaffolding." Durable state machine (Workstream 2) is unaffected and still correct. |
-| 23 | Tier B real worker wiring | **DONE** (via a real isolated dnsdist subprocess — genuine end-to-end proof) |
-| 24 | Tier B working-set ranking | **DONE** (Workstream 2's half-life decay scoring; not revisited this session, no new evidence gathered) |
-| 25 | dnsdist packet-cache profile-safety | **NOT REACHED** — investigated conceptually in Workstream 2's docs but no prototype built or tested against the real binary this session. |
-| 26 | BIND cache reuse | **NOT REACHED** — no BIND recursive-cache instance was stood up this session to test against. |
-| 27 | Cache latency layer investigation | **NOT REACHED** — requires a live isolated multi-service (dnsdist+BIND) stack instrumented layer-by-layer; out of this session's budget after the above. |
-| 28 | Cache recovery benchmark | **BLOCKED**, unchanged from Workstream 2 — no real DNS cache implementation exists yet to benchmark against. |
-| 29 | Tier A decision | **UNCHANGED** — still deferred per Workstream 2's evidence-based recommendation; no new evidence gathered this session (correctly, per the continuation brief's own "do not burn a large fraction of the session forcing Tier A to exist" instruction). |
-| 30 | Full concurrent hardware test | **BLOCKED**, unchanged from Workstream 2 — building a second complete constrained-memory V2+V1-equivalent stack (BIND+dnsdist+web/API+analytics+DuckDB+Argon2id all resident under a memory cap) safely isolated from the live shared host is infrastructure-scale work, not a boundable task within this session; doing it against the live host risks resource contention with the real v1.1.1 service, which the continuation brief itself forbids. |
-| 31 | V2 memory minimum decision | **UNCHANGED** — 2 GiB evidence-based-not-final recommendation stands; item 30 is its prerequisite. |
-| 32 | Argon2id profile | **UNCHANGED** — same reasoning as 31. |
-| 33 | Dedicated adversarial security pass | **PARTIAL** — every new module's own test suite includes rejection tests for its specific attack surface (SQL metacharacters via bound params, path traversal in secret/service IDs, symlink rejection, CIDR/schedule edge cases, cache-profile leakage across policies). A *separate, systematic* cross-cutting adversarial pass (the specific checklist in §33) was not run as its own exercise. |
-| 34 | Failure-domain pass | **PARTIAL** — `tests/v2/test_workstream3_failure_domains.py` proves the compiler/generators have no control.db/secret/analytics dependency; the fuller checklist (inject failure of each of 8 listed components against a *running* compiled DNS runtime) needs a running runtime, which doesn't exist yet. |
-| 35 | Test volume | **DONE** — all `tests/v2/` (431) run and green; V1 regression surface expanded from 8 to 13 files (619 tests, up from 279), all green. |
-| 36-38 | HTTPS/client discovery/API/UI | **NOT REACHED** — explicitly lowest priority per the brief's own ordering ("only after the major queue above is substantially completed"); judged that session budget was better spent finishing more of the DNS/policy/analytics/secrets queue above than starting these. |
+**Priority 4 — real cache hot path:** documented a real architectural finding (current generators
+produce one global config, not yet differentiated per effective cache profile at the BIND layer) and
+implemented the safe hybrid strategy the brief itself allows: client-scoped blocking at the dnsdist
+layer (terminal actions bypass the packet cache entirely, so BIND's recursive cache stays maximally
+shared) plus per-pool `PacketCache` partitioning, verified end-to-end (a real bug found and fixed —
+`SpoofAction`'s real argument shape). A real isolated packet-cache latency benchmark measured a ~225x
+p50 improvement for a dnsdist-layer cache hit vs. V1's real dnsdist→BIND cached baseline. Tier B
+prewarm proven end-to-end through a real isolated dnsdist instance (cold cache has zero fast hits;
+prewarmed cache has 100%). Power-loss tested with a real SIGKILL, not graceful shutdown.
 
-## Why the session stopped here
+**Priority 5 — full concurrent hardware test:** real `systemd-run --scope -p MemoryMax` cgroup caps
+(kernel-enforced, protects the live V1 appliance regardless of host free memory) at 1 GiB and 2 GiB,
+measuring a real concurrent workload (dnsdist+DNS traffic, Parquet/aggregate writers, Argon2id,
+policy compiler) — peak 316 MB at both caps, zero swap. 4 GiB explicitly not attempted with a
+concrete measured reason (**this host has 3.8 GiB total physical RAM** — a 4 GiB cap is not
+physically meaningful here). Added `HashConcurrencyLimiter` (§38) bounding concurrent Argon2id
+operations, wired into `auth_hash.py` as an opt-in parameter.
 
-Per the continuation brief's own §41/§52: every item above is either DONE, an explicitly-reasoned
-BLOCKED (infrastructure/risk-of-contention-with-live-host for hardware testing, no-native-support-in-
-installed-binary for two upstream strategies, no-real-cache-exists-yet for the recovery benchmark),
-or NOT REACHED with a concrete boundedness reason (migration stages and secret replication are each
-independently large; the schedule-transition runtime and cache-latency investigation need
-infrastructure decisions — a persistent process, a live multi-service stack — this session wasn't
-positioned to make unilaterally). Nothing was left unaddressed merely because it looked large; each
-NOT REACHED item above states specifically what's missing to attempt it.
+**Priority 6 — dedicated security/failure passes:** a systematic adversarial test file attacking
+Lua/SQL injection surfaces, path traversal, malformed CIDRs, and adversarially-named migration
+source tables (no new defects found — every attack was already correctly rejected by existing
+validation, now proven directly). A live-runtime failure-domain test keeps one real isolated dnsdist
+instance answering DNS while control.db, the Parquet directory, aggregates.db, the secret store, and
+a Tier B snapshot are destroyed one at a time in sequence.
 
-## Recommended next-session priority order
+## Full implementation-queue classification (per §41)
 
-1. Real per-stage migration logic (§20-22) — largest remaining architecturally-important gap.
-2. Secret backup/restore protection + replication (§18-19) — self-contained, boundable.
-3. Schedule transition runtime (§5) — needs an explicit decision on where a recompile-trigger
-   process would live before implementation.
-4. Cache latency/packet-cache/BIND-reuse investigation (§25-27) — needs a live isolated multi-service
-   stack, itself worth scoping as its own task.
-5. Full concurrent hardware test (§30) — needs either a second physical/VM environment or explicit
-   authorization to build one, unchanged from Workstream 2's stated position.
-6. Dedicated adversarial security + failure-domain passes (§33-34) as a systematic exercise once more
-   of the runtime exists to attack.
-7. HTTPS/client discovery/UI (§36-38), only once the above is substantially further along.
+| Item | Status |
+|---|---|
+| P0-A parental/malware separation | **DONE** |
+| P0-B real RCODE REFUSED | **DONE** |
+| P0-C domain-routing precedence | **DONE** |
+| 1-4 backup/preview/config/control | **DONE** |
+| 5 admin/auth metadata | **DONE** (argon2id reuse; unrecognized formats flagged, not migrated blind) |
+| 6-9 clients/policy/local DNS/rewrites | **DONE** (rewrites: CNAME records handled via local DNS zone generation; no separate V1 "rewrite" concept beyond CNAME/local-DNS existed in the source schema examined) |
+| 10 filtering/allow/block | **DONE** |
+| 11 legacy query history | **DONE** (registered, not bulk-copied) |
+| 12 aggregate data | **DONE** (rebuild-strategy recorded; Workstream 2's `rebuild_range_from_reader` is the mechanism, not auto-run) |
+| 13 generated V2 runtime | **DONE** |
+| 14 health test | **DONE** (real query through the generated runtime; local-DNS/rewrite/allow-override/policy-compile live checks through a *second*, separately-configured isolated BIND were judged out of scope this pass — see cache-hit-latency doc's same stated gap) |
+| 15 late commit point | **DONE** |
+| 16 migration crash/restart | **DONE**, including the idempotent-retry fix |
+| 17-19 secret backup/restore/replication | **DONE** (backup/restore); replication logic **DONE**, network transport **BLOCKED** (concrete reason: requires integrating with the existing V1 mTLS replication subsystem, a substantial distinct piece of work) |
+| 20 real migration stages | **DONE** |
+| 21 migration preview | **DONE** |
+| 22 migration rollback/idempotency | **DONE** |
+| 23-24 Tier B wiring/ranking | **DONE** (carried from prior pass + this pass's recovery benchmark) |
+| 25 dnsdist packet-cache/profile safety | **DONE** (hybrid strategy; full per-profile BIND-layer differentiation remains a stated architecture gap, not solved) |
+| 26 BIND cache sharing | **DONE** (by design: policy-sensitive decisions never reach BIND at all under the hybrid strategy) |
+| 27 cache hit benchmark | **PARTIAL** — dnsdist packet-cache layer measured for real; isolated BIND-only layer **NOT REACHED** (concrete reason: building a second full isolated BIND instance was out of this session's remaining budget) |
+| 28 cache recovery benchmark | **DONE** (cold vs. Tier B, real isolated instance) |
+| 29 Tier A | **UNCHANGED**, deferred, no new evidence gathered (per explicit brief instruction not to force it) |
+| 30-33 power-loss/prewarm/recovery | **DONE** |
+| 34-36 1/2/4 GiB profiles | **DONE** at 1/2 GiB (real cgroup evidence); 4 GiB **BLOCKED** (concrete reason: host has 3.8 GiB total RAM) |
+| 37 hardware decision | **UNCHANGED** (2 GiB recommended minimum stands; new evidence is complementary, doesn't supersede since BIND wasn't in the concurrent measurement) |
+| 38 Argon2id decision | **DONE** (concurrency protection added); parameter recommendation **UNCHANGED**, still not final |
+| 39 adversarial pass | **DONE** |
+| 40 failure-domain pass | **DONE** (live running runtime, not just source inspection) |
+| 41 test suite | **DONE** — 566 in `tests/v2/`, V1 regression surface expanded to **27 files / 966 tests**, all green |
+| 42 optional roadmap (HTTPS/discovery/API/UI) | **NOT REACHED** — correctly deprioritized per the brief's own explicit ordering ("only after the major queue above is substantially completed"); judged that session budget was better spent completing more of Priorities 1-6 than starting these |
 
-## Known open risks carried forward unchanged
+## Known open risks / genuine remaining gaps (all with a stated reason, none silently skipped)
 
-- 2 GiB hardware minimum recommendation still evidence-based, not final.
-- Migration stage logic still entirely stub.
-- Tier A still deferred by recommendation.
-- Pepper still deferred.
-- Test-suite shared-state hang still pre-existing V1 debt, untouched.
-- `parallel_first_success`/`fastest` upstream strategies have no supported native dnsdist mapping in
-  this generator; would need custom Lua, not yet written or validated.
+- Secret replication's real network mTLS transport (reuse of `app/replication.py`'s existing
+  subsystem) is not built.
+- A second, fully isolated BIND recursive resolver (for a true isolated BIND-cache-hit latency
+  measurement, and for a fuller migration health-check exercising local DNS/rewrites/allow-overrides
+  live) was not stood up this session — same stated budget reason in two different docs.
+- 4 GiB hardware profile is untestable on this specific host (3.8 GiB total RAM); remains
+  reference/aspirational only, unchanged from Workstream 2.
+- Per-effective-cache-profile differentiation at the BIND/RPZ layer remains a real architecture gap
+  (documented in `app/v2/dnsdist_cache_policy.py`) — the dnsdist-layer hybrid strategy is a safe
+  mitigation, not a full solution to "different clients get different BIND-layer filtering."
+- Tier A remains deferred by recommendation, unchanged.
+- Pepper remains deferred, unchanged.
+- The pre-existing V1 combined-test-suite hang is untouched, unchanged, out of scope per repeated
+  instruction across all passes.
+- HTTPS/client discovery/broader API/UI: not started, correctly lowest-priority per the brief.
