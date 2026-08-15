@@ -96,11 +96,8 @@ def detect_source(source_root: Path) -> SourceInfo:
     """Real, exhaustive pre-flight schema validation (§5A-5B): every table
     and column the real migration conversion functions actually read is
     checked here, BEFORE backup/migration proceeds -- a source missing
-    ``client_identifiers`` (Dex's exact reproduction: a database with only
-    ``admins``+``clients`` previously passed detection, then failed deep
-    into a later migration stage with a raw traceback) is now rejected
-    right here, with every missing table/column named explicitly, not
-    just the first one encountered.
+    ``client_identifiers`` is now rejected right here, with every missing
+    table/column named explicitly, not just the first one encountered.
 
     Never opens the source for writing.
     """

@@ -15,9 +15,9 @@ rule as the rest of ``app/v2/``: never the live
 
 Migration is layered on top of ``app/v2/control_db.py``'s existing
 guarded-transaction migration mechanism (``apply_migration_in_transaction``)
-at schema version 2, so the forbidden-raw-history-table invariant Dex's
-review locked in continues to be checked on every DDL change this module
-makes, not just the original Workstream 1 schema.
+at schema version 2, so the forbidden-raw-history-table invariant continues
+to be checked on every DDL change this module makes, not just the original
+Workstream 1 schema.
 """
 
 from __future__ import annotations

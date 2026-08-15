@@ -32,7 +32,7 @@ SOURCE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 # appropriate to this branch." 2.0.0~privateN-1: "~" sorts before the
 # final 2.0.0-1 this candidate is a pre-release of, same convention V1's
 # own build-deb.sh already uses for beta/dev/rc tags.
-DEB_VERSION="2.0.0~private3-1"
+DEB_VERSION="2.0.0~private4-1"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -72,10 +72,10 @@ Description: Alderpoint DNS V2 -- PRIVATE RELEASE CANDIDATE (not for production)
  Private, pre-release Workstream 4A/4B packaging of Alderpoint DNS V2.
  Ships the V2 policy/analytics/migration engine, the analytics vendor
  runtime (pyarrow/duckdb), background services (analytics ingestion, Tier B
- prewarm, schedule transitions, native HTTPS management/API, replication,
+ prewarm, schedule transitions, native HTTPS management UI/API, replication,
  discovery, and an observation-only DNS packet ingress on alternate port
  1053), and self-signed TLS bootstrap. Does NOT ship or manage a live
- authoritative dnsdist/BIND listener or a UI -- V2 is not yet authoritative.
+ authoritative dnsdist/BIND listener -- V2 is not yet authoritative.
  Never install alongside the V1 "alderpointdns" package on the same host
  that package is serving traffic from.
 EOF

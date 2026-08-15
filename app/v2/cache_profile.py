@@ -39,10 +39,9 @@ from dataclasses import asdict, dataclass, field
 # protection are independently-toggleable, independently-identified
 # categories rather than sharing one ruleset field (see
 # app/v2/filtering_decision.py for the full rationale — this was a
-# self-identified review risk from the prior pass, fixed here rather than
-# left for Dex to find). The version bump means every previously-computed
-# profile id is invalidated, which is correct: the dimension set genuinely
-# changed shape.
+# self-identified review risk from the prior pass). The version bump means
+# every previously-computed profile id is invalidated, which is correct: the
+# dimension set genuinely changed shape.
 CACHE_PROFILE_SCHEMA_VERSION = 2
 
 

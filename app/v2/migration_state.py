@@ -2,8 +2,8 @@
 
 Workstream 1's ``app/v2/migration.py`` had an in-memory-only
 ``MigrationState`` — fine for exercising the stage pipeline shape, not
-acceptable once migration can run against a real installation (Dex gate,
-``docs/v2/handoff-workstream-2.md`` gate 2). This module adds the durable
+acceptable once migration can run against a real installation
+(``docs/v2/handoff-workstream-2.md`` gate 2). This module adds the durable
 half: state is persisted to a JSON file after every stage transition, using
 the same atomic-write pattern used everywhere else in this codebase
 (temp file + fsync + ``os.replace``), so a crash/reboot between stages

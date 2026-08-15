@@ -34,7 +34,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 from pydantic import BaseModel, Field
 
@@ -66,6 +67,8 @@ from app.v2.secret_store import SecretStore
 APP_ROOT = Path(os.environ.get("ALDERPOINTDNS_V2_APP_ROOT", "/opt/alderpointdns-v2"))
 CONFIG_DIR = Path(os.environ.get("ALDERPOINTDNS_V2_CONFIG_ROOT", "/etc/alderpointdns-v2"))
 STATE_DIR = Path(os.environ.get("ALDERPOINTDNS_V2_STATE_ROOT", "/var/lib/alderpointdns-v2"))
+MODULE_DIR = Path(__file__).resolve().parent
+UI_DIR = MODULE_DIR / "ui"
 
 CONTROL_DB = STATE_DIR / "control.db"
 SECRETS_DIR = STATE_DIR / "secrets"
@@ -128,14 +131,21 @@ def _serializer_instance() -> URLSafeTimedSerializer:
 # --- app + security headers -------------------------------------------------
 
 app = FastAPI(title="Alderpoint DNS V2 Management API", docs_url=None, redoc_url=None, openapi_url=None)
+if UI_DIR.exists():
+    app.mount("/ui-static", StaticFiles(directory=str(UI_DIR)), name="ui-static")
 
 
 @app.middleware("http")
 async def _security_headers(request: Request, call_next):
     response = await call_next(request)
-    # §15: appropriate headers for a pure JSON API served over HTTPS-only.
     response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+    if request.url.path.startswith("/api/") or request.url.path.startswith("/replication/"):
+        response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+    else:
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+            "font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+        )
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Cache-Control"] = "no-store"
@@ -296,6 +306,23 @@ def check_csrf(admin: dict, x_csrf_token: Optional[str]) -> None:
 CsrfHeader = Header(None, alias="X-CSRF-Token")
 
 
+# --- UI shell ---------------------------------------------------------------
+
+
+def _ui_index() -> str:
+    index = UI_DIR / "index.html"
+    if not index.exists():
+        raise ApiError(404, "ui_not_available", "the V2 UI assets are not installed")
+    return index.read_text(encoding="utf-8")
+
+
+@app.get("/", response_class=HTMLResponse)
+@app.get("/ui", response_class=HTMLResponse)
+@app.get("/ui/{path:path}", response_class=HTMLResponse)
+def ui_app(path: str = ""):
+    return HTMLResponse(_ui_index())
+
+
 # --- setup / bootstrap (§11) -------------------------------------------------
 
 
@@ -406,6 +433,13 @@ def logout(request: Request, response: Response, admin=Depends(current_admin)):
     return {"status": "ok"}
 
 
+@app.get("/api/session")
+def session_status(admin=Depends(current_admin)):
+    with _db() as conn:
+        row = conn.execute("SELECT username FROM admins WHERE id=?", (admin["admin_id"],)).fetchone()
+    return {"authenticated": True, "username": row[0] if row else "", "csrf": admin["csrf"]}
+
+
 # --- health (§16) ------------------------------------------------------------
 
 
@@ -489,7 +523,11 @@ class NetworkCreate(BaseModel):
 def list_networks(admin=Depends(current_admin)):
     with _db() as conn:
         rows = conn.execute("SELECT network_id, cidr FROM policy_networks ORDER BY network_id").fetchall()
-    return {"networks": [{"network_id": r[0], "cidr": r[1]} for r in rows]}
+        result = []
+        for network_id, cidr in rows:
+            layer = store.load_policy_layer(conn, "network", network_id)
+            result.append({"network_id": network_id, "cidr": cidr, "policy": _policy_layer_dict(layer)})
+    return {"networks": result}
 
 
 @app.post("/api/networks")
@@ -517,11 +555,15 @@ class PolicyLayerUpdate(BaseModel):
     statistics_enabled: Optional[bool] = None
 
 
+def _policy_layer_dict(layer: PolicyLayer) -> dict[str, Any]:
+    return {f.name: getattr(layer, f.name) for f in __import__("dataclasses").fields(layer)}
+
+
 @app.get("/api/policy/global")
 def get_global_policy(admin=Depends(current_admin)):
     with _db() as conn:
         layer = store.load_policy_layer(conn, "global", "singleton")
-    return {"policy": {f.name: getattr(layer, f.name) for f in __import__("dataclasses").fields(layer)}}
+    return {"policy": _policy_layer_dict(layer)}
 
 
 @app.put("/api/policy/global")
@@ -540,6 +582,57 @@ def put_network_policy(network_id: str, req: PolicyLayerUpdate, admin=Depends(cu
     return {"status": "updated", "runtime": {"promoted": result.promoted, "binding_count": result.binding_count}}
 
 
+class GroupCreate(BaseModel):
+    group_id: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=128)
+    priority: int = 100
+
+
+@app.get("/api/groups")
+def list_groups(admin=Depends(current_admin)):
+    with _db() as conn:
+        rows = conn.execute("SELECT group_id, name, priority FROM policy_groups ORDER BY priority, name").fetchall()
+        groups = []
+        for group_id, name, priority in rows:
+            members = conn.execute(
+                """
+                SELECT c.id, c.name
+                FROM clients c
+                JOIN policy_client_group_membership m ON m.client_id = c.id
+                JOIN policy_groups g ON g.id = m.policy_group_row_id
+                WHERE g.group_id = ?
+                ORDER BY c.name
+                """,
+                (group_id,),
+            ).fetchall()
+            groups.append(
+                {
+                    "group_id": group_id,
+                    "name": name,
+                    "priority": priority,
+                    "members": [{"id": r[0], "name": r[1]} for r in members],
+                    "policy": _policy_layer_dict(store.load_policy_layer(conn, "group", group_id)),
+                }
+            )
+    return {"groups": groups}
+
+
+@app.post("/api/groups")
+def create_group(req: GroupCreate, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    with _db() as conn:
+        store.create_group(conn, req.group_id, req.name, req.priority)
+    return {"status": "created"}
+
+
+@app.put("/api/policy/group/{group_id}")
+def put_group_policy(group_id: str, req: PolicyLayerUpdate, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    layer = PolicyLayer(**req.model_dump())
+    result = _mutate_and_promote(lambda conn: store.save_policy_layer(conn, "group", group_id, layer))
+    return {"status": "updated", "runtime": {"promoted": result.promoted, "binding_count": result.binding_count}}
+
+
 # --- clients + effective-policy explain (§21-22) -----------------------
 
 
@@ -552,7 +645,24 @@ class ClientCreate(BaseModel):
 def list_clients(admin=Depends(current_admin)):
     with _db() as conn:
         rows = conn.execute("SELECT id, name, description, enabled FROM clients ORDER BY id").fetchall()
-    return {"clients": [{"id": r[0], "name": r[1], "description": r[2], "enabled": bool(r[3])} for r in rows]}
+        clients = []
+        for client_id, name, description, enabled in rows:
+            identifiers = conn.execute(
+                "SELECT kind, value FROM client_identifiers WHERE client_id=? ORDER BY kind, value", (client_id,)
+            ).fetchall()
+            groups = store.load_groups_for_client(conn, client_id)
+            clients.append(
+                {
+                    "id": client_id,
+                    "name": name,
+                    "description": description,
+                    "enabled": bool(enabled),
+                    "identifiers": [{"kind": r[0], "value": r[1]} for r in identifiers],
+                    "groups": [{"group_id": g.group_id, "name": g.name, "priority": g.priority} for g in groups],
+                    "policy": _policy_layer_dict(store.load_policy_layer(conn, "client", str(client_id))),
+                }
+            )
+    return {"clients": clients}
 
 
 @app.post("/api/clients")
@@ -587,11 +697,37 @@ def add_client_identifier(client_id: int, req: ClientIdentifierCreate, admin=Dep
         exists = conn.execute("SELECT 1 FROM clients WHERE id=?", (client_id,)).fetchone()
         if not exists:
             raise ApiError(404, "not_found", "unknown client")
-        conn.execute(
-            "INSERT INTO client_identifiers(client_id, kind, value, created_at) VALUES (?, ?, ?, ?)",
-            (client_id, req.kind, req.value, now),
-        )
+        try:
+            conn.execute(
+                "INSERT INTO client_identifiers(client_id, kind, value, created_at) VALUES (?, ?, ?, ?)",
+                (client_id, req.kind, req.value, now),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ApiError(409, "identifier_conflict", "that client identifier is already assigned") from exc
     return {"status": "created"}
+
+
+class ClientGroupMembershipIn(BaseModel):
+    group_id: str = Field(min_length=1, max_length=64)
+
+
+@app.post("/api/clients/{client_id}/groups")
+def add_client_group(client_id: int, req: ClientGroupMembershipIn, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    with _db() as conn:
+        exists = conn.execute("SELECT 1 FROM clients WHERE id=?", (client_id,)).fetchone()
+        if not exists:
+            raise ApiError(404, "not_found", "unknown client")
+        store.add_client_to_group(conn, client_id, req.group_id)
+    return {"status": "created"}
+
+
+@app.put("/api/policy/client/{client_id}")
+def put_client_policy(client_id: int, req: PolicyLayerUpdate, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    layer = PolicyLayer(**req.model_dump())
+    result = _mutate_and_promote(lambda conn: store.save_policy_layer(conn, "client", str(client_id), layer))
+    return {"status": "updated", "runtime": {"promoted": result.promoted, "binding_count": result.binding_count}}
 
 
 @app.get("/api/policy/explain")
@@ -624,7 +760,27 @@ class UpstreamProfileCreate(BaseModel):
 def list_upstreams(admin=Depends(current_admin)):
     with _db() as conn:
         rows = conn.execute("SELECT upstream_profile_id, name, transport, strategy FROM upstream_profiles ORDER BY upstream_profile_id").fetchall()
-    return {"upstreams": [{"upstream_profile_id": r[0], "name": r[1], "transport": r[2], "strategy": r[3]} for r in rows]}
+        upstreams = []
+        for upstream_profile_id, name, transport, strategy in rows:
+            ep_rows = conn.execute(
+                "SELECT address, tls_hostname, priority, weight, doh_path FROM upstream_endpoints "
+                "WHERE upstream_profile_row_id=(SELECT id FROM upstream_profiles WHERE upstream_profile_id=?) "
+                "ORDER BY priority, address",
+                (upstream_profile_id,),
+            ).fetchall()
+            upstreams.append(
+                {
+                    "upstream_profile_id": upstream_profile_id,
+                    "name": name,
+                    "transport": transport,
+                    "strategy": strategy,
+                    "endpoints": [
+                        {"address": e[0], "tls_hostname": e[1], "priority": e[2], "weight": e[3], "doh_path": e[4]}
+                        for e in ep_rows
+                    ],
+                }
+            )
+    return {"upstreams": upstreams}
 
 
 @app.post("/api/upstreams")
@@ -643,6 +799,20 @@ class DomainRoutingCreate(BaseModel):
     rule_id: str
     suffix_domain: str
     upstream_profile_id: str
+
+
+@app.get("/api/domain-routing")
+def list_domain_routes(admin=Depends(current_admin)):
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT ruleset_id, match_kind, domain, upstream_profile_id FROM domain_routing_rules "
+            "ORDER BY ruleset_id, domain"
+        ).fetchall()
+    return {
+        "routes": [
+            {"ruleset_id": r[0], "match_kind": r[1], "domain": r[2], "upstream_profile_id": r[3]} for r in rows
+        ]
+    }
 
 
 @app.post("/api/domain-routing")
@@ -679,6 +849,27 @@ def create_service(req: ServiceCreate, admin=Depends(current_admin), x_csrf_toke
     return {"status": "created"}
 
 
+@app.get("/api/services")
+def list_services(admin=Depends(current_admin)):
+    with _db() as conn:
+        rows = conn.execute("SELECT id, service_id, display_name, category FROM service_definitions ORDER BY category, display_name").fetchall()
+        services = []
+        for row_id, service_id, display_name, category in rows:
+            domains = conn.execute(
+                "SELECT match_kind, domain FROM service_domains WHERE service_row_id=? ORDER BY match_kind, domain",
+                (row_id,),
+            ).fetchall()
+            services.append(
+                {
+                    "service_id": service_id,
+                    "display_name": display_name,
+                    "category": category,
+                    "domains": [{"match_kind": d[0], "domain": d[1]} for d in domains],
+                }
+            )
+    return {"services": services}
+
+
 class ServiceRulesetCreate(BaseModel):
     ruleset_id: str
     service_ids: list[str]
@@ -690,6 +881,26 @@ def create_service_ruleset(req: ServiceRulesetCreate, admin=Depends(current_admi
     with _db() as conn:
         store.create_service_ruleset(conn, req.ruleset_id, req.service_ids)
     return {"status": "created"}
+
+
+@app.get("/api/service-rulesets")
+def list_service_rulesets(admin=Depends(current_admin)):
+    with _db() as conn:
+        rows = conn.execute("SELECT id, ruleset_id FROM service_blocking_rulesets ORDER BY ruleset_id").fetchall()
+        rulesets = []
+        for row_id, ruleset_id in rows:
+            members = conn.execute(
+                """
+                SELECT s.service_id, s.display_name
+                FROM service_blocking_ruleset_members m
+                JOIN service_definitions s ON s.id = m.service_row_id
+                WHERE m.ruleset_row_id=?
+                ORDER BY s.display_name
+                """,
+                (row_id,),
+            ).fetchall()
+            rulesets.append({"ruleset_id": ruleset_id, "services": [{"service_id": m[0], "display_name": m[1]} for m in members]})
+    return {"rulesets": rulesets}
 
 
 # --- schedules (§23) --------------------------------------------------------
@@ -722,6 +933,105 @@ def create_schedule_route(req: ScheduleCreate, admin=Depends(current_admin), x_c
     with _db() as conn:
         store.create_schedule(conn, req.schedule_id, req.timezone, windows)
     return {"status": "created"}
+
+
+@app.get("/api/schedules")
+def list_schedules(admin=Depends(current_admin)):
+    with _db() as conn:
+        rows = conn.execute("SELECT id, schedule_id, timezone FROM policy_schedules ORDER BY schedule_id").fetchall()
+        schedules = []
+        for row_id, schedule_id, timezone_name in rows:
+            windows = conn.execute(
+                "SELECT start_time, end_time, weekdays FROM policy_schedule_windows WHERE schedule_row_id=? ORDER BY start_time",
+                (row_id,),
+            ).fetchall()
+            schedules.append(
+                {
+                    "schedule_id": schedule_id,
+                    "timezone": timezone_name,
+                    "windows": [{"start": w[0], "end": w[1], "weekdays": w[2]} for w in windows],
+                    "policy": _policy_layer_dict(store.load_policy_layer(conn, "schedule", schedule_id)),
+                }
+            )
+    return {"schedules": schedules}
+
+
+@app.put("/api/policy/schedule/{schedule_id}")
+def put_schedule_policy(schedule_id: str, req: PolicyLayerUpdate, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    layer = PolicyLayer(**req.model_dump())
+    result = _mutate_and_promote(lambda conn: store.save_policy_layer(conn, "schedule", schedule_id, layer))
+    return {"status": "updated", "runtime": {"promoted": result.promoted, "binding_count": result.binding_count}}
+
+
+class LocalDnsRecordCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    record_type: str
+    value: str = Field(min_length=1, max_length=255)
+    ttl: int = Field(default=300, ge=30, le=86400)
+    enabled: bool = True
+
+
+def _ensure_local_dns_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS local_dns_records (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            record_type TEXT NOT NULL CHECK(record_type IN ('A','AAAA','CNAME','PTR')),
+            value TEXT NOT NULL,
+            ttl INTEGER NOT NULL DEFAULT 300,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(name, record_type, value)
+        )
+        """
+    )
+
+
+@app.get("/api/local-dns")
+def list_local_dns(admin=Depends(current_admin)):
+    with _db() as conn:
+        _ensure_local_dns_schema(conn)
+        rows = conn.execute(
+            "SELECT id, name, record_type, value, ttl, enabled FROM local_dns_records ORDER BY name, record_type, value LIMIT 500"
+        ).fetchall()
+    return {"records": [{"id": r[0], "name": r[1], "record_type": r[2], "value": r[3], "ttl": r[4], "enabled": bool(r[5])} for r in rows]}
+
+
+@app.post("/api/local-dns")
+def create_local_dns(req: LocalDnsRecordCreate, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    if req.record_type not in ("A", "AAAA", "CNAME", "PTR"):
+        raise ApiError(400, "validation_error", "invalid record type")
+    if req.record_type == "A":
+        ipaddress.IPv4Address(req.value)
+    elif req.record_type == "AAAA":
+        ipaddress.IPv6Address(req.value)
+    elif req.record_type in ("CNAME", "PTR"):
+        from app.v2.dns_name_validate import validate_dns_name
+
+        validate_dns_name(req.value)
+
+    from app.v2.dns_name_validate import validate_dns_name
+
+    validate_dns_name(req.name)
+
+    def _mutate(conn):
+        _ensure_local_dns_schema(conn)
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            conn.execute(
+                "INSERT INTO local_dns_records(name, record_type, value, ttl, enabled, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (req.name.strip(".").lower(), req.record_type, req.value, req.ttl, int(req.enabled), now, now),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ApiError(409, "duplicate_record", "that Local DNS record already exists") from exc
+
+    result = _mutate_and_promote(_mutate)
+    return {"status": "created", "runtime": {"promoted": result.promoted, "binding_count": result.binding_count}}
 
 
 # --- analytics (§28) ---------------------------------------------------

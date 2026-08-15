@@ -5,7 +5,7 @@ Workstream 1's benchmark (`benchmarks/v2_analytics/`) used flat per-batch
 segment files in one directory — it proved storage-format performance, not
 that a real time-bounded query against the production
 ``YYYY/MM/DD/HH-<segment>.parquet`` layout actually skips irrelevant
-partitions. Dex flagged this explicitly as a Workstream 2 gate
+partitions. This was explicitly tracked as a Workstream 2 gate
 (``docs/v2/handoff-workstream-2.md`` gate 1).
 
 This module closes that gap: ``enumerate_partition_files`` walks the

@@ -216,8 +216,8 @@ class SecretStore:
 
     # --- crash-atomic restore journal (P0-A) -------------------------------
     #
-    # A durable restore journal/state machine (Dex's "OR" option): written
-    # atomically (tempfile + fsync + os.replace, same primitive as
+    # A durable restore journal/state machine: written atomically
+    # (tempfile + fsync + os.replace, same primitive as
     # _atomic_write) BEFORE the first real-path mutation of a restore, and
     # updated atomically once more when every promotion has succeeded. Its
     # presence on disk is itself the "an interrupted restore exists" signal
