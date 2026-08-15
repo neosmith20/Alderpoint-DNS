@@ -565,6 +565,13 @@ def push_to_peer(conn, secrets: SecretStore, peer_node_id: str, temp_root: Path)
     conn.execute("UPDATE replication_peers SET last_attempt_at=?, last_error='' WHERE peer_node_id=?", (_now(), peer_node_id))
     try:
         client = http.client.HTTPSConnection(parsed.hostname, parsed.port or 443, context=ctx, timeout=10)
+        client.connect()
+        server_cert = client.sock.getpeercert(binary_form=True) if client.sock else None
+        if not server_cert:
+            raise ReplicationAuthError("peer server certificate is required")
+        actual_fp = cert_fingerprint_sha256(ssl.DER_cert_to_PEM_cert(server_cert))
+        if peer.expected_cert_sha256 and actual_fp.lower() != peer.expected_cert_sha256.lower():
+            raise ReplicationAuthError("peer server certificate fingerprint mismatch")
         client.request("POST", parsed.path or "/replication/v1/apply", body=body, headers={"Content-Type": "application/json"})
         resp = client.getresponse()
         response_body = resp.read(MAX_BODY_BYTES)

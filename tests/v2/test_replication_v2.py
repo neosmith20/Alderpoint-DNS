@@ -161,6 +161,31 @@ def test_real_mtls_server_rejects_missing_client_cert_and_accepts_authorized_pee
     )
     port = server.server_address[1]
     try:
+        with control_db.connect(db_b) as b_lookup:
+            peer_b = node_identity.get_or_create(b_lookup).node_id
+        with control_db.connect(db_a) as a:
+            replication_v2.upsert_peer(
+                a,
+                peer_node_id=peer_b,
+                display_name="b",
+                url=f"https://localhost:{port}/replication/v1/apply",
+                ca_pem=ca,
+                expected_cert_sha256=replication_v2.cert_fingerprint_sha256(cert_a),
+                client_cert_pem=cert_a,
+                client_key_pem=key_a,
+            )
+            with pytest.raises(replication_v2.ReplicationAuthError, match="server certificate fingerprint mismatch"):
+                replication_v2.push_to_peer(a, SecretStore(tmp_path / "sa"), peer_b, tmp_path / "tmp")
+            replication_v2.upsert_peer(
+                a,
+                peer_node_id=peer_b,
+                display_name="b",
+                url=f"https://localhost:{port}/replication/v1/apply",
+                ca_pem=ca,
+                expected_cert_sha256=replication_v2.cert_fingerprint_sha256(cert_b),
+                client_cert_pem=cert_a,
+                client_key_pem=key_a,
+            )
         import http.client
 
         no_cert_ctx = ssl.create_default_context(cafile=str(ca_path))
