@@ -128,3 +128,131 @@ limitation on full service-start validation, those items were not
 attempted this session rather than attempted and misreported. They remain
 open exactly as listed in `docs/v2/handoff-workstream-4.md`'s "Known open
 risks" section, plus the two new findings above.
+
+---
+
+## Follow-up session (HEAD `fd5b43e` → this session): both flagged findings resolved
+
+### A. Live-internet DNS test dependency — resolved
+
+Root cause was not just `test_policy_runtime_matrix.py`'s use of `iana.org`
+directly: the module-level "is the network reachable" guard reused across
+seven v2 test files only called `socket.connect()` on a UDP socket with no
+`send()`/`recv()` — that proves a route exists, not that packets survive
+the round trip. In an environment that silently black-holes outbound
+UDP:53 (route present, no response), that check reports "reachable" and
+every real query in the gated tests then blocks for a full per-query
+timeout — this, not any single test file, is what produced the
+combined-suite stall.
+
+Fix (commit `c7759e1`):
+
+- `app/v2/net_probe.py` (new): shared real round-trip probe (send a real
+  minimal DNS query, require an actual response, short timeout) —
+  distinguishes "no route" from "route exists but nothing answers."
+  `tests/v2/_network_probe.py` is a thin alias so both the app and the
+  test suite use the identical check.
+- Applied to the weak checks in `test_doh_no_downgrade.py`,
+  `test_cache_recovery.py`, `test_failure_domain_live_runtime.py`,
+  `test_tier_b_worker.py`, `test_p0_review_fixes.py`,
+  `test_dnsdist_cache_policy.py`, and `test_migration_real_stages.py`
+  (whose `NETWORK_REQUIRED` mark, despite its name, never actually
+  checked network reachability — only that `dnsdist` was installed).
+  These tests are inherently real-internet/real-TLS proofs (e.g. a real
+  DoH handshake to Cloudflare) and stay network-gated rather than moved
+  to a local backend.
+- `test_policy_runtime_matrix.py`: this suite's actual intent (per its own
+  module docstring) is proving dnsdist cross-policy isolation, not
+  outbound internet reachability. Replaced its dependency on public
+  resolvers (1.1.1.1/9.9.9.9) and the real domain `iana.org` with a real
+  local-only authoritative `named` instance
+  (`tests/v2/_local_dns_backend.py`) as the upstream — a real BIND
+  daemon, not a mock, so the real dnsdist → real backend DNS path is
+  still exercised end to end, with zero outbound network dependency.
+  (Debian's `named` AppArmor profile confines it to `/etc/bind`,
+  `/var/lib/bind`, `/var/cache/bind` regardless of the invoking user's
+  own permissions — the fixture's ephemeral per-test config has to live
+  under `/var/lib/bind`, not a generic tempdir, or `named` gets
+  "permission denied" reading its own config even as root.)
+- `app/v2/migration.py`'s `_stage_health_check`: this is production code,
+  not just a test — it runs a real query against whatever upstream got
+  migrated (often a real public resolver carried over from V1) with no
+  network-outage handling, hard-failing the *whole migration* (blocking
+  commit) whenever there was no outbound route at that moment. That is
+  not a real signal about the generated runtime's correctness (`validate`,
+  the stage immediately before it, already confirms the config is
+  well-formed) — it just means migration silently required internet
+  access. Now checks outbound reachability first via the same probe and
+  degrades to a recorded `"skipped: no outbound network route"` result
+  instead of failing the stage, mirroring the existing
+  dnsdist-not-installed degrade path already in the same function.
+
+Proof: `pytest tests/v2 tests` run inside `unshare --net` (loopback-only,
+no route to any external host at all) completes deterministically in
+~2m10s with no hang and no unexpected failures — the genuinely
+internet/TLS-dependent tests skip cleanly, `test_policy_runtime_matrix.py`
+runs and passes fully offline (9/9), and the migration end-to-end tests
+that used to hard-fail now pass with a recorded degraded health-check
+result. The same run with real outbound network available also passes in
+full, including the tests that need it. `tests/v2` in isolation: 788
+passed (matches baseline exactly). `tests --ignore=tests/v2` in isolation:
+1188 passed (matches baseline exactly). Two unrelated flakes seen only
+when running the full suite concurrently with a separate heavy `podman`
+build/install in the background (`test_replication_v2.py`'s real mTLS
+server test, and the Chromium UI harness's `test_chromium_management_ui_harness`)
+both passed cleanly when re-run in isolation — resource contention, not a
+regression from this change, and not investigated further under this
+item.
+
+### B. `ProtectSystem=strict` clean-install discrepancy — resolved (environment-specific, not a package defect)
+
+Reproduced the prior session's failure mode and isolated the actual cause:
+`podman run --cap-add SYS_ADMIN` (what the prior session tried) is
+insufficient for a systemd-in-container workload — Debian/RHEL's own
+documented pattern for running systemd inside Podman is
+`podman run --privileged --systemd=always`, not a piecemeal `--cap-add`.
+This host (confirmed via `systemd-detect-virt` → `kvm`, `systemd-detect-virt
+--container` → none) is itself a real VM with a real systemd PID 1, not a
+nested container — i.e. it is the actual target-shaped host, not another
+layer of sandboxing. On it:
+
+- `podman run -d --privileged --systemd=always -v /sys/fs/cgroup:/sys/fs/cgroup:rw
+  localhost/apdns-v2-4c-accept-base:trixie` → `systemctl is-system-running`
+  → `running`, full capability set inside the container
+  (`capsh --print` → `Current: =ep`).
+- Installed the exact accepted private5 artifact
+  (`alderpointdns-v2_2.0.0~private5-1_all.deb`,
+  `sha256:862ca82b66c0cb838068585533bc0ab1083bf964394850befe54a60c89981964`
+  — re-verified against the retained copy before use) via
+  `apt-get install`: exit 0, full postinst completion (vendor runtime,
+  `init-state`, `generate-runtime` with both dnsdist config and RPZ zone
+  validated+promoted, node identity, control.db schema 6, secret store,
+  TLS bootstrap).
+- `systemctl is-active` on all five V2 units, including both previously-
+  failing ones, → `active` for every one:
+  `alderpointdns-v2-web`, `alderpointdns-v2-replication`,
+  `alderpointdns-v2-analytics`, `alderpointdns-v2-tierb`,
+  `alderpointdns-v2-schedule`.
+- `alderpointdns-v2-web.service` (`ProtectSystem=strict`, `PrivateTmp=true`,
+  `CapabilityBoundingSet=`) — `systemctl status` shows it running under the
+  full hardening with `MemoryMax=768M` applied, and a real HTTPS request
+  (`curl -sk https://127.0.0.1:8443/`) returned `HTTP 200`.
+- `alderpointdns-v2-replication.service` (same hardening class) — active,
+  `init-replication-cert` ExecStartPre succeeded, real mTLS listener up on
+  `0.0.0.0:9443`.
+
+Conclusion, matching option 2/3 from the original decision tree: the
+package and its systemd units are not defective. The prior CC session's
+own sandbox was evidently already running inside a container with a
+restricted capability set (its own diagnostic noted this host's shell
+capabilities were unaffected while the *container's* `/proc/1/status`
+lacked `cap_sys_admin`) — launching Podman with `--cap-add SYS_ADMIN`
+*inside* an already-capability-restricted environment cannot grant a
+capability the outer layer never had, whereas `--privileged --systemd=always`
+run directly on this real target-shaped VM host works cleanly and
+reproduces the earlier accepted Workstream 4B/4C/4D evidence exactly. No
+package/systemd change was made or needed. The container used for this
+proof was removed after verification (not retained as a running service).
+
+Both items above are commit `c7759e1` (test/migration fix) plus this
+document (evidence-only, no package changes needed for item B).
