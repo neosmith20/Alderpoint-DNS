@@ -34,10 +34,21 @@ CREATE TABLE local_dns_records (
     value TEXT NOT NULL, ttl INTEGER NOT NULL DEFAULT 300, comment TEXT NOT NULL DEFAULT '',
     enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
-CREATE TABLE custom_rules (
-    id INTEGER PRIMARY KEY, domain TEXT NOT NULL,
-    action TEXT NOT NULL CHECK(action IN ('allow','block')),
-    enabled INTEGER NOT NULL DEFAULT 1, comment TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+-- The real (v1.1.1) table every current V1 code path actually reads/
+-- writes for custom filter rules -- webapp.py's /rules routes and
+-- custom_rules.py's add_rule()/add_rules_bulk(), never the differently-
+-- shaped bare "custom_rules" table that exists in the live schema only
+-- as dead, unwritten-to legacy DDL (see app/v2/migration_convert.py's
+-- migrate_filtering() docstring for the real defect this used to mask:
+-- the fixture and the migration code both used to agree on the wrong
+-- table, so no test ever caught it).
+CREATE TABLE custom_filter_rules (
+    id INTEGER PRIMARY KEY, rule_text TEXT NOT NULL, normalized TEXT NOT NULL,
+    rule_type TEXT NOT NULL DEFAULT 'block', domain TEXT,
+    action TEXT NOT NULL CHECK(action IN ('allow','block','rewrite','none')),
+    enabled INTEGER NOT NULL DEFAULT 1,
+    validation_state TEXT NOT NULL DEFAULT 'valid',
+    comment TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE TABLE notification_providers (
     id INTEGER PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL,
@@ -130,12 +141,14 @@ def build_v1_fixture(
                 "'10.0.0.20', 300, '', 1, '2026-01-01T00:00:00', '2026-01-01T00:00:00')"
             )
             conn.execute(
-                "INSERT INTO custom_rules VALUES (1, 'ads.example', 'block', 1, '', "
-                "'2026-01-01T00:00:00')"
+                "INSERT INTO custom_filter_rules VALUES (1, '||ads.example^', 'ads.example', "
+                "'block', 'ads.example', 'block', 1, 'valid', '', "
+                "'2026-01-01T00:00:00', '2026-01-01T00:00:00')"
             )
             conn.execute(
-                "INSERT INTO custom_rules VALUES (2, 'good.example', 'allow', 1, '', "
-                "'2026-01-01T00:00:00')"
+                "INSERT INTO custom_filter_rules VALUES (2, '@@||good.example^', 'good.example', "
+                "'allow', 'good.example', 'allow', 1, 'valid', '', "
+                "'2026-01-01T00:00:00', '2026-01-01T00:00:00')"
             )
             conn.execute(
                 "INSERT INTO notification_providers VALUES (1, 'webhook', 'Ops Webhook', 1, "
@@ -185,9 +198,11 @@ def build_v1_fixture(
             for i in range(custom_rules):
                 n = 3 + i
                 action = "block" if i % 2 == 0 else "allow"
+                domain = f"rule{n}.example"
                 conn.execute(
-                    "INSERT INTO custom_rules VALUES (?, ?, ?, 1, '', '2026-01-01T00:00:00')",
-                    (n, f"rule{n}.example", action),
+                    "INSERT INTO custom_filter_rules VALUES (?, ?, ?, ?, ?, ?, 1, 'valid', '', "
+                    "'2026-01-01T00:00:00', '2026-01-01T00:00:00')",
+                    (n, f"||{domain}^", domain, action, domain, action),
                 )
             for i in range(clients):
                 n = 2 + i

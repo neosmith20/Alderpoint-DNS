@@ -212,6 +212,7 @@ def _stage_migrate_policies(state: MigrationState) -> None:
     mconv.migrate_local_dns_to_control_db(local_dns_records, state.target_control_db())
 
     state.filtering = mconv.migrate_filtering(_backup_db_path(state))
+    state.warnings.extend(state.filtering.get("warnings", []))
     state.object_counts["filtering_blocked"] = len(state.filtering["blocked_domains"])
     state.object_counts["filtering_allowed"] = len(state.filtering["allowed_domains"])
     if state.filtering["allowed_domains"]:

@@ -77,7 +77,7 @@ class TestMissingRequiredTableRejected:
         db_path = build_v1_fixture(source / "alderpointdns.db")
         conn = sqlite3.connect(str(db_path))
         conn.execute("DROP TABLE upstream_resolvers")
-        conn.execute("DROP TABLE custom_rules")
+        conn.execute("DROP TABLE custom_filter_rules")
         conn.execute("DROP TABLE notification_providers")
         conn.commit()
         conn.close()
@@ -85,7 +85,7 @@ class TestMissingRequiredTableRejected:
             detect_source(source)
         message = str(exc_info.value)
         assert "upstream_resolvers" in message
-        assert "custom_rules" in message
+        assert "custom_filter_rules" in message
         assert "notification_providers" in message
 
 

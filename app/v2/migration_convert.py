@@ -42,7 +42,7 @@ REQUIRED_TABLES_AND_COLUMNS: dict[str, frozenset[str]] = {
     "client_identifiers": frozenset({"client_id", "kind", "value", "created_at"}),
     "network_policies": frozenset({"cidr", "profile_key", "description", "enabled"}),
     "local_dns_records": frozenset({"fqdn", "record_type", "value", "ttl", "enabled"}),
-    "custom_rules": frozenset({"domain", "action", "enabled"}),
+    "custom_filter_rules": frozenset({"domain", "action", "enabled", "validation_state"}),
     "upstream_resolvers": frozenset(
         {"name", "protocol", "address", "port", "tls_hostname", "doh_path", "position", "enabled"}
     ),
@@ -316,12 +316,21 @@ def build_preview(backup_db_path: Path) -> dict:
                 "client_identifiers": _count("client_identifiers"),
                 "access_rules": _count("access_rules"),
                 "local_dns_records": _count("local_dns_records"),
+                # custom_rules (bare "domain"/"action"/"enabled" columns)
+                # is dead V1 schema: no current V1 code path (webapp.py's
+                # real /rules feature, custom_rules.py's add_rule/
+                # add_rules_bulk, the importer) ever writes to it -- every
+                # real custom filter rule a real V1 admin has ever created
+                # lives in custom_filter_rules instead (found live during
+                # RC2 migration acceptance testing: a real V1 install with
+                # 20 real rules created through the real add_rule() API
+                # previewed and migrated as 0 rules with the old query).
                 "custom_rules_block": conn.execute(
-                    "SELECT COUNT(*) FROM custom_rules WHERE action='block'"
-                ).fetchone()[0] if _count("custom_rules") else 0,
+                    "SELECT COUNT(*) FROM custom_filter_rules WHERE action='block' AND enabled=1 AND validation_state='valid'"
+                ).fetchone()[0] if _count("custom_filter_rules") else 0,
                 "custom_rules_allow": conn.execute(
-                    "SELECT COUNT(*) FROM custom_rules WHERE action='allow'"
-                ).fetchone()[0] if _count("custom_rules") else 0,
+                    "SELECT COUNT(*) FROM custom_filter_rules WHERE action='allow' AND enabled=1 AND validation_state='valid'"
+                ).fetchone()[0] if _count("custom_filter_rules") else 0,
                 "notification_providers": secret_count,
                 "upstream_resolvers": _count("upstream_resolvers"),
                 "network_policies": _count("network_policies"),
@@ -547,7 +556,7 @@ def migrate_policies(backup_db_path: Path, target_control_db: Path) -> dict:
     fabricate behavior when V1 lacks a direct concept) since V1's
     profile_key/policy_profiles system has no per-profile filtering
     behavior of its own in this schema (that lives in the separate,
-    global-only ``custom_rules`` table, migrated in ``migrate_filtering``)
+    global-only ``custom_filter_rules`` table, migrated in ``migrate_filtering``)
     -- this semantic simplification is explicitly surfaced as a preview
     warning, not silently applied.
     """
@@ -610,16 +619,44 @@ def migrate_local_dns(backup_db_path: Path) -> tuple[list[LocalDnsRecord], list[
 
 
 def migrate_filtering(backup_db_path: Path) -> dict:
+    """Reads V1's real custom-filter-rule table. custom_filter_rules, not
+    the bare custom_rules table this used to (incorrectly) read from --
+    custom_rules has matching-looking domain/action/enabled columns but
+    is dead schema no current V1 code path ever writes to; every real V1
+    admin's real custom rules (via the actual /rules UI, custom_rules.py's
+    add_rule()/add_rules_bulk(), or the importer) live in
+    custom_filter_rules instead. Found live during RC2 migration
+    acceptance testing: a real V1 install with 20 real rules migrated as
+    zero with the old query, silently.
+
+    Only 'block'/'allow' domain rules the V1 app itself currently
+    considers active and valid are migrated -- rewrite/regex/comment/
+    unsupported rule_types have no V2 equivalent in this simple
+    domain-list migration and are surfaced as a count in warnings rather
+    than silently dropped.
+    """
     src = sqlite3.connect(f"file:{backup_db_path}?mode=ro", uri=True)
     try:
         rows = src.execute(
-            "SELECT domain, action FROM custom_rules WHERE enabled = 1"
+            "SELECT domain, action FROM custom_filter_rules "
+            "WHERE enabled = 1 AND validation_state = 'valid' AND action IN ('block', 'allow') "
+            "AND domain IS NOT NULL"
         ).fetchall()
+        skipped = src.execute(
+            "SELECT COUNT(*) FROM custom_filter_rules "
+            "WHERE enabled = 1 AND validation_state = 'valid' AND action NOT IN ('block', 'allow')"
+        ).fetchone()[0]
     finally:
         src.close()
     blocked = sorted({d for d, a in rows if a == "block"})
     allowed = sorted({d for d, a in rows if a == "allow"})
-    return {"blocked_domains": blocked, "allowed_domains": allowed}
+    warnings: list[str] = []
+    if skipped:
+        warnings.append(
+            f"{skipped} enabled custom filter rule(s) use a rewrite/regex rule type with no V2 "
+            "migration path yet and were not migrated (only plain block/allow domain rules are)"
+        )
+    return {"blocked_domains": blocked, "allowed_domains": allowed, "warnings": warnings}
 
 
 def migrate_filtering_to_control_db(blocked_domains: list[str], target_control_db: Path) -> dict:

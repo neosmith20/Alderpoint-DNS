@@ -212,7 +212,7 @@ class TestMissingOptionalHistoricalState:
     documents as tolerated entirely absent: ``analytics_settings`` and
     ``query_events``. (The other candidate tables considered for this
     fixture -- ``notification_providers``, ``local_dns_records``,
-    ``custom_rules`` -- turn out to be in
+    ``custom_filter_rules`` -- turn out to be in
     ``REQUIRED_TABLES_AND_COLUMNS``, correctly rejected by
     ``detect_source`` rather than silently degraded; verified directly
     below so that contract can't silently drift without a test noticing.)
@@ -236,7 +236,7 @@ class TestMissingOptionalHistoricalState:
         assert results["analytics"]["row_count"] == expected_rows
 
     @pytest.mark.parametrize(
-        "required_table", ["notification_providers", "local_dns_records", "custom_rules"]
+        "required_table", ["notification_providers", "local_dns_records", "custom_filter_rules"]
     )
     def test_missing_required_table_is_explicitly_rejected_not_silently_degraded(
         self, tmp_path, required_table

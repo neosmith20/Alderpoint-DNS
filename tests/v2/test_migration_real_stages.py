@@ -204,6 +204,41 @@ class TestFilteringMigration:
         assert result["blocked_domains"] == ["ads.example"]
         assert result["allowed_domains"] == ["good.example"]
 
+    def test_preview_object_counts_match_real_custom_filter_rules_table(self, v1_source, tmp_path):
+        # Real regression found live during RC2 migration acceptance
+        # testing: migrate_filtering() and build_preview() both used to
+        # read the bare "custom_rules" table -- dead V1 schema no current
+        # V1 code path (the real /rules UI, custom_rules.py's
+        # add_rule()/add_rules_bulk(), the importer) ever writes to.
+        # Every real V1 admin's real custom rules live in
+        # custom_filter_rules instead, so a real V1 install with real
+        # rules previewed and migrated as zero, silently, with no error.
+        info = mconv.detect_source(v1_source)
+        manifest = mconv.create_backup(info.db_path, tmp_path / "staging")
+        preview = mconv.build_preview(Path(manifest["backup_path"]))
+        assert preview["object_counts"]["custom_rules_block"] == 1
+        assert preview["object_counts"]["custom_rules_allow"] == 1
+
+    def test_non_block_allow_rule_types_excluded_and_reported_not_silently_dropped(self, tmp_path):
+        source = tmp_path / "src" / "alderpointdns.db"
+        build_v1_fixture(source)
+        conn = sqlite3.connect(str(source))
+        conn.execute(
+            "INSERT INTO custom_filter_rules VALUES (100, 'x.example -> 1.2.3.4', 'x.example', "
+            "'rewrite', 'x.example', 'rewrite', 1, 'valid', '', "
+            "'2026-01-01T00:00:00', '2026-01-01T00:00:00')"
+        )
+        conn.commit()
+        conn.close()
+        info = mconv.detect_source(source.parent)
+        manifest = mconv.create_backup(info.db_path, tmp_path / "staging")
+        result = mconv.migrate_filtering(Path(manifest["backup_path"]))
+        # The rewrite rule must not silently appear as a block/allow domain...
+        assert "x.example" not in result["blocked_domains"]
+        assert "x.example" not in result["allowed_domains"]
+        # ...but its exclusion must be surfaced, not silent.
+        assert any("rewrite" in w or "1 enabled custom filter rule" in w for w in result["warnings"])
+
 
 class TestUpstreamsMigration:
     def test_upstream_profile_created(self, v1_source, tmp_path):
