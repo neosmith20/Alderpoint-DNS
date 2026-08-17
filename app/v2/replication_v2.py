@@ -43,7 +43,7 @@ from app.v2.secret_store import SecretStore
 # peer-cert-issuance capability.
 REPLICATION_CA_KEY_SECRET_ID = "replication-ca-signing-key"
 
-REPLICATION_SCHEMA_VERSION = 6
+REPLICATION_SCHEMA_VERSION = 7
 PROTOCOL_VERSION = 1
 MAX_BODY_BYTES = 1_000_000
 MAX_OBJECTS = 2000
@@ -72,6 +72,20 @@ REPLICATED_TABLES = (
     "notification_providers",
 )
 
+# Two distinct real certificates are in play for a real cross-issuance
+# peer relationship (see docs/v2/replication-enrollment-fix-and-rc5-
+# acceptance.md's "bidirectional schema limit" finding for the real
+# defect this closes -- one column trying to serve both roles was
+# confirmed to break a genuinely bidirectional peer configuration):
+# - expected_cert_sha256: this peer's real, fixed SERVER certificate
+#   (whatever TLS handed us during the handshake when WE call OUT to
+#   them via push_to_peer) -- dictated entirely by their own
+#   init-replication-cert bootstrap, we have no control over it.
+# - expected_incoming_cert_sha256: the cert THEY present as their
+#   CLIENT identity when THEY call us -- under the cross-issuance
+#   enrollment model (issue_peer_client_cert), that's a cert WE issued
+#   them, a completely different certificate/key from their server
+#   cert. Checked only by _validate_message's incoming-push path.
 _MIGRATION: list[str] = [
     """
     CREATE TABLE IF NOT EXISTS replication_peers (
@@ -80,6 +94,7 @@ _MIGRATION: list[str] = [
         url TEXT NOT NULL,
         ca_pem TEXT NOT NULL,
         expected_cert_sha256 TEXT NOT NULL,
+        expected_incoming_cert_sha256 TEXT NOT NULL DEFAULT '',
         client_cert_pem TEXT NOT NULL DEFAULT '',
         client_key_pem TEXT NOT NULL DEFAULT '',
         authorized INTEGER NOT NULL DEFAULT 0,
@@ -130,6 +145,10 @@ def _table_exists(conn, table: str) -> bool:
     return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone() is not None
 
 
+def _column_exists(conn, table: str, column: str) -> bool:
+    return any(row[1] == column for row in conn.execute(f"PRAGMA table_info({table})").fetchall())
+
+
 def ensure_schema(path: str | Path) -> None:
     control_db.initialize(path)
     policy_store.ensure_schema(path)
@@ -139,6 +158,20 @@ def ensure_schema(path: str | Path) -> None:
         present = _table_exists(conn, "replication_peers")
     if not present:
         control_db.apply_migration_in_transaction(path, _MIGRATION, REPLICATION_SCHEMA_VERSION)
+        return
+    # Incremental migration for a node whose replication_peers table
+    # already existed before expected_incoming_cert_sha256 was added
+    # (schema 6 -> 7) -- CREATE TABLE IF NOT EXISTS in _MIGRATION only
+    # ever applies to a brand-new table, so an in-place package upgrade
+    # needs its own explicit ADD COLUMN step to avoid breaking on "no
+    # such column" the first time this node's control.db is opened
+    # post-upgrade.
+    with control_db.connect(path) as conn:
+        if not _column_exists(conn, "replication_peers", "expected_incoming_cert_sha256"):
+            conn.execute(
+                "ALTER TABLE replication_peers ADD COLUMN expected_incoming_cert_sha256 TEXT NOT NULL DEFAULT ''"
+            )
+            conn.commit()
 
 
 def cert_fingerprint_sha256(pem: str | bytes) -> str:
@@ -261,6 +294,7 @@ class Peer:
     url: str
     ca_pem: str
     expected_cert_sha256: str
+    expected_incoming_cert_sha256: str
     client_cert_pem: str
     client_key_pem: str
     authorized: bool
@@ -277,6 +311,7 @@ class Peer:
             "display_name": self.display_name,
             "url": self.url,
             "expected_cert_sha256": self.expected_cert_sha256,
+            "expected_incoming_cert_sha256": self.expected_incoming_cert_sha256,
             "authorized": self.authorized,
             "direction": self.direction,
             "last_attempt_at": self.last_attempt_at,
@@ -296,6 +331,7 @@ def upsert_peer(
     url: str,
     ca_pem: str,
     expected_cert_sha256: str,
+    expected_incoming_cert_sha256: str = "",
     client_cert_pem: str = "",
     client_key_pem: str = "",
     authorized: bool = True,
@@ -309,18 +345,38 @@ def upsert_peer(
         raise ValueError("replication peer url must be https://")
     if expected_cert_sha256 and len(expected_cert_sha256) != 64:
         raise ValueError("expected_cert_sha256 must be a SHA-256 hex fingerprint")
+    if expected_incoming_cert_sha256 and len(expected_incoming_cert_sha256) != 64:
+        raise ValueError("expected_incoming_cert_sha256 must be a SHA-256 hex fingerprint")
+    if direction == "bidirectional" and not expected_incoming_cert_sha256:
+        # A "bidirectional" peer accepts incoming pushes from this peer
+        # too, and _validate_message needs a real fingerprint to pin an
+        # incoming connection's presented cert against -- saving one
+        # with only expected_cert_sha256 (the OLD, single-field shape,
+        # which only ever covers the OUTGOING direction) is exactly the
+        # real misconfiguration that silently broke incoming validation
+        # before this fix. Reject it loudly here instead of accepting a
+        # peer record that can never actually validate an incoming
+        # push -- if this peer never pushes to us, use direction='push'
+        # instead, which doesn't require it.
+        raise ValueError(
+            "direction='bidirectional' requires expected_incoming_cert_sha256 -- the fingerprint of "
+            "the cert this peer presents when IT calls us, from issue_peer_client_cert() run on "
+            "THIS node for that peer's node_id"
+        )
     now = _now()
     conn.execute(
         """
         INSERT INTO replication_peers(
             peer_node_id, display_name, url, ca_pem, expected_cert_sha256,
-            client_cert_pem, client_key_pem, authorized, direction, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            expected_incoming_cert_sha256, client_cert_pem, client_key_pem,
+            authorized, direction, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(peer_node_id) DO UPDATE SET
             display_name=excluded.display_name,
             url=excluded.url,
             ca_pem=excluded.ca_pem,
             expected_cert_sha256=excluded.expected_cert_sha256,
+            expected_incoming_cert_sha256=excluded.expected_incoming_cert_sha256,
             client_cert_pem=excluded.client_cert_pem,
             client_key_pem=excluded.client_key_pem,
             authorized=excluded.authorized,
@@ -333,6 +389,7 @@ def upsert_peer(
             url,
             ca_pem,
             expected_cert_sha256.lower(),
+            expected_incoming_cert_sha256.lower(),
             client_cert_pem,
             client_key_pem,
             1 if authorized else 0,
@@ -347,13 +404,17 @@ def list_peers(conn) -> list[Peer]:
     rows = conn.execute(
         """
         SELECT peer_node_id, display_name, url, ca_pem, expected_cert_sha256,
-               client_cert_pem, client_key_pem, authorized, direction,
+               expected_incoming_cert_sha256, client_cert_pem, client_key_pem,
+               authorized, direction,
                last_attempt_at, last_success_at, last_error,
                local_generation, remote_known_generation
         FROM replication_peers ORDER BY peer_node_id
         """
     ).fetchall()
-    return [Peer(r[0], r[1], r[2], r[3], r[4], r[5], r[6], bool(r[7]), r[8], r[9], r[10], r[11], r[12], r[13]) for r in rows]
+    return [
+        Peer(r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], bool(r[8]), r[9], r[10], r[11], r[12], r[13], r[14])
+        for r in rows
+    ]
 
 
 def get_peer(conn, peer_node_id: str) -> Peer | None:
@@ -449,7 +510,16 @@ def _validate_message(conn, message: dict, *, peer_cert_pem: str | None = None) 
     if peer_cert_pem:
         actual_fp = cert_fingerprint_sha256(peer_cert_pem)
         actual_node = cert_node_id(peer_cert_pem)
-        if peer.expected_cert_sha256 and actual_fp.lower() != peer.expected_cert_sha256.lower():
+        # An INCOMING push is validated against expected_incoming_cert_
+        # sha256 -- the cert THIS peer presents as ITS client identity,
+        # which under real cross-issuance enrollment is a different
+        # cert from their server cert (see upsert_peer's docstring).
+        # Falls back to the single expected_cert_sha256 field when the
+        # newer field isn't populated, for peer records saved before
+        # this fix or using the test-only shared-cert model where the
+        # two are the same fingerprint anyway.
+        expected = peer.expected_incoming_cert_sha256 or peer.expected_cert_sha256
+        if expected and actual_fp.lower() != expected.lower():
             raise ReplicationAuthError("peer certificate fingerprint mismatch")
         if actual_node and actual_node != sender:
             raise ReplicationAuthError("peer certificate node identity mismatch")

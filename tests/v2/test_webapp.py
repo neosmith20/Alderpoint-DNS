@@ -344,6 +344,12 @@ class TestReplicationPeerCertEnrollment:
         assert body["ca_pem"] == ca_pem
         assert body["expected_cert_sha256"] == replication_v2.cert_fingerprint_sha256(cert_pem)
         assert replication_v2.cert_node_id(body["client_cert_pem"]) == "remote-node-xyz"
+        # issued_cert_sha256 is what the remote node's admin needs as
+        # THEIR OWN peer-record's expected_incoming_cert_sha256 for a
+        # bidirectional relationship -- must be the fingerprint of the
+        # cert actually returned, not this node's own server cert.
+        assert body["issued_cert_sha256"] == replication_v2.cert_fingerprint_sha256(body["client_cert_pem"])
+        assert body["issued_cert_sha256"] != body["expected_cert_sha256"]
         # The CA private key itself must never be returned to the caller.
         assert ca_key_pem not in json.dumps(body)
 

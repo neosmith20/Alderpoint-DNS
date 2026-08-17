@@ -1413,6 +1413,14 @@ class ReplicationPeerUpsert(BaseModel):
     url: str
     ca_pem: str
     expected_cert_sha256: str = Field(min_length=64, max_length=64)
+    # Required for direction="bidirectional" (this peer may push TO
+    # us): the fingerprint of the cert THIS peer presents as ITS client
+    # identity, from issue_peer_client_cert() run on THIS node for that
+    # peer's node_id -- deliberately a separate field from
+    # expected_cert_sha256 (that peer's own, different, server cert
+    # fingerprint) -- see replication_v2.upsert_peer's docstring for
+    # the real bidirectional-trust defect this closes.
+    expected_incoming_cert_sha256: str = ""
     client_cert_pem: str = ""
     client_key_pem: str = ""
     authorized: bool = True
@@ -1480,9 +1488,15 @@ def replication_issue_peer_cert(req: IssuePeerCertRequest, admin=Depends(current
     use as its client cert when connecting to THIS node. Returns
     everything the remote node's administrator needs to paste into that
     node's peer record for this one (PUT /api/replication/peers/{this
-    node's id}): this node's ca_pem, this node's own server-cert
-    fingerprint, and the freshly issued client cert+key. Never returns
-    this node's own CA *key* -- only ever the issued leaf cert/key pair.
+    node's id}, direction="push"): this node's ca_pem, this node's own
+    server-cert fingerprint, the freshly issued client cert+key, and
+    that cert's own fingerprint (issued_cert_sha256). For a real
+    bidirectional relationship, call this on BOTH nodes and combine
+    fields from both responses -- see replication_v2.upsert_peer's
+    docstring for why expected_cert_sha256 and
+    expected_incoming_cert_sha256 are two different real certificates,
+    not the same value twice. Never returns this node's own CA *key* --
+    only ever the issued leaf cert/key pair.
     """
     check_csrf(admin, x_csrf_token)
     if not REPLICATION_CA_PATH.exists() or not REPLICATION_SERVER_CERT_PATH.exists():
@@ -1504,6 +1518,7 @@ def replication_issue_peer_cert(req: IssuePeerCertRequest, admin=Depends(current
         "expected_cert_sha256": replication_v2.cert_fingerprint_sha256(REPLICATION_SERVER_CERT_PATH.read_text(encoding="utf-8")),
         "client_cert_pem": cert_pem,
         "client_key_pem": key_pem,
+        "issued_cert_sha256": replication_v2.cert_fingerprint_sha256(cert_pem),
     }
 
 

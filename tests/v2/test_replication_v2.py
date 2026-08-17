@@ -22,6 +22,14 @@ def _trust_pair(conn_a, conn_b, tmp_path):
     id_b = node_identity.get_or_create(conn_b).node_id
     cert_a, key_a = replication_v2.issue_node_cert(ca_pem, ca_key, id_a)
     cert_b, key_b = replication_v2.issue_node_cert(ca_pem, ca_key, id_b)
+    # Test-only shared-CA model: each node has exactly one cert, reused
+    # as both its server identity and its client identity (unlike real
+    # cross-issuance enrollment, where those are deliberately separate
+    # certs -- see upsert_peer's docstring/comment on
+    # expected_incoming_cert_sha256). So expected_cert_sha256 (outgoing:
+    # the peer's server cert) and expected_incoming_cert_sha256
+    # (incoming: the cert the peer presents as client) are the same
+    # real fingerprint here.
     replication_v2.upsert_peer(
         conn_a,
         peer_node_id=id_b,
@@ -29,6 +37,7 @@ def _trust_pair(conn_a, conn_b, tmp_path):
         url="https://localhost:1/replication/v1/apply",
         ca_pem=ca_pem,
         expected_cert_sha256=replication_v2.cert_fingerprint_sha256(cert_b),
+        expected_incoming_cert_sha256=replication_v2.cert_fingerprint_sha256(cert_b),
         client_cert_pem=cert_a,
         client_key_pem=key_a,
     )
@@ -39,6 +48,7 @@ def _trust_pair(conn_a, conn_b, tmp_path):
         url="https://localhost:1/replication/v1/apply",
         ca_pem=ca_pem,
         expected_cert_sha256=replication_v2.cert_fingerprint_sha256(cert_a),
+        expected_incoming_cert_sha256=replication_v2.cert_fingerprint_sha256(cert_a),
         client_cert_pem=cert_b,
         client_key_pem=key_b,
     )
@@ -96,6 +106,7 @@ def test_unknown_peer_and_identity_mismatch_fail_closed(tmp_path):
             url="https://localhost:1/replication/v1/apply",
             ca_pem=ca,
             expected_cert_sha256=replication_v2.cert_fingerprint_sha256(cert_wrong),
+            expected_incoming_cert_sha256=replication_v2.cert_fingerprint_sha256(cert_wrong),
         )
         with pytest.raises(replication_v2.ReplicationAuthError):
             replication_v2.apply_message(b, SecretStore(tmp_path / "sb"), msg, peer_cert_pem=cert_wrong)
@@ -171,6 +182,31 @@ def test_apply_message_real_recompile_defaults_to_sane_listen_address(tmp_path):
         )
     conf_text = (tmp_path / "dnsdist.conf").read_text()
     assert 'setLocal("0.0.0.0:53")' in conf_text
+
+
+def test_bidirectional_peer_without_incoming_fingerprint_rejected_not_silently_broken(tmp_path):
+    # Real regression: saving a direction="bidirectional" peer with
+    # only the single (old-shape) expected_cert_sha256 field used to be
+    # silently accepted and then could never actually validate an
+    # incoming push from that peer (see
+    # docs/v2/replication-enrollment-fix-and-rc5-acceptance.md). Must
+    # now be rejected loudly at save time instead.
+    db = tmp_path / "a.db"
+    _init(db)
+    with control_db.connect(db) as conn:
+        with pytest.raises(ValueError, match="expected_incoming_cert_sha256"):
+            replication_v2.upsert_peer(
+                conn, peer_node_id="some-peer", display_name="x",
+                url="https://localhost:1/replication/v1/apply",
+                ca_pem="ca", expected_cert_sha256="a" * 64,
+                # direction defaults to "bidirectional"
+            )
+        # direction="push" doesn't need it and must succeed.
+        replication_v2.upsert_peer(
+            conn, peer_node_id="some-peer", display_name="x",
+            url="https://localhost:1/replication/v1/apply",
+            ca_pem="ca", expected_cert_sha256="a" * 64, direction="push",
+        )
 
 
 class TestPeerCertEnrollment:
@@ -250,19 +286,27 @@ class TestPeerCertEnrollment:
             # identity == node_b.
             b_creds_for_calling_a = replication_v2.issue_peer_client_cert(secrets_a, ca_a, node_b)
 
-            # A's own record of how to reach B.
+            # A's own record of how to reach B -- this test only
+            # exercises A pushing TO B, so direction="push" (doesn't
+            # need expected_incoming_cert_sha256).
             replication_v2.upsert_peer(
                 a, peer_node_id=node_b, display_name="b", url="https://localhost:1/replication/v1/apply",
                 ca_pem=ca_b, expected_cert_sha256=replication_v2.cert_fingerprint_sha256(server_cert_b),
                 client_cert_pem=a_creds_for_calling_b[0], client_key_pem=a_creds_for_calling_b[1],
+                direction="push",
             )
-            # B's own record of A -- expected_cert_sha256 here is what
-            # _validate_message checks an INCOMING push from A against,
-            # i.e. the cert A actually presents (a_creds_for_calling_b),
-            # not B's own outgoing credential.
+            # B's own record of A -- expected_incoming_cert_sha256 is
+            # what _validate_message checks an INCOMING push from A
+            # against, i.e. the cert A actually presents
+            # (a_creds_for_calling_b), which is deliberately a
+            # *different* real cert from A's own server cert
+            # (expected_cert_sha256, B's server_cert_a below -- unused
+            # for incoming validation, only relevant if B ever pushes
+            # back out to A).
             replication_v2.upsert_peer(
                 b, peer_node_id=node_a, display_name="a", url="https://localhost:1/replication/v1/apply",
-                ca_pem=ca_a, expected_cert_sha256=replication_v2.cert_fingerprint_sha256(a_creds_for_calling_b[0]),
+                ca_pem=ca_a, expected_cert_sha256=replication_v2.cert_fingerprint_sha256(server_cert_a),
+                expected_incoming_cert_sha256=replication_v2.cert_fingerprint_sha256(a_creds_for_calling_b[0]),
                 client_cert_pem=b_creds_for_calling_a[0], client_key_pem=b_creds_for_calling_a[1],
             )
             msg = replication_v2.build_message(a, SecretStore(tmp_path / "data-a"))
@@ -270,6 +314,85 @@ class TestPeerCertEnrollment:
                 b, SecretStore(tmp_path / "data-b"), msg, peer_cert_pem=a_creds_for_calling_b[0]
             )
         assert result["applied"] is True
+
+    def test_genuinely_bidirectional_trust_validates_both_directions_independently(self, tmp_path):
+        # Real regression for the bidirectional schema defect found live
+        # during RC replication acceptance testing (see
+        # docs/v2/replication-enrollment-fix-and-rc5-acceptance.md):
+        # expected_cert_sha256 alone cannot correctly pin BOTH "the
+        # peer's real server cert" (needed to validate A's OUTGOING
+        # push to B) and "the cert the peer presents as client" (needed
+        # to validate an INCOMING push FROM the peer) at the same time,
+        # because under real cross-issuance enrollment those are two
+        # different real certificates. Proves both directions validate
+        # correctly and independently using the two-field model, with
+        # deliberately WRONG values in the field each direction doesn't
+        # use, to prove the two checks are truly independent rather
+        # than one silently subsuming the other.
+        db_a = tmp_path / "a.db"
+        db_b = tmp_path / "b.db"
+        _init(db_a)
+        _init(db_b)
+        secrets_a = SecretStore(tmp_path / "sa")
+        secrets_b = SecretStore(tmp_path / "sb")
+        ca_a, ca_key_a = replication_v2.generate_private_ca("node-a-ca")
+        ca_b, ca_key_b = replication_v2.generate_private_ca("node-b-ca")
+        secrets_a.create(ca_key_a, secret_id=replication_v2.REPLICATION_CA_KEY_SECRET_ID)
+        secrets_b.create(ca_key_b, secret_id=replication_v2.REPLICATION_CA_KEY_SECRET_ID)
+
+        with control_db.connect(db_a) as a, control_db.connect(db_b) as b:
+            node_a = node_identity.get_or_create(a).node_id
+            node_b = node_identity.get_or_create(b).node_id
+            server_cert_a, _ = replication_v2.issue_node_cert(ca_a, ca_key_a, node_a, server_name="localhost")
+            server_cert_b, _ = replication_v2.issue_node_cert(ca_b, ca_key_b, node_b, server_name="localhost")
+            a_creds_for_calling_b = replication_v2.issue_peer_client_cert(secrets_b, ca_b, node_a)
+            b_creds_for_calling_a = replication_v2.issue_peer_client_cert(secrets_a, ca_a, node_b)
+
+            # A's peer-record-for-B: real server fingerprint for
+            # verifying B, real issued cert for A's own incoming
+            # validation of B's push -- deliberately different values,
+            # each checked by a different code path.
+            replication_v2.upsert_peer(
+                a, peer_node_id=node_b, display_name="b", url="https://localhost:1/replication/v1/apply",
+                ca_pem=ca_b, expected_cert_sha256=replication_v2.cert_fingerprint_sha256(server_cert_b),
+                expected_incoming_cert_sha256=replication_v2.cert_fingerprint_sha256(b_creds_for_calling_a[0]),
+                client_cert_pem=a_creds_for_calling_b[0], client_key_pem=a_creds_for_calling_b[1],
+            )
+            replication_v2.upsert_peer(
+                b, peer_node_id=node_a, display_name="a", url="https://localhost:1/replication/v1/apply",
+                ca_pem=ca_a, expected_cert_sha256=replication_v2.cert_fingerprint_sha256(server_cert_a),
+                expected_incoming_cert_sha256=replication_v2.cert_fingerprint_sha256(a_creds_for_calling_b[0]),
+                client_cert_pem=b_creds_for_calling_a[0], client_key_pem=b_creds_for_calling_a[1],
+            )
+
+            # A -> B: B validates A's incoming push using its
+            # expected_incoming_cert_sha256 (a_creds_for_calling_b).
+            msg_a_to_b = replication_v2.build_message(a, SecretStore(tmp_path / "data-a"))
+            result_a_to_b = replication_v2.apply_message(
+                b, SecretStore(tmp_path / "data-b"), msg_a_to_b, peer_cert_pem=a_creds_for_calling_b[0]
+            )
+            assert result_a_to_b["applied"] is True
+
+            # B -> A: A validates B's incoming push using ITS OWN
+            # expected_incoming_cert_sha256 (b_creds_for_calling_a) --
+            # a completely different fingerprint from what A just used
+            # to validate B's server identity above, proving the two
+            # fields are checked independently, not conflated.
+            msg_b_to_a = replication_v2.build_message(b, SecretStore(tmp_path / "data-b"))
+            result_b_to_a = replication_v2.apply_message(
+                a, SecretStore(tmp_path / "data-a"), msg_b_to_a, peer_cert_pem=b_creds_for_calling_a[0]
+            )
+            assert result_b_to_a["applied"] is True
+
+            # Sanity: presenting the WRONG cert for the incoming
+            # direction (server cert instead of the issued client
+            # cert) must still fail closed -- proves this isn't
+            # accidentally accepting anything signed by the right CA.
+            msg_a_to_b_2 = replication_v2.build_message(a, SecretStore(tmp_path / "data-a"))
+            with pytest.raises(replication_v2.ReplicationAuthError, match="fingerprint mismatch"):
+                replication_v2.apply_message(
+                    b, SecretStore(tmp_path / "data-b2"), msg_a_to_b_2, peer_cert_pem=server_cert_a
+                )
 
 
 def test_push_to_peer_does_not_shadow_http_module():
@@ -322,6 +445,7 @@ def test_real_mtls_server_rejects_missing_client_cert_and_accepts_authorized_pee
                 expected_cert_sha256=replication_v2.cert_fingerprint_sha256(cert_a),
                 client_cert_pem=cert_a,
                 client_key_pem=key_a,
+                direction="push",
             )
             with pytest.raises(replication_v2.ReplicationAuthError, match="server certificate fingerprint mismatch"):
                 replication_v2.push_to_peer(a, SecretStore(tmp_path / "sa"), peer_b, tmp_path / "tmp")
@@ -334,6 +458,7 @@ def test_real_mtls_server_rejects_missing_client_cert_and_accepts_authorized_pee
                 expected_cert_sha256=replication_v2.cert_fingerprint_sha256(cert_b),
                 client_cert_pem=cert_a,
                 client_key_pem=key_a,
+                direction="push",
             )
         import http.client
 
@@ -409,6 +534,7 @@ def test_push_to_peer_succeeds_against_a_real_second_host_address_not_just_local
                 b, peer_node_id=id_a, display_name="a",
                 url="https://localhost:1/replication/v1/apply",
                 ca_pem=ca_pem, expected_cert_sha256=replication_v2.cert_fingerprint_sha256(cert_a),
+                expected_incoming_cert_sha256=replication_v2.cert_fingerprint_sha256(cert_a),
                 client_cert_pem=cert_b, client_key_pem=key_b,
             )
         with control_db.connect(db_a) as a:
@@ -417,6 +543,7 @@ def test_push_to_peer_succeeds_against_a_real_second_host_address_not_just_local
                 url=f"https://127.0.0.1:{port}/replication/v1/apply",  # real IP, NOT "localhost"
                 ca_pem=ca_pem, expected_cert_sha256=replication_v2.cert_fingerprint_sha256(cert_b),
                 client_cert_pem=cert_a, client_key_pem=key_a,
+                direction="push",
             )
             result = replication_v2.push_to_peer(a, SecretStore(tmp_path / "sa"), id_b, tmp_path / "tmp")
         assert result["applied"] is True

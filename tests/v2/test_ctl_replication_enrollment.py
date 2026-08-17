@@ -92,6 +92,7 @@ class TestIssuePeerCertCommand:
         assert bundle["expected_cert_sha256"] == replication_v2.cert_fingerprint_sha256(
             ctl_module.REPLICATION_SERVER_CERT_PATH.read_text()
         )
+        assert bundle["issued_cert_sha256"] == replication_v2.cert_fingerprint_sha256(bundle["client_cert_pem"])
         assert "PRIVATE KEY" not in bundle["ca_pem"]  # never leaks the CA key itself
 
     def test_out_file_written_with_restricted_permissions(self, ctl_module, tmp_path):

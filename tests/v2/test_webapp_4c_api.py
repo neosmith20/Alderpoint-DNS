@@ -38,6 +38,7 @@ def test_replication_peer_public_api_never_exposes_private_key(tmp_path, monkeyp
         url="https://peer.example:9443/replication/v1/apply",
         ca_pem="ca",
         expected_cert_sha256="a" * 64,
+        expected_incoming_cert_sha256="c" * 64,
         client_cert_pem="cert",
         client_key_pem="VERY-SECRET-KEY",
         authorized=True,

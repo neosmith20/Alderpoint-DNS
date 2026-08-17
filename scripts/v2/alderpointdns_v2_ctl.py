@@ -271,9 +271,22 @@ def cmd_issue_peer_cert(args: argparse.Namespace) -> int:
     THIS node. Prints everything the *other* node's administrator needs
     to paste into that node's peer record for this one
     (``PUT /api/replication/peers/{this node's id}``): this node's own
-    ca_pem, this node's own server-cert fingerprint, and the freshly
-    issued client cert+key -- to stdout by default, or to
-    --out (a single JSON file) for scripted enrollment.
+    ca_pem, this node's own server-cert fingerprint, the freshly issued
+    client cert+key, and that cert's own fingerprint -- to stdout by
+    default, or to --out (a single JSON file) for scripted enrollment.
+
+    One bundle only covers ONE direction (the remote node pushing to
+    THIS node). For a real bidirectional peer relationship, run this
+    command on BOTH nodes (each issuing a cert for the OTHER) and
+    combine fields from both bundles into each node's own peer record:
+    a node's own peer-record-for-the-other needs the OTHER bundle's
+    ca_pem/expected_cert_sha256/client_cert_pem/client_key_pem (to call
+    out) *plus* THIS bundle's issued_cert_sha256 as its own
+    expected_incoming_cert_sha256 (to validate the other node's incoming
+    push) -- see replication_v2.upsert_peer's docstring for exactly why
+    these are two different real certificates, not the same value
+    twice. direction="push" only needs one bundle and doesn't require
+    this.
     """
     if not REPLICATION_CA_PATH.exists() or not REPLICATION_SERVER_CERT_PATH.exists():
         print("replication TLS material not initialized on this node -- run init-replication-cert first", file=sys.stderr)
@@ -295,13 +308,17 @@ def cmd_issue_peer_cert(args: argparse.Namespace) -> int:
         "expected_cert_sha256": replication_v2.cert_fingerprint_sha256(REPLICATION_SERVER_CERT_PATH.read_text(encoding="utf-8")),
         "client_cert_pem": cert_pem,
         "client_key_pem": key_pem,
+        "issued_cert_sha256": replication_v2.cert_fingerprint_sha256(cert_pem),
     }
     if args.out:
         Path(args.out).write_text(json.dumps(bundle, indent=2), encoding="utf-8")
         os.chmod(args.out, 0o600)
         print(f"enrollment bundle written to {args.out} -- copy it to {args.remote_node_id}'s administrator, "
               f"who pastes ca_pem/expected_cert_sha256/client_cert_pem/client_key_pem into "
-              f"PUT /api/replication/peers/{ident.node_id} on that node")
+              f"PUT /api/replication/peers/{ident.node_id} on that node (direction='push'); for a "
+              f"bidirectional relationship they also need this bundle's issued_cert_sha256 as THEIR "
+              f"own peer-record-for-{ident.node_id}'s expected_incoming_cert_sha256 -- see this "
+              f"command's own --help/docstring")
     else:
         print(json.dumps(bundle, indent=2))
     return 0
