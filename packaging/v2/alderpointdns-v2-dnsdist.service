@@ -3,6 +3,20 @@ Description=Alderpoint DNS V2 packaged dnsdist runtime (private candidate)
 Documentation=man:dnsdist(1)
 After=network.target
 ConditionPathExists=/var/lib/alderpointdns-v2/compiled/dnsdist.conf
+# Real defect found by hardware/performance load testing (roadmap
+# Priority 3), same root cause as
+# alderpointdns-v2-dnsdist-reload.service's own comment: this unit is
+# restarted (not reloaded -- dnsdist has no live-reload for Lua-defined
+# rules) by that reload unit once per compiled-runtime promotion. Raising
+# only the reload unit's own start-rate limit surfaced the exact same
+# failure one layer deeper -- a legitimate burst of rapid admin changes
+# (e.g. bulk-importing local DNS records) then hit THIS unit's default
+# systemd start-rate limit (5 restarts per 10s) instead, taking real live
+# DNS answering down entirely (`failed (Result: start-limit-hit)`) until
+# manual intervention, which is strictly worse than the reload unit
+# merely falling behind. Matches the same generous-but-bounded limit.
+StartLimitIntervalSec=60
+StartLimitBurst=200
 
 [Service]
 Type=simple

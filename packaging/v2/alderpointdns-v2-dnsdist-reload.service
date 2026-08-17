@@ -1,6 +1,29 @@
 [Unit]
 Description=Reload Alderpoint DNS V2 packaged dnsdist after runtime promotion
 After=alderpointdns-v2-dnsdist.service
+# Real defect found by hardware/performance load testing (roadmap
+# Priority 3): systemd's default per-unit start-rate limit
+# (DefaultStartLimitIntervalSec=10s / DefaultStartLimitBurst=5) applies
+# to this unit too. Any ordinary admin action that changes the compiled
+# runtime more than 5 times within 10 seconds -- e.g. a bulk import of
+# local DNS records or filter rules through the real management API,
+# each of which independently stages/validates/promotes and so each of
+# which independently touches the watched file -- pushed this unit (and
+# the .path unit watching it, which fails along with it) into a
+# permanent `failed (Result: unit-start-limit-hit)` state after the 5th
+# reload. Every promotion after that continued to succeed at the
+# file/control.db layer (correctly staged, validated, and written) and
+# the management API kept reporting "promoted" for each one, but the
+# *running* dnsdist process silently stopped picking any of them up --
+# with no operator-visible signal that auto-reload had stopped working
+# at all, until a manual `systemctl reset-failed
+# alderpointdns-v2-dnsdist-reload.path && systemctl start
+# alderpointdns-v2-dnsdist-reload.path`. A generous but still-bounded
+# limit (as opposed to disabling the limit entirely) keeps a backstop
+# against a genuine runaway-reload bug while comfortably covering any
+# realistic single burst of manual or scripted admin changes.
+StartLimitIntervalSec=60
+StartLimitBurst=200
 
 [Service]
 Type=oneshot

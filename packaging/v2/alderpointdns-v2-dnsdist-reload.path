@@ -1,6 +1,14 @@
 [Unit]
 Description=Watch Alderpoint DNS V2 promoted dnsdist runtime for reload
 After=alderpointdns-v2-dnsdist.service
+# Same real defect/fix as alderpointdns-v2-dnsdist-reload.service's own
+# comment: when the triggered .service unit hits systemd's start-rate
+# limit, this .path unit's own activation is reported failed too and it
+# stops watching entirely -- matching the triggered unit's generous
+# bounded limit here as well, defense in depth against the same failure
+# mode reaching this unit through a different path.
+StartLimitIntervalSec=60
+StartLimitBurst=200
 
 [Path]
 PathChanged=/var/lib/alderpointdns-v2/compiled/dnsdist.conf
