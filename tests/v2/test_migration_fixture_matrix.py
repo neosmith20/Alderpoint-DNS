@@ -162,6 +162,50 @@ class TestAlternateUpstreamConfiguration:
         assert profile.transport == "dot"
 
 
+class TestInboundEncryptedTransportNotSilentlyLost:
+    """G. V1's inbound encrypted-DNS-for-clients config (encryption_settings:
+    doh/dot/doh3/doq/dnscrypt_enabled -- a real, commonly-on-by-default V1
+    feature per app/encryption.py's _DEFAULTS) has no V2 migration path yet
+    (dnsdist_gen.py emits only a single plain listener). This must surface
+    as an explicit warning, not vanish silently."""
+
+    def test_preview_warns_when_source_has_encrypted_transports_enabled(self, tmp_path):
+        source = build_v1_fixture(
+            tmp_path / "src" / "alderpointdns.db",
+            encrypted_transports_enabled=("doh_enabled", "dot_enabled"),
+        )
+        manifest = mconv.create_backup(source, tmp_path / "staging")
+        preview = mconv.build_preview(Path(manifest["backup_path"]))
+        assert preview["encryption_settings"]["migrated"] is False
+        assert set(preview["encryption_settings"]["inbound_transports_enabled_in_source"]) == {
+            "DoH",
+            "DoT",
+        }
+        assert any("DoH" in w and "DoT" in w for w in preview["warnings"])
+
+    def test_preview_no_warning_when_source_has_no_encrypted_transports(self, tmp_path):
+        # The shared baseline fixture seeds dot_enabled='true' (matching a
+        # real V1 default install); explicitly disable it here to test the
+        # genuinely-all-off case.
+        source = build_v1_fixture(tmp_path / "src" / "alderpointdns.db", dot_enabled=False)
+        manifest = mconv.create_backup(source, tmp_path / "staging")
+        preview = mconv.build_preview(Path(manifest["backup_path"]))
+        assert preview["encryption_settings"]["inbound_transports_enabled_in_source"] == []
+        assert not any("encrypted DNS transport" in w for w in preview["warnings"])
+
+    def test_full_pipeline_warning_present_in_migration_state(self, tmp_path):
+        from app.v2 import migration as mig
+
+        source = tmp_path / "src"
+        build_v1_fixture(
+            source / "alderpointdns.db", encrypted_transports_enabled=("doq_enabled",)
+        )
+        state = mig.MigrationState(source_path=source, staging_dir=tmp_path / "staging")
+        for stage in ("detect", "backup", "preview", "migrate_config"):
+            mig._STAGE_FUNCS[stage](state)
+        assert any("DoQ" in w for w in state.warnings)
+
+
 class TestMissingOptionalHistoricalState:
     """J. Older/leaner V1 schema shapes missing tables that migration's own
     schema contract (``migration_convert.OPTIONAL_TABLES_AND_COLUMNS``)

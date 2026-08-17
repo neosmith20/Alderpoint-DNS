@@ -164,6 +164,20 @@ def _stage_migrate_config(state: MigrationState) -> None:
     except mconv.MigrationConvertError as exc:
         raise MigrationError("migrate_config", str(exc)) from exc
 
+    import sqlite3
+
+    conn = sqlite3.connect(f"file:{_backup_db_path(state)}?mode=ro", uri=True)
+    try:
+        enabled_transports = mconv._enabled_inbound_encrypted_transports(conn)
+    finally:
+        conn.close()
+    if enabled_transports:
+        state.warnings.append(
+            "source had inbound encrypted DNS transport(s) enabled for clients "
+            f"({', '.join(enabled_transports)}) -- NOT migrated (see preview_report."
+            "encryption_settings); migrated appliance serves plain UDP/TCP:53 only"
+        )
+
 
 def _stage_migrate_control(state: MigrationState) -> None:
     mconv.initialize_target_control_db(state.target_control_db())
@@ -510,6 +524,167 @@ def run_migration(
             mstate.save(state_path, durable_record)
 
     return state
+
+
+class PromotionError(RuntimeError):
+    """Raised when promoting a committed staged migration onto the live
+    install fails or is refused. Distinct from ``MigrationError`` (which
+    covers the staging pipeline itself) so a caller can tell "the staged
+    conversion is wrong" apart from "the staged conversion is fine but
+    promoting it onto this particular live install isn't safe."""
+
+
+def promote_to_live(
+    state: MigrationState,
+    *,
+    live_control_db: Path,
+    live_secrets_dir: Path,
+    live_compiled_dir: Path,
+    live_listen_address: str = "0.0.0.0:53",
+    dnsdist_binary: str = "dnsdist",
+    named_checkzone_binary: str = "named-checkzone",
+    allow_overwrite: bool = False,
+) -> dict:
+    """Promotes a committed staged migration (``state.committed`` from
+    ``run_migration``) onto a real live V2 install.
+
+    This is deliberately a separate, explicit step from ``commit`` (see
+    ``_stage_commit``'s docstring: commit only finalizes the *staged*
+    output, it never touches a live install) -- promotion is inherently
+    host-mutating and, unlike every staging-pipeline stage, is NOT safe to
+    retry blindly from scratch (it writes real files other live processes
+    may already be reading), so a caller must ask for it explicitly with
+    real live paths rather than it happening implicitly at the end of
+    ``run_migration``.
+
+    Safety:
+
+    - Refuses to run at all unless ``state.committed`` is True.
+    - Refuses to overwrite a live control.db that already has real admin
+      configuration (i.e. isn't just the fresh-install default a
+      packaged V2's own ``init-state`` produces) unless
+      ``allow_overwrite=True`` -- prevents a migration accidentally
+      clobbering a V2 install an operator already configured by hand.
+    - The dnsdist config is NOT a blind copy of the staged
+      health-check artifact: that artifact is intentionally bound to a
+      private throwaway loopback port (see ``_stage_generate_runtime_config``)
+      so the health check never collides with a real live listener on
+      port 53. Promotion regenerates the config from the same already-
+      migrated upstream profile but with the real ``live_listen_address``,
+      and validates THAT regenerated config against the live binaries
+      before promoting it -- "invalid config never becomes active" is
+      enforced at the live path, not inherited from the staging-path
+      validation.
+    - RPZ / local-DNS zone text has no listen-address dependency, so the
+      already-validated staged text is reused directly, but is still
+      re-validated (not just re-copied) against the live binaries at the
+      live path before promotion -- defense in depth against a staged
+      artifact that was valid at staging time but stale/corrupted since.
+    """
+    if not state.committed:
+        raise PromotionError("migration has not reached commit; refusing to promote")
+
+    from app.v2 import control_db as v2control_db
+
+    if live_control_db.exists() and not allow_overwrite:
+        try:
+            with v2control_db.connect(live_control_db) as conn:
+                admin_count = conn.execute("SELECT COUNT(*) FROM admins").fetchone()[0]
+        except Exception:
+            admin_count = 0  # unreadable/foreign file -- treat cautiously below instead
+            if live_control_db.stat().st_size > 0:
+                raise PromotionError(
+                    f"live control.db at {live_control_db} exists and is not a readable "
+                    "V2 control.db; refusing to overwrite without allow_overwrite"
+                )
+        if admin_count > 0:
+            raise PromotionError(
+                f"live control.db at {live_control_db} already has {admin_count} admin(s) "
+                "configured; refusing to overwrite an already-configured live install "
+                "without allow_overwrite"
+            )
+
+    import os
+    import shutil as _shutil
+
+    from app.v2 import bind_rpz_gen, dnsdist_gen, local_dns_gen
+    from app.v2 import policy_store as pstore
+    from app.v2.runtime_staging import ValidationFailedError
+    from app.v2.secret_store import SecretStore
+
+    promoted: dict = {}
+
+    # 1. control.db: staged copy is already integrity-checked (validate
+    # stage) -- promote via write-to-tmp + atomic rename so a reader never
+    # observes a partially-written file.
+    live_control_db.parent.mkdir(parents=True, exist_ok=True)
+    tmp_db = live_control_db.with_name(live_control_db.name + ".migrating.tmp")
+    _shutil.copy2(state.target_control_db(), tmp_db)
+    os.replace(tmp_db, live_control_db)
+    promoted["control_db"] = str(live_control_db)
+
+    # 2. secrets: merge (not replace -- the live secrets dir already holds
+    # unrelated secrets, e.g. TLS/replication material, that migration
+    # never touched) via the store's own journaled, all-or-nothing
+    # import_all -- never a raw file copy, so path-traversal/symlink
+    # defenses and atomicity are inherited, not reimplemented here.
+    staged_secrets_store = SecretStore(state.target_secrets_dir())
+    staged_ids = staged_secrets_store.list_ids()
+    if staged_ids:
+        live_secrets = SecretStore(live_secrets_dir)
+        values = {sid: staged_secrets_store.get(sid) for sid in staged_ids}
+        live_secrets.import_all(values, overwrite=allow_overwrite)
+    promoted["secrets_promoted"] = len(staged_ids)
+
+    # 3. Runtime: regenerate dnsdist config at the REAL live listen
+    # address (not the staging health-check's throwaway port) from the
+    # same migrated profile, and validate+promote at the live path.
+    live_compiled_dir.mkdir(parents=True, exist_ok=True)
+    with v2control_db.connect(live_control_db) as conn:
+        profile = pstore.load_upstream_profile(conn, "migrated-default")
+    try:
+        if profile is not None:
+            dnsdist_text = dnsdist_gen.generate_dnsdist_config_from_profiles(
+                live_listen_address, [], profile,
+            )
+            result = dnsdist_gen.stage_and_validate_dnsdist_config(
+                live_compiled_dir, dnsdist_text, live_compiled_dir / "dnsdist.conf",
+                binary=dnsdist_binary,
+            )
+            promoted["dnsdist_config"] = str(result.live_path)
+
+        rpz_src = state.generated_runtime.get("rpz_zone")
+        if rpz_src and Path(rpz_src).exists():
+            rpz_text = Path(rpz_src).read_text()
+            rpz_result = bind_rpz_gen.stage_and_validate_rpz_zone(
+                live_compiled_dir, rpz_text, live_compiled_dir / "bind" / "alderpointdns-v2.rpz",
+                binary=named_checkzone_binary,
+            )
+            promoted["rpz_zone"] = str(rpz_result.live_path)
+
+        local_src = state.generated_runtime.get("local_dns_zone")
+        if local_src and Path(local_src).exists():
+            zone_text = Path(local_src).read_text()
+            zone_result = local_dns_gen.stage_and_validate_local_dns_zone(
+                live_compiled_dir, zone_text, live_compiled_dir / "alderpointdns-v2-local.zone",
+                binary=named_checkzone_binary,
+            )
+            promoted["local_dns_zone"] = str(zone_result.live_path)
+    except ValidationFailedError as exc:
+        # Invalid config never becomes active: stage_validate_promote()
+        # never writes live_path unless validation passed, so at this
+        # point nothing live was touched by whichever artifact failed --
+        # but control.db/secrets promotion above already happened. That is
+        # intentional: those two are validated at staging time (integrity
+        # check + journaled atomic import) and are safe to have live even
+        # if a later runtime-compile step fails; the failure here means
+        # "the promoted control state generated a config the live host
+        # can't run," which is real, actionable information the caller
+        # needs (e.g. surfaced as a stuck-but-recoverable promotion, not a
+        # silently-successful migration with a broken runtime).
+        raise PromotionError(f"live runtime artifact failed validation: {exc}") from exc
+
+    return promoted
 
 
 def resume_state_from_durable_record(record: "mstate.MigrationRecord") -> MigrationState:

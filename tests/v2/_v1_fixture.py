@@ -82,6 +82,7 @@ def build_v1_fixture(
     notification_providers: int = 0,
     upstream_protocol: str | None = None,
     dot_enabled: bool | None = None,
+    encrypted_transports_enabled: tuple[str, ...] = (),
     drop_optional_tables: tuple[str, ...] = (),
 ) -> Path:
     """Builds a realistic V1 fixture. ``populate=True`` seeds the original
@@ -167,6 +168,12 @@ def build_v1_fixture(
                 conn.execute(
                     "UPDATE encryption_settings SET value=? WHERE key='dot_enabled'",
                     ("true" if dot_enabled else "false",),
+                )
+            for flag_key in encrypted_transports_enabled:
+                conn.execute(
+                    "INSERT INTO encryption_settings VALUES (?, '1') "
+                    "ON CONFLICT(key) DO UPDATE SET value='1'",
+                    (flag_key,),
                 )
             for i in range(local_dns_records):
                 n = 3 + i

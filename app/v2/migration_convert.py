@@ -294,6 +294,18 @@ def build_preview(backup_db_path: Path) -> dict:
                 "behavior is NOT automatically reconstructed (see migrate_policies warnings)"
             )
 
+        enabled_transports = _enabled_inbound_encrypted_transports(conn)
+        if enabled_transports:
+            warnings.append(
+                "source has inbound encrypted DNS transport(s) enabled for clients "
+                f"({', '.join(enabled_transports)}) via V1 encryption_settings -- V2's "
+                "runtime generator does not emit inbound DoT/DoH/DoH3/DoQ/DNSCrypt "
+                "listeners yet (plain UDP/TCP:53 only), so this configuration has NO "
+                "migration path and will NOT be present after migration; clients using "
+                "encrypted DNS to this appliance will need plain DNS or manual "
+                "reconfiguration post-migration"
+            )
+
         report = {
             "source_version": "v1.x",
             "target_schema": "v2 (control.db schema v2/v3/v4, config schema "
@@ -321,11 +333,42 @@ def build_preview(backup_db_path: Path) -> dict:
                 "converted as part of this migration"
             ),
             "statistics_treatment": "aggregate rebuild strategy recorded, not auto-run",
+            "encryption_settings": {
+                "inbound_transports_enabled_in_source": enabled_transports,
+                "migrated": False,
+            },
             "warnings": warnings,
         }
         return report
     finally:
         conn.close()
+
+
+# V1's app/encryption.py flag names -> the client-facing label used in
+# warnings/docs. Table is key/value (`encryption_settings`), so any subset
+# may be present or absent; a missing key is treated as "unknown, not
+# confirmed disabled" (V1 defaults doh_enabled/dot_enabled to "1" --
+# app/encryption.py's _DEFAULTS -- so most real installs have at least one
+# of these on).
+_INBOUND_ENCRYPTED_TRANSPORT_FLAGS: tuple[tuple[str, str], ...] = (
+    ("doh_enabled", "DoH"),
+    ("dot_enabled", "DoT"),
+    ("doh3_enabled", "DoH3"),
+    ("doq_enabled", "DoQ"),
+    ("dnscrypt_enabled", "DNSCrypt"),
+)
+
+
+def _enabled_inbound_encrypted_transports(conn: sqlite3.Connection) -> list[str]:
+    try:
+        kv = dict(conn.execute("SELECT key, value FROM encryption_settings").fetchall())
+    except sqlite3.OperationalError:
+        return []  # table absent entirely -- nothing to report
+    return [
+        label
+        for flag_key, label in _INBOUND_ENCRYPTED_TRANSPORT_FLAGS
+        if kv.get(flag_key) in ("1", "true", "True")
+    ]
 
 
 # --------------------------------------------------------------------------

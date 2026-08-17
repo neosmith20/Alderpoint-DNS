@@ -279,6 +279,81 @@ def cmd_ensure_tls_cert(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- migrate ---------------------------------------------------------------
+
+
+def cmd_migrate(args: argparse.Namespace) -> int:
+    """The real, package-invokable V1 -> V2 migration entry point.
+
+    Previously ``app/v2/migration.py``'s full pipeline (detect -> backup ->
+    preview -> per-object migrate -> generate_runtime_config -> validate ->
+    health_check -> commit) existed only as a library other tests called
+    directly -- no CLI command, no API route, no way for a real installed
+    package to actually run it. This closes that gap: `migrate` runs the
+    staging pipeline (resuming from ``MIGRATION_DIR/state.json`` if a prior
+    run left one, exactly like the durable-state tests exercise) and, on
+    ``--promote``, calls ``app.v2.migration.promote_to_live`` to write the
+    result onto this host's real live V2 paths. Without ``--promote`` the
+    command only stages and reports -- safe to run repeatedly to preview.
+    """
+    from app.v2 import migration as mig
+    from app.v2 import migration_state as mstate
+
+    source_path = Path(args.source)
+    staging_dir = MIGRATION_DIR / "staging"
+    state_path = MIGRATION_DIR / "state.json"
+    MIGRATION_DIR.mkdir(parents=True, exist_ok=True)
+
+    existing = mstate.load(state_path)
+    if existing is not None and existing.source_path == str(source_path):
+        print(f"resuming migration {existing.migration_id} (status={existing.status})")
+        record = existing
+        resume_state = mig.resume_state_from_durable_record(existing)
+    else:
+        record = mstate.MigrationRecord.new(
+            source_version="1.1.1", target_version=f"v2-config-schema-{v2config.CONFIG_SCHEMA_VERSION}",
+            staging_dir=str(staging_dir), source_path=str(source_path),
+        )
+        resume_state = None
+
+    try:
+        state = mig.run_migration(
+            source_path, staging_dir, resume_state=resume_state,
+            durable_record=record, state_path=state_path,
+        )
+    except mig.MigrationError as exc:
+        print(f"migration FAILED at stage {exc.args[0] if exc.args else '?'}: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"migration staged and committed: {state.object_counts}")
+    for warning in state.warnings:
+        print(f"WARNING: {warning}")
+
+    if not args.promote:
+        print("staged only (pass --promote to write this onto the live install)")
+        return 0
+
+    try:
+        promoted = mig.promote_to_live(
+            state,
+            live_control_db=CONTROL_DB,
+            live_secrets_dir=SECRETS_DIR,
+            live_compiled_dir=COMPILED_DIR,
+            live_listen_address=args.live_listen_address,
+            dnsdist_binary=args.dnsdist_binary,
+            named_checkzone_binary=args.named_checkzone_binary,
+            allow_overwrite=args.allow_overwrite,
+        )
+    except mig.PromotionError as exc:
+        print(f"promotion FAILED (staged migration is intact and retryable): {exc}", file=sys.stderr)
+        return 1
+
+    print(f"promoted onto live install: {promoted}")
+    print("reload the affected services (e.g. via the dnsdist-reload path unit / "
+          "systemctl restart alderpointdns-v2-web) to pick up the promoted state")
+    return 0
+
+
 # --- generate-runtime ----------------------------------------------------
 
 
@@ -713,6 +788,17 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("init-state").set_defaults(func=cmd_init_state)
     sub.add_parser("ensure-tls-cert").set_defaults(func=cmd_ensure_tls_cert)
     sub.add_parser("init-replication-cert").set_defaults(func=cmd_init_replication_cert)
+
+    p = sub.add_parser("migrate")
+    p.add_argument("source", help="path to a V1 install root (containing alderpointdns.db)")
+    p.add_argument("--promote", action="store_true",
+                    help="write the staged, committed migration onto this host's live V2 install")
+    p.add_argument("--allow-overwrite", action="store_true",
+                    help="permit --promote to overwrite an already-configured live install/secrets")
+    p.add_argument("--live-listen-address", default="0.0.0.0:53")
+    p.add_argument("--dnsdist-binary", default="dnsdist")
+    p.add_argument("--named-checkzone-binary", default="named-checkzone")
+    p.set_defaults(func=cmd_migrate)
 
     p = sub.add_parser("generate-runtime")
     p.add_argument("--dnsdist-binary", default="dnsdist")
