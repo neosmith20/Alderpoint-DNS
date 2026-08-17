@@ -695,18 +695,26 @@ def cmd_tier_b_worker(args: argparse.Namespace) -> int:
     a genuinely-isolated UDP resolve against the configured local dnsdist
     listener -- prewarm only ever *replays through the normal DNS path*
     (app/v2/tier_b_prewarm.py's own invariant), never a bypass, so DNS
-    readiness is provably never gated on this worker even existing."""
-    import socket
+    readiness is provably never gated on this worker even existing.
 
-    def resolve_fn(entry) -> bool:
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.settimeout(2.0)
-            sock.sendto(b"", (args.dns_address, args.dns_port))
-            sock.close()
-            return True
-        except OSError:
-            return False
+    Real defect found by hands-on Tier B load testing (roadmap Priority 6):
+    this previously had its own inline ``resolve_fn`` that sent a
+    zero-byte UDP packet and returned True as soon as ``sendto`` didn't
+    raise -- it never built a real DNS query, never used
+    ``entry.qname``/``entry.qtype`` at all, and never waited for or
+    checked a response. It always "succeeded" regardless of whether the
+    replayed name actually got a real answer or landed in dnsdist's
+    packet cache, so prewarm's reported stats were meaningless and cold
+    caches never actually got warmed by this worker in production. A
+    real, already-implemented and already-tested resolve function
+    (``app/v2/tier_b_worker.py``'s ``make_udp_resolve_fn`` --
+    ``tests/v2/test_tier_b_worker.py``) existed the whole time but was
+    never wired into this, the actual packaged/systemd-invoked entry
+    point -- only used by tests exercising the library directly.
+    """
+    from app.v2.tier_b_worker import make_udp_resolve_fn
+
+    resolve_fn = make_udp_resolve_fn(args.dns_address, args.dns_port, timeout=2.0)
 
     def _tick_once() -> int:
         index = tier_b_load(TIER_B_STATE_FILE) if TIER_B_STATE_FILE.exists() else WorkingSetIndex()
