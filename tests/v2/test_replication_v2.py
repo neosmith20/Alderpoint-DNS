@@ -355,3 +355,71 @@ def test_real_mtls_server_rejects_missing_client_cert_and_accepts_authorized_pee
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_push_to_peer_succeeds_against_a_real_second_host_address_not_just_localhost(tmp_path, monkeypatch):
+    # Real defect found live during RC4 replication acceptance testing:
+    # every real peer's server cert carries only "localhost" in its SAN
+    # (issue_node_cert's server_name default, matching
+    # init-replication-cert's real production bootstrap call) -- so
+    # push_to_peer against a peer reachable at its real IP/hostname
+    # (anything other than literally "localhost") always failed TLS
+    # hostname verification, even with a fully valid cert chain and a
+    # correct fingerprint pin. Reproduces exactly that mismatch (server
+    # cert SAN="localhost", connect via "127.0.0.1") and proves
+    # push_to_peer now succeeds -- client_ssl_context's fingerprint
+    # pinning (checked separately, right after connect()) still provides
+    # the real identity guarantee.
+    monkeypatch.setattr(replication_v2.runtime_compile, "recompile_and_promote", lambda *a, **k: None)
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.close()
+    except PermissionError as exc:
+        pytest.skip(f"environment denies socket creation: {exc}")
+    db_a = tmp_path / "a.db"
+    db_b = tmp_path / "b.db"
+    _init(db_a)
+    _init(db_b)
+    with control_db.connect(db_a) as a, control_db.connect(db_b) as b:
+        ca_pem, ca_key = replication_v2.generate_private_ca("test-ca")
+        id_a = node_identity.get_or_create(a).node_id
+        id_b = node_identity.get_or_create(b).node_id
+        cert_a, key_a = replication_v2.issue_node_cert(ca_pem, ca_key, id_a, server_name="localhost")
+        cert_b, key_b = replication_v2.issue_node_cert(ca_pem, ca_key, id_b, server_name="localhost")
+    cert_b_path = tmp_path / "server.crt"
+    key_b_path = tmp_path / "server.key"
+    ca_path = tmp_path / "ca.pem"
+    cert_b_path.write_text(cert_b)
+    key_b_path.write_text(key_b)
+    ca_path.write_text(ca_pem)
+    server, thread = replication_v2.serve_forever_in_thread(
+        bind=("127.0.0.1", 0),
+        server_cert=cert_b_path,
+        server_key=key_b_path,
+        ca_file=ca_path,
+        control_db_path=db_b,
+        secrets_dir=tmp_path / "sb",
+        staging_dir=tmp_path / "staging",
+        live_dnsdist_conf_path=tmp_path / "dnsdist.conf",
+    )
+    port = server.server_address[1]
+    try:
+        with control_db.connect(db_b) as b:
+            replication_v2.upsert_peer(
+                b, peer_node_id=id_a, display_name="a",
+                url="https://localhost:1/replication/v1/apply",
+                ca_pem=ca_pem, expected_cert_sha256=replication_v2.cert_fingerprint_sha256(cert_a),
+                client_cert_pem=cert_b, client_key_pem=key_b,
+            )
+        with control_db.connect(db_a) as a:
+            replication_v2.upsert_peer(
+                a, peer_node_id=id_b, display_name="b",
+                url=f"https://127.0.0.1:{port}/replication/v1/apply",  # real IP, NOT "localhost"
+                ca_pem=ca_pem, expected_cert_sha256=replication_v2.cert_fingerprint_sha256(cert_b),
+                client_cert_pem=cert_a, client_key_pem=key_a,
+            )
+            result = replication_v2.push_to_peer(a, SecretStore(tmp_path / "sa"), id_b, tmp_path / "tmp")
+        assert result["applied"] is True
+    finally:
+        server.shutdown()
+        server.server_close()

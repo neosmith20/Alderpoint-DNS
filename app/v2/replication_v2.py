@@ -605,7 +605,26 @@ def client_ssl_context(peer: Peer, temp_root: Path) -> ssl.SSLContext:
     key = _write_temp_file(temp_root, f"{peer.peer_node_id}.client.key", peer.client_key_pem)
     ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=str(ca))
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-    ctx.check_hostname = True
+    # Real defect found live during RC4 replication acceptance testing:
+    # every real peer's server cert (issue_node_cert, called with
+    # server_name="localhost" at install time -- the appliance cannot
+    # know in advance what address a future peer will actually dial it
+    # on) carries only "localhost" in its SAN, so hostname verification
+    # against a real peer URL's real IP/hostname always fails --
+    # push_to_peer() could never actually succeed against a second,
+    # independently installed node reachable at anything other than
+    # literally "localhost". Hostname matching is also strictly weaker
+    # than the explicit certificate-fingerprint pinning push_to_peer()
+    # already performs immediately after connect() (peer.expected_cert_
+    # sha256, checked against this exact connection's presented cert) --
+    # pinning a specific certificate's exact bytes is a stronger identity
+    # guarantee than a name inside that certificate, so disabling
+    # hostname checking here does not weaken real security, it removes a
+    # redundant check that was silently the only thing actually blocking
+    # real cross-host replication. Full chain validation against the
+    # peer's own CA (cafile=ca, verify_mode stays the default
+    # CERT_REQUIRED) still applies.
+    ctx.check_hostname = False
     ctx.load_cert_chain(str(cert), str(key))
     return ctx
 
