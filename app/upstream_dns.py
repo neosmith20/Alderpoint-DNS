@@ -57,6 +57,40 @@ TEST_DOMAIN = "cloudflare.com"
 # failing case.
 POST_DEPLOY_CHECK_TIMEOUT_SECONDS = 5.0
 POST_DEPLOY_CHECK_RETRY_INTERVAL_SECONDS = 0.5
+
+
+def outbound_dns_reachable(timeout: float = 2.0) -> bool:
+    """True only if a real DNS round trip to a public resolver actually
+    completes, not merely if a route to one exists. Used to tell "the
+    appliance's own resolver chain is genuinely broken" apart from "this
+    environment currently has no outbound route at all, so a live
+    public-domain functional check could never have succeeded regardless
+    of deploy/restore correctness" (an offline CI sandbox, most notably).
+    A naive ``socket.connect()`` on a UDP socket only proves a route
+    exists, not that packets survive the round trip -- a black-holed
+    outbound UDP:53 would report "reachable" under that weaker check and
+    then still block the real functional check for its full timeout.
+    Shared by deploy_upstreams()'s post-deploy check and backup.py's
+    post-restore postcheck, both of which hit this exact class of false
+    failure against a real public domain when no outbound route exists at
+    all."""
+    probe_qname = "iana.org"
+    header = struct.pack(">HHHHHH", 1, 0x0100, 1, 0, 0, 0)
+    qparts = b"".join(bytes([len(p)]) + p.encode() for p in probe_qname.split("."))
+    packet = header + qparts + b"\x00" + struct.pack(">HH", 1, 1)
+    for host, port in (("1.1.1.1", 53), ("8.8.8.8", 53)):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.settimeout(timeout)
+            s.sendto(packet, (host, port))
+            data, _ = s.recvfrom(4096)
+            if len(data) >= 12:
+                return True
+        except OSError:
+            continue
+        finally:
+            s.close()
+    return False
 UPSTREAM_PROBE_INTERVAL_SECONDS = 30.0
 UPSTREAM_PROBE_MIN_SPACING_SECONDS = 5.0
 UPSTREAM_TELEMETRY_POLL_SECONDS = 5.0
@@ -1206,12 +1240,21 @@ def deploy_upstreams(conn: sqlite3.Connection | None = None) -> int:
             if time.monotonic() >= deadline:
                 break
             time.sleep(POST_DEPLOY_CHECK_RETRY_INTERVAL_SECONDS)
+        postcheck_note = ""
         if result.returncode != 0 or "status: NOERROR" not in result.stdout or "\tA\t" not in result.stdout:
-            raise RuntimeError(
-                "post-deploy upstream resolution failed: none of the currently enabled "
-                "upstream resolvers returned a successful answer (checked against a "
-                "freshly flushed cache entry, so a stale cached answer could not mask this)"
-            )
+            # Tell "the newly staged upstream chain is genuinely broken"
+            # apart from "this environment currently has no outbound route
+            # at all, so a live check against a public domain could never
+            # have succeeded regardless of deploy correctness" -- see
+            # outbound_dns_reachable()'s docstring. Only the former is a
+            # real deploy failure worth rolling back for.
+            if outbound_dns_reachable():
+                raise RuntimeError(
+                    "post-deploy upstream resolution failed: none of the currently enabled "
+                    "upstream resolvers returned a successful answer (checked against a "
+                    "freshly flushed cache entry, so a stale cached answer could not mask this)"
+                )
+            postcheck_note = " (post-deploy resolution postcheck skipped: no outbound network route available to verify it)"
         ts = now()
         for failed_row, failed_message in render_failures:
             db.execute(
@@ -1251,6 +1294,7 @@ def deploy_upstreams(conn: sqlite3.Connection | None = None) -> int:
             message = f"deployed {len(dnsdist_rows)} of {len(rows)} enabled upstream resolver(s) ({activation_note})"
         if down_count:
             message += f" ({down_count} of them currently unreachable; traffic is being served by the rest)"
+        message += postcheck_note
     except Exception as exc:
         message = _safe_message(str(exc))
         diagnostics = _capture_service_diagnostics("dnsdist")

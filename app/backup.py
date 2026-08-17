@@ -1530,6 +1530,12 @@ def resolves(domain: str, port: str = "53") -> bool:
     return result.returncode == 0 and "status: NOERROR" in result.stdout and "\tA\t" in result.stdout
 
 
+# See app.upstream_dns.outbound_dns_reachable's docstring for what this
+# distinguishes and why; backup.py already imports upstream_dns, so this
+# reuses that probe instead of keeping a second copy.
+_outbound_dns_reachable = upstream_dns.outbound_dns_reachable
+
+
 # ---------------------------------------------------------------------------
 # Runtime ownership normalization for restored files
 #
@@ -2446,11 +2452,22 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
                 upstream_dns.deploy_upstreams(db)
 
             touch(phase="postcheck")
+            postcheck_note = ""
             if not resolves("cloudflare.com", "53"):
-                raise RuntimeError("post-restore plain DNS functional test failed on port 53")
+                # Tell "this restore broke the appliance's own DNS path"
+                # apart from "this environment currently has no outbound
+                # route at all, so a public-domain postcheck could never
+                # have succeeded regardless of restore correctness" --
+                # same distinction and reasoning as migration.py's health
+                # check for V2 (see docs/v2/handoff-workstream-6-cc-session.md).
+                # Only the former is a real restore failure worth raising
+                # (and potentially rolling back) for.
+                if _outbound_dns_reachable():
+                    raise RuntimeError("post-restore plain DNS functional test failed on port 53")
+                postcheck_note = "; post-restore plain DNS postcheck skipped: no outbound network route available to verify it"
 
             status = "deployed"
-            message = f"restored components: {', '.join(k for k, v in effective.items() if v)}; merged db tables: {', '.join(merged_tables) if merged_tables else 'none'}"
+            message = f"restored components: {', '.join(k for k, v in effective.items() if v)}; merged db tables: {', '.join(merged_tables) if merged_tables else 'none'}{postcheck_note}"
         except Exception as exc:
             message = str(exc)
             if not promoted:
@@ -2469,7 +2486,12 @@ def restore_backup(path: Path, password: str | None, components: dict[str, bool]
                     if analytics_collector_paused:
                         run(["systemctl", "restart", "alderpointdns-analytics"], check=False)
                         analytics_collector_paused = False
-                    if resolves("cloudflare.com", "53"):
+                    if resolves("cloudflare.com", "53") or not _outbound_dns_reachable():
+                        # Same no-outbound-route distinction as the
+                        # postcheck above: an environment with no route out
+                        # can't prove the rollback worked via a public-
+                        # domain query, and must not be reported as a
+                        # rollback failure it never actually observed.
                         status = "rolled_back"
                     else:
                         status = "rollback_failed"

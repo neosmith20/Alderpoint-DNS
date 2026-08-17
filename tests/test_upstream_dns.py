@@ -162,6 +162,45 @@ class UpstreamDNSTest(unittest.TestCase):
         self.assertNotIn("1.1.1.1:443", dnsdist)
         self.assertEqual(upstream_dns.last_deployment()["status"], "deployed")
 
+    def test_post_deploy_check_failure_raises_when_outbound_network_reachable(self) -> None:
+        # A genuinely broken newly-staged upstream chain (the post-deploy
+        # dig against 127.0.0.1 never returns a real answer) must still be
+        # treated as a real deploy failure when this host can actually
+        # reach the outside world -- this is the "real bug" branch that
+        # the no-outbound-route degrade below must not accidentally
+        # swallow.
+        upstream_dns.add_resolver({"name": "Cloudflare DoH", "protocol": "doh", "address": "https://cloudflare-dns.com/dns-query", "bootstrap_ips": "1.1.1.1", "enabled": "1"})
+
+        def broken_backend_run(command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+            if command[:2] == ["dig", "@127.0.0.1"]:
+                return subprocess.CompletedProcess(command, 1, "")
+            return self.fake_run(command, check)
+
+        with mock.patch.object(upstream_dns, "run", broken_backend_run), mock.patch.object(upstream_dns, "outbound_dns_reachable", lambda timeout=2.0: True):
+            with self.assertRaises(RuntimeError):
+                upstream_dns.deploy_upstreams()
+        self.assertEqual(upstream_dns.last_deployment()["status"], "rolled_back")
+
+    def test_post_deploy_check_failure_degrades_when_no_outbound_route(self) -> None:
+        # The same broken-looking postcheck must NOT be reported as a
+        # deploy failure when this environment genuinely has no outbound
+        # network route at all (an offline CI sandbox, most notably) --
+        # the public-domain postcheck could never have succeeded either
+        # way, so it must not be able to fail (or roll back) an otherwise
+        # correct deploy.
+        upstream_dns.add_resolver({"name": "Cloudflare DoH", "protocol": "doh", "address": "https://cloudflare-dns.com/dns-query", "bootstrap_ips": "1.1.1.1", "enabled": "1"})
+
+        def broken_backend_run(command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+            if command[:2] == ["dig", "@127.0.0.1"]:
+                return subprocess.CompletedProcess(command, 1, "")
+            return self.fake_run(command, check)
+
+        with mock.patch.object(upstream_dns, "run", broken_backend_run), mock.patch.object(upstream_dns, "outbound_dns_reachable", lambda timeout=2.0: False):
+            upstream_dns.deploy_upstreams()
+        deployment = upstream_dns.last_deployment()
+        self.assertEqual(deployment["status"], "deployed")
+        self.assertIn("postcheck skipped: no outbound network route", deployment["message"])
+
     def test_deploy_records_real_backend_latency_not_pool_check_duration(self) -> None:
         upstream_dns.add_resolver({"name": "Cloudflare DoH", "protocol": "doh", "address": "https://cloudflare-dns.com/dns-query", "bootstrap_ips": "1.1.1.1", "enabled": "1"})
 

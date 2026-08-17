@@ -765,6 +765,34 @@ class RestoreTest(BackupTestBase):
         self.assertEqual(last["phase"], "completed")
         self.assertIsNotNone(last["promoted_at"])
 
+    def test_postrestore_dns_postcheck_failure_raises_when_outbound_network_reachable(self) -> None:
+        # A genuinely broken post-restore plain-DNS path must still be
+        # treated as a real restore failure when this host can actually
+        # reach the outside world -- the "real bug" branch the no-
+        # outbound-route degrade below must not accidentally swallow.
+        path = self._make_backup()
+        with mock.patch.object(backup, "run", self.fake_run), mock.patch.object(backup, "resolves", return_value=False), \
+                mock.patch.object(backup, "_outbound_dns_reachable", return_value=True), \
+                mock.patch.object(backup, "_wait_active", return_value=True):
+            with self.assertRaises(RuntimeError):
+                backup.restore_backup(path, None, dict.fromkeys(backup.COMPONENT_KEYS, True))
+
+    def test_postrestore_dns_postcheck_degrades_when_no_outbound_route(self) -> None:
+        # The same failing-looking postcheck must NOT be reported as a
+        # restore failure when this environment genuinely has no outbound
+        # network route at all (an offline CI sandbox, most notably) --
+        # the public-domain postcheck could never have succeeded either
+        # way, so it must not be able to fail (or trigger a rollback of)
+        # an otherwise correct restore.
+        path = self._make_backup()
+        with mock.patch.object(backup, "run", self.fake_run), mock.patch.object(backup, "resolves", return_value=False), \
+                mock.patch.object(backup, "_outbound_dns_reachable", return_value=False), \
+                mock.patch.object(backup, "_wait_active", return_value=True):
+            backup.restore_backup(path, None, dict.fromkeys(backup.COMPONENT_KEYS, True))
+        last = backup.last_restore()
+        self.assertEqual(last["status"], "deployed")
+        self.assertIn("postcheck skipped: no outbound network route", last["message"])
+
     def test_excluded_components_retain_live_values_across_a_real_promotion(self) -> None:
         # Representative exclusions per the staged-restore architecture's
         # requirement that the working copy starts as a full live snapshot
