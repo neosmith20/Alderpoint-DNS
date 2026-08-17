@@ -156,7 +156,17 @@ def recompile_and_promote(
     conn: sqlite3.Connection,
     staging_dir: Path,
     live_dnsdist_conf_path: Path,
-    listen_address: str = "127.0.0.1:53",
+    # Defense-in-depth default only -- every real caller (webapp.py,
+    # replication_v2.py, scripts/v2/alderpointdns_v2_ctl.py) explicitly
+    # passes the appliance's real configured listener. A loopback-only
+    # default here previously meant any caller that forgot to pass
+    # listen_address would silently cut dnsdist off from real LAN
+    # clients with no error (found live during RC1 acceptance testing --
+    # webapp.py's own live policy-mutation path was exactly that missing
+    # caller). "0.0.0.0:53" matches what every real install actually
+    # needs, so an omitted argument now fails toward "still reachable"
+    # rather than "silently loopback-only."
+    listen_address: str = "0.0.0.0:53",
     dnsdist_binary: str = "dnsdist",
 ) -> RuntimeCompileResult:
     """The real, single code path from "control.db changed" to "compiled

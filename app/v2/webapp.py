@@ -57,6 +57,7 @@ from app.v2.auth_concurrency import HashConcurrencyLimiter, TooManyConcurrentHas
 from app.v2.auth_hash import hash_password, verify_and_maybe_rehash
 from app.v2.blocking_response import InvalidBlockingResponseError
 from app.v2.dns_name_validate import InvalidDnsNameError
+from app.v2 import config as v2config
 from app.v2.dnsdist_gen import DnsdistGenError
 from app.v2.network_match import InvalidNetworkError
 from app.v2.policy_model import InvalidPolicyError, PolicyLayer
@@ -72,6 +73,7 @@ STATE_DIR = Path(os.environ.get("ALDERPOINTDNS_V2_STATE_ROOT", "/var/lib/alderpo
 MODULE_DIR = Path(__file__).resolve().parent
 UI_DIR = MODULE_DIR / "ui"
 
+CONFIG_FILE = CONFIG_DIR / "alderpointdns.yaml"
 CONTROL_DB = STATE_DIR / "control.db"
 SECRETS_DIR = STATE_DIR / "secrets"
 ANALYTICS_PARQUET_DIR = STATE_DIR / "analytics" / "queries"
@@ -532,6 +534,22 @@ def health():
 # --- runtime recompile helper (§18) ------------------------------------------
 
 
+def _configured_listen_address() -> str:
+    """The real appliance-configured DNS listen address ("host:port"),
+    same source and same fallback as
+    scripts/v2/alderpointdns_v2_ctl.py's install-time bootstrap compiler
+    (``_default_dnsdist_config_text``). Without this, every live policy
+    mutation through this API would silently fall back to
+    runtime_compile.recompile_and_promote()'s own default
+    ("127.0.0.1:53") instead of the configured listener -- rebinding
+    dnsdist to loopback-only and cutting off every real LAN client the
+    next time an admin changes any policy, without any error or warning
+    (found live during RC1 clean-install acceptance testing)."""
+    cfg = v2config.load_file(CONFIG_FILE) if CONFIG_FILE.exists() else v2config.AlderpointV2Config()
+    listener = cfg.listeners[0] if cfg.listeners else v2config.Listener(protocol="udp", address="0.0.0.0", port=53)
+    return f"{listener.address}:{listener.port}"
+
+
 def _mutate_and_promote(mutate_fn) -> runtime_compile.RuntimeCompileResult:
     """Runs ``mutate_fn(conn)`` (a control.db write) and
     runtime_compile.recompile_and_promote() inside ONE transaction: the
@@ -546,7 +564,9 @@ def _mutate_and_promote(mutate_fn) -> runtime_compile.RuntimeCompileResult:
         conn.execute("BEGIN IMMEDIATE")
         try:
             mutate_fn(conn)
-            result = runtime_compile.recompile_and_promote(conn, STAGING_DIR, COMPILED_DNSDIST_CONF)
+            result = runtime_compile.recompile_and_promote(
+                conn, STAGING_DIR, COMPILED_DNSDIST_CONF, listen_address=_configured_listen_address()
+            )
         except BaseException:
             conn.execute("ROLLBACK")
             raise

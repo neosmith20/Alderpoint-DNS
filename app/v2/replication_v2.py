@@ -442,6 +442,7 @@ def apply_message(
     peer_cert_pem: str | None = None,
     staging_dir: Path | None = None,
     live_dnsdist_conf_path: Path | None = None,
+    listen_address: str = "0.0.0.0:53",
 ) -> dict:
     peer = _validate_message(conn, message, peer_cert_pem=peer_cert_pem)
     sender = message["sender_node_id"]
@@ -489,7 +490,14 @@ def apply_message(
         secrets.import_all(secret_payload, overwrite=True)
         if staging_dir is not None and live_dnsdist_conf_path is not None:
             try:
-                runtime_compile.recompile_and_promote(conn, staging_dir, live_dnsdist_conf_path)
+                # Same real-configured-listener requirement as
+                # webapp.py's _mutate_and_promote -- without threading
+                # this through explicitly, recompile_and_promote() falls
+                # back to its own default ("127.0.0.1:53"), rebinding
+                # this node's dnsdist to loopback-only the next time it
+                # applies replicated state (found live during RC1
+                # acceptance testing, same defect as webapp.py's).
+                runtime_compile.recompile_and_promote(conn, staging_dir, live_dnsdist_conf_path, listen_address=listen_address)
             except BaseException:
                 secrets.import_all(old_secrets, overwrite=True)
                 raise
@@ -596,6 +604,7 @@ class ReplicationHandler(http.server.BaseHTTPRequestHandler):
     secrets_dir: Path
     staging_dir: Path
     live_dnsdist_conf_path: Path
+    listen_address: str = "0.0.0.0:53"
 
     def log_message(self, fmt, *args):  # avoid logging request bodies/secrets
         return
@@ -629,6 +638,7 @@ class ReplicationHandler(http.server.BaseHTTPRequestHandler):
                     peer_cert_pem=peer_pem,
                     staging_dir=self.staging_dir,
                     live_dnsdist_conf_path=self.live_dnsdist_conf_path,
+                    listen_address=self.listen_address,
                 )
             self._json(200, result)
         except ReplicationAuthError as exc:
@@ -655,12 +665,14 @@ def serve(
     secrets_dir: Path,
     staging_dir: Path,
     live_dnsdist_conf_path: Path,
+    listen_address: str = "0.0.0.0:53",
 ) -> http.server.ThreadingHTTPServer:
     handler = type("BoundReplicationHandler", (ReplicationHandler,), {})
     handler.control_db_path = control_db_path
     handler.secrets_dir = secrets_dir
     handler.staging_dir = staging_dir
     handler.live_dnsdist_conf_path = live_dnsdist_conf_path
+    handler.listen_address = listen_address
     httpd = http.server.ThreadingHTTPServer(bind, handler)
     ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2

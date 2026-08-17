@@ -123,6 +123,56 @@ def test_replay_stale_and_conflict_semantics(tmp_path):
             replication_v2.apply_message(b, SecretStore(tmp_path / "sb"), conflict)
 
 
+def test_apply_message_real_recompile_uses_configured_listen_address_not_loopback_default(tmp_path):
+    # Real regression found live during RC1 clean-install acceptance
+    # testing: a real (non-mocked) recompile triggered by applying
+    # replicated state used to call runtime_compile.recompile_and_promote()
+    # without threading through any listen_address at all, silently
+    # falling back to its own loopback-only default -- rebinding this
+    # node's dnsdist away from real LAN clients the moment it applied any
+    # replicated change, with no error. Real dnsdist validation, no mocks.
+    db_a = tmp_path / "a.db"
+    db_b = tmp_path / "b.db"
+    _init(db_a)
+    _init(db_b)
+    with control_db.connect(db_a) as a, control_db.connect(db_b) as b:
+        _trust_pair(a, b, tmp_path)
+        msg = replication_v2.build_message(a, SecretStore(tmp_path / "sa"))
+        result = replication_v2.apply_message(
+            b,
+            SecretStore(tmp_path / "sb"),
+            msg,
+            staging_dir=tmp_path / "staging",
+            live_dnsdist_conf_path=tmp_path / "dnsdist.conf",
+            listen_address="10.20.30.40:53",
+        )
+    assert result["applied"] is True
+    conf_text = (tmp_path / "dnsdist.conf").read_text()
+    assert 'setLocal("10.20.30.40:53")' in conf_text
+    assert 'setLocal("127.0.0.1:53")' not in conf_text
+
+
+def test_apply_message_real_recompile_defaults_to_sane_listen_address(tmp_path):
+    # Omitting listen_address entirely (e.g. an older caller) must still
+    # fail toward "reachable," not silently loopback-only.
+    db_a = tmp_path / "a.db"
+    db_b = tmp_path / "b.db"
+    _init(db_a)
+    _init(db_b)
+    with control_db.connect(db_a) as a, control_db.connect(db_b) as b:
+        _trust_pair(a, b, tmp_path)
+        msg = replication_v2.build_message(a, SecretStore(tmp_path / "sa"))
+        replication_v2.apply_message(
+            b,
+            SecretStore(tmp_path / "sb"),
+            msg,
+            staging_dir=tmp_path / "staging",
+            live_dnsdist_conf_path=tmp_path / "dnsdist.conf",
+        )
+    conf_text = (tmp_path / "dnsdist.conf").read_text()
+    assert 'setLocal("0.0.0.0:53")' in conf_text
+
+
 def test_push_to_peer_does_not_shadow_http_module():
     source = inspect.getsource(replication_v2.push_to_peer)
     assert "http = http.client" not in source

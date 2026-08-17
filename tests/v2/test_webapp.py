@@ -233,6 +233,38 @@ class TestPolicyApiReachesRuntime:
         assert r.json()["runtime"]["promoted"] is True
         assert webapp.COMPILED_DNSDIST_CONF.exists()
 
+    def test_policy_mutation_promotes_configured_listen_address_not_loopback_default(self, app_client):
+        # Real regression found live during RC1 clean-install acceptance
+        # testing: webapp.py's live policy-mutation path used to call
+        # runtime_compile.recompile_and_promote() without threading
+        # through the appliance's real configured listener at all, so it
+        # silently fell back to that function's own default
+        # ("127.0.0.1:53") -- rebinding dnsdist to loopback-only (cutting
+        # off every real LAN client) the moment any admin made any real
+        # policy change through the UI/API, with no error or warning.
+        webapp, client = app_client
+        webapp.CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        webapp.CONFIG_FILE.write_text(
+            "schema_version: 1\nlisteners:\n- protocol: udp\n  address: 0.0.0.0\n  port: 53\n"
+        )
+        csrf = _setup_and_login(webapp, client)
+        r = client.post("/api/networks", json={"network_id": "lan", "cidr": "10.0.0.0/24"}, headers={"X-CSRF-Token": csrf})
+        assert r.status_code == 200
+        conf_text = webapp.COMPILED_DNSDIST_CONF.read_text()
+        assert 'setLocal("0.0.0.0:53")' in conf_text
+        assert 'setLocal("127.0.0.1:53")' not in conf_text
+
+    def test_policy_mutation_falls_back_to_sane_default_when_config_file_missing(self, app_client):
+        # No config file at all (shouldn't normally happen post-install,
+        # but must fail toward "still reachable," not loopback-only).
+        webapp, client = app_client
+        assert not webapp.CONFIG_FILE.exists()
+        csrf = _setup_and_login(webapp, client)
+        r = client.post("/api/networks", json={"network_id": "lan", "cidr": "10.0.0.0/24"}, headers={"X-CSRF-Token": csrf})
+        assert r.status_code == 200
+        conf_text = webapp.COMPILED_DNSDIST_CONF.read_text()
+        assert 'setLocal("0.0.0.0:53")' in conf_text
+
     def test_explain_endpoint_returns_structured_no_secrets(self, app_client):
         webapp, client = app_client
         csrf = _setup_and_login(webapp, client)

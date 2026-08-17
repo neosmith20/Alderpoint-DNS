@@ -357,14 +357,23 @@ def cmd_migrate(args: argparse.Namespace) -> int:
 # --- generate-runtime ----------------------------------------------------
 
 
+def _configured_listen_address() -> str:
+    """The real appliance-configured DNS listen address ("host:port").
+    Shared by the install-time bootstrap dnsdist config and the
+    replication server's post-apply recompile -- both need the real
+    configured listener, not runtime_compile.recompile_and_promote()'s
+    own loopback-only default (see webapp.py's identical helper for the
+    live policy-mutation path's version of this same requirement)."""
+    cfg = v2config.load_file(CONFIG_FILE) if CONFIG_FILE.exists() else v2config.AlderpointV2Config()
+    listener = cfg.listeners[0] if cfg.listeners else v2config.Listener(protocol="udp", address="0.0.0.0", port=53)
+    return f"{listener.address}:{listener.port}"
+
+
 def _default_dnsdist_config_text() -> str:
     UpstreamServer, NetworkScope = _import_optional_generators()
     acls = [NetworkScope.create(f"default-{i}", cidr, f"default ACL {cidr}") for i, cidr in enumerate(_DEFAULT_ACL_CIDRS)]
     upstreams = [UpstreamServer(name, addr) for name, addr in _DEFAULT_UPSTREAMS]
-    cfg = v2config.load_file(CONFIG_FILE) if CONFIG_FILE.exists() else v2config.AlderpointV2Config()
-    listener = cfg.listeners[0] if cfg.listeners else v2config.Listener(protocol="udp", address="0.0.0.0", port=53)
-    listen_address = f"{listener.address}:{listener.port}"
-    return dnsdist_gen.generate_dnsdist_config(listen_address, acls, upstreams)
+    return dnsdist_gen.generate_dnsdist_config(_configured_listen_address(), acls, upstreams)
 
 
 def cmd_generate_runtime(args: argparse.Namespace) -> int:
@@ -678,6 +687,7 @@ def cmd_replication_server(args: argparse.Namespace) -> int:
         secrets_dir=SECRETS_DIR,
         staging_dir=STAGING_DIR,
         live_dnsdist_conf_path=COMPILED_DIR / "dnsdist.conf",
+        listen_address=_configured_listen_address(),
     )
     print(f"replication-server: listening on {args.host}:{args.port}")
     try:
