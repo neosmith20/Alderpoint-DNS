@@ -36,9 +36,9 @@ def _live_paths(tmp_path):
     }
 
 
-def _run_committed_migration(tmp_path):
+def _run_committed_migration(tmp_path, **fixture_kwargs):
     source = tmp_path / "v1-install"
-    build_v1_fixture(source / "alderpointdns.db")
+    build_v1_fixture(source / "alderpointdns.db", **fixture_kwargs)
     state = mig.run_migration(source, tmp_path / "staging")
     assert state.committed
     return state
@@ -126,3 +126,86 @@ class TestPromoteToLive:
         mig.promote_to_live(state, **_live_paths(tmp_path))
         after = source_db.read_bytes()
         assert before == after
+
+    def test_migrated_local_dns_and_filtering_actually_enforced_live(self, tmp_path):
+        """Regression for the real defect the package-level migration test
+        found (docs/v2/migration-real-package-gate.md): migrated local DNS
+        records and block rules were generated/validated but never
+        referenced by the live dnsdist.conf. Promotion now goes through
+        the real per-effective-policy compiler, which must actually
+        compile these into the live config."""
+        state = _run_committed_migration(
+            tmp_path, local_dns_records=3, custom_rules=4,
+        )
+        live = _live_paths(tmp_path)
+        mig.promote_to_live(state, **live)
+        text = (live["live_compiled_dir"] / "dnsdist.conf").read_text()
+
+        # Baseline fixture's local DNS records ('nas'/'printer') plus 3
+        # extras ('host3'..'host5') should all be compiled as SpoofAction
+        # rules.
+        assert 'QNameRule("nas.lan.")' in text
+        assert 'SpoofAction({"10.0.0.10"})' in text
+        assert 'QNameRule("host3.lan.")' in text
+
+        # Baseline 'ads.example' block plus alternating extras should be
+        # compiled as a real terminal block action (default response mode
+        # is nxdomain).
+        assert "ads.example" in text
+        assert "RCodeAction(DNSRCode.NXDOMAIN)" in text
+
+        with control_db.connect(live["live_control_db"]) as conn:
+            layer = pstore.load_policy_layer(conn, "global", "singleton")
+        assert layer.service_blocking_ruleset_id == "migrated-v1-custom-blocklist"
+        assert layer.upstream_profile_id == "migrated-default"
+
+    @REAL_BINARIES
+    def test_migrated_runtime_actually_answers_for_local_dns_and_blocks(self, tmp_path):
+        """End-to-end: start the real promoted dnsdist config and prove it
+        answers a migrated local DNS record and refuses a migrated
+        blocked domain -- not just that the Lua text contains the right
+        substrings."""
+        import socket
+        import struct
+        import subprocess
+        import time as _time
+
+        state = _run_committed_migration(tmp_path)
+        live = _live_paths(tmp_path)
+        mig.promote_to_live(state, live_listen_address="127.0.0.1:15360", **live)
+
+        proc = subprocess.Popen(
+            ["dnsdist", "-C", str(live["live_compiled_dir"] / "dnsdist.conf"),
+             "--supervised", "--disable-syslog"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        try:
+            _time.sleep(1.0)
+            assert proc.poll() is None, "generated dnsdist config failed to start"
+
+            def _query(qname: str) -> bytes:
+                header = struct.pack(">HHHHHH", 1, 0x0100, 1, 0, 0, 0)
+                qparts = b"".join(bytes([len(p)]) + p.encode() for p in qname.split("."))
+                pkt = header + qparts + b"\x00" + struct.pack(">HH", 1, 1)
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.settimeout(3)
+                try:
+                    s.sendto(pkt, ("127.0.0.1", 15360))
+                    data, _ = s.recvfrom(4096)
+                    return data
+                finally:
+                    s.close()
+
+            local_answer = _query("nas.lan")
+            assert (local_answer[3] & 0x0F) == 0  # NOERROR
+            assert b"\x0a\x00\x00\x0a" in local_answer  # 10.0.0.10 as raw A-record bytes
+
+            blocked_answer = _query("ads.example")
+            assert (blocked_answer[3] & 0x0F) == 3  # NXDOMAIN
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)

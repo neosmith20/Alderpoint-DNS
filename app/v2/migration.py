@@ -206,10 +206,24 @@ def _stage_migrate_policies(state: MigrationState) -> None:
     state.local_dns_records = local_dns_records
     state.warnings.extend(local_dns_warnings)
     state.object_counts["local_dns_records_migrated"] = len(local_dns_records)
+    # Also written into control.db (not just kept for the standalone
+    # zone-file generator) so the real compiled runtime actually answers
+    # for them -- see migrate_local_dns_to_control_db's docstring.
+    mconv.migrate_local_dns_to_control_db(local_dns_records, state.target_control_db())
 
     state.filtering = mconv.migrate_filtering(_backup_db_path(state))
     state.object_counts["filtering_blocked"] = len(state.filtering["blocked_domains"])
     state.object_counts["filtering_allowed"] = len(state.filtering["allowed_domains"])
+    if state.filtering["allowed_domains"]:
+        state.warnings.append(
+            f"{len(state.filtering['allowed_domains'])} V1 allow-list domain(s) have no "
+            "migration target: they exist in V1 to override its separate default aggregator "
+            "blocklist, which is not migrated, so there is nothing for them to override"
+        )
+    filtering_result = mconv.migrate_filtering_to_control_db(
+        state.filtering["blocked_domains"], state.target_control_db()
+    )
+    state.object_counts["filtering_blocked_domains_enforced"] = filtering_result["domains_migrated"]
 
     upstream_result = mconv.migrate_upstreams(_backup_db_path(state), state.target_control_db())
     state.warnings.extend(upstream_result["warnings"])
@@ -607,8 +621,7 @@ def promote_to_live(
     import os
     import shutil as _shutil
 
-    from app.v2 import bind_rpz_gen, dnsdist_gen, local_dns_gen
-    from app.v2 import policy_store as pstore
+    from app.v2 import bind_rpz_gen, local_dns_gen
     from app.v2.runtime_staging import ValidationFailedError
     from app.v2.secret_store import SecretStore
 
@@ -636,23 +649,41 @@ def promote_to_live(
         live_secrets.import_all(values, overwrite=allow_overwrite)
     promoted["secrets_promoted"] = len(staged_ids)
 
-    # 3. Runtime: regenerate dnsdist config at the REAL live listen
-    # address (not the staging health-check's throwaway port) from the
-    # same migrated profile, and validate+promote at the live path.
+    # 3. Runtime: compile the REAL live dnsdist config via the same real
+    # per-effective-policy compiler the live management API uses
+    # (app/v2/runtime_compile.py -> app/v2/dnsdist_policy_runtime.py), at
+    # the real live listen address (not the staging health-check's
+    # throwaway port). This is NOT the simplified single-upstream
+    # generator (app/v2/dnsdist_gen.py's generate_dnsdist_config_from_
+    # profiles) used earlier in the pipeline purely to prove the staged
+    # upstream endpoint is well-formed -- that generator has no RPZ/
+    # local-DNS/blocking-rule support at all, so promoting its output
+    # verbatim would silently make migrated local DNS records and
+    # migrated block rules dead on the live install (found by the real
+    # package-level migration test, see docs/v2/migration-real-package-
+    # gate.md). The real compiler reads control.db directly (networks,
+    # the global upstream profile pointer, local_dns_records, the
+    # migrated-filtering service ruleset -- all populated by
+    # migrate_upstreams/migrate_local_dns_to_control_db/
+    # migrate_filtering_to_control_db above), so migrated state is
+    # enforced the same way any admin-configured state would be.
     live_compiled_dir.mkdir(parents=True, exist_ok=True)
-    with v2control_db.connect(live_control_db) as conn:
-        profile = pstore.load_upstream_profile(conn, "migrated-default")
-    try:
-        if profile is not None:
-            dnsdist_text = dnsdist_gen.generate_dnsdist_config_from_profiles(
-                live_listen_address, [], profile,
-            )
-            result = dnsdist_gen.stage_and_validate_dnsdist_config(
-                live_compiled_dir, dnsdist_text, live_compiled_dir / "dnsdist.conf",
-                binary=dnsdist_binary,
-            )
-            promoted["dnsdist_config"] = str(result.live_path)
+    from app.v2.runtime_compile import RuntimeCompileError, recompile_and_promote
 
+    try:
+        with v2control_db.connect(live_control_db) as conn:
+            compile_result = recompile_and_promote(
+                conn, live_compiled_dir / "staging", live_compiled_dir / "dnsdist.conf",
+                listen_address=live_listen_address, dnsdist_binary=dnsdist_binary,
+            )
+        promoted["dnsdist_config"] = str(live_compiled_dir / "dnsdist.conf")
+        promoted["binding_count"] = compile_result.binding_count
+        if compile_result.ptr_records_skipped:
+            promoted["ptr_records_not_enforced"] = compile_result.ptr_records_skipped
+    except RuntimeCompileError as exc:
+        raise PromotionError(f"live runtime compile failed: {exc}") from exc
+
+    try:
         rpz_src = state.generated_runtime.get("rpz_zone")
         if rpz_src and Path(rpz_src).exists():
             rpz_text = Path(rpz_src).read_text()

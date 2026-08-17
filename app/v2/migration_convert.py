@@ -622,6 +622,92 @@ def migrate_filtering(backup_db_path: Path) -> dict:
     return {"blocked_domains": blocked, "allowed_domains": allowed}
 
 
+def migrate_filtering_to_control_db(blocked_domains: list[str], target_control_db: Path) -> dict:
+    """Makes migrated V1 block-list domains actually enforced by the real
+    compiled runtime, not just present in a staged report.
+
+    V2's real per-effective-policy compiler (``app/v2/runtime_compile.py``
+    -> ``app/v2/dnsdist_policy_runtime.py``) only ever enforces domains
+    reachable through the ``service_blocking_ruleset`` mechanism (parental/
+    security/service rulesets, ``policy_store.create_service_ruleset``) --
+    there is no separate "plain ad-hoc block list" storage/CRUD surface in
+    the live product yet (``runtime_compile.py``'s own docstring: "ordinary
+    allow/block lists... not yet mapped"). Rather than inventing a new
+    storage mechanism under migration, this reuses the existing, already-
+    wired ruleset mechanism: every migrated blocked domain becomes one
+    ``service_definitions`` row (exact match) inside one synthetic service
+    named ``migrated-v1-custom-blocklist``, grouped into one ruleset
+    (``migrated-v1-custom-blocklist``) that the global policy layer's
+    ``service_blocking_ruleset_id`` is pointed at -- so it compiles into a
+    real terminal block rule for every network, the same as any
+    admin-configured parental/security ruleset would.
+
+    V1's "allow" domains (``migrate_filtering``'s ``allowed_domains``) are
+    intentionally NOT written anywhere here: they exist in V1 to override
+    entries in V1's much larger default aggregator blocklist (the
+    ``sources``-derived list, tracked separately and never migrated at
+    all -- see ``docs/v2/migration-real-package-gate.md``), so with no
+    migrated default blocklist for them to override, they have nothing to
+    do post-migration. ``app/v2/dnsdist_policy_runtime.py``'s
+    ``ClientPolicyBinding.allowed_domains`` field exists for a future
+    per-binding allow-list but nothing populates it from control.db
+    anywhere in the codebase today (fresh-install or migrated) -- out of
+    scope for this fix, which is about making migrated block rules
+    enforced, not building a new allow-list feature.
+    """
+    if not blocked_domains:
+        return {"ruleset_created": False, "domains_migrated": 0}
+
+    with control_db.connect(target_control_db) as conn:
+        # Idempotent retry (§21/§22): same pattern as migrate_upstreams --
+        # delete-then-recreate rather than erroring on a second attempt.
+        conn.execute(
+            "DELETE FROM service_blocking_ruleset_members WHERE ruleset_row_id IN "
+            "(SELECT id FROM service_blocking_rulesets WHERE ruleset_id = 'migrated-v1-custom-blocklist')"
+        )
+        conn.execute(
+            "DELETE FROM service_blocking_rulesets WHERE ruleset_id = 'migrated-v1-custom-blocklist'"
+        )
+        conn.execute(
+            "DELETE FROM service_domains WHERE service_row_id IN "
+            "(SELECT id FROM service_definitions WHERE service_id = 'migrated-v1-custom-blocklist')"
+        )
+        conn.execute(
+            "DELETE FROM service_definitions WHERE service_id = 'migrated-v1-custom-blocklist'"
+        )
+        pstore.create_service(
+            conn, "migrated-v1-custom-blocklist", "Migrated V1 Custom Block List",
+            domains=[("exact", d) for d in blocked_domains], category="migrated",
+        )
+        pstore.create_service_ruleset(
+            conn, "migrated-v1-custom-blocklist", ["migrated-v1-custom-blocklist"]
+        )
+        from dataclasses import replace as _dc_replace
+
+        global_layer = pstore.load_policy_layer(conn, "global", "singleton")
+        pstore.save_policy_layer(
+            conn, "global", "singleton",
+            _dc_replace(global_layer, service_blocking_ruleset_id="migrated-v1-custom-blocklist"),
+        )
+    return {"ruleset_created": True, "domains_migrated": len(blocked_domains)}
+
+
+def migrate_local_dns_to_control_db(records: "list[LocalDnsRecord]", target_control_db: Path) -> dict:
+    """Writes migrated local DNS records into control.db's shared
+    ``local_dns_records`` table (``policy_store.upsert_local_dns_record``)
+    so the real runtime compiler actually answers for them (see
+    ``app/v2/dnsdist_policy_runtime.py``'s local-DNS compilation) --
+    previously these only ever reached the standalone, not-live-wired
+    zone-file generator (``app/v2/local_dns_gen.py``).
+    """
+    with control_db.connect(target_control_db) as conn:
+        for record in records:
+            pstore.upsert_local_dns_record(
+                conn, record.fqdn, record.record_type, record.value, record.ttl,
+            )
+    return {"records_migrated": len(records)}
+
+
 # --------------------------------------------------------------------------
 # 13. Upstream configuration
 # --------------------------------------------------------------------------
@@ -689,6 +775,23 @@ def migrate_upstreams(backup_db_path: Path, target_control_db: Path) -> dict:
         pstore.create_upstream_profile(
             conn, "migrated-default", "Migrated Default Upstreams",
             transport=transport, endpoints=endpoints, strategy="ordered",
+        )
+        # Creating the profile row alone is not enough -- the real runtime
+        # compiler (app/v2/runtime_compile.py's build_bindings()) only
+        # ever uses an upstream profile a policy layer actually points at
+        # (policy.upstream_profile_id); without this, every migrated
+        # binding silently falls back to the hardcoded default resolvers
+        # (1.1.1.1/9.9.9.9 plain) instead of the migrated upstream. Set on
+        # the global layer specifically (not a network layer) so it's the
+        # effective default for every binding unless a network overrides
+        # it later -- merge onto whatever global layer already exists
+        # rather than clobbering other fields an operator may have set.
+        from dataclasses import replace as _dc_replace
+
+        global_layer = pstore.load_policy_layer(conn, "global", "singleton")
+        pstore.save_policy_layer(
+            conn, "global", "singleton",
+            _dc_replace(global_layer, upstream_profile_id="migrated-default"),
         )
     return {"migrated": len(endpoints), "warnings": warnings}
 

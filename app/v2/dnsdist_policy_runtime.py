@@ -111,10 +111,49 @@ def _refused_or_spoof_action(response: BlockingResponse) -> str:
     return f"SpoofAction({{{addr_list}}})"
 
 
+def _local_dns_rule_lines(local_dns_records: list[tuple]) -> list[str]:
+    """Appliance-wide (not per-network -- V1's local DNS records were
+    never network-scoped either, and a LAN hostname answer isn't a
+    policy-differentiated decision the way blocking/SafeSearch are) terminal
+    rules for locally-defined A/AAAA/CNAME records, deterministically
+    ordered by (name, record_type, value) so repeated compiles of the same
+    control.db state are byte-identical.
+
+    PTR records are intentionally NOT compiled here -- a PTR answer is
+    looked up by a different qname (under in-addr.arpa/ip6.arpa) and
+    qtype than the forward record it's paired with, which needs its own
+    matcher, not a same-name QNameRule; not implemented yet. Callers
+    (``app/v2/runtime_compile.py``) are expected to warn, not silently
+    drop, when a PTR record is present but excluded here.
+    """
+    lines: list[str] = []
+    for name, record_type, value, _ttl in sorted(local_dns_records, key=lambda r: (r[0], r[1], r[2])):
+        if record_type == "PTR":
+            continue
+        try:
+            validated_name = validate_dns_name(name)
+        except InvalidDnsNameError as exc:
+            raise PolicyRuntimeError(f"invalid local DNS record name {name!r}: {exc}") from exc
+        matcher = f'QNameRule({_lua_string(validated_name + ".")})'
+        if record_type in ("A", "AAAA"):
+            lines.append(f'addAction({matcher}, SpoofAction({{{_lua_string(value)}}}))')
+        elif record_type == "CNAME":
+            target = value.rstrip(".") + "."
+            try:
+                validate_dns_name(value.rstrip("."))
+            except InvalidDnsNameError as exc:
+                raise PolicyRuntimeError(f"invalid local DNS CNAME target {value!r}: {exc}") from exc
+            lines.append(f'addAction({matcher}, SpoofCNAMEAction({_lua_string(target)}))')
+        else:
+            raise PolicyRuntimeError(f"unsupported local DNS record_type: {record_type!r}")
+    return lines
+
+
 def compile_multi_policy_dnsdist_config(
     listen_address: str,
     bindings: list[ClientPolicyBinding],
     max_cache_entries: int = DEFAULT_MAX_CACHE_ENTRIES,
+    local_dns_records: list[tuple] | None = None,
 ) -> str:
     """Deterministic (§2H requires reproducible behavior regardless of
     query order): bindings are processed most-specific-network-first
@@ -137,6 +176,15 @@ def compile_multi_policy_dnsdist_config(
         f'setLocal("{listen_address}")',
         "",
     ]
+
+    # Local DNS records -- registered first (highest precedence, applies
+    # to every network) so a LAN hostname always answers locally,
+    # regardless of which policy pool the client would otherwise land in.
+    local_dns_lines = _local_dns_rule_lines(local_dns_records or [])
+    if local_dns_lines:
+        lines.append("-- local DNS records (appliance-wide, highest precedence)")
+        lines.extend(local_dns_lines)
+        lines.append("")
 
     # Pools are deduplicated by cache_profile_id -- identical effective
     # policy always shares one pool/cache, never one per client.

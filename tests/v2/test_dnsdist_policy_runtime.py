@@ -121,6 +121,65 @@ class TestECSDifferentiation:
 
 
 @pytest.mark.skipif(not DNSDIST_INSTALLED, reason="dnsdist not installed")
+class TestLocalDnsRecords:
+    def test_a_record_compiled_as_terminal_spoof_action(self):
+        b = _binding("10.0.1.0/24", "p1")
+        text = compile_multi_policy_dnsdist_config(
+            "127.0.0.1:5300", [b], local_dns_records=[("host1.lan", "A", "10.20.1.1", 300)],
+        )
+        assert 'QNameRule("host1.lan.")' in text
+        assert 'SpoofAction({"10.20.1.1"})' in text
+        # Registered before any per-binding pool/catch-all rule.
+        assert text.index("host1.lan") < text.index("-- rules for network")
+
+    def test_cname_record_compiled_as_spoof_cname(self):
+        b = _binding("10.0.1.0/24", "p1")
+        text = compile_multi_policy_dnsdist_config(
+            "127.0.0.1:5300", [b],
+            local_dns_records=[("alias.lan", "CNAME", "host1.lan", 300)],
+        )
+        assert 'SpoofCNAMEAction("host1.lan.")' in text
+
+    def test_ptr_record_silently_excluded_from_generated_rules(self):
+        b = _binding("10.0.1.0/24", "p1")
+        text = compile_multi_policy_dnsdist_config(
+            "127.0.0.1:5300", [b],
+            local_dns_records=[("1.1.20.10.in-addr.arpa", "PTR", "host1.lan", 300)],
+        )
+        assert "in-addr" not in text
+
+    def test_invalid_local_dns_name_rejected(self):
+        b = _binding("10.0.1.0/24", "p1")
+        with pytest.raises(PolicyRuntimeError):
+            compile_multi_policy_dnsdist_config(
+                "127.0.0.1:5300", [b],
+                local_dns_records=[("not a valid name!", "A", "10.0.0.1", 300)],
+            )
+
+    def test_deterministic_regardless_of_input_order(self):
+        b = _binding("10.0.1.0/24", "p1")
+        records = [("host2.lan", "A", "10.0.0.2", 300), ("host1.lan", "A", "10.0.0.1", 300)]
+        a = compile_multi_policy_dnsdist_config("127.0.0.1:5300", [b], local_dns_records=records)
+        c = compile_multi_policy_dnsdist_config("127.0.0.1:5300", [b], local_dns_records=list(reversed(records)))
+        assert a == c
+
+    def test_real_validation_with_local_dns_records(self, tmp_path):
+        import subprocess
+
+        b = _binding("10.0.1.0/24", "p1")
+        text = compile_multi_policy_dnsdist_config(
+            "127.0.0.1:15351", [b],
+            local_dns_records=[
+                ("host1.lan", "A", "10.20.1.1", 300),
+                ("alias.lan", "CNAME", "host1.lan", 300),
+            ],
+        )
+        conf_path = tmp_path / "c.conf"
+        conf_path.write_text(text)
+        result = subprocess.run(["dnsdist", "-C", str(conf_path), "--check-config"], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+
+
 class TestRealValidation:
     def test_multi_policy_config_validates(self, tmp_path):
         import subprocess

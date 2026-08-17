@@ -598,3 +598,56 @@ def is_domain_service_blocked(conn: sqlite3.Connection, ruleset_id: str, qname: 
         if match_kind == "suffix" and (qname == domain or qname.endswith("." + domain)):
             return service_id
     return None
+
+
+# --------------------------------------------------------------------------
+# Local DNS records (shared with app/v2/webapp.py's own lazily-created
+# copy of this exact table -- CREATE TABLE IF NOT EXISTS with identical
+# DDL, so it is safe for either module to create it first; see
+# app/v2/runtime_compile.py for the reader that feeds it into the real
+# compiled runtime, and app/v2/migration_convert.py for the migration
+# writer).
+# --------------------------------------------------------------------------
+
+
+def ensure_local_dns_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS local_dns_records (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            record_type TEXT NOT NULL CHECK(record_type IN ('A','AAAA','CNAME','PTR')),
+            value TEXT NOT NULL,
+            ttl INTEGER NOT NULL DEFAULT 300,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(name, record_type, value)
+        )
+        """
+    )
+
+
+def load_local_dns_records(conn: sqlite3.Connection) -> list[tuple[str, str, str, int]]:
+    """Returns (name, record_type, value, ttl) for every enabled record."""
+    ensure_local_dns_schema(conn)
+    return conn.execute(
+        "SELECT name, record_type, value, ttl FROM local_dns_records WHERE enabled = 1"
+    ).fetchall()
+
+
+def upsert_local_dns_record(
+    conn: sqlite3.Connection, name: str, record_type: str, value: str, ttl: int = 300,
+    *, enabled: bool = True,
+) -> None:
+    ensure_local_dns_schema(conn)
+    now = _now()
+    conn.execute(
+        """
+        INSERT INTO local_dns_records (name, record_type, value, ttl, enabled, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(name, record_type, value) DO UPDATE SET
+            ttl = excluded.ttl, enabled = excluded.enabled, updated_at = excluded.updated_at
+        """,
+        (name, record_type, value, ttl, int(enabled), now, now),
+    )

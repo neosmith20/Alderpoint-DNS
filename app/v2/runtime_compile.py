@@ -149,6 +149,7 @@ class RuntimeCompileResult:
     promoted: bool
     validation_output: str
     binding_count: int
+    ptr_records_skipped: int = 0
 
 
 def recompile_and_promote(
@@ -166,7 +167,16 @@ def recompile_and_promote(
     """
     try:
         bindings = build_bindings(conn)
-        config_text = compile_multi_policy_dnsdist_config(listen_address, bindings)
+        local_dns_records = store.load_local_dns_records(conn)
+        # compile_multi_policy_dnsdist_config()'s local-DNS compiler
+        # silently skips PTR rows (needs a different matcher than the
+        # forward record it's paired with -- not implemented yet);
+        # counted here, not inside the compiler, so a caller can decide
+        # whether to surface it rather than it vanishing with no signal.
+        ptr_records_skipped = sum(1 for r in local_dns_records if r[1] == "PTR")
+        config_text = compile_multi_policy_dnsdist_config(
+            listen_address, bindings, local_dns_records=local_dns_records
+        )
     except PolicyRuntimeError as exc:
         raise RuntimeCompileError(f"policy runtime compile failed: {exc}") from exc
 
@@ -183,5 +193,6 @@ def recompile_and_promote(
         raise RuntimeCompileError(f"runtime validation/promotion failed: {exc}") from exc
 
     return RuntimeCompileResult(
-        promoted=result.promoted, validation_output=result.validation.output, binding_count=len(bindings)
+        promoted=result.promoted, validation_output=result.validation.output, binding_count=len(bindings),
+        ptr_records_skipped=ptr_records_skipped,
     )
