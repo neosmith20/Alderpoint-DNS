@@ -10,7 +10,7 @@ set -e
 
 case "$1" in
   remove)
-    systemctl disable alderpointdns-v2-dnsdist-reload.path alderpointdns-v2-dnsdist alderpointdns-v2-analytics alderpointdns-v2-tierb alderpointdns-v2-schedule alderpointdns-v2-web alderpointdns-v2-discovery alderpointdns-v2-dns-observer alderpointdns-v2-replication >/dev/null 2>&1 || true
+    systemctl disable alderpointdns-v2-dnsdist-reload.path alderpointdns-v2-dnsdist alderpointdns-v2-analytics alderpointdns-v2-analytics-protobuf-receiver alderpointdns-v2-tierb alderpointdns-v2-schedule alderpointdns-v2-web alderpointdns-v2-discovery alderpointdns-v2-dns-observer alderpointdns-v2-replication >/dev/null 2>&1 || true
     systemctl daemon-reload >/dev/null 2>&1 || true
     # /opt/alderpointdns-v2 itself is package-owned content (code, vendor
     # wheels, the provisioned analytics vendor runtime) -- dpkg already
@@ -26,7 +26,7 @@ case "$1" in
     find /opt/alderpointdns-v2 -depth -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
     ;;
   purge)
-    systemctl disable alderpointdns-v2-dnsdist-reload.path alderpointdns-v2-dnsdist alderpointdns-v2-analytics alderpointdns-v2-tierb alderpointdns-v2-schedule alderpointdns-v2-web alderpointdns-v2-discovery alderpointdns-v2-dns-observer alderpointdns-v2-replication >/dev/null 2>&1 || true
+    systemctl disable alderpointdns-v2-dnsdist-reload.path alderpointdns-v2-dnsdist alderpointdns-v2-analytics alderpointdns-v2-analytics-protobuf-receiver alderpointdns-v2-tierb alderpointdns-v2-schedule alderpointdns-v2-web alderpointdns-v2-discovery alderpointdns-v2-dns-observer alderpointdns-v2-replication >/dev/null 2>&1 || true
     systemctl daemon-reload >/dev/null 2>&1 || true
     rm -rf /opt/alderpointdns-v2/vendor-runtime-v2-analytics
     find /opt/alderpointdns-v2 -depth -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true

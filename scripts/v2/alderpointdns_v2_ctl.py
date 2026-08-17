@@ -50,6 +50,7 @@ from app.v2 import bind_rpz_gen  # noqa: E402
 from app.v2 import config as v2config  # noqa: E402
 from app.v2 import control_db  # noqa: E402
 from app.v2 import dnsdist_gen  # noqa: E402
+from app.v2 import dnsdist_protobuf  # noqa: E402
 from app.v2 import policy_store  # noqa: E402
 from app.v2 import node_identity  # noqa: E402
 from app.v2 import observed_clients  # noqa: E402
@@ -664,6 +665,124 @@ def _write_observation_batch(inbox: Path, observations: list[observed_clients.Ob
     os.replace(tmp, final)
 
 
+def _write_analytics_events_batch(inbox: Path, events: list[dict]) -> None:
+    """Same atomic-write-then-rename pattern as
+    _write_observation_batch -- a reader draining the inbox (see
+    cmd_analytics_worker) never observes a partially-written file."""
+    if not events:
+        return
+    inbox.mkdir(parents=True, exist_ok=True)
+    tmp = inbox / f"pb-{int(time.time() * 1000)}-{os.getpid()}-{threading.get_ident()}.jsonl.tmp"
+    final = tmp.with_suffix("")
+    with tmp.open("w", encoding="utf-8") as fh:
+        for event in events[:4096]:
+            fh.write(json.dumps(event, separators=(",", ":")) + "\n")
+    os.replace(tmp, final)
+
+
+def cmd_analytics_protobuf_receiver(args: argparse.Namespace) -> int:
+    """Real DNS-side event producer for analytics ingestion (roadmap
+    Priority 6 continuation -- see
+    docs/v2/analytics-ingestion-not-wired-to-live-dns.md for the real
+    gap this closes: before this, nothing populated the analytics
+    inbox for real traffic through the packaged dnsdist runtime at
+    all). A real TCP server for dnsdist's real, native protobuf
+    "remote logger" protocol (newRemoteLogger +
+    RemoteLogResponseAction, wired into the generated config by
+    dnsdist_gen.py) -- dnsdist connects to this as a client and streams
+    one length-prefixed PBDNSMessage per completed query/response pair.
+    Deliberately reads only RemoteLogResponseAction traffic (never
+    RemoteLogAction/pre-resolution messages): a real response message
+    already carries both the original question (qname/qtype) and the
+    real rcode together in one message, so no query/response
+    correlation state is needed at all -- simpler and safer than
+    tracking in-flight queries across two separate message streams.
+
+    This is a passive, best-effort log sink: a malformed/undecodable
+    message is logged and skipped, never raised past this function,
+    and a receiver failure/crash cannot affect DNS answering -- dnsdist
+    treats a remote logger it can't reach as fire-and-forget (per its
+    own documented behavior) and keeps answering queries regardless.
+    """
+    inbox = STATE_DIR / "analytics" / "inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    stop = {"flag": False}
+
+    def _handle_signal(signum, frame):
+        stop["flag"] = True
+
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind((args.host, args.port))
+    server.listen(8)
+    server.settimeout(0.5)
+    print(f"analytics-protobuf-receiver: listening on {args.host}:{args.port}")
+
+    def _handle_connection(conn: socket.socket) -> None:
+        conn.settimeout(2.0)
+        batch: list[dict] = []
+        last_flush = time.monotonic()
+        try:
+            while not stop["flag"]:
+                try:
+                    body = dnsdist_protobuf.read_framed_messages(conn.recv)
+                except socket.timeout:
+                    body = None
+                except dnsdist_protobuf.ProtobufDecodeError as exc:
+                    log.warning("analytics-protobuf-receiver: framing error, closing connection: %s", exc)
+                    break
+                if body == b"":
+                    break  # clean close
+                if body:
+                    try:
+                        decoded = dnsdist_protobuf.decode_message(body)
+                    except dnsdist_protobuf.ProtobufDecodeError as exc:
+                        log.warning("analytics-protobuf-receiver: skipped undecodable message: %s", exc)
+                        decoded = None
+                    if isinstance(decoded, dnsdist_protobuf.DecodedResponse):
+                        batch.append({
+                            "ts": decoded.ts,
+                            "qname": decoded.qname,
+                            "qtype": decoded.qtype,
+                            "protocol": decoded.protocol,
+                            "client": decoded.client,
+                            "rcode": decoded.rcode,
+                        })
+                now = time.monotonic()
+                if len(batch) >= args.flush_batch_size or (batch and now - last_flush >= args.flush_interval_seconds):
+                    _write_analytics_events_batch(inbox, batch)
+                    batch = []
+                    last_flush = now
+        finally:
+            _write_analytics_events_batch(inbox, batch)
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    threads: list[threading.Thread] = []
+    try:
+        while not stop["flag"]:
+            try:
+                conn, _addr = server.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                if stop["flag"]:
+                    break
+                raise
+            t = threading.Thread(target=_handle_connection, args=(conn,), daemon=True)
+            t.start()
+            threads.append(t)
+            threads = [th for th in threads if th.is_alive()]
+    finally:
+        server.close()
+    return 0
+
+
 def cmd_dns_observer(args: argparse.Namespace) -> int:
     """Observation-only UDP DNS ingress for package-first discovery tests.
 
@@ -903,6 +1022,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--flush-interval-seconds", type=float, default=0.5)
     p.add_argument("--max-packet-bytes", type=int, default=4096)
     p.set_defaults(func=cmd_dns_observer)
+
+    p = sub.add_parser("analytics-protobuf-receiver", help="real dnsdist protobuf remote-logger receiver, feeds the analytics inbox")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=5391)
+    p.add_argument("--flush-batch-size", type=int, default=512)
+    p.add_argument("--flush-interval-seconds", type=float, default=1.0)
+    p.set_defaults(func=cmd_analytics_protobuf_receiver)
 
     p = sub.add_parser("replication-server")
     p.add_argument("--host", default="0.0.0.0")

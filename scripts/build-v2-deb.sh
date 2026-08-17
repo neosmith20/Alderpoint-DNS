@@ -105,6 +105,7 @@ cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-tierb.service" "$PKG/lib/systemd/s
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-schedule.service" "$PKG/lib/systemd/system/alderpointdns-v2-schedule.service"
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-web.service" "$PKG/lib/systemd/system/alderpointdns-v2-web.service"
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-discovery.service" "$PKG/lib/systemd/system/alderpointdns-v2-discovery.service"
+cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-analytics-protobuf-receiver.service" "$PKG/lib/systemd/system/alderpointdns-v2-analytics-protobuf-receiver.service"
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-dns-observer.service" "$PKG/lib/systemd/system/alderpointdns-v2-dns-observer.service"
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-replication.service" "$PKG/lib/systemd/system/alderpointdns-v2-replication.service"
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-dnsdist.service" "$PKG/lib/systemd/system/alderpointdns-v2-dnsdist.service"

@@ -194,3 +194,20 @@ class TestRealValidation:
         conf_path.write_text(text)
         result = subprocess.run(["dnsdist", "-C", str(conf_path), "--check-config"], capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
+
+    def test_query_log_remote_logger_wired_and_passes_real_check_config(self, tmp_path):
+        import subprocess
+
+        b1 = _binding("10.0.1.0/24", "p1")
+        text = compile_multi_policy_dnsdist_config("127.0.0.1:15351", [b1])
+        assert 'newRemoteLogger("127.0.0.1:5391")' in text
+        assert "addResponseAction(AllRule(), RemoteLogResponseAction(" in text
+        conf_path = tmp_path / "c.conf"
+        conf_path.write_text(text)
+        result = subprocess.run(["dnsdist", "-C", str(conf_path), "--check-config"], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+
+    def test_query_log_can_be_disabled(self):
+        b1 = _binding("10.0.1.0/24", "p1")
+        text = compile_multi_policy_dnsdist_config("127.0.0.1:15352", [b1], analytics_log_address=None)
+        assert "RemoteLogger" not in text

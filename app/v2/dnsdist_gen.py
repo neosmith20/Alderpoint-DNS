@@ -64,6 +64,16 @@ def generate_dnsdist_config(
     upstreams: list[UpstreamServer],
     cache_profile_summary: dict[str, str] | None = None,
     refused_domains: list[str] | None = None,
+    # Same address/rationale as
+    # dnsdist_policy_runtime.ANALYTICS_PROTOBUF_LOG_ADDRESS -- kept as an
+    # independent literal (not a cross-import) since this bootstrap
+    # generator and the real per-policy compiler are already
+    # independently maintained by design (see this module's own "V2
+    # PROTOTYPE, NOT the live config" header). A fresh install must get
+    # the real DNS query log from its very first boot, not only after
+    # the admin's first policy mutation replaces this bootstrap config
+    # with the real compiler's output.
+    query_log_address: str | None = "127.0.0.1:5391",
 ) -> str:
     """Pure function: same inputs -> byte-identical config text. Only
     accepts already-validated ``NetworkScope``/``UpstreamServer`` value
@@ -82,6 +92,13 @@ def generate_dnsdist_config(
         f'setLocal("{listen_address}")',
         "",
     ]
+
+    if query_log_address:
+        lines += [
+            f'query_log_rl = newRemoteLogger("{query_log_address}")',
+            "addResponseAction(AllRule(), RemoteLogResponseAction(query_log_rl))",
+            "",
+        ]
 
     for scope in acl_networks:
         lines.append(f'addACL("{scope.cidr}")  -- network: {scope.network_id}')

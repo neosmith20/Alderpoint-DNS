@@ -149,11 +149,22 @@ def _local_dns_rule_lines(local_dns_records: list[tuple]) -> list[str]:
     return lines
 
 
+# Local-only IPC address for the real analytics event producer (roadmap
+# Priority 6 continuation -- see
+# docs/v2/analytics-ingestion-not-wired-to-live-dns.md for the gap this
+# closes, and app/v2/dnsdist_protobuf.py for the receiver-side decoder).
+# dnsdist's RemoteLogger is documented fire-and-forget: an unreachable
+# receiver logs a warning and never blocks or fails a query, so this is
+# always safe to emit even before/without the receiver service running.
+ANALYTICS_PROTOBUF_LOG_ADDRESS = "127.0.0.1:5391"
+
+
 def compile_multi_policy_dnsdist_config(
     listen_address: str,
     bindings: list[ClientPolicyBinding],
     max_cache_entries: int = DEFAULT_MAX_CACHE_ENTRIES,
     local_dns_records: list[tuple] | None = None,
+    analytics_log_address: str | None = ANALYTICS_PROTOBUF_LOG_ADDRESS,
 ) -> str:
     """Deterministic (§2H requires reproducible behavior regardless of
     query order): bindings are processed most-specific-network-first
@@ -176,6 +187,21 @@ def compile_multi_policy_dnsdist_config(
         f'setLocal("{listen_address}")',
         "",
     ]
+
+    if analytics_log_address:
+        # Real query-log/analytics producer: logs the completed
+        # question+answer (qname/qtype/rcode/client/protocol) for every
+        # query, not just this dnsdist's own decisions -- deliberately
+        # response-side only (RemoteLogResponseAction), never
+        # RemoteLogAction, since a single response message already
+        # carries both the original question and the real rcode
+        # together, so the receiver needs no query/response correlation
+        # state at all.
+        lines += [
+            f'analytics_rl = newRemoteLogger("{analytics_log_address}")',
+            "addResponseAction(AllRule(), RemoteLogResponseAction(analytics_rl))",
+            "",
+        ]
 
     # Local DNS records -- registered first (highest precedence, applies
     # to every network) so a LAN hostname always answers locally,
