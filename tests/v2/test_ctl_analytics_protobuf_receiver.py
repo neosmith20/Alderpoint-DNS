@@ -21,7 +21,13 @@ from pathlib import Path
 
 import pytest
 
-from tests.v2.test_dnsdist_protobuf import REAL_QUERY_HEX, REAL_RESPONSE_HEX
+from tests.v2.test_dnsdist_protobuf import (
+    REAL_MATCHED_QUERY_HEX,
+    REAL_MATCHED_RESPONSE_HEX,
+    REAL_QUERY_HEX,
+    REAL_RESPONSE_HEX,
+    REAL_SPOOFED_QUERY_ONLY_HEX,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CTL_PATH = REPO_ROOT / "scripts" / "v2" / "alderpointdns_v2_ctl.py"
@@ -34,13 +40,13 @@ class _RunningReceiver:
     which only works from a process's main thread, so an in-process
     thread can't run it directly."""
 
-    def __init__(self, tmp_path, port):
+    def __init__(self, tmp_path, port, spoof_flush_seconds=2.0):
         self.state_dir = tmp_path / "var" / "lib"
         env = dict(os.environ)
         env["ALDERPOINTDNS_V2_STATE_ROOT"] = str(self.state_dir)
         self.proc = subprocess.Popen(
             [sys.executable, str(CTL_PATH), "analytics-protobuf-receiver", "--port", str(port),
-             "--flush-interval-seconds", "0.2"],
+             "--flush-interval-seconds", "0.2", "--spoof-flush-seconds", str(spoof_flush_seconds)],
             env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
 
@@ -60,6 +66,17 @@ class _RunningReceiver:
 def receiver(tmp_path):
     port = _free_port()
     r = _RunningReceiver(tmp_path, port)
+    r.port = port
+    yield r
+    r.stop()
+
+
+@pytest.fixture()
+def fast_spoof_flush_receiver(tmp_path):
+    # A short spoof-flush window so tests don't have to wait the real
+    # 2s production default to observe an unmatched query get flushed.
+    port = _free_port()
+    r = _RunningReceiver(tmp_path, port, spoof_flush_seconds=0.3)
     r.port = port
     yield r
     r.stop()
@@ -133,3 +150,59 @@ def test_malformed_message_is_skipped_not_fatal_to_the_connection(receiver):
 
     files = _wait_for_inbox_file(receiver.inbox)
     assert files, "the valid message after the garbage one was never processed"
+
+
+def _all_events(files: list[Path]) -> list[dict]:
+    events = []
+    for f in files:
+        for line in f.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                events.append(json.loads(line))
+    return events
+
+
+def test_matched_query_and_response_produce_exactly_one_event_with_the_real_rcode(receiver):
+    # Real regression: a real backend-forwarded query must produce
+    # exactly one analytics event (using the response's real rcode),
+    # never two (one from the query message, one from the response
+    # message) -- that would silently double-count every ordinary,
+    # non-spoofed query in analytics.
+    sock = _connect(receiver.port)
+    assert sock is not None
+    try:
+        for hexdata in (REAL_MATCHED_QUERY_HEX, REAL_MATCHED_RESPONSE_HEX):
+            body = bytes.fromhex(hexdata)
+            sock.sendall(struct.pack(">H", len(body)) + body)
+    finally:
+        sock.close()
+
+    files = _wait_for_inbox_file(receiver.inbox)
+    assert files
+    time.sleep(0.5)  # let a possible second flush cycle land, if any
+    events = _all_events(_wait_for_inbox_file(receiver.inbox))
+    matching = [e for e in events if e["qname"] == "real-check.example.com."]
+    assert len(matching) == 1, f"expected exactly one event, got {matching}"
+    assert matching[0]["rcode"] == "NOERROR"
+
+
+def test_spoofed_query_with_no_response_is_flushed_as_noerror_after_the_window(fast_spoof_flush_receiver):
+    # The real gap this whole correlation mechanism closes: a
+    # terminally-spoofed query (blocked domain / SafeSearch / local DNS
+    # record) never gets a RemoteLogResponseAction message at all, so
+    # it must still show up in analytics on its own once the
+    # correlation window expires, not be silently dropped forever.
+    receiver = fast_spoof_flush_receiver
+    sock = _connect(receiver.port)
+    assert sock is not None
+    try:
+        body = bytes.fromhex(REAL_SPOOFED_QUERY_ONLY_HEX)
+        sock.sendall(struct.pack(">H", len(body)) + body)
+    finally:
+        sock.close()
+
+    files = _wait_for_inbox_file(receiver.inbox, deadline_seconds=10.0)
+    assert files, "the spoofed query was never flushed on its own"
+    events = _all_events(files)
+    matching = [e for e in events if e["qname"] == "spoofed.example.com."]
+    assert len(matching) == 1
+    assert matching[0]["rcode"] == "NOERROR"

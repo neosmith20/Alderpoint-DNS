@@ -680,6 +680,40 @@ def _write_analytics_events_batch(inbox: Path, events: list[dict]) -> None:
     os.replace(tmp, final)
 
 
+def _event_from_response(decoded: "dnsdist_protobuf.DecodedResponse") -> dict:
+    return {
+        "ts": decoded.ts, "qname": decoded.qname, "qtype": decoded.qtype,
+        "protocol": decoded.protocol, "client": decoded.client, "rcode": decoded.rcode,
+    }
+
+
+def _event_from_unmatched_query(decoded: "dnsdist_protobuf.DecodedQuery") -> dict:
+    # A query message with no matching response ever arrived within the
+    # correlation window -- real, verified dnsdist behavior for a
+    # terminally-spoofed query (SpoofAction/SpoofCNAMEAction: blocked
+    # domains, SafeSearch, local DNS records), which answers entirely
+    # within the query-processing stage and never produces a "response
+    # received from a backend" event for RemoteLogResponseAction to log.
+    # Those always succeed with a synthesized answer, so NOERROR is the
+    # real, correct rcode here, not a guess -- see
+    # app/v2/dnsdist_protobuf.py's module docstring for the live
+    # verification this is based on.
+    return {
+        "ts": decoded.ts, "qname": decoded.qname, "qtype": decoded.qtype,
+        "protocol": decoded.protocol, "client": decoded.client, "rcode": "NOERROR",
+    }
+
+
+# Bounds how long an in-flight query waits for its matching response
+# before being flushed as an assumed-spoofed event, and how many
+# in-flight queries a single connection tracks at once (defense against
+# unbounded growth if responses are somehow never arriving at all --
+# same bounded-queue principle as replication_v2.MAX_SEEN_MESSAGES /
+# observed_clients.ObservationQueue elsewhere in this codebase).
+_PENDING_QUERY_FLUSH_SECONDS = 2.0
+_PENDING_QUERY_MAX = 8192
+
+
 def cmd_analytics_protobuf_receiver(args: argparse.Namespace) -> int:
     """Real DNS-side event producer for analytics ingestion (roadmap
     Priority 6 continuation -- see
@@ -687,16 +721,22 @@ def cmd_analytics_protobuf_receiver(args: argparse.Namespace) -> int:
     gap this closes: before this, nothing populated the analytics
     inbox for real traffic through the packaged dnsdist runtime at
     all). A real TCP server for dnsdist's real, native protobuf
-    "remote logger" protocol (newRemoteLogger +
+    "remote logger" protocol (newRemoteLogger + RemoteLogAction +
     RemoteLogResponseAction, wired into the generated config by
-    dnsdist_gen.py) -- dnsdist connects to this as a client and streams
-    one length-prefixed PBDNSMessage per completed query/response pair.
-    Deliberately reads only RemoteLogResponseAction traffic (never
-    RemoteLogAction/pre-resolution messages): a real response message
-    already carries both the original question (qname/qtype) and the
-    real rcode together in one message, so no query/response
-    correlation state is needed at all -- simpler and safer than
-    tracking in-flight queries across two separate message streams.
+    dnsdist_gen.py/dnsdist_policy_runtime.py) -- dnsdist connects to
+    this as a client and streams one length-prefixed PBDNSMessage per
+    query and, for backend-forwarded queries, a second one per
+    response.
+
+    Both hooks are read and correlated by the real DNS transaction id
+    (verified identical between a real query message and its matching
+    response message): a real response message is preferred when it
+    arrives (has the real rcode); a query message with no matching
+    response after a short window is assumed spoofed/locally-answered
+    and flushed on its own -- see app/v2/dnsdist_protobuf.py's module
+    docstring for the live verification this design is based on
+    (RemoteLogResponseAction alone was found to never fire at all for
+    blocked/SafeSearch/local-DNS answers).
 
     This is a passive, best-effort log sink: a malformed/undecodable
     message is logged and skipped, never raised past this function,
@@ -725,6 +765,16 @@ def cmd_analytics_protobuf_receiver(args: argparse.Namespace) -> int:
         conn.settimeout(2.0)
         batch: list[dict] = []
         last_flush = time.monotonic()
+        # (client, msg_id) -> (DecodedQuery, monotonic insert time)
+        pending: dict[tuple[str, int], tuple["dnsdist_protobuf.DecodedQuery", float]] = {}
+
+        def _sweep_expired_pending() -> None:
+            now = time.monotonic()
+            expired = [k for k, (_q, t0) in pending.items() if now - t0 >= args.spoof_flush_seconds]
+            for k in expired:
+                q, _t0 = pending.pop(k)
+                batch.append(_event_from_unmatched_query(q))
+
         try:
             while not stop["flag"]:
                 try:
@@ -743,20 +793,27 @@ def cmd_analytics_protobuf_receiver(args: argparse.Namespace) -> int:
                         log.warning("analytics-protobuf-receiver: skipped undecodable message: %s", exc)
                         decoded = None
                     if isinstance(decoded, dnsdist_protobuf.DecodedResponse):
-                        batch.append({
-                            "ts": decoded.ts,
-                            "qname": decoded.qname,
-                            "qtype": decoded.qtype,
-                            "protocol": decoded.protocol,
-                            "client": decoded.client,
-                            "rcode": decoded.rcode,
-                        })
+                        key = (decoded.client, decoded.msg_id)
+                        pending.pop(key, None)  # matched -- the response is authoritative, drop any pending query
+                        batch.append(_event_from_response(decoded))
+                    elif isinstance(decoded, dnsdist_protobuf.DecodedQuery):
+                        if len(pending) >= _PENDING_QUERY_MAX:
+                            # Defense in depth only: drop the oldest
+                            # in-flight entry rather than grow unbounded
+                            # if responses are somehow never arriving.
+                            oldest_key = min(pending, key=lambda k: pending[k][1])
+                            q, _t0 = pending.pop(oldest_key)
+                            batch.append(_event_from_unmatched_query(q))
+                        pending[(decoded.client, decoded.msg_id)] = (decoded, time.monotonic())
+                _sweep_expired_pending()
                 now = time.monotonic()
                 if len(batch) >= args.flush_batch_size or (batch and now - last_flush >= args.flush_interval_seconds):
                     _write_analytics_events_batch(inbox, batch)
                     batch = []
                     last_flush = now
         finally:
+            for q, _t0 in pending.values():
+                batch.append(_event_from_unmatched_query(q))
             _write_analytics_events_batch(inbox, batch)
             try:
                 conn.close()
@@ -1028,6 +1085,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--port", type=int, default=5391)
     p.add_argument("--flush-batch-size", type=int, default=512)
     p.add_argument("--flush-interval-seconds", type=float, default=1.0)
+    p.add_argument("--spoof-flush-seconds", type=float, default=_PENDING_QUERY_FLUSH_SECONDS,
+                    help="how long to wait for a query's matching response before assuming it was spoofed/locally-answered")
     p.set_defaults(func=cmd_analytics_protobuf_receiver)
 
     p = sub.add_parser("replication-server")

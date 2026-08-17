@@ -130,6 +130,7 @@ class DecodedQuery:
     qtype: str
     client: str
     protocol: str
+    msg_id: int
 
 
 @dataclass(frozen=True)
@@ -140,6 +141,7 @@ class DecodedResponse:
     client: str
     protocol: str
     rcode: str
+    msg_id: int
 
 
 def _client_ip(raw: bytes) -> str:
@@ -190,6 +192,7 @@ def decode_message(data: bytes) -> DecodedQuery | DecodedResponse:
     protocol_num = None
     question_raw = None
     response_raw = None
+    msg_id = None
     for field_no, wire_type, val in walk_fields(data):
         if field_no == 1 and wire_type == 0:
             msg_type = val
@@ -199,6 +202,17 @@ def decode_message(data: bytes) -> DecodedQuery | DecodedResponse:
             client = _client_ip(val)
         elif field_no == 9 and wire_type == 0:
             ts = float(val)
+        elif field_no == 11 and wire_type == 0:
+            # PBDNSMessage field 11 ("id"): the real 16-bit DNS
+            # transaction ID -- verified empirically to be identical
+            # between a real query message and its matching response
+            # message for the same real query (both carried the same
+            # value, 54320, for a real "real-check.example.com." query).
+            # Used by the receiver to correlate a query-time message
+            # with its eventual response-time message, or to recognize
+            # a terminally-spoofed query that will never get one (see
+            # dnsdist_protobuf's module docstring).
+            msg_id = val
         elif field_no == 12 and wire_type == 2:
             question_raw = val
         elif field_no == 13 and wire_type == 2:
@@ -211,15 +225,19 @@ def decode_message(data: bytes) -> DecodedQuery | DecodedResponse:
         raise ProtobufDecodeError("message missing 'from' (client) field")
     if ts is None:
         raise ProtobufDecodeError("message missing timeSec field")
+    if msg_id is None:
+        raise ProtobufDecodeError("message missing id field")
     qname, qtype = _decode_question(question_raw)
     protocol = _PROTOCOL_NAMES.get(protocol_num, "udp")
     if msg_type == TYPE_QUERY:
-        return DecodedQuery(ts=ts, qname=qname, qtype=qtype, client=client, protocol=protocol)
+        return DecodedQuery(ts=ts, qname=qname, qtype=qtype, client=client, protocol=protocol, msg_id=msg_id)
     if msg_type == TYPE_RESPONSE:
         if response_raw is None:
             raise ProtobufDecodeError("response-type message missing response field")
         rcode = _decode_response_rcode(response_raw)
-        return DecodedResponse(ts=ts, qname=qname, qtype=qtype, client=client, protocol=protocol, rcode=rcode)
+        return DecodedResponse(
+            ts=ts, qname=qname, qtype=qtype, client=client, protocol=protocol, rcode=rcode, msg_id=msg_id
+        )
     raise ProtobufDecodeError(f"unrecognized message type {msg_type}")
 
 

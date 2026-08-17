@@ -96,6 +96,20 @@ def generate_dnsdist_config(
     if query_log_address:
         lines += [
             f'query_log_rl = newRemoteLogger("{query_log_address}")',
+            # Both hooks, deliberately: RemoteLogResponseAction alone
+            # never fires for a terminally-spoofed query (SpoofAction/
+            # SpoofCNAMEAction, e.g. blocked domains, SafeSearch, local
+            # DNS records answer entirely within the query-processing
+            # stage and never reach a "response received from a
+            # backend" event dnsdist can log a response for) -- verified
+            # empirically: a real spoofed query produced only a
+            # RemoteLogAction (query-time) message and no
+            # RemoteLogResponseAction message at all, while an ordinary
+            # backend-forwarded query produced both, with the same real
+            # DNS transaction id in each. The receiver correlates the
+            # two by that id and only emits one event per real query
+            # either way -- see app/v2/dnsdist_protobuf.py.
+            "addAction(AllRule(), RemoteLogAction(query_log_rl))",
             "addResponseAction(AllRule(), RemoteLogResponseAction(query_log_rl))",
             "",
         ]

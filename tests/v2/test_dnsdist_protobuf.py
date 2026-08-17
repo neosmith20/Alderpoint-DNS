@@ -36,6 +36,23 @@ REAL_QUERY_HEX = "08014885df8bd40650d9df1212109dfea3dbd3b2448490ac39e606e788f220
 # answer.
 REAL_RESPONSE_HEX = "080248c8de8bd40650c0e61f1210b0112f355792454aa9c2f91660df5f602001280132047f0000013a047f000001404848c8de8bd40650c1e61f58e16c62120a0c6578616d706c652e636f6d2e10011801a00180c703a801f977e001818102d00100d801016a4428c8de8bd406308dc11e0800121a0a0c6578616d706c652e636f6d2e1001180120232a046814179a121a0a0c6578616d706c652e636f6d2e1001180120232a04ac4293f3"
 
+# Real captured query message for a real domain that was configured to
+# be terminally spoofed by a real SpoofAction rule -- no matching
+# response message was ever sent for this query (verified: capturing
+# the same real dnsdist session's full traffic showed only this one
+# message for this qname, never a type=2 response) -- this is exactly
+# what a real blocked-domain/SafeSearch/local-DNS answer looks like on
+# the wire, the gap RemoteLogAction wiring closes.
+REAL_SPOOFED_QUERY_ONLY_HEX = "080148858a8cd40650f983041210d6a510e5dda24d8385b29974f8f387cc2001280132047f0000013a047f000001403c48858a8cd40650fb830458c3c201621a0a1473706f6f6665642e6578616d706c652e636f6d2e10011801a00199fd02a801fb77e00181406a0a28858a8cd40630ca8304"
+
+# A real query+response PAIR for the same real query (a real
+# backend-forwarded, non-spoofed lookup), captured from the same real
+# dnsdist session as REAL_SPOOFED_QUERY_ONLY_HEX above -- both carry the
+# real DNS transaction id 54320, verified identical between the two by
+# direct field-level decode.
+REAL_MATCHED_QUERY_HEX = "080148868a8cd4065081ff0412106183df3a992f494bb0b1919f5340a0542001280132047f0000013a047f000001403f48868a8cd4065083ff0458b0a803621d0a177265616c2d636865636b2e6578616d706c652e636f6d2e10011801a001f6e802a801fb77e00181406a0a28868a8cd40630f1fe04"
+REAL_MATCHED_RESPONSE_HEX = "080248868a8cd40650d2a10712106183df3a992f494bb0b1919f5340a0542001280132047f0000013a047f000001407148868a8cd40650d3a10758b0a803621d0a177265616c2d636865636b2e6578616d706c652e636f6d2e10011801a001f6e802a801fb77e00181c102d00100d801016a0c28868a8cd40630f1fe040800"
+
 
 def test_real_captured_query_decodes_correct_qname_client_protocol():
     data = bytes.fromhex(REAL_QUERY_HEX)
@@ -56,6 +73,26 @@ def test_real_captured_response_decodes_correct_rcode():
     assert decoded.qtype == "A"
     assert decoded.rcode == "NOERROR"
     assert decoded.client == "127.0.0.1"
+
+
+def test_real_matched_query_and_response_share_the_same_real_transaction_id():
+    q = decode_message(bytes.fromhex(REAL_MATCHED_QUERY_HEX))
+    r = decode_message(bytes.fromhex(REAL_MATCHED_RESPONSE_HEX))
+    assert isinstance(q, DecodedQuery)
+    assert isinstance(r, DecodedResponse)
+    assert q.qname == r.qname == "real-check.example.com."
+    assert q.msg_id == r.msg_id == 54320
+
+
+def test_real_spoofed_query_decodes_with_no_response_counterpart():
+    # This is exactly the message dnsdist sends for a terminally
+    # spoofed query -- it decodes cleanly as a query-type message on
+    # its own; there is deliberately no corresponding response fixture
+    # because dnsdist never sent one for this real query.
+    decoded = decode_message(bytes.fromhex(REAL_SPOOFED_QUERY_ONLY_HEX))
+    assert isinstance(decoded, DecodedQuery)
+    assert decoded.qname == "spoofed.example.com."
+    assert decoded.msg_id != 54320  # a different real query, different id
 
 
 def test_walk_fields_never_raises_on_the_real_captured_bytes():

@@ -191,14 +191,25 @@ def compile_multi_policy_dnsdist_config(
     if analytics_log_address:
         # Real query-log/analytics producer: logs the completed
         # question+answer (qname/qtype/rcode/client/protocol) for every
-        # query, not just this dnsdist's own decisions -- deliberately
-        # response-side only (RemoteLogResponseAction), never
-        # RemoteLogAction, since a single response message already
-        # carries both the original question and the real rcode
-        # together, so the receiver needs no query/response correlation
-        # state at all.
+        # query. Both hooks are needed, registered here (before any
+        # per-binding SpoofAction/SpoofCNAMEAction rule below, which
+        # matters -- addAction rules are evaluated in registration
+        # order and RemoteLogAction is non-terminal so it always runs
+        # first, then evaluation continues to whichever terminal rule
+        # applies): RemoteLogResponseAction alone never fires for a
+        # terminally-spoofed query (blocked domains, SafeSearch, local
+        # DNS records all answer entirely within the query-processing
+        # stage and never reach a "response received from a backend"
+        # event dnsdist can log a response for) -- verified empirically,
+        # see app/v2/dnsdist_protobuf.py's module docstring. The
+        # receiver correlates a query-time message with its eventual
+        # response-time message by the real DNS transaction id (present
+        # and identical in both, confirmed against real captured
+        # traffic) and emits exactly one event per real query either
+        # way.
         lines += [
             f'analytics_rl = newRemoteLogger("{analytics_log_address}")',
+            "addAction(AllRule(), RemoteLogAction(analytics_rl))",
             "addResponseAction(AllRule(), RemoteLogResponseAction(analytics_rl))",
             "",
         ]
