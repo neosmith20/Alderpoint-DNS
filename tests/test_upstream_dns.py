@@ -655,6 +655,7 @@ class UpstreamDNSTest(unittest.TestCase):
         upstream_dns.add_resolver({"name": "bad", "protocol": "plain", "address": "192.0.2.53", "port": "53", "enabled": "1"})
         with self.assertRaises(RuntimeError):
             with mock.patch.object(upstream_dns, "run", fail_dig), \
+                 mock.patch.object(upstream_dns, "outbound_dns_reachable", return_value=True), \
                  mock.patch.object(upstream_dns, "POST_DEPLOY_CHECK_TIMEOUT_SECONDS", 0.2), \
                  mock.patch.object(upstream_dns, "POST_DEPLOY_CHECK_RETRY_INTERVAL_SECONDS", 0.05):
                 upstream_dns.deploy_upstreams()
@@ -713,6 +714,7 @@ class UpstreamDNSTest(unittest.TestCase):
         state["reachable"] = False
         with self.assertRaises(RuntimeError):
             with mock.patch.object(upstream_dns, "run", cache_aware_run), \
+                 mock.patch.object(upstream_dns, "outbound_dns_reachable", return_value=True), \
                  mock.patch.object(upstream_dns, "POST_DEPLOY_CHECK_TIMEOUT_SECONDS", 0.2), \
                  mock.patch.object(upstream_dns, "POST_DEPLOY_CHECK_RETRY_INTERVAL_SECONDS", 0.05):
                 upstream_dns.deploy_upstreams()

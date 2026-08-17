@@ -272,6 +272,7 @@ class UpstreamCacheReconciliationOrderTests(unittest.TestCase):
         with mock.patch.object(compiler, "run", always_fail_dig), \
                 mock.patch.object(dns_cache, "run", always_fail_dig), \
                 mock.patch.object(upstream_dns, "run", always_fail_dig), \
+                mock.patch.object(upstream_dns, "outbound_dns_reachable", return_value=True), \
                 mock.patch.object(custom_rules, "run", always_fail_dig), \
                 mock.patch.object(compiler, "is_blocked", lambda domain: True), \
                 mock.patch.object(compiler.local_dns, "deploy_zones", lambda conn=None: 1), \

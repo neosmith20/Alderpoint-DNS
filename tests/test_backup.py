@@ -844,6 +844,7 @@ class RestoreTest(BackupTestBase):
         # since rollback restores exactly the config that was working
         # before the restore attempt began).
         with mock.patch.object(backup, "run", self.fake_run), mock.patch.object(backup, "resolves", side_effect=[False, True]), \
+                mock.patch.object(backup, "_outbound_dns_reachable", return_value=True), \
                 mock.patch.object(backup, "_wait_active", return_value=True):
             with self.assertRaises(RuntimeError):
                 backup.restore_backup(path, None, file_only_components)
@@ -862,6 +863,7 @@ class RestoreTest(BackupTestBase):
         # fails -- this asserts that contract directly.
         path = self._make_backup()
         with mock.patch.object(backup, "run", self.fake_run), mock.patch.object(backup, "resolves", return_value=False), \
+                mock.patch.object(backup, "_outbound_dns_reachable", return_value=True), \
                 mock.patch.object(backup, "_wait_active", return_value=True), mock.patch.object(backup, "_wait_inactive", return_value=True):
             with self.assertRaises(RuntimeError):
                 backup.restore_backup(path, None, dict.fromkeys(backup.COMPONENT_KEYS, True))
