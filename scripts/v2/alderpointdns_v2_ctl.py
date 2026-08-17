@@ -237,6 +237,17 @@ def cmd_init_replication_cert(args: argparse.Namespace) -> int:
         ident = node_identity.get_or_create(conn)
     ca_pem, ca_key_pem = replication_v2.generate_private_ca(f"apdns-v2-ca-{ident.node_id}")
     cert_pem, key_pem = replication_v2.issue_node_cert(ca_pem, ca_key_pem, ident.node_id, server_name="localhost")
+    # Persist the CA private key (protected the same way every other
+    # sensitive secret this appliance holds is) so this node can later
+    # issue additional certs signed by its own CA for real peer
+    # enrollment -- see replication_v2.REPLICATION_CA_KEY_SECRET_ID's
+    # docstring for the real gap this closes (previously discarded
+    # immediately after signing this node's own server cert, which meant
+    # no tool could ever establish trust with a second, independent node).
+    try:
+        secret_store.SecretStore(SECRETS_DIR).create(ca_key_pem, secret_id=replication_v2.REPLICATION_CA_KEY_SECRET_ID)
+    except secret_store.SecretStoreError:
+        pass  # already present -- do not overwrite known-good key material
     fd = os.open(REPLICATION_CA_PATH, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(ca_pem)
@@ -248,6 +259,50 @@ def cmd_init_replication_cert(args: argparse.Namespace) -> int:
         fh.write(key_pem)
     _chown_best_effort(REPLICATION_DIR, 0o750)
     print(f"replication TLS material created: node_id={ident.node_id} fingerprint={replication_v2.cert_fingerprint_sha256(cert_pem)}")
+    return 0
+
+
+def cmd_issue_peer_cert(args: argparse.Namespace) -> int:
+    """Real replication peer-enrollment step (previously missing entirely
+    -- see replication_v2.REPLICATION_CA_KEY_SECRET_ID's docstring):
+    issues a cert signed by THIS node's own replication CA for
+    ``args.remote_node_id`` to use as its client cert when connecting to
+    THIS node. Prints everything the *other* node's administrator needs
+    to paste into that node's peer record for this one
+    (``PUT /api/replication/peers/{this node's id}``): this node's own
+    ca_pem, this node's own server-cert fingerprint, and the freshly
+    issued client cert+key -- to stdout by default, or to
+    --out (a single JSON file) for scripted enrollment.
+    """
+    if not REPLICATION_CA_PATH.exists() or not REPLICATION_SERVER_CERT_PATH.exists():
+        print("replication TLS material not initialized on this node -- run init-replication-cert first", file=sys.stderr)
+        return 1
+    ca_pem = REPLICATION_CA_PATH.read_text(encoding="utf-8")
+    with control_db.connect(CONTROL_DB) as conn:
+        ident = node_identity.get_or_create(conn)
+    try:
+        cert_pem, key_pem = replication_v2.issue_peer_client_cert(
+            secret_store.SecretStore(SECRETS_DIR), ca_pem, args.remote_node_id, server_name=args.server_name
+        )
+    except replication_v2.ReplicationEnrollmentError as exc:
+        print(f"cannot issue peer cert: {exc}", file=sys.stderr)
+        return 1
+    bundle = {
+        "this_node_id": ident.node_id,
+        "issued_for_node_id": args.remote_node_id,
+        "ca_pem": ca_pem,
+        "expected_cert_sha256": replication_v2.cert_fingerprint_sha256(REPLICATION_SERVER_CERT_PATH.read_text(encoding="utf-8")),
+        "client_cert_pem": cert_pem,
+        "client_key_pem": key_pem,
+    }
+    if args.out:
+        Path(args.out).write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+        os.chmod(args.out, 0o600)
+        print(f"enrollment bundle written to {args.out} -- copy it to {args.remote_node_id}'s administrator, "
+              f"who pastes ca_pem/expected_cert_sha256/client_cert_pem/client_key_pem into "
+              f"PUT /api/replication/peers/{ident.node_id} on that node")
+    else:
+        print(json.dumps(bundle, indent=2))
     return 0
 
 
@@ -806,6 +861,12 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("init-state").set_defaults(func=cmd_init_state)
     sub.add_parser("ensure-tls-cert").set_defaults(func=cmd_ensure_tls_cert)
     sub.add_parser("init-replication-cert").set_defaults(func=cmd_init_replication_cert)
+
+    p = sub.add_parser("issue-peer-cert", help="issue a replication client cert for a remote node, signed by this node's own CA")
+    p.add_argument("remote_node_id", help="the remote node's node_id (from its /api/node-identity)")
+    p.add_argument("--server-name", default="localhost", help="hostname/IP the issued cert's SAN should carry (informational; not enforced by this node)")
+    p.add_argument("--out", help="write the enrollment bundle as JSON to this path (0600) instead of stdout")
+    p.set_defaults(func=cmd_issue_peer_cert)
 
     p = sub.add_parser("migrate")
     p.add_argument("source", help="path to a V1 install root (containing alderpointdns.db)")

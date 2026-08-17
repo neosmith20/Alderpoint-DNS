@@ -4,6 +4,7 @@ test, see docs/v2/clean-install-evidence.md; this file proves route
 logic, auth, CSRF, and session mechanics thoroughly and fast)."""
 
 import importlib
+import json
 import os
 import shutil
 import sys
@@ -281,6 +282,70 @@ class TestPolicyApiReachesRuntime:
         client.cookies.clear()
         r = client.get("/api/policy/explain", params={"client_id": 1})
         assert r.status_code == 401
+
+
+class TestReplicationPeerCertEnrollment:
+    """Real replication peer-enrollment endpoint (previously missing
+    entirely -- see replication_v2.REPLICATION_CA_KEY_SECRET_ID's and
+    webapp.py's replication_issue_peer_cert's docstrings for the real
+    gap this closes: found live during RC3 replication acceptance
+    testing that no shipped tool could ever establish trust between two
+    independently installed nodes)."""
+
+    def test_issue_peer_cert_requires_auth(self, app_client):
+        webapp, client = app_client
+        _setup_and_login(webapp, client)
+        client.cookies.clear()
+        r = client.post("/api/replication/issue-peer-cert", json={"remote_node_id": "some-node"})
+        assert r.status_code == 401
+
+    def test_issue_peer_cert_without_replication_material_returns_clear_error(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        r = client.post("/api/replication/issue-peer-cert", json={"remote_node_id": "some-node"}, headers={"X-CSRF-Token": csrf})
+        assert r.status_code == 409
+        assert "not_initialized" in r.text or "replication_not_initialized" in r.text
+
+    def test_issue_peer_cert_without_persisted_ca_key_returns_clear_error(self, app_client):
+        # Simulates a node provisioned before this fix: replication TLS
+        # material exists on disk, but no CA key was ever persisted.
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        from app.v2 import replication_v2
+
+        ca_pem, ca_key_pem = replication_v2.generate_private_ca("pre-fix-node-ca")
+        cert_pem, key_pem = replication_v2.issue_node_cert(ca_pem, ca_key_pem, "pre-fix-node", server_name="localhost")
+        webapp.REPLICATION_DIR.mkdir(parents=True, exist_ok=True)
+        webapp.REPLICATION_CA_PATH.write_text(ca_pem)
+        webapp.REPLICATION_SERVER_CERT_PATH.write_text(cert_pem)
+        r = client.post("/api/replication/issue-peer-cert", json={"remote_node_id": "some-node"}, headers={"X-CSRF-Token": csrf})
+        assert r.status_code == 409
+        assert "no_persisted_ca_key" in r.text
+
+    def test_issue_peer_cert_returns_a_valid_enrollment_bundle(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        from app.v2 import replication_v2
+
+        ca_pem, ca_key_pem = replication_v2.generate_private_ca("this-node-ca")
+        cert_pem, key_pem = replication_v2.issue_node_cert(ca_pem, ca_key_pem, "this-node", server_name="localhost")
+        webapp.REPLICATION_DIR.mkdir(parents=True, exist_ok=True)
+        webapp.REPLICATION_CA_PATH.write_text(ca_pem)
+        webapp.REPLICATION_SERVER_CERT_PATH.write_text(cert_pem)
+        webapp._secrets().create(ca_key_pem, secret_id=replication_v2.REPLICATION_CA_KEY_SECRET_ID)
+
+        r = client.post(
+            "/api/replication/issue-peer-cert",
+            json={"remote_node_id": "remote-node-xyz", "server_name": "10.1.2.3"},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["ca_pem"] == ca_pem
+        assert body["expected_cert_sha256"] == replication_v2.cert_fingerprint_sha256(cert_pem)
+        assert replication_v2.cert_node_id(body["client_cert_pem"]) == "remote-node-xyz"
+        # The CA private key itself must never be returned to the caller.
+        assert ca_key_pem not in json.dumps(body)
 
 
 class TestTlsStatusApi:

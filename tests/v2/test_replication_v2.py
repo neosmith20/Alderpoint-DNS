@@ -173,6 +173,105 @@ def test_apply_message_real_recompile_defaults_to_sane_listen_address(tmp_path):
     assert 'setLocal("0.0.0.0:53")' in conf_text
 
 
+class TestPeerCertEnrollment:
+    """Real replication peer-enrollment (previously missing entirely --
+    see replication_v2.REPLICATION_CA_KEY_SECRET_ID's docstring): a node
+    must be able to issue an additional cert signed by its own CA for a
+    real second, independent node to use as its client cert."""
+
+    def test_issue_peer_client_cert_signed_by_correct_ca_for_correct_node_id(self, tmp_path):
+        ca_pem, ca_key_pem = replication_v2.generate_private_ca("node-a-ca")
+        secrets = SecretStore(tmp_path / "secrets")
+        secrets.create(ca_key_pem, secret_id=replication_v2.REPLICATION_CA_KEY_SECRET_ID)
+
+        cert_pem, key_pem = replication_v2.issue_peer_client_cert(
+            secrets, ca_pem, "remote-node-b", server_name="10.0.0.5"
+        )
+
+        # Issued for the right identity...
+        assert replication_v2.cert_node_id(cert_pem) == "remote-node-b"
+        # ...signed by the right CA (not some other/self-signed cert)...
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes
+
+        ca_cert = x509.load_pem_x509_certificate(ca_pem.encode())
+        leaf = x509.load_pem_x509_certificate(cert_pem.encode())
+        ca_cert.public_key().verify(
+            leaf.signature,
+            leaf.tbs_certificate_bytes,
+            __import__("cryptography.hazmat.primitives.asymmetric.padding", fromlist=["PKCS1v15"]).PKCS1v15(),
+            leaf.signature_hash_algorithm,
+        )
+        # ...and the returned key actually matches the issued cert.
+        from cryptography.hazmat.primitives import serialization
+
+        priv = serialization.load_pem_private_key(key_pem.encode(), password=None)
+        assert priv.public_key().public_numbers() == leaf.public_key().public_numbers()
+
+    def test_issue_peer_client_cert_fails_clearly_without_persisted_ca_key(self, tmp_path):
+        # A node whose CA key was never persisted (e.g. provisioned before
+        # this fix) must get a clear, actionable error -- not a bare
+        # SecretStoreError/KeyError with no explanation.
+        ca_pem, _ca_key_pem = replication_v2.generate_private_ca("node-a-ca")
+        secrets = SecretStore(tmp_path / "secrets")  # no CA key stored
+        with pytest.raises(replication_v2.ReplicationEnrollmentError, match="no persisted replication CA"):
+            replication_v2.issue_peer_client_cert(secrets, ca_pem, "remote-node-b")
+
+    def test_two_nodes_enroll_each_other_and_replicate_for_real(self, tmp_path):
+        # End-to-end proof of the fix: two nodes, each with its OWN CA (no
+        # shared external CA, unlike _trust_pair's test-only shortcut).
+        # A's real server (serve()) only ever trusts A's own CA for
+        # incoming client certs (a single global ca_file) -- so for B to
+        # call A, B must present a cert signed by A's CA, and vice versa.
+        # That is exactly what issue_peer_client_cert lets each node do
+        # for the other, closing the real enrollment gap.
+        db_a = tmp_path / "a.db"
+        db_b = tmp_path / "b.db"
+        _init(db_a)
+        _init(db_b)
+        secrets_a = SecretStore(tmp_path / "sa")
+        secrets_b = SecretStore(tmp_path / "sb")
+        ca_a, ca_key_a = replication_v2.generate_private_ca("node-a-ca")
+        ca_b, ca_key_b = replication_v2.generate_private_ca("node-b-ca")
+        secrets_a.create(ca_key_a, secret_id=replication_v2.REPLICATION_CA_KEY_SECRET_ID)
+        secrets_b.create(ca_key_b, secret_id=replication_v2.REPLICATION_CA_KEY_SECRET_ID)
+
+        with control_db.connect(db_a) as a, control_db.connect(db_b) as b:
+            node_a = node_identity.get_or_create(a).node_id
+            node_b = node_identity.get_or_create(b).node_id
+
+            server_cert_a, _server_key_a = replication_v2.issue_node_cert(ca_a, ca_key_a, node_a, server_name="localhost")
+            server_cert_b, _server_key_b = replication_v2.issue_node_cert(ca_b, ca_key_b, node_b, server_name="localhost")
+            # What A presents when IT calls B: signed by B's own CA
+            # (issued by B, since only B's CA key can produce something
+            # B's server will accept), identity == node_a.
+            a_creds_for_calling_b = replication_v2.issue_peer_client_cert(secrets_b, ca_b, node_a)
+            # What B presents when IT calls A: signed by A's own CA,
+            # identity == node_b.
+            b_creds_for_calling_a = replication_v2.issue_peer_client_cert(secrets_a, ca_a, node_b)
+
+            # A's own record of how to reach B.
+            replication_v2.upsert_peer(
+                a, peer_node_id=node_b, display_name="b", url="https://localhost:1/replication/v1/apply",
+                ca_pem=ca_b, expected_cert_sha256=replication_v2.cert_fingerprint_sha256(server_cert_b),
+                client_cert_pem=a_creds_for_calling_b[0], client_key_pem=a_creds_for_calling_b[1],
+            )
+            # B's own record of A -- expected_cert_sha256 here is what
+            # _validate_message checks an INCOMING push from A against,
+            # i.e. the cert A actually presents (a_creds_for_calling_b),
+            # not B's own outgoing credential.
+            replication_v2.upsert_peer(
+                b, peer_node_id=node_a, display_name="a", url="https://localhost:1/replication/v1/apply",
+                ca_pem=ca_a, expected_cert_sha256=replication_v2.cert_fingerprint_sha256(a_creds_for_calling_b[0]),
+                client_cert_pem=b_creds_for_calling_a[0], client_key_pem=b_creds_for_calling_a[1],
+            )
+            msg = replication_v2.build_message(a, SecretStore(tmp_path / "data-a"))
+            result = replication_v2.apply_message(
+                b, SecretStore(tmp_path / "data-b"), msg, peer_cert_pem=a_creds_for_calling_b[0]
+            )
+        assert result["applied"] is True
+
+
 def test_push_to_peer_does_not_shadow_http_module():
     source = inspect.getsource(replication_v2.push_to_peer)
     assert "http = http.client" not in source

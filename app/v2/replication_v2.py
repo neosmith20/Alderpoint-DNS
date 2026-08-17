@@ -25,6 +25,24 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from app.v2 import control_db, node_identity, notification_store, policy_store, runtime_compile
 from app.v2.secret_store import SecretStore
 
+# Fixed secret ID (same pattern as webapp.py's SESSION_SECRET_ID/
+# BACKUP_KEY_SECRET_ID) for this node's own replication CA private key.
+# Persisting this -- init-replication-cert used to generate the CA key
+# purely in memory and discard it immediately after signing this node's
+# own server cert -- is what makes issue_peer_client_cert() below
+# possible at all: without it, no tool (CLI or API) could ever issue an
+# *additional* cert signed by this node's CA after initial install,
+# which meant there was no real workflow for a real administrator to
+# establish replication trust between two independently installed nodes
+# (found live during RC3 replication acceptance testing; see
+# docs/v2/replication-real-two-node-acceptance.md). Nodes provisioned
+# before this fix never had a CA key to persist -- there is no way to
+# retroactively recover a key that was never saved; those nodes must
+# regenerate their replication identity (which already clears existing
+# trust per node_identity's own documented semantics) to gain
+# peer-cert-issuance capability.
+REPLICATION_CA_KEY_SECRET_ID = "replication-ca-signing-key"
+
 REPLICATION_SCHEMA_VERSION = 6
 PROTOCOL_VERSION = 1
 MAX_BODY_BYTES = 1_000_000
@@ -200,6 +218,40 @@ def issue_node_cert(ca_pem: str, ca_key_pem: str, node_id: str, *, server_name: 
             serialization.NoEncryption(),
         ).decode("ascii"),
     )
+
+
+class ReplicationEnrollmentError(RuntimeError):
+    pass
+
+
+def issue_peer_client_cert(
+    secrets: SecretStore, ca_pem: str, remote_node_id: str, *, server_name: str = "localhost"
+) -> tuple[str, str]:
+    """Issues a cert (signed by THIS node's own replication CA) for
+    ``remote_node_id`` to present as ITS client cert when connecting to
+    THIS node -- the real enrollment step that was previously impossible
+    (see REPLICATION_CA_KEY_SECRET_ID's docstring). Callers hand the
+    returned (cert_pem, key_pem), together with this node's own ca_pem
+    and server-cert fingerprint -- see webapp.py's
+    /api/replication/issue-peer-cert -- to the remote node's
+    administrator, who pastes it into that node's peer record for THIS
+    node (client_cert_pem/client_key_pem).
+
+    Raises ReplicationEnrollmentError (not a bare KeyError/SecretStoreError)
+    if this node has no persisted CA key -- either it predates this fix
+    (see REPLICATION_CA_KEY_SECRET_ID's docstring: regenerate node
+    identity to get one) or its replication TLS material was never
+    bootstrapped at all.
+    """
+    try:
+        ca_key_pem = secrets.get(REPLICATION_CA_KEY_SECRET_ID)
+    except Exception as exc:
+        raise ReplicationEnrollmentError(
+            "no persisted replication CA signing key on this node -- either replication TLS "
+            "material was never initialized, or this node was provisioned before peer-cert "
+            "issuance was supported (regenerate this node's identity to get a persisted CA key)"
+        ) from exc
+    return issue_node_cert(ca_pem, ca_key_pem, remote_node_id, server_name=server_name)
 
 
 @dataclass(frozen=True)

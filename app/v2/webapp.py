@@ -85,6 +85,12 @@ ACTIVE_CERT_PATH = CERTS_DIR / "server.crt"
 ACTIVE_KEY_PATH = CERTS_DIR / "server.key"
 BOOTSTRAP_TOKEN_PATH = STATE_DIR / "bootstrap-setup-token"
 TIER_B_STATE_FILE = STATE_DIR / "tierb" / "working-set.json"
+# Mirrors scripts/v2/alderpointdns_v2_ctl.py's own REPLICATION_* paths --
+# this node's own replication mTLS material, needed by the
+# /api/replication/issue-peer-cert enrollment endpoint below.
+REPLICATION_DIR = STATE_DIR / "replication"
+REPLICATION_SERVER_CERT_PATH = REPLICATION_DIR / "server.crt"
+REPLICATION_CA_PATH = REPLICATION_DIR / "trust-ca.pem"
 SCHEDULE_STATE_FILE = STATE_DIR / "schedule" / "schedule-transition-state.json"
 
 SESSION_SECRET_ID = "web-session-signing-key"
@@ -1458,6 +1464,47 @@ def replication_sync(peer_node_id: str, admin=Depends(current_admin), x_csrf_tok
     with _db() as conn:
         result = replication_v2.push_to_peer(conn, _secrets(), peer_node_id, temp_root)
     return {"status": "ok", "result": result}
+
+
+class IssuePeerCertRequest(BaseModel):
+    remote_node_id: str = Field(min_length=1, max_length=128)
+    server_name: str = Field(default="localhost", max_length=255)
+
+
+@app.post("/api/replication/issue-peer-cert")
+def replication_issue_peer_cert(req: IssuePeerCertRequest, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    """The real replication peer-enrollment step (previously missing
+    entirely -- found live during RC3 replication acceptance testing,
+    see docs/v2/replication-real-two-node-acceptance.md): issues a cert
+    signed by THIS node's own replication CA for req.remote_node_id to
+    use as its client cert when connecting to THIS node. Returns
+    everything the remote node's administrator needs to paste into that
+    node's peer record for this one (PUT /api/replication/peers/{this
+    node's id}): this node's ca_pem, this node's own server-cert
+    fingerprint, and the freshly issued client cert+key. Never returns
+    this node's own CA *key* -- only ever the issued leaf cert/key pair.
+    """
+    check_csrf(admin, x_csrf_token)
+    if not REPLICATION_CA_PATH.exists() or not REPLICATION_SERVER_CERT_PATH.exists():
+        raise ApiError(409, "replication_not_initialized", "replication TLS material not initialized on this node")
+    ca_pem = REPLICATION_CA_PATH.read_text(encoding="utf-8")
+    try:
+        cert_pem, key_pem = replication_v2.issue_peer_client_cert(
+            _secrets(), ca_pem, req.remote_node_id, server_name=req.server_name
+        )
+    except replication_v2.ReplicationEnrollmentError as exc:
+        raise ApiError(409, "no_persisted_ca_key", str(exc))
+    _ensure_extended_schemas()
+    with _db() as conn:
+        ident = node_identity.get_or_create(conn)
+    return {
+        "this_node_id": ident.node_id,
+        "issued_for_node_id": req.remote_node_id,
+        "ca_pem": ca_pem,
+        "expected_cert_sha256": replication_v2.cert_fingerprint_sha256(REPLICATION_SERVER_CERT_PATH.read_text(encoding="utf-8")),
+        "client_cert_pem": cert_pem,
+        "client_key_pem": key_pem,
+    }
 
 
 # --- observed client discovery (§4C) ----------------------------------------
