@@ -32,7 +32,7 @@ SOURCE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 # appropriate to this branch." 2.0.0~privateN-1: "~" sorts before the
 # final 2.0.0-1 this candidate is a pre-release of, same convention V1's
 # own build-deb.sh already uses for beta/dev/rc tags.
-DEB_VERSION="2.0.0~rc6-1"
+DEB_VERSION="2.0.0~rc7-1"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
