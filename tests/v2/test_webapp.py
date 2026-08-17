@@ -191,6 +191,39 @@ class TestErrorHandlingNoLeakage:
         assert body["error"] == "validation_error"
 
 
+class TestOversizedRequestRejected:
+    """Regression for a real finding from adversarial security testing:
+    no request body size limit existed anywhere, so an oversized field
+    value was accepted through ASGI/Starlette/Pydantic parsing before a
+    field-level validator finally rejected it -- and Pydantic's default
+    error response echoed the full oversized value back verbatim (a 5 MB
+    request produced a ~5 MB response). Now rejected immediately on
+    declared Content-Length, before any body parsing."""
+
+    def test_oversized_body_rejected_with_413_before_parsing(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        huge_value = "x" * (webapp.MAX_REQUEST_BODY_BYTES + 1000)
+        r = client.post(
+            "/api/networks",
+            json={"network_id": "x", "cidr": "10.0.0.0/24", "description": huge_value},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert r.status_code == 413
+        # The oversized value itself must never be echoed back.
+        assert huge_value not in r.text
+        assert len(r.content) < 1000
+
+    def test_ordinary_sized_request_still_works(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        r = client.post(
+            "/api/networks", json={"network_id": "y", "cidr": "10.0.1.0/24"},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert r.status_code == 200, r.text
+
+
 class TestPolicyApiReachesRuntime:
     def test_creating_network_promotes_real_compiled_runtime(self, app_client):
         webapp, client = app_client

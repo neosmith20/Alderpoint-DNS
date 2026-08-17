@@ -24,6 +24,7 @@ scripts/v2/alderpointdns_v2_ctl.py already uses, for testing.
 
 from __future__ import annotations
 
+import hmac
 import ipaddress
 import json
 import os
@@ -134,6 +135,40 @@ def _serializer_instance() -> URLSafeTimedSerializer:
 app = FastAPI(title="Alderpoint DNS V2 Management API", docs_url=None, redoc_url=None, openapi_url=None)
 if UI_DIR.exists():
     app.mount("/ui-static", StaticFiles(directory=str(UI_DIR)), name="ui-static")
+
+
+# Found during adversarial security testing: no request body size limit
+# existed anywhere in this app -- a single authenticated request (valid
+# session + CSRF token, so bounded to an already-logged-in admin, not an
+# arbitrary unauthenticated caller, but still a real gap) with an
+# oversized field value was accepted all the way through ASGI/Starlette/
+# Pydantic parsing before being rejected by a field-level validator, and
+# Pydantic's default validation-error response echoes the full rejected
+# value back verbatim -- a 5 MB request produced a ~5 MB response, exact
+# reflection. No legitimate request this API ever needs to accept is
+# anywhere close to this size (the largest real payload is a TLS
+# certificate+key PEM pair, a few KB at most). Rejects on the declared
+# Content-Length before any parsing happens; does not (yet) defend
+# against a client lying about Content-Length while streaming more via
+# chunked transfer encoding -- a real remaining gap for a future pass,
+# not claimed as full protection here.
+MAX_REQUEST_BODY_BYTES = 1_000_000
+
+
+@app.middleware("http")
+async def _reject_oversized_requests(request: Request, call_next):
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_size = int(content_length)
+        except ValueError:
+            declared_size = None
+        if declared_size is not None and declared_size > MAX_REQUEST_BODY_BYTES:
+            return JSONResponse(
+                status_code=413,
+                content={"error": "payload_too_large", "detail": "request body exceeds the maximum accepted size"},
+            )
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -300,7 +335,16 @@ def current_admin(request: Request):
 
 
 def check_csrf(admin: dict, x_csrf_token: Optional[str]) -> None:
-    if not x_csrf_token or x_csrf_token != admin["csrf"]:
+    # Constant-time comparison (found during adversarial security testing):
+    # a plain `!=` here leaks a timing signal proportional to the matching
+    # prefix length of a 32-byte urlsafe token. The practical exposure is
+    # narrow (an attacker needs an already-valid session cookie to reach
+    # this check at all, at which point CSRF is one of several problems),
+    # but every other secret-equality check in this codebase already uses
+    # hmac.compare_digest (see /api/setup's bootstrap-token check) -- this
+    # was the one inconsistent case, fixed for defense in depth rather than
+    # left as an unexplained exception to that pattern.
+    if not x_csrf_token or not hmac.compare_digest(x_csrf_token, admin["csrf"]):
         raise ApiError(403, "invalid_csrf_token", "missing or incorrect X-CSRF-Token header")
 
 
@@ -349,8 +393,6 @@ def setup(req: SetupRequest, request: Request):
         if not BOOTSTRAP_TOKEN_PATH.exists():
             raise ApiError(409, "setup_unavailable", "no bootstrap setup token is available")
         expected = BOOTSTRAP_TOKEN_PATH.read_text(encoding="utf-8").strip()
-        import hmac
-
         if not expected or not hmac.compare_digest(expected, req.setup_token.strip()):
             raise ApiError(403, "invalid_setup_token", "incorrect setup token")
         password_hash = hash_password(req.password, limiter=_hash_limiter)
