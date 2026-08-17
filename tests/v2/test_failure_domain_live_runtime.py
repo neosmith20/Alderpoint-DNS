@@ -27,23 +27,14 @@ from app.v2.dnsdist_gen import UpstreamServer, generate_dnsdist_config
 from app.v2.parquet_writer import ParquetSegmentWriter
 from app.v2.secret_store import SecretStore
 from app.v2.tier_b_prewarm import WorkingSetIndex, flush
+from tests.v2._network_probe import network_reachable
 
 DNSDIST_INSTALLED = shutil.which("dnsdist") is not None
 
-
-def _network_reachable() -> bool:
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(2.0)
-        s.connect(("1.1.1.1", 53))
-        s.close()
-        return True
-    except OSError:
-        return False
-
-
+# Real round-trip probe, not just route existence -- see
+# docs/v2/handoff-workstream-6-cc-session.md.
 pytestmark = pytest.mark.skipif(
-    not (DNSDIST_INSTALLED and _network_reachable()),
+    not (DNSDIST_INSTALLED and network_reachable()),
     reason="requires installed dnsdist and outbound network reachability",
 )
 

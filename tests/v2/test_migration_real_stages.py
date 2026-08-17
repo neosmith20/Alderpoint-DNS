@@ -18,12 +18,20 @@ from app.v2 import control_db, migration as mig, migration_convert as mconv
 from app.v2 import notification_store as nstore
 from app.v2 import policy_store as pstore
 from app.v2.secret_store import SecretStore
+from tests.v2._network_probe import network_reachable
 from tests.v2._v1_fixture import build_v1_fixture
 
 DNSDIST_INSTALLED = shutil.which("dnsdist") is not None
 NAMED_CHECKZONE_INSTALLED = shutil.which("named-checkzone") is not None
+# Despite the name, this previously only checked that dnsdist was
+# installed, not that outbound DNS actually works -- the health-check
+# stage itself now degrades gracefully with no network (see
+# app/v2/migration.py's _stage_health_check), but this particular test
+# asserts `recursive_resolution_ok is True`, which is a real claim about
+# a live upstream and needs real outbound reachability to be meaningful.
 NETWORK_REQUIRED = pytest.mark.skipif(
-    not DNSDIST_INSTALLED, reason="requires installed dnsdist for generate/health-check stages"
+    not (DNSDIST_INSTALLED and network_reachable()),
+    reason="requires installed dnsdist and outbound network reachability",
 )
 
 

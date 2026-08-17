@@ -25,30 +25,29 @@ from app.v2.ecs_policy import EcsPolicy
 from app.v2.network_match import NetworkScope
 from app.v2.policy_store import UpstreamEndpointRecord
 
+from tests.v2._local_dns_backend import NAMED_INSTALLED, local_authoritative_backend
+
 DNSDIST_INSTALLED = shutil.which("dnsdist") is not None
 
-
-def _network_reachable() -> bool:
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(2.0)
-        s.connect(("1.1.1.1", 53))
-        s.close()
-        return True
-    except OSError:
-        return False
-
-
+# This suite proves dnsdist policy isolation (routing/blocking/rewrite
+# precedence across two conflicting client bindings), not outbound
+# internet reachability. It uses a real local authoritative `named`
+# instance (tests/v2/_local_dns_backend.py) as the "real upstream" so the
+# real dnsdist -> real backend DNS server path is still exercised end to
+# end, without depending on public DNS resolvers or the domain iana.org
+# actually being reachable (see docs/v2/handoff-workstream-6-cc-session.md
+# for the stall this previously caused when outbound DNS was silently
+# dropped).
 pytestmark = pytest.mark.skipif(
-    not (DNSDIST_INSTALLED and _network_reachable()),
-    reason="requires installed dnsdist and outbound network reachability",
+    not (DNSDIST_INSTALLED and NAMED_INSTALLED),
+    reason="requires installed dnsdist and named",
 )
 
 STRICT_IP = "127.0.0.2"   # bindable loopback address representing "kids" client
 LENIENT_IP = "127.0.0.100"  # falls under 127.0.0.0/8 but NOT 127.0.0.2/32
 
 
-def _build_config(port: int) -> str:
+def _build_config(port: int, backend: str) -> str:
     strict_net = NetworkScope.create("strict", "127.0.0.2/32", "x")
     lenient_net = NetworkScope.create("lenient", "127.0.0.0/8", "x")  # least-specific catch-all
 
@@ -68,9 +67,9 @@ def _build_config(port: int) -> str:
             "custom-block.example": BlockingResponse(mode="custom_ip", custom_ipv4="10.9.9.9"),
         },
         domain_routes=(
-            ("routed.example", (UpstreamEndpointRecord("9.9.9.9:53", None, 0, 1, None),), "plain", "ordered"),
+            ("routed.example", (UpstreamEndpointRecord(backend, None, 0, 1, None),), "plain", "ordered"),
         ),
-        upstream_endpoints=(UpstreamEndpointRecord("1.1.1.1:53", None, 0, 1, None),),
+        upstream_endpoints=(UpstreamEndpointRecord(backend, None, 0, 1, None),),
         upstream_transport="plain",
         ecs_policy=EcsPolicy(mode="preserve"),
     )
@@ -79,7 +78,7 @@ def _build_config(port: int) -> str:
         cache_profile_id="lenient-profile",
         safesearch_providers=(),
         blocked_domains={},
-        upstream_endpoints=(UpstreamEndpointRecord("9.9.9.9:53", None, 0, 1, None),),
+        upstream_endpoints=(UpstreamEndpointRecord(backend, None, 0, 1, None),),
         upstream_transport="plain",
         ecs_policy=EcsPolicy(mode="disabled"),
     )
@@ -110,19 +109,20 @@ def _query(qname: str, src_ip: str, port: int, timeout: float = 4.0):
 
 @pytest.fixture()
 def running_instance():
-    port = _pick_port()
-    conf_text = _build_config(port)
-    staging = Path(tempfile.mkdtemp())
-    conf_path = staging / "matrix.conf"
-    conf_path.write_text(conf_text)
-    proc = subprocess.Popen(
-        ["dnsdist", "-C", str(conf_path), "--supervised", "--disable-syslog"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    time.sleep(1.2)
-    yield port
-    proc.terminate()
-    proc.wait(timeout=5)
+    with local_authoritative_backend() as backend:
+        port = _pick_port()
+        conf_text = _build_config(port, backend)
+        staging = Path(tempfile.mkdtemp())
+        conf_path = staging / "matrix.conf"
+        conf_path.write_text(conf_text)
+        proc = subprocess.Popen(
+            ["dnsdist", "-C", str(conf_path), "--supervised", "--disable-syslog"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        time.sleep(1.2)
+        yield port
+        proc.terminate()
+        proc.wait(timeout=5)
 
 
 class TestSafeSearch:

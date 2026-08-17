@@ -24,21 +24,16 @@ from app.v2.dnsdist_gen import (
     stage_and_validate_dnsdist_config,
 )
 
+from tests.v2._network_probe import network_reachable
+
 DNSDIST_INSTALLED = shutil.which("dnsdist") is not None
 
-
-def _network_reachable() -> bool:
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(2.0)
-        s.connect(("1.1.1.1", 53))
-        s.close()
-        return True
-    except OSError:
-        return False
-
-
-NETWORK_OK = _network_reachable()
+# Real round-trip probe, not just route existence -- see
+# docs/v2/handoff-workstream-6-cc-session.md. TestRealEndToEndDoH below
+# genuinely needs real internet+TLS (a real Cloudflare DoH handshake is
+# the point of that test), so it stays network-gated rather than moved
+# to a local backend.
+NETWORK_OK = network_reachable()
 
 
 @pytest.fixture()

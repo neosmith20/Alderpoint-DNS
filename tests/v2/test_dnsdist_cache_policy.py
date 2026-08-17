@@ -14,6 +14,7 @@ from app.v2.dnsdist_cache_policy import (
     render_packet_cache_setup,
 )
 from app.v2.network_match import NetworkScope
+from tests.v2._network_probe import network_reachable
 
 DNSDIST_INSTALLED = shutil.which("dnsdist") is not None
 
@@ -95,6 +96,9 @@ class TestRealValidationAndBehavior:
         )
         assert result.returncode == 0, result.stderr
 
+    @pytest.mark.skipif(
+        not network_reachable(), reason="requires outbound network reachability"
+    )
     def test_blocked_domain_bypasses_cache_and_returns_real_refused(self, tmp_path):
         net = _net("127.0.0.1/32")
         rule = ClientScopedBlockRule(net, ("blocked.example",), BlockingResponse(mode="refused"))

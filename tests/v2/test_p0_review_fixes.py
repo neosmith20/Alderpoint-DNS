@@ -23,6 +23,7 @@ from app.v2.dnsdist_gen import (
     render_refused_block_rules,
 )
 from app.v2.policy_store import UpstreamEndpointRecord, UpstreamProfileRecord
+from tests.v2._network_probe import network_reachable
 
 DNSDIST_INSTALLED = shutil.which("dnsdist") is not None
 
@@ -60,7 +61,10 @@ class TestP0BRefusedRendering:
         assert "RCodeAction(DNSRCode.REFUSED)" in text
 
 
-@pytest.mark.skipif(not DNSDIST_INSTALLED, reason="dnsdist not installed")
+@pytest.mark.skipif(
+    not (DNSDIST_INSTALLED and network_reachable()),
+    reason="requires installed dnsdist and outbound network reachability",
+)
 class TestP0BRealRcode:
     def test_refused_domain_actually_returns_rcode_refused(self, tmp_path):
         from app.v2.dnsdist_gen import UpstreamServer

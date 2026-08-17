@@ -1,27 +1,20 @@
 import shutil
-import socket
 import time
 
 import pytest
 
 from app.v2.tier_b_prewarm import WorkingSetEntry, run_prewarm
 from app.v2.tier_b_worker import isolated_dnsdist_instance, make_udp_resolve_fn
+from tests.v2._network_probe import network_reachable
 
 DNSDIST_INSTALLED = shutil.which("dnsdist") is not None
 
-
-def _network_reachable() -> bool:
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(2.0)
-        s.connect(("1.1.1.1", 53))
-        s.close()
-        return True
-    except OSError:
-        return False
-
-
-NETWORK_OK = _network_reachable()
+# Uses a real round-trip DNS probe, not just route existence -- a naive
+# connect()-only check reports "reachable" even when outbound UDP:53 is
+# silently black-holed, which previously let these real-internet-backed
+# tests hang for a full per-query timeout instead of skipping cleanly.
+# See docs/v2/handoff-workstream-6-cc-session.md.
+NETWORK_OK = network_reachable()
 
 pytestmark = pytest.mark.skipif(
     not (DNSDIST_INSTALLED and NETWORK_OK),

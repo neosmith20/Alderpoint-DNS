@@ -20,23 +20,14 @@ import pytest
 from app.v2.dnsdist_cache_policy import render_packet_cache_setup
 from app.v2.tier_b_prewarm import WorkingSetIndex, flush, load, run_prewarm
 from app.v2.tier_b_worker import make_udp_resolve_fn
+from tests.v2._network_probe import network_reachable
 
 DNSDIST_INSTALLED = shutil.which("dnsdist") is not None
 
-
-def _network_reachable() -> bool:
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(2.0)
-        s.connect(("1.1.1.1", 53))
-        s.close()
-        return True
-    except OSError:
-        return False
-
-
+# Real round-trip probe, not just route existence -- see
+# docs/v2/handoff-workstream-6-cc-session.md.
 pytestmark = pytest.mark.skipif(
-    not (DNSDIST_INSTALLED and _network_reachable()),
+    not (DNSDIST_INSTALLED and network_reachable()),
     reason="requires installed dnsdist and outbound network reachability",
 )
 

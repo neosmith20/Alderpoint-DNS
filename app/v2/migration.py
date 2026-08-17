@@ -364,6 +364,24 @@ def _stage_health_check(state: MigrationState) -> None:
         state.health_check_result = {"skipped": "dnsdist binary not installed on this host"}
         return
 
+    from app.v2.net_probe import outbound_dns_reachable
+
+    if not outbound_dns_reachable():
+        # A migrated upstream almost always points at a real public
+        # resolver (e.g. a real DoT/DoH provider carried over from V1) --
+        # if there is currently no outbound route at all, a failed test
+        # query proves nothing about whether the *generated runtime* is
+        # correct, only that the network is unavailable right now. Failing
+        # the whole migration (and blocking commit) in that case would
+        # make migration itself depend on internet access, which is not a
+        # real correctness signal. Recorded as degraded, not fatal --
+        # ``validate`` (the stage before this one) already confirmed the
+        # generated config is well-formed.
+        state.health_check_result = {
+            "skipped": "no outbound network route available to verify recursive resolution"
+        }
+        return
+
     proc = subprocess.Popen(
         ["dnsdist", "-C", dnsdist_config, "--supervised", "--disable-syslog"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
