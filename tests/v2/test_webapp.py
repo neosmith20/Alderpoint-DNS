@@ -771,6 +771,30 @@ class TestDnscrypt:
         assert r.status_code == 400, r.text
         assert r.json()["error"] == "port_conflict"
 
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            "2.dnscrypt-cert.test.local.\nos.execute(\"touch /tmp/pwned-pytest\")\n--",
+            "\x00nullbyte",
+            "2.dnscrypt-cert.test.local.\\",
+            "has space",
+            "quote\"here",
+        ],
+    )
+    def test_malformed_provider_name_rejected_at_the_api_layer(self, app_client, payload):
+        # Real hardening from this workstream's own adversarial security
+        # pass: these values previously reached real dnsdist
+        # --check-config before being rejected (safely, but later than
+        # necessary) or were silently accepted despite having no
+        # legitimate reason to contain such bytes. Now rejected by input
+        # validation before ever reaching control.db or the compiler.
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        r = client.put(
+            "/api/dns-transports", json={"dnscrypt_provider_name": payload}, headers={"X-CSRF-Token": csrf}
+        )
+        assert r.status_code == 422, r.text
+
     def test_disabling_removes_the_listener_from_the_next_compile(self, app_client):
         webapp, client = app_client
         csrf = _setup_and_login(webapp, client)
@@ -793,6 +817,47 @@ class TestDnscrypt:
         r = client.post("/api/dns-transports/dnscrypt/rotate", json={})
         assert r.status_code == 403
         assert r.json()["error"] == "invalid_csrf_token"
+
+    def test_failed_promotion_does_not_orphan_secrets(self, app_client):
+        # Real defect found live during this workstream's own adversarial
+        # security pass: SecretStore.create() writes directly to disk and
+        # is NOT part of _mutate_and_promote's SQL transaction. Forcing a
+        # post-_mutate failure (recompile_and_promote raising) previously
+        # left the freshly-generated provider/resolver private key
+        # secrets permanently orphaned on disk -- real key material,
+        # referenced by nothing, un-rotatable, un-auditable -- even
+        # though control.db correctly rolled back to the unprovisioned
+        # state. Fixed: every secret a rotate attempt creates is tracked
+        # and deleted on any failure of that same attempt.
+        from unittest import mock
+
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        secrets_before = set(webapp._secrets().list_ids())
+
+        with mock.patch.object(
+            webapp.runtime_compile, "recompile_and_promote", side_effect=RuntimeError("forced failure")
+        ):
+            # app_client's TestClient propagates unhandled server
+            # exceptions rather than returning a response (its default
+            # raise_server_exceptions=True) -- the forced failure itself
+            # IS the point being tested, so assert it propagates rather
+            # than swallowing it.
+            with pytest.raises(RuntimeError, match="forced failure"):
+                client.post("/api/dns-transports/dnscrypt/rotate", json={}, headers={"X-CSRF-Token": csrf})
+
+        assert set(webapp._secrets().list_ids()) == secrets_before, (
+            "a failed rotation must not leave orphaned secret files on disk"
+        )
+        with webapp._db() as conn:
+            settings = webapp.store.load_dnscrypt_settings(conn)
+        assert settings.identity_provisioned is False
+
+        # A real, successful rotation afterward must still work correctly
+        # -- the failure-path cleanup must not have broken anything.
+        r2 = client.post("/api/dns-transports/dnscrypt/rotate", json={}, headers={"X-CSRF-Token": csrf})
+        assert r2.status_code == 200, r2.text
+        assert len(set(webapp._secrets().list_ids()) - secrets_before) == 2  # provider + resolver secrets
 
 
 class TestReplicationPeerCertEnrollment:

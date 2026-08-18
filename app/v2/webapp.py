@@ -765,8 +765,21 @@ class DnsTransportSettingsUpdate(BaseModel):
     doh3_port: int = Field(default=443, ge=1, le=65535)
     dnscrypt_enabled: bool = False
     dnscrypt_port: int = Field(default=5443, ge=1, le=65535)
+    # Real hardening found during this session's own adversarial security
+    # pass on this new surface: without a character-set restriction,
+    # values containing NUL bytes, backslashes, or newlines were accepted
+    # by this model and only caught later, if at all, by real dnsdist
+    # --check-config (which does correctly reject an embedded raw
+    # newline -- confirmed live, no Lua/RCE injection was actually
+    # achievable, addDNSCryptBind's provider-name argument is always
+    # safely escaped by _lua_string -- but relying solely on that
+    # downstream safety net for a value with no legitimate reason to
+    # contain such bytes is unnecessary risk surface). Restricted to the
+    # real character set a DNS name (this value's actual purpose --
+    # clients query it) can ever legitimately contain.
     dnscrypt_provider_name: str = Field(
-        default="2.dnscrypt-cert.alderpointdns-v2.local", min_length=1, max_length=255
+        default="2.dnscrypt-cert.alderpointdns-v2.local", min_length=1, max_length=255,
+        pattern=r"^[A-Za-z0-9._-]+$",
     )
 
 
@@ -954,6 +967,20 @@ def rotate_dnscrypt(
     import time
 
     secrets_store = _secrets()
+    # Real defect found live during this session's own adversarial
+    # security pass on this new surface: SecretStore.create() writes
+    # directly to disk and is NOT part of _mutate_and_promote's SQL
+    # transaction -- confirmed live, forcing recompile_and_promote to
+    # fail after _mutate had already generated and stored real key
+    # material: control.db correctly rolled back to unprovisioned state,
+    # but the newly-created provider/resolver secret files were left on
+    # disk, referenced by nothing, permanently orphaned (real key
+    # material with no lifecycle, never rotated, never cleaned up -- a
+    # genuine secret-hygiene defect, not just a resource leak). Every
+    # secret this function creates is now tracked here regardless of
+    # outcome so a failure path can clean up exactly what THIS attempt
+    # created, never anything from a prior successful rotation.
+    holder: dict = {"new_secret_ids": []}
 
     def _mutate(conn):
         existing = store.load_dnscrypt_settings(conn)
@@ -961,6 +988,7 @@ def rotate_dnscrypt(
         if need_new_provider:
             public_key, private_key = dnscrypt_provisioning.generate_provider_keypair()
             new_provider_secret_id = secrets_store.create(base64.b64encode(private_key).decode())
+            holder["new_secret_ids"].append(new_provider_secret_id)
             old_provider_secret_id = existing.provider_secret_id
             existing.provider_secret_id = new_provider_secret_id
             existing.provider_public_key_b64 = base64.b64encode(public_key).decode()
@@ -980,6 +1008,7 @@ def rotate_dnscrypt(
             provider_private_key_bytes, serial=serial, valid_from=now, valid_until=valid_until
         )
         new_resolver_secret_id = secrets_store.create(base64.b64encode(resolver_key).decode())
+        holder["new_secret_ids"].append(new_resolver_secret_id)
         old_resolver_secret_id = existing.resolver_secret_id
         existing.resolver_secret_id = new_resolver_secret_id
         existing.cert_b64 = base64.b64encode(cert_bytes).decode()
@@ -999,8 +1028,16 @@ def rotate_dnscrypt(
         holder["old_secret_ids"] = [s for s in (old_provider_secret_id, old_resolver_secret_id) if s]
         holder["rotated_provider"] = need_new_provider
 
-    holder: dict = {}
-    result = _mutate_and_promote(_mutate)
+    try:
+        result = _mutate_and_promote(_mutate)
+    except BaseException:
+        for new_id in holder.get("new_secret_ids", []):
+            try:
+                secrets_store.delete(new_id)
+            except Exception:
+                pass  # best-effort; a leaked-on-cleanup-failure secret is still strictly
+                # better than never having attempted cleanup at all
+        raise
     for old_id in holder.get("old_secret_ids", []):
         try:
             secrets_store.delete(old_id)
