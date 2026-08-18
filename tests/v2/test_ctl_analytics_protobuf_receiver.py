@@ -22,8 +22,11 @@ from pathlib import Path
 import pytest
 
 from tests.v2.test_dnsdist_protobuf import (
+    REAL_CACHE_HIT_QUERY_ONLY_HEX,
     REAL_MATCHED_QUERY_HEX,
     REAL_MATCHED_RESPONSE_HEX,
+    REAL_NXDOMAIN_QUERY_HEX,
+    REAL_NXDOMAIN_RESPONSE_HEX,
     REAL_QUERY_HEX,
     REAL_RESPONSE_HEX,
     REAL_SPOOFED_QUERY_ONLY_HEX,
@@ -206,3 +209,72 @@ def test_spoofed_query_with_no_response_is_flushed_as_noerror_after_the_window(f
     matching = [e for e in events if e["qname"] == "spoofed.example.com."]
     assert len(matching) == 1
     assert matching[0]["rcode"] == "NOERROR"
+
+
+def test_cache_hit_query_with_no_response_reuses_real_remembered_rcode(fast_spoof_flush_receiver):
+    # Real defect found live during the RC13 continuation
+    # (docs/v2/cache-hit-response-not-logged-rc13.md): a dnsdist
+    # packet-cache HIT produces exactly the same "query message with no
+    # matching response" shape as a terminally-spoofed query -- proven
+    # live with a real, repeated NXDOMAIN query. Before this fix, the
+    # receiver unconditionally assumed NOERROR for every such event,
+    # which is simply wrong here: the real cached answer is NXDOMAIN.
+    # This proves the fix: once a real response for a (qname, qtype)
+    # has been seen, a later unmatched query for the exact same
+    # (qname, qtype) reuses that real rcode and is honestly reported as
+    # cache_status="hit" instead of silently defaulting to "miss".
+    # Real timing subtlety confirmed live: the spoof-flush sweep only
+    # runs when the connection's read loop ticks over (gated by the
+    # receiver's own 2s socket recv timeout, not by
+    # --spoof-flush-seconds itself), so the socket is kept open past
+    # that idle timeout rather than closed immediately after sending --
+    # closing early races the sweep and can lose the cache-hit event's
+    # own flush before it happens.
+    receiver = fast_spoof_flush_receiver
+    sock = _connect(receiver.port)
+    assert sock is not None
+    try:
+        for hexdata in (REAL_NXDOMAIN_QUERY_HEX, REAL_NXDOMAIN_RESPONSE_HEX):
+            body = bytes.fromhex(hexdata)
+            sock.sendall(struct.pack(">H", len(body)) + body)
+        time.sleep(0.5)  # let the matched pair flush before the cache-hit query arrives
+        body = bytes.fromhex(REAL_CACHE_HIT_QUERY_ONLY_HEX)
+        sock.sendall(struct.pack(">H", len(body)) + body)
+
+        deadline = time.monotonic() + 10.0
+        matching: list[dict] = []
+        while time.monotonic() < deadline:
+            events = _all_events(list(receiver.inbox.glob("*.jsonl")) if receiver.inbox.exists() else [])
+            matching = [e for e in events if e["qname"] == "nxtest-cache-check.invalid."]
+            if len(matching) >= 2:
+                break
+            time.sleep(0.2)
+    finally:
+        sock.close()
+    assert len(matching) == 2, f"expected the real response event plus the cache-hit event, got {matching}"
+    real_response = next(e for e in matching if "cache_status" not in e or e.get("cache_status") != "hit")
+    cache_hit = next(e for e in matching if e.get("cache_status") == "hit")
+    assert real_response["rcode"] == "NXDOMAIN"
+    assert cache_hit["rcode"] == "NXDOMAIN", "cache-hit event must reuse the real remembered rcode, not assume NOERROR"
+
+
+def test_unmatched_query_for_a_never_before_seen_qname_still_falls_back_to_noerror(fast_spoof_flush_receiver):
+    # No regression on the original, still-correct case: a genuinely
+    # first-seen unmatched query (real terminally-spoofed shape) with no
+    # prior remembered answer for its (qname, qtype) keeps the original
+    # NOERROR fallback.
+    receiver = fast_spoof_flush_receiver
+    sock = _connect(receiver.port)
+    assert sock is not None
+    try:
+        body = bytes.fromhex(REAL_SPOOFED_QUERY_ONLY_HEX)
+        sock.sendall(struct.pack(">H", len(body)) + body)
+    finally:
+        sock.close()
+
+    files = _wait_for_inbox_file(receiver.inbox, deadline_seconds=10.0)
+    events = _all_events(files)
+    matching = [e for e in events if e["qname"] == "spoofed.example.com."]
+    assert len(matching) == 1
+    assert matching[0]["rcode"] == "NOERROR"
+    assert matching[0].get("cache_status", "miss") != "hit"

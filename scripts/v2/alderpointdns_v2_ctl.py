@@ -795,17 +795,45 @@ def _event_from_response(decoded: "dnsdist_protobuf.DecodedResponse") -> dict:
     }
 
 
-def _event_from_unmatched_query(decoded: "dnsdist_protobuf.DecodedQuery") -> dict:
+def _event_from_unmatched_query(decoded: "dnsdist_protobuf.DecodedQuery", recent_answer: tuple[str, bool] | None = None) -> dict:
     # A query message with no matching response ever arrived within the
-    # correlation window -- real, verified dnsdist behavior for a
-    # terminally-spoofed query (SpoofAction/SpoofCNAMEAction: blocked
-    # domains, SafeSearch, local DNS records), which answers entirely
-    # within the query-processing stage and never produces a "response
-    # received from a backend" event for RemoteLogResponseAction to log.
-    # Those always succeed with a synthesized answer, so NOERROR is the
-    # real, correct rcode here, not a guess -- see
-    # app/v2/dnsdist_protobuf.py's module docstring for the live
-    # verification this is based on.
+    # correlation window. Real, verified dnsdist 2.1.1 behavior confirmed
+    # live during the RC13 continuation covers TWO distinct real cases
+    # this shape can mean, not one:
+    #
+    # 1. A terminally-spoofed query (SpoofAction/SpoofCNAMEAction:
+    #    blocked domains, SafeSearch, local DNS records) -- answers
+    #    entirely within the query-processing stage and never produces a
+    #    RemoteLogResponseAction event. Always NOERROR (a synthesized
+    #    answer), which is what this function originally assumed
+    #    unconditionally.
+    # 2. A packet-cache HIT of a previously backend-resolved answer --
+    #    live-verified (docs/v2/cache-hit-response-not-logged-rc13.md)
+    #    that RemoteLogResponseAction *also* never fires for these, with
+    #    a real repeated NXDOMAIN query proving the old NOERROR
+    #    assumption is flatly wrong for this case: the real cached
+    #    answer can be any rcode, not just NOERROR.
+    #
+    # dnsdist's protobuf stream gives no direct signal distinguishing
+    # case 1 from case 2, and no rcode at all for case 2. ``recent_answer``
+    # is this receiver's own bounded, best-effort memory of the last real
+    # rcode seen for this exact (qname, qtype) from an actual
+    # RemoteLogResponseAction event -- if present, this unmatched query
+    # is almost certainly a real cache hit of that exact answer (case 2),
+    # so its real rcode is reused and cache_status is honestly reported
+    # as "hit" instead of silently defaulting to "miss". If no such
+    # memory exists (a qname never seen answered before in this
+    # receiver's process lifetime), this is either case 1 or an
+    # unresolvable case-2 blind spot -- NOERROR remains the fallback,
+    # which is correct for case 1 and merely honestly wrong (same as
+    # before this fix) for the rare unresolvable case-2 instance.
+    if recent_answer is not None:
+        rcode, _is_cache = recent_answer
+        return {
+            "ts": decoded.ts, "qname": decoded.qname, "qtype": decoded.qtype,
+            "protocol": decoded.protocol, "client": decoded.client, "rcode": rcode,
+            "cache_status": "hit",
+        }
     return {
         "ts": decoded.ts, "qname": decoded.qname, "qtype": decoded.qtype,
         "protocol": decoded.protocol, "client": decoded.client, "rcode": "NOERROR",
@@ -820,6 +848,14 @@ def _event_from_unmatched_query(decoded: "dnsdist_protobuf.DecodedQuery") -> dic
 # observed_clients.ObservationQueue elsewhere in this codebase).
 _PENDING_QUERY_FLUSH_SECONDS = 2.0
 _PENDING_QUERY_MAX = 8192
+
+# Bounds the best-effort (qname, qtype) -> (rcode, monotonic insert time)
+# memory used to recover the real rcode for a packet-cache-hit query
+# (see _event_from_unmatched_query). Not a real TTL-accurate mirror of
+# dnsdist's own packet cache -- just a bounded, honest heuristic that is
+# strictly more accurate than always assuming NOERROR.
+_QNAME_RCODE_CACHE_MAX = 4096
+_QNAME_RCODE_CACHE_TTL_SECONDS = 3600.0
 
 
 def cmd_analytics_protobuf_receiver(args: argparse.Namespace) -> int:
@@ -875,13 +911,35 @@ def cmd_analytics_protobuf_receiver(args: argparse.Namespace) -> int:
         last_flush = time.monotonic()
         # (client, msg_id) -> (DecodedQuery, monotonic insert time)
         pending: dict[tuple[str, int], tuple["dnsdist_protobuf.DecodedQuery", float]] = {}
+        # (qname, qtype) -> (rcode, monotonic insert time) -- see
+        # _event_from_unmatched_query's docstring for why this exists.
+        qname_rcode_cache: dict[tuple[str, str], tuple[str, float]] = {}
+
+        def _remember_answer(decoded: "dnsdist_protobuf.DecodedResponse") -> None:
+            if len(qname_rcode_cache) >= _QNAME_RCODE_CACHE_MAX:
+                oldest_key = min(qname_rcode_cache, key=lambda k: qname_rcode_cache[k][1])
+                qname_rcode_cache.pop(oldest_key, None)
+            qname_rcode_cache[(decoded.qname, decoded.qtype)] = (decoded.rcode, time.monotonic())
+
+        def _recent_answer_for(decoded: "dnsdist_protobuf.DecodedQuery") -> tuple[str, bool] | None:
+            entry = qname_rcode_cache.get((decoded.qname, decoded.qtype))
+            if entry is None:
+                return None
+            rcode, t0 = entry
+            if time.monotonic() - t0 >= _QNAME_RCODE_CACHE_TTL_SECONDS:
+                qname_rcode_cache.pop((decoded.qname, decoded.qtype), None)
+                return None
+            return rcode, True
+
+        def _emit_unmatched(q: "dnsdist_protobuf.DecodedQuery") -> None:
+            batch.append(_event_from_unmatched_query(q, _recent_answer_for(q)))
 
         def _sweep_expired_pending() -> None:
             now = time.monotonic()
             expired = [k for k, (_q, t0) in pending.items() if now - t0 >= args.spoof_flush_seconds]
             for k in expired:
                 q, _t0 = pending.pop(k)
-                batch.append(_event_from_unmatched_query(q))
+                _emit_unmatched(q)
 
         try:
             while not stop["flag"]:
@@ -903,6 +961,7 @@ def cmd_analytics_protobuf_receiver(args: argparse.Namespace) -> int:
                     if isinstance(decoded, dnsdist_protobuf.DecodedResponse):
                         key = (decoded.client, decoded.msg_id)
                         pending.pop(key, None)  # matched -- the response is authoritative, drop any pending query
+                        _remember_answer(decoded)
                         batch.append(_event_from_response(decoded))
                     elif isinstance(decoded, dnsdist_protobuf.DecodedQuery):
                         if len(pending) >= _PENDING_QUERY_MAX:
@@ -911,7 +970,7 @@ def cmd_analytics_protobuf_receiver(args: argparse.Namespace) -> int:
                             # if responses are somehow never arriving.
                             oldest_key = min(pending, key=lambda k: pending[k][1])
                             q, _t0 = pending.pop(oldest_key)
-                            batch.append(_event_from_unmatched_query(q))
+                            _emit_unmatched(q)
                         pending[(decoded.client, decoded.msg_id)] = (decoded, time.monotonic())
                 _sweep_expired_pending()
                 now = time.monotonic()
@@ -921,7 +980,7 @@ def cmd_analytics_protobuf_receiver(args: argparse.Namespace) -> int:
                     last_flush = now
         finally:
             for q, _t0 in pending.values():
-                batch.append(_event_from_unmatched_query(q))
+                _emit_unmatched(q)
             _write_analytics_events_batch(inbox, batch)
             try:
                 conn.close()
