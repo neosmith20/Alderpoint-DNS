@@ -1,12 +1,27 @@
 # Alderpoint DNS V2 -- private RC ready for Dex Gate #3 review
 
-Artifact: `alderpointdns-v2_2.0.0~rc14-1_all.deb`
-(sha256 `e67bc0189b18efff8a752b272c14af0aa648dc155ce1a196540f45c4ce0ccfb7`),
+Artifact: `alderpointdns-v2_2.0.0~rc15-1_all.deb`
+(sha256 `ff0a9ae329d9f844556a4c0d935cfb7fef523ff90d986cc3e467b549b6395e31`),
 branch `v2/architecture-storage-foundation`, still fully private
 (no push/tag/publish to any remote; `origin/main` -- the public V1
 line -- untouched throughout).
 
-## What RC14 fixes over RC13 (roadmap continuation, "keep going")
+## What RC15 fixes over RC14 (roadmap continuation, "keep going")
+
+1. **`docs/v2/prewarm-analytics-pollution-fix.md`** (real defect found
+   and fixed): Tier B prewarm's self-generated re-queries of
+   already-popular domains replayed through the live DNS path from
+   client `127.0.0.1`, indistinguishable from real client traffic --
+   live-proven on a real installed RC14 package: a single manual
+   prewarm tick pushed `total_queries` from 1 to 2 with no way to tell
+   the two apart. Fixed by sourcing prewarm traffic from a dedicated
+   loopback address and unconditionally excluding it from both
+   analytics sinks (not via the normal per-client policy chain, since
+   this is an architectural invariant). Live-verified on RC15
+   (`docs/v2/package-baseline-rc15.md`): a real prewarm tick now
+   leaves `total_queries` unchanged.
+
+## What RC14 fixes over RC13
 
 1. **`docs/v2/ipv6-client-decode-rc13.md`**: closed the last
    "not independently verified" gap from RC6 -- the protobuf decoder's
@@ -80,10 +95,11 @@ full-stack validation (found and fixed a real defect), Tier B
 re-check, failure-domain re-check, adversarial security re-sweep of
 the replication/analytics-receiver attack surfaces (message replay
 window, dedupe, size bounds, cert pinning, bounded protobuf parsing),
-IPv6 client-decode verification, a second real analytics-accuracy
-defect found and fixed (packet-cache-hit mislabeling), CI determinism
-(online + offline), and this RC scrub. Full suite: 2072 passed
-(`tests/`), 879 passed (`tests/v2/`), all remaining failures
-individually confirmed as pre-existing concurrent-load flakes that
-pass in isolation, not regressions. The private candidate (RC14) is
-ready for Dex Gate #3 review.
+IPv6 client-decode verification, and two further real analytics-
+accuracy defects found and fixed (packet-cache-hit mislabeling,
+prewarm-traffic pollution), CI determinism (online + offline), and
+this RC scrub. Full suite: 2073 passed (`tests/`), 881 passed
+(`tests/v2/`), all remaining failures individually confirmed as
+pre-existing concurrent-load flakes that pass in isolation, not
+regressions. The private candidate (RC15) is ready for Dex Gate #3
+review.
