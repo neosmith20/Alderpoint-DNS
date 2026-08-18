@@ -7,7 +7,7 @@ import pytest
 from argon2 import PasswordHasher
 
 from app.v2.auth_concurrency import HashConcurrencyLimiter, TooManyConcurrentHashesError
-from app.v2.auth_hash import hash_password, verify_password
+from app.v2.auth_hash import hash_password, verify_and_maybe_rehash, verify_password
 
 
 @pytest.fixture()
@@ -59,4 +59,26 @@ class TestLimiterWiredIntoRealHashing:
         # pass limiter= must work exactly as before.
         encoded = hash_password("pw", hasher=fast_hasher)
         result = verify_password(encoded, "pw", hasher=fast_hasher)
+        assert result.ok
+
+    def test_verify_and_maybe_rehash_respects_limiter(self, fast_hasher):
+        # Real defect found live during RC12 concurrent-login load
+        # testing: verify_and_maybe_rehash (what app/v2/webapp.py's
+        # /api/login actually calls) had no limiter= parameter at all,
+        # so the login endpoint's own _hash_limiter was silently
+        # dropped -- concurrent logins ran fully unbounded Argon2id
+        # instead of the 4th+ being fast-rejected with 503 as designed.
+        # This pins the fix: a saturated limiter must reject a real
+        # verify_and_maybe_rehash call, not silently let it through.
+        limiter = HashConcurrencyLimiter(max_concurrent=1)
+        encoded = hash_password("correct-horse", hasher=fast_hasher)
+
+        with limiter.slot():
+            with pytest.raises(TooManyConcurrentHashesError):
+                verify_and_maybe_rehash(encoded, "correct-horse", hasher=fast_hasher, limiter=limiter)
+
+    def test_verify_and_maybe_rehash_normal_operation_unaffected(self, fast_hasher):
+        limiter = HashConcurrencyLimiter(max_concurrent=3)
+        encoded = hash_password("pw", hasher=fast_hasher, limiter=limiter)
+        result, new_hash = verify_and_maybe_rehash(encoded, "pw", hasher=fast_hasher, limiter=limiter)
         assert result.ok

@@ -128,6 +128,26 @@ class TestLoginLogoutSessions:
         r2 = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
         assert r1.json()["csrf"] != r2.json()["csrf"]
 
+    def test_login_rejects_fast_with_503_when_hash_limiter_saturated(self, app_client):
+        # Real defect found live during RC12 concurrent-login load testing:
+        # /api/login's Argon2id verify call was structurally unable to
+        # engage app/v2/webapp.py's own _hash_limiter (auth_hash.
+        # verify_and_maybe_rehash had no limiter= parameter at all), so
+        # a saturated limiter never protected this endpoint -- 5 real
+        # concurrent logins against a real installed package measured
+        # ~349s per request instead of the intended fast 503. This pins
+        # the fix at the actual HTTP boundary, not just the library call.
+        webapp, client = app_client
+        _setup_and_login(webapp, client)
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for _ in range(webapp._hash_limiter.max_concurrent):
+                stack.enter_context(webapp._hash_limiter.slot())
+            r = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
+        assert r.status_code == 503
+        assert r.json()["error"] == "auth_busy"
+
 
 class TestCsrf:
     def test_post_without_csrf_token_rejected(self, app_client):

@@ -459,7 +459,7 @@ def login(req: LoginRequest, request: Request, response: Response):
             new_hash = None
             if row is not None:
                 (_, username, password_hash, _created_at) = row
-                result, new_hash = verify_and_maybe_rehash(password_hash, req.password)
+                result, new_hash = verify_and_maybe_rehash(password_hash, req.password, limiter=_hash_limiter)
                 ok = result.ok
         except TooManyConcurrentHashesError:
             raise ApiError(503, "auth_busy", "too many concurrent authentication attempts, retry shortly")

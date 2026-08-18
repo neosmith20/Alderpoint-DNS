@@ -143,15 +143,28 @@ def verify_and_maybe_rehash(
     *,
     pepper: str | None = None,
     hasher: PasswordHasher | None = None,
+    limiter: "HashConcurrencyLimiter | None" = None,
 ) -> tuple[VerifyResult, str | None]:
     """Verify, and if the stored hash's parameters are stale, compute a fresh
     hash under current parameters. Returns (result, new_encoded_hash_or_None).
 
     Caller is responsible for persisting new_encoded_hash if not None — this
     module never touches control.db directly.
+
+    ``limiter`` is forwarded to both the verify and the (rare) rehash
+    calls. Real defect found live during RC12 concurrent-login load
+    testing: this function previously had no ``limiter`` parameter at
+    all, so the login endpoint's call into it was structurally unable
+    to engage ``HashConcurrencyLimiter`` no matter what the caller
+    passed -- exactly the unbounded-concurrent-Argon2id DoS shape
+    ``auth_concurrency.py``'s own module docstring describes as the
+    threat this exists to prevent. 5 concurrent real logins against a
+    real installed RC12 package (2 vCPU / 2 GiB) measured ~349s per
+    request (vs. ~0.5s single-request baseline) instead of the fourth
+    and fifth being fast-rejected with 503 as designed.
     """
-    result = verify_password(encoded_hash, password, pepper=pepper, hasher=hasher)
+    result = verify_password(encoded_hash, password, pepper=pepper, hasher=hasher, limiter=limiter)
     if not result.ok or not result.needs_rehash:
         return result, None
-    new_hash = hash_password(password, pepper=pepper, hasher=hasher)
+    new_hash = hash_password(password, pepper=pepper, hasher=hasher, limiter=limiter)
     return result, new_hash
