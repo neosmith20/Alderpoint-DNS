@@ -33,6 +33,7 @@ import logging
 import os
 import signal
 import socket
+import sqlite3
 import struct
 import sys
 import threading
@@ -573,8 +574,31 @@ def cmd_analytics_worker(args: argparse.Namespace) -> int:
     def _drain_once() -> int:
         processed = 0
         flag_cache: dict[str, tuple[bool, bool]] = {}
-        policy_store.ensure_schema(CONTROL_DB)
-        with control_db.connect(CONTROL_DB) as conn:
+        # Real regression found live during RC9 clean-install acceptance
+        # testing: this service's systemd unit (like every other V2
+        # worker) is deliberately hardened with ProtectSystem=strict and
+        # a narrow ReadWritePaths= that never included control.db --
+        # this worker never wrote to it before this session's per-client
+        # policy-exclusion feature. control_db.connect()'s unconditional
+        # `PRAGMA journal_mode = WAL` needs to create/write real -wal/
+        # -shm sibling files in control.db's own directory, which
+        # ProtectSystem=strict blocks outside ReadWritePaths --
+        # "unable to open database file" every single drain tick.
+        # Fixed the RIGHT way (not by widening this service's write
+        # access to match the web/discovery services, which genuinely
+        # do write control.db) -- this worker only ever reads policy, so
+        # a real SQLite read-only URI connection avoids the WAL-write
+        # requirement entirely; ProtectSystem=strict permits reads
+        # anywhere, only writes are confined to ReadWritePaths. A
+        # concurrent WAL-mode writer (the web service) does not block
+        # real-only readers -- that's WAL's whole purpose.
+        conn = None
+        if CONTROL_DB.exists():
+            try:
+                conn = sqlite3.connect(f"file:{CONTROL_DB}?mode=ro", uri=True)
+            except sqlite3.Error:
+                log.exception("could not open control.db read-only for policy lookups; logging everything")
+        try:
             now = datetime.now(timezone.utc)
             for f in sorted(inbox.glob("*.jsonl")):
                 try:
@@ -583,7 +607,7 @@ def cmd_analytics_worker(args: argparse.Namespace) -> int:
                             continue
                         record = json.loads(line)
                         client_ip = record.get("client", "")
-                        if client_ip:
+                        if client_ip and conn is not None:
                             if client_ip not in flag_cache:
                                 try:
                                     flag_cache[client_ip] = _query_log_flags_for_client(conn, client_ip, now)
@@ -598,6 +622,9 @@ def cmd_analytics_worker(args: argparse.Namespace) -> int:
                     f.unlink()
                 except (OSError, ValueError, TypeError) as exc:
                     log.error("failed processing inbox file %s: %s", f, exc)
+        finally:
+            if conn is not None:
+                conn.close()
         n = pipeline.flush()
         tier_b_flush(tier_b_index, TIER_B_STATE_FILE)
         return n
