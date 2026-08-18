@@ -61,6 +61,14 @@ class SecretSymlinkError(SecretStoreError):
     as app/v2/config.py's load_file/atomic_write."""
 
 
+class SecretStoreMissingError(SecretStoreError):
+    """Raised by ``SecretStore(root, create_if_missing=False)`` when
+    ``root`` does not already exist. See that parameter's own docstring
+    for why this distinction is real and load-bearing — the same class
+    of defect ``app/v2/control_db.py``'s ``ControlDbMissingError`` fixes,
+    see ``docs/v2/control-db-silent-recreation-fix.md``."""
+
+
 @dataclass(frozen=True)
 class SecretMetadata:
     """Everything about a secret EXCEPT its value — safe to log, return over
@@ -93,8 +101,38 @@ class SecretStore:
     so a malicious or malformed ID cannot escape the store directory.
     """
 
-    def __init__(self, root: str | os.PathLike):
+    def __init__(self, root: str | os.PathLike, *, create_if_missing: bool = True):
+        """``create_if_missing=True`` (default) preserves the historical
+        behavior every existing caller already relies on (bootstrap/
+        ``init-state``, migration, replication, tests -- all genuinely
+        need "create on first use").
+
+        Real defect found and fixed live during this workstream's
+        failure-domain/chaos pass (same class as
+        ``app/v2/control_db.py``'s ``ControlDbMissingError``, see
+        ``docs/v2/control-db-silent-recreation-fix.md``): a real
+        installed appliance's secrets directory, moved aside (simulating
+        it becoming unavailable), was silently, invisibly replaced by a
+        fresh, empty directory the moment any request touched it --
+        every real secret (replication CA key, DNSCrypt provider/
+        resolver keys, notification credentials) orphaned with zero
+        error signal; a subsequent DNSCrypt rotate or replication cert
+        issuance would report success while quietly generating a
+        second, disconnected identity. ``app/v2/webapp.py``'s
+        ``_secrets()`` (ongoing request-serving against an already-
+        initialized appliance, as opposed to the explicit bootstrap/
+        migration/replication call sites that legitimately need
+        creation) now passes ``create_if_missing=False`` and gets a
+        clear ``SecretStoreMissingError`` instead.
+        """
         self.root = Path(root)
+        if not create_if_missing and not self.root.exists():
+            raise SecretStoreMissingError(
+                f"secret store not found at {self.root} -- refusing to silently create a new, "
+                "empty store in its place (a real, previously-initialized appliance's secret "
+                "store should never simply not exist; this looks like it became unavailable, "
+                "not a fresh install)"
+            )
         self.root.mkdir(parents=True, exist_ok=True)
         os.chmod(self.root, _STORE_DIR_MODE)
         # P0-A (Gate #2 residual, crash atomicity): a prior process may have

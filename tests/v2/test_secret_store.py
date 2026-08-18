@@ -14,6 +14,43 @@ sys.path.insert(0, str(ROOT))
 from app.v2 import secret_store as ss  # noqa: E402
 
 
+class TestCreateIfMissing(unittest.TestCase):
+    """Real defect found and fixed live during this workstream's
+    failure-domain/chaos pass (same class as
+    app/v2/control_db.py's ControlDbMissingError, see
+    docs/v2/control-db-silent-recreation-fix.md): SecretStore.__init__
+    silently created an empty root directory if the real one had gone
+    missing -- every real secret (replication CA key, DNSCrypt
+    provider/resolver keys, notification credentials) orphaned with no
+    error signal."""
+
+    def test_default_still_creates_when_missing(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "secrets"
+            self.assertFalse(root.exists())
+            ss.SecretStore(root)  # historical behavior, must stay unchanged
+            self.assertTrue(root.exists())
+
+    def test_create_if_missing_false_raises_when_absent(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "secrets"
+            self.assertFalse(root.exists())
+            with self.assertRaises(ss.SecretStoreMissingError):
+                ss.SecretStore(root, create_if_missing=False)
+            # The real, live-reproduced defect this guards against:
+            # must NOT have silently created the directory as a side
+            # effect of merely checking.
+            self.assertFalse(root.exists())
+
+    def test_create_if_missing_false_succeeds_when_present(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "secrets"
+            ss.SecretStore(root)  # real, already-initialized appliance
+            store = ss.SecretStore(root, create_if_missing=False)
+            sid = store.create("real-value")
+            self.assertEqual(store.get(sid), "real-value")
+
+
 class TestSecretStoreCrud(unittest.TestCase):
     def test_create_get_roundtrip(self):
         with tempfile.TemporaryDirectory() as td:

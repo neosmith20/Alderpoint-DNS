@@ -66,7 +66,7 @@ from app.v2.network_match import InvalidNetworkError
 from app.v2.policy_model import InvalidPolicyError, PolicyLayer
 from app.v2.policy_store import PolicyStoreError
 from app.v2.runtime_compile import RuntimeCompileError
-from app.v2.secret_store import SecretStore
+from app.v2.secret_store import SecretStore, SecretStoreMissingError
 
 # --- installed layout (mirrors scripts/v2/alderpointdns_v2_ctl.py) --------
 
@@ -213,16 +213,41 @@ async def _security_headers(request: Request, call_next):
 
 @contextmanager
 def _db():
+    # create_if_missing=False: see control_db.connect()'s own docstring
+    # and docs/v2/control-db-silent-recreation-fix.md -- a real,
+    # already-initialized appliance's control.db going missing must
+    # never be silently, invisibly replaced by an empty one indistinguishable
+    # from a genuine fresh install.
     CONTROL_DB.parent.mkdir(parents=True, exist_ok=True)
-    with control_db.connect(CONTROL_DB) as conn:
+    with control_db.connect(CONTROL_DB, create_if_missing=False) as conn:
         yield conn
 
 
 def _secrets() -> SecretStore:
-    return SecretStore(SECRETS_DIR)
+    # create_if_missing=False: see SecretStore.__init__'s own docstring
+    # and docs/v2/control-db-silent-recreation-fix.md -- a real,
+    # already-initialized appliance's secret store going missing must
+    # never be silently, invisibly replaced by an empty one.
+    return SecretStore(SECRETS_DIR, create_if_missing=False)
 
 
 def _ensure_extended_schemas() -> None:
+    # Real defect found and fixed live during this workstream's
+    # failure-domain/chaos pass (docs/v2/control-db-silent-recreation-
+    # fix.md): every ensure_schema() below starts with
+    # control_db.initialize(path), which -- like control_db.connect()
+    # itself -- silently creates an empty control.db if the path
+    # doesn't exist. This function is called from nearly every request
+    # handler in this module, so guarding only _db() (webapp.py's other
+    # connect() call site) was NOT sufficient on its own -- this path
+    # would have silently recreated a missing control.db regardless.
+    # Same fail-closed contract as _db(): a real, previously-
+    # initialized appliance's control.db must never simply not exist.
+    if not CONTROL_DB.exists():
+        raise control_db.ControlDbMissingError(
+            f"control.db not found at {CONTROL_DB} -- refusing to silently create a new, empty "
+            "database in its place"
+        )
     node_identity.ensure_schema(CONTROL_DB)
     observed_clients.ensure_schema(CONTROL_DB)
     replication_v2.ensure_schema(CONTROL_DB)
@@ -307,6 +332,39 @@ async def _sqlite_operational_error_handler(request: Request, exc: sqlite3.Opera
     if is_lock_error(exc):
         return await _database_busy_handler(request, DatabaseBusyError(str(exc)))
     return JSONResponse(status_code=500, content={"error": "internal_error", "detail": "an internal error occurred"})
+
+
+@app.exception_handler(control_db.ControlDbMissingError)
+async def _control_db_missing_handler(request: Request, exc: control_db.ControlDbMissingError):
+    # Never a silent "setup required" -- this specific, distinct error
+    # code exists so an admin/monitoring system can tell "control.db
+    # went missing" apart from a genuinely fresh, never-configured
+    # appliance. See control_db.connect()'s own docstring and
+    # docs/v2/control-db-silent-recreation-fix.md.
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "control_db_missing",
+            "detail": "the appliance's control database is missing or unreachable -- this is not a "
+            "fresh install; do not proceed through setup, investigate the appliance's storage first",
+        },
+    )
+
+
+@app.exception_handler(SecretStoreMissingError)
+async def _secret_store_missing_handler(request: Request, exc: SecretStoreMissingError):
+    # Same real defect, same fix shape, applied to the protected secret
+    # store -- see SecretStore.__init__'s own docstring and
+    # docs/v2/control-db-silent-recreation-fix.md.
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "secret_store_missing",
+            "detail": "the appliance's secret store is missing or unreachable -- this is not a "
+            "fresh install; real secret material may be orphaned, investigate the appliance's "
+            "storage before proceeding",
+        },
+    )
 
 
 @app.exception_handler(Exception)

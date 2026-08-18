@@ -200,6 +200,60 @@ class TestLoginLogoutSessions:
         assert r.json()["error"] == "database_busy"
 
 
+class TestControlDbMissing:
+    """Real defect found and fixed live during this workstream's
+    failure-domain/chaos pass (docs/v2/control-db-silent-recreation-
+    fix.md): a real installed appliance's control.db, moved aside to
+    simulate it becoming unavailable, was silently replaced by dnsdist's
+    own webapp with a brand-new, empty, freshly-schema'd database the
+    moment any request touched it -- indistinguishable from a genuinely
+    fresh, never-configured appliance, with the admin's real
+    configuration merely invisible, not actually gone.
+    """
+
+    def test_missing_control_db_returns_clear_error_not_silent_fresh_install(self, app_client):
+        webapp, client = app_client
+        _setup_and_login(webapp, client)
+        webapp.CONTROL_DB.unlink()
+
+        r = client.get("/api/setup/status")
+        assert r.status_code == 500, r.text
+        assert r.json()["error"] == "control_db_missing"
+        # The defect this guards against: the file must not have been
+        # silently recreated as a side effect of merely handling the
+        # request.
+        assert not webapp.CONTROL_DB.exists()
+
+    def test_missing_control_db_does_not_get_silently_recreated_via_extended_schemas(self, app_client):
+        # _ensure_extended_schemas() (called from nearly every route,
+        # not just _db()'s own direct call sites) was the second,
+        # independent path that could silently recreate control.db --
+        # regression coverage for that path specifically, not just _db().
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        webapp.CONTROL_DB.unlink()
+
+        r = client.get("/api/notifications", headers={"X-CSRF-Token": csrf})
+        assert r.status_code in (401, 500)  # session itself is gone too, but never a silent 200
+        assert not webapp.CONTROL_DB.exists()
+
+    def test_missing_secret_store_returns_clear_error_not_silent_recreation(self, app_client):
+        # Same real defect, same fix, applied to the protected secret
+        # store: real secret material (replication CA key, DNSCrypt
+        # keys) must never be silently orphaned by an empty directory
+        # recreated on next use.
+        import shutil
+
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        shutil.rmtree(webapp.SECRETS_DIR)
+
+        r = client.post("/api/dns-transports/dnscrypt/rotate", json={}, headers={"X-CSRF-Token": csrf})
+        assert r.status_code == 500, r.text
+        assert r.json()["error"] == "secret_store_missing"
+        assert not webapp.SECRETS_DIR.exists()
+
+
 class TestCsrf:
     def test_post_without_csrf_token_rejected(self, app_client):
         webapp, client = app_client

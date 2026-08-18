@@ -46,6 +46,47 @@ class TestInitialization(unittest.TestCase):
             self.assertEqual(mode.lower(), "wal")
 
 
+class TestCreateIfMissing(unittest.TestCase):
+    """Real defect found and fixed live during this workstream's
+    failure-domain/chaos pass (docs/v2/control-db-silent-recreation-
+    fix.md): connect() -- like the raw sqlite3.connect() it wraps --
+    silently created an empty control.db if the real one had gone
+    missing (a failed mount, accidental deletion, disk issue),
+    indistinguishable from a genuine fresh install to every caller.
+    """
+
+    def test_default_still_creates_when_missing(self):
+        # The historical behavior every existing caller (bootstrap,
+        # migration, replication, every ensure_schema()) already relies
+        # on -- must stay unchanged.
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "control.db"
+            self.assertFalse(path.exists())
+            with control_db.connect(path) as conn:
+                conn.execute("SELECT 1")
+            self.assertTrue(path.exists())
+
+    def test_create_if_missing_false_raises_when_absent(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "control.db"
+            self.assertFalse(path.exists())
+            with self.assertRaises(control_db.ControlDbMissingError):
+                with control_db.connect(path, create_if_missing=False):
+                    pass
+            # The real, live-reproduced defect this guards against:
+            # must NOT have silently created the file as a side effect
+            # of merely checking.
+            self.assertFalse(path.exists())
+
+    def test_create_if_missing_false_succeeds_when_present(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "control.db"
+            control_db.initialize(path)  # real, already-initialized appliance
+            with control_db.connect(path, create_if_missing=False) as conn:
+                names = control_db._table_names(conn)
+            self.assertIn("admins", names)
+
+
 class TestNoQueryHistoryGuard(unittest.TestCase):
     def test_schema_has_no_forbidden_table_names(self):
         with tempfile.TemporaryDirectory() as td:

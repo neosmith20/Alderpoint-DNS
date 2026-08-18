@@ -210,9 +210,54 @@ def _assert_no_forbidden_tables(conn: sqlite3.Connection) -> None:
                 )
 
 
+class ControlDbMissingError(RuntimeError):
+    """Raised by ``connect(..., create_if_missing=False)`` when ``path``
+    does not already exist. See that parameter's own docstring for why
+    this distinction is real and load-bearing, not defensive
+    boilerplate."""
+
+
 @contextmanager
-def connect(path: str | Path) -> Iterator[sqlite3.Connection]:
-    """Open (creating if needed) a control.db at ``path`` with WAL + busy_timeout."""
+def connect(path: str | Path, *, create_if_missing: bool = True) -> Iterator[sqlite3.Connection]:
+    """Open a control.db at ``path`` with WAL + busy_timeout, creating it
+    if needed by default (``create_if_missing=True``, the historical
+    behavior every existing caller already relies on -- bootstrap/
+    ``init-state``, migration, replication cert issuance, and every
+    ``ensure_schema()`` all genuinely need "create on first use").
+
+    Real defect found and fixed live during this workstream's failure-
+    domain/chaos pass (docs/v2/control-db-silent-recreation-fix.md):
+    ``sqlite3.connect()`` (what this function wraps) transparently
+    creates an empty file at ``path`` if none exists -- confirmed live,
+    a real installed appliance's ``control.db`` moved aside (simulating
+    it becoming unavailable -- a failed mount, accidental deletion,
+    disk issue) was silently, invisibly replaced by a brand-new, empty,
+    freshly-schema'd database the moment any web request touched it.
+    Every API caller -- including the admin -- then saw "setup
+    required" exactly as if this were a genuinely fresh, never-
+    configured appliance, with **no signal whatsoever** that their real
+    configuration (networks, policies, clients, DNSCrypt identity,
+    everything) was sitting right there, merely temporarily
+    unreachable. An admin who then completed setup again would create a
+    second, disconnected identity while their real state remained
+    invisible.
+
+    ``create_if_missing=False`` closes this: ``app/v2/webapp.py``'s
+    ``_db()`` (the one call site representing "ongoing request-serving
+    against an already-initialized appliance", as opposed to the
+    explicit, deliberate, root-only bootstrap/migration/replication
+    call sites that legitimately need creation) now passes it, and gets
+    a clear ``ControlDbMissingError`` instead of a silent, indistinguishable
+    fresh-install illusion.
+    """
+    path = Path(path)
+    if not create_if_missing and not path.exists():
+        raise ControlDbMissingError(
+            f"control.db not found at {path} -- refusing to silently create a new, empty "
+            "database in its place (a real, previously-initialized appliance's control.db "
+            "should never simply not exist; this looks like the file became unavailable, "
+            "not a fresh install)"
+        )
     conn = sqlite3.connect(str(path), timeout=5.0, isolation_level=None)
     try:
         conn.execute("PRAGMA journal_mode = WAL")
