@@ -165,9 +165,15 @@ class TestAlternateUpstreamConfiguration:
 class TestInboundEncryptedTransportNotSilentlyLost:
     """G. V1's inbound encrypted-DNS-for-clients config (encryption_settings:
     doh/dot/doh3/doq/dnscrypt_enabled -- a real, commonly-on-by-default V1
-    feature per app/encryption.py's _DEFAULTS) has no V2 migration path yet
-    (dnsdist_gen.py emits only a single plain listener). This must surface
-    as an explicit warning, not vanish silently."""
+    feature per app/encryption.py's _DEFAULTS). V2 now has real, working
+    implementations of all five (see docs/v2/encrypted-transport-parity-
+    gap.md) -- but a migrated install still never auto-carries V1's
+    enabled/port/provider settings over (a deliberate scope decision, not
+    a gap: the two config shapes differ enough, and the trust-affecting
+    nature of re-enabling encrypted listeners on a migrated appliance
+    without an explicit admin decision, that this was never attempted).
+    This must keep surfacing as an explicit warning, not vanish silently,
+    for every one of the five protocols, DNSCrypt included."""
 
     def test_preview_warns_when_source_has_encrypted_transports_enabled(self, tmp_path):
         source = build_v1_fixture(
@@ -204,6 +210,34 @@ class TestInboundEncryptedTransportNotSilentlyLost:
         for stage in ("detect", "backup", "preview", "migrate_config"):
             mig._STAGE_FUNCS[stage](state)
         assert any("DoQ" in w for w in state.warnings)
+
+    def test_dnscrypt_specifically_warns_and_is_not_auto_migrated(self, tmp_path):
+        # DNSCrypt's own dedicated coverage (roadmap continuation --
+        # docs/v2/dnscrypt-transport-implemented.md): the newest of the
+        # five protocols, verified here the same way DoQ already was
+        # above, plus the real end state -- a migrated V2 install must
+        # have DNSCrypt genuinely disabled/unprovisioned, never silently
+        # inheriting V1's enabled state or any key material.
+        # dot_enabled=False: the shared fixture otherwise seeds
+        # dot_enabled='true' (a real V1 default-install value, per the
+        # "genuinely all off" test above) -- disabled here so this test
+        # isolates DNSCrypt specifically rather than asserting around an
+        # incidental second enabled protocol.
+        source = build_v1_fixture(
+            tmp_path / "src" / "alderpointdns.db", dot_enabled=False,
+            encrypted_transports_enabled=("dnscrypt_enabled",),
+        )
+        manifest = mconv.create_backup(source, tmp_path / "staging")
+        preview = mconv.build_preview(Path(manifest["backup_path"]))
+        assert preview["encryption_settings"]["migrated"] is False
+        assert preview["encryption_settings"]["inbound_transports_enabled_in_source"] == ["DNSCrypt"]
+        assert any("DNSCrypt" in w for w in preview["warnings"])
+
+        _, _, target, _, _ = _migrate_all(source, tmp_path)
+        with control_db.connect(target) as conn:
+            dnscrypt_settings = pstore.load_dnscrypt_settings(conn)
+        assert dnscrypt_settings.enabled is False
+        assert dnscrypt_settings.identity_provisioned is False
 
 
 class TestMissingOptionalHistoricalState:
