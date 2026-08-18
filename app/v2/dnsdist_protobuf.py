@@ -146,10 +146,14 @@ class DecodedResponse:
 
 def _client_ip(raw: bytes) -> str:
     # PBDNSMessage field 6 ("from"): 4 raw bytes for IPv4, 16 for IPv6 --
-    # verified for the IPv4 case (4 raw bytes, matched 127.0.0.1 exactly
-    # against a real query from that address); IPv6 (16 bytes) follows
-    # the same field per PowerDNS's published schema, not independently
-    # re-verified against a real IPv6 query this pass.
+    # both independently verified against real queries through the real
+    # installed package: IPv4 (4 raw bytes, matched 127.0.0.1 exactly),
+    # and IPv6 (16 raw bytes, matched "::1" exactly against a real
+    # `dig -6 @::1` query with dnsdist's listener temporarily extended
+    # to `setLocal("[::]:53")` for the test -- see
+    # docs/v2/ipv6-client-decode-rc13.md). The packaged default config
+    # only binds IPv4 (`setLocal("0.0.0.0:53")`); this decode path is
+    # exercised only if/when a future IPv6 listen address is configured.
     if len(raw) == 4:
         return ".".join(str(b) for b in raw)
     if len(raw) == 16:

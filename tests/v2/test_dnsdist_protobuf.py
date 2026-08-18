@@ -21,6 +21,7 @@ from app.v2.dnsdist_protobuf import (
     DecodedQuery,
     DecodedResponse,
     ProtobufDecodeError,
+    _client_ip,
     decode_message,
     read_framed_messages,
     walk_fields,
@@ -161,3 +162,25 @@ def test_real_framing_round_trip_from_the_actual_captured_bytes():
     assert recovered == body
     decoded = decode_message(recovered)
     assert decoded.qname == "pbtest.example.com."
+
+
+class TestClientIpDecode:
+    def test_ipv4_four_raw_bytes(self):
+        assert _client_ip(bytes([127, 0, 0, 1])) == "127.0.0.1"
+
+    def test_ipv6_sixteen_raw_bytes(self):
+        # Real defect-closing regression: previously only the IPv4 case
+        # (4 raw bytes) had been independently verified against real
+        # traffic; the IPv6 branch (16 raw bytes) was implemented per
+        # PowerDNS's published schema but not confirmed against a real
+        # query. Live-verified during the RC13 continuation (see
+        # docs/v2/ipv6-client-decode-rc13.md): a real `dig -6 @::1`
+        # query through the real installed package produced this exact
+        # 16-byte wire encoding of "::1" (15 zero bytes then 0x01), and
+        # the receiver's real analytics event showed `"client":"::1"`.
+        raw = bytes([0] * 15 + [1])
+        assert _client_ip(raw) == "::1"
+
+    def test_unexpected_length_raises_not_silent(self):
+        with pytest.raises(ProtobufDecodeError, match="unexpected 'from' address length"):
+            _client_ip(b"\x01\x02\x03")
