@@ -1,12 +1,30 @@
 # Alderpoint DNS V2 -- private RC ready for Dex Gate #3 review
 
-Artifact: `alderpointdns-v2_2.0.0~rc15-1_all.deb`
-(sha256 `ff0a9ae329d9f844556a4c0d935cfb7fef523ff90d986cc3e467b549b6395e31`),
+Artifact: `alderpointdns-v2_2.0.0~rc16-1_all.deb`
+(sha256 `05bb0f7df4eda4603aa0a067d83d0f50b249b7f5826b66a34c32f953a818ecf8`),
 branch `v2/architecture-storage-foundation`, still fully private
 (no push/tag/publish to any remote; `origin/main` -- the public V1
 line -- untouched throughout).
 
-## What RC15 fixes over RC14 (roadmap continuation, "keep going")
+## What RC16 fixes over RC15 (roadmap continuation, "keep going")
+
+1. **`docs/v2/cache-profile-id-not-populated-fix.md`** (real defect
+   found and fixed): `cache_profile_id` -- a real filterable/sortable
+   query-log column -- was always blank for every real dnsdist-sourced
+   analytics event, even though the exact policy compile needed to
+   produce it was already happening one function call away. Fixed by
+   threading `compile_cache_profile(policy).profile_id` through the
+   same per-client policy resolution already used for
+   `query_log_enabled`/`statistics_enabled`. Live-verified on RC16
+   (`docs/v2/package-baseline-rc16.md`): a real query through the real
+   installed package now shows a real, non-blank compiled profile
+   digest via the real `GET /api/analytics/query-log` API. Also
+   surfaced (not a regression, documented transparently, not fixed
+   this pass) that the raw per-query log buffers up to 1 hour before
+   flushing to disk by design -- the aggregate statistics dashboard is
+   unaffected and updates within seconds.
+
+## What RC15 fixes over RC14
 
 1. **`docs/v2/prewarm-analytics-pollution-fix.md`** (real defect found
    and fixed): Tier B prewarm's self-generated re-queries of
@@ -95,11 +113,11 @@ full-stack validation (found and fixed a real defect), Tier B
 re-check, failure-domain re-check, adversarial security re-sweep of
 the replication/analytics-receiver attack surfaces (message replay
 window, dedupe, size bounds, cert pinning, bounded protobuf parsing),
-IPv6 client-decode verification, and two further real analytics-
+IPv6 client-decode verification, and three further real analytics-
 accuracy defects found and fixed (packet-cache-hit mislabeling,
-prewarm-traffic pollution), CI determinism (online + offline), and
-this RC scrub. Full suite: 2073 passed (`tests/`), 881 passed
-(`tests/v2/`), all remaining failures individually confirmed as
-pre-existing concurrent-load flakes that pass in isolation, not
-regressions. The private candidate (RC15) is ready for Dex Gate #3
-review.
+prewarm-traffic pollution, blank cache_profile_id), CI determinism
+(online + offline), and this RC scrub. Full suite: 2074 passed
+(`tests/`), 882 passed (`tests/v2/`), all remaining failures
+individually confirmed as pre-existing concurrent-load flakes that
+pass in isolation, not regressions. The private candidate (RC16) is
+ready for Dex Gate #3 review.
