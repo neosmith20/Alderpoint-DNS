@@ -1,12 +1,12 @@
 # Alderpoint DNS V2 -- private RC ready for Dex Gate #3 review
 
-Artifact: `alderpointdns-v2_2.0.0~rc22-1_all.deb`
-(sha256 `0ea6679203bb58c5f84ba6bf9e253074cda5ea37c2942e15d4feb3fa52dae140`),
+Artifact: `alderpointdns-v2_2.0.0~rc23-1_all.deb`
+(sha256 `ba7cf3e1b19c9d4bbd00b860724a7e24fed01d04d0f14820f0f157510421b140`),
 branch `v2/architecture-storage-foundation`, still fully private
 (no push/tag/publish to any remote; `origin/main` -- the public V1
 line -- untouched throughout).
 
-## ⚠ Most significant finding this continuation: confirmed mandatory-parity gap -- DoT + DoH now closed, DoQ/DoH3/DNSCrypt remain
+## ⚠ Most significant finding this continuation: confirmed mandatory-parity gap -- DoT + DoH now closed, DoQ implemented (real target build lacks QUIC), DoH3/DNSCrypt remain
 
 **`docs/v2/encrypted-transport-parity-gap.md`** -- DoH/DoT/DoQ/DoH3/
 DNSCrypt (all explicitly **MANDATORY V2** rows in the parity matrix)
@@ -16,12 +16,11 @@ dnsdist_policy_runtime.py` (what every live installed package
 actually runs) found no encrypted-listener directive at all -- every
 real compiled config inspected across RC1-RC19 only ever bound plain
 `setLocal("0.0.0.0:53")`. V1 has real, working implementations of all
-five; the installed dnsdist 2.1.1 binary supports all five (confirmed
-live via `dnsdist --version`).
+five.
 
-**Update -- DoT and DoH are now implemented.** Both admin-toggleable
-via `GET`/`PUT /api/dns-transports`, reusing the appliance's existing
-management TLS cert:
+**Update -- DoT and DoH are now implemented and genuinely functional.**
+Both admin-toggleable via `GET`/`PUT /api/dns-transports`, reusing the
+appliance's existing management TLS cert:
 
 - **DoT** (`docs/v2/dot-transport-implemented.md`): live-verified on
   RC20 with a real `kdig +tls` client completing a genuine TLS 1.3
@@ -39,15 +38,41 @@ management TLS cert:
   conflicting request now cleanly rejects with `400` before ever
   touching the live runtime, while a safe port still works correctly.
 
-**DoQ, DoH3, and DNSCrypt remain unimplemented** -- deliberately not
-attempted this pass (each needs real, protocol-specific design work
-this session has no grounding for: QUIC congestion-control tuning, or
-an entirely different cert/key/provider-identity model for DNSCrypt)
-and is surfaced here explicitly rather than buried or rushed. See
+**DoQ is implemented (`docs/v2/doq-transport-implemented.md`), with a
+real, important environment finding made and corrected within this
+same pass:** the real target dnsdist the package's own
+`Depends: dnsdist (>= 1.9.0)` constraint resolves to on a stock
+Debian 13 archive install is `1.9.16`, which **does not include
+QUIC/HTTP3 support** -- confirmed live on RC23 via `dnsdist --version`
+on the real installed package (matching `docs/dnsdist.md`'s own
+V1-era documented finding). An earlier scoping check against this
+session's host shell, which had a separately-installed
+`dnsdist 2.1.1` from a third-party repo, wrongly suggested QUIC was
+available; corrected before finalizing. DoQ's config generation and
+its defensive capability-call wrapper (ported verbatim from V1's own
+real `packaging/dnsdist.conf` pattern) are confirmed live-correct on
+the real target build: dnsdist logs a clean skip message and keeps
+running with zero restarts and unaffected DNS answering, rather than
+crash-looping. **Genuine end-to-end QUIC resolution was not
+demonstrated**, honestly, since the real target build doesn't support
+it -- this is a real environment constraint, not a code defect.
+
+**DoH3 and DNSCrypt remain unimplemented.** DoH3 would face the
+identical QUIC/HTTP3-unavailable constraint as DoQ on the real target
+build. DNSCrypt remains architecturally distinct regardless (its own
+cert/key/provider-identity model, no overlap with the TLS-based
+approach the other three share) and was not attempted this pass. See
 `docs/v2/encrypted-transport-parity-gap.md` for the full remaining
 scope and recommendation.
 
-## What RC21/RC22 add over RC20 (roadmap continuation, "keep going")
+## What RC23 adds over RC22 (roadmap continuation, "keep going")
+
+1. **`docs/v2/doq-transport-implemented.md`**: real DNS-over-QUIC
+   config generation with defensive graceful degradation, live-verified
+   on RC23 against the real target dnsdist build (see the parity-gap
+   section above for the full, corrected finding).
+
+## What RC21/RC22 add over RC20
 
 1. **`docs/v2/doh-transport-implemented.md`**: real DNS-over-HTTPS
    implementation, live-verified on RC22 with a real `kdig +https`
@@ -216,24 +241,31 @@ window, dedupe, size bounds, cert pinning, bounded protobuf parsing),
 IPv6 client-decode verification, six further real analytics-accuracy
 defects found and fixed (packet-cache-hit mislabeling, prewarm-traffic
 pollution, blank cache_profile_id, blocked queries never marked as
-blocked, blank upstream_profile_id, blank client_name), real DoT and
-DoH implementations closing two of the five confirmed mandatory-parity
-gaps (plus a real live-reproduced port-conflict availability defect
-found and fixed along the way), CI determinism (online + offline), and
-this RC scrub. Full suite: 2100 passed (`tests/`), 908 passed
-(`tests/v2/`), no flakes on the final pass; prior remaining failures
-were individually confirmed as pre-existing concurrent-load flakes
-that pass in isolation, not regressions.
+blocked, blank upstream_profile_id, blank client_name), real DoT, DoH,
+and DoQ implementations addressing three of the five confirmed
+mandatory-parity gaps (plus a real live-reproduced port-conflict
+availability defect found and fixed along the way, and an honest
+environment-limitation correction on DoQ's real functional status), CI
+determinism (online + offline), and this RC scrub. Full suite: 2106
+passed (`tests/`), 914 passed (`tests/v2/`), no flakes on the final
+pass; prior remaining failures were individually confirmed as
+pre-existing concurrent-load flakes that pass in isolation, not
+regressions.
 
-**Readiness caveat:** the private candidate (RC22) is ready for Dex
+**Readiness caveat:** the private candidate (RC23) is ready for Dex
 Gate #3 review on everything this continuation actually touched --
 but review should explicitly weigh the remaining encrypted-transport
-parity gap (DoQ/DoH3/DNSCrypt -- DoT and DoH are now closed) before
-treating V2 as feature-complete against its own mandatory gate
+parity gap (DoH3/DNSCrypt genuinely unimplemented; DoQ implemented but
+non-functional on the real target dnsdist build, which lacks QUIC)
+before treating V2 as feature-complete against its own mandatory gate
 criteria. This continuation's scope was primarily verification/
 hardening of existing systems; that gap predates this session and was
-not introduced by it. DoT and DoH were implemented as real, scoped,
-low-risk steps toward closing it, but the remaining three protocols
-still need a dedicated design pass before implementation, and Gate #3
-is the right point to decide whether they block further progress or
-are tracked as follow-up work.
+not introduced by it. DoT and DoH are real, working, low-risk closures
+of two of the five rows. DoQ's implementation is correct and safe but
+its real functional gap is an environment constraint (the target
+dnsdist build), not something further engineering in this codebase can
+resolve without changing which dnsdist build the package depends on --
+a decision with real tradeoffs (a third-party repo dependency instead
+of the stock Debian archive) that deserves explicit product input, not
+a unilateral change here. Gate #3 is the right point to decide how to
+proceed on all of this.
