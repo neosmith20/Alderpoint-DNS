@@ -1,10 +1,30 @@
 # Alderpoint DNS V2 -- private RC ready for Dex Gate #3 review
 
-Artifact: `alderpointdns-v2_2.0.0~rc13-1_all.deb`
-(sha256 `d1ca4c4eabd40f648d3a494acd3722acbbc8a8c48bcc2ef1d65ae4bc0d82dc90`),
+Artifact: `alderpointdns-v2_2.0.0~rc14-1_all.deb`
+(sha256 `e67bc0189b18efff8a752b272c14af0aa648dc155ce1a196540f45c4ce0ccfb7`),
 branch `v2/architecture-storage-foundation`, still fully private
 (no push/tag/publish to any remote; `origin/main` -- the public V1
 line -- untouched throughout).
+
+## What RC14 fixes over RC13 (roadmap continuation, "keep going")
+
+1. **`docs/v2/ipv6-client-decode-rc13.md`**: closed the last
+   "not independently verified" gap from RC6 -- the protobuf decoder's
+   IPv6 client-address branch, live-verified against a real
+   `dig -6 @::1` query through the real installed package
+   (`"client":"::1"` decoded correctly end to end).
+2. **`docs/v2/cache-hit-response-not-logged-rc13.md`** (real defect
+   found and fixed): dnsdist packet-cache hits never emit a
+   `RemoteLogResponseAction` message at all, live-proven with a real,
+   repeated NXDOMAIN query -- the receiver's fallback silently
+   mislabeled every real cache hit as `NOERROR`/`"miss"`, an accuracy
+   defect that would corrupt statistics for the majority of real
+   repeat-domain traffic. Fixed with a bounded best-effort
+   `(qname, qtype) -> real rcode` memory; live-verified on RC14
+   (`docs/v2/package-baseline-rc14.md`): a real 1-miss/2-hit query
+   sequence now correctly shows `cache_hits=2, cache_misses=1` and
+   `rcode=NXDOMAIN` for all three in the real aggregate database,
+   instead of all three being silently counted as NOERROR misses.
 
 ## What RC13 fixes over RC12 (this continuation session)
 
@@ -59,6 +79,11 @@ package baseline, full hardware/performance matrix, Argon2id
 full-stack validation (found and fixed a real defect), Tier B
 re-check, failure-domain re-check, adversarial security re-sweep of
 the replication/analytics-receiver attack surfaces (message replay
-window, dedupe, size bounds, cert pinning, bounded protobuf parsing --
-no new gaps found), CI determinism (online + offline), and this RC
-scrub. The private candidate (RC13) is ready for Dex Gate #3 review.
+window, dedupe, size bounds, cert pinning, bounded protobuf parsing),
+IPv6 client-decode verification, a second real analytics-accuracy
+defect found and fixed (packet-cache-hit mislabeling), CI determinism
+(online + offline), and this RC scrub. Full suite: 2072 passed
+(`tests/`), 879 passed (`tests/v2/`), all remaining failures
+individually confirmed as pre-existing concurrent-load flakes that
+pass in isolation, not regressions. The private candidate (RC14) is
+ready for Dex Gate #3 review.
