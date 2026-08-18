@@ -148,6 +148,57 @@ class TestLoginLogoutSessions:
         assert r.status_code == 503
         assert r.json()["error"] == "auth_busy"
 
+    def test_login_survives_transient_database_lock(self, app_client):
+        # Real defect found live during the hardware/performance matrix
+        # re-verification (docs/v2/login-database-locked-under-load-fix.md):
+        # under real combined DNS+analytics+concurrent-login load, the
+        # login_attempts write hit real SQLite write-lock contention that
+        # outlasted the 5s busy_timeout, surfacing as an unhandled
+        # sqlite3.OperationalError -> raw 500 for an otherwise genuinely
+        # successful, already-verified login. Reproduces the exact
+        # transient-then-recovers shape live contention has: the first
+        # write attempt raises "database is locked", the retry succeeds.
+        import sqlite3
+        from unittest import mock
+
+        webapp, client = app_client
+        webapp.BOOTSTRAP_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+        webapp.BOOTSTRAP_TOKEN_PATH.write_text("tok")
+        client.post("/api/setup", json={"setup_token": "tok", "username": "admin", "password": "correcthorsebattery12"})
+
+        real_record = webapp._record_login_attempt
+        calls = {"n": 0}
+
+        def flaky_record(conn, ip, ok):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return real_record(conn, ip, ok)
+
+        with mock.patch.object(webapp, "_record_login_attempt", side_effect=flaky_record):
+            r = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
+        assert r.status_code == 200, r.text
+        assert calls["n"] == 2  # first attempt hit the lock, retry succeeded
+
+    def test_login_returns_clean_503_when_lock_retry_budget_exhausted(self, app_client):
+        # The belt-and-suspenders side: once retry_on_locked's bounded
+        # budget is genuinely exhausted, the client gets a clean,
+        # specific 503 -- never a raw 500/traceback.
+        import sqlite3
+        from unittest import mock
+
+        webapp, client = app_client
+        webapp.BOOTSTRAP_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+        webapp.BOOTSTRAP_TOKEN_PATH.write_text("tok")
+        client.post("/api/setup", json={"setup_token": "tok", "username": "admin", "password": "correcthorsebattery12"})
+
+        with mock.patch.object(
+            webapp, "_record_login_attempt", side_effect=sqlite3.OperationalError("database is locked")
+        ), mock.patch("app.db_retry.time.sleep", return_value=None):  # skip real backoff delay in this test
+            r = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
+        assert r.status_code == 503, r.text
+        assert r.json()["error"] == "database_busy"
+
 
 class TestCsrf:
     def test_post_without_csrf_token_rejected(self, app_client):

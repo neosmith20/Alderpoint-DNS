@@ -119,6 +119,14 @@ cp "$SOURCE_DIR/app/__init__.py" "$PKG/opt/alderpointdns-v2/app/__init__.py"
 # dnsdist`/`dnsdist-capabilities` -- see docs/v2/doh3-transport-
 # implemented.md.
 cp "$SOURCE_DIR/app/dnsdist_upgrade.py" "$PKG/opt/alderpointdns-v2/app/dnsdist_upgrade.py"
+# Second deliberate exception to "only app/v2/ ships" (see this
+# script's header comment): app/db_retry.py is a standalone,
+# stdlib-only SQLite busy/locked retry helper with no V1 app/web-code
+# dependency, reused verbatim for the real defect fix in
+# docs/v2/login-database-locked-under-load-fix.md (a real "database is
+# locked" crash under real combined DNS+login load) rather than
+# reimplementing V1's own already-proven pattern.
+cp "$SOURCE_DIR/app/db_retry.py" "$PKG/opt/alderpointdns-v2/app/db_retry.py"
 tar -C "$SOURCE_DIR" --exclude __pycache__ --exclude '*.pyc' -cf - app/v2 | \
   tar -C "$PKG/opt/alderpointdns-v2" -xf -
 tar -C "$SOURCE_DIR" -cf - vendor/v2-analytics | \

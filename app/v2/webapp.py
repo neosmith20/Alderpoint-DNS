@@ -42,6 +42,7 @@ from itsdangerous import BadSignature, URLSafeTimedSerializer
 from pydantic import BaseModel, Field
 
 from app import dnsdist_upgrade
+from app.db_retry import DatabaseBusyError, is_lock_error, retry_on_locked
 from app.v2 import analytics_deps
 from app.v2 import control_db
 from app.v2 import dnscrypt_provisioning
@@ -274,6 +275,40 @@ async def _runtime_compile_error_handler(request: Request, exc: RuntimeCompileEr
     )
 
 
+# Real defect found live during this workstream's hardware/performance
+# matrix re-verification (docs/v2/login-database-locked-under-load-fix.md):
+# under real combined DNS + analytics + concurrent-login load, a write
+# inside /api/login (recording the login attempt for the brute-force
+# lockout counter) hit real SQLite write-lock contention that outlasted
+# even the 5-second busy_timeout already configured
+# (app/v2/control_db.py) -- surfacing as an unhandled
+# sqlite3.OperationalError -> a raw 500, turning an otherwise-genuinely-
+# successful, already-Argon2id-verified login into a client-visible
+# crash. V1 already solved this exact class of problem
+# (app/db_retry.py's own module docstring/tests/test_db_hotpath_and_
+# busy_recovery.py) -- reused verbatim rather than reimplemented (see
+# scripts/build-v2-deb.sh for why it's a safe, stdlib-only, no-V1-
+# dependency addition to what V2 ships). Two-layer defense, matching
+# V1's own real, production-proven shape: retry_on_locked() bounds and
+# backs off individual writes that are expected to occasionally
+# contend (below), and these two handlers are the belt-and-suspenders
+# net for anything that still gets through -- a controlled 503, never
+# a raw traceback.
+@app.exception_handler(DatabaseBusyError)
+async def _database_busy_handler(request: Request, exc: DatabaseBusyError):
+    return JSONResponse(
+        status_code=503,
+        content={"error": "database_busy", "detail": "the database is temporarily busy, please retry shortly"},
+    )
+
+
+@app.exception_handler(sqlite3.OperationalError)
+async def _sqlite_operational_error_handler(request: Request, exc: sqlite3.OperationalError):
+    if is_lock_error(exc):
+        return await _database_busy_handler(request, DatabaseBusyError(str(exc)))
+    return JSONResponse(status_code=500, content={"error": "internal_error", "detail": "an internal error occurred"})
+
+
 @app.exception_handler(Exception)
 async def _unhandled_exception_handler(request: Request, exc: Exception):
     # Anything else: a safe, generic 500 -- never the traceback, filesystem
@@ -465,15 +500,22 @@ def login(req: LoginRequest, request: Request, response: Response):
                 ok = result.ok
         except TooManyConcurrentHashesError:
             raise ApiError(503, "auth_busy", "too many concurrent authentication attempts, retry shortly")
-        _record_login_attempt(conn, ip, ok)
+        # Real defect found live under real combined DNS+analytics+
+        # concurrent-login load (docs/v2/login-database-locked-under-
+        # load-fix.md): these writes can hit real SQLite write-lock
+        # contention outlasting the 5s busy_timeout already configured
+        # -- bounded retry-with-backoff (V1's own proven app/db_retry.py,
+        # reused verbatim) rather than letting an otherwise-genuinely-
+        # successful, already-verified login crash with a raw 500.
+        retry_on_locked(lambda: _record_login_attempt(conn, ip, ok))
         if not ok:
             raise ApiError(401, "invalid_credentials", "incorrect username or password")
         admin_id = row[0]
         if new_hash is not None:
-            conn.execute("UPDATE admins SET password_hash=? WHERE id=?", (new_hash, admin_id))
+            retry_on_locked(lambda: conn.execute("UPDATE admins SET password_hash=? WHERE id=?", (new_hash, admin_id)))
         # §12 "session rotation after login": always a brand-new session
         # row, never reusing a pre-login one.
-        session = _create_session_row(conn, admin_id, request)
+        session = retry_on_locked(lambda: _create_session_row(conn, admin_id, request))
     _set_session_cookie(response, session["id"])
     return {"status": "ok", "csrf": session["csrf"]}
 
