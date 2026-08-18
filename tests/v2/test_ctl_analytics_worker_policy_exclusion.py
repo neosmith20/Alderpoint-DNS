@@ -222,6 +222,62 @@ def test_real_effective_cache_profile_id_is_populated_not_left_blank(ctl_module)
         "the client's overridden cache profile must differ from the global default, not just be non-blank"
 
 
+def test_real_blocked_query_gets_action_blocked_not_silently_allowed(ctl_module):
+    # Real defect found live during the RC13-RC16 continuation
+    # (docs/v2/blocked-action-not-populated-fix.md): app/v2/
+    # filtering_decision.py's evaluate_filtering -- the real, tested
+    # "why was this blocked" decision engine -- was never actually
+    # invoked anywhere in production, so every real dnsdist-sourced
+    # analytics event defaulted to action="allowed" unconditionally,
+    # even for a domain a real admin had explicitly configured to be
+    # blocked. This proves the fix end to end: a real service-blocking
+    # ruleset assigned to a client marks a real matching query as
+    # action="blocked" with the real service_id as block_reason, all
+    # the way through to the written Parquet segment.
+    import pyarrow.parquet as pq
+
+    from app.v2 import control_db, policy_store
+
+    _seed_control_db(ctl_module)
+    with control_db.connect(ctl_module.CONTROL_DB) as conn:
+        policy_store.create_service(
+            conn, "blocked-app", "Blocked App", [("exact", "blocked-app.example")], category="service"
+        )
+        policy_store.create_service_ruleset(conn, "blocklist-1", ["blocked-app"])
+        conn.commit()
+
+        client_id = conn.execute(
+            "INSERT INTO clients(name, description, enabled, created_at, updated_at) "
+            "VALUES ('blocked-ruleset-client', '', 1, '2026-01-01', '2026-01-01')"
+        ).lastrowid
+        conn.execute(
+            "INSERT INTO client_identifiers(client_id, kind, value, created_at) "
+            "VALUES (?, 'ipv4', '10.9.9.10', '2026-01-01')",
+            (client_id,),
+        )
+        conn.commit()
+        policy_store.save_policy_layer(
+            conn, "client", str(client_id), policy_store.PolicyLayer(service_blocking_ruleset_id="blocklist-1")
+        )
+        conn.commit()
+
+    _write_inbox_event(ctl_module, "blocked-app.example", "10.9.9.10")
+    _write_inbox_event(ctl_module, "not-blocked.example", "10.9.9.10")
+
+    args = argparse.Namespace(once=True, interval_seconds=1.0, inject_test_event=False)
+    rc = ctl_module.cmd_analytics_worker(args)
+    assert rc == 0
+
+    parquet_dir = ctl_module.ANALYTICS_PARQUET_DIR
+    parquet_files = list(parquet_dir.rglob("*.parquet")) if parquet_dir.exists() else []
+    rows = [r for f in parquet_files for r in pq.read_table(f).to_pylist()]
+    blocked = next(r for r in rows if r["domain"] == "blocked-app.example")
+    allowed = next(r for r in rows if r["domain"] == "not-blocked.example")
+    assert blocked["blocked"] is True
+    assert blocked["block_reason"] == "blocked-app"
+    assert allowed["blocked"] is False
+
+
 def test_prewarm_source_ip_is_unconditionally_excluded_from_both_sinks(ctl_module):
     # Real defect found live during the RC13/RC14 continuation
     # (docs/v2/prewarm-analytics-pollution-fix.md): Tier B prewarm

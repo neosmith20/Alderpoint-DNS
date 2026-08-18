@@ -505,16 +505,20 @@ def _build_pipeline():
     ), index
 
 
-def _effective_flags_for_client(conn, client_ip: str, now) -> tuple[bool, bool, str]:
+def _effective_flags_for_client(conn, client_ip: str, now):
     """Resolves the real effective (query_log_enabled, statistics_enabled,
-    cache_profile_id) for a client IP, via the same control.db policy
-    chain (client -> group -> network -> global) the rest of V2 already
-    uses -- closes the real gap where every event from the analytics-
-    protobuf-receiver was unconditionally logged regardless of a
-    per-client exclusion an admin had actually configured. An IP that
+    cache_profile_id, policy) for a client IP, via the same control.db
+    policy chain (client -> group -> network -> global) the rest of V2
+    already uses -- closes the real gap where every event from the
+    analytics-protobuf-receiver was unconditionally logged regardless of
+    a per-client exclusion an admin had actually configured. An IP that
     doesn't match any registered client still gets a real answer
     (network/global layers only, per compile_effective_policy's own
-    client_layer=None support), not a hardcoded default.
+    client_layer=None support), not a hardcoded default. ``policy`` (the
+    compiled ``EffectivePolicy``, or ``None`` for the excluded prewarm
+    identity) is returned so the caller can also resolve a real
+    per-qname blocked/allowed/rewritten decision (see
+    ``_action_for_event``) without a second, separate policy compile.
 
     Real defect found live during the RC13/RC14/RC15 continuation
     (docs/v2/cache-profile-id-not-populated-fix.md): every real
@@ -538,7 +542,7 @@ def _effective_flags_for_client(conn, client_ip: str, now) -> tuple[bool, bool, 
     from app.v2.tier_b_worker import PREWARM_SOURCE_IP
 
     if client_ip == PREWARM_SOURCE_IP:
-        return False, False, ""
+        return False, False, "", None
 
     from app.v2 import policy_service
     from app.v2.policy_compiler import compile_cache_profile, compile_effective_policy
@@ -560,7 +564,51 @@ def _effective_flags_for_client(conn, client_ip: str, now) -> tuple[bool, bool, 
             global_layer=global_layer, network_layer=network_layer, network_source=network_source
         )
     cache_profile_id = compile_cache_profile(policy).profile_id
-    return policy.query_log_enabled, policy.statistics_enabled, cache_profile_id
+    return policy.query_log_enabled, policy.statistics_enabled, cache_profile_id, policy
+
+
+def _action_for_event(conn, policy, qname: str) -> tuple[str, str]:
+    """Resolves the real (action, block_reason) for one event's qname
+    against its client's already-compiled effective policy.
+
+    Real defect found live during the RC13-RC16 continuation
+    (docs/v2/blocked-action-not-populated-fix.md): every real
+    dnsdist-sourced analytics event defaulted to
+    ``action="allowed"``/``block_reason=""`` unconditionally --
+    app/v2/filtering_decision.py's ``evaluate_filtering`` (the real,
+    tested "why was this blocked" decision engine §47 calls for) was
+    never actually invoked anywhere in production. Confirmed live:
+    blocking is enforced entirely via terminal dnsdist actions
+    (SpoofAction/RCodeAction, see app/v2/dnsdist_policy_runtime.py) --
+    the same terminally-answered shape as local-DNS/SafeSearch, so a
+    genuinely blocked query was silently logged as "allowed" with
+    whatever rcode the spoofed answer carried (real live evidence: the
+    entire "blocked queries" dashboard was non-functional for real
+    traffic). ``app/v2/bind_rpz_gen.py``'s RPZ zone is confirmed always
+    empty in the real running system (``cmd_generate_runtime`` calls
+    ``render_rpz_zone({}, [], ...)`` unconditionally) -- all real
+    blocking, including migrated V1 custom block/allow lists
+    (``app/v2/migration_convert.py``'s ``migrate_filtering_to_control_db``),
+    goes through the same ``service_definitions``/``service_domains``
+    mechanism ``evaluate_filtering`` already reads, so this is the
+    complete real decision source, not a partial one.
+
+    Fails safe: any error here defaults to ("allowed", "") rather than
+    risking a false "blocked" classification or crashing the drain
+    loop over one malformed qname.
+    """
+    if policy is None:
+        return "allowed", ""
+    from app.v2.filtering_decision import evaluate_filtering
+
+    try:
+        decision = evaluate_filtering(conn, policy, qname)
+    except Exception:
+        log.exception("filtering decision failed for qname %s, defaulting to allowed", qname)
+        return "allowed", ""
+    if decision.action == "blocked":
+        return "blocked", decision.reason
+    return decision.action, ""
 
 
 def cmd_analytics_worker(args: argparse.Namespace) -> int:
@@ -645,11 +693,14 @@ def cmd_analytics_worker(args: argparse.Namespace) -> int:
                                     flag_cache[client_ip] = _effective_flags_for_client(conn, client_ip, now)
                                 except Exception:
                                     log.exception("policy lookup failed for client %s, defaulting to logged", client_ip)
-                                    flag_cache[client_ip] = (True, True, "")
-                            log_enabled, stats_enabled, cache_profile_id = flag_cache[client_ip]
+                                    flag_cache[client_ip] = (True, True, "", None)
+                            log_enabled, stats_enabled, cache_profile_id, policy = flag_cache[client_ip]
                             record.setdefault("query_log_enabled", log_enabled)
                             record.setdefault("statistics_enabled", stats_enabled)
                             record.setdefault("effective_cache_profile_id", cache_profile_id)
+                            action, block_reason = _action_for_event(conn, policy, record.get("qname", ""))
+                            record.setdefault("action", action)
+                            record.setdefault("block_reason", block_reason)
                         pipeline.submit(NormalizedQueryEvent(**record))
                         processed += 1
                     f.unlink()
