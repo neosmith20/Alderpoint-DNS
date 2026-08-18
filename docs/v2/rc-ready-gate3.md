@@ -1,12 +1,22 @@
 # Alderpoint DNS V2 -- private RC ready for Dex Gate #3 review
 
-Artifact: `alderpointdns-v2_2.0.0~rc17-1_all.deb`
-(sha256 `3b3d2c60b71632969fba0cfa0668a638c777b78ce391d348d74696a7a6ca7bc3`),
+Artifact: `alderpointdns-v2_2.0.0~rc18-1_all.deb`
+(sha256 `8f02a7d27d14e3d7fab3aa4395acbf6947a0d6cfdb24465484fdaf784ef1f91d`),
 branch `v2/architecture-storage-foundation`, still fully private
 (no push/tag/publish to any remote; `origin/main` -- the public V1
 line -- untouched throughout).
 
-## What RC17 fixes over RC16 (roadmap continuation, "keep going")
+## What RC18 fixes over RC17 (roadmap continuation, "keep going")
+
+1. **`docs/v2/upstream-profile-id-not-populated-fix.md`**:
+   `upstream_profile_id` (the real `"upstream"` filterable query-log
+   column) was also always blank for every real event, same root cause
+   as the `cache_profile_id`/blocked-action fixes. One-line fix at the
+   same call site. Live-verified on RC18
+   (`docs/v2/package-baseline-rc18.md`): real `GET /api/analytics/
+   query-log` now shows the real configured upstream profile label.
+
+## What RC17 fixes over RC16
 
 1. **`docs/v2/blocked-action-not-populated-fix.md`** (real defect
    found and fixed -- the most significant analytics-accuracy gap
@@ -134,12 +144,12 @@ full-stack validation (found and fixed a real defect), Tier B
 re-check, failure-domain re-check, adversarial security re-sweep of
 the replication/analytics-receiver attack surfaces (message replay
 window, dedupe, size bounds, cert pinning, bounded protobuf parsing),
-IPv6 client-decode verification, and four further real analytics-
+IPv6 client-decode verification, and five further real analytics-
 accuracy defects found and fixed (packet-cache-hit mislabeling,
 prewarm-traffic pollution, blank cache_profile_id, blocked queries
-never marked as blocked), CI determinism (online + offline), and this
-RC scrub. Full suite: 2074 passed (`tests/`), 883 passed
-(`tests/v2/`), all remaining failures individually confirmed as
-pre-existing concurrent-load flakes that pass in isolation, not
-regressions. The private candidate (RC17) is ready for Dex Gate #3
-review.
+never marked as blocked, blank upstream_profile_id), CI determinism
+(online + offline), and this RC scrub. Full suite: 2076 passed
+(`tests/`), 884 passed (`tests/v2/`), no flakes on the final pass;
+prior remaining failures were individually confirmed as pre-existing
+concurrent-load flakes that pass in isolation, not regressions. The
+private candidate (RC18) is ready for Dex Gate #3 review.
