@@ -201,6 +201,72 @@ def ensure_schema(path: str | Path) -> None:
         already_present = _table_exists(conn, "policy_layers")
     if not already_present:
         control_db.apply_migration_in_transaction(path, _MIGRATION_V2, POLICY_STORE_SCHEMA_VERSION)
+    _ensure_dns_transport_settings_table(path)
+
+
+def _ensure_dns_transport_settings_table(path: str | Path) -> None:
+    """Runs unconditionally on every ``ensure_schema`` call (unlike
+    ``_MIGRATION_V2`` above, which is gated on ``policy_layers`` not yet
+    existing and so never runs again for a pre-existing install) --
+    ``CREATE TABLE IF NOT EXISTS`` is naturally idempotent and this needs
+    to reach existing installs too, not only fresh ones, matching the
+    incremental-migration pattern app/v2/replication_v2.py's
+    ``ensure_schema`` already established for the same reason.
+
+    Real defect found this continuation (docs/v2/
+    encrypted-transport-parity-gap.md): DoH/DoT/DoQ/DoH3/DNSCrypt were
+    entirely absent from V2's real config generation. DoT is the first
+    one implemented here -- it needs no new key material (reuses the
+    appliance's existing management TLS cert, same as V1's real
+    ``packaging/dnsdist.conf`` does) and no HTTP/QUIC protocol surface,
+    making it the lowest-risk of the five to add safely. A single-row
+    singleton table (matching the global policy layer's own
+    ``scope_ref='singleton'`` convention) rather than folding into
+    ``policy_layers``: a listening port is an appliance-wide concept,
+    not a per-client/per-network answer-affecting policy dimension the
+    rest of that table's columns are.
+    """
+    with control_db.connect(path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dns_transport_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                dot_enabled INTEGER NOT NULL DEFAULT 0,
+                dot_port INTEGER NOT NULL DEFAULT 853,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.commit()
+
+
+@dataclass
+class DnsTransportSettings:
+    dot_enabled: bool = False
+    dot_port: int = 853
+
+
+def load_dns_transport_settings(conn: sqlite3.Connection) -> DnsTransportSettings:
+    row = conn.execute("SELECT dot_enabled, dot_port FROM dns_transport_settings WHERE id=1").fetchone()
+    if row is None:
+        return DnsTransportSettings()
+    return DnsTransportSettings(dot_enabled=bool(row[0]), dot_port=row[1])
+
+
+def save_dns_transport_settings(conn: sqlite3.Connection, settings: DnsTransportSettings) -> None:
+    if not (1 <= settings.dot_port <= 65535):
+        raise PolicyStoreError(f"invalid dot_port: {settings.dot_port!r}")
+    conn.execute(
+        """
+        INSERT INTO dns_transport_settings (id, dot_enabled, dot_port, updated_at)
+        VALUES (1, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            dot_enabled = excluded.dot_enabled,
+            dot_port = excluded.dot_port,
+            updated_at = excluded.updated_at
+        """,
+        (int(settings.dot_enabled), settings.dot_port, _now()),
+    )
 
 
 # --------------------------------------------------------------------------

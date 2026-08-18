@@ -5,6 +5,7 @@ import pytest
 from app.v2.blocking_response import BlockingResponse
 from app.v2.dnsdist_policy_runtime import (
     ClientPolicyBinding,
+    DotConfig,
     PolicyRuntimeError,
     compile_multi_policy_dnsdist_config,
 )
@@ -211,3 +212,51 @@ class TestRealValidation:
         b1 = _binding("10.0.1.0/24", "p1")
         text = compile_multi_policy_dnsdist_config("127.0.0.1:15352", [b1], analytics_log_address=None)
         assert "RemoteLogger" not in text
+
+    def test_dot_listener_wired_and_passes_real_check_config(self, tmp_path):
+        # Real defect this closes (docs/v2/encrypted-transport-parity-gap.md):
+        # DoH/DoT/DoQ/DoH3/DNSCrypt were entirely absent from V2's real
+        # config generation. This proves DoT's real addTLSLocal directive
+        # (V1's own proven packaging/dnsdist.conf syntax, ported here)
+        # both renders correctly and validates against the real installed
+        # dnsdist binary.
+        import subprocess
+
+        cert_path, key_path = _self_signed_cert(tmp_path)
+        b1 = _binding("10.0.1.0/24", "p1")
+        dot = DotConfig(enabled=True, port=15353, cert_path=str(cert_path), key_path=str(key_path))
+        text = compile_multi_policy_dnsdist_config("127.0.0.1:15354", [b1], dot=dot)
+        assert 'addTLSLocal("127.0.0.1:15353"' in text
+        assert 'minTLSVersion="tls1.2"' in text
+        conf_path = tmp_path / "c.conf"
+        conf_path.write_text(text)
+        result = subprocess.run(["dnsdist", "-C", str(conf_path), "--check-config"], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+
+    def test_dot_listener_omitted_when_disabled(self):
+        b1 = _binding("10.0.1.0/24", "p1")
+        text = compile_multi_policy_dnsdist_config(
+            "127.0.0.1:15355", [b1], dot=DotConfig(enabled=False, port=853, cert_path="x", key_path="y")
+        )
+        assert "addTLSLocal" not in text
+
+    def test_dot_listener_omitted_when_not_passed_at_all(self):
+        b1 = _binding("10.0.1.0/24", "p1")
+        text = compile_multi_policy_dnsdist_config("127.0.0.1:15356", [b1])
+        assert "addTLSLocal" not in text
+
+
+def _self_signed_cert(tmp_path):
+    import subprocess
+
+    cert_path = tmp_path / "dot-test.crt"
+    key_path = tmp_path / "dot-test.key"
+    subprocess.run(
+        [
+            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+            "-keyout", str(key_path), "-out", str(cert_path),
+            "-days", "1", "-subj", "/CN=dot-test",
+        ],
+        check=True, capture_output=True,
+    )
+    return cert_path, key_path

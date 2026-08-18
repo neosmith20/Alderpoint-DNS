@@ -1,4 +1,9 @@
-# Confirmed real gap: DoH/DoT/DoQ/DoH3/DNSCrypt (mandatory parity rows) not implemented in V2
+# Confirmed real gap: DoH/DoQ/DoH3/DNSCrypt (mandatory parity rows) not implemented in V2 -- DoT now closed
+
+**Update:** DoT is now implemented and live-verified -- see
+`docs/v2/dot-transport-implemented.md`. The remaining four protocols
+(DoH/DoQ/DoH3/DNSCrypt) are still absent; this doc's original findings
+below stand for those.
 
 **This is the most consequential finding of this continuation session
 -- surfaced prominently for Dex's Gate #3 review, not buried among the

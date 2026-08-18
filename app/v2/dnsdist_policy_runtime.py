@@ -159,12 +159,48 @@ def _local_dns_rule_lines(local_dns_records: list[tuple]) -> list[str]:
 ANALYTICS_PROTOBUF_LOG_ADDRESS = "127.0.0.1:5391"
 
 
+@dataclass(frozen=True)
+class DotConfig:
+    """DNS-over-TLS listener configuration (roadmap continuation: closes
+    part of the confirmed mandatory-parity gap documented in
+    docs/v2/encrypted-transport-parity-gap.md). Reuses the appliance's
+    existing management-API TLS cert/key (``cert_path``/``key_path`` --
+    the caller passes ``app/v2/webapp.py``'s ``ACTIVE_CERT_PATH``/
+    ``ACTIVE_KEY_PATH``) rather than provisioning separate key material,
+    matching V1's real, production-proven ``packaging/dnsdist.conf``
+    pattern (a single appliance-wide cert used for DoH/DoT alike).
+    ``min_tls_version``/``ciphers`` match V1's own real values verbatim
+    (``tls1.2`` / ``HIGH:!aNULL:!MD5:!RC4``) -- a real, already-deployed
+    baseline, not a new choice made here.
+    """
+
+    enabled: bool
+    port: int
+    cert_path: str
+    key_path: str
+    min_tls_version: str = "tls1.2"
+    ciphers: str = "HIGH:!aNULL:!MD5:!RC4"
+
+
+def _dot_bind_lines(listen_address: str, dot: DotConfig) -> list[str]:
+    host = listen_address.rsplit(":", 1)[0]
+    return [
+        f'addTLSLocal("{host}:{dot.port}", {{{_lua_string(dot.cert_path)}}}, {{{_lua_string(dot.key_path)}}}, {{',
+        "  reusePort=true,",
+        f'  minTLSVersion={_lua_string(dot.min_tls_version)},',
+        f'  ciphers={_lua_string(dot.ciphers)}',
+        "})",
+        "",
+    ]
+
+
 def compile_multi_policy_dnsdist_config(
     listen_address: str,
     bindings: list[ClientPolicyBinding],
     max_cache_entries: int = DEFAULT_MAX_CACHE_ENTRIES,
     local_dns_records: list[tuple] | None = None,
     analytics_log_address: str | None = ANALYTICS_PROTOBUF_LOG_ADDRESS,
+    dot: DotConfig | None = None,
 ) -> str:
     """Deterministic (§2H requires reproducible behavior regardless of
     query order): bindings are processed most-specific-network-first
@@ -187,6 +223,9 @@ def compile_multi_policy_dnsdist_config(
         f'setLocal("{listen_address}")',
         "",
     ]
+
+    if dot is not None and dot.enabled:
+        lines += _dot_bind_lines(listen_address, dot)
 
     if analytics_log_address:
         # Real query-log/analytics producer: logs the completed

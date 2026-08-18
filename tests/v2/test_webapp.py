@@ -304,6 +304,88 @@ class TestPolicyApiReachesRuntime:
         assert r.status_code == 401
 
 
+class TestDnsTransports:
+    # Real defect this closes (docs/v2/encrypted-transport-parity-gap.md):
+    # DoT was entirely absent from V2's real config generation.
+
+    def test_get_defaults_disabled(self, app_client):
+        webapp, client = app_client
+        _setup_and_login(webapp, client)
+        r = client.get("/api/dns-transports")
+        assert r.status_code == 200, r.text
+        assert r.json()["dot_enabled"] is False
+        assert r.json()["dot_port"] == 853
+
+    def test_enabling_without_cert_provisioned_does_not_emit_a_listener(self, app_client):
+        # A fresh install before ensure-tls-cert has ever run must not
+        # crash or emit a listener pointing at cert files that don't
+        # exist -- fails safe to "no DoT listener yet," not a broken
+        # compiled config.
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        assert not webapp.ACTIVE_CERT_PATH.exists()
+        r = client.put("/api/dns-transports", json={"dot_enabled": True, "dot_port": 8853}, headers={"X-CSRF-Token": csrf})
+        assert r.status_code == 200, r.text
+        conf_text = webapp.COMPILED_DNSDIST_CONF.read_text()
+        assert "addTLSLocal" not in conf_text
+
+    def test_enabling_with_cert_provisioned_emits_a_real_dot_listener(self, app_client, tmp_path):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+
+        import subprocess
+
+        webapp.ACTIVE_CERT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [
+                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                "-keyout", str(webapp.ACTIVE_KEY_PATH), "-out", str(webapp.ACTIVE_CERT_PATH),
+                "-days", "1", "-subj", "/CN=test",
+            ],
+            check=True, capture_output=True,
+        )
+
+        r = client.put("/api/dns-transports", json={"dot_enabled": True, "dot_port": 8853}, headers={"X-CSRF-Token": csrf})
+        assert r.status_code == 200, r.text
+        assert r.json()["runtime"]["promoted"] is True
+        conf_text = webapp.COMPILED_DNSDIST_CONF.read_text()
+        assert 'addTLSLocal("0.0.0.0:8853"' in conf_text
+
+        r2 = client.get("/api/dns-transports")
+        assert r2.json()["dot_enabled"] is True
+        assert r2.json()["dot_port"] == 8853
+        assert r2.json()["dot_cert_provisioned"] is True
+
+    def test_disabling_removes_the_listener_from_the_next_compile(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+
+        import subprocess
+
+        webapp.ACTIVE_CERT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [
+                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                "-keyout", str(webapp.ACTIVE_KEY_PATH), "-out", str(webapp.ACTIVE_CERT_PATH),
+                "-days", "1", "-subj", "/CN=test",
+            ],
+            check=True, capture_output=True,
+        )
+        client.put("/api/dns-transports", json={"dot_enabled": True, "dot_port": 8853}, headers={"X-CSRF-Token": csrf})
+        assert "addTLSLocal" in webapp.COMPILED_DNSDIST_CONF.read_text()
+
+        r = client.put("/api/dns-transports", json={"dot_enabled": False, "dot_port": 8853}, headers={"X-CSRF-Token": csrf})
+        assert r.status_code == 200, r.text
+        assert "addTLSLocal" not in webapp.COMPILED_DNSDIST_CONF.read_text()
+
+    def test_requires_auth(self, app_client):
+        webapp, client = app_client
+        r = client.get("/api/dns-transports")
+        assert r.status_code == 401
+        r2 = client.put("/api/dns-transports", json={"dot_enabled": True, "dot_port": 853})
+        assert r2.status_code == 401
+
+
 class TestReplicationPeerCertEnrollment:
     """Real replication peer-enrollment endpoint (previously missing
     entirely -- see replication_v2.REPLICATION_CA_KEY_SECRET_ID's and

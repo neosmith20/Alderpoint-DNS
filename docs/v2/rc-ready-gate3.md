@@ -1,32 +1,45 @@
 # Alderpoint DNS V2 -- private RC ready for Dex Gate #3 review
 
-Artifact: `alderpointdns-v2_2.0.0~rc19-1_all.deb`
-(sha256 `aa4307b053b6b05703343df5956d760c5f50e9f97d809e597d8fc76ed3d62241`),
+Artifact: `alderpointdns-v2_2.0.0~rc20-1_all.deb`
+(sha256 `5e891e50b7357061c67881559a7848bddd1e7586a854eb7be6082046d9f502d8`),
 branch `v2/architecture-storage-foundation`, still fully private
 (no push/tag/publish to any remote; `origin/main` -- the public V1
 line -- untouched throughout).
 
-## ⚠ Most significant finding this continuation: confirmed mandatory-parity gap, not fixed
+## ⚠ Most significant finding this continuation: confirmed mandatory-parity gap -- DoT now closed, 4 remain
 
 **`docs/v2/encrypted-transport-parity-gap.md`** -- DoH/DoT/DoQ/DoH3/
 DNSCrypt (all explicitly **MANDATORY V2** rows in the parity matrix)
-are confirmed **entirely absent** from V2's real config generation:
+were confirmed **entirely absent** from V2's real config generation:
 exhaustive grep of both `app/v2/dnsdist_gen.py` and `app/v2/
 dnsdist_policy_runtime.py` (what every live installed package
-actually runs) finds no encrypted-listener directive at all -- every
-real compiled config inspected across this entire session (RC1-RC19)
-only ever binds plain `setLocal("0.0.0.0:53")`. V1 has real, working
-implementations of all five; the installed dnsdist 2.1.1 binary
-supports all five (confirmed live via `dnsdist --version`). This is a
-genuine feature regression against an explicit release-gate criterion,
-larger in scope than any other finding this session -- deliberately
-**not** implemented in this pass (it is new feature surface requiring
-real design decisions this session has no grounding for, not a
-small fix to existing machinery like everything else below) and is
-surfaced here explicitly rather than buried or rushed. See the doc for
-the full recommendation.
+actually runs) found no encrypted-listener directive at all -- every
+real compiled config inspected across RC1-RC19 only ever bound plain
+`setLocal("0.0.0.0:53")`. V1 has real, working implementations of all
+five; the installed dnsdist 2.1.1 binary supports all five (confirmed
+live via `dnsdist --version`).
 
-## What RC19 fixes over RC18 (roadmap continuation, "keep going")
+**Update -- `docs/v2/dot-transport-implemented.md`**: DoT (the
+lowest-risk of the five, needing no new key material or HTTP/QUIC
+protocol surface) is now implemented, admin-toggleable
+(`GET`/`PUT /api/dns-transports`), and live-verified on RC20
+(`docs/v2/package-baseline-rc20.md`) with a real `kdig +tls` client
+completing a genuine TLS 1.3 session and real DNS resolution on port
+853. **DoH, DoQ, DoH3, and DNSCrypt remain unimplemented** --
+deliberately not attempted this pass (each needs real, protocol-
+specific design work this session has no grounding for: HTTP path
+config, QUIC tuning, or an entirely different cert/key/provider-identity
+model for DNSCrypt) and is surfaced here explicitly rather than
+buried or rushed. See the docs for the full remaining scope and
+recommendation.
+
+## What RC20 adds over RC19 (roadmap continuation, "keep going")
+
+1. **`docs/v2/dot-transport-implemented.md`**: real DNS-over-TLS
+   implementation (see the parity-gap section above for full detail),
+   live-verified on RC20 with a real `kdig +tls` client.
+
+## What RC19 fixes over RC18
 
 1. **`docs/v2/client-name-not-populated-fix.md`**: `client_name` (a
    real projectable/sortable query-log column) was also always blank
@@ -177,23 +190,26 @@ full-stack validation (found and fixed a real defect), Tier B
 re-check, failure-domain re-check, adversarial security re-sweep of
 the replication/analytics-receiver attack surfaces (message replay
 window, dedupe, size bounds, cert pinning, bounded protobuf parsing),
-IPv6 client-decode verification, and six further real analytics-
-accuracy defects found and fixed (packet-cache-hit mislabeling,
-prewarm-traffic pollution, blank cache_profile_id, blocked queries
-never marked as blocked, blank upstream_profile_id, blank
-client_name), CI determinism (online + offline), and this RC scrub.
-Full suite: 2077 passed (`tests/`), 885 passed (`tests/v2/`), no
-flakes on the final pass; prior remaining failures were individually
-confirmed as pre-existing concurrent-load flakes that pass in
-isolation, not regressions.
+IPv6 client-decode verification, six further real analytics-accuracy
+defects found and fixed (packet-cache-hit mislabeling, prewarm-traffic
+pollution, blank cache_profile_id, blocked queries never marked as
+blocked, blank upstream_profile_id, blank client_name), a real DoT
+implementation closing part of the confirmed mandatory-parity gap, CI
+determinism (online + offline), and this RC scrub. Full suite: 2085
+passed (`tests/`), 893 passed (`tests/v2/`), no flakes on the final
+pass; prior remaining failures were individually confirmed as
+pre-existing concurrent-load flakes that pass in isolation, not
+regressions.
 
-**Readiness caveat:** the private candidate (RC19) is ready for Dex
+**Readiness caveat:** the private candidate (RC20) is ready for Dex
 Gate #3 review on everything this continuation actually touched --
-but review should explicitly weigh the encrypted-transport parity gap
-above before treating V2 as feature-complete against its own mandatory
-gate criteria. This continuation's scope was verification/hardening of
-existing systems, not building the missing DoH/DoT/DoQ/DoH3/DNSCrypt
-feature surface; that gap predates this session and was not
-introduced by it, but it is real and confirmed, and Gate #3 is the
-right point to decide whether it blocks further progress or is
-tracked as follow-up work.
+but review should explicitly weigh the remaining encrypted-transport
+parity gap (DoH/DoQ/DoH3/DNSCrypt -- DoT is now closed) before
+treating V2 as feature-complete against its own mandatory gate
+criteria. This continuation's scope was primarily verification/
+hardening of existing systems; that gap predates this session and was
+not introduced by it. DoT was implemented as a real, scoped, low-risk
+step toward closing it, but the remaining four protocols still need a
+dedicated design pass before implementation, and Gate #3 is the right
+point to decide whether they block further progress or are tracked as
+follow-up work.
