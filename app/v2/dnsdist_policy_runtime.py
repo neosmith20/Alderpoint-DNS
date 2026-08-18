@@ -194,6 +194,35 @@ def _dot_bind_lines(listen_address: str, dot: DotConfig) -> list[str]:
     ]
 
 
+@dataclass(frozen=True)
+class DohConfig:
+    """DNS-over-HTTPS listener configuration -- same rationale/cert-reuse
+    approach as ``DotConfig`` above, plus the real RFC 8484 default path
+    (``/dns-query``), matching V1's own real, production-proven
+    ``packaging/dnsdist.conf`` default verbatim."""
+
+    enabled: bool
+    port: int
+    cert_path: str
+    key_path: str
+    path: str = "/dns-query"
+    min_tls_version: str = "tls1.2"
+    ciphers: str = "HIGH:!aNULL:!MD5:!RC4"
+
+
+def _doh_bind_lines(listen_address: str, doh: DohConfig) -> list[str]:
+    host = listen_address.rsplit(":", 1)[0]
+    return [
+        f'addDOHLocal("{host}:{doh.port}", {{{_lua_string(doh.cert_path)}}}, {{{_lua_string(doh.key_path)}}}, '
+        f'{{{_lua_string(doh.path)}}}, {{',
+        "  reusePort=true,",
+        f'  minTLSVersion={_lua_string(doh.min_tls_version)},',
+        f'  ciphers={_lua_string(doh.ciphers)}',
+        "})",
+        "",
+    ]
+
+
 def compile_multi_policy_dnsdist_config(
     listen_address: str,
     bindings: list[ClientPolicyBinding],
@@ -201,6 +230,7 @@ def compile_multi_policy_dnsdist_config(
     local_dns_records: list[tuple] | None = None,
     analytics_log_address: str | None = ANALYTICS_PROTOBUF_LOG_ADDRESS,
     dot: DotConfig | None = None,
+    doh: DohConfig | None = None,
 ) -> str:
     """Deterministic (§2H requires reproducible behavior regardless of
     query order): bindings are processed most-specific-network-first
@@ -226,6 +256,9 @@ def compile_multi_policy_dnsdist_config(
 
     if dot is not None and dot.enabled:
         lines += _dot_bind_lines(listen_address, dot)
+
+    if doh is not None and doh.enabled:
+        lines += _doh_bind_lines(listen_address, doh)
 
     if analytics_log_address:
         # Real query-log/analytics producer: logs the completed

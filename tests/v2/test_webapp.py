@@ -354,7 +354,7 @@ class TestDnsTransports:
         r2 = client.get("/api/dns-transports")
         assert r2.json()["dot_enabled"] is True
         assert r2.json()["dot_port"] == 8853
-        assert r2.json()["dot_cert_provisioned"] is True
+        assert r2.json()["cert_provisioned"] is True
 
     def test_disabling_removes_the_listener_from_the_next_compile(self, app_client):
         webapp, client = app_client
@@ -384,6 +384,67 @@ class TestDnsTransports:
         assert r.status_code == 401
         r2 = client.put("/api/dns-transports", json={"dot_enabled": True, "dot_port": 853})
         assert r2.status_code == 401
+
+    def test_enabling_doh_with_cert_provisioned_emits_a_real_doh_listener(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+
+        import subprocess
+
+        webapp.ACTIVE_CERT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [
+                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                "-keyout", str(webapp.ACTIVE_KEY_PATH), "-out", str(webapp.ACTIVE_CERT_PATH),
+                "-days", "1", "-subj", "/CN=test",
+            ],
+            check=True, capture_output=True,
+        )
+
+        r = client.put(
+            "/api/dns-transports",
+            json={"doh_enabled": True, "doh_port": 8443, "doh_path": "/dns-query"},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert r.status_code == 200, r.text
+        conf_text = webapp.COMPILED_DNSDIST_CONF.read_text()
+        assert 'addDOHLocal("0.0.0.0:8443"' in conf_text
+        assert '"/dns-query"' in conf_text
+
+    def test_doh_and_dot_both_enabled_simultaneously(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+
+        import subprocess
+
+        webapp.ACTIVE_CERT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [
+                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                "-keyout", str(webapp.ACTIVE_KEY_PATH), "-out", str(webapp.ACTIVE_CERT_PATH),
+                "-days", "1", "-subj", "/CN=test",
+            ],
+            check=True, capture_output=True,
+        )
+
+        r = client.put(
+            "/api/dns-transports",
+            json={"dot_enabled": True, "dot_port": 8853, "doh_enabled": True, "doh_port": 8443},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert r.status_code == 200, r.text
+        conf_text = webapp.COMPILED_DNSDIST_CONF.read_text()
+        assert 'addTLSLocal("0.0.0.0:8853"' in conf_text
+        assert 'addDOHLocal("0.0.0.0:8443"' in conf_text
+
+    def test_invalid_doh_path_rejected(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        r = client.put(
+            "/api/dns-transports", json={"doh_enabled": True, "doh_path": "no-leading-slash"},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert r.status_code == 422
 
 
 class TestReplicationPeerCertEnrollment:

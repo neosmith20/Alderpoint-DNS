@@ -177,6 +177,55 @@ class TestServiceBlocking:
             store.create_service_ruleset(conn, "r1", ["ghost-service"])
 
 
+class TestDnsTransportSettings:
+    def test_defaults_disabled(self, conn):
+        settings = store.load_dns_transport_settings(conn)
+        assert settings.dot_enabled is False
+        assert settings.dot_port == 853
+        assert settings.doh_enabled is False
+        assert settings.doh_port == 443
+        assert settings.doh_path == "/dns-query"
+
+    def test_round_trip(self, conn):
+        store.save_dns_transport_settings(
+            conn,
+            store.DnsTransportSettings(
+                dot_enabled=True, dot_port=8853, doh_enabled=True, doh_port=8443, doh_path="/custom-path"
+            ),
+        )
+        conn.commit()
+        settings = store.load_dns_transport_settings(conn)
+        assert settings.dot_enabled is True
+        assert settings.dot_port == 8853
+        assert settings.doh_enabled is True
+        assert settings.doh_port == 8443
+        assert settings.doh_path == "/custom-path"
+
+    def test_invalid_port_rejected(self, conn):
+        with pytest.raises(store.PolicyStoreError):
+            store.save_dns_transport_settings(conn, store.DnsTransportSettings(dot_port=0))
+        with pytest.raises(store.PolicyStoreError):
+            store.save_dns_transport_settings(conn, store.DnsTransportSettings(doh_port=99999))
+
+    def test_invalid_doh_path_rejected(self, conn):
+        with pytest.raises(store.PolicyStoreError):
+            store.save_dns_transport_settings(conn, store.DnsTransportSettings(doh_path="no-leading-slash"))
+
+    def test_ensure_schema_is_idempotent_and_incremental(self, tmp_path):
+        # Real regression coverage: re-running ensure_schema against an
+        # already-migrated DB (simulating a package upgrade) must not
+        # fail and must leave a functioning table -- the incremental
+        # ALTER TABLE ADD COLUMN path (doh_enabled/doh_port/doh_path)
+        # must be idempotent too, not just the CREATE TABLE.
+        path = tmp_path / "control.db"
+        store.ensure_schema(path)
+        store.ensure_schema(path)
+        store.ensure_schema(path)
+        with control_db.connect(path) as conn:
+            settings = store.load_dns_transport_settings(conn)
+            assert settings.doh_port == 443
+
+
 class TestRoundTrip:
     def test_control_db_backed_compile_matches_in_memory_fixture(self, conn):
         store.save_policy_layer(conn, "global", "singleton", PolicyLayer(safesearch_mode="off"))

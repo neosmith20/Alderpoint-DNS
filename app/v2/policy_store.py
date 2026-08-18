@@ -237,6 +237,19 @@ def _ensure_dns_transport_settings_table(path: str | Path) -> None:
             )
             """
         )
+        # Incremental columns added after the table's first release
+        # (DoH support) -- ALTER TABLE ADD COLUMN, not a CREATE TABLE
+        # change, since CREATE TABLE IF NOT EXISTS is a no-op against a
+        # table an earlier package version already created (same
+        # incremental-migration need app/v2/replication_v2.py's
+        # ensure_schema documents for the exact same reason).
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(dns_transport_settings)").fetchall()}
+        if "doh_enabled" not in cols:
+            conn.execute("ALTER TABLE dns_transport_settings ADD COLUMN doh_enabled INTEGER NOT NULL DEFAULT 0")
+        if "doh_port" not in cols:
+            conn.execute("ALTER TABLE dns_transport_settings ADD COLUMN doh_port INTEGER NOT NULL DEFAULT 443")
+        if "doh_path" not in cols:
+            conn.execute("ALTER TABLE dns_transport_settings ADD COLUMN doh_path TEXT NOT NULL DEFAULT '/dns-query'")
         conn.commit()
 
 
@@ -244,28 +257,46 @@ def _ensure_dns_transport_settings_table(path: str | Path) -> None:
 class DnsTransportSettings:
     dot_enabled: bool = False
     dot_port: int = 853
+    doh_enabled: bool = False
+    doh_port: int = 443
+    doh_path: str = "/dns-query"
 
 
 def load_dns_transport_settings(conn: sqlite3.Connection) -> DnsTransportSettings:
-    row = conn.execute("SELECT dot_enabled, dot_port FROM dns_transport_settings WHERE id=1").fetchone()
+    row = conn.execute(
+        "SELECT dot_enabled, dot_port, doh_enabled, doh_port, doh_path FROM dns_transport_settings WHERE id=1"
+    ).fetchone()
     if row is None:
         return DnsTransportSettings()
-    return DnsTransportSettings(dot_enabled=bool(row[0]), dot_port=row[1])
+    return DnsTransportSettings(
+        dot_enabled=bool(row[0]), dot_port=row[1], doh_enabled=bool(row[2]), doh_port=row[3], doh_path=row[4]
+    )
 
 
 def save_dns_transport_settings(conn: sqlite3.Connection, settings: DnsTransportSettings) -> None:
     if not (1 <= settings.dot_port <= 65535):
         raise PolicyStoreError(f"invalid dot_port: {settings.dot_port!r}")
+    if not (1 <= settings.doh_port <= 65535):
+        raise PolicyStoreError(f"invalid doh_port: {settings.doh_port!r}")
+    if not settings.doh_path.startswith("/"):
+        raise PolicyStoreError(f"invalid doh_path: {settings.doh_path!r}")
     conn.execute(
         """
-        INSERT INTO dns_transport_settings (id, dot_enabled, dot_port, updated_at)
-        VALUES (1, ?, ?, ?)
+        INSERT INTO dns_transport_settings (id, dot_enabled, dot_port, doh_enabled, doh_port, doh_path, updated_at)
+        VALUES (1, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             dot_enabled = excluded.dot_enabled,
             dot_port = excluded.dot_port,
+            doh_enabled = excluded.doh_enabled,
+            doh_port = excluded.doh_port,
+            doh_path = excluded.doh_path,
             updated_at = excluded.updated_at
         """,
-        (int(settings.dot_enabled), settings.dot_port, _now()),
+        (
+            int(settings.dot_enabled), settings.dot_port,
+            int(settings.doh_enabled), settings.doh_port, settings.doh_path,
+            _now(),
+        ),
     )
 
 

@@ -556,26 +556,36 @@ def _configured_listen_address() -> str:
     return f"{listener.address}:{listener.port}"
 
 
-def _dot_config(conn) -> Optional[runtime_compile.DotConfig]:
-    """Builds the real DoT listener config for this recompile from the
-    real admin-configured setting (see ``/api/dns-transports``), reusing
-    the appliance's existing management TLS cert/key -- see
+def _encrypted_transport_configs(conn) -> tuple[Optional[runtime_compile.DotConfig], Optional[runtime_compile.DohConfig]]:
+    """Builds the real DoT/DoH listener configs for this recompile from
+    the real admin-configured settings (see ``/api/dns-transports``),
+    reusing the appliance's existing management TLS cert/key -- see
     docs/v2/encrypted-transport-parity-gap.md for why this exists and
-    dnsdist_policy_runtime.DotConfig's own docstring for why no separate
-    key material is provisioned. Returns ``None`` (no DoT listener
-    emitted at all) when disabled or when the cert/key aren't
+    dnsdist_policy_runtime.DotConfig/DohConfig's own docstrings for why
+    no separate key material is provisioned. Each returns ``None`` (no
+    listener emitted at all) when disabled or when the cert/key aren't
     provisioned yet (a fresh install before ``ensure-tls-cert`` has ever
     run) -- never raises here; a missing cert must not break every other
     policy mutation.
     """
     settings = store.load_dns_transport_settings(conn)
-    if not settings.dot_enabled:
-        return None
-    if not ACTIVE_CERT_PATH.exists() or not ACTIVE_KEY_PATH.exists():
-        return None
-    return runtime_compile.DotConfig(
-        enabled=True, port=settings.dot_port, cert_path=str(ACTIVE_CERT_PATH), key_path=str(ACTIVE_KEY_PATH)
+    cert_ready = ACTIVE_CERT_PATH.exists() and ACTIVE_KEY_PATH.exists()
+    dot = (
+        runtime_compile.DotConfig(
+            enabled=True, port=settings.dot_port, cert_path=str(ACTIVE_CERT_PATH), key_path=str(ACTIVE_KEY_PATH)
+        )
+        if settings.dot_enabled and cert_ready
+        else None
     )
+    doh = (
+        runtime_compile.DohConfig(
+            enabled=True, port=settings.doh_port, cert_path=str(ACTIVE_CERT_PATH), key_path=str(ACTIVE_KEY_PATH),
+            path=settings.doh_path,
+        )
+        if settings.doh_enabled and cert_ready
+        else None
+    )
+    return dot, doh
 
 
 def _mutate_and_promote(mutate_fn) -> runtime_compile.RuntimeCompileResult:
@@ -592,9 +602,10 @@ def _mutate_and_promote(mutate_fn) -> runtime_compile.RuntimeCompileResult:
         conn.execute("BEGIN IMMEDIATE")
         try:
             mutate_fn(conn)
+            dot, doh = _encrypted_transport_configs(conn)
             result = runtime_compile.recompile_and_promote(
                 conn, STAGING_DIR, COMPILED_DNSDIST_CONF,
-                listen_address=_configured_listen_address(), dot=_dot_config(conn),
+                listen_address=_configured_listen_address(), dot=dot, doh=doh,
             )
         except BaseException:
             conn.execute("ROLLBACK")
@@ -672,6 +683,9 @@ def put_global_policy(req: PolicyLayerUpdate, admin=Depends(current_admin), x_cs
 class DnsTransportSettingsUpdate(BaseModel):
     dot_enabled: bool = False
     dot_port: int = Field(default=853, ge=1, le=65535)
+    doh_enabled: bool = False
+    doh_port: int = Field(default=443, ge=1, le=65535)
+    doh_path: str = Field(default="/dns-query", min_length=1, max_length=255, pattern=r"^/.*$")
 
 
 @app.get("/api/dns-transports")
@@ -681,7 +695,10 @@ def get_dns_transports(admin=Depends(current_admin)):
     return {
         "dot_enabled": settings.dot_enabled,
         "dot_port": settings.dot_port,
-        "dot_cert_provisioned": ACTIVE_CERT_PATH.exists() and ACTIVE_KEY_PATH.exists(),
+        "doh_enabled": settings.doh_enabled,
+        "doh_port": settings.doh_port,
+        "doh_path": settings.doh_path,
+        "cert_provisioned": ACTIVE_CERT_PATH.exists() and ACTIVE_KEY_PATH.exists(),
     }
 
 
@@ -690,7 +707,10 @@ def put_dns_transports(
     req: DnsTransportSettingsUpdate, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader
 ):
     check_csrf(admin, x_csrf_token)
-    settings = store.DnsTransportSettings(dot_enabled=req.dot_enabled, dot_port=req.dot_port)
+    settings = store.DnsTransportSettings(
+        dot_enabled=req.dot_enabled, dot_port=req.dot_port,
+        doh_enabled=req.doh_enabled, doh_port=req.doh_port, doh_path=req.doh_path,
+    )
     result = _mutate_and_promote(lambda conn: store.save_dns_transport_settings(conn, settings))
     return {"status": "updated", "runtime": {"promoted": result.promoted, "binding_count": result.binding_count}}
 

@@ -39,6 +39,7 @@ from app.v2.blocking_response import BlockingResponse
 from app.v2.dnsdist_gen import dnsdist_check_config_validator
 from app.v2.dnsdist_policy_runtime import (
     ClientPolicyBinding,
+    DohConfig,
     DotConfig,
     PolicyRuntimeError,
     compile_multi_policy_dnsdist_config,
@@ -176,6 +177,7 @@ def recompile_and_promote(
     # listener, same as before this change; wiring every caller is a
     # separate, incremental step from adding the capability itself.
     dot: DotConfig | None = None,
+    doh: DohConfig | None = None,
 ) -> RuntimeCompileResult:
     """The real, single code path from "control.db changed" to "compiled
     dnsdist config on disk validated by the real binary." Raises on any
@@ -193,7 +195,7 @@ def recompile_and_promote(
         # whether to surface it rather than it vanishing with no signal.
         ptr_records_skipped = sum(1 for r in local_dns_records if r[1] == "PTR")
         config_text = compile_multi_policy_dnsdist_config(
-            listen_address, bindings, local_dns_records=local_dns_records, dot=dot
+            listen_address, bindings, local_dns_records=local_dns_records, dot=dot, doh=doh
         )
     except PolicyRuntimeError as exc:
         raise RuntimeCompileError(f"policy runtime compile failed: {exc}") from exc
