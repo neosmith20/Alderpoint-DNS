@@ -578,20 +578,26 @@ def cmd_analytics_worker(args: argparse.Namespace) -> int:
         # testing: this service's systemd unit (like every other V2
         # worker) is deliberately hardened with ProtectSystem=strict and
         # a narrow ReadWritePaths= that never included control.db --
-        # this worker never wrote to it before this session's per-client
+        # this worker never touched it before this session's per-client
         # policy-exclusion feature. control_db.connect()'s unconditional
         # `PRAGMA journal_mode = WAL` needs to create/write real -wal/
-        # -shm sibling files in control.db's own directory, which
-        # ProtectSystem=strict blocks outside ReadWritePaths --
+        # -shm sibling files in control.db's own directory --
+        # ProtectSystem=strict blocked that outside ReadWritePaths,
         # "unable to open database file" every single drain tick.
-        # Fixed the RIGHT way (not by widening this service's write
-        # access to match the web/discovery services, which genuinely
-        # do write control.db) -- this worker only ever reads policy, so
-        # a real SQLite read-only URI connection avoids the WAL-write
-        # requirement entirely; ProtectSystem=strict permits reads
-        # anywhere, only writes are confined to ReadWritePaths. A
-        # concurrent WAL-mode writer (the web service) does not block
-        # real-only readers -- that's WAL's whole purpose.
+        # First attempt at a fix used a real SQLite read-only URI
+        # connection (mode=ro) hoping to avoid needing write access at
+        # all -- confirmed live this does NOT work: a genuine SQLite WAL
+        # constraint means even a read-only connection to a database
+        # another process holds open in WAL mode still needs write
+        # access to that database's own -shm locking file, so mode=ro
+        # alone still failed identically. Real fix: the packaged systemd
+        # unit's ReadWritePaths now covers the whole state directory,
+        # matching the web/discovery services (which genuinely write
+        # control.db) -- this worker still only ever reads it, connected
+        # read-only at the SQLite level below as real defense in depth
+        # (this process cannot execute a write against control.db's
+        # actual tables even though the OS layer now permits the -shm
+        # write SQLite's WAL locking requires).
         conn = None
         if CONTROL_DB.exists():
             try:

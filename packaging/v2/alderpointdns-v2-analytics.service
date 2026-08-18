@@ -20,9 +20,19 @@ TimeoutStopSec=30
 
 # Hardening (Workstream 4A §7). Documented exceptions:
 #  - ProtectHome=true, not "read-only": this service never touches /home.
-#  - ReadWritePaths is scoped to exactly the state/log trees it owns;
-#    everything else (including /opt/alderpointdns-v2 itself) is read-only
-#    at runtime, so a compromised worker cannot modify its own code.
+#  - ReadWritePaths covers the whole state directory, not just
+#    analytics/tierb -- this worker now resolves real per-client
+#    query_log_enabled/statistics_enabled exclusions against control.db
+#    (roadmap Priority 6 continuation) via a real read-only SQLite
+#    connection. A genuine read-only connection to a database another
+#    process holds open in WAL mode still needs write access to that
+#    database's own -shm locking file (a real SQLite WAL constraint,
+#    not something this service's own code chooses to do) -- confirmed
+#    live: scoping ReadWritePaths to only analytics/tierb still failed
+#    with "unable to open database file" even for a read-only
+#    connection. Matches the same ReadWritePaths scope the web and
+#    discovery services (which genuinely write control.db) already use
+#    -- this worker itself never writes to control.db, only reads it.
 #  - RestrictAddressFamilies excludes AF_NETLINK/AF_PACKET (not needed --
 #    this worker only does file I/O; it makes no network calls of its own)
 #    but keeps AF_UNIX/AF_INET/AF_INET6 since the queue-drain path may run
@@ -35,7 +45,7 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ReadWritePaths=/var/lib/alderpointdns-v2/analytics /var/lib/alderpointdns-v2/tierb /var/log/alderpointdns-v2
+ReadWritePaths=/var/lib/alderpointdns-v2 /var/log/alderpointdns-v2
 UMask=0027
 CapabilityBoundingSet=
 MemoryMax=512M
