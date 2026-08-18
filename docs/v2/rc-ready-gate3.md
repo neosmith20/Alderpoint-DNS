@@ -1,12 +1,38 @@
 # Alderpoint DNS V2 -- private RC ready for Dex Gate #3 review
 
-Artifact: `alderpointdns-v2_2.0.0~rc24-1_all.deb`
-(sha256 `e2c578f19508dd7093e0a89f622d77d328bfa0d22326f4a055eb7eeb33b256f8`),
+Artifact: `alderpointdns-v2_2.0.0~rc25-1_all.deb`
+(sha256 `01ac3cf18184be38689cb9a85a052b8707b1b6b5992e0ebd936f75b39df09d1d`),
 branch `v2/architecture-storage-foundation`, still fully private
 (no push/tag/publish to any remote; `origin/main` -- the public V1
 line -- untouched throughout).
 
-## Update (RC24): DoQ and DoH3 are now genuinely functional end-to-end -- only DNSCrypt remains unimplemented
+## Update (RC25): DNSCrypt is now genuinely functional end-to-end -- the confirmed mandatory encrypted-transport parity gap is FULLY CLOSED
+
+**`docs/v2/dnscrypt-transport-implemented.md`** and
+**`docs/v2/package-baseline-rc25.md`**: real DNSCrypt provider-identity
+(Ed25519)/resolver-certificate (X25519) provisioning, always driven
+through the real installed dnsdist binary's own console functions
+(never a hand-rolled binary format), via a disposable, loopback-only
+scratch dnsdist instance rather than the live production one. Along the
+way, independently reconfirmed a real dnsdist behavior V1's own
+`app/encryption.py` had already documented (one-shot `-e` invocation
+prints a fingerprint but does not persist key files) and found the real
+root cause and a reliable workaround (a genuine interactive console
+session over stdin does persist them) -- see that doc for the full
+finding. Real, live, end-to-end proof on a genuinely fresh Debian 13
+target, stock (non-QUIC) `dnsdist 1.9.16`: real provisioning via
+`POST /api/dns-transports/dnscrypt/rotate`, a real `addDNSCryptBind`
+listener, and a real `dnscrypt-proxy` client (the reference DNSCrypt
+implementation) completing a genuine encrypted handshake and DNS
+resolution against the packaged runtime.
+
+**This closes the confirmed mandatory encrypted-transport parity gap in
+full: DoT, DoH, DoQ, DoH3, and DNSCrypt are all real, working, and
+live-verified end-to-end** -- see
+`docs/v2/encrypted-transport-parity-gap.md` for the complete closure
+record.
+
+## Update (RC24): DoQ and DoH3 are now genuinely functional end-to-end
 
 **`docs/v2/doh3-transport-implemented.md`** and
 **`docs/v2/package-baseline-rc24.md`**: DoH3 config generation
@@ -27,11 +53,8 @@ hardcoded runtime topology assumptions) plus one real restart/verify
 race condition -- all with regression coverage, all re-verified
 against a fresh clean-install target after each fix.
 
-**DNSCrypt is now the only unimplemented mandatory-parity row.** Its
-own cert/key format and provider-identity model has no overlap with
-the TLS/QUIC-based approach DoT/DoH/DoQ/DoH3 all share, and remains
-the next item for this workstream -- see
-`docs/v2/encrypted-transport-parity-gap.md`.
+**DNSCrypt was the only remaining unimplemented mandatory-parity row at
+this point -- since closed, see the RC25 update above.**
 
 ## Prior finding (RC23, now superseded above): DoT + DoH closed, DoQ implemented but real target build lacked QUIC
 
@@ -257,42 +280,46 @@ scope and recommendation.
   with dummy keys, verified by inspection), 25 commits ahead of local
   `main` / 325 ahead of `origin/main`, nothing pushed.
 
-## Conclusion
+## Conclusion (updated through RC25)
 
-All roadmap items from this continuation's open list are addressed:
-package baseline, full hardware/performance matrix, Argon2id
-full-stack validation (found and fixed a real defect), Tier B
-re-check, failure-domain re-check, adversarial security re-sweep of
-the replication/analytics-receiver attack surfaces (message replay
-window, dedupe, size bounds, cert pinning, bounded protobuf parsing),
-IPv6 client-decode verification, six further real analytics-accuracy
-defects found and fixed (packet-cache-hit mislabeling, prewarm-traffic
-pollution, blank cache_profile_id, blocked queries never marked as
-blocked, blank upstream_profile_id, blank client_name), real DoT, DoH,
-and DoQ implementations addressing three of the five confirmed
-mandatory-parity gaps (plus a real live-reproduced port-conflict
-availability defect found and fixed along the way, and an honest
-environment-limitation correction on DoQ's real functional status), CI
-determinism (online + offline), and this RC scrub. Full suite: 2106
-passed (`tests/`), 914 passed (`tests/v2/`), no flakes on the final
-pass; prior remaining failures were individually confirmed as
-pre-existing concurrent-load flakes that pass in isolation, not
-regressions.
+The confirmed mandatory encrypted-transport parity gap that RC13-23
+identified and progressively closed is now **fully resolved**: DoT,
+DoH, DoQ, DoH3, and DNSCrypt are all real, working implementations,
+each independently live-verified end-to-end against a genuinely fresh
+clean-install target with a real client of that exact protocol (`kdig
++tls`/`+https`/`+quic`, `curl --http3`, `dnscrypt-proxy`) through the
+packaged runtime with normal Alderpoint policy/routing active -- not
+merely "config generates and validates." QUIC-dependent protocols
+(DoQ/DoH3) required resolving a real environment constraint (the stock
+Debian archive dnsdist lacks QUIC), done by reusing V1's existing,
+security-reviewed, opt-in `install-enhanced-dnsdist` mechanism rather
+than changing the package's default dependency. DNSCrypt required its
+own from-scratch design (a distinct provider-identity/certificate
+model with no TLS overlap) and, along the way, independently
+reconfirmed and worked around a real dnsdist reliability issue V1 had
+already documented for one-shot key generation.
 
-**Readiness caveat:** the private candidate (RC23) is ready for Dex
-Gate #3 review on everything this continuation actually touched --
-but review should explicitly weigh the remaining encrypted-transport
-parity gap (DoH3/DNSCrypt genuinely unimplemented; DoQ implemented but
-non-functional on the real target dnsdist build, which lacks QUIC)
-before treating V2 as feature-complete against its own mandatory gate
-criteria. This continuation's scope was primarily verification/
-hardening of existing systems; that gap predates this session and was
-not introduced by it. DoT and DoH are real, working, low-risk closures
-of two of the five rows. DoQ's implementation is correct and safe but
-its real functional gap is an environment constraint (the target
-dnsdist build), not something further engineering in this codebase can
-resolve without changing which dnsdist build the package depends on --
-a decision with real tradeoffs (a third-party repo dependency instead
-of the stock Debian archive) that deserves explicit product input, not
-a unilateral change here. Gate #3 is the right point to decide how to
-proceed on all of this.
+Six real, live-reproduced defects were found and fixed across this
+encrypted-transport work specifically (beyond the earlier analytics-
+accuracy defects RC13-19 already closed): the RC21 DoT/DoH port-
+conflict availability incident, RC24's missing installer package
+dependencies, RC24's V1-hardcoded runtime topology in the reused
+installer, RC24's restart/verify race condition, and this pass's
+scratch-instance default-DNS-port collision -- all with regression
+coverage, all re-verified against a fresh clean-install target after
+each fix.
+
+Full `tests/v2/` suite as of RC25: 953 passed, 1 pre-existing
+concurrent-load mTLS-server flake (confirmed to pass in isolation, not
+a regression, not touched by this work).
+
+**Readiness assessment:** the private candidate (RC25) is ready for Dex
+Gate #3 review with the encrypted-transport mandatory-parity gate
+criterion now genuinely met in full, not partially. Remaining roadmap
+items not attempted this continuation (hardware/performance matrix
+re-verification, Argon2id full-stack re-validation under this exact
+build, Tier B re-check, failure-domain/chaos pass, a fresh adversarial
+security sweep specifically targeting the new DNSCrypt provisioning
+surface, CI determinism re-run, migration-lifecycle re-verification)
+should be explicitly scoped for the next session rather than assumed
+complete -- see the handoff report for the exact list.
