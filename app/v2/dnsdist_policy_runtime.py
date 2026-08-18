@@ -223,6 +223,58 @@ def _doh_bind_lines(listen_address: str, doh: DohConfig) -> list[str]:
     ]
 
 
+@dataclass(frozen=True)
+class DoqConfig:
+    """DNS-over-QUIC listener configuration -- same cert-reuse rationale
+    as DotConfig/DohConfig. Unlike ``addTLSLocal``/``addDOHLocal``,
+    dnsdist's real ``addDOQLocal`` takes plain cert/key path strings, not
+    single-element tables (verified against V1's own real, production-
+    proven ``packaging/dnsdist.conf`` syntax). ``congestion_control_algo``
+    matches V1's own real value verbatim (``cubic``)."""
+
+    enabled: bool
+    port: int
+    cert_path: str
+    key_path: str
+    congestion_control_algo: str = "cubic"
+
+
+# QUIC support (DoQ/DoH3) is a newer, optional dnsdist build feature --
+# not present in every distro's packaged dnsdist the way TLS/DoH are
+# (V1's own real, hands-on finding, documented in docs/dnsdist.md: the
+# stock Debian archive build lacks it entirely). Calling addDOQLocal/
+# addDOH3Local on a build without it either raises a Lua error the
+# generated config startup would otherwise crash on, or (older builds)
+# the function may not exist at all -- wrapped the same defensive way
+# V1's own packaging/dnsdist.conf already does (alderpointdnsSafeCapabilityCall),
+# ported verbatim rather than reinvented.
+_SAFE_CAPABILITY_CALL_HELPER = """\
+local function alderpointdnsv2SafeCapabilityCall(label, fn, ...)
+  if type(fn) ~= "function" then
+    print("Alderpoint DNS V2: " .. label .. " is not supported by this dnsdist build; skipping.")
+    return false
+  end
+  local ok, err = pcall(fn, ...)
+  if not ok then
+    print("Alderpoint DNS V2: " .. label .. " failed on this dnsdist build (" .. tostring(err) .. "); skipping.")
+    return false
+  end
+  return true
+end"""
+
+
+def _doq_bind_lines(listen_address: str, doq: DoqConfig) -> list[str]:
+    host = listen_address.rsplit(":", 1)[0]
+    return [
+        _SAFE_CAPABILITY_CALL_HELPER,
+        f'alderpointdnsv2SafeCapabilityCall("DoQ (addDOQLocal)", addDOQLocal, "{host}:{doq.port}", '
+        f'{_lua_string(doq.cert_path)}, {_lua_string(doq.key_path)}, {{',
+        f'  congestionControlAlgo={_lua_string(doq.congestion_control_algo)}',
+        "})",
+        "",
+    ]
+
+
 def compile_multi_policy_dnsdist_config(
     listen_address: str,
     bindings: list[ClientPolicyBinding],
@@ -231,6 +283,7 @@ def compile_multi_policy_dnsdist_config(
     analytics_log_address: str | None = ANALYTICS_PROTOBUF_LOG_ADDRESS,
     dot: DotConfig | None = None,
     doh: DohConfig | None = None,
+    doq: DoqConfig | None = None,
 ) -> str:
     """Deterministic (§2H requires reproducible behavior regardless of
     query order): bindings are processed most-specific-network-first
@@ -259,6 +312,9 @@ def compile_multi_policy_dnsdist_config(
 
     if doh is not None and doh.enabled:
         lines += _doh_bind_lines(listen_address, doh)
+
+    if doq is not None and doq.enabled:
+        lines += _doq_bind_lines(listen_address, doq)
 
     if analytics_log_address:
         # Real query-log/analytics producer: logs the completed

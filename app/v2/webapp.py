@@ -556,17 +556,20 @@ def _configured_listen_address() -> str:
     return f"{listener.address}:{listener.port}"
 
 
-def _encrypted_transport_configs(conn) -> tuple[Optional[runtime_compile.DotConfig], Optional[runtime_compile.DohConfig]]:
-    """Builds the real DoT/DoH listener configs for this recompile from
-    the real admin-configured settings (see ``/api/dns-transports``),
-    reusing the appliance's existing management TLS cert/key -- see
-    docs/v2/encrypted-transport-parity-gap.md for why this exists and
-    dnsdist_policy_runtime.DotConfig/DohConfig's own docstrings for why
-    no separate key material is provisioned. Each returns ``None`` (no
-    listener emitted at all) when disabled or when the cert/key aren't
-    provisioned yet (a fresh install before ``ensure-tls-cert`` has ever
-    run) -- never raises here; a missing cert must not break every other
-    policy mutation.
+def _encrypted_transport_configs(conn) -> tuple[
+    Optional[runtime_compile.DotConfig], Optional[runtime_compile.DohConfig], Optional[runtime_compile.DoqConfig]
+]:
+    """Builds the real DoT/DoH/DoQ listener configs for this recompile
+    from the real admin-configured settings (see
+    ``/api/dns-transports``), reusing the appliance's existing
+    management TLS cert/key -- see docs/v2/encrypted-transport-parity-
+    gap.md for why this exists and dnsdist_policy_runtime.DotConfig/
+    DohConfig/DoqConfig's own docstrings for why no separate key
+    material is provisioned. Each returns ``None`` (no listener emitted
+    at all) when disabled or when the cert/key aren't provisioned yet
+    (a fresh install before ``ensure-tls-cert`` has ever run) -- never
+    raises here; a missing cert must not break every other policy
+    mutation.
     """
     settings = store.load_dns_transport_settings(conn)
     cert_ready = ACTIVE_CERT_PATH.exists() and ACTIVE_KEY_PATH.exists()
@@ -585,7 +588,14 @@ def _encrypted_transport_configs(conn) -> tuple[Optional[runtime_compile.DotConf
         if settings.doh_enabled and cert_ready
         else None
     )
-    return dot, doh
+    doq = (
+        runtime_compile.DoqConfig(
+            enabled=True, port=settings.doq_port, cert_path=str(ACTIVE_CERT_PATH), key_path=str(ACTIVE_KEY_PATH)
+        )
+        if settings.doq_enabled and cert_ready
+        else None
+    )
+    return dot, doh, doq
 
 
 def _mutate_and_promote(mutate_fn) -> runtime_compile.RuntimeCompileResult:
@@ -602,10 +612,10 @@ def _mutate_and_promote(mutate_fn) -> runtime_compile.RuntimeCompileResult:
         conn.execute("BEGIN IMMEDIATE")
         try:
             mutate_fn(conn)
-            dot, doh = _encrypted_transport_configs(conn)
+            dot, doh, doq = _encrypted_transport_configs(conn)
             result = runtime_compile.recompile_and_promote(
                 conn, STAGING_DIR, COMPILED_DNSDIST_CONF,
-                listen_address=_configured_listen_address(), dot=dot, doh=doh,
+                listen_address=_configured_listen_address(), dot=dot, doh=doh, doq=doq,
             )
         except BaseException:
             conn.execute("ROLLBACK")
@@ -686,6 +696,8 @@ class DnsTransportSettingsUpdate(BaseModel):
     doh_enabled: bool = False
     doh_port: int = Field(default=443, ge=1, le=65535)
     doh_path: str = Field(default="/dns-query", min_length=1, max_length=255, pattern=r"^/.*$")
+    doq_enabled: bool = False
+    doq_port: int = Field(default=853, ge=1, le=65535)
 
 
 @app.get("/api/dns-transports")
@@ -698,6 +710,8 @@ def get_dns_transports(admin=Depends(current_admin)):
         "doh_enabled": settings.doh_enabled,
         "doh_port": settings.doh_port,
         "doh_path": settings.doh_path,
+        "doq_enabled": settings.doq_enabled,
+        "doq_port": settings.doq_port,
         "cert_provisioned": ACTIVE_CERT_PATH.exists() and ACTIVE_KEY_PATH.exists(),
     }
 
@@ -725,13 +739,29 @@ _RESERVED_APPLIANCE_PORTS = {
 
 
 def _validate_dns_transport_ports(req: "DnsTransportSettingsUpdate") -> None:
-    requested: list[tuple[str, int]] = []
+    # DoQ binds UDP (addDOQLocal), while DoT/DoH bind TCP (addTLSLocal/
+    # addDOHLocal) -- real, standard DNS practice (RFC 9250) is for DoQ
+    # to share the *same numeric port* as DoT (both default to 853
+    # here, deliberately) since they occupy separate TCP/UDP namespaces
+    # and never actually collide. Only TCP-based listeners are checked
+    # against each other for a literal same-port conflict; DoQ is only
+    # checked against this appliance's own reserved ports and the
+    # plain DNS listener (conservative -- treated as reserved even
+    # where the real conflict would only be TCP-side, since being
+    # overly cautious here is safe and being wrong the other way took
+    # down real DNS live on RC21).
+    tcp_requested: list[tuple[str, int]] = []
+    all_requested: list[tuple[str, int]] = []
     if req.dot_enabled:
-        requested.append(("dot_port", req.dot_port))
+        tcp_requested.append(("dot_port", req.dot_port))
+        all_requested.append(("dot_port", req.dot_port))
     if req.doh_enabled:
-        requested.append(("doh_port", req.doh_port))
+        tcp_requested.append(("doh_port", req.doh_port))
+        all_requested.append(("doh_port", req.doh_port))
+    if req.doq_enabled:
+        all_requested.append(("doq_port", req.doq_port))
     dns_port = int(_configured_listen_address().rsplit(":", 1)[-1])
-    for field, port in requested:
+    for field, port in all_requested:
         if port in _RESERVED_APPLIANCE_PORTS:
             raise ApiError(
                 400, "port_conflict",
@@ -739,8 +769,10 @@ def _validate_dns_transport_ports(req: "DnsTransportSettingsUpdate") -> None:
             )
         if port == dns_port:
             raise ApiError(400, "port_conflict", f"{field}={port} conflicts with the plain DNS listener")
-    if req.dot_enabled and req.doh_enabled and req.dot_port == req.doh_port:
-        raise ApiError(400, "port_conflict", "dot_port and doh_port must be different when both are enabled")
+    for i, (field_a, port_a) in enumerate(tcp_requested):
+        for field_b, port_b in tcp_requested[i + 1:]:
+            if port_a == port_b:
+                raise ApiError(400, "port_conflict", f"{field_a} and {field_b} must be different when both are enabled")
 
 
 @app.put("/api/dns-transports")
@@ -752,6 +784,7 @@ def put_dns_transports(
     settings = store.DnsTransportSettings(
         dot_enabled=req.dot_enabled, dot_port=req.dot_port,
         doh_enabled=req.doh_enabled, doh_port=req.doh_port, doh_path=req.doh_path,
+        doq_enabled=req.doq_enabled, doq_port=req.doq_port,
     )
     result = _mutate_and_promote(lambda conn: store.save_dns_transport_settings(conn, settings))
     return {"status": "updated", "runtime": {"promoted": result.promoted, "binding_count": result.binding_count}}

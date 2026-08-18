@@ -185,12 +185,15 @@ class TestDnsTransportSettings:
         assert settings.doh_enabled is False
         assert settings.doh_port == 443
         assert settings.doh_path == "/dns-query"
+        assert settings.doq_enabled is False
+        assert settings.doq_port == 853
 
     def test_round_trip(self, conn):
         store.save_dns_transport_settings(
             conn,
             store.DnsTransportSettings(
-                dot_enabled=True, dot_port=8853, doh_enabled=True, doh_port=8443, doh_path="/custom-path"
+                dot_enabled=True, dot_port=8853, doh_enabled=True, doh_port=8443, doh_path="/custom-path",
+                doq_enabled=True, doq_port=8853,
             ),
         )
         conn.commit()
@@ -200,12 +203,16 @@ class TestDnsTransportSettings:
         assert settings.doh_enabled is True
         assert settings.doh_port == 8443
         assert settings.doh_path == "/custom-path"
+        assert settings.doq_enabled is True
+        assert settings.doq_port == 8853
 
     def test_invalid_port_rejected(self, conn):
         with pytest.raises(store.PolicyStoreError):
             store.save_dns_transport_settings(conn, store.DnsTransportSettings(dot_port=0))
         with pytest.raises(store.PolicyStoreError):
             store.save_dns_transport_settings(conn, store.DnsTransportSettings(doh_port=99999))
+        with pytest.raises(store.PolicyStoreError):
+            store.save_dns_transport_settings(conn, store.DnsTransportSettings(doq_port=0))
 
     def test_invalid_doh_path_rejected(self, conn):
         with pytest.raises(store.PolicyStoreError):

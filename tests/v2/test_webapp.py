@@ -499,6 +499,67 @@ class TestDnsTransports:
         )
         assert r.status_code == 200, r.text
 
+    def test_enabling_doq_with_cert_provisioned_emits_a_real_doq_listener(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+
+        import subprocess
+
+        webapp.ACTIVE_CERT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [
+                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                "-keyout", str(webapp.ACTIVE_KEY_PATH), "-out", str(webapp.ACTIVE_CERT_PATH),
+                "-days", "1", "-subj", "/CN=test",
+            ],
+            check=True, capture_output=True,
+        )
+
+        r = client.put("/api/dns-transports", json={"doq_enabled": True, "doq_port": 8853}, headers={"X-CSRF-Token": csrf})
+        assert r.status_code == 200, r.text
+        conf_text = webapp.COMPILED_DNSDIST_CONF.read_text()
+        assert "addDOQLocal" in conf_text
+        assert "0.0.0.0:8853" in conf_text
+
+    def test_dot_and_doq_may_share_the_same_default_port(self, app_client):
+        # Real, standard DNS practice (RFC 9250): DoQ (UDP) and DoT
+        # (TCP) both conventionally default to port 853 and do not
+        # actually conflict -- must not be rejected as a port_conflict.
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+
+        import subprocess
+
+        webapp.ACTIVE_CERT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [
+                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                "-keyout", str(webapp.ACTIVE_KEY_PATH), "-out", str(webapp.ACTIVE_CERT_PATH),
+                "-days", "1", "-subj", "/CN=test",
+            ],
+            check=True, capture_output=True,
+        )
+
+        r = client.put(
+            "/api/dns-transports",
+            json={"dot_enabled": True, "dot_port": 853, "doq_enabled": True, "doq_port": 853},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert r.status_code == 200, r.text
+        conf_text = webapp.COMPILED_DNSDIST_CONF.read_text()
+        assert "addTLSLocal" in conf_text
+        assert "addDOQLocal" in conf_text
+
+    def test_doq_port_conflicting_with_management_api_rejected(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        r = client.put(
+            "/api/dns-transports", json={"doq_enabled": True, "doq_port": 8443},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert r.status_code == 400, r.text
+        assert r.json()["error"] == "port_conflict"
+
 
 class TestReplicationPeerCertEnrollment:
     """Real replication peer-enrollment endpoint (previously missing

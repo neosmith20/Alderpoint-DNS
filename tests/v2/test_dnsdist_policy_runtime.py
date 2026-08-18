@@ -6,6 +6,7 @@ from app.v2.blocking_response import BlockingResponse
 from app.v2.dnsdist_policy_runtime import (
     ClientPolicyBinding,
     DohConfig,
+    DoqConfig,
     DotConfig,
     PolicyRuntimeError,
     compile_multi_policy_dnsdist_config,
@@ -278,6 +279,48 @@ class TestRealValidation:
         assert 'addTLSLocal("127.0.0.1:15360"' in text
         assert 'addDOHLocal("127.0.0.1:15361"' in text
         conf_path = tmp_path / "c3.conf"
+        conf_path.write_text(text)
+        result = subprocess.run(["dnsdist", "-C", str(conf_path), "--check-config"], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+
+    def test_doq_listener_wired_and_passes_real_check_config(self, tmp_path):
+        # Real defect this closes (docs/v2/encrypted-transport-parity-gap.md):
+        # DoQ was entirely absent from V2's real config generation.
+        # Confirmed this exact real installed dnsdist build supports QUIC
+        # (`dnsdist --version` lists dns-over-quic) -- if it hadn't, the
+        # generated alderpointdnsv2SafeCapabilityCall wrapper (ported from
+        # V1's own real, production-proven fallback) would print a skip
+        # message and validate cleanly anyway rather than crash.
+        import subprocess
+
+        cert_path, key_path = _self_signed_cert(tmp_path)
+        b1 = _binding("10.0.1.0/24", "p1")
+        doq = DoqConfig(enabled=True, port=15363, cert_path=str(cert_path), key_path=str(key_path))
+        text = compile_multi_policy_dnsdist_config("127.0.0.1:15364", [b1], doq=doq)
+        assert "addDOQLocal" in text
+        assert 'congestionControlAlgo="cubic"' in text
+        conf_path = tmp_path / "c4.conf"
+        conf_path.write_text(text)
+        result = subprocess.run(["dnsdist", "-C", str(conf_path), "--check-config"], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+
+    def test_doq_listener_omitted_when_disabled(self):
+        b1 = _binding("10.0.1.0/24", "p1")
+        text = compile_multi_policy_dnsdist_config(
+            "127.0.0.1:15365", [b1], doq=DoqConfig(enabled=False, port=853, cert_path="x", key_path="y")
+        )
+        assert "addDOQLocal" not in text
+
+    def test_all_three_dot_doh_doq_enabled_simultaneously(self, tmp_path):
+        import subprocess
+
+        cert_path, key_path = _self_signed_cert(tmp_path)
+        b1 = _binding("10.0.1.0/24", "p1")
+        dot = DotConfig(enabled=True, port=15366, cert_path=str(cert_path), key_path=str(key_path))
+        doh = DohConfig(enabled=True, port=15367, cert_path=str(cert_path), key_path=str(key_path))
+        doq = DoqConfig(enabled=True, port=15368, cert_path=str(cert_path), key_path=str(key_path))
+        text = compile_multi_policy_dnsdist_config("127.0.0.1:15369", [b1], dot=dot, doh=doh, doq=doq)
+        conf_path = tmp_path / "c5.conf"
         conf_path.write_text(text)
         result = subprocess.run(["dnsdist", "-C", str(conf_path), "--check-config"], capture_output=True, text=True)
         assert result.returncode == 0, result.stderr

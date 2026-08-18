@@ -250,6 +250,10 @@ def _ensure_dns_transport_settings_table(path: str | Path) -> None:
             conn.execute("ALTER TABLE dns_transport_settings ADD COLUMN doh_port INTEGER NOT NULL DEFAULT 443")
         if "doh_path" not in cols:
             conn.execute("ALTER TABLE dns_transport_settings ADD COLUMN doh_path TEXT NOT NULL DEFAULT '/dns-query'")
+        if "doq_enabled" not in cols:
+            conn.execute("ALTER TABLE dns_transport_settings ADD COLUMN doq_enabled INTEGER NOT NULL DEFAULT 0")
+        if "doq_port" not in cols:
+            conn.execute("ALTER TABLE dns_transport_settings ADD COLUMN doq_port INTEGER NOT NULL DEFAULT 853")
         conn.commit()
 
 
@@ -260,16 +264,20 @@ class DnsTransportSettings:
     doh_enabled: bool = False
     doh_port: int = 443
     doh_path: str = "/dns-query"
+    doq_enabled: bool = False
+    doq_port: int = 853
 
 
 def load_dns_transport_settings(conn: sqlite3.Connection) -> DnsTransportSettings:
     row = conn.execute(
-        "SELECT dot_enabled, dot_port, doh_enabled, doh_port, doh_path FROM dns_transport_settings WHERE id=1"
+        "SELECT dot_enabled, dot_port, doh_enabled, doh_port, doh_path, doq_enabled, doq_port "
+        "FROM dns_transport_settings WHERE id=1"
     ).fetchone()
     if row is None:
         return DnsTransportSettings()
     return DnsTransportSettings(
-        dot_enabled=bool(row[0]), dot_port=row[1], doh_enabled=bool(row[2]), doh_port=row[3], doh_path=row[4]
+        dot_enabled=bool(row[0]), dot_port=row[1], doh_enabled=bool(row[2]), doh_port=row[3], doh_path=row[4],
+        doq_enabled=bool(row[5]), doq_port=row[6],
     )
 
 
@@ -280,21 +288,27 @@ def save_dns_transport_settings(conn: sqlite3.Connection, settings: DnsTransport
         raise PolicyStoreError(f"invalid doh_port: {settings.doh_port!r}")
     if not settings.doh_path.startswith("/"):
         raise PolicyStoreError(f"invalid doh_path: {settings.doh_path!r}")
+    if not (1 <= settings.doq_port <= 65535):
+        raise PolicyStoreError(f"invalid doq_port: {settings.doq_port!r}")
     conn.execute(
         """
-        INSERT INTO dns_transport_settings (id, dot_enabled, dot_port, doh_enabled, doh_port, doh_path, updated_at)
-        VALUES (1, ?, ?, ?, ?, ?, ?)
+        INSERT INTO dns_transport_settings
+            (id, dot_enabled, dot_port, doh_enabled, doh_port, doh_path, doq_enabled, doq_port, updated_at)
+        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             dot_enabled = excluded.dot_enabled,
             dot_port = excluded.dot_port,
             doh_enabled = excluded.doh_enabled,
             doh_port = excluded.doh_port,
             doh_path = excluded.doh_path,
+            doq_enabled = excluded.doq_enabled,
+            doq_port = excluded.doq_port,
             updated_at = excluded.updated_at
         """,
         (
             int(settings.dot_enabled), settings.dot_port,
             int(settings.doh_enabled), settings.doh_port, settings.doh_path,
+            int(settings.doq_enabled), settings.doq_port,
             _now(),
         ),
     )
