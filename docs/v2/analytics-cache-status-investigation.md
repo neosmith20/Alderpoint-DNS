@@ -1,5 +1,19 @@
 # Cache-status field investigation: resolved (partially) with real evidence (roadmap Priority 6 continuation)
 
+**Superseded in part by `docs/v2/cache-hit-response-not-logged-rc13.md`:**
+this doc's "packet-cache attachment does NOT suppress protobuf
+logging" conclusion below was accurate for the specific config it
+tested (the bootstrap-only config, which -- unknown at the time --
+never actually had a packet cache attached at all, since caches are
+only compiled in by the real per-policy compiler after an admin
+mutation). Re-tested later against a real config with a real packet
+cache genuinely attached: cache HITS specifically do suppress the
+*response*-side protobuf message (only the query-side message still
+arrives), which is a real, distinct, now-fixed defect -- see that doc
+for the live NXDOMAIN proof and the fix. The findings below remain
+accurate for what they actually tested; they just weren't testing a
+real cache hit.
+
 ## What was uncertain
 
 `docs/v2/package-baseline-rc6.md`/`rc7.md` flagged `cache_status` as
