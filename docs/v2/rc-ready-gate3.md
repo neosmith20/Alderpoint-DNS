@@ -1,12 +1,33 @@
 # Alderpoint DNS V2 -- private RC ready for Dex Gate #3 review
 
-Artifact: `alderpointdns-v2_2.0.0~rc16-1_all.deb`
-(sha256 `05bb0f7df4eda4603aa0a067d83d0f50b249b7f5826b66a34c32f953a818ecf8`),
+Artifact: `alderpointdns-v2_2.0.0~rc17-1_all.deb`
+(sha256 `3b3d2c60b71632969fba0cfa0668a638c777b78ce391d348d74696a7a6ca7bc3`),
 branch `v2/architecture-storage-foundation`, still fully private
 (no push/tag/publish to any remote; `origin/main` -- the public V1
 line -- untouched throughout).
 
-## What RC16 fixes over RC15 (roadmap continuation, "keep going")
+## What RC17 fixes over RC16 (roadmap continuation, "keep going")
+
+1. **`docs/v2/blocked-action-not-populated-fix.md`** (real defect
+   found and fixed -- the most significant analytics-accuracy gap
+   found this continuation): `app/v2/filtering_decision.py`'s
+   `evaluate_filtering` -- a real, independently tested "why was this
+   blocked" decision engine -- was never actually invoked anywhere in
+   production. Every real blocked query was silently logged as
+   `action="allowed"`, making the entire "blocked queries"
+   dashboard/statistic non-functional for real traffic. Also confirmed
+   along the way: `app/v2/bind_rpz_gen.py`'s RPZ zone is always empty
+   in the real running system, so the `service_definitions` mechanism
+   `evaluate_filtering` reads is the complete real blocking-decision
+   source, not a partial one. Fixed by threading the per-client
+   compiled policy through `evaluate_filtering` per event. Live-verified
+   on RC17 (`docs/v2/package-baseline-rc17.md`): a real admin flow
+   (create service -> ruleset -> assign globally) blocks a domain at
+   the real DNS level (`NXDOMAIN`) *and* now correctly shows
+   `blocked=true, block_reason="rc17-blocked-svc"` via the real
+   `GET /api/analytics/query-log` API.
+
+## What RC16 fixes over RC15
 
 1. **`docs/v2/cache-profile-id-not-populated-fix.md`** (real defect
    found and fixed): `cache_profile_id` -- a real filterable/sortable
@@ -113,11 +134,12 @@ full-stack validation (found and fixed a real defect), Tier B
 re-check, failure-domain re-check, adversarial security re-sweep of
 the replication/analytics-receiver attack surfaces (message replay
 window, dedupe, size bounds, cert pinning, bounded protobuf parsing),
-IPv6 client-decode verification, and three further real analytics-
+IPv6 client-decode verification, and four further real analytics-
 accuracy defects found and fixed (packet-cache-hit mislabeling,
-prewarm-traffic pollution, blank cache_profile_id), CI determinism
-(online + offline), and this RC scrub. Full suite: 2074 passed
-(`tests/`), 882 passed (`tests/v2/`), all remaining failures
-individually confirmed as pre-existing concurrent-load flakes that
-pass in isolation, not regressions. The private candidate (RC16) is
-ready for Dex Gate #3 review.
+prewarm-traffic pollution, blank cache_profile_id, blocked queries
+never marked as blocked), CI determinism (online + offline), and this
+RC scrub. Full suite: 2074 passed (`tests/`), 883 passed
+(`tests/v2/`), all remaining failures individually confirmed as
+pre-existing concurrent-load flakes that pass in isolation, not
+regressions. The private candidate (RC17) is ready for Dex Gate #3
+review.
