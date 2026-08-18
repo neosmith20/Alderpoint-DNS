@@ -1,10 +1,30 @@
 # Alderpoint DNS V2 -- private RC ready for Dex Gate #3 review
 
-Artifact: `alderpointdns-v2_2.0.0~rc27-1_all.deb`
-(sha256 `446f4c7416e0951d323733bb98a65fe20903e431f4b15a500bb3431ecee48791`),
+Artifact: `alderpointdns-v2_2.0.0~rc28-1_all.deb`
+(sha256 `4e6271626ee183e29f1d1c486da58b16bd5af4e1e8f88c8f279b880ea5e824ba`),
 branch `v2/architecture-storage-foundation`, still fully private
 (no push/tag/publish to any remote; `origin/main` -- the public V1
 line -- untouched throughout).
+
+## Update (RC28): real defect found and fixed -- /api/login crashed under real combined DNS+analytics+concurrent-login load
+
+**`docs/v2/login-database-locked-under-load-fix.md`**: the hardware/
+performance matrix re-verification (real `dnsperf` load at 1/2/4 GiB
+tiers, real background services active) combined with the Argon2id
+concurrency re-validation surfaced a real defect neither pass alone
+had caught: under real combined DNS + analytics + concurrent-login
+load, `sqlite3.OperationalError: database is locked` in
+`/api/login`'s audit-log write outlasted the 5-second `busy_timeout`,
+crashing an otherwise genuinely-successful, already-Argon2id-verified
+login with a raw HTTP 500 (2 of 3 logins that passed the concurrency
+limiter, in the live reproduction). Fixed by reusing V1's own already-
+proven `app/db_retry.py` retry/backoff + exception-handler pattern
+verbatim. Re-verified live against the exact reproduction conditions
+on RC28: all 3 logins that pass the limiter now return real `200`,
+zero `500`s (`docs/v2/package-baseline-rc28.md`). Also includes the
+full real 1/2/4 GiB hardware/performance matrix results (flat ~80-83k
+QPS, ~1.1-1.2ms latency, zero query loss, zero dnsdist restarts at
+every tier including the 1 GiB minimum).
 
 ## Update (RC27): real defect found and fixed -- Tier B prewarm never actually helped real clients
 
