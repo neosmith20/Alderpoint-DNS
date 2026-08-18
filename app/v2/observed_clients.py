@@ -150,7 +150,7 @@ def sanitize_hostname(value: str) -> str:
     return ".".join(labels)[:MAX_HOSTNAME_LEN]
 
 
-def _managed_client_for_ip(conn: sqlite3.Connection, source_ip: str) -> Optional[int]:
+def managed_client_for_ip(conn: sqlite3.Connection, source_ip: str) -> Optional[int]:
     ip = ipaddress.ip_address(source_ip)
     for client_id, kind, value in conn.execute("SELECT client_id, kind, value FROM client_identifiers").fetchall():
         try:
@@ -199,7 +199,7 @@ def apply_observations(conn: sqlite3.Connection, observations: list[Observation]
         family = "ipv6" if ip.version == 6 else "ipv4"
         ts = _now_iso(obs.ts)
         hostname = sanitize_hostname(obs.hostname_candidate)
-        managed_id = _managed_client_for_ip(conn, str(ip))
+        managed_id = managed_client_for_ip(conn, str(ip))
         conn.execute(
             """
             INSERT INTO observed_clients(
@@ -338,7 +338,7 @@ def promote(
             (client_id, kind, source_ip, now),
         )
     except sqlite3.IntegrityError:
-        existing = _managed_client_for_ip(conn, source_ip)
+        existing = managed_client_for_ip(conn, source_ip)
         if existing is None:
             raise
         client_id = existing

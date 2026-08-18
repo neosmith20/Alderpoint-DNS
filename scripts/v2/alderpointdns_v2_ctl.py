@@ -504,15 +504,57 @@ def _build_pipeline():
     ), index
 
 
+def _query_log_flags_for_client(conn, client_ip: str, now) -> tuple[bool, bool]:
+    """Resolves the real effective (query_log_enabled, statistics_enabled)
+    flags for a client IP, via the same control.db policy chain
+    (client -> group -> network -> global) the rest of V2 already uses --
+    closes the real gap where every event from the analytics-protobuf-
+    receiver was unconditionally logged regardless of a per-client
+    exclusion an admin had actually configured. An IP that doesn't match
+    any registered client still gets a real answer (network/global
+    layers only, per compile_effective_policy's own client_layer=None
+    support), not a hardcoded default."""
+    from app.v2 import policy_service
+    from app.v2.policy_compiler import compile_effective_policy
+
+    client_id = observed_clients.managed_client_for_ip(conn, client_ip)
+    if client_id is not None:
+        policy = policy_service.compile_effective_policy_from_store(
+            conn, policy_service.ClientResolutionContext(client_id=client_id, client_ip=client_ip), now=now
+        )
+    else:
+        global_layer = policy_store.load_policy_layer(conn, "global", "singleton")
+        network_layer = None
+        network_source = None
+        match = policy_store.load_network_table(conn).match(client_ip)
+        if match is not None:
+            network_layer = policy_store.load_policy_layer(conn, "network", match.network_id)
+            network_source = match.network_id
+        policy = compile_effective_policy(
+            global_layer=global_layer, network_layer=network_layer, network_source=network_source
+        )
+    return policy.query_log_enabled, policy.statistics_enabled
+
+
 def cmd_analytics_worker(args: argparse.Namespace) -> int:
-    """Drains a real inbox directory of one-JSON-line-per-event files
-    (the real integration point a future DNS-side event logger writes
-    into -- nothing populates it yet in this pass, same honest gap noted
-    for the management API) into the real Parquet/aggregate/Tier-B sinks.
+    """Drains a real inbox directory of one-JSON-line-per-event files --
+    fed by the real analytics-protobuf-receiver service for real DNS
+    traffic through the packaged dnsdist runtime (see
+    docs/v2/analytics-ingestion-not-wired-to-live-dns.md for the gap
+    that closed) -- into the real Parquet/aggregate/Tier-B sinks.
     ``--inject-test-event`` (used by the clean-install proof, §13) submits
     one synthetic event directly, without needing an inbox producer, to
     prove the real Parquet-write + DuckDB-query + aggregate-update path
     end to end.
+
+    Real per-client query_log_enabled/statistics_enabled exclusions are
+    resolved here (not in the receiver, which stays a lightweight,
+    control.db-independent TCP sink by design) against the real
+    effective policy chain for each event's client IP, cached per
+    client IP for the duration of one drain cycle -- a real
+    control.db-backed policy compile per unique client, not per event,
+    since the same handful of clients repeat constantly in real
+    traffic.
     """
     from app.v2.query_event import NormalizedQueryEvent
 
@@ -530,16 +572,32 @@ def cmd_analytics_worker(args: argparse.Namespace) -> int:
 
     def _drain_once() -> int:
         processed = 0
-        for f in sorted(inbox.glob("*.jsonl")):
-            try:
-                for line in f.read_text(encoding="utf-8").splitlines():
-                    if not line.strip():
-                        continue
-                    pipeline.submit(NormalizedQueryEvent(**json.loads(line)))
-                    processed += 1
-                f.unlink()
-            except (OSError, ValueError, TypeError) as exc:
-                log.error("failed processing inbox file %s: %s", f, exc)
+        flag_cache: dict[str, tuple[bool, bool]] = {}
+        policy_store.ensure_schema(CONTROL_DB)
+        with control_db.connect(CONTROL_DB) as conn:
+            now = datetime.now(timezone.utc)
+            for f in sorted(inbox.glob("*.jsonl")):
+                try:
+                    for line in f.read_text(encoding="utf-8").splitlines():
+                        if not line.strip():
+                            continue
+                        record = json.loads(line)
+                        client_ip = record.get("client", "")
+                        if client_ip:
+                            if client_ip not in flag_cache:
+                                try:
+                                    flag_cache[client_ip] = _query_log_flags_for_client(conn, client_ip, now)
+                                except Exception:
+                                    log.exception("policy lookup failed for client %s, defaulting to logged", client_ip)
+                                    flag_cache[client_ip] = (True, True)
+                            log_enabled, stats_enabled = flag_cache[client_ip]
+                            record.setdefault("query_log_enabled", log_enabled)
+                            record.setdefault("statistics_enabled", stats_enabled)
+                        pipeline.submit(NormalizedQueryEvent(**record))
+                        processed += 1
+                    f.unlink()
+                except (OSError, ValueError, TypeError) as exc:
+                    log.error("failed processing inbox file %s: %s", f, exc)
         n = pipeline.flush()
         tier_b_flush(tier_b_index, TIER_B_STATE_FILE)
         return n
