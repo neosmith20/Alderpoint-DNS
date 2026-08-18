@@ -1,12 +1,12 @@
 # Alderpoint DNS V2 -- private RC ready for Dex Gate #3 review
 
-Artifact: `alderpointdns-v2_2.0.0~rc20-1_all.deb`
-(sha256 `5e891e50b7357061c67881559a7848bddd1e7586a854eb7be6082046d9f502d8`),
+Artifact: `alderpointdns-v2_2.0.0~rc22-1_all.deb`
+(sha256 `0ea6679203bb58c5f84ba6bf9e253074cda5ea37c2942e15d4feb3fa52dae140`),
 branch `v2/architecture-storage-foundation`, still fully private
 (no push/tag/publish to any remote; `origin/main` -- the public V1
 line -- untouched throughout).
 
-## ⚠ Most significant finding this continuation: confirmed mandatory-parity gap -- DoT now closed, 4 remain
+## ⚠ Most significant finding this continuation: confirmed mandatory-parity gap -- DoT + DoH now closed, DoQ/DoH3/DNSCrypt remain
 
 **`docs/v2/encrypted-transport-parity-gap.md`** -- DoH/DoT/DoQ/DoH3/
 DNSCrypt (all explicitly **MANDATORY V2** rows in the parity matrix)
@@ -19,25 +19,48 @@ real compiled config inspected across RC1-RC19 only ever bound plain
 five; the installed dnsdist 2.1.1 binary supports all five (confirmed
 live via `dnsdist --version`).
 
-**Update -- `docs/v2/dot-transport-implemented.md`**: DoT (the
-lowest-risk of the five, needing no new key material or HTTP/QUIC
-protocol surface) is now implemented, admin-toggleable
-(`GET`/`PUT /api/dns-transports`), and live-verified on RC20
-(`docs/v2/package-baseline-rc20.md`) with a real `kdig +tls` client
-completing a genuine TLS 1.3 session and real DNS resolution on port
-853. **DoH, DoQ, DoH3, and DNSCrypt remain unimplemented** --
-deliberately not attempted this pass (each needs real, protocol-
-specific design work this session has no grounding for: HTTP path
-config, QUIC tuning, or an entirely different cert/key/provider-identity
-model for DNSCrypt) and is surfaced here explicitly rather than
-buried or rushed. See the docs for the full remaining scope and
-recommendation.
+**Update -- DoT and DoH are now implemented.** Both admin-toggleable
+via `GET`/`PUT /api/dns-transports`, reusing the appliance's existing
+management TLS cert:
 
-## What RC20 adds over RC19 (roadmap continuation, "keep going")
+- **DoT** (`docs/v2/dot-transport-implemented.md`): live-verified on
+  RC20 with a real `kdig +tls` client completing a genuine TLS 1.3
+  session on port 853.
+- **DoH** (`docs/v2/doh-transport-implemented.md`): live-verified on
+  RC22 with a real `kdig +https` client completing a genuine
+  TLS 1.3 + HTTP/2 session.
+- **Real defect found and fixed along the way**
+  (`docs/v2/dns-transport-port-conflict-fix.md`): enabling DoH on the
+  same port as the management API crash-looped dnsdist and took down
+  **all real DNS answering** (confirmed live on RC21) -- `dnsdist
+  --check-config` only validates syntax, not real socket binds. Fixed
+  with pre-promotion port-conflict validation against every one of the
+  appliance's own fixed ports; live-verified on RC22 that the same
+  conflicting request now cleanly rejects with `400` before ever
+  touching the live runtime, while a safe port still works correctly.
+
+**DoQ, DoH3, and DNSCrypt remain unimplemented** -- deliberately not
+attempted this pass (each needs real, protocol-specific design work
+this session has no grounding for: QUIC congestion-control tuning, or
+an entirely different cert/key/provider-identity model for DNSCrypt)
+and is surfaced here explicitly rather than buried or rushed. See
+`docs/v2/encrypted-transport-parity-gap.md` for the full remaining
+scope and recommendation.
+
+## What RC21/RC22 add over RC20 (roadmap continuation, "keep going")
+
+1. **`docs/v2/doh-transport-implemented.md`**: real DNS-over-HTTPS
+   implementation, live-verified on RC22 with a real `kdig +https`
+   client.
+2. **`docs/v2/dns-transport-port-conflict-fix.md`**: a real,
+   live-reproduced availability defect (port conflict crash-looping
+   dnsdist) found and fixed, live-verified on RC22.
+
+## What RC20 adds over RC19
 
 1. **`docs/v2/dot-transport-implemented.md`**: real DNS-over-TLS
-   implementation (see the parity-gap section above for full detail),
-   live-verified on RC20 with a real `kdig +tls` client.
+   implementation, live-verified on RC20 with a real `kdig +tls`
+   client.
 
 ## What RC19 fixes over RC18
 
@@ -193,23 +216,24 @@ window, dedupe, size bounds, cert pinning, bounded protobuf parsing),
 IPv6 client-decode verification, six further real analytics-accuracy
 defects found and fixed (packet-cache-hit mislabeling, prewarm-traffic
 pollution, blank cache_profile_id, blocked queries never marked as
-blocked, blank upstream_profile_id, blank client_name), a real DoT
-implementation closing part of the confirmed mandatory-parity gap, CI
-determinism (online + offline), and this RC scrub. Full suite: 2085
-passed (`tests/`), 893 passed (`tests/v2/`), no flakes on the final
-pass; prior remaining failures were individually confirmed as
-pre-existing concurrent-load flakes that pass in isolation, not
-regressions.
+blocked, blank upstream_profile_id, blank client_name), real DoT and
+DoH implementations closing two of the five confirmed mandatory-parity
+gaps (plus a real live-reproduced port-conflict availability defect
+found and fixed along the way), CI determinism (online + offline), and
+this RC scrub. Full suite: 2100 passed (`tests/`), 908 passed
+(`tests/v2/`), no flakes on the final pass; prior remaining failures
+were individually confirmed as pre-existing concurrent-load flakes
+that pass in isolation, not regressions.
 
-**Readiness caveat:** the private candidate (RC20) is ready for Dex
+**Readiness caveat:** the private candidate (RC22) is ready for Dex
 Gate #3 review on everything this continuation actually touched --
 but review should explicitly weigh the remaining encrypted-transport
-parity gap (DoH/DoQ/DoH3/DNSCrypt -- DoT is now closed) before
+parity gap (DoQ/DoH3/DNSCrypt -- DoT and DoH are now closed) before
 treating V2 as feature-complete against its own mandatory gate
 criteria. This continuation's scope was primarily verification/
 hardening of existing systems; that gap predates this session and was
-not introduced by it. DoT was implemented as a real, scoped, low-risk
-step toward closing it, but the remaining four protocols still need a
-dedicated design pass before implementation, and Gate #3 is the right
-point to decide whether they block further progress or are tracked as
-follow-up work.
+not introduced by it. DoT and DoH were implemented as real, scoped,
+low-risk steps toward closing it, but the remaining three protocols
+still need a dedicated design pass before implementation, and Gate #3
+is the right point to decide whether they block further progress or
+are tracked as follow-up work.
