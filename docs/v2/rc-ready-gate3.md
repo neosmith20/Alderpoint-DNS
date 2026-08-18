@@ -1,10 +1,32 @@
 # Alderpoint DNS V2 -- private RC ready for Dex Gate #3 review
 
-Artifact: `alderpointdns-v2_2.0.0~rc26-1_all.deb`
-(sha256 `71bf0cf6769bb5569aa85741574b37b1bc77196ddf581764a661de77a6ee30f0`),
+Artifact: `alderpointdns-v2_2.0.0~rc27-1_all.deb`
+(sha256 `446f4c7416e0951d323733bb98a65fe20903e431f4b15a500bb3431ecee48791`),
 branch `v2/architecture-storage-foundation`, still fully private
 (no push/tag/publish to any remote; `origin/main` -- the public V1
 line -- untouched throughout).
+
+## Update (RC27): real defect found and fixed -- Tier B prewarm never actually helped real clients
+
+**`docs/v2/tier-b-cache-key-defect-fix.md`**: Tier B's whole purpose
+("a real client's first query after restart is already a cache hit")
+was silently defeated -- the prewarm worker's own hand-built DNS query
+used a wire-format shape (`flags=0x0100`, no EDNS0) that dnsdist's real
+packet cache key treats as distinct from what real modern DNS clients
+actually send (confirmed live: real `dig` sets `AD=1` and includes
+EDNS0 by default). Every prewarmed cache entry was therefore
+unreachable by typical real client traffic, despite the worker
+correctly reporting "succeeded" throughout. Root-caused via exhaustive
+live reproduction against dnsdist's own real `cache-hits` counter
+(packet content, source IP, EDNS presence, and DNS Cookie presence
+were each isolated and ruled out individually before landing on the
+AD flag + EDNS0 combination). Fixed, live-verified repeatedly, and
+independently re-confirmed by a pre-existing test
+(`tests/v2/test_cache_recovery.py`) that had itself been using the
+same broken query shape as its own verification probe -- masking the
+defect until this fix turned its assertions honest. Re-verified
+against the real packaged `tier-b-worker` entry point on a fresh
+clean-install target (`docs/v2/package-baseline-rc27.md`).
 
 ## Update (RC26): real defect found and fixed by this workstream's own adversarial security pass on the new DNSCrypt surface
 
