@@ -165,6 +165,41 @@ def test_client_with_no_exclusions_is_logged_normally(ctl_module):
     assert any(b"normal-domain" in f.read_bytes() for f in parquet_files)
 
 
+def test_prewarm_source_ip_is_unconditionally_excluded_from_both_sinks(ctl_module):
+    # Real defect found live during the RC13/RC14 continuation
+    # (docs/v2/prewarm-analytics-pollution-fix.md): Tier B prewarm
+    # replays real queries through the live DNS path from client
+    # "127.0.0.1" -- identical to real client traffic -- silently
+    # inflating every dashboard/statistic with the appliance's own
+    # self-generated re-queries. app/v2/tier_b_worker.py now sources
+    # that traffic from a dedicated PREWARM_SOURCE_IP instead; this
+    # pins that _query_log_flags_for_client excludes it from BOTH
+    # sinks unconditionally -- not via the normal per-client policy
+    # chain (no control.db state is seeded for it at all here,
+    # confirming it isn't a policy decision an admin could
+    # accidentally leave permissive).
+    from app.v2.tier_b_worker import PREWARM_SOURCE_IP
+
+    _seed_control_db(ctl_module)
+    _write_inbox_event(ctl_module, "prewarmed-domain.example", PREWARM_SOURCE_IP)
+
+    args = argparse.Namespace(once=True, interval_seconds=1.0, inject_test_event=False)
+    rc = ctl_module.cmd_analytics_worker(args)
+    assert rc == 0
+
+    parquet_dir = ctl_module.ANALYTICS_PARQUET_DIR
+    parquet_files = list(parquet_dir.rglob("*.parquet")) if parquet_dir.exists() else []
+    assert not any(b"prewarmed-domain" in f.read_bytes() for f in parquet_files), \
+        "prewarm's self-generated traffic must never reach the real query log"
+
+    import sqlite3
+    if ctl_module.ANALYTICS_AGGREGATES_DB.exists():
+        conn = sqlite3.connect(ctl_module.ANALYTICS_AGGREGATES_DB)
+        total = conn.execute("SELECT COALESCE(SUM(total_queries), 0) FROM time_buckets").fetchone()[0]
+        conn.close()
+        assert total == 0, "prewarm's self-generated traffic must never inflate real statistics"
+
+
 def test_policy_lookup_failure_defaults_to_logged_not_silently_dropped(ctl_module, monkeypatch):
     # If the real policy lookup itself raises for some reason, the event
     # must still be processed (defaulting to logged/counted) rather than

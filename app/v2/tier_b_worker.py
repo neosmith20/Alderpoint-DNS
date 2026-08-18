@@ -33,6 +33,24 @@ from app.v2.tier_b_prewarm import WorkingSetEntry
 
 _QTYPE_NUMBERS = {"A": 1, "AAAA": 28, "CNAME": 5, "MX": 15, "TXT": 16, "NS": 2}
 
+# Real defect found live during the RC13/RC14 continuation
+# (docs/v2/prewarm-analytics-pollution-fix.md): prewarm deliberately
+# replays every query through the real, live DNS path (this module's
+# own docstring, "never a bypass") -- which means the appliance's own
+# self-generated cache-warming traffic was indistinguishable, in
+# dnsdist's protobuf log, from a real client's traffic: both showed up
+# as client "127.0.0.1", silently inflating every dashboard/statistic
+# with the appliance's own repeated re-queries of its already-popular
+# domains. Sourcing prewarm's UDP socket from a second, dedicated
+# loopback address (still real, still local, still goes through the
+# actual validated DNS path -- 127.0.0.0/8 is entirely loopback on
+# Linux, confirmed live: binding and sending from 127.0.0.2 works
+# exactly like 127.0.0.1) gives the analytics pipeline a real,
+# reliable signal to recognize and exclude this traffic from
+# statistics, without needing any cross-process coordination or
+# fragile heuristic.
+PREWARM_SOURCE_IP = "127.0.0.2"
+
 
 def _build_query(qname: str, qtype: str, qid: int) -> bytes:
     header = struct.pack(">HHHHHH", qid, 0x0100, 1, 0, 0, 0)
@@ -55,6 +73,14 @@ def make_udp_resolve_fn(
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.settimeout(timeout)
         try:
+            # Bind to the dedicated prewarm source address (see
+            # PREWARM_SOURCE_IP) rather than the OS-assigned default
+            # (would otherwise be 127.0.0.1, same as ordinary local
+            # traffic) -- only meaningful when server_ip is itself
+            # loopback, which is the only real deployment shape this
+            # worker is ever configured for.
+            if server_ip.startswith("127."):
+                sock.bind((PREWARM_SOURCE_IP, 0))
             pkt = _build_query(entry.qname, entry.qtype, qid=hash(entry.qname) & 0xFFFF)
             sock.sendto(pkt, (server_ip, port))
             sock.recvfrom(4096)

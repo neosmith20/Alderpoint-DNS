@@ -514,7 +514,20 @@ def _query_log_flags_for_client(conn, client_ip: str, now) -> tuple[bool, bool]:
     exclusion an admin had actually configured. An IP that doesn't match
     any registered client still gets a real answer (network/global
     layers only, per compile_effective_policy's own client_layer=None
-    support), not a hardcoded default."""
+    support), not a hardcoded default.
+
+    The appliance's own Tier B prewarm traffic (see
+    app/v2/tier_b_worker.py's PREWARM_SOURCE_IP) is excluded here
+    unconditionally, not via the normal policy chain -- it is an
+    architectural invariant (self-generated cache-warming traffic is
+    never a real client's activity), not something an admin's network/
+    client policy should need to know to configure correctly.
+    """
+    from app.v2.tier_b_worker import PREWARM_SOURCE_IP
+
+    if client_ip == PREWARM_SOURCE_IP:
+        return False, False
+
     from app.v2 import policy_service
     from app.v2.policy_compiler import compile_effective_policy
 
