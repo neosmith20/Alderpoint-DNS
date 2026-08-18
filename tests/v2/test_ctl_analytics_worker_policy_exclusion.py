@@ -165,6 +165,63 @@ def test_client_with_no_exclusions_is_logged_normally(ctl_module):
     assert any(b"normal-domain" in f.read_bytes() for f in parquet_files)
 
 
+def test_real_effective_cache_profile_id_is_populated_not_left_blank(ctl_module):
+    # Real defect found live during the RC13/RC14/RC15 continuation
+    # (docs/v2/cache-profile-id-not-populated-fix.md): every real
+    # dnsdist-sourced analytics event's cache_profile_id was always ""
+    # -- a real filterable/sortable query-log column
+    # (app/v2/analytics_query.py) that was silently non-functional,
+    # even though the exact per-client policy compile this worker
+    # already does for query_log_enabled/statistics_enabled was one
+    # call away from also producing the real answer via
+    # compile_cache_profile. Proves a client with a real,
+    # answer-affecting policy override gets a real, non-default,
+    # non-blank cache_profile_id threaded all the way into parquet.
+    import pyarrow.parquet as pq
+
+    from app.v2 import control_db, policy_store
+    from app.v2.policy_compiler import compile_cache_profile, compile_effective_policy
+
+    _seed_control_db(ctl_module)
+    with control_db.connect(ctl_module.CONTROL_DB) as conn:
+        global_profile_id = compile_cache_profile(
+            compile_effective_policy(global_layer=policy_store.load_policy_layer(conn, "global", "singleton"))
+        ).profile_id
+
+        client_id = conn.execute(
+            "INSERT INTO clients(name, description, enabled, created_at, updated_at) "
+            "VALUES ('cache-profile-client', '', 1, '2026-01-01', '2026-01-01')"
+        ).lastrowid
+        conn.execute(
+            "INSERT INTO client_identifiers(client_id, kind, value, created_at) "
+            "VALUES (?, 'ipv4', '10.9.9.9', '2026-01-01')",
+            (client_id,),
+        )
+        conn.commit()
+        policy_store.save_policy_layer(
+            conn, "client", str(client_id), policy_store.PolicyLayer(upstream_profile_id="custom-profile")
+        )
+        conn.commit()
+
+    _write_inbox_event(ctl_module, "cache-profile-domain.example", "10.9.9.9")
+
+    args = argparse.Namespace(once=True, interval_seconds=1.0, inject_test_event=False)
+    rc = ctl_module.cmd_analytics_worker(args)
+    assert rc == 0
+
+    parquet_dir = ctl_module.ANALYTICS_PARQUET_DIR
+    parquet_files = list(parquet_dir.rglob("*.parquet")) if parquet_dir.exists() else []
+    profile_ids = []
+    for f in parquet_files:
+        table = pq.read_table(f)
+        rows = table.to_pylist()
+        profile_ids.extend(r["cache_profile_id"] for r in rows if r.get("domain") == "cache-profile-domain.example")
+    assert profile_ids, "the event itself never landed"
+    assert all(pid for pid in profile_ids), "cache_profile_id must not be blank for a client with a real override"
+    assert all(pid != global_profile_id for pid in profile_ids), \
+        "the client's overridden cache profile must differ from the global default, not just be non-blank"
+
+
 def test_prewarm_source_ip_is_unconditionally_excluded_from_both_sinks(ctl_module):
     # Real defect found live during the RC13/RC14 continuation
     # (docs/v2/prewarm-analytics-pollution-fix.md): Tier B prewarm
@@ -173,7 +230,7 @@ def test_prewarm_source_ip_is_unconditionally_excluded_from_both_sinks(ctl_modul
     # inflating every dashboard/statistic with the appliance's own
     # self-generated re-queries. app/v2/tier_b_worker.py now sources
     # that traffic from a dedicated PREWARM_SOURCE_IP instead; this
-    # pins that _query_log_flags_for_client excludes it from BOTH
+    # pins that _effective_flags_for_client excludes it from BOTH
     # sinks unconditionally -- not via the normal per-client policy
     # chain (no control.db state is seeded for it at all here,
     # confirming it isn't a policy decision an admin could
@@ -206,7 +263,7 @@ def test_policy_lookup_failure_defaults_to_logged_not_silently_dropped(ctl_modul
     # an analytics worker bug silently blackholing all real traffic.
     _seed_control_db(ctl_module)
     monkeypatch.setattr(
-        ctl_module, "_query_log_flags_for_client",
+        ctl_module, "_effective_flags_for_client",
         lambda conn, client_ip, now: (_ for _ in ()).throw(RuntimeError("boom")),
     )
     _write_inbox_event(ctl_module, "resilient-domain.example", "10.9.9.5")

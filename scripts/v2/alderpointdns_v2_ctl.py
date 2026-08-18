@@ -505,16 +505,28 @@ def _build_pipeline():
     ), index
 
 
-def _query_log_flags_for_client(conn, client_ip: str, now) -> tuple[bool, bool]:
-    """Resolves the real effective (query_log_enabled, statistics_enabled)
-    flags for a client IP, via the same control.db policy chain
-    (client -> group -> network -> global) the rest of V2 already uses --
-    closes the real gap where every event from the analytics-protobuf-
-    receiver was unconditionally logged regardless of a per-client
-    exclusion an admin had actually configured. An IP that doesn't match
-    any registered client still gets a real answer (network/global
-    layers only, per compile_effective_policy's own client_layer=None
-    support), not a hardcoded default.
+def _effective_flags_for_client(conn, client_ip: str, now) -> tuple[bool, bool, str]:
+    """Resolves the real effective (query_log_enabled, statistics_enabled,
+    cache_profile_id) for a client IP, via the same control.db policy
+    chain (client -> group -> network -> global) the rest of V2 already
+    uses -- closes the real gap where every event from the analytics-
+    protobuf-receiver was unconditionally logged regardless of a
+    per-client exclusion an admin had actually configured. An IP that
+    doesn't match any registered client still gets a real answer
+    (network/global layers only, per compile_effective_policy's own
+    client_layer=None support), not a hardcoded default.
+
+    Real defect found live during the RC13/RC14/RC15 continuation
+    (docs/v2/cache-profile-id-not-populated-fix.md): every real
+    dnsdist-sourced analytics event's ``cache_profile_id`` was always
+    "" -- a real, admin-facing filterable/sortable query-log column
+    (app/v2/analytics_query.py's ``_FILTERABLE_COLUMNS``/
+    ``_SORTABLE_COLUMNS``) that was silently non-functional for all
+    real traffic, even though the exact machinery to compute it
+    correctly (``compile_cache_profile``) was already one call away
+    from the policy object this function already compiles for the
+    query-log/statistics flags. Now resolved here too, in the same
+    single per-client policy compile, rather than left blank.
 
     The appliance's own Tier B prewarm traffic (see
     app/v2/tier_b_worker.py's PREWARM_SOURCE_IP) is excluded here
@@ -526,10 +538,10 @@ def _query_log_flags_for_client(conn, client_ip: str, now) -> tuple[bool, bool]:
     from app.v2.tier_b_worker import PREWARM_SOURCE_IP
 
     if client_ip == PREWARM_SOURCE_IP:
-        return False, False
+        return False, False, ""
 
     from app.v2 import policy_service
-    from app.v2.policy_compiler import compile_effective_policy
+    from app.v2.policy_compiler import compile_cache_profile, compile_effective_policy
 
     client_id = observed_clients.managed_client_for_ip(conn, client_ip)
     if client_id is not None:
@@ -547,7 +559,8 @@ def _query_log_flags_for_client(conn, client_ip: str, now) -> tuple[bool, bool]:
         policy = compile_effective_policy(
             global_layer=global_layer, network_layer=network_layer, network_source=network_source
         )
-    return policy.query_log_enabled, policy.statistics_enabled
+    cache_profile_id = compile_cache_profile(policy).profile_id
+    return policy.query_log_enabled, policy.statistics_enabled, cache_profile_id
 
 
 def cmd_analytics_worker(args: argparse.Namespace) -> int:
@@ -629,13 +642,14 @@ def cmd_analytics_worker(args: argparse.Namespace) -> int:
                         if client_ip and conn is not None:
                             if client_ip not in flag_cache:
                                 try:
-                                    flag_cache[client_ip] = _query_log_flags_for_client(conn, client_ip, now)
+                                    flag_cache[client_ip] = _effective_flags_for_client(conn, client_ip, now)
                                 except Exception:
                                     log.exception("policy lookup failed for client %s, defaulting to logged", client_ip)
-                                    flag_cache[client_ip] = (True, True)
-                            log_enabled, stats_enabled = flag_cache[client_ip]
+                                    flag_cache[client_ip] = (True, True, "")
+                            log_enabled, stats_enabled, cache_profile_id = flag_cache[client_ip]
                             record.setdefault("query_log_enabled", log_enabled)
                             record.setdefault("statistics_enabled", stats_enabled)
+                            record.setdefault("effective_cache_profile_id", cache_profile_id)
                         pipeline.submit(NormalizedQueryEvent(**record))
                         processed += 1
                     f.unlink()
