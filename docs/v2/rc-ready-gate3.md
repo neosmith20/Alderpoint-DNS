@@ -6,6 +6,26 @@ branch `v2/architecture-storage-foundation`, still fully private
 (no push/tag/publish to any remote; `origin/main` -- the public V1
 line -- untouched throughout).
 
+## ⚠ Most significant finding this continuation: confirmed mandatory-parity gap, not fixed
+
+**`docs/v2/encrypted-transport-parity-gap.md`** -- DoH/DoT/DoQ/DoH3/
+DNSCrypt (all explicitly **MANDATORY V2** rows in the parity matrix)
+are confirmed **entirely absent** from V2's real config generation:
+exhaustive grep of both `app/v2/dnsdist_gen.py` and `app/v2/
+dnsdist_policy_runtime.py` (what every live installed package
+actually runs) finds no encrypted-listener directive at all -- every
+real compiled config inspected across this entire session (RC1-RC19)
+only ever binds plain `setLocal("0.0.0.0:53")`. V1 has real, working
+implementations of all five; the installed dnsdist 2.1.1 binary
+supports all five (confirmed live via `dnsdist --version`). This is a
+genuine feature regression against an explicit release-gate criterion,
+larger in scope than any other finding this session -- deliberately
+**not** implemented in this pass (it is new feature surface requiring
+real design decisions this session has no grounding for, not a
+small fix to existing machinery like everything else below) and is
+surfaced here explicitly rather than buried or rushed. See the doc for
+the full recommendation.
+
 ## What RC19 fixes over RC18 (roadmap continuation, "keep going")
 
 1. **`docs/v2/client-name-not-populated-fix.md`**: `client_name` (a
@@ -165,5 +185,15 @@ client_name), CI determinism (online + offline), and this RC scrub.
 Full suite: 2077 passed (`tests/`), 885 passed (`tests/v2/`), no
 flakes on the final pass; prior remaining failures were individually
 confirmed as pre-existing concurrent-load flakes that pass in
-isolation, not regressions. The private candidate (RC19) is ready for
-Dex Gate #3 review.
+isolation, not regressions.
+
+**Readiness caveat:** the private candidate (RC19) is ready for Dex
+Gate #3 review on everything this continuation actually touched --
+but review should explicitly weigh the encrypted-transport parity gap
+above before treating V2 as feature-complete against its own mandatory
+gate criteria. This continuation's scope was verification/hardening of
+existing systems, not building the missing DoH/DoT/DoQ/DoH3/DNSCrypt
+feature surface; that gap predates this session and was not
+introduced by it, but it is real and confirmed, and Gate #3 is the
+right point to decide whether it blocks further progress or is
+tracked as follow-up work.
