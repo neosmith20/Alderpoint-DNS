@@ -61,6 +61,21 @@ mkdir -p \
   "$PKG/lib/systemd/system" \
   "$PKG/usr/share/doc/alderpointdns-v2"
 
+# Real defect found live during RC24 clean-install acceptance testing:
+# alderpointdns-v2-ctl install-enhanced-dnsdist (app/dnsdist_upgrade.py,
+# reused verbatim from V1 -- see docs/v2/doh3-transport-implemented.md)
+# calls `gpg` to verify the PowerDNS signing-key fingerprint and `dig`
+# to verify functional resolution after the upgrade, but neither
+# gnupg nor bind9-dnsutils (the Debian package providing `dig`, distinct
+# from bind9-utils) were declared below -- confirmed live: a fresh
+# clean-install container had `curl` (pulled in transitively) but not
+# `gpg`, and the command failed outright with a clear, fail-closed
+# error and automatic rollback (not a silent partial state), but should
+# never have been reachable in the first place on a stock install. V1's
+# own packaging/debian/control already carries the same two
+# dependencies for the identical reason (see its own Depends line and
+# packaging/debian/changelog's "gnupg dependency required by
+# install-enhanced-dnsdist" entry) -- V2 simply hadn't picked it up yet.
 cat > "$PKG/DEBIAN/control" <<EOF
 Package: alderpointdns-v2
 Version: ${DEB_VERSION}
@@ -68,7 +83,7 @@ Section: net
 Priority: optional
 Architecture: all
 Maintainer: Alderpoint DNS Maintainers <maintainers@example.invalid>
-Depends: dnsdist (>= 1.9.0), bind9-utils, python3 (>= 3.11), python3-argon2, python3-cryptography, python3-yaml, python3-pip, python3-fastapi, python3-itsdangerous, python3-pydantic, uvicorn, sqlite3
+Depends: dnsdist (>= 1.9.0), bind9-utils, bind9-dnsutils, curl, gnupg, python3 (>= 3.11), python3-argon2, python3-cryptography, python3-yaml, python3-pip, python3-fastapi, python3-itsdangerous, python3-pydantic, uvicorn, sqlite3
 Conflicts: alderpointdns
 Description: Alderpoint DNS V2 -- PRIVATE RELEASE CANDIDATE (not for production)
  Private, pre-release Workstream 4A/4B packaging of Alderpoint DNS V2.

@@ -161,7 +161,33 @@ def cmd_install_enhanced_dnsdist(args: argparse.Namespace) -> int:
     must be explicitly turned on afterward."""
     _require_root()
     try:
-        report = dnsdist_upgrade.install_enhanced_dnsdist()
+        # Real defect found live during RC24 clean-install acceptance
+        # testing: app.dnsdist_upgrade's default check-config/restart/
+        # verify topology is V1's own (`dnsdist.service`, `/etc/dnsdist/
+        # dnsdist.conf`) -- wrong for V2, whose real live dnsdist runtime
+        # is `alderpointdns-v2-dnsdist.service` reading
+        # `/var/lib/alderpointdns-v2/compiled/dnsdist.conf`. Passed
+        # explicitly here; the apt-level repo/key/package-install
+        # portion needed no change (see app.dnsdist_upgrade
+        # .install_enhanced_dnsdist's own docstring).
+        report = dnsdist_upgrade.install_enhanced_dnsdist(
+            dnsdist_conf=COMPILED_DIR / "dnsdist.conf",
+            # V2 has no systemd drop-in override on the stock dnsdist
+            # unit (it ships its own dedicated unit file instead) and
+            # keeps its own cert/backup namespaces, separate from V1's --
+            # backing up V1's paths on a V2-only host would be a no-op
+            # at best (they don't exist) and cross the package boundary
+            # at worst; use V2's own real state directories. No V2
+            # equivalent of a dnsdist.service.d override dir exists, so
+            # this points at a path that will simply never exist --
+            # backup_state() already skips any source path that doesn't
+            # exist, so this is a correct no-op, not a workaround.
+            service_override_dir=STATE_DIR / "no-v2-dnsdist-service-override",
+            cert_dir=CERTS_DIR,
+            backup_dir=BACKUPS_DIR,
+            dnsdist_service_name="alderpointdns-v2-dnsdist",
+            required_services=("alderpointdns-v2-dnsdist", "alderpointdns-v2-web"),
+        )
     except dnsdist_upgrade.UpgradeError as exc:
         print(f"alderpointdns-v2-ctl install-enhanced-dnsdist: FAILED\n{exc}", file=sys.stderr)
         return 1

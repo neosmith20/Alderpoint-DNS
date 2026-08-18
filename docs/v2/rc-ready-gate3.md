@@ -1,12 +1,39 @@
 # Alderpoint DNS V2 -- private RC ready for Dex Gate #3 review
 
-Artifact: `alderpointdns-v2_2.0.0~rc23-1_all.deb`
-(sha256 `ba7cf3e1b19c9d4bbd00b860724a7e24fed01d04d0f14820f0f157510421b140`),
+Artifact: `alderpointdns-v2_2.0.0~rc24-1_all.deb`
+(sha256 `e2c578f19508dd7093e0a89f622d77d328bfa0d22326f4a055eb7eeb33b256f8`),
 branch `v2/architecture-storage-foundation`, still fully private
 (no push/tag/publish to any remote; `origin/main` -- the public V1
 line -- untouched throughout).
 
-## ⚠ Most significant finding this continuation: confirmed mandatory-parity gap -- DoT + DoH now closed, DoQ implemented (real target build lacks QUIC), DoH3/DNSCrypt remain
+## Update (RC24): DoQ and DoH3 are now genuinely functional end-to-end -- only DNSCrypt remains unimplemented
+
+**`docs/v2/doh3-transport-implemented.md`** and
+**`docs/v2/package-baseline-rc24.md`**: DoH3 config generation
+implemented, and DoQ's real environment blocker (the stock Debian
+archive dnsdist has no QUIC) resolved by reusing V1's existing,
+security-reviewed, opt-in `install-enhanced-dnsdist` mechanism
+verbatim for V2 -- deliberately NOT a package `Depends` bump, which
+would have silently changed every appliance's default trust base; see
+that doc for the reasoning. Real, live, end-to-end proof on a
+genuinely fresh Debian 13 target: real `kdig +quic` DoQ resolution and
+real `curl --http3` DoH3 resolution, both through the packaged runtime
+with normal policy/routing active -- the first genuine end-to-end QUIC
+resolution demonstrated in this project (RC23 could not demonstrate
+this on the QUIC-lacking stock target). Two real, live-reproduced
+defects were found and fixed in the reused installer itself along the
+way (missing `gnupg`/`bind9-dnsutils` package dependencies; V1-
+hardcoded runtime topology assumptions) plus one real restart/verify
+race condition -- all with regression coverage, all re-verified
+against a fresh clean-install target after each fix.
+
+**DNSCrypt is now the only unimplemented mandatory-parity row.** Its
+own cert/key format and provider-identity model has no overlap with
+the TLS/QUIC-based approach DoT/DoH/DoQ/DoH3 all share, and remains
+the next item for this workstream -- see
+`docs/v2/encrypted-transport-parity-gap.md`.
+
+## Prior finding (RC23, now superseded above): DoT + DoH closed, DoQ implemented but real target build lacked QUIC
 
 **`docs/v2/encrypted-transport-parity-gap.md`** -- DoH/DoT/DoQ/DoH3/
 DNSCrypt (all explicitly **MANDATORY V2** rows in the parity matrix)

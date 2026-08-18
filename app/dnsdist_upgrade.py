@@ -277,12 +277,17 @@ def apt_policy_candidate() -> str:
     return candidate
 
 
-def backup_state() -> Path:
-    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    archive_path = BACKUP_DIR / f"dnsdist-upgrade.pre-2.1.{int(time.time())}.tar.gz"
+def backup_state(
+    dnsdist_conf: Path = DNSDIST_CONF,
+    service_override_dir: Path = SERVICE_OVERRIDE_DIR,
+    cert_dir: Path = CERT_DIR,
+    backup_dir: Path = BACKUP_DIR,
+) -> Path:
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = backup_dir / f"dnsdist-upgrade.pre-2.1.{int(time.time())}.tar.gz"
     tmp_path = archive_path.with_suffix(archive_path.suffix + ".tmp")
     with tarfile.open(tmp_path, "w:gz") as archive:
-        for source in (DNSDIST_CONF, SERVICE_OVERRIDE_DIR, CERT_DIR):
+        for source in (dnsdist_conf, service_override_dir, cert_dir):
             if source.exists():
                 archive.add(source, arcname=str(source).lstrip("/"))
     os.replace(tmp_path, archive_path)
@@ -325,37 +330,59 @@ def apt_install() -> None:
         raise UpgradeError("apt-get install dnsdist timed out") from None
 
 
-def check_config() -> None:
+def check_config(dnsdist_conf: Path = DNSDIST_CONF) -> None:
     try:
-        result = run(["dnsdist", "--check-config", "-C", str(DNSDIST_CONF)], check=False, timeout=30)
+        result = run(["dnsdist", "--check-config", "-C", str(dnsdist_conf)], check=False, timeout=30)
     except (OSError, FileNotFoundError) as exc:
         raise UpgradeError(f"dnsdist --check-config could not run: {exc}") from None
     if result.returncode != 0:
         raise UpgradeError(f"dnsdist --check-config failed after upgrade: {result.stdout}")
 
 
-def restart_dnsdist_and_verify_services(timeout: int = 20) -> None:
+def restart_dnsdist_and_verify_services(
+    timeout: int = 20,
+    dnsdist_service_name: str = "dnsdist",
+    required_services: tuple = REQUIRED_SERVICES,
+) -> None:
     try:
-        run(["systemctl", "restart", "dnsdist"], timeout=30)
+        run(["systemctl", "restart", dnsdist_service_name], timeout=30)
     except subprocess.CalledProcessError as exc:
-        raise UpgradeError(f"systemctl restart dnsdist failed: {exc.output}") from None
+        raise UpgradeError(f"systemctl restart {dnsdist_service_name} failed: {exc.output}") from None
     deadline = time.monotonic() + timeout
     failed: list[str] = []
     while time.monotonic() < deadline:
-        failed = [svc for svc in REQUIRED_SERVICES if run(["systemctl", "is-active", svc], check=False, timeout=10).stdout.strip() != "active"]
+        failed = [svc for svc in required_services if run(["systemctl", "is-active", svc], check=False, timeout=10).stdout.strip() != "active"]
         if not failed:
             return
         time.sleep(0.5)
     raise UpgradeError(f"service(s) not active after restart: {', '.join(failed)}")
 
 
-def baseline_dns_test() -> None:
-    try:
-        result = run(["dig", "@127.0.0.1", "cloudflare.com", "A", "+time=3", "+tries=1"], check=False, timeout=10)
-    except (OSError, FileNotFoundError) as exc:
-        raise UpgradeError(f"baseline DNS test could not run: {exc}") from None
-    if result.returncode != 0 or "status: NOERROR" not in result.stdout:
-        raise UpgradeError(f"baseline plain-DNS query after upgrade failed:\n{result.stdout}")
+def baseline_dns_test(timeout: int = 10) -> None:
+    # Real race condition found live during V2's RC24 clean-install
+    # acceptance testing: restart_dnsdist_and_verify_services() only
+    # waits for systemd to report the unit "active", which for dnsdist's
+    # unit type happens as soon as the process is exec'd -- not once it
+    # has actually finished startup (loading backends, ACLs, and, on a
+    # freshly-upgraded 2.1.x build, binding the Do53 socket) and is
+    # ready to answer. A single immediate `dig` right after that
+    # observed "connection refused" even though the exact same query
+    # succeeded well under a second later once dnsdist finished binding.
+    # Bounded retry here, matching the same
+    # deadline/poll-and-retry shape restart_dnsdist_and_verify_services()
+    # already uses, rather than a single racy attempt.
+    deadline = time.monotonic() + timeout
+    last_result = None
+    while time.monotonic() < deadline:
+        try:
+            last_result = run(["dig", "@127.0.0.1", "cloudflare.com", "A", "+time=2", "+tries=1"], check=False, timeout=5)
+        except (OSError, FileNotFoundError) as exc:
+            raise UpgradeError(f"baseline DNS test could not run: {exc}") from None
+        if last_result.returncode == 0 and "status: NOERROR" in last_result.stdout:
+            return
+        time.sleep(0.5)
+    output = last_result.stdout if last_result is not None else "(dig never ran)"
+    raise UpgradeError(f"baseline plain-DNS query after upgrade failed:\n{output}")
 
 
 def restore_config_from_backup(backup_path: Path) -> None:
@@ -367,7 +394,31 @@ def restore_config_from_backup(backup_path: Path) -> None:
 # Orchestration
 # ---------------------------------------------------------------------------
 
-def install_enhanced_dnsdist(expected_fingerprint: str = EXPECTED_KEY_FINGERPRINT) -> UpgradeReport:
+def install_enhanced_dnsdist(
+    expected_fingerprint: str = EXPECTED_KEY_FINGERPRINT,
+    # Real defect found live during V2's RC24 clean-install acceptance
+    # testing: this function's post-upgrade check-config/restart/verify
+    # steps were hardcoded to V1's own real runtime topology (the stock
+    # `dnsdist` package unit and V1's own generated
+    # /etc/dnsdist/dnsdist.conf, restarted by `systemctl restart
+    # dnsdist`) -- correct for V1 (unchanged default below), but wrong
+    # for V2, whose real live dnsdist runtime is a *different* systemd
+    # unit (`alderpointdns-v2-dnsdist.service`) pointed at a *different*
+    # compiled config path (`/var/lib/alderpointdns-v2/compiled/
+    # dnsdist.conf`) -- confirmed live: restarting the stock `dnsdist`
+    # unit on a V2-only host (which never generates
+    # /etc/dnsdist/dnsdist.conf at all) failed outright. This is the
+    # apt-level repo/key/package-install portion's ONLY dependency on
+    # caller topology; every other step (key verification, apt source,
+    # capability re-check) is already OS/package-level and needed no
+    # change. Defaults preserve V1's exact prior behavior unchanged.
+    dnsdist_conf: Path = DNSDIST_CONF,
+    service_override_dir: Path = SERVICE_OVERRIDE_DIR,
+    cert_dir: Path = CERT_DIR,
+    backup_dir: Path = BACKUP_DIR,
+    dnsdist_service_name: str = "dnsdist",
+    required_services: tuple = REQUIRED_SERVICES,
+) -> UpgradeReport:
     report = UpgradeReport()
     report.capabilities_before = dnsdist_capabilities()
     report.version_before = dnsdist_version()
@@ -388,9 +439,9 @@ def install_enhanced_dnsdist(expected_fingerprint: str = EXPECTED_KEY_FINGERPRIN
     resolve_repo_host()
     report.note(f"resolved {REPO_HOST}")
 
-    backup_path = backup_state()
+    backup_path = backup_state(dnsdist_conf, service_override_dir, cert_dir, backup_dir)
     report.backup_path = str(backup_path)
-    report.note(f"backed up {DNSDIST_CONF}, {SERVICE_OVERRIDE_DIR}, {CERT_DIR} to {backup_path}")
+    report.note(f"backed up {dnsdist_conf}, {service_override_dir}, {cert_dir} to {backup_path}")
 
     with tempfile.TemporaryDirectory() as tmp:
         key_path = Path(tmp) / "dnsdist-21-pub.asc"
@@ -428,11 +479,13 @@ def install_enhanced_dnsdist(expected_fingerprint: str = EXPECTED_KEY_FINGERPRIN
                 )
             report.note("installed dnsdist reports dns-over-quic and dns-over-http3")
 
-            check_config()
+            check_config(dnsdist_conf)
             report.note("dnsdist --check-config passed with the existing Alderpoint configuration")
 
-            restart_dnsdist_and_verify_services()
-            report.note(f"restarted dnsdist; all required services active: {', '.join(REQUIRED_SERVICES)}")
+            restart_dnsdist_and_verify_services(
+                dnsdist_service_name=dnsdist_service_name, required_services=required_services
+            )
+            report.note(f"restarted {dnsdist_service_name}; all required services active: {', '.join(required_services)}")
 
             baseline_dns_test()
             report.note("baseline plain-DNS query after upgrade succeeded")
@@ -452,7 +505,7 @@ def install_enhanced_dnsdist(expected_fingerprint: str = EXPECTED_KEY_FINGERPRIN
                 f"  sudo rm -f {SOURCES_LIST_PATH} {PREFERENCES_PATH} {KEYRING_PATH}\n"
                 "  sudo apt-get update\n"
                 "  sudo apt-get install -y --allow-downgrades dnsdist\n"
-                "  sudo systemctl restart dnsdist\n"
+                f"  sudo systemctl restart {dnsdist_service_name}\n"
                 f"Backup archive of prior state: {backup_path}"
             ) from exc
 

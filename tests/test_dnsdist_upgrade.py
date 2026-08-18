@@ -161,6 +161,118 @@ class SimulateInstallTest(unittest.TestCase):
                 dnsdist_upgrade.simulate_install()
 
 
+class BaselineDnsTestTest(unittest.TestCase):
+    """Real race condition found live during V2's RC24 clean-install
+    acceptance testing: a freshly-restarted dnsdist doesn't finish
+    binding its socket the instant systemd reports the unit "active" --
+    a single immediate dig can see "connection refused" even though the
+    same query succeeds well under a second later. baseline_dns_test()
+    must retry within a bounded deadline, not fail on the first racy
+    attempt."""
+
+    def test_succeeds_immediately_when_dns_already_answering(self) -> None:
+        good = subprocess.CompletedProcess([], 0, "...status: NOERROR...")
+        with mock.patch.object(dnsdist_upgrade, "run", return_value=good) as mocked:
+            dnsdist_upgrade.baseline_dns_test(timeout=5)
+        self.assertEqual(mocked.call_count, 1)
+
+    def test_retries_past_a_transient_connection_refused(self) -> None:
+        refused = subprocess.CompletedProcess([], 9, "connection refused\n")
+        good = subprocess.CompletedProcess([], 0, "...status: NOERROR...")
+        with mock.patch.object(dnsdist_upgrade, "run", side_effect=[refused, refused, good]):
+            dnsdist_upgrade.baseline_dns_test(timeout=5)  # must not raise
+
+    def test_raises_with_last_output_after_the_deadline(self) -> None:
+        refused = subprocess.CompletedProcess([], 9, "connection refused\n")
+        with mock.patch.object(dnsdist_upgrade, "run", return_value=refused):
+            with self.assertRaises(dnsdist_upgrade.UpgradeError) as ctx:
+                dnsdist_upgrade.baseline_dns_test(timeout=1)
+        self.assertIn("connection refused", str(ctx.exception))
+
+
+class RuntimeTopologyParameterizationTest(unittest.TestCase):
+    """Real defect found live during V2's RC24 clean-install acceptance
+    testing: install_enhanced_dnsdist()'s post-upgrade check-config/
+    restart/verify steps were hardcoded to V1's own runtime topology
+    (the stock `dnsdist` systemd unit, /etc/dnsdist/dnsdist.conf) --
+    wrong for any other caller (V2) with its own real dnsdist unit name
+    and compiled-config path. Defaults must stay exactly V1's real
+    values (regression-critical: V1's own `alderpointdns
+    install-enhanced-dnsdist` calls this with no arguments)."""
+
+    def test_defaults_match_v1s_real_runtime_topology(self) -> None:
+        import inspect
+
+        sig = inspect.signature(dnsdist_upgrade.install_enhanced_dnsdist)
+        self.assertEqual(sig.parameters["dnsdist_conf"].default, dnsdist_upgrade.DNSDIST_CONF)
+        self.assertEqual(sig.parameters["service_override_dir"].default, dnsdist_upgrade.SERVICE_OVERRIDE_DIR)
+        self.assertEqual(sig.parameters["cert_dir"].default, dnsdist_upgrade.CERT_DIR)
+        self.assertEqual(sig.parameters["backup_dir"].default, dnsdist_upgrade.BACKUP_DIR)
+        self.assertEqual(sig.parameters["dnsdist_service_name"].default, "dnsdist")
+        self.assertEqual(sig.parameters["required_services"].default, dnsdist_upgrade.REQUIRED_SERVICES)
+
+    def test_custom_topology_is_actually_used_end_to_end(self) -> None:
+        # Real regression coverage for the exact live defect: passing a
+        # non-default service name/config path must reach every real
+        # subprocess call that touches them, not just the ones nearest
+        # the call site.
+        tmp = Path(tempfile.mkdtemp(prefix="alderpointdns-topology-test-"))
+        custom_conf = tmp / "compiled" / "dnsdist.conf"
+        custom_backup_dir = tmp / "backups"
+        calls: list[list[str]] = []
+        version_calls = {"n": 0}
+
+        def fake_run(command, check=True, timeout=60, input_text=None):
+            calls.append(command)
+            if command[:2] == ["dnsdist", "--version"]:
+                version_calls["n"] += 1
+                if version_calls["n"] == 1:
+                    # Pre-upgrade capability check: stock build, no QUIC.
+                    return subprocess.CompletedProcess(command, 0, "dnsdist 1.9.16\nEnabled features: dns-over-tls dns-over-https")
+                return subprocess.CompletedProcess(command, 0, "dnsdist 2.1.1\nEnabled features: dns-over-quic dns-over-http3")
+            if command[:2] == ["dpkg", "--print-architecture"]:
+                return subprocess.CompletedProcess(command, 0, "amd64")
+            if command[:2] == ["apt-cache", "policy"]:
+                policy_output = (
+                    "dnsdist:\n"
+                    "  Installed: 1.9.16-0+deb13u1\n"
+                    "  Candidate: 2.1.1-1pdns.debian13\n"
+                    "  Version table:\n"
+                    " *** 2.1.1-1pdns.debian13 600\n"
+                    "        600 http://repo.powerdns.com/debian trixie-dnsdist-21/main amd64 Packages\n"
+                    "     1.9.16-0+deb13u1 500\n"
+                    "        500 http://deb.debian.org/debian trixie/main amd64 Packages\n"
+                )
+                return subprocess.CompletedProcess(command, 0, policy_output)
+            if command[0] == "systemctl" and command[1] == "is-active":
+                return subprocess.CompletedProcess(command, 0, "active")
+            if command[:2] == ["dnsdist", "--check-config"]:
+                self.assertIn(str(custom_conf), command)
+                return subprocess.CompletedProcess(command, 0, "")
+            if command == ["dig", "@127.0.0.1", "cloudflare.com", "A", "+time=2", "+tries=1"]:
+                return subprocess.CompletedProcess(command, 0, "...status: NOERROR...")
+            return subprocess.CompletedProcess(command, 0, "")
+
+        with mock.patch.object(dnsdist_upgrade, "run", side_effect=fake_run), \
+             mock.patch.object(dnsdist_upgrade, "resolve_repo_host", return_value=None), \
+             mock.patch.object(dnsdist_upgrade, "download_signing_key", return_value=None), \
+             mock.patch.object(dnsdist_upgrade, "verify_signing_key", return_value=None), \
+             mock.patch.object(dnsdist_upgrade, "install_keyring", return_value=None), \
+             mock.patch.object(dnsdist_upgrade, "write_apt_sources", return_value=None), \
+             mock.patch.object(dnsdist_upgrade, "check_os_supported", return_value=None):
+            report = dnsdist_upgrade.install_enhanced_dnsdist(
+                dnsdist_conf=custom_conf,
+                backup_dir=custom_backup_dir,
+                dnsdist_service_name="alderpointdns-v2-dnsdist",
+                required_services=("alderpointdns-v2-dnsdist", "alderpointdns-v2-web"),
+            )
+        self.assertTrue(report.changed)
+        self.assertIn(["systemctl", "restart", "alderpointdns-v2-dnsdist"], calls)
+        self.assertIn(["systemctl", "is-active", "alderpointdns-v2-dnsdist"], calls)
+        self.assertIn(["systemctl", "is-active", "alderpointdns-v2-web"], calls)
+        self.assertNotIn(["systemctl", "restart", "dnsdist"], calls)
+
+
 class EnableQuicTransportsOrchestrationTest(unittest.TestCase):
     """Exercises the full install_enhanced_dnsdist() control flow with every
     OS-touching step mocked, to prove idempotency and fail-closed behavior

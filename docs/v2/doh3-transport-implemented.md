@@ -123,15 +123,19 @@ default baked into the package.
   DNSCrypt : supported
   ```
 
-- **Still owed before this can be called fully proven end-to-end**: a
-  clean-room install of the exact next RC package onto a fresh Debian
-  13 target, running `install-enhanced-dnsdist` for real against that
-  fresh target (not this dev host's pre-existing repo config), then a
-  real `kdig +quic` DoQ resolution and (kdig has no `+http3` client
-  mode; a genuine HTTP/3 client tool would be needed) DoH3 resolution
-  through the packaged runtime with normal Alderpoint policy/filtering
-  active. That full clean-install proof is tracked as the next step of
-  this workstream, not yet completed as of this doc.
+- **Update -- the full clean-install proof is now done**, see
+  `docs/v2/package-baseline-rc24.md`: a genuinely fresh Debian 13
+  target (stock `dnsdist 1.9.16`, no QUIC), real `install-enhanced-
+  dnsdist` run against it (not a pre-configured host), real `kdig
+  +quic` DoQ resolution (`QUIC session (QUICv1)-(TLS1.3)-...`, real
+  `NOERROR` answer) and real `curl --http3` DoH3 resolution (`HTTP/3
+  200`, real `application/dns-message` answer bytes) through the
+  packaged runtime with normal Alderpoint policy/runtime active, plus
+  real Alt-Svc discovery. Two real, live-reproduced defects were found
+  and fixed along the way in the reused installer itself (missing
+  `gnupg`/`bind9-dnsutils` package deps; V1-hardcoded runtime topology)
+  and one real restart/verify race condition -- see that doc for full
+  detail and regression coverage.
 
 ## What remains open
 
