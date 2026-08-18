@@ -254,6 +254,14 @@ def _ensure_dns_transport_settings_table(path: str | Path) -> None:
             conn.execute("ALTER TABLE dns_transport_settings ADD COLUMN doq_enabled INTEGER NOT NULL DEFAULT 0")
         if "doq_port" not in cols:
             conn.execute("ALTER TABLE dns_transport_settings ADD COLUMN doq_port INTEGER NOT NULL DEFAULT 853")
+        # DoH3 (roadmap continuation: closes the last QUIC-dependent row
+        # of the confirmed mandatory-parity gap alongside DoQ -- see
+        # docs/v2/doh3-transport-implemented.md). Same incremental-
+        # migration pattern as every prior protocol added to this table.
+        if "doh3_enabled" not in cols:
+            conn.execute("ALTER TABLE dns_transport_settings ADD COLUMN doh3_enabled INTEGER NOT NULL DEFAULT 0")
+        if "doh3_port" not in cols:
+            conn.execute("ALTER TABLE dns_transport_settings ADD COLUMN doh3_port INTEGER NOT NULL DEFAULT 443")
         conn.commit()
 
 
@@ -266,18 +274,20 @@ class DnsTransportSettings:
     doh_path: str = "/dns-query"
     doq_enabled: bool = False
     doq_port: int = 853
+    doh3_enabled: bool = False
+    doh3_port: int = 443
 
 
 def load_dns_transport_settings(conn: sqlite3.Connection) -> DnsTransportSettings:
     row = conn.execute(
-        "SELECT dot_enabled, dot_port, doh_enabled, doh_port, doh_path, doq_enabled, doq_port "
-        "FROM dns_transport_settings WHERE id=1"
+        "SELECT dot_enabled, dot_port, doh_enabled, doh_port, doh_path, doq_enabled, doq_port, "
+        "doh3_enabled, doh3_port FROM dns_transport_settings WHERE id=1"
     ).fetchone()
     if row is None:
         return DnsTransportSettings()
     return DnsTransportSettings(
         dot_enabled=bool(row[0]), dot_port=row[1], doh_enabled=bool(row[2]), doh_port=row[3], doh_path=row[4],
-        doq_enabled=bool(row[5]), doq_port=row[6],
+        doq_enabled=bool(row[5]), doq_port=row[6], doh3_enabled=bool(row[7]), doh3_port=row[8],
     )
 
 
@@ -290,11 +300,14 @@ def save_dns_transport_settings(conn: sqlite3.Connection, settings: DnsTransport
         raise PolicyStoreError(f"invalid doh_path: {settings.doh_path!r}")
     if not (1 <= settings.doq_port <= 65535):
         raise PolicyStoreError(f"invalid doq_port: {settings.doq_port!r}")
+    if not (1 <= settings.doh3_port <= 65535):
+        raise PolicyStoreError(f"invalid doh3_port: {settings.doh3_port!r}")
     conn.execute(
         """
         INSERT INTO dns_transport_settings
-            (id, dot_enabled, dot_port, doh_enabled, doh_port, doh_path, doq_enabled, doq_port, updated_at)
-        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, dot_enabled, dot_port, doh_enabled, doh_port, doh_path, doq_enabled, doq_port,
+             doh3_enabled, doh3_port, updated_at)
+        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             dot_enabled = excluded.dot_enabled,
             dot_port = excluded.dot_port,
@@ -303,12 +316,15 @@ def save_dns_transport_settings(conn: sqlite3.Connection, settings: DnsTransport
             doh_path = excluded.doh_path,
             doq_enabled = excluded.doq_enabled,
             doq_port = excluded.doq_port,
+            doh3_enabled = excluded.doh3_enabled,
+            doh3_port = excluded.doh3_port,
             updated_at = excluded.updated_at
         """,
         (
             int(settings.dot_enabled), settings.dot_port,
             int(settings.doh_enabled), settings.doh_port, settings.doh_path,
             int(settings.doq_enabled), settings.doq_port,
+            int(settings.doh3_enabled), settings.doh3_port,
             _now(),
         ),
     )

@@ -46,6 +46,7 @@ _REPO_ROOT = _SCRIPT_DIR.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from app import dnsdist_upgrade  # noqa: E402
 from app.v2 import analytics_deps  # noqa: E402
 from app.v2 import bind_rpz_gen  # noqa: E402
 from app.v2 import config as v2config  # noqa: E402
@@ -137,6 +138,60 @@ def _chown_best_effort(path: Path, mode: int) -> None:
         os.chown(path, uid, gid)
     except KeyError:
         pass  # dev/test environment without the real service account
+
+
+def _require_root() -> None:
+    if os.geteuid() != 0:
+        print("alderpointdns-v2-ctl: must be run as root (try: sudo alderpointdns-v2-ctl ...)", file=sys.stderr)
+        raise SystemExit(1)
+
+
+def cmd_install_enhanced_dnsdist(args: argparse.Namespace) -> int:
+    """V2's own real entry point for the same opt-in, root-only PowerDNS-
+    repository dnsdist 2.1 installer V1's ``alderpointdns install-
+    enhanced-dnsdist`` already uses (``app.dnsdist_upgrade``, reused
+    verbatim, not reimplemented) -- closes the DoQ/DoH3 confirmed
+    mandatory-parity gap's real environment blocker (docs/v2/
+    doh3-transport-implemented.md): the stock Debian archive dnsdist
+    (1.9.x) has no QUIC support, and this is the only safe, maintainable
+    way to get a build that does, without silently changing every V2
+    appliance's default trust base the way a hard package Depends bump
+    would. This installs dnsdist CAPABILITY only -- V2's own DoQ/DoH3
+    admin toggles (PUT /api/dns-transports) still start out disabled and
+    must be explicitly turned on afterward."""
+    _require_root()
+    try:
+        report = dnsdist_upgrade.install_enhanced_dnsdist()
+    except dnsdist_upgrade.UpgradeError as exc:
+        print(f"alderpointdns-v2-ctl install-enhanced-dnsdist: FAILED\n{exc}", file=sys.stderr)
+        return 1
+    for step in report.steps:
+        print(f"- {step}")
+    print()
+    if report.already_satisfied:
+        print(
+            f"Already satisfied: dnsdist {report.version_before} already has dns-over-quic "
+            "and dns-over-http3 capability. Nothing changed."
+        )
+    else:
+        print(f"dnsdist version: {report.version_before} -> {report.version_after}")
+        print(f"dns-over-quic capability:  {report.capabilities_before.get('doq')} -> {report.capabilities_after.get('doq')}")
+        print(f"dns-over-http3 capability: {report.capabilities_before.get('doh3')} -> {report.capabilities_after.get('doh3')}")
+        print(f"backup of prior /etc/dnsdist, dnsdist.service.d, and certs: {report.backup_path}")
+    print()
+    print("This installed dnsdist CAPABILITY only. DoQ and DoH3 are still disabled in")
+    print("Alderpoint DNS V2 -- turn them on via PUT /api/dns-transports (or the admin UI)")
+    print("to start the real listeners.")
+    return 0
+
+
+def cmd_dnsdist_capabilities(args: argparse.Namespace) -> int:
+    report = dnsdist_upgrade.capabilities_report()
+    print(f"dnsdist version: {report['version']}")
+    print(f"source/origin:   {report['origin']}")
+    for label, key in (("DoH", "doh"), ("DoT", "dot"), ("DoQ", "doq"), ("DoH3", "doh3"), ("DNSCrypt", "dnscrypt")):
+        print(f"{label:9s}: {'supported' if report[key] else 'not supported'}")
+    return 0
 
 
 def cmd_init_state(args: argparse.Namespace) -> int:
@@ -1302,6 +1357,20 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("init-state").set_defaults(func=cmd_init_state)
     sub.add_parser("ensure-tls-cert").set_defaults(func=cmd_ensure_tls_cert)
     sub.add_parser("init-replication-cert").set_defaults(func=cmd_init_replication_cert)
+
+    sub.add_parser(
+        "install-enhanced-dnsdist",
+        help=(
+            "opt in to the official PowerDNS dnsdist 2.1 repository to install DoQ/DoH3 "
+            "CAPABILITY (requires local root); does not itself enable DoQ/DoH3 -- turn "
+            "them on afterward via PUT /api/dns-transports"
+        ),
+    ).set_defaults(func=cmd_install_enhanced_dnsdist)
+
+    sub.add_parser(
+        "dnsdist-capabilities",
+        help="report the installed dnsdist version and which encrypted-DNS transports it supports",
+    ).set_defaults(func=cmd_dnsdist_capabilities)
 
     p = sub.add_parser("issue-peer-cert", help="issue a replication client cert for a remote node, signed by this node's own CA")
     p.add_argument("remote_node_id", help="the remote node's node_id (from its /api/node-identity)")

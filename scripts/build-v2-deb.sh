@@ -11,11 +11,13 @@ set -eu
 # building/installing it can never interact with the live V1
 # "alderpointdns" package or appliance.
 #
-# Only app/__init__.py + app/v2/ ship (confirmed by inspection: no
-# app/v2/*.py imports any top-level app/*.py module -- see
-# docs/v2/packaging.md), plus the vendored analytics wheels and the new
-# V2 ctl script/systemd units/provisioning script. No V1 application code,
-# no V1 web/ assets, no V1 systemd units.
+# Only app/__init__.py + app/v2/ ship, with one deliberate, documented
+# exception: app/dnsdist_upgrade.py (a standalone, stdlib-only, root-only
+# opt-in dnsdist-repository installer with no V1 app/web-code dependency)
+# -- see docs/v2/packaging.md and docs/v2/doh3-transport-implemented.md.
+# Plus the vendored analytics wheels and the new V2 ctl script/systemd
+# units/provisioning script. No other V1 application code, no V1 web/
+# assets, no V1 systemd units.
 
 usage() {
   cat <<'EOF'
@@ -32,7 +34,7 @@ SOURCE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 # appropriate to this branch." 2.0.0~privateN-1: "~" sorts before the
 # final 2.0.0-1 this candidate is a pre-release of, same convention V1's
 # own build-deb.sh already uses for beta/dev/rc tags.
-DEB_VERSION="2.0.0~rc23-1"
+DEB_VERSION="2.0.0~rc24-1"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -92,6 +94,16 @@ cp "$SOURCE_DIR/packaging/v2/postrm" "$PKG/DEBIAN/postrm"
 chmod 0755 "$PKG/DEBIAN/postinst" "$PKG/DEBIAN/preinst" "$PKG/DEBIAN/prerm" "$PKG/DEBIAN/postrm"
 
 cp "$SOURCE_DIR/app/__init__.py" "$PKG/opt/alderpointdns-v2/app/__init__.py"
+# app/dnsdist_upgrade.py is the one deliberate exception to "only
+# app/v2/ ships" (see this script's header comment): it's a standalone,
+# stdlib-only, root-only opt-in dnsdist-repository installer with no V1
+# app/web-code dependency (confirmed by inspection -- its own imports
+# are all stdlib). V2 reuses it verbatim rather than duplicating it, for
+# both `app/v2/webapp.py`'s real dnsdist-capability reporting
+# (GET /api/dns-transports) and `alderpointdns-v2-ctl install-enhanced-
+# dnsdist`/`dnsdist-capabilities` -- see docs/v2/doh3-transport-
+# implemented.md.
+cp "$SOURCE_DIR/app/dnsdist_upgrade.py" "$PKG/opt/alderpointdns-v2/app/dnsdist_upgrade.py"
 tar -C "$SOURCE_DIR" --exclude __pycache__ --exclude '*.pyc' -cf - app/v2 | \
   tar -C "$PKG/opt/alderpointdns-v2" -xf -
 tar -C "$SOURCE_DIR" -cf - vendor/v2-analytics | \

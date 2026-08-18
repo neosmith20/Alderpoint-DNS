@@ -6,6 +6,7 @@ from app.v2.blocking_response import BlockingResponse
 from app.v2.dnsdist_policy_runtime import (
     ClientPolicyBinding,
     DohConfig,
+    Doh3Config,
     DoqConfig,
     DotConfig,
     PolicyRuntimeError,
@@ -321,6 +322,78 @@ class TestRealValidation:
         doq = DoqConfig(enabled=True, port=15368, cert_path=str(cert_path), key_path=str(key_path))
         text = compile_multi_policy_dnsdist_config("127.0.0.1:15369", [b1], dot=dot, doh=doh, doq=doq)
         conf_path = tmp_path / "c5.conf"
+        conf_path.write_text(text)
+        result = subprocess.run(["dnsdist", "-C", str(conf_path), "--check-config"], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+
+    def test_doh3_listener_wired_and_passes_real_check_config(self, tmp_path):
+        # Real defect this closes (docs/v2/encrypted-transport-parity-gap.md
+        # / docs/v2/doh3-transport-implemented.md): DoH3 was entirely
+        # absent from V2's real config generation, the last QUIC-dependent
+        # row of the confirmed mandatory-parity gap alongside DoQ. This
+        # dev host has the real PowerDNS-repo dnsdist 2.1.1 build
+        # installed (`dnsdist --version` lists dns-over-http3) -- if it
+        # hadn't, the generated alderpointdnsv2SafeCapabilityCall wrapper
+        # would print a skip message and validate cleanly anyway rather
+        # than crash, same as DoQ.
+        import subprocess
+
+        cert_path, key_path = _self_signed_cert(tmp_path)
+        b1 = _binding("10.0.1.0/24", "p1")
+        doh3 = Doh3Config(enabled=True, port=15370, cert_path=str(cert_path), key_path=str(key_path))
+        text = compile_multi_policy_dnsdist_config("127.0.0.1:15371", [b1], doh3=doh3)
+        assert "addDOH3Local" in text
+        conf_path = tmp_path / "c6.conf"
+        conf_path.write_text(text)
+        result = subprocess.run(["dnsdist", "-C", str(conf_path), "--check-config"], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+
+    def test_doh3_listener_omitted_when_disabled(self):
+        b1 = _binding("10.0.1.0/24", "p1")
+        text = compile_multi_policy_dnsdist_config(
+            "127.0.0.1:15372", [b1], doh3=Doh3Config(enabled=False, port=443, cert_path="x", key_path="y")
+        )
+        assert "addDOH3Local" not in text
+
+    def test_doh3_advertised_via_alt_svc_on_doh_listener_when_both_enabled(self, tmp_path):
+        # Ported behavior from V1's own real, production-proven
+        # packaging/dnsdist.conf "doh-altsvc" managed block: when DoH3 is
+        # enabled, the plain DoH (HTTP/1.1/2) listener advertises the
+        # HTTP/3 upgrade via the standard Alt-Svc response header
+        # (RFC 7838) so real clients can discover and use it.
+        import subprocess
+
+        cert_path, key_path = _self_signed_cert(tmp_path)
+        b1 = _binding("10.0.1.0/24", "p1")
+        doh = DohConfig(enabled=True, port=15373, cert_path=str(cert_path), key_path=str(key_path))
+        doh3 = Doh3Config(enabled=True, port=15373, cert_path=str(cert_path), key_path=str(key_path))
+        text = compile_multi_policy_dnsdist_config("127.0.0.1:15374", [b1], doh=doh, doh3=doh3)
+        assert 'customResponseHeaders={["alt-svc"]="h3=\\":15373\\"; ma=86400"}' in text
+        conf_path = tmp_path / "c7.conf"
+        conf_path.write_text(text)
+        result = subprocess.run(["dnsdist", "-C", str(conf_path), "--check-config"], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+
+    def test_no_alt_svc_header_when_doh3_disabled(self, tmp_path):
+        cert_path, key_path = _self_signed_cert(tmp_path)
+        b1 = _binding("10.0.1.0/24", "p1")
+        doh = DohConfig(enabled=True, port=15375, cert_path=str(cert_path), key_path=str(key_path))
+        text = compile_multi_policy_dnsdist_config("127.0.0.1:15376", [b1], doh=doh)
+        assert "alt-svc" not in text
+
+    def test_all_four_encrypted_transports_enabled_simultaneously(self, tmp_path):
+        import subprocess
+
+        cert_path, key_path = _self_signed_cert(tmp_path)
+        b1 = _binding("10.0.1.0/24", "p1")
+        dot = DotConfig(enabled=True, port=15377, cert_path=str(cert_path), key_path=str(key_path))
+        doh = DohConfig(enabled=True, port=15378, cert_path=str(cert_path), key_path=str(key_path))
+        doq = DoqConfig(enabled=True, port=15379, cert_path=str(cert_path), key_path=str(key_path))
+        doh3 = Doh3Config(enabled=True, port=15380, cert_path=str(cert_path), key_path=str(key_path))
+        text = compile_multi_policy_dnsdist_config(
+            "127.0.0.1:15381", [b1], dot=dot, doh=doh, doq=doq, doh3=doh3
+        )
+        conf_path = tmp_path / "c8.conf"
         conf_path.write_text(text)
         result = subprocess.run(["dnsdist", "-C", str(conf_path), "--check-config"], capture_output=True, text=True)
         assert result.returncode == 0, result.stderr

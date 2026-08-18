@@ -560,6 +560,116 @@ class TestDnsTransports:
         assert r.status_code == 400, r.text
         assert r.json()["error"] == "port_conflict"
 
+    def test_get_reports_real_dnsdist_capabilities(self, app_client):
+        # Real capability detection (docs/v2/doh3-transport-implemented.md):
+        # reuses app.dnsdist_upgrade.dnsdist_capabilities() -- the same
+        # `dnsdist --version` parser V1's install-enhanced-dnsdist command
+        # already uses -- rather than a second implementation, so the
+        # admin UI can show *why* a toggled-on protocol isn't actually
+        # answering queries on a build that lacks it.
+        webapp, client = app_client
+        _setup_and_login(webapp, client)
+        r = client.get("/api/dns-transports")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert "doq_supported" in body
+        assert "doh3_supported" in body
+        assert "dnscrypt_supported" in body
+        assert "dnsdist_version" in body
+        assert isinstance(body["doq_supported"], bool)
+
+    def test_enabling_doh3_with_cert_provisioned_emits_a_real_doh3_listener(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+
+        import subprocess
+
+        webapp.ACTIVE_CERT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [
+                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                "-keyout", str(webapp.ACTIVE_KEY_PATH), "-out", str(webapp.ACTIVE_CERT_PATH),
+                "-days", "1", "-subj", "/CN=test",
+            ],
+            check=True, capture_output=True,
+        )
+
+        r = client.put("/api/dns-transports", json={"doh3_enabled": True, "doh3_port": 8446}, headers={"X-CSRF-Token": csrf})
+        assert r.status_code == 200, r.text
+        conf_text = webapp.COMPILED_DNSDIST_CONF.read_text()
+        assert "addDOH3Local" in conf_text
+        assert "0.0.0.0:8446" in conf_text
+
+        r2 = client.get("/api/dns-transports")
+        assert r2.json()["doh3_enabled"] is True
+        assert r2.json()["doh3_port"] == 8446
+
+    def test_doh3_advertised_via_alt_svc_when_doh_also_enabled(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+
+        import subprocess
+
+        webapp.ACTIVE_CERT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [
+                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                "-keyout", str(webapp.ACTIVE_KEY_PATH), "-out", str(webapp.ACTIVE_CERT_PATH),
+                "-days", "1", "-subj", "/CN=test",
+            ],
+            check=True, capture_output=True,
+        )
+
+        r = client.put(
+            "/api/dns-transports",
+            json={"doh_enabled": True, "doh_port": 8447, "doh3_enabled": True, "doh3_port": 8447},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert r.status_code == 200, r.text
+        conf_text = webapp.COMPILED_DNSDIST_CONF.read_text()
+        assert "addDOHLocal" in conf_text
+        assert "addDOH3Local" in conf_text
+        assert "alt-svc" in conf_text
+
+    def test_doh3_port_conflicting_with_management_api_rejected(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        r = client.put(
+            "/api/dns-transports", json={"doh3_enabled": True, "doh3_port": 8443},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert r.status_code == 400, r.text
+        assert r.json()["error"] == "port_conflict"
+
+    def test_doq_and_doh3_may_share_the_same_default_port(self, app_client):
+        # Both are QUIC/UDP-transported -- checked only against reserved
+        # appliance ports and the plain DNS listener, never against each
+        # other or against DoT/DoH's TCP-only conflict set.
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+
+        import subprocess
+
+        webapp.ACTIVE_CERT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [
+                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                "-keyout", str(webapp.ACTIVE_KEY_PATH), "-out", str(webapp.ACTIVE_CERT_PATH),
+                "-days", "1", "-subj", "/CN=test",
+            ],
+            check=True, capture_output=True,
+        )
+
+        r = client.put(
+            "/api/dns-transports",
+            json={"doq_enabled": True, "doq_port": 4443, "doh3_enabled": True, "doh3_port": 4443},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert r.status_code == 200, r.text
+        conf_text = webapp.COMPILED_DNSDIST_CONF.read_text()
+        assert "addDOQLocal" in conf_text
+        assert "addDOH3Local" in conf_text
+
 
 class TestReplicationPeerCertEnrollment:
     """Real replication peer-enrollment endpoint (previously missing

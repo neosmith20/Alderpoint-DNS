@@ -9,7 +9,7 @@ the package also declares `Conflicts: alderpointdns`).
 
 | Path | Owner:Group | Mode | Contents |
 |---|---|---|---|
-| `/opt/alderpointdns-v2/` | root:root | 0755 | `app/` (only `app/__init__.py` + `app/v2/` — no V1 code, confirmed no cross-imports), `vendor/v2-analytics/*.whl`, `scripts/v2/alderpointdns_v2_ctl.py`, `scripts/provision-v2-analytics-vendor-runtime.sh` |
+| `/opt/alderpointdns-v2/` | root:root | 0755 | `app/` (`app/__init__.py` + `app/v2/`, plus one deliberate exception: `app/dnsdist_upgrade.py` — a standalone, stdlib-only, root-only opt-in dnsdist-repository installer reused verbatim for real dnsdist-capability detection and `alderpointdns-v2-ctl install-enhanced-dnsdist`/`dnsdist-capabilities`, see `docs/v2/doh3-transport-implemented.md`; no other V1 code, confirmed no other cross-imports), `vendor/v2-analytics/*.whl`, `scripts/v2/alderpointdns_v2_ctl.py`, `scripts/provision-v2-analytics-vendor-runtime.sh` |
 | `/opt/alderpointdns-v2/vendor-runtime-v2-analytics/` | root:root | 0755 | Provisioned pyarrow/duckdb, generated at install time, reproducible from the bundled wheels — never user state, deleted on remove/purge |
 | `/etc/alderpointdns-v2/` | root:alderpointdns-v2 | 0750 | `alderpointdns.yaml` (0640, root:alderpointdns-v2) |
 | `/var/lib/alderpointdns-v2/` | alderpointdns-v2:alderpointdns-v2 | 0750 | state root |

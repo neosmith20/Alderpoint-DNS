@@ -187,13 +187,15 @@ class TestDnsTransportSettings:
         assert settings.doh_path == "/dns-query"
         assert settings.doq_enabled is False
         assert settings.doq_port == 853
+        assert settings.doh3_enabled is False
+        assert settings.doh3_port == 443
 
     def test_round_trip(self, conn):
         store.save_dns_transport_settings(
             conn,
             store.DnsTransportSettings(
                 dot_enabled=True, dot_port=8853, doh_enabled=True, doh_port=8443, doh_path="/custom-path",
-                doq_enabled=True, doq_port=8853,
+                doq_enabled=True, doq_port=8853, doh3_enabled=True, doh3_port=8444,
             ),
         )
         conn.commit()
@@ -205,6 +207,8 @@ class TestDnsTransportSettings:
         assert settings.doh_path == "/custom-path"
         assert settings.doq_enabled is True
         assert settings.doq_port == 8853
+        assert settings.doh3_enabled is True
+        assert settings.doh3_port == 8444
 
     def test_invalid_port_rejected(self, conn):
         with pytest.raises(store.PolicyStoreError):
@@ -213,6 +217,23 @@ class TestDnsTransportSettings:
             store.save_dns_transport_settings(conn, store.DnsTransportSettings(doh_port=99999))
         with pytest.raises(store.PolicyStoreError):
             store.save_dns_transport_settings(conn, store.DnsTransportSettings(doq_port=0))
+        with pytest.raises(store.PolicyStoreError):
+            store.save_dns_transport_settings(conn, store.DnsTransportSettings(doh3_port=0))
+
+    def test_pre_doh3_schema_migrates_cleanly(self, db):
+        # Real regression coverage for the incremental-migration path
+        # (_ensure_dns_transport_settings_table): an existing install
+        # whose dns_transport_settings table predates the doh3_enabled/
+        # doh3_port columns must gain them via ALTER TABLE, not break.
+        with control_db.connect(db) as c:
+            c.execute("ALTER TABLE dns_transport_settings DROP COLUMN doh3_enabled")
+            c.execute("ALTER TABLE dns_transport_settings DROP COLUMN doh3_port")
+            c.commit()
+        store._ensure_dns_transport_settings_table(db)
+        with control_db.connect(db) as c:
+            settings = store.load_dns_transport_settings(c)
+        assert settings.doh3_enabled is False
+        assert settings.doh3_port == 443
 
     def test_invalid_doh_path_rejected(self, conn):
         with pytest.raises(store.PolicyStoreError):

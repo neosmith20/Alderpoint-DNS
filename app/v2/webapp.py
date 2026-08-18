@@ -41,6 +41,7 @@ from fastapi.staticfiles import StaticFiles
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 from pydantic import BaseModel, Field
 
+from app import dnsdist_upgrade
 from app.v2 import analytics_deps
 from app.v2 import control_db
 from app.v2 import migration_convert
@@ -557,7 +558,8 @@ def _configured_listen_address() -> str:
 
 
 def _encrypted_transport_configs(conn) -> tuple[
-    Optional[runtime_compile.DotConfig], Optional[runtime_compile.DohConfig], Optional[runtime_compile.DoqConfig]
+    Optional[runtime_compile.DotConfig], Optional[runtime_compile.DohConfig],
+    Optional[runtime_compile.DoqConfig], Optional[runtime_compile.Doh3Config],
 ]:
     """Builds the real DoT/DoH/DoQ listener configs for this recompile
     from the real admin-configured settings (see
@@ -595,7 +597,14 @@ def _encrypted_transport_configs(conn) -> tuple[
         if settings.doq_enabled and cert_ready
         else None
     )
-    return dot, doh, doq
+    doh3 = (
+        runtime_compile.Doh3Config(
+            enabled=True, port=settings.doh3_port, cert_path=str(ACTIVE_CERT_PATH), key_path=str(ACTIVE_KEY_PATH)
+        )
+        if settings.doh3_enabled and cert_ready
+        else None
+    )
+    return dot, doh, doq, doh3
 
 
 def _mutate_and_promote(mutate_fn) -> runtime_compile.RuntimeCompileResult:
@@ -612,10 +621,10 @@ def _mutate_and_promote(mutate_fn) -> runtime_compile.RuntimeCompileResult:
         conn.execute("BEGIN IMMEDIATE")
         try:
             mutate_fn(conn)
-            dot, doh, doq = _encrypted_transport_configs(conn)
+            dot, doh, doq, doh3 = _encrypted_transport_configs(conn)
             result = runtime_compile.recompile_and_promote(
                 conn, STAGING_DIR, COMPILED_DNSDIST_CONF,
-                listen_address=_configured_listen_address(), dot=dot, doh=doh, doq=doq,
+                listen_address=_configured_listen_address(), dot=dot, doh=doh, doq=doq, doh3=doh3,
             )
         except BaseException:
             conn.execute("ROLLBACK")
@@ -698,12 +707,24 @@ class DnsTransportSettingsUpdate(BaseModel):
     doh_path: str = Field(default="/dns-query", min_length=1, max_length=255, pattern=r"^/.*$")
     doq_enabled: bool = False
     doq_port: int = Field(default=853, ge=1, le=65535)
+    doh3_enabled: bool = False
+    doh3_port: int = Field(default=443, ge=1, le=65535)
 
 
 @app.get("/api/dns-transports")
 def get_dns_transports(admin=Depends(current_admin)):
     with _db() as conn:
         settings = store.load_dns_transport_settings(conn)
+    # Real dnsdist-build capability detection (docs/v2/doh3-transport-
+    # implemented.md) -- reuses app.dnsdist_upgrade.dnsdist_capabilities(),
+    # the same `dnsdist --version` feature-list parser V1's own
+    # app/encryption.py and the opt-in `install-enhanced-dnsdist` command
+    # already use, rather than a second implementation. DoQ/DoH3 remain
+    # togglable regardless of what this reports (the generated config's
+    # own SafeCapabilityCall wrapper degrades safely either way) -- this
+    # is surfaced so the admin UI can show *why* a protocol isn't
+    # actually answering queries on a build that lacks it.
+    caps = dnsdist_upgrade.dnsdist_capabilities()
     return {
         "dot_enabled": settings.dot_enabled,
         "dot_port": settings.dot_port,
@@ -712,7 +733,13 @@ def get_dns_transports(admin=Depends(current_admin)):
         "doh_path": settings.doh_path,
         "doq_enabled": settings.doq_enabled,
         "doq_port": settings.doq_port,
+        "doh3_enabled": settings.doh3_enabled,
+        "doh3_port": settings.doh3_port,
         "cert_provisioned": ACTIVE_CERT_PATH.exists() and ACTIVE_KEY_PATH.exists(),
+        "dnsdist_version": dnsdist_upgrade.dnsdist_version(),
+        "doq_supported": caps.get("doq", False),
+        "doh3_supported": caps.get("doh3", False),
+        "dnscrypt_supported": caps.get("dnscrypt", False),
     }
 
 
@@ -760,6 +787,11 @@ def _validate_dns_transport_ports(req: "DnsTransportSettingsUpdate") -> None:
         all_requested.append(("doh_port", req.doh_port))
     if req.doq_enabled:
         all_requested.append(("doq_port", req.doq_port))
+    if req.doh3_enabled:
+        # QUIC-transported (UDP), same as DoQ -- not checked against the
+        # TCP-only conflict set below, only against this appliance's own
+        # reserved ports and the plain DNS listener.
+        all_requested.append(("doh3_port", req.doh3_port))
     dns_port = int(_configured_listen_address().rsplit(":", 1)[-1])
     for field, port in all_requested:
         if port in _RESERVED_APPLIANCE_PORTS:
@@ -785,6 +817,7 @@ def put_dns_transports(
         dot_enabled=req.dot_enabled, dot_port=req.dot_port,
         doh_enabled=req.doh_enabled, doh_port=req.doh_port, doh_path=req.doh_path,
         doq_enabled=req.doq_enabled, doq_port=req.doq_port,
+        doh3_enabled=req.doh3_enabled, doh3_port=req.doh3_port,
     )
     result = _mutate_and_promote(lambda conn: store.save_dns_transport_settings(conn, settings))
     return {"status": "updated", "runtime": {"promoted": result.promoted, "binding_count": result.binding_count}}

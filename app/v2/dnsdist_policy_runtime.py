@@ -210,15 +210,53 @@ class DohConfig:
     ciphers: str = "HIGH:!aNULL:!MD5:!RC4"
 
 
-def _doh_bind_lines(listen_address: str, doh: DohConfig) -> list[str]:
+def _doh_bind_lines(listen_address: str, doh: DohConfig, doh3: "Doh3Config | None" = None) -> list[str]:
     host = listen_address.rsplit(":", 1)[0]
-    return [
+    lines = [
         f'addDOHLocal("{host}:{doh.port}", {{{_lua_string(doh.cert_path)}}}, {{{_lua_string(doh.key_path)}}}, '
         f'{{{_lua_string(doh.path)}}}, {{',
         "  reusePort=true,",
         f'  minTLSVersion={_lua_string(doh.min_tls_version)},',
-        f'  ciphers={_lua_string(doh.ciphers)}',
-        "})",
+        f'  ciphers={_lua_string(doh.ciphers)},',
+    ]
+    if doh3 is not None and doh3.enabled:
+        # Advertise the DoH3 upgrade to plain DoH (HTTP/1.1/2) clients via
+        # the standard Alt-Svc response header (RFC 7838) -- ported
+        # verbatim from V1's own real, production-proven
+        # packaging/dnsdist.conf ("doh-altsvc" managed block) rather than
+        # reinvented. Only emitted while DoH3 is actually enabled -- it
+        # would otherwise point clients at a UDP port nothing is
+        # listening on.
+        alt_svc_value = f'h3=":{doh3.port}"; ma=86400'
+        lines.append(f'  customResponseHeaders={{["alt-svc"]={_lua_string(alt_svc_value)}}},')
+    lines += ["})", ""]
+    return lines
+
+
+@dataclass(frozen=True)
+class Doh3Config:
+    """DNS-over-HTTP/3 listener configuration -- same cert-reuse
+    rationale as DotConfig/DohConfig, but QUIC-transported like DoQ
+    (RFC 9114 over QUIC), so it shares DoqConfig's defensive
+    capability-call wrapper: not every dnsdist build includes QUIC
+    support (V1's own real, hands-on finding, documented in
+    docs/dnsdist.md). dnsdist's real ``addDOH3Local`` takes plain
+    cert/key path strings, not single-element tables (matching
+    ``addDOQLocal``'s calling convention, verified against V1's own
+    real ``packaging/dnsdist.conf`` syntax)."""
+
+    enabled: bool
+    port: int
+    cert_path: str
+    key_path: str
+
+
+def _doh3_bind_lines(listen_address: str, doh3: Doh3Config) -> list[str]:
+    host = listen_address.rsplit(":", 1)[0]
+    return [
+        _SAFE_CAPABILITY_CALL_HELPER,
+        f'alderpointdnsv2SafeCapabilityCall("DoH3 (addDOH3Local)", addDOH3Local, "{host}:{doh3.port}", '
+        f'{_lua_string(doh3.cert_path)}, {_lua_string(doh3.key_path)})',
         "",
     ]
 
@@ -284,6 +322,7 @@ def compile_multi_policy_dnsdist_config(
     dot: DotConfig | None = None,
     doh: DohConfig | None = None,
     doq: DoqConfig | None = None,
+    doh3: Doh3Config | None = None,
 ) -> str:
     """Deterministic (§2H requires reproducible behavior regardless of
     query order): bindings are processed most-specific-network-first
@@ -311,10 +350,13 @@ def compile_multi_policy_dnsdist_config(
         lines += _dot_bind_lines(listen_address, dot)
 
     if doh is not None and doh.enabled:
-        lines += _doh_bind_lines(listen_address, doh)
+        lines += _doh_bind_lines(listen_address, doh, doh3)
 
     if doq is not None and doq.enabled:
         lines += _doq_bind_lines(listen_address, doq)
+
+    if doh3 is not None and doh3.enabled:
+        lines += _doh3_bind_lines(listen_address, doh3)
 
     if analytics_log_address:
         # Real query-log/analytics producer: logs the completed
