@@ -239,6 +239,76 @@ class TestDnsTransportSettings:
         with pytest.raises(store.PolicyStoreError):
             store.save_dns_transport_settings(conn, store.DnsTransportSettings(doh_path="no-leading-slash"))
 
+
+class TestDnscryptSettings:
+    def test_defaults_disabled_and_unprovisioned(self, conn):
+        settings = store.load_dnscrypt_settings(conn)
+        assert settings.enabled is False
+        assert settings.port == 5443
+        assert settings.provider_name == "2.dnscrypt-cert.alderpointdns-v2.local"
+        assert settings.provider_secret_id is None
+        assert settings.resolver_secret_id is None
+        assert settings.identity_provisioned is False
+
+    def test_round_trip(self, conn):
+        store.save_dnscrypt_settings(
+            conn,
+            store.DnscryptSettings(
+                enabled=True, port=5444, provider_name="2.dnscrypt-cert.example.local",
+                provider_secret_id="prov-secret-1", provider_public_key_b64="cHVi",
+                resolver_secret_id="res-secret-1", cert_b64="Y2VydA==",
+                cert_serial=3, cert_valid_from=1000, cert_valid_until=2000,
+            ),
+        )
+        conn.commit()
+        settings = store.load_dnscrypt_settings(conn)
+        assert settings.enabled is True
+        assert settings.port == 5444
+        assert settings.provider_name == "2.dnscrypt-cert.example.local"
+        assert settings.provider_secret_id == "prov-secret-1"
+        assert settings.provider_public_key_b64 == "cHVi"
+        assert settings.resolver_secret_id == "res-secret-1"
+        assert settings.cert_b64 == "Y2VydA=="
+        assert settings.cert_serial == 3
+        assert settings.cert_valid_from == 1000
+        assert settings.cert_valid_until == 2000
+        assert settings.identity_provisioned is True
+
+    def test_identity_provisioned_requires_all_three_fields(self, conn):
+        # Real regression coverage: a partially-provisioned state (e.g. a
+        # provider identity generated but cert issuance never completed)
+        # must not be treated as ready to emit a live listener.
+        partial = store.DnscryptSettings(provider_secret_id="p1", resolver_secret_id=None, cert_b64=None)
+        assert partial.identity_provisioned is False
+        partial2 = store.DnscryptSettings(provider_secret_id="p1", resolver_secret_id="r1", cert_b64=None)
+        assert partial2.identity_provisioned is False
+
+    def test_invalid_port_rejected(self, conn):
+        with pytest.raises(store.PolicyStoreError):
+            store.save_dnscrypt_settings(conn, store.DnscryptSettings(port=0))
+        with pytest.raises(store.PolicyStoreError):
+            store.save_dnscrypt_settings(conn, store.DnscryptSettings(port=99999))
+
+    def test_empty_provider_name_rejected(self, conn):
+        with pytest.raises(store.PolicyStoreError):
+            store.save_dnscrypt_settings(conn, store.DnscryptSettings(provider_name="   "))
+
+    def test_negative_serial_rejected(self, conn):
+        with pytest.raises(store.PolicyStoreError):
+            store.save_dnscrypt_settings(conn, store.DnscryptSettings(cert_serial=-1))
+
+    def test_table_created_by_ensure_schema(self, db):
+        # Real regression coverage for the incremental-migration path:
+        # an existing install whose control.db predates this table must
+        # gain it on the next ensure_schema call, not break.
+        with control_db.connect(db) as c:
+            c.execute("DROP TABLE dnscrypt_settings")
+            c.commit()
+        store._ensure_dnscrypt_settings_table(db)
+        with control_db.connect(db) as c:
+            settings = store.load_dnscrypt_settings(c)
+        assert settings.enabled is False
+
     def test_ensure_schema_is_idempotent_and_incremental(self, tmp_path):
         # Real regression coverage: re-running ensure_schema against an
         # already-migrated DB (simulating a package upgrade) must not

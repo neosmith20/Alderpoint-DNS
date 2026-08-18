@@ -262,6 +262,48 @@ def _doh3_bind_lines(listen_address: str, doh3: Doh3Config) -> list[str]:
 
 
 @dataclass(frozen=True)
+class DnscryptConfig:
+    """DNSCrypt listener configuration -- the one encrypted transport that
+    does NOT reuse the appliance's management TLS cert (DotConfig/
+    DohConfig/DoqConfig/Doh3Config all do): DNSCrypt has its own real
+    provider-identity (long-term Ed25519 signing key) and resolver-
+    certificate (short-term X25519, re-issued periodically) model with no
+    overlap with the TLS trust the other four share. ``cert_path``/
+    ``key_path`` here point at files materialized fresh at every compile
+    from protected secret material (``app/v2/dnscrypt_provisioning.py``
+    generates the real bytes; see ``docs/v2/dnscrypt-transport-
+    implemented.md`` for the full design and why generation always goes
+    through the real dnsdist binary rather than a hand-rolled binary
+    format). ``provider_name`` is the public, non-secret identity string
+    clients query to discover this resolver's certificate (dnsdist's own
+    real convention, matching V1's default: ``2.dnscrypt-cert.<domain>``).
+    Shares DoQ/DoH3's defensive capability-call wrapper: not every distro
+    build necessarily ships DNSCrypt support, even though the stock
+    Debian archive build this appliance targets does (confirmed live,
+    this continuation: ``dnscrypt`` listed among RC24's real installed
+    ``dnsdist 1.9.16``'s ``Enabled features``) -- wrapped anyway, since
+    being defensive here costs nothing and a future packaging change
+    should never be able to crash-loop the live runtime."""
+
+    enabled: bool
+    port: int
+    provider_name: str
+    cert_path: str
+    key_path: str
+
+
+def _dnscrypt_bind_lines(listen_address: str, dnscrypt: DnscryptConfig) -> list[str]:
+    host = listen_address.rsplit(":", 1)[0]
+    return [
+        _SAFE_CAPABILITY_CALL_HELPER,
+        f'alderpointdnsv2SafeCapabilityCall("DNSCrypt (addDNSCryptBind)", addDNSCryptBind, '
+        f'"{host}:{dnscrypt.port}", {_lua_string(dnscrypt.provider_name)}, '
+        f'{_lua_string(dnscrypt.cert_path)}, {_lua_string(dnscrypt.key_path)})',
+        "",
+    ]
+
+
+@dataclass(frozen=True)
 class DoqConfig:
     """DNS-over-QUIC listener configuration -- same cert-reuse rationale
     as DotConfig/DohConfig. Unlike ``addTLSLocal``/``addDOHLocal``,
@@ -323,6 +365,7 @@ def compile_multi_policy_dnsdist_config(
     doh: DohConfig | None = None,
     doq: DoqConfig | None = None,
     doh3: Doh3Config | None = None,
+    dnscrypt: DnscryptConfig | None = None,
 ) -> str:
     """Deterministic (§2H requires reproducible behavior regardless of
     query order): bindings are processed most-specific-network-first
@@ -357,6 +400,9 @@ def compile_multi_policy_dnsdist_config(
 
     if doh3 is not None and doh3.enabled:
         lines += _doh3_bind_lines(listen_address, doh3)
+
+    if dnscrypt is not None and dnscrypt.enabled:
+        lines += _dnscrypt_bind_lines(listen_address, dnscrypt)
 
     if analytics_log_address:
         # Real query-log/analytics producer: logs the completed

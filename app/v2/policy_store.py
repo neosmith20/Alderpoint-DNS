@@ -202,6 +202,7 @@ def ensure_schema(path: str | Path) -> None:
     if not already_present:
         control_db.apply_migration_in_transaction(path, _MIGRATION_V2, POLICY_STORE_SCHEMA_VERSION)
     _ensure_dns_transport_settings_table(path)
+    _ensure_dnscrypt_settings_table(path)
 
 
 def _ensure_dns_transport_settings_table(path: str | Path) -> None:
@@ -325,6 +326,127 @@ def save_dns_transport_settings(conn: sqlite3.Connection, settings: DnsTransport
             int(settings.doh_enabled), settings.doh_port, settings.doh_path,
             int(settings.doq_enabled), settings.doq_port,
             int(settings.doh3_enabled), settings.doh3_port,
+            _now(),
+        ),
+    )
+
+
+# --------------------------------------------------------------------------
+# DNSCrypt (roadmap continuation: closes the last remaining row of the
+# confirmed mandatory encrypted-transport parity gap -- see
+# docs/v2/dnscrypt-transport-implemented.md)
+# --------------------------------------------------------------------------
+
+# A separate table from dns_transport_settings deliberately: DNSCrypt has
+# no shared management-TLS-cert-reuse rationale the way DoT/DoH/DoQ/DoH3
+# do (see DnscryptConfig's own docstring in dnsdist_policy_runtime.py) --
+# its own provider-identity/resolver-certificate lifecycle needs distinct
+# columns (secret references, cert bytes, serial, validity window) that
+# don't fit the simple enabled/port shape the other four share.
+#
+# Frozen architecture (docs/v2/architecture-map.md "Notification secret
+# architecture", the same invariant app/v2/secret_store.py's own module
+# docstring documents and app/v2/replication_v2.py's
+# REPLICATION_CA_KEY_SECRET_ID already follows for the CA signing key):
+# control.db holds a secret REFERENCE only (provider_secret_id/
+# resolver_secret_id) -- the real private key bytes live in the protected
+# SecretStore, never here. provider_public_key_b64 and cert_b64 are NOT
+# secrets (the public key is the fingerprint every client is meant to
+# pin against; the certificate is broadcast in plaintext to any client
+# that asks for it) -- stored directly as ordinary columns.
+def _ensure_dnscrypt_settings_table(path: str | Path) -> None:
+    with control_db.connect(path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dnscrypt_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                enabled INTEGER NOT NULL DEFAULT 0,
+                port INTEGER NOT NULL DEFAULT 5443,
+                provider_name TEXT NOT NULL DEFAULT '2.dnscrypt-cert.alderpointdns-v2.local',
+                provider_secret_id TEXT,
+                provider_public_key_b64 TEXT,
+                resolver_secret_id TEXT,
+                cert_b64 TEXT,
+                cert_serial INTEGER NOT NULL DEFAULT 0,
+                cert_valid_from INTEGER,
+                cert_valid_until INTEGER,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.commit()
+
+
+@dataclass
+class DnscryptSettings:
+    enabled: bool = False
+    port: int = 5443
+    provider_name: str = "2.dnscrypt-cert.alderpointdns-v2.local"
+    provider_secret_id: Optional[str] = None
+    provider_public_key_b64: Optional[str] = None
+    resolver_secret_id: Optional[str] = None
+    cert_b64: Optional[str] = None
+    cert_serial: int = 0
+    cert_valid_from: Optional[int] = None
+    cert_valid_until: Optional[int] = None
+
+    @property
+    def identity_provisioned(self) -> bool:
+        """True once a provider identity AND a signed resolver
+        certificate both exist -- the real precondition for emitting a
+        live addDNSCryptBind, mirroring the cert_provisioned gate
+        webapp.py already applies to DoT/DoH/DoQ/DoH3 (never emit a
+        listener pointing at material that doesn't exist yet)."""
+        return bool(self.provider_secret_id and self.resolver_secret_id and self.cert_b64)
+
+
+def load_dnscrypt_settings(conn: sqlite3.Connection) -> DnscryptSettings:
+    row = conn.execute(
+        "SELECT enabled, port, provider_name, provider_secret_id, provider_public_key_b64, "
+        "resolver_secret_id, cert_b64, cert_serial, cert_valid_from, cert_valid_until "
+        "FROM dnscrypt_settings WHERE id=1"
+    ).fetchone()
+    if row is None:
+        return DnscryptSettings()
+    return DnscryptSettings(
+        enabled=bool(row[0]), port=row[1], provider_name=row[2],
+        provider_secret_id=row[3], provider_public_key_b64=row[4],
+        resolver_secret_id=row[5], cert_b64=row[6], cert_serial=row[7],
+        cert_valid_from=row[8], cert_valid_until=row[9],
+    )
+
+
+def save_dnscrypt_settings(conn: sqlite3.Connection, settings: DnscryptSettings) -> None:
+    if not (1 <= settings.port <= 65535):
+        raise PolicyStoreError(f"invalid dnscrypt port: {settings.port!r}")
+    if not settings.provider_name.strip():
+        raise PolicyStoreError("dnscrypt provider_name must not be empty")
+    if settings.cert_serial < 0:
+        raise PolicyStoreError(f"invalid cert_serial: {settings.cert_serial!r}")
+    conn.execute(
+        """
+        INSERT INTO dnscrypt_settings
+            (id, enabled, port, provider_name, provider_secret_id, provider_public_key_b64,
+             resolver_secret_id, cert_b64, cert_serial, cert_valid_from, cert_valid_until, updated_at)
+        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            enabled = excluded.enabled,
+            port = excluded.port,
+            provider_name = excluded.provider_name,
+            provider_secret_id = excluded.provider_secret_id,
+            provider_public_key_b64 = excluded.provider_public_key_b64,
+            resolver_secret_id = excluded.resolver_secret_id,
+            cert_b64 = excluded.cert_b64,
+            cert_serial = excluded.cert_serial,
+            cert_valid_from = excluded.cert_valid_from,
+            cert_valid_until = excluded.cert_valid_until,
+            updated_at = excluded.updated_at
+        """,
+        (
+            int(settings.enabled), settings.port, settings.provider_name,
+            settings.provider_secret_id, settings.provider_public_key_b64,
+            settings.resolver_secret_id, settings.cert_b64, settings.cert_serial,
+            settings.cert_valid_from, settings.cert_valid_until,
             _now(),
         ),
     )

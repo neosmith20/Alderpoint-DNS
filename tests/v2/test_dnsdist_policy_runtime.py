@@ -7,6 +7,7 @@ from app.v2.dnsdist_policy_runtime import (
     ClientPolicyBinding,
     DohConfig,
     Doh3Config,
+    DnscryptConfig,
     DoqConfig,
     DotConfig,
     PolicyRuntimeError,
@@ -397,6 +398,48 @@ class TestRealValidation:
         conf_path.write_text(text)
         result = subprocess.run(["dnsdist", "-C", str(conf_path), "--check-config"], capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
+
+    def test_dnscrypt_listener_wired_and_passes_real_check_config(self, tmp_path):
+        # Real defect this closes (docs/v2/encrypted-transport-parity-
+        # gap.md / docs/v2/dnscrypt-transport-implemented.md): DNSCrypt
+        # was the last unimplemented row. Uses real dnsdist-generated key
+        # material (app/v2/dnscrypt_provisioning.py), not synthetic
+        # bytes -- a malformed cert would be rejected by real
+        # --check-config, the same rigor every other transport here uses.
+        import subprocess
+        import time
+
+        from app.v2 import dnscrypt_provisioning as prov
+
+        _, provider_priv = prov.generate_provider_keypair()
+        now = int(time.time())
+        cert, resolver_key = prov.generate_resolver_certificate(
+            provider_priv, serial=1, valid_from=now, valid_until=now + 365 * 86400
+        )
+        cert_path = tmp_path / "dnscrypt-resolver.cert"
+        key_path = tmp_path / "dnscrypt-resolver.key"
+        cert_path.write_bytes(cert)
+        key_path.write_bytes(resolver_key)
+
+        b1 = _binding("10.0.1.0/24", "p1")
+        dnscrypt = DnscryptConfig(
+            enabled=True, port=15382, provider_name="2.dnscrypt-cert.pytest.local.",
+            cert_path=str(cert_path), key_path=str(key_path),
+        )
+        text = compile_multi_policy_dnsdist_config("127.0.0.1:15383", [b1], dnscrypt=dnscrypt)
+        assert "addDNSCryptBind" in text
+        conf_path = tmp_path / "c9.conf"
+        conf_path.write_text(text)
+        result = subprocess.run(["dnsdist", "-C", str(conf_path), "--check-config"], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+
+    def test_dnscrypt_listener_omitted_when_disabled(self):
+        b1 = _binding("10.0.1.0/24", "p1")
+        text = compile_multi_policy_dnsdist_config(
+            "127.0.0.1:15384", [b1],
+            dnscrypt=DnscryptConfig(enabled=False, port=5443, provider_name="x", cert_path="x", key_path="y"),
+        )
+        assert "addDNSCryptBind" not in text
 
 
 def _self_signed_cert(tmp_path):

@@ -671,6 +671,130 @@ class TestDnsTransports:
         assert "addDOH3Local" in conf_text
 
 
+class TestDnscrypt:
+    """Real DNSCrypt provisioning + runtime wiring (roadmap continuation:
+    closes the last remaining row of the confirmed mandatory-parity gap
+    -- see docs/v2/dnscrypt-transport-implemented.md). Every test here
+    drives real dnsdist key/cert generation (app/v2/
+    dnscrypt_provisioning.py) end to end through the real HTTP API, not
+    mocks -- matching the standard the rest of this workstream was held
+    to.
+    """
+
+    def test_get_reports_unprovisioned_state(self, app_client):
+        webapp, client = app_client
+        _setup_and_login(webapp, client)
+        r = client.get("/api/dns-transports")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["dnscrypt_enabled"] is False
+        assert body["dnscrypt_identity_provisioned"] is False
+        assert body["dnscrypt_fingerprint"] is None
+
+    def test_enabling_without_provisioning_is_rejected(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        r = client.put(
+            "/api/dns-transports", json={"dnscrypt_enabled": True}, headers={"X-CSRF-Token": csrf}
+        )
+        assert r.status_code == 409, r.text
+        assert r.json()["error"] == "dnscrypt_not_provisioned"
+
+    def test_rotate_generates_real_identity_and_certificate(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        r = client.post("/api/dns-transports/dnscrypt/rotate", json={}, headers={"X-CSRF-Token": csrf})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["rotated_provider"] is True  # first call always generates a provider identity
+        assert body["fingerprint"] is not None
+        assert len(body["fingerprint"].replace(":", "")) == 64  # 32 real bytes, hex-doubled
+        assert body["cert_serial"] == 1
+        assert body["cert_valid_until"] is not None
+
+        r2 = client.get("/api/dns-transports")
+        assert r2.json()["dnscrypt_identity_provisioned"] is True
+        assert r2.json()["dnscrypt_fingerprint"] == body["fingerprint"]
+
+    def test_enabling_after_provisioning_emits_a_real_dnscrypt_listener(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        client.post("/api/dns-transports/dnscrypt/rotate", json={}, headers={"X-CSRF-Token": csrf})
+
+        r = client.put(
+            "/api/dns-transports",
+            json={"dnscrypt_enabled": True, "dnscrypt_port": 5443, "dnscrypt_provider_name": "2.dnscrypt-cert.pytest.local."},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["runtime"]["promoted"] is True
+        conf_text = webapp.COMPILED_DNSDIST_CONF.read_text()
+        assert "addDNSCryptBind" in conf_text
+        assert "2.dnscrypt-cert.pytest.local." in conf_text
+        # Real materialized files, not just referenced by path.
+        assert webapp.DNSCRYPT_CERT_PATH.exists()
+        assert webapp.DNSCRYPT_KEY_PATH.exists()
+        assert webapp.DNSCRYPT_CERT_PATH.read_bytes()[:4] == b"DNSC"
+
+    def test_routine_rotate_keeps_provider_issues_new_cert(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        first = client.post("/api/dns-transports/dnscrypt/rotate", json={}, headers={"X-CSRF-Token": csrf}).json()
+
+        second = client.post(
+            "/api/dns-transports/dnscrypt/rotate", json={"rotate_provider": False}, headers={"X-CSRF-Token": csrf}
+        ).json()
+        assert second["rotated_provider"] is False
+        assert second["fingerprint"] == first["fingerprint"]  # same provider identity
+        assert second["cert_serial"] == first["cert_serial"] + 1  # but a fresh cert
+
+    def test_explicit_provider_rotation_changes_fingerprint(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        first = client.post("/api/dns-transports/dnscrypt/rotate", json={}, headers={"X-CSRF-Token": csrf}).json()
+
+        second = client.post(
+            "/api/dns-transports/dnscrypt/rotate", json={"rotate_provider": True}, headers={"X-CSRF-Token": csrf}
+        ).json()
+        assert second["rotated_provider"] is True
+        assert second["fingerprint"] != first["fingerprint"]  # real new identity
+        assert second["cert_serial"] == 1  # serial sequence restarts under the new identity
+
+    def test_dnscrypt_port_conflicting_with_management_api_rejected(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        client.post("/api/dns-transports/dnscrypt/rotate", json={}, headers={"X-CSRF-Token": csrf})
+        r = client.put(
+            "/api/dns-transports", json={"dnscrypt_enabled": True, "dnscrypt_port": 8443},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert r.status_code == 400, r.text
+        assert r.json()["error"] == "port_conflict"
+
+    def test_disabling_removes_the_listener_from_the_next_compile(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        client.post("/api/dns-transports/dnscrypt/rotate", json={}, headers={"X-CSRF-Token": csrf})
+        client.put("/api/dns-transports", json={"dnscrypt_enabled": True}, headers={"X-CSRF-Token": csrf})
+        assert "addDNSCryptBind" in webapp.COMPILED_DNSDIST_CONF.read_text()
+
+        r = client.put("/api/dns-transports", json={"dnscrypt_enabled": False}, headers={"X-CSRF-Token": csrf})
+        assert r.status_code == 200, r.text
+        assert "addDNSCryptBind" not in webapp.COMPILED_DNSDIST_CONF.read_text()
+
+    def test_rotate_requires_auth(self, app_client):
+        webapp, client = app_client
+        r = client.post("/api/dns-transports/dnscrypt/rotate", json={})
+        assert r.status_code == 401
+
+    def test_rotate_requires_csrf(self, app_client):
+        webapp, client = app_client
+        _setup_and_login(webapp, client)
+        r = client.post("/api/dns-transports/dnscrypt/rotate", json={})
+        assert r.status_code == 403
+        assert r.json()["error"] == "invalid_csrf_token"
+
+
 class TestReplicationPeerCertEnrollment:
     """Real replication peer-enrollment endpoint (previously missing
     entirely -- see replication_v2.REPLICATION_CA_KEY_SECRET_ID's and

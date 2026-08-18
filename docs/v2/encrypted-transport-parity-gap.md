@@ -1,13 +1,18 @@
-# Confirmed real gap: DoH/DoQ/DoH3/DNSCrypt (mandatory parity rows) not implemented in V2 -- DoT/DoH/DoQ/DoH3 now closed, DNSCrypt remains
+# Confirmed real gap: DoH/DoQ/DoH3/DNSCrypt (mandatory parity rows) not implemented in V2 -- ALL FIVE now closed
 
-**Update:** DoT, DoH, DoQ, and DoH3 are now all implemented -- see
-`docs/v2/dot-transport-implemented.md`, `docs/v2/doh-transport-
-implemented.md`, `docs/v2/doq-transport-implemented.md`, and
-`docs/v2/doh3-transport-implemented.md`. The latter also resolves DoQ's
-real-target-build QUIC blocker via V1's existing, security-reviewed
-opt-in `install-enhanced-dnsdist` mechanism, reused verbatim for V2.
-**DNSCrypt remains the only unimplemented row** -- this doc's original
-findings below stand for that one protocol.
+**Update: this gap is fully closed.** DoT, DoH, DoQ, DoH3, and DNSCrypt
+are all implemented -- see `docs/v2/dot-transport-implemented.md`,
+`docs/v2/doh-transport-implemented.md`,
+`docs/v2/doq-transport-implemented.md`,
+`docs/v2/doh3-transport-implemented.md`, and
+`docs/v2/dnscrypt-transport-implemented.md`. DoH3's doc also resolves
+DoQ's real-target-build QUIC blocker via V1's existing, security-
+reviewed opt-in `install-enhanced-dnsdist` mechanism, reused verbatim
+for V2. DNSCrypt's own doc covers its distinct provider-identity/
+certificate design and a real dnsdist behavior (unreliable one-shot
+`-e` key persistence) found and worked around along the way. This doc's
+original findings below are retained as the historical record of the
+gap as originally found.
 
 **This is the most consequential finding of this continuation session
 -- surfaced prominently for Dex's Gate #3 review, not buried among the

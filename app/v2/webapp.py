@@ -44,6 +44,7 @@ from pydantic import BaseModel, Field
 from app import dnsdist_upgrade
 from app.v2 import analytics_deps
 from app.v2 import control_db
+from app.v2 import dnscrypt_provisioning
 from app.v2 import migration_convert
 from app.v2 import node_identity
 from app.v2 import notification_store
@@ -557,9 +558,53 @@ def _configured_listen_address() -> str:
     return f"{listener.address}:{listener.port}"
 
 
+DNSCRYPT_CERT_PATH = CERTS_DIR / "dnscrypt-resolver.cert"
+DNSCRYPT_KEY_PATH = CERTS_DIR / "dnscrypt-resolver.key"
+
+
+def _materialize_dnscrypt_files(settings: "store.DnscryptSettings") -> bool:
+    """Writes the real resolver cert/key files ``addDNSCryptBind`` needs
+    to disk, freshly, from stored material -- cert bytes are public
+    (stored directly in control.db, see DnscryptSettings' own docstring)
+    but the resolver private key is protected secret material, fetched
+    from the SecretStore fresh every compile rather than cached on disk
+    permanently outside a recompile cycle, matching how DoT/DoH/DoQ/DoH3
+    already reuse ACTIVE_CERT_PATH/ACTIVE_KEY_PATH (materialized files,
+    not secret-store-direct dnsdist reads -- dnsdist has no notion of
+    this application's secret store). Returns False (no files written)
+    when identity/cert material doesn't exist yet -- never raises, same
+    fail-safe contract as the cert_ready check the other four transports
+    use."""
+    if not settings.identity_provisioned:
+        return False
+    import base64
+
+    try:
+        resolver_key_b64 = _secrets().get(settings.resolver_secret_id)
+        cert_bytes = base64.b64decode(settings.cert_b64)
+        resolver_key_bytes = base64.b64decode(resolver_key_b64)
+    except Exception:
+        # Secret went missing/corrupt (e.g. a restore that predates this
+        # secret, or manual tampering) -- fail safe to "no DNSCrypt
+        # listener this compile," same as a missing TLS cert does for
+        # the other four, never crash the whole recompile over it.
+        return False
+    CERTS_DIR.mkdir(parents=True, exist_ok=True, mode=0o750)
+    tmp_cert = DNSCRYPT_CERT_PATH.parent / f".{DNSCRYPT_CERT_PATH.name}.tmp"
+    tmp_key = DNSCRYPT_KEY_PATH.parent / f".{DNSCRYPT_KEY_PATH.name}.tmp"
+    tmp_cert.write_bytes(cert_bytes)
+    tmp_cert.chmod(0o644)
+    os.replace(tmp_cert, DNSCRYPT_CERT_PATH)
+    tmp_key.write_bytes(resolver_key_bytes)
+    tmp_key.chmod(0o600)
+    os.replace(tmp_key, DNSCRYPT_KEY_PATH)
+    return True
+
+
 def _encrypted_transport_configs(conn) -> tuple[
     Optional[runtime_compile.DotConfig], Optional[runtime_compile.DohConfig],
     Optional[runtime_compile.DoqConfig], Optional[runtime_compile.Doh3Config],
+    Optional[runtime_compile.DnscryptConfig],
 ]:
     """Builds the real DoT/DoH/DoQ listener configs for this recompile
     from the real admin-configured settings (see
@@ -604,7 +649,16 @@ def _encrypted_transport_configs(conn) -> tuple[
         if settings.doh3_enabled and cert_ready
         else None
     )
-    return dot, doh, doq, doh3
+    dnscrypt_settings = store.load_dnscrypt_settings(conn)
+    dnscrypt = (
+        runtime_compile.DnscryptConfig(
+            enabled=True, port=dnscrypt_settings.port, provider_name=dnscrypt_settings.provider_name,
+            cert_path=str(DNSCRYPT_CERT_PATH), key_path=str(DNSCRYPT_KEY_PATH),
+        )
+        if dnscrypt_settings.enabled and _materialize_dnscrypt_files(dnscrypt_settings)
+        else None
+    )
+    return dot, doh, doq, doh3, dnscrypt
 
 
 def _mutate_and_promote(mutate_fn) -> runtime_compile.RuntimeCompileResult:
@@ -621,10 +675,10 @@ def _mutate_and_promote(mutate_fn) -> runtime_compile.RuntimeCompileResult:
         conn.execute("BEGIN IMMEDIATE")
         try:
             mutate_fn(conn)
-            dot, doh, doq, doh3 = _encrypted_transport_configs(conn)
+            dot, doh, doq, doh3, dnscrypt = _encrypted_transport_configs(conn)
             result = runtime_compile.recompile_and_promote(
                 conn, STAGING_DIR, COMPILED_DNSDIST_CONF,
-                listen_address=_configured_listen_address(), dot=dot, doh=doh, doq=doq, doh3=doh3,
+                listen_address=_configured_listen_address(), dot=dot, doh=doh, doq=doq, doh3=doh3, dnscrypt=dnscrypt,
             )
         except BaseException:
             conn.execute("ROLLBACK")
@@ -709,12 +763,18 @@ class DnsTransportSettingsUpdate(BaseModel):
     doq_port: int = Field(default=853, ge=1, le=65535)
     doh3_enabled: bool = False
     doh3_port: int = Field(default=443, ge=1, le=65535)
+    dnscrypt_enabled: bool = False
+    dnscrypt_port: int = Field(default=5443, ge=1, le=65535)
+    dnscrypt_provider_name: str = Field(
+        default="2.dnscrypt-cert.alderpointdns-v2.local", min_length=1, max_length=255
+    )
 
 
 @app.get("/api/dns-transports")
 def get_dns_transports(admin=Depends(current_admin)):
     with _db() as conn:
         settings = store.load_dns_transport_settings(conn)
+        dnscrypt_settings = store.load_dnscrypt_settings(conn)
     # Real dnsdist-build capability detection (docs/v2/doh3-transport-
     # implemented.md) -- reuses app.dnsdist_upgrade.dnsdist_capabilities(),
     # the same `dnsdist --version` feature-list parser V1's own
@@ -725,6 +785,13 @@ def get_dns_transports(admin=Depends(current_admin)):
     # is surfaced so the admin UI can show *why* a protocol isn't
     # actually answering queries on a build that lacks it.
     caps = dnsdist_upgrade.dnsdist_capabilities()
+    dnscrypt_fingerprint = None
+    if dnscrypt_settings.provider_public_key_b64:
+        import base64
+
+        dnscrypt_fingerprint = dnscrypt_provisioning.provider_fingerprint(
+            base64.b64decode(dnscrypt_settings.provider_public_key_b64)
+        )
     return {
         "dot_enabled": settings.dot_enabled,
         "dot_port": settings.dot_port,
@@ -735,6 +802,13 @@ def get_dns_transports(admin=Depends(current_admin)):
         "doq_port": settings.doq_port,
         "doh3_enabled": settings.doh3_enabled,
         "doh3_port": settings.doh3_port,
+        "dnscrypt_enabled": dnscrypt_settings.enabled,
+        "dnscrypt_port": dnscrypt_settings.port,
+        "dnscrypt_provider_name": dnscrypt_settings.provider_name,
+        "dnscrypt_identity_provisioned": dnscrypt_settings.identity_provisioned,
+        "dnscrypt_fingerprint": dnscrypt_fingerprint,
+        "dnscrypt_cert_serial": dnscrypt_settings.cert_serial,
+        "dnscrypt_cert_valid_until": dnscrypt_settings.cert_valid_until,
         "cert_provisioned": ACTIVE_CERT_PATH.exists() and ACTIVE_KEY_PATH.exists(),
         "dnsdist_version": dnsdist_upgrade.dnsdist_version(),
         "doq_supported": caps.get("doq", False),
@@ -792,6 +866,14 @@ def _validate_dns_transport_ports(req: "DnsTransportSettingsUpdate") -> None:
         # TCP-only conflict set below, only against this appliance's own
         # reserved ports and the plain DNS listener.
         all_requested.append(("doh3_port", req.doh3_port))
+    if req.dnscrypt_enabled:
+        # dnsdist's real addDNSCryptBind binds BOTH UDP and TCP on the
+        # same port -- checked against the TCP pairwise-conflict set too
+        # (not just DoQ/DoH3's UDP-only treatment), conservative in the
+        # same direction RC21's real live incident already proved is the
+        # safe one to err on.
+        tcp_requested.append(("dnscrypt_port", req.dnscrypt_port))
+        all_requested.append(("dnscrypt_port", req.dnscrypt_port))
     dns_port = int(_configured_listen_address().rsplit(":", 1)[-1])
     for field, port in all_requested:
         if port in _RESERVED_APPLIANCE_PORTS:
@@ -819,8 +901,122 @@ def put_dns_transports(
         doq_enabled=req.doq_enabled, doq_port=req.doq_port,
         doh3_enabled=req.doh3_enabled, doh3_port=req.doh3_port,
     )
-    result = _mutate_and_promote(lambda conn: store.save_dns_transport_settings(conn, settings))
+
+    def _mutate(conn):
+        store.save_dns_transport_settings(conn, settings)
+        existing_dnscrypt = store.load_dnscrypt_settings(conn)
+        # Real, deliberate guard (matching this workstream's established
+        # posture for consequential crypto/trust actions -- see
+        # app/dnsdist_upgrade.py's own "never automatic" install-
+        # enhanced-dnsdist design): enabling DNSCrypt before a provider
+        # identity has ever been issued is rejected with a clear error
+        # rather than silently auto-generating one as a side effect of a
+        # checkbox toggle -- generate it explicitly via
+        # POST /api/dns-transports/dnscrypt/rotate first.
+        if req.dnscrypt_enabled and not existing_dnscrypt.identity_provisioned:
+            raise ApiError(
+                409, "dnscrypt_not_provisioned",
+                "DNSCrypt has no provider identity/certificate yet -- "
+                "call POST /api/dns-transports/dnscrypt/rotate first",
+            )
+        existing_dnscrypt.enabled = req.dnscrypt_enabled
+        existing_dnscrypt.port = req.dnscrypt_port
+        existing_dnscrypt.provider_name = req.dnscrypt_provider_name
+        store.save_dnscrypt_settings(conn, existing_dnscrypt)
+
+    result = _mutate_and_promote(_mutate)
     return {"status": "updated", "runtime": {"promoted": result.promoted, "binding_count": result.binding_count}}
+
+
+class DnscryptRotateRequest(BaseModel):
+    rotate_provider: bool = False
+
+
+_DNSCRYPT_CERT_VALIDITY_DAYS = 397  # matches app/v2/tls_cert.py's own bounded-but-not-forever rationale
+
+
+@app.post("/api/dns-transports/dnscrypt/rotate")
+def rotate_dnscrypt(
+    req: DnscryptRotateRequest, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader
+):
+    """Issues real DNSCrypt provider/resolver key material via the real
+    dnsdist binary (app/v2/dnscrypt_provisioning.py) -- see
+    docs/v2/dnscrypt-transport-implemented.md for the full design and why
+    generation always goes through dnsdist itself. ``rotate_provider``
+    defaults to False (issue a fresh resolver certificate under the
+    EXISTING provider identity -- the routine action, e.g. before the
+    current certificate expires) since rotating the provider identity
+    itself invalidates every previously-pinned client's stamp and should
+    never happen as a side effect of a routine cert renewal.
+    """
+    check_csrf(admin, x_csrf_token)
+    import base64
+    import time
+
+    secrets_store = _secrets()
+
+    def _mutate(conn):
+        existing = store.load_dnscrypt_settings(conn)
+        need_new_provider = req.rotate_provider or not existing.identity_provisioned
+        if need_new_provider:
+            public_key, private_key = dnscrypt_provisioning.generate_provider_keypair()
+            new_provider_secret_id = secrets_store.create(base64.b64encode(private_key).decode())
+            old_provider_secret_id = existing.provider_secret_id
+            existing.provider_secret_id = new_provider_secret_id
+            existing.provider_public_key_b64 = base64.b64encode(public_key).decode()
+            existing.cert_serial = 0  # a new provider identity restarts the resolver-cert serial sequence
+        else:
+            if not existing.provider_secret_id:
+                raise ApiError(409, "dnscrypt_not_provisioned", "no provider identity exists to sign a certificate with")
+            provider_private_key = base64.b64decode(secrets_store.get(existing.provider_secret_id))
+            old_provider_secret_id = None
+        provider_private_key_bytes = (
+            private_key if need_new_provider else provider_private_key
+        )
+        now = int(time.time())
+        serial = existing.cert_serial + 1
+        valid_until = now + _DNSCRYPT_CERT_VALIDITY_DAYS * 86400
+        cert_bytes, resolver_key = dnscrypt_provisioning.generate_resolver_certificate(
+            provider_private_key_bytes, serial=serial, valid_from=now, valid_until=valid_until
+        )
+        new_resolver_secret_id = secrets_store.create(base64.b64encode(resolver_key).decode())
+        old_resolver_secret_id = existing.resolver_secret_id
+        existing.resolver_secret_id = new_resolver_secret_id
+        existing.cert_b64 = base64.b64encode(cert_bytes).decode()
+        existing.cert_serial = serial
+        existing.cert_valid_from = now
+        existing.cert_valid_until = valid_until
+        store.save_dnscrypt_settings(conn, existing)
+        # Old secrets are deleted only after save_dnscrypt_settings above
+        # has recorded the new references -- if anything after this point
+        # fails, _mutate_and_promote's transaction rolls the control.db
+        # write back, but a SecretStore delete is not itself part of that
+        # SQL transaction; deleting the OLD secret only (never the new
+        # one) after the new reference is durably about to be recorded
+        # is the safest ordering available without a two-phase secret
+        # store, matching the "individually reversible steps" standard
+        # used elsewhere in this session (app/dnsdist_upgrade.py).
+        holder["old_secret_ids"] = [s for s in (old_provider_secret_id, old_resolver_secret_id) if s]
+        holder["rotated_provider"] = need_new_provider
+
+    holder: dict = {}
+    result = _mutate_and_promote(_mutate)
+    for old_id in holder.get("old_secret_ids", []):
+        try:
+            secrets_store.delete(old_id)
+        except Exception:
+            pass  # best-effort cleanup; an orphaned old secret is inert, never reused
+    with _db() as conn:
+        settings = store.load_dnscrypt_settings(conn)
+    fingerprint = dnscrypt_provisioning.provider_fingerprint(base64.b64decode(settings.provider_public_key_b64))
+    return {
+        "status": "rotated",
+        "rotated_provider": holder["rotated_provider"],
+        "fingerprint": fingerprint,
+        "cert_serial": settings.cert_serial,
+        "cert_valid_until": settings.cert_valid_until,
+        "runtime": {"promoted": result.promoted, "binding_count": result.binding_count},
+    }
 
 
 @app.put("/api/policy/network/{network_id}")
