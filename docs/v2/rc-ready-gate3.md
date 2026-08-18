@@ -1,10 +1,28 @@
 # Alderpoint DNS V2 -- private RC ready for Dex Gate #3 review
 
-Artifact: `alderpointdns-v2_2.0.0~rc25-1_all.deb`
-(sha256 `01ac3cf18184be38689cb9a85a052b8707b1b6b5992e0ebd936f75b39df09d1d`),
+Artifact: `alderpointdns-v2_2.0.0~rc26-1_all.deb`
+(sha256 `71bf0cf6769bb5569aa85741574b37b1bc77196ddf581764a661de77a6ee30f0`),
 branch `v2/architecture-storage-foundation`, still fully private
 (no push/tag/publish to any remote; `origin/main` -- the public V1
 line -- untouched throughout).
+
+## Update (RC26): real defect found and fixed by this workstream's own adversarial security pass on the new DNSCrypt surface
+
+**`docs/v2/dnscrypt-adversarial-security-pass.md`**: a failed DNSCrypt
+rotation (any failure of `recompile_and_promote` after key material had
+already been generated and stored) previously left the newly-generated
+provider/resolver private key secrets permanently orphaned on disk --
+`control.db` correctly rolled back, but `SecretStore.create()` writes
+are not part of that SQL transaction. Live-reproduced via the real HTTP
+API, fixed (every secret a rotate attempt creates is now tracked and
+cleaned up on that attempt's failure), and re-verified against the
+exact RC26 package on a fresh clean-install target: a real successful
+rotate leaves exactly 2 secrets (provider + resolver, no orphans), and
+`dnscrypt_provider_name` now rejects NUL bytes/backslashes/control
+characters at the API layer (`422`) rather than relying solely on
+dnsdist's own downstream validation. Lua/RCE injection via that same
+field was attempted and confirmed NOT exploitable (properly escaped).
+See that doc for the full attack/fix record.
 
 ## Update (RC25): DNSCrypt is now genuinely functional end-to-end -- the confirmed mandatory encrypted-transport parity gap is FULLY CLOSED
 
