@@ -1,10 +1,32 @@
 # Alderpoint DNS V2 -- private RC ready for Dex Gate #3 review
 
-Artifact: `alderpointdns-v2_2.0.0~rc28-1_all.deb`
-(sha256 `4e6271626ee183e29f1d1c486da58b16bd5af4e1e8f88c8f279b880ea5e824ba`),
+Artifact: `alderpointdns-v2_2.0.0~rc29-1_all.deb`
+(sha256 `0b0a06427ffec93e9949905467c23cc90d8eaca82c4552f9ceae30bc0038472c`),
 branch `v2/architecture-storage-foundation`, still fully private
 (no push/tag/publish to any remote; `origin/main` -- the public V1
 line -- untouched throughout).
+
+## Update (RC29): real defect found and fixed -- a missing control.db/secret store was silently, invisibly recreated as empty
+
+**`docs/v2/control-db-silent-recreation-fix.md`**: the full failure-
+domain/chaos pass (every management/analytics/replication component
+individually stopped, mass-SIGKILLed, `control.db` and the secret
+store each made unavailable, analytics storage corrupted, and a
+combined worst case) confirmed DNS answering is structurally
+independent of every one of those -- while doing so surfaced a real
+defect in the admin-facing correctness of that same architecture:
+`sqlite3.connect()`/`SecretStore.__init__`'s "create on first use"
+convenience silently, invisibly recreated a genuinely missing
+`control.db`/secret store as empty, indistinguishable from a fresh
+install, orphaning real configuration and real secret material with
+zero error signal. Fixed with a `create_if_missing` parameter
+(defaulting to the exact historical behavior every legitimate bootstrap
+caller relies on) plus two dedicated FastAPI exception handlers. A
+second, independent silent-recreation path (`_ensure_extended_
+schemas()`, called from nearly every route) was found and fixed too.
+Re-verified live against the exact reproduction on RC29: real `500
+control_db_missing`/`500 secret_store_missing`, confirmed via `ls` that
+neither was silently recreated (`docs/v2/package-baseline-rc29.md`).
 
 ## Update (RC28): real defect found and fixed -- /api/login crashed under real combined DNS+analytics+concurrent-login load
 
