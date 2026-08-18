@@ -322,6 +322,21 @@ class TestReplicationPeerCertEnrollment:
         assert r.status_code == 409
         assert "no_persisted_ca_key" in r.text
 
+    def test_issue_peer_cert_rejects_unsafe_remote_node_id(self, app_client):
+        # Real finding from RC11 live security spot-checking: an
+        # arbitrary string like "../../etc/passwd" used to be accepted
+        # and embedded into a real issued certificate's CN with no
+        # format validation at all.
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        for bad in ("../../etc/passwd", '"});os.execute("id")--', "a" * 5000, ""):
+            r = client.post(
+                "/api/replication/issue-peer-cert",
+                json={"remote_node_id": bad},
+                headers={"X-CSRF-Token": csrf},
+            )
+            assert r.status_code == 422, (bad, r.text)
+
     def test_issue_peer_cert_returns_a_valid_enrollment_bundle(self, app_client):
         webapp, client = app_client
         csrf = _setup_and_login(webapp, client)

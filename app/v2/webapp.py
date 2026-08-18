@@ -1475,7 +1475,17 @@ def replication_sync(peer_node_id: str, admin=Depends(current_admin), x_csrf_tok
 
 
 class IssuePeerCertRequest(BaseModel):
-    remote_node_id: str = Field(min_length=1, max_length=128)
+    # Real node_ids are always UUID4 strings (node_identity.py); this is
+    # deliberately a little more permissive than strict UUID (allows
+    # future non-UUID identifiers) while still refusing to embed
+    # arbitrary attacker-controlled text into a real X.509 certificate's
+    # CN field -- found live during RC11 security spot-checking: a
+    # value like "../../etc/passwd" was accepted and issued into a real
+    # cert with no functional exploit path found (never used as a
+    # filesystem path or interpreted by anything other than being
+    # embedded as a CN string), but tightened anyway since there is no
+    # legitimate reason a real node_id ever needs those characters.
+    remote_node_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
     server_name: str = Field(default="localhost", max_length=255)
 
 
