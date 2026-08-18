@@ -165,6 +165,44 @@ def test_client_with_no_exclusions_is_logged_normally(ctl_module):
     assert any(b"normal-domain" in f.read_bytes() for f in parquet_files)
 
 
+def test_real_client_name_is_populated_not_left_blank(ctl_module):
+    # Real defect found in the same pass as cache_profile_id/action/
+    # upstream_profile_id: client_name (a real projectable/sortable
+    # query-log column, app/v2/analytics_query.py) was also always
+    # left blank for every real event with a registered client -- the
+    # client_id needed to look it up was already resolved right there
+    # and simply never used for this.
+    import pyarrow.parquet as pq
+
+    from app.v2 import control_db, policy_store
+
+    _seed_control_db(ctl_module)
+    with control_db.connect(ctl_module.CONTROL_DB) as conn:
+        conn.execute(
+            "INSERT INTO clients(name, description, enabled, created_at, updated_at) "
+            "VALUES ('Kids Tablet', '', 1, '2026-01-01', '2026-01-01')"
+        )
+        client_id = conn.execute("SELECT id FROM clients WHERE name='Kids Tablet'").fetchone()[0]
+        conn.execute(
+            "INSERT INTO client_identifiers(client_id, kind, value, created_at) "
+            "VALUES (?, 'ipv4', '10.9.9.12', '2026-01-01')",
+            (client_id,),
+        )
+        conn.commit()
+
+    _write_inbox_event(ctl_module, "client-name-domain.example", "10.9.9.12")
+
+    args = argparse.Namespace(once=True, interval_seconds=1.0, inject_test_event=False)
+    rc = ctl_module.cmd_analytics_worker(args)
+    assert rc == 0
+
+    parquet_dir = ctl_module.ANALYTICS_PARQUET_DIR
+    parquet_files = list(parquet_dir.rglob("*.parquet")) if parquet_dir.exists() else []
+    rows = [r for f in parquet_files for r in pq.read_table(f).to_pylist()]
+    row = next(r for r in rows if r["domain"] == "client-name-domain.example")
+    assert row["client_name"] == "Kids Tablet"
+
+
 def test_real_upstream_profile_id_is_populated_not_left_blank(ctl_module):
     # Real defect found in the same investigation pass as
     # cache_profile_id/blocked-action (docs/v2/blocked-action-not-

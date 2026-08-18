@@ -507,9 +507,9 @@ def _build_pipeline():
 
 def _effective_flags_for_client(conn, client_ip: str, now):
     """Resolves the real effective (query_log_enabled, statistics_enabled,
-    cache_profile_id, policy) for a client IP, via the same control.db
-    policy chain (client -> group -> network -> global) the rest of V2
-    already uses -- closes the real gap where every event from the
+    cache_profile_id, policy, client_name) for a client IP, via the same
+    control.db policy chain (client -> group -> network -> global) the
+    rest of V2 already uses -- closes the real gap where every event from the
     analytics-protobuf-receiver was unconditionally logged regardless of
     a per-client exclusion an admin had actually configured. An IP that
     doesn't match any registered client still gets a real answer
@@ -542,16 +542,26 @@ def _effective_flags_for_client(conn, client_ip: str, now):
     from app.v2.tier_b_worker import PREWARM_SOURCE_IP
 
     if client_ip == PREWARM_SOURCE_IP:
-        return False, False, "", None
+        return False, False, "", None, ""
 
     from app.v2 import policy_service
     from app.v2.policy_compiler import compile_cache_profile, compile_effective_policy
 
     client_id = observed_clients.managed_client_for_ip(conn, client_ip)
+    client_name = ""
     if client_id is not None:
         policy = policy_service.compile_effective_policy_from_store(
             conn, policy_service.ClientResolutionContext(client_id=client_id, client_ip=client_ip), now=now
         )
+        # Real defect found in the same pass as cache_profile_id/action/
+        # upstream_profile_id: client_name (a real projectable/sortable
+        # query-log column, app/v2/analytics_query.py) was also always
+        # left blank for every real event with a registered client --
+        # the client_id needed to look it up was already resolved right
+        # here and simply never used for this.
+        row = conn.execute("SELECT name FROM clients WHERE id=?", (client_id,)).fetchone()
+        if row is not None:
+            client_name = row[0]
     else:
         global_layer = policy_store.load_policy_layer(conn, "global", "singleton")
         network_layer = None
@@ -564,7 +574,7 @@ def _effective_flags_for_client(conn, client_ip: str, now):
             global_layer=global_layer, network_layer=network_layer, network_source=network_source
         )
     cache_profile_id = compile_cache_profile(policy).profile_id
-    return policy.query_log_enabled, policy.statistics_enabled, cache_profile_id, policy
+    return policy.query_log_enabled, policy.statistics_enabled, cache_profile_id, policy, client_name
 
 
 def _action_for_event(conn, policy, qname: str) -> tuple[str, str]:
@@ -693,11 +703,12 @@ def cmd_analytics_worker(args: argparse.Namespace) -> int:
                                     flag_cache[client_ip] = _effective_flags_for_client(conn, client_ip, now)
                                 except Exception:
                                     log.exception("policy lookup failed for client %s, defaulting to logged", client_ip)
-                                    flag_cache[client_ip] = (True, True, "", None)
-                            log_enabled, stats_enabled, cache_profile_id, policy = flag_cache[client_ip]
+                                    flag_cache[client_ip] = (True, True, "", None, "")
+                            log_enabled, stats_enabled, cache_profile_id, policy, client_name = flag_cache[client_ip]
                             record.setdefault("query_log_enabled", log_enabled)
                             record.setdefault("statistics_enabled", stats_enabled)
                             record.setdefault("effective_cache_profile_id", cache_profile_id)
+                            record.setdefault("client_name", client_name)
                             action, block_reason = _action_for_event(conn, policy, record.get("qname", ""))
                             record.setdefault("action", action)
                             record.setdefault("block_reason", block_reason)
