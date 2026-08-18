@@ -403,12 +403,12 @@ class TestDnsTransports:
 
         r = client.put(
             "/api/dns-transports",
-            json={"doh_enabled": True, "doh_port": 8443, "doh_path": "/dns-query"},
+            json={"doh_enabled": True, "doh_port": 8444, "doh_path": "/dns-query"},
             headers={"X-CSRF-Token": csrf},
         )
         assert r.status_code == 200, r.text
         conf_text = webapp.COMPILED_DNSDIST_CONF.read_text()
-        assert 'addDOHLocal("0.0.0.0:8443"' in conf_text
+        assert 'addDOHLocal("0.0.0.0:8444"' in conf_text
         assert '"/dns-query"' in conf_text
 
     def test_doh_and_dot_both_enabled_simultaneously(self, app_client):
@@ -429,13 +429,13 @@ class TestDnsTransports:
 
         r = client.put(
             "/api/dns-transports",
-            json={"dot_enabled": True, "dot_port": 8853, "doh_enabled": True, "doh_port": 8443},
+            json={"dot_enabled": True, "dot_port": 8853, "doh_enabled": True, "doh_port": 8444},
             headers={"X-CSRF-Token": csrf},
         )
         assert r.status_code == 200, r.text
         conf_text = webapp.COMPILED_DNSDIST_CONF.read_text()
         assert 'addTLSLocal("0.0.0.0:8853"' in conf_text
-        assert 'addDOHLocal("0.0.0.0:8443"' in conf_text
+        assert 'addDOHLocal("0.0.0.0:8444"' in conf_text
 
     def test_invalid_doh_path_rejected(self, app_client):
         webapp, client = app_client
@@ -445,6 +445,59 @@ class TestDnsTransports:
             headers={"X-CSRF-Token": csrf},
         )
         assert r.status_code == 422
+
+    def test_dot_port_conflicting_with_management_api_rejected(self, app_client):
+        # Real defect found live during RC21 acceptance testing: a
+        # requested port colliding with an already-bound appliance port
+        # (tried 8443, the management API's own port) passed real
+        # dnsdist --check-config (a syntax check, not a bind attempt)
+        # and got promoted -- but the live dnsdist process then
+        # crash-looped trying to bind the occupied port, taking down
+        # real DNS answering entirely, not just the misconfigured
+        # listener. Must now be rejected before promotion, not
+        # discovered live.
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        r = client.put(
+            "/api/dns-transports", json={"dot_enabled": True, "dot_port": 8443},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert r.status_code == 400, r.text
+        assert r.json()["error"] == "port_conflict"
+        assert not webapp.COMPILED_DNSDIST_CONF.exists() or "addTLSLocal" not in webapp.COMPILED_DNSDIST_CONF.read_text()
+
+    def test_doh_port_conflicting_with_replication_service_rejected(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        r = client.put(
+            "/api/dns-transports", json={"doh_enabled": True, "doh_port": 9443},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert r.status_code == 400, r.text
+        assert r.json()["error"] == "port_conflict"
+
+    def test_dot_and_doh_same_port_rejected(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        r = client.put(
+            "/api/dns-transports",
+            json={"dot_enabled": True, "dot_port": 9999, "doh_enabled": True, "doh_port": 9999},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert r.status_code == 400, r.text
+        assert r.json()["error"] == "port_conflict"
+
+    def test_disabled_protocol_port_conflict_not_checked(self, app_client):
+        # A leftover/default port value for a protocol that is NOT being
+        # enabled must not block an otherwise-valid update.
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        r = client.put(
+            "/api/dns-transports",
+            json={"dot_enabled": False, "dot_port": 8443, "doh_enabled": False, "doh_port": 8443},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert r.status_code == 200, r.text
 
 
 class TestReplicationPeerCertEnrollment:

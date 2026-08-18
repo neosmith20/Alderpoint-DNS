@@ -702,11 +702,53 @@ def get_dns_transports(admin=Depends(current_admin)):
     }
 
 
+# Real defect found live during RC21 acceptance testing: requesting a
+# DoT/DoH port that collides with an already-bound appliance port
+# (tried the management API's own 8443) passed real dnsdist --check-
+# config validation (a syntax check, not a bind attempt) and got
+# promoted successfully, but the *live* dnsdist process then crash-
+# looped trying to bind the already-occupied port -- taking down real
+# DNS answering entirely (confirmed live: "connection refused" on
+# port 53, NRestarts climbing), not just the misconfigured listener.
+# This is exactly the kind of failure this architecture's own
+# recompile_and_promote() invariant ("a known-good runtime always
+# remains active on failure") is supposed to prevent, but a runtime
+# bind conflict is invisible to --check-config's static validation, so
+# it must be caught here, before promotion, by checking against every
+# other real fixed port this appliance itself already binds.
+_RESERVED_APPLIANCE_PORTS = {
+    8443: "the management HTTPS API",
+    9443: "the mTLS replication service",
+    1053: "the discovery/dns-observer ingress",
+    5391: "the analytics protobuf receiver",
+}
+
+
+def _validate_dns_transport_ports(req: "DnsTransportSettingsUpdate") -> None:
+    requested: list[tuple[str, int]] = []
+    if req.dot_enabled:
+        requested.append(("dot_port", req.dot_port))
+    if req.doh_enabled:
+        requested.append(("doh_port", req.doh_port))
+    dns_port = int(_configured_listen_address().rsplit(":", 1)[-1])
+    for field, port in requested:
+        if port in _RESERVED_APPLIANCE_PORTS:
+            raise ApiError(
+                400, "port_conflict",
+                f"{field}={port} conflicts with {_RESERVED_APPLIANCE_PORTS[port]}, which already uses that port",
+            )
+        if port == dns_port:
+            raise ApiError(400, "port_conflict", f"{field}={port} conflicts with the plain DNS listener")
+    if req.dot_enabled and req.doh_enabled and req.dot_port == req.doh_port:
+        raise ApiError(400, "port_conflict", "dot_port and doh_port must be different when both are enabled")
+
+
 @app.put("/api/dns-transports")
 def put_dns_transports(
     req: DnsTransportSettingsUpdate, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader
 ):
     check_csrf(admin, x_csrf_token)
+    _validate_dns_transport_ports(req)
     settings = store.DnsTransportSettings(
         dot_enabled=req.dot_enabled, dot_port=req.dot_port,
         doh_enabled=req.doh_enabled, doh_port=req.doh_port, doh_path=req.doh_path,
