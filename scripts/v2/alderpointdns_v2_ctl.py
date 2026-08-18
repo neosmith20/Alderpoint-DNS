@@ -701,6 +701,15 @@ def cmd_analytics_worker(args: argparse.Namespace) -> int:
                             action, block_reason = _action_for_event(conn, policy, record.get("qname", ""))
                             record.setdefault("action", action)
                             record.setdefault("block_reason", block_reason)
+                            # Real defect found live in the same pass as
+                            # cache_profile_id/action: upstream_profile_id
+                            # (the "upstream" filterable query-log column,
+                            # app/v2/analytics_query.py) was also always
+                            # left blank for every real event, for the
+                            # exact same reason -- the policy object was
+                            # already compiled right here and simply never
+                            # read for this field either.
+                            record.setdefault("upstream_profile_id", policy.upstream_profile_id if policy else "")
                         pipeline.submit(NormalizedQueryEvent(**record))
                         processed += 1
                     f.unlink()

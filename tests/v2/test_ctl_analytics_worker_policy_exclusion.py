@@ -165,6 +165,49 @@ def test_client_with_no_exclusions_is_logged_normally(ctl_module):
     assert any(b"normal-domain" in f.read_bytes() for f in parquet_files)
 
 
+def test_real_upstream_profile_id_is_populated_not_left_blank(ctl_module):
+    # Real defect found in the same investigation pass as
+    # cache_profile_id/blocked-action (docs/v2/blocked-action-not-
+    # populated-fix.md): upstream_profile_id -- also a real
+    # filterable query-log column (app/v2/analytics_query.py's
+    # "upstream") -- was likewise always left blank for every real
+    # dnsdist-sourced event, for the exact same root cause: the
+    # per-client EffectivePolicy was already compiled right there and
+    # simply never read for this field either.
+    import pyarrow.parquet as pq
+
+    from app.v2 import control_db, policy_store
+
+    _seed_control_db(ctl_module)
+    with control_db.connect(ctl_module.CONTROL_DB) as conn:
+        client_id = conn.execute(
+            "INSERT INTO clients(name, description, enabled, created_at, updated_at) "
+            "VALUES ('upstream-profile-client', '', 1, '2026-01-01', '2026-01-01')"
+        ).lastrowid
+        conn.execute(
+            "INSERT INTO client_identifiers(client_id, kind, value, created_at) "
+            "VALUES (?, 'ipv4', '10.9.9.11', '2026-01-01')",
+            (client_id,),
+        )
+        conn.commit()
+        policy_store.save_policy_layer(
+            conn, "client", str(client_id), policy_store.PolicyLayer(upstream_profile_id="secure-dns-profile")
+        )
+        conn.commit()
+
+    _write_inbox_event(ctl_module, "upstream-profile-domain.example", "10.9.9.11")
+
+    args = argparse.Namespace(once=True, interval_seconds=1.0, inject_test_event=False)
+    rc = ctl_module.cmd_analytics_worker(args)
+    assert rc == 0
+
+    parquet_dir = ctl_module.ANALYTICS_PARQUET_DIR
+    parquet_files = list(parquet_dir.rglob("*.parquet")) if parquet_dir.exists() else []
+    rows = [r for f in parquet_files for r in pq.read_table(f).to_pylist()]
+    row = next(r for r in rows if r["domain"] == "upstream-profile-domain.example")
+    assert row["upstream"] == "secure-dns-profile"
+
+
 def test_real_effective_cache_profile_id_is_populated_not_left_blank(ctl_module):
     # Real defect found live during the RC13/RC14/RC15 continuation
     # (docs/v2/cache-profile-id-not-populated-fix.md): every real
