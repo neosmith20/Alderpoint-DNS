@@ -10,7 +10,6 @@ from __future__ import annotations
 import shutil
 import signal
 import socket
-import struct
 import subprocess
 import time
 from pathlib import Path
@@ -19,7 +18,7 @@ import pytest
 
 from app.v2.dnsdist_cache_policy import render_packet_cache_setup
 from app.v2.tier_b_prewarm import WorkingSetIndex, flush, load, run_prewarm
-from app.v2.tier_b_worker import make_udp_resolve_fn
+from app.v2.tier_b_worker import _build_query, make_udp_resolve_fn
 from tests.v2._network_probe import network_reachable
 
 DNSDIST_INSTALLED = shutil.which("dnsdist") is not None
@@ -66,10 +65,25 @@ def _query_is_fast(port: int, qname: str, threshold_ms: float = 3.0) -> bool:
     """A query answered in under threshold_ms is almost certainly a local
     packet-cache hit, not a real upstream round-trip (cold queries in this
     environment measured ~14-23ms; see docs/v2/cache-hit-latency-
-    investigation.md) -- used here as the hit/miss proxy signal."""
-    header = struct.pack(">HHHHHH", 1, 0x0100, 1, 0, 0, 0)
-    qparts = b"".join(bytes([len(p)]) + p.encode() for p in qname.split("."))
-    pkt = header + qparts + b"\x00" + struct.pack(">HH", 1, 1)
+    investigation.md) -- used here as the hit/miss proxy signal.
+
+    Real defect found and fixed live during this workstream's Tier B
+    re-verification (docs/v2/tier-b-cache-key-defect-fix.md): this
+    probe used to hand-build its own query with the exact same
+    flags=0x0100/no-EDNS shape ``_build_query()`` (the real prewarm
+    query builder) used to send -- which meant this test's own "is it
+    cached" check happened to match prewarm's cache key by symmetry,
+    not because real client traffic (which sets AD and sends EDNS0 by
+    default -- confirmed live against real dnsdist, real
+    dnsdist-generated cache keys are sensitive to both) would actually
+    get a hit. `_build_query()` has since been fixed to send that
+    realistic shape; reusing it here (rather than a second, now
+    independently-drifting hand-rolled packet) keeps this probe
+    honestly representative of what a real client gets, and keeps it
+    from silently going stale again if the real shape ever needs to
+    change once more.
+    """
+    pkt = _build_query(qname, "A", qid=1)
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.settimeout(3)
     t0 = time.perf_counter()
@@ -159,9 +173,7 @@ class TestAbruptPowerLoss:
         new_port = _pick_port()
         new_proc = _start_dnsdist(tmp_path, new_port)
         try:
-            header = struct.pack(">HHHHHH", 1, 0x0100, 1, 0, 0, 0)
-            qparts = b"".join(bytes([len(p)]) + p.encode() for p in "example.com".split("."))
-            pkt = header + qparts + b"\x00" + struct.pack(">HH", 1, 1)
+            pkt = _build_query("example.com", "A", qid=1)
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.settimeout(3)
             s.sendto(pkt, ("127.0.0.1", new_port))

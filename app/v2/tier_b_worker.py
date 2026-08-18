@@ -53,11 +53,48 @@ PREWARM_SOURCE_IP = "127.0.0.2"
 
 
 def _build_query(qname: str, qtype: str, qid: int) -> bytes:
-    header = struct.pack(">HHHHHH", qid, 0x0100, 1, 0, 0, 0)
+    # Real defect found and fixed live during this workstream's Tier B
+    # cold/prewarm re-verification (docs/v2/tier-b-cache-key-defect-fix.md):
+    # dnsdist's real packet cache key is sensitive to the query's AD
+    # (Authenticated Data) flag and to EDNS0 presence -- confirmed by
+    # exhaustive live reproduction against a real dnsdist instance, not
+    # assumed. This function previously always sent flags=0x0100 (RD
+    # only, AD=0) with no EDNS0 OPT record at all -- a "raw legacy"
+    # query shape essentially no real modern DNS client actually sends
+    # (confirmed live: real `dig` -- BIND's, the tool used throughout
+    # this whole session -- sets AD=1 and EDNS0 by default). The
+    # practical effect: every prewarmed cache entry was inserted under a
+    # cache key that typical real client traffic could never match,
+    # making Tier B prewarm's own core purpose ("so the first real
+    # client query is already a cache hit") silently ineffective for
+    # the large majority of real-world client query shapes, despite
+    # run_prewarm() correctly reporting "succeeded" throughout (the
+    # resolves themselves genuinely succeeded -- they just weren't
+    # reusable afterward).
+    #
+    # Fixed: set AD=1 (matching the confirmed-working real-client shape)
+    # and include a minimal EDNS0 OPT record (no DNS Cookie -- Cookies
+    # are inherently per-query/per-client and correctly bypass any
+    # cache regardless of this fix, and are not sent by default by
+    # typical stub resolvers, only by diagnostic tools like dig; a
+    # cache entry keyed to a specific client's cookie could never be
+    # reused anyway, so there is nothing to fix there). Live-verified:
+    # a real `dig +nocookie` query (the realistic modern-stub-resolver
+    # shape) now correctly reuses a prewarmed entry built by this exact
+    # function, confirmed via dnsdist's own real cache-hits counter.
+    flags = 0x0120  # RD (0x0100) + AD (0x0020)
+    header = struct.pack(">HHHHHH", qid, flags, 1, 0, 0, 1)  # ARCOUNT=1 for the EDNS0 OPT record below
     qparts = b"".join(bytes([len(p)]) + p.encode("ascii", "ignore") for p in qname.split("."))
     type_num = _QTYPE_NUMBERS.get(qtype.upper(), 1)
     question = qparts + b"\x00" + struct.pack(">HH", type_num, 1)
-    return header + question
+    # Minimal EDNS0 OPT record: root name (0x00), TYPE=OPT (41),
+    # CLASS=UDP payload size (1232, the modern conservative default --
+    # matches app/v2/dnsdist_policy_runtime.py's own DoT/DoH default
+    # posture of following current real-world conventions rather than
+    # the legacy 512/4096 extremes), extended-RCODE/version/flags=0,
+    # RDLENGTH=0 (no options -- deliberately no Cookie, see above).
+    opt_rr = b"\x00" + struct.pack(">HHIH", 41, 1232, 0, 0)
+    return header + question + opt_rr
 
 
 def make_udp_resolve_fn(
