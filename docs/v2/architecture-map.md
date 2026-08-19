@@ -205,6 +205,19 @@ Owner-approved V2 architectural requirement, locked alongside this commit. Copie
 roadmap (`docs/v2-architecture-plan.md` §3.6, `docs/v2-adguard-parity-matrix.md` "Alderpoint beyond
 parity") at summary level; this section is the fuller engineering detail for Workstream 2.
 
+**Implementation status (Gate #3 architecture correction, post-RC30):** a Gate #3 review found this
+locked hot path had never actually been implemented -- V2 forwarded straight from dnsdist to public
+upstreams, with no BIND tier, from inception through RC30. Investigated and confirmed as real
+implementation drift, not a later superseding architecture decision (no document or commit ever
+descoped BIND; every workstream handoff treated a full BIND build-out as a tracked, budget-deferred
+gap, never a removed requirement -- see `docs/v2/build-reproducibility-fix.md`'s sibling
+investigation for the Gate #3 process and `docs/v2/bind-backend-v2.md` for the fix). RC31 implements
+the real tier: `app/v2/bind_gen.py` (isolated V2 `named.conf` generation/validation), a packaged
+`alderpointdns-v2-bind.service`, and `app/v2/dnsdist_policy_runtime.py`/`app/v2/runtime_compile.py`
+routing ordinary (plain-transport, non-ECS, default-upstream) recursive traffic through it. See
+`docs/v2/bind-backend-v2.md` for the full design, scope, and known bounded follow-ups (per-profile
+BIND view differentiation, DoT/DoH forwarding through BIND).
+
 **RAM-first hot path.** Client -> dnsdist RAM packet cache -> compiled runtime policy/routing ->
 BIND RAM recursive cache -> upstream only on miss. The DNS lookup/cache hot path must never
 synchronously depend on disk, SQLite, control.db, the aggregate store, DuckDB, Parquet, FastAPI, the
