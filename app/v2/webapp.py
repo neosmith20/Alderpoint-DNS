@@ -83,6 +83,8 @@ ANALYTICS_PARQUET_DIR = STATE_DIR / "analytics" / "queries"
 ANALYTICS_AGGREGATES_DB = STATE_DIR / "analytics" / "aggregates.db"
 STAGING_DIR = STATE_DIR / "staging"
 COMPILED_DNSDIST_CONF = STATE_DIR / "compiled" / "dnsdist.conf"
+COMPILED_BIND_CONF = STATE_DIR / "compiled" / "bind" / "named.conf"
+COMPILED_RPZ_ZONE = STATE_DIR / "compiled" / "bind" / "alderpointdns-v2.rpz"
 CERTS_DIR = STATE_DIR / "certs"
 ACTIVE_CERT_PATH = CERTS_DIR / "server.crt"
 ACTIVE_KEY_PATH = CERTS_DIR / "server.key"
@@ -776,9 +778,26 @@ def _mutate_and_promote(mutate_fn) -> runtime_compile.RuntimeCompileResult:
         try:
             mutate_fn(conn)
             dot, doh, doq, doh3, dnscrypt = _encrypted_transport_configs(conn)
+            # BIND architecture correction (Gate #3): live policy mutations
+            # also recompile+validate+coherently-promote the V2 BIND
+            # recursive-cache backend's named.conf whenever the appliance's
+            # default policy is a plain, non-ECS upstream selection -- see
+            # dnsdist_policy_runtime._route_via_bind's docstring for the
+            # exact, conservative condition. This is only attempted once
+            # COMPILED_RPZ_ZONE already exists: real installs always have
+            # it (generate-runtime / postinst creates it, even empty,
+            # before any policy mutation is possible), and a test/dev root
+            # that hasn't bootstrapped it yet gets exactly the prior
+            # dnsdist-only compile behavior rather than a hard failure --
+            # BIND wiring turns on the moment its real prerequisite exists,
+            # it never silently blocks unrelated policy mutations.
+            bind_kwargs = {}
+            if COMPILED_RPZ_ZONE.exists():
+                bind_kwargs = dict(live_bind_conf_path=COMPILED_BIND_CONF, rpz_zone_path=COMPILED_RPZ_ZONE)
             result = runtime_compile.recompile_and_promote(
                 conn, STAGING_DIR, COMPILED_DNSDIST_CONF,
                 listen_address=_configured_listen_address(), dot=dot, doh=doh, doq=doq, doh3=doh3, dnscrypt=dnscrypt,
+                **bind_kwargs,
             )
         except BaseException:
             conn.execute("ROLLBACK")

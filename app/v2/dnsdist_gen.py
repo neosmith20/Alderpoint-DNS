@@ -44,6 +44,15 @@ class UpstreamServer:
     name: str
     address: str  # "ip:port"
     pool: str = ""
+    # BIND architecture correction (Gate #3): true when this server is
+    # the V2 BIND recursive-cache backend (app/v2/bind_gen.py), whose
+    # PROXYv2 listener (BIND_PROXY_PORT) requires the connecting client
+    # to actually speak the proxy protocol -- an unproxied connection is
+    # refused outright (verified live: a direct `dig` to that port with
+    # no proxy header gets no response at all, see
+    # docs/v2/bind-backend-v2.md). Real, verified dnsdist 2.1.1 syntax:
+    # `newServer({..., useProxyProtocol=true})`.
+    use_proxy_protocol: bool = False
 
     def __post_init__(self) -> None:
         if not _LABEL_RE.match(self.name):
@@ -127,8 +136,12 @@ def generate_dnsdist_config(
         pool_comment = f" (pool: {pool_name})" if pool_name else " (default pool)"
         lines.append(f"-- upstream pool{pool_comment}")
         for srv in servers:
-            pool_kw = f', {{pool={_lua_string(pool_name)}}}' if pool_name else ""
-            lines.append(f'newServer({{address={_lua_string(srv.address)}{pool_kw}}})')
+            kwargs = f"address={_lua_string(srv.address)}"
+            if pool_name:
+                kwargs += f", pool={_lua_string(pool_name)}"
+            if srv.use_proxy_protocol:
+                kwargs += ", useProxyProtocol=true"
+            lines.append(f"newServer({{{kwargs}}})")
         lines.append("")
 
     refused_lines = render_refused_block_rules(refused_domains or [])

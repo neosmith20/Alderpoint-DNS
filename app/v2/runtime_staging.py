@@ -97,6 +97,61 @@ def run_command_validator(command: list[str]) -> Validator:
     return _validate
 
 
+@dataclass(frozen=True)
+class Artifact:
+    name: str
+    content: str
+    live_path: Path
+    validator: Validator
+
+
+def stage_validate_promote_all(
+    staging_root: Path, artifacts: list["Artifact"]
+) -> list[PromotionResult]:
+    """Coherent multi-artifact promotion (BIND architecture correction,
+    Gate #3): stages and validates *every* artifact first, and only
+    promotes any of them if *all* validate. This is what makes the
+    dnsdist+BIND generation pair (and the RPZ zone BIND loads) coherent --
+    a BIND ``named.conf``/zone that fails ``named-checkconf``/
+    ``named-checkzone`` must not leave the previously-promoted dnsdist
+    config live while a stale or absent BIND config sits underneath it
+    (or vice versa). Raises the same ``ValidationFailedError`` as
+    ``stage_validate_promote`` on the first failing artifact, and -- the
+    important difference -- promotes *nothing* in that case, leaving
+    every artifact's previous known-good generation untouched.
+    """
+    staged: list[tuple[Artifact, Path, ValidationResult]] = []
+    for artifact in artifacts:
+        staged_path = stage(staging_root, artifact.name, artifact.content)
+        validation = artifact.validator(staged_path)
+        if not validation.ok:
+            raise ValidationFailedError(
+                f"validation failed for staged artifact {artifact.name!r} "
+                f"-- no artifact in this generation was promoted",
+                validator_output=validation.output,
+            )
+        staged.append((artifact, staged_path, validation))
+
+    results = []
+    for artifact, staged_path, validation in staged:
+        live_path = Path(artifact.live_path)
+        previous_backup: Optional[Path] = None
+        if live_path.exists():
+            previous_backup = staging_root / f".{artifact.name}.previous"
+            shutil.copy2(live_path, previous_backup)
+        _atomic_write(live_path, artifact.content)
+        results.append(
+            PromotionResult(
+                promoted=True,
+                staged_path=staged_path,
+                live_path=live_path,
+                validation=validation,
+                previous_content_backup=previous_backup,
+            )
+        )
+    return results
+
+
 def stage_validate_promote(
     staging_root: Path,
     name: str,

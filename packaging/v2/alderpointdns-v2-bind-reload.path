@@ -1,0 +1,13 @@
+[Unit]
+Description=Watch Alderpoint DNS V2 promoted BIND runtime for reload
+After=alderpointdns-v2-bind.service
+StartLimitIntervalSec=60
+StartLimitBurst=200
+
+[Path]
+PathChanged=/var/lib/alderpointdns-v2/compiled/bind/named.conf
+PathModified=/var/lib/alderpointdns-v2/compiled/bind/named.conf
+Unit=alderpointdns-v2-bind-reload.service
+
+[Install]
+WantedBy=multi-user.target

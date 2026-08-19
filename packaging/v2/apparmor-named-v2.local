@@ -1,0 +1,7 @@
+# Alderpoint DNS V2 generated BIND state/log paths (private candidate).
+/var/lib/alderpointdns-v2/bind/ rw,
+/var/lib/alderpointdns-v2/bind/** rw,
+/var/lib/alderpointdns-v2/compiled/bind/ r,
+/var/lib/alderpointdns-v2/compiled/bind/** r,
+/var/log/alderpointdns-v2/bind/ rw,
+/var/log/alderpointdns-v2/bind/** rw,

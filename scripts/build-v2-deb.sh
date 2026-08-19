@@ -34,7 +34,7 @@ SOURCE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 # appropriate to this branch." 2.0.0~privateN-1: "~" sorts before the
 # final 2.0.0-1 this candidate is a pre-release of, same convention V1's
 # own build-deb.sh already uses for beta/dev/rc tags.
-DEB_VERSION="2.0.0~rc30-1"
+DEB_VERSION="2.0.0~rc31-1"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -58,6 +58,7 @@ mkdir -p \
   "$PKG/opt/alderpointdns-v2/app" \
   "$PKG/opt/alderpointdns-v2/vendor" \
   "$PKG/opt/alderpointdns-v2/scripts/v2" \
+  "$PKG/opt/alderpointdns-v2/packaging" \
   "$PKG/lib/systemd/system" \
   "$PKG/usr/share/doc/alderpointdns-v2"
 
@@ -83,7 +84,7 @@ Section: net
 Priority: optional
 Architecture: all
 Maintainer: Alderpoint DNS Maintainers <maintainers@example.invalid>
-Depends: dnsdist (>= 1.9.0), bind9-utils, bind9-dnsutils, curl, gnupg, python3 (>= 3.11), python3-argon2, python3-cryptography, python3-yaml, python3-pip, python3-fastapi, python3-itsdangerous, python3-pydantic, uvicorn, sqlite3
+Depends: dnsdist (>= 1.9.0), bind9, bind9-utils, bind9-dnsutils, curl, gnupg, python3 (>= 3.11), python3-argon2, python3-cryptography, python3-yaml, python3-pip, python3-fastapi, python3-itsdangerous, python3-pydantic, uvicorn, sqlite3
 Conflicts: alderpointdns
 Description: Alderpoint DNS V2 -- PRIVATE RELEASE CANDIDATE (not for production)
  Private, pre-release Workstream 4A/4B packaging of Alderpoint DNS V2.
@@ -91,10 +92,15 @@ Description: Alderpoint DNS V2 -- PRIVATE RELEASE CANDIDATE (not for production)
  runtime (pyarrow/duckdb), background services (analytics ingestion, Tier B
  prewarm, schedule transitions, native HTTPS management UI/API, replication,
  discovery, an observation-only DNS packet ingress on alternate port 1053),
- a packaged V2 dnsdist runtime reading only the promoted V2 compiled
- configuration, and self-signed TLS bootstrap.
+ a packaged V2 dnsdist runtime and a packaged, isolated V2 BIND
+ recursive-cache backend reading only the promoted V2 compiled
+ configuration (client -> dnsdist packet cache -> compiled policy/routing
+ -> BIND RAM recursive cache -> upstream, per docs/v2/architecture-map.md's
+ locked hot path), and self-signed TLS bootstrap.
  Never install alongside the V1 "alderpointdns" package on the same host
- that package is serving traffic from.
+ that package is serving traffic from -- V2's own BIND instance uses
+ entirely disjoint ports/paths from V1's, but the two packages Conflict
+ regardless.
 EOF
 # Conflicts: alderpointdns is deliberate belt-and-suspenders (Workstream
 # 4A safety constraint: "DO NOT INSTALL THE V2 PACKAGE ON THE HOST") --
@@ -146,6 +152,16 @@ cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-replication.service" "$PKG/lib/sys
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-dnsdist.service" "$PKG/lib/systemd/system/alderpointdns-v2-dnsdist.service"
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-dnsdist-reload.service" "$PKG/lib/systemd/system/alderpointdns-v2-dnsdist-reload.service"
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-dnsdist-reload.path" "$PKG/lib/systemd/system/alderpointdns-v2-dnsdist-reload.path"
+# BIND architecture correction (Gate #3): the real packaged V2 BIND
+# recursive-cache backend unit + its AppArmor local override (see
+# packaging/v2/postinst's own apparmor block for why this must be
+# appended to the shared /etc/apparmor.d/local/usr.sbin.named file, not
+# a standalone V2-only profile -- apparmor's usr.sbin.named profile is
+# keyed by binary path, and V1/V2 both run /usr/sbin/named).
+cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-bind.service" "$PKG/lib/systemd/system/alderpointdns-v2-bind.service"
+cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-bind-reload.service" "$PKG/lib/systemd/system/alderpointdns-v2-bind-reload.service"
+cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-bind-reload.path" "$PKG/lib/systemd/system/alderpointdns-v2-bind-reload.path"
+cp "$SOURCE_DIR/packaging/v2/apparmor-named-v2.local" "$PKG/opt/alderpointdns-v2/packaging/apparmor-named-v2.local"
 
 cp "$SOURCE_DIR/LICENSE" "$PKG/usr/share/doc/alderpointdns-v2/LICENSE"
 cp "$SOURCE_DIR/COPYRIGHT" "$PKG/usr/share/doc/alderpointdns-v2/copyright"

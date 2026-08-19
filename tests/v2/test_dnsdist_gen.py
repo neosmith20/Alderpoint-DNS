@@ -39,7 +39,16 @@ class TestGeneration:
         ]
         text = generate_dnsdist_config("127.0.0.1:5300", [], ups)
         assert "family" in text
-        assert 'newServer({address="127.0.0.1:5301", {pool="family"}})' in text
+        # BIND architecture correction pass: found and fixed a real latent
+        # bug here live -- `pool` was previously emitted as a nested Lua
+        # table literal (`{pool="family"}}`) instead of a flat newServer()
+        # kwarg, inconsistent with every other pool-kwarg emission in this
+        # same file (see _server_line's own `kwargs += f", pool=..."`
+        # pattern) and in dnsdist_policy_runtime.py. Both forms happened to
+        # pass dnsdist --check-config, so this went undetected until
+        # useProxyProtocol needed to be added alongside pool as a second
+        # flat kwarg, which the nested-table form could not accommodate.
+        assert 'newServer({address="127.0.0.1:5301", pool="family"})' in text
 
     def test_cache_profile_summary_included_as_comment_only(self):
         text = generate_dnsdist_config(

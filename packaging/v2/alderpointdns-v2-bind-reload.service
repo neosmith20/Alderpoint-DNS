@@ -1,0 +1,17 @@
+[Unit]
+Description=Reload Alderpoint DNS V2 packaged BIND after runtime promotion
+After=alderpointdns-v2-bind.service
+# Same real defect/fix as alderpointdns-v2-dnsdist-reload.service's own
+# comment -- matches its identical generous-but-bounded start-rate limit.
+StartLimitIntervalSec=60
+StartLimitBurst=200
+
+[Service]
+Type=oneshot
+# Restart BIND *before* dnsdist's own reload unit fires for the same
+# generation (both watch files written together by
+# app/v2/runtime_staging.py's stage_validate_promote_all, in the same
+# coherent promotion) -- an admin change that also touches BIND's
+# forwarders/RPZ must never leave dnsdist pointed at a BIND instance that
+# hasn't picked up the new config yet.
+ExecStart=/bin/systemctl restart alderpointdns-v2-bind.service

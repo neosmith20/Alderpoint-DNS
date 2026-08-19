@@ -10,7 +10,7 @@ set -e
 # and is intended for isolated/private V2 targets, not co-installation on a
 # live V1 appliance.
 
-V2_SERVICES="alderpointdns-v2-dnsdist alderpointdns-v2-dnsdist-reload.path alderpointdns-v2-analytics alderpointdns-v2-analytics-protobuf-receiver alderpointdns-v2-tierb alderpointdns-v2-schedule alderpointdns-v2-web alderpointdns-v2-discovery alderpointdns-v2-dns-observer alderpointdns-v2-replication"
+V2_SERVICES="alderpointdns-v2-bind alderpointdns-v2-bind-reload.path alderpointdns-v2-dnsdist alderpointdns-v2-dnsdist-reload.path alderpointdns-v2-analytics alderpointdns-v2-analytics-protobuf-receiver alderpointdns-v2-tierb alderpointdns-v2-schedule alderpointdns-v2-web alderpointdns-v2-discovery alderpointdns-v2-dns-observer alderpointdns-v2-replication"
 
 alderpointdns_v2_wait_active() {
   svc="$1"
@@ -33,6 +33,35 @@ case "$1" in
     if ! id alderpointdns-v2 >/dev/null 2>&1; then
       adduser --system --home /var/lib/alderpointdns-v2 --no-create-home \
         --ingroup alderpointdns-v2 --disabled-login alderpointdns-v2
+    fi
+
+    # BIND architecture correction (Gate #3): apparmor's usr.sbin.named
+    # profile is keyed by the binary path (/usr/sbin/named), which V1 and
+    # V2 both use -- the same real defect V1's own postinst already found
+    # and fixed (a default profile that only knows V1's own generated
+    # paths denies named read/write access to V2's isolated
+    # /var/lib/alderpointdns-v2/bind, /var/log/alderpointdns-v2/bind
+    # paths with a "permission denied" that looks like a Unix permissions
+    # bug but isn't). Appended (never overwritten) and guarded by its own
+    # V2-specific marker so this is idempotent across installs/upgrades
+    # and never clobbers V1's own local override entry in the same file
+    # (the two packages Conflict and are never co-installed, but the
+    # apparmor profile itself is host-wide, not per-package).
+    apparmor_local=/etc/apparmor.d/local/usr.sbin.named
+    apparmor_marker="# Alderpoint DNS V2 local override -- see /opt/alderpointdns-v2/packaging/apparmor-named-v2.local"
+    if [ -d /etc/apparmor.d/local ]; then
+      if [ ! -e "$apparmor_local" ] || ! grep -qF "$apparmor_marker" "$apparmor_local" 2>/dev/null; then
+        {
+          printf '%s\n' "$apparmor_marker"
+          cat /opt/alderpointdns-v2/packaging/apparmor-named-v2.local
+        } >> "$apparmor_local"
+      fi
+      if command -v apparmor_parser >/dev/null 2>&1 \
+          && [ -e /sys/module/apparmor/parameters/enabled ] \
+          && [ "$(cat /sys/module/apparmor/parameters/enabled)" = "Y" ] \
+          && [ -e /etc/apparmor.d/usr.sbin.named ]; then
+        apparmor_parser -r /etc/apparmor.d/usr.sbin.named || true
+      fi
     fi
 
     # Analytics vendor runtime provisioning (P0-C, Workstream 4A §4):

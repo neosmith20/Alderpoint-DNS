@@ -48,6 +48,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from app import dnsdist_upgrade  # noqa: E402
 from app.v2 import analytics_deps  # noqa: E402
+from app.v2 import bind_gen  # noqa: E402
 from app.v2 import bind_rpz_gen  # noqa: E402
 from app.v2 import config as v2config  # noqa: E402
 from app.v2 import control_db  # noqa: E402
@@ -61,6 +62,7 @@ from app.v2 import schedule_runtime  # noqa: E402
 from app.v2 import secret_store  # noqa: E402
 from app.v2.dnsdist_gen import stage_and_validate_dnsdist_config  # noqa: E402
 from app.v2.network_match import NetworkScope  # noqa: E402
+from app.v2.runtime_staging import Artifact, stage_validate_promote_all  # noqa: E402
 from app.v2.tier_b_prewarm import WorkingSetIndex, load as tier_b_load, flush as tier_b_flush, run_prewarm  # noqa: E402
 
 log = logging.getLogger("alderpointdns-v2-ctl")
@@ -525,20 +527,44 @@ def _configured_listen_address() -> str:
 
 
 def _default_dnsdist_config_text() -> str:
+    """BIND architecture correction (Gate #3): the default/"ordinary"
+    pool no longer forwards straight to the public upstreams -- it
+    forwards to the packaged V2 BIND recursive-cache backend
+    (app/v2/bind_gen.py), which is what actually holds the public
+    upstream forwarders now. This is the fix for the locked
+    ``docs/v2/architecture-map.md`` hot path (client -> dnsdist packet
+    cache -> compiled policy/routing -> BIND RAM recursive cache ->
+    upstream) that a Gate #3 review caught was never implemented.
+    """
     UpstreamServer, NetworkScope = _import_optional_generators()
     acls = [NetworkScope.create(f"default-{i}", cidr, f"default ACL {cidr}") for i, cidr in enumerate(_DEFAULT_ACL_CIDRS)]
-    upstreams = [UpstreamServer(name, addr) for name, addr in _DEFAULT_UPSTREAMS]
+    upstreams = [UpstreamServer("bind-v2", bind_gen.BIND_BACKEND_ADDRESS, use_proxy_protocol=True)]
     return dnsdist_gen.generate_dnsdist_config(_configured_listen_address(), acls, upstreams)
 
 
+def _default_bind_config_text(rpz_zone_path: Path) -> str:
+    forwarders = [addr for _name, addr in _DEFAULT_UPSTREAMS]
+    return bind_gen.render_named_conf(
+        forwarders,
+        str(rpz_zone_path),
+        directory=str(STATE_DIR / "bind"),
+        log_path=str(LOG_DIR / "bind" / "named.log"),
+    )
+
+
 def cmd_generate_runtime(args: argparse.Namespace) -> int:
-    """Compiles the current default-install dnsdist config (§9) and an
-    empty (no blocked/allowed domains yet -- none are configured on a
-    fresh install, since Priority 6/7's management API doesn't exist to
-    configure any) RPZ zone, validating both against the REAL installed
-    ``dnsdist``/``named-checkzone`` binaries before promoting into
-    COMPILED_DIR. Never touches /etc/dnsdist or /etc/bind -- this is V2's
-    own isolated compiled-artifact directory, not a live listener.
+    """Compiles the current default-install dnsdist config (§9), the V2
+    BIND recursive-cache backend's ``named.conf`` (BIND architecture
+    correction), and an empty (no blocked/allowed domains yet -- none are
+    configured on a fresh install, since Priority 6/7's management API
+    doesn't exist to configure any) RPZ zone, validating all three
+    against the REAL installed ``dnsdist``/``named-checkconf``/
+    ``named-checkzone`` binaries and promoting them *coherently* -- if
+    any one fails validation, none of the three are promoted, so dnsdist
+    and BIND can never end up on mismatched generations (see
+    ``app/v2/runtime_staging.py``'s ``stage_validate_promote_all``).
+    Never touches /etc/dnsdist or /etc/bind -- this is V2's own isolated
+    compiled-artifact directory, not a live listener.
 
     This intentionally does NOT yet compile a full multi-network/
     multi-client effective-policy runtime from arbitrary control.db
@@ -550,24 +576,37 @@ def cmd_generate_runtime(args: argparse.Namespace) -> int:
     """
     STAGING_DIR.mkdir(parents=True, exist_ok=True)
     COMPILED_DIR.mkdir(parents=True, exist_ok=True)
+    (STATE_DIR / "bind").mkdir(parents=True, exist_ok=True)
+    (LOG_DIR / "bind").mkdir(parents=True, exist_ok=True)
 
-    dnsdist_text = _default_dnsdist_config_text()
-    result = stage_and_validate_dnsdist_config(
-        staging_root=STAGING_DIR,
-        config_text=dnsdist_text,
-        live_path=COMPILED_DIR / "dnsdist.conf",
-        binary=args.dnsdist_binary,
-    )
-    print(f"dnsdist config validated + promoted: {result.live_path} (validated={result.validation.ok})")
-
+    rpz_path = COMPILED_DIR / "bind" / "alderpointdns-v2.rpz"
     rpz_text = bind_rpz_gen.render_rpz_zone({}, [], serial=int(time.time()))
-    rpz_result = bind_rpz_gen.stage_and_validate_rpz_zone(
-        staging_root=STAGING_DIR,
-        zone_text=rpz_text,
-        live_path=COMPILED_DIR / "bind" / "alderpointdns-v2.rpz",
-        binary=args.named_checkzone_binary,
-    )
-    print(f"RPZ zone validated + promoted: {rpz_result.live_path} (validated={rpz_result.validation.ok})")
+    dnsdist_text = _default_dnsdist_config_text()
+    bind_text = _default_bind_config_text(rpz_path)
+
+    artifacts = [
+        Artifact(
+            name="alderpointdns-v2.rpz",
+            content=rpz_text,
+            live_path=rpz_path,
+            validator=bind_rpz_gen.named_checkzone_validator(args.named_checkzone_binary),
+        ),
+        Artifact(
+            name="named.conf",
+            content=bind_text,
+            live_path=COMPILED_DIR / "bind" / "named.conf",
+            validator=bind_gen.named_checkconf_validator(args.named_checkconf_binary),
+        ),
+        Artifact(
+            name="dnsdist.conf",
+            content=dnsdist_text,
+            live_path=COMPILED_DIR / "dnsdist.conf",
+            validator=dnsdist_gen.dnsdist_check_config_validator(args.dnsdist_binary),
+        ),
+    ]
+    results = stage_validate_promote_all(STAGING_DIR, artifacts)
+    for result in results:
+        print(f"{result.staged_path.name} validated + promoted: {result.live_path} (validated={result.validation.ok})")
     return 0
 
 
@@ -1329,7 +1368,7 @@ def cmd_schedule_worker(args: argparse.Namespace) -> int:
 
     def on_transition(now: datetime, active_ids: frozenset) -> bool:
         try:
-            cmd_generate_runtime(argparse.Namespace(dnsdist_binary="dnsdist", named_checkzone_binary="named-checkzone"))
+            cmd_generate_runtime(argparse.Namespace(dnsdist_binary="dnsdist", named_checkzone_binary="named-checkzone", named_checkconf_binary="named-checkconf"))
             return True
         except Exception as exc:  # noqa: BLE001 -- must not crash the worker loop
             log.error("schedule transition recompile failed: %s", exc)
@@ -1418,6 +1457,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("generate-runtime")
     p.add_argument("--dnsdist-binary", default="dnsdist")
     p.add_argument("--named-checkzone-binary", default="named-checkzone")
+    p.add_argument("--named-checkconf-binary", default="named-checkconf")
     p.set_defaults(func=cmd_generate_runtime)
 
     p = sub.add_parser("analytics-worker")

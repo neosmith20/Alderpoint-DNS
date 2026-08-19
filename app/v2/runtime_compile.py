@@ -33,6 +33,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.v2 import bind_gen
 from app.v2 import policy_store as store
 from app.v2 import safesearch
 from app.v2.blocking_response import BlockingResponse
@@ -47,11 +48,11 @@ from app.v2.dnsdist_policy_runtime import (
     PolicyRuntimeError,
     compile_multi_policy_dnsdist_config,
 )
-from app.v2.ecs_policy import EcsPolicy
+from app.v2.ecs_policy import EcsPolicy, server_uses_client_subnet
 from app.v2.network_match import NetworkScope
 from app.v2.policy_compiler import compile_cache_profile, compile_effective_policy
 from app.v2.policy_model import PolicyLayer
-from app.v2.runtime_staging import PromotionResult, stage_validate_promote
+from app.v2.runtime_staging import Artifact, PromotionResult, stage_validate_promote, stage_validate_promote_all
 
 _ECS_MODE_MAP = {"disabled": "disabled", "preserve": "preserve", "custom": "custom"}
 _DEFAULT_NETWORK_ID = "__default__"
@@ -184,12 +185,23 @@ def recompile_and_promote(
     doq: DoqConfig | None = None,
     doh3: Doh3Config | None = None,
     dnscrypt: DnscryptConfig | None = None,
+    # BIND architecture correction (Gate #3): when the caller supplies a
+    # real live BIND config path, this becomes the single code path from
+    # "control.db changed" to "coherently compiled+validated+promoted
+    # dnsdist config AND BIND config" -- see
+    # app/v2/runtime_staging.py's stage_validate_promote_all. Omitted
+    # (None, the default) preserves the exact prior behavior (dnsdist.conf
+    # only) for any caller not yet updated to pass it -- no regression.
+    live_bind_conf_path: "Path | None" = None,
+    rpz_zone_path: "Path | None" = None,
+    named_checkconf_binary: str = "named-checkconf",
 ) -> RuntimeCompileResult:
     """The real, single code path from "control.db changed" to "compiled
-    dnsdist config on disk validated by the real binary." Raises on any
-    failure (invalid domain data, dnsdist rejects the config, ...) -- the
-    live path is never touched until validation succeeds, so a known-good
-    runtime always remains active on failure, per §18.
+    dnsdist (and, when wired, BIND) config on disk validated by the real
+    binaries." Raises on any failure (invalid domain data, dnsdist/BIND
+    rejects the config, ...) -- the live path is never touched until
+    validation succeeds, so a known-good runtime always remains active on
+    failure, per §18.
     """
     try:
         bindings = build_bindings(conn)
@@ -200,22 +212,71 @@ def recompile_and_promote(
         # counted here, not inside the compiler, so a caller can decide
         # whether to surface it rather than it vanishing with no signal.
         ptr_records_skipped = sum(1 for r in local_dns_records if r[1] == "PTR")
+
+        # The appliance-wide default policy (the catch-all 0.0.0.0/0
+        # binding build_bindings() always appends, global layer only) is
+        # "the" default upstream selection by construction -- no separate
+        # profile lookup needed. Only plain-transport, non-ECS default
+        # endpoints are ever treated as BIND's forwarder set (see
+        # dnsdist_policy_runtime._route_via_bind's own docstring for why
+        # ECS/dot/doh are excluded); anything else means BIND routing
+        # stays off for this compile, same as before this pass.
+        default_binding = next((b for b in bindings if b.network.network_id == _DEFAULT_NETWORK_ID), None)
+        bind_forwarders: frozenset = frozenset()
+        if (
+            live_bind_conf_path is not None
+            and default_binding is not None
+            and default_binding.upstream_transport == "plain"
+            and not server_uses_client_subnet(default_binding.ecs_policy)
+        ):
+            bind_forwarders = frozenset(ep.address for ep in default_binding.upstream_endpoints)
+
         config_text = compile_multi_policy_dnsdist_config(
             listen_address, bindings, local_dns_records=local_dns_records,
             dot=dot, doh=doh, doq=doq, doh3=doh3, dnscrypt=dnscrypt,
+            bind_forwarders=bind_forwarders,
         )
     except PolicyRuntimeError as exc:
         raise RuntimeCompileError(f"policy runtime compile failed: {exc}") from exc
 
     staging_dir.mkdir(parents=True, exist_ok=True)
     try:
-        result: PromotionResult = stage_validate_promote(
-            staging_root=staging_dir,
-            name="dnsdist.conf",
-            content=config_text,
-            live_path=live_dnsdist_conf_path,
-            validator=dnsdist_check_config_validator(dnsdist_binary),
-        )
+        if live_bind_conf_path is not None and bind_forwarders:
+            if rpz_zone_path is None:
+                raise RuntimeCompileError(
+                    "live_bind_conf_path was given but rpz_zone_path was not -- "
+                    "BIND's named.conf must reference an already-promoted RPZ zone file"
+                )
+            bind_state_dir = Path(live_bind_conf_path).parent.parent / "bind"
+            bind_log_path = Path(live_bind_conf_path).parent.parent.parent / "log" / "bind" / "named.log"
+            bind_state_dir.mkdir(parents=True, exist_ok=True)
+            bind_log_path.parent.mkdir(parents=True, exist_ok=True)
+            bind_conf_text = bind_gen.render_named_conf(
+                sorted(bind_forwarders), str(rpz_zone_path),
+                directory=str(bind_state_dir), log_path=str(bind_log_path),
+            )
+            results = stage_validate_promote_all(
+                staging_dir,
+                [
+                    Artifact(
+                        name="named.conf", content=bind_conf_text, live_path=live_bind_conf_path,
+                        validator=bind_gen.named_checkconf_validator(named_checkconf_binary),
+                    ),
+                    Artifact(
+                        name="dnsdist.conf", content=config_text, live_path=live_dnsdist_conf_path,
+                        validator=dnsdist_check_config_validator(dnsdist_binary),
+                    ),
+                ],
+            )
+            result = results[-1]
+        else:
+            result: PromotionResult = stage_validate_promote(
+                staging_root=staging_dir,
+                name="dnsdist.conf",
+                content=config_text,
+                live_path=live_dnsdist_conf_path,
+                validator=dnsdist_check_config_validator(dnsdist_binary),
+            )
     except Exception as exc:  # ValidationFailedError, StagingError
         raise RuntimeCompileError(f"runtime validation/promotion failed: {exc}") from exc
 

@@ -99,6 +99,43 @@ def _endpoint_server_line(address: str, pool: str, transport: str, tls_hostname,
     return f"newServer({{{kwargs}}})"
 
 
+def _bind_server_line(pool: str) -> str:
+    """BIND architecture correction (Gate #3): the real ``newServer()``
+    line for a pool that's been determined to route through the packaged
+    V2 BIND recursive-cache tier (``app/v2/bind_gen.py``) instead of
+    directly to its configured plain upstream endpoints. Real, verified
+    dnsdist 2.1.1 syntax -- see ``app/v2/dnsdist_gen.py``'s
+    ``UpstreamServer.use_proxy_protocol``.
+    """
+    from app.v2.bind_gen import BIND_BACKEND_ADDRESS
+
+    return f'newServer({{address={_lua_string(BIND_BACKEND_ADDRESS)}, pool={_lua_string(pool)}, useProxyProtocol=true}})'
+
+
+def _route_via_bind(endpoints: tuple, transport: str, use_ecs: bool, bind_forwarders: frozenset) -> bool:
+    """Whether a pool's plain-transport endpoints should be routed
+    through the shared V2 BIND recursive-cache backend rather than
+    directly to their configured upstream addresses.
+
+    Deliberately conservative (§ preserve upstream/routing/ECS
+    semantics): only true when the transport is plain, ECS is not in use
+    for this pool (BIND ECS pass-through is unproven -- see
+    ``docs/v2/bind-backend-v2.md``), and the pool's exact endpoint
+    address set is identical to the appliance's single configured BIND
+    forwarder set. A pool with a *different* custom plain upstream
+    selection (a genuinely distinct operator choice, e.g. a
+    domain-routing rule pointed at a specific alternate resolver)
+    continues straight to its own configured endpoints, exactly as
+    before this pass -- collapsing two different upstream choices onto
+    one shared BIND forwarder list would silently change which upstream
+    actually answers a given client's queries, which this compiler must
+    never do.
+    """
+    if transport != "plain" or use_ecs or not bind_forwarders:
+        return False
+    return frozenset(ep.address for ep in endpoints) == bind_forwarders
+
+
 def _refused_or_spoof_action(response: BlockingResponse) -> str:
     if response.mode == "refused":
         return "RCodeAction(DNSRCode.REFUSED)"
@@ -366,6 +403,7 @@ def compile_multi_policy_dnsdist_config(
     doq: DoqConfig | None = None,
     doh3: Doh3Config | None = None,
     dnscrypt: DnscryptConfig | None = None,
+    bind_forwarders: frozenset = frozenset(),
 ) -> str:
     """Deterministic (§2H requires reproducible behavior regardless of
     query order): bindings are processed most-specific-network-first
@@ -453,26 +491,37 @@ def compile_multi_policy_dnsdist_config(
             lines.append(f"-- ECS policy for pool {pool_name}: {binding.ecs_policy.mode}")
             lines.extend(ecs_directives)
         lines.append(f"-- upstream servers for effective policy pool: {pool_name}")
-        for ep in binding.upstream_endpoints:
+        if _route_via_bind(binding.upstream_endpoints, binding.upstream_transport, use_ecs, bind_forwarders):
             lines.append(
-                _endpoint_server_line(
-                    ep.address, pool_name, binding.upstream_transport,
-                    ep.tls_hostname, getattr(ep, "doh_path", None), use_ecs,
-                )
+                "-- ordinary recursion: routed through the packaged V2 BIND "
+                "recursive-cache tier (docs/v2/architecture-map.md locked hot path)"
             )
+            lines.append(_bind_server_line(pool_name))
+        else:
+            for ep in binding.upstream_endpoints:
+                lines.append(
+                    _endpoint_server_line(
+                        ep.address, pool_name, binding.upstream_transport,
+                        ep.tls_hostname, getattr(ep, "doh_path", None), use_ecs,
+                    )
+                )
         for suffix, route_endpoints, route_transport, _strategy in binding.domain_routes:
             try:
                 validated_suffix = validate_dns_name(suffix)
             except InvalidDnsNameError as exc:
                 raise PolicyRuntimeError(f"invalid domain routing suffix {suffix!r}: {exc}") from exc
             route_pool = f"{pool_name}__route_{validated_suffix.replace('.', '_')}"
-            for ep in route_endpoints:
-                lines.append(
-                    _endpoint_server_line(
-                        ep.address, route_pool, route_transport,
-                        ep.tls_hostname, getattr(ep, "doh_path", None), use_ecs,
+            if _route_via_bind(route_endpoints, route_transport, use_ecs, bind_forwarders):
+                lines.append(f"-- domain route {validated_suffix}: routed through the packaged V2 BIND recursive-cache tier")
+                lines.append(_bind_server_line(route_pool))
+            else:
+                for ep in route_endpoints:
+                    lines.append(
+                        _endpoint_server_line(
+                            ep.address, route_pool, route_transport,
+                            ep.tls_hostname, getattr(ep, "doh_path", None), use_ecs,
+                        )
                     )
-                )
         lines.append("")
 
     lines.append("-- per-effective-policy-pool packet caches (never shared across pools)")
