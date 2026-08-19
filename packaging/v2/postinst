@@ -13,11 +13,31 @@ set -e
 V2_SERVICES="alderpointdns-v2-bind@ctx0.service alderpointdns-v2-bind-reload.path alderpointdns-v2-dnsdist alderpointdns-v2-dnsdist-reload.path alderpointdns-v2-analytics alderpointdns-v2-analytics-protobuf-receiver alderpointdns-v2-tierb alderpointdns-v2-schedule alderpointdns-v2-web alderpointdns-v2-discovery alderpointdns-v2-dns-observer alderpointdns-v2-replication"
 
 alderpointdns_v2_wait_active() {
+  # Real defect found live during Gate #3 clean-install acceptance on a
+  # genuine (non-container) KVM Debian 13 VM: a Type=simple service that
+  # crash-loops immediately after every start (e.g. dnsdist failing an
+  # EADDRINUSE bind) is briefly reported "active" by systemd the instant
+  # the process is exec'd, before the process itself notices the failure
+  # and exits. A single is-active poll can land in that split-second
+  # window between restarts and return success even though the service
+  # never actually stays up -- which is exactly what happened here: this
+  # postinst reported a clean install (dpkg state "ii") while
+  # alderpointdns-v2-dnsdist was permanently stuck in
+  # activating/auto-restart, never serving a single query. Require the
+  # active state to hold across a short confirmation delay before
+  # accepting it, not just a single instantaneous check.
   svc="$1"
   i=0
   while [ "$i" -lt 15 ]; do
     if systemctl is-active --quiet "$svc"; then
-      return 0
+      sleep 2
+      if systemctl is-active --quiet "$svc"; then
+        return 0
+      fi
+      # Flapped back out of active during the confirmation delay -- keep
+      # polling rather than failing immediately, in case this was a
+      # legitimate one-off restart (e.g. ExecStartPre re-run) rather than
+      # a genuine crash loop.
     fi
     i=$((i + 1))
     sleep 1
@@ -64,6 +84,57 @@ case "$1" in
     if systemctl list-unit-files dnsdist.service >/dev/null 2>&1; then
       systemctl stop dnsdist.service >/dev/null 2>&1 || true
       systemctl disable dnsdist.service >/dev/null 2>&1 || true
+    fi
+
+    # Real defect found live during Gate #3 clean-install acceptance on a
+    # genuine (non-container) KVM Debian 13 VM -- reproduces on a stock
+    # Debian 13 install and was masked by every prior container-based
+    # install test because minimal containers don't run systemd-resolved.
+    # systemd-resolved's stub DNS listener is enabled by default on
+    # Debian 12/13 and binds specific loopback aliases (127.0.0.53:53,
+    # sometimes also 127.0.0.54:53) without SO_REUSEPORT. Because a
+    # *wildcard* bind (0.0.0.0:53, what alderpointdns-v2-dnsdist needs) on
+    # a port already claimed by any non-SO_REUSEPORT socket -- even one
+    # bound to a different, more specific address -- is refused by the
+    # kernel, dnsdist's own bind to port 53 fails with EADDRINUSE on a
+    # completely unmodified, default fresh install, before this package's
+    # own config is even a factor. This is the same class of conflict V1's
+    # own postinst already found and fixed (see packaging/debian/postinst)
+    # -- V2 never carried the fix forward. Disable only the stub listener
+    # and LLMNR; systemd-resolved keeps running and NSS/D-Bus-based name
+    # resolution is unaffected.
+    if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+      install -d -m 0755 /etc/systemd/resolved.conf.d
+      cat > /etc/systemd/resolved.conf.d/alderpointdns-v2-disable-stub.conf <<'RESOLVEDCONF'
+# Installed by alderpointdns-v2 (packaging/v2/postinst). Alderpoint DNS V2
+# itself listens on port 53 (via alderpointdns-v2-dnsdist) once installed;
+# systemd-resolved's stub listener and LLMNR responder conflict with that
+# bind (see postinst for the full explanation). Only these two listeners
+# are disabled -- systemd-resolved keeps running for everything else.
+[Resolve]
+DNSStubListener=no
+LLMNR=no
+RESOLVEDCONF
+      systemctl restart systemd-resolved
+      # /etc/resolv.conf is normally a symlink to systemd-resolved's
+      # dynamic stub file (nameserver 127.0.0.53), which stops answering
+      # once the stub listener above is disabled. Repoint it at this
+      # host's own Alderpoint DNS V2 listener -- the intended end state
+      # for a host running Alderpoint DNS V2 as its resolver anyway --
+      # but only when it's still the default symlink/absent; an
+      # administrator's own static /etc/resolv.conf (a real, non-symlink
+      # file) is left alone rather than silently overwritten.
+      if [ -L /etc/resolv.conf ]; then
+        rm -f /etc/resolv.conf
+        cat > /etc/resolv.conf <<'RESOLVCONFEOF'
+# Managed by alderpointdns-v2. systemd-resolved's stub listener was
+# disabled (see /etc/systemd/resolved.conf.d/alderpointdns-v2-disable-stub.conf)
+# so Alderpoint DNS V2's own dnsdist could bind port 53. Points at this
+# host's own Alderpoint DNS V2 listener.
+nameserver 127.0.0.1
+options edns0 trust-ad
+RESOLVCONFEOF
+      fi
     fi
 
     # BIND architecture correction (Gate #3): apparmor's usr.sbin.named
