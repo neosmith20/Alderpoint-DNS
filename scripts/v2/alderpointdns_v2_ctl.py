@@ -930,6 +930,78 @@ def cmd_discovery_worker(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_ecs_source_ip(packet: bytes) -> str | None:
+    """Extracts the real client address from an EDNS Client Subnet (ECS,
+    RFC 7871) option in a query's OPT additional record, or None if not
+    present/parseable.
+
+    Real defect found live during two-node discovery acceptance testing
+    (see docs/v2/two-node-replication-discovery-acceptance.md): this
+    ingress is only ever fed via dnsdist's TeeAction, which re-originates
+    the tee'd copy from dnsdist's OWN local UDP socket -- the raw UDP
+    peer address this process's own recvfrom() sees is therefore always
+    dnsdist itself (typically 127.0.0.1), never the real client, no
+    matter how TeeAction is configured. dnsdist's TeeAction has a
+    documented ``addECS`` option that embeds the real client's address as
+    an ECS option on the tee'd copy specifically to solve this class of
+    problem -- this decodes that option so real discovery can use the
+    real client address instead of always recording dnsdist's own.
+
+    Deliberately conservative: only attempts this for a well-formed query
+    with zero answer/authority records (true of every real query
+    TeeAction clones -- it copies the question, never a response), so
+    this never needs general resource-record skipping/name-decompression
+    for sections that would come before the additional section.
+    """
+    if len(packet) < 12:
+        return None
+    _qdcount, ancount, nscount, arcount = struct.unpack("!HHHH", packet[4:12])
+    if ancount or nscount or not arcount:
+        return None
+    try:
+        _qname, _qtype, _qclass, question = _parse_dns_qname(packet)
+    except ValueError:
+        return None
+    offset = 12 + len(question)
+    # Additional section: one or more RRs. Only the OPT RR (TYPE 41) is
+    # relevant; a bare root name (single 0x00 byte) precedes it since OPT
+    # never carries a real owner name.
+    while offset < len(packet):
+        if packet[offset] != 0x00:
+            return None  # a non-root owner name here isn't OPT; give up
+        offset += 1
+        if offset + 10 > len(packet):
+            return None
+        rtype, _rclass, _ttl, rdlength = struct.unpack("!HHIH", packet[offset : offset + 10])
+        offset += 10
+        if offset + rdlength > len(packet):
+            return None
+        rdata = packet[offset : offset + rdlength]
+        offset += rdlength
+        if rtype != 41:  # OPT
+            continue
+        pos = 0
+        while pos + 4 <= len(rdata):
+            opt_code, opt_len = struct.unpack("!HH", rdata[pos : pos + 4])
+            opt_data = rdata[pos + 4 : pos + 4 + opt_len]
+            pos += 4 + opt_len
+            if opt_code != 8 or len(opt_data) < 4:  # ECS (RFC 7871 §6)
+                continue
+            family, source_prefix, _scope_prefix = struct.unpack("!HBB", opt_data[:4])
+            addr_bytes = opt_data[4:]
+            try:
+                if family == 1:
+                    padded = addr_bytes.ljust(4, b"\x00")
+                    return socket.inet_ntop(socket.AF_INET, padded[:4])
+                if family == 2:
+                    padded = addr_bytes.ljust(16, b"\x00")
+                    return socket.inet_ntop(socket.AF_INET6, padded[:16])
+            except (OSError, ValueError):
+                return None
+        return None  # OPT present but no ECS option in it
+    return None
+
+
 def _parse_dns_qname(packet: bytes) -> tuple[str, int, int, bytes]:
     """Return qname/qtype/qclass/original-question for a simple DNS query.
 
@@ -1280,7 +1352,13 @@ def cmd_dns_observer(args: argparse.Namespace) -> int:
                 if stop["flag"]:
                     break
                 raise
-            source_ip = addr[0]
+            # This ingress is only ever fed via dnsdist's TeeAction, whose
+            # tee'd copy always arrives from dnsdist's OWN local socket
+            # (addr[0] is dnsdist, e.g. 127.0.0.1) -- prefer the real
+            # client address dnsdist embeds as an ECS option (see
+            # _parse_ecs_source_ip's own docstring) and only fall back to
+            # the raw UDP peer when it's absent/unparseable.
+            source_ip = _parse_ecs_source_ip(packet) or addr[0]
             hostname = ""
             try:
                 hostname, _qtype, _qclass, _question = _parse_dns_qname(packet)

@@ -92,7 +92,7 @@ def generate_dnsdist_config(
     # policy mutation -- so real client discovery from real DNS traffic
     # did not work on a freshly installed appliance even after that
     # fix, exactly the same class of gap query_log_address above already
-    # exists to prevent for analytics.
+    # exists to prevent for its own producer.
     discovery_ingress_address: str | None = "127.0.0.1:1053",
     # Gate #3 acceptance closure: the locked RAM-first hot path
     # (docs/v2/architecture-map.md) begins with the dnsdist packet cache,
@@ -155,8 +155,15 @@ def generate_dnsdist_config(
         # blocks on or uses the target's response, so this cannot slow
         # down or affect a real client's own answer (same safety
         # property RemoteLogger already gives query_log_address above).
+        # addECS=true: TeeAction re-originates the tee'd copy from
+        # dnsdist's OWN local socket, so the real client's address is
+        # otherwise lost by the time dns-observer's own recvfrom() sees
+        # it -- this embeds it as a real ECS option instead (real defect
+        # found live, see docs/v2/two-node-replication-discovery-
+        # acceptance.md; dns-observer decodes it back out via
+        # _parse_ecs_source_ip).
         lines += [
-            f'addAction(AllRule(), TeeAction("{discovery_ingress_address}", false))',
+            f'addAction(AllRule(), TeeAction("{discovery_ingress_address}", true))',
             "",
         ]
 

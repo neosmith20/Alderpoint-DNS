@@ -48,7 +48,7 @@ class TestBasicGeneration:
         # for the analytics producer just above it.
         b = _binding("10.0.1.0/24", "p1")
         text = compile_multi_policy_dnsdist_config("127.0.0.1:5300", [b])
-        assert 'TeeAction("127.0.0.1:1053", false)' in text
+        assert 'TeeAction("127.0.0.1:1053", true)' in text
         assert "addAction(AllRule(), TeeAction(" in text
 
     def test_discovery_ingress_address_can_be_disabled(self):

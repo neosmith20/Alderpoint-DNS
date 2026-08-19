@@ -111,7 +111,7 @@ class TestRealValidation:
         # covers the config the real per-policy compiler emits after an
         # admin's first policy mutation.
         text = generate_dnsdist_config("127.0.0.1:15303", _acl(), _upstreams())
-        assert 'TeeAction("127.0.0.1:1053", false)' in text
+        assert 'TeeAction("127.0.0.1:1053", true)' in text
         staging = tmp_path / "staging"
         staging.mkdir()
         live = tmp_path / "live" / "dnsdist.conf"

@@ -544,11 +544,15 @@ def compile_multi_policy_dnsdist_config(
         # Real client-discovery producer: mirrors every query datagram
         # to the dns-observer ingress (see DISCOVERY_INGRESS_ADDRESS's
         # own comment above for why this is safe to always emit).
-        # addECS=false: dns-observer only needs the packet's real source
-        # address (already the UDP peer address TeeAction preserves),
-        # not an EDNS Client Subnet option.
+        # addECS=true: real defect found live (see docs/v2/two-node-
+        # replication-discovery-acceptance.md) -- TeeAction re-originates
+        # the tee'd copy from dnsdist's OWN local socket, so the real
+        # client's address is otherwise lost by the time dns-observer's
+        # own recvfrom() sees it; this embeds it as a real ECS option
+        # instead, which dns-observer decodes back out
+        # (_parse_ecs_source_ip in scripts/v2/alderpointdns_v2_ctl.py).
         lines += [
-            f'addAction(AllRule(), TeeAction("{discovery_ingress_address}", false))',
+            f'addAction(AllRule(), TeeAction("{discovery_ingress_address}", true))',
             "",
         ]
 
