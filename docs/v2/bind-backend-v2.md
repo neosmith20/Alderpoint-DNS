@@ -37,6 +37,68 @@ dnsdist's own config: `stage_validate_promote_all` stages+validates every artifa
 `named.conf`, dnsdist `dnsdist.conf`) before promoting any of them, so a BIND validation failure
 never leaves a mismatched dnsdist generation live, and vice versa.
 
+## Update: multi-context BIND (Gate #3 acceptance closure)
+
+RC31 (above design) only routed the single appliance-default plain
+upstream selection through BIND; a Dex acceptance-closure pass correctly
+flagged that as still an "accidental direct-upstream bypass" gap for
+custom upstream profiles and domain-routing rules. RC33 closes this:
+
+- Every distinct plain, non-ECS forwarder set actually in use (default
+  policy, any other network's own upstream selection, any domain-routing
+  rule's own endpoints) gets allocated its own real BIND context
+  (`app/v2/bind_gen.BindContext`/`allocate_bind_contexts`), bounded at
+  `MAX_BIND_CONTEXTS = 4`.
+- **Design pivot, tried live:** the first design used BIND "views"
+  matched by `match-destinations` on distinct loopback addresses
+  (127.0.0.2, 127.0.0.3, ...) sharing one `named` process. Confirmed
+  live that this needs the extra loopback addresses actually assigned to
+  an interface first (`ip addr add ...`), which requires `CAP_NET_ADMIN`
+  the live management-API's own unprivileged runtime user does not have,
+  and a dynamic per-compile context count that a static systemd unit
+  can't pre-provision. Abandoned before shipping, in favor of:
+- **Port-based multi-instance:** one independent `named` process per
+  context, all on `127.0.0.1`, each with its own disjoint port pair and
+  state/log subdirectory. Zero extra infrastructure needed, confirmed
+  live. `packaging/v2/alderpointdns-v2-bind@.service` is a systemd
+  template unit; `alderpointdns-v2-bind-reload.service` unconditionally
+  restarts all `MAX_BIND_CONTEXTS` possible instance names on every
+  promotion (safe/idempotent -- each instance's own
+  `ConditionPathExists` skips the ones not in the current generation).
+
+**Real bug found and fixed during this pass's own live multi-context
+acceptance testing:** `app/v2/runtime_staging.py`'s
+`stage_validate_promote_all`/`stage_validate_promote` built the
+previous-content backup path as `staging_root / f".{name}.previous"`
+without creating intermediate directories -- fine for a flat name like
+`dnsdist.conf`, but every BIND context's artifact name (`ctx0/named.conf`,
+...) contains a real path separator, so the backup path needed a parent
+directory that was never created. This crashed the **second** promotion
+of any BIND context config (the first promotion has no prior `live_path`
+to back up, masking it until this pass's own live testing actually
+promoted twice). Fixed by flattening the name for the backup filename
+only. Regression coverage:
+`tests/v2/test_runtime_staging.py::TestArtifactNameWithSlash`.
+
+**Verified-live technical findings on transport support through BIND:**
+- **ECS:** the installed BIND 9.20 binary has **no** EDNS Client Subnet
+  support at all -- confirmed via `strings` against the installed
+  binary (no `client-subnet`/`ecs-zones`/`edns-client-subnet` directive
+  exists anywhere in it). Categorically cannot be routed through BIND;
+  ECS pools stay direct-to-upstream unconditionally.
+- **DoT:** BIND 9.20 genuinely supports TLS-forwarding
+  (`forwarders { <ip> port 853 tls <profile>; };`) -- proven live with a
+  real, successfully answered query using the anonymous/unverified
+  `ephemeral` TLS profile. Certificate-hostname-verified forwarding
+  (`tls <name> { remote-hostname "..."; };`) is also accepted by
+  `named-checkconf`, but a live functional test of it returned SERVFAIL
+  and the root cause was not isolated within this pass's remaining time
+  budget. Shipping unverified TLS peer-certificate forwarding would be a
+  real security regression versus dnsdist's own existing DoT backend
+  (which does verify `subjectName`), so DoT/DoH upstream profiles
+  continue routing direct-to-upstream -- a genuine, bounded, time-limited
+  gap, not a technical impossibility, and not silently dropped.
+
 ## Routing scope (deliberately bounded)
 
 `dnsdist_policy_runtime.compile_multi_policy_dnsdist_config` routes a client-policy pool through
