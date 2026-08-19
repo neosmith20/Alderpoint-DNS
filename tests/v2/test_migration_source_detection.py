@@ -78,7 +78,6 @@ class TestMissingRequiredTableRejected:
         conn = sqlite3.connect(str(db_path))
         conn.execute("DROP TABLE upstream_resolvers")
         conn.execute("DROP TABLE custom_filter_rules")
-        conn.execute("DROP TABLE notification_providers")
         conn.commit()
         conn.close()
         with pytest.raises(UnsupportedSourceSchemaError) as exc_info:
@@ -86,7 +85,6 @@ class TestMissingRequiredTableRejected:
         message = str(exc_info.value)
         assert "upstream_resolvers" in message
         assert "custom_filter_rules" in message
-        assert "notification_providers" in message
 
 
 class TestMissingRequiredColumnRejected:
@@ -206,6 +204,12 @@ class TestSchemaContractIsRealAndExhaustive:
         # documented in migration_convert.py's own docstrings.
         assert "client_identifiers" in REQUIRED_TABLES_AND_COLUMNS
         assert "upstream_resolvers" in REQUIRED_TABLES_AND_COLUMNS
-        assert "notification_providers" in REQUIRED_TABLES_AND_COLUMNS
         assert "query_events" in OPTIONAL_TABLES_AND_COLUMNS
         assert "analytics_settings" in OPTIONAL_TABLES_AND_COLUMNS
+        # notification_providers real defect found live during
+        # package-level migration acceptance testing: it is lazily
+        # created by V1's notify-check timer, not part of V1's base
+        # schema, so a real, freshly installed (timer-never-yet-fired)
+        # V1 source genuinely lacks it -- optional, not required.
+        assert "notification_providers" in OPTIONAL_TABLES_AND_COLUMNS
+        assert "notification_providers" not in REQUIRED_TABLES_AND_COLUMNS

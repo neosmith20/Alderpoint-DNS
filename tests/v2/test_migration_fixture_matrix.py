@@ -243,16 +243,22 @@ class TestInboundEncryptedTransportNotSilentlyLost:
 class TestMissingOptionalHistoricalState:
     """J. Older/leaner V1 schema shapes missing tables that migration's own
     schema contract (``migration_convert.OPTIONAL_TABLES_AND_COLUMNS``)
-    documents as tolerated entirely absent: ``analytics_settings`` and
-    ``query_events``. (The other candidate tables considered for this
-    fixture -- ``notification_providers``, ``local_dns_records``,
+    documents as tolerated entirely absent: ``analytics_settings``,
+    ``query_events``, and ``notification_providers`` (real defect found
+    live during package-level migration acceptance testing:
+    ``notification_providers`` is lazily created by V1's own notify-check
+    timer, not part of V1's base schema, so a real, freshly installed
+    -- timer-never-yet-fired -- V1 source genuinely lacks it; previously
+    misclassified as required, which hard-failed migration of an
+    otherwise perfectly valid, fully-migratable V1 source). (The other
+    candidate tables considered for this fixture -- ``local_dns_records``,
     ``custom_filter_rules`` -- turn out to be in
     ``REQUIRED_TABLES_AND_COLUMNS``, correctly rejected by
     ``detect_source`` rather than silently degraded; verified directly
     below so that contract can't silently drift without a test noticing.)
     """
 
-    @pytest.mark.parametrize("missing_table", ["query_events", "analytics_settings"])
+    @pytest.mark.parametrize("missing_table", ["query_events", "analytics_settings", "notification_providers"])
     def test_missing_optional_table_does_not_break_migration(self, tmp_path, missing_table):
         source = build_v1_fixture(
             tmp_path / "src" / "alderpointdns.db",
@@ -264,14 +270,13 @@ class TestMissingOptionalHistoricalState:
         assert results["clients"]["clients_migrated"] == 1
         assert results["admins"]["migrated"] == 1
         # query_events itself missing -> no history to register; a missing
-        # analytics_settings (a separate, unrelated table) doesn't affect
-        # the baseline fixture's 50 query_events rows.
+        # analytics_settings/notification_providers (separate, unrelated
+        # tables) doesn't affect the baseline fixture's 50 query_events
+        # rows.
         expected_rows = 0 if missing_table == "query_events" else 50
         assert results["analytics"]["row_count"] == expected_rows
 
-    @pytest.mark.parametrize(
-        "required_table", ["notification_providers", "local_dns_records", "custom_filter_rules"]
-    )
+    @pytest.mark.parametrize("required_table", ["local_dns_records", "custom_filter_rules"])
     def test_missing_required_table_is_explicitly_rejected_not_silently_degraded(
         self, tmp_path, required_table
     ):

@@ -46,7 +46,6 @@ REQUIRED_TABLES_AND_COLUMNS: dict[str, frozenset[str]] = {
     "upstream_resolvers": frozenset(
         {"name", "protocol", "address", "port", "tls_hostname", "doh_path", "position", "enabled"}
     ),
-    "notification_providers": frozenset({"kind", "name", "enabled", "config_json", "secret"}),
 }
 
 # Tables the migration logic already tolerates being entirely absent
@@ -56,9 +55,21 @@ REQUIRED_TABLES_AND_COLUMNS: dict[str, frozenset[str]] = {
 # requirement. A source missing these is still "supported," just with
 # reduced fidelity (no analytics-settings-derived config conversion, no
 # legacy-history archive registration).
+#
+# notification_providers real defect found live during package-level
+# migration acceptance testing: this table is lazily created by V1's own
+# app/notifications.py init_db(), only ever called from the
+# alderpointdns-notify.timer's periodic check -- NOT part of V1's base
+# schema created at install time. A real, never-yet-fired-its-first-
+# timer-tick V1 install (a perfectly ordinary, freshly installed
+# appliance) genuinely lacks this table, and migration must not hard-
+# fail a real, valid, otherwise-fully-migratable V1 source over a table
+# it was previously misclassified as REQUIRED -- there's simply nothing
+# to migrate in that case, same as any other optional/empty table below.
 OPTIONAL_TABLES_AND_COLUMNS: dict[str, frozenset[str]] = {
     "analytics_settings": frozenset({"key", "value"}),
     "query_events": frozenset({"ts"}),
+    "notification_providers": frozenset({"kind", "name", "enabled", "config_json", "secret"}),
 }
 
 
@@ -843,9 +854,18 @@ def migrate_notifications(
 ) -> dict:
     src = sqlite3.connect(f"file:{backup_db_path}?mode=ro", uri=True)
     try:
-        rows = src.execute(
-            "SELECT kind, name, enabled, config_json, secret FROM notification_providers"
-        ).fetchall()
+        try:
+            rows = src.execute(
+                "SELECT kind, name, enabled, config_json, secret FROM notification_providers"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # Real defect found live during package-level migration
+            # acceptance testing: this table is lazily created by V1's
+            # own notify-check timer, not part of its base schema -- a
+            # real, freshly installed V1 source genuinely may not have
+            # it yet, same as OPTIONAL_TABLES_AND_COLUMNS's other
+            # entries. Nothing to migrate, not an error.
+            rows = []
     finally:
         src.close()
 
