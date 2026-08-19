@@ -137,7 +137,18 @@ def stage_validate_promote_all(
         live_path = Path(artifact.live_path)
         previous_backup: Optional[Path] = None
         if live_path.exists():
-            previous_backup = staging_root / f".{artifact.name}.previous"
+            # Real defect found live during Gate #3 multi-context BIND
+            # acceptance testing: an artifact name containing "/" (e.g.
+            # "ctx0/named.conf", used for each BIND context's own
+            # promoted config) produced a backup path
+            # ".ctx0/named.conf.previous" whose parent directory was
+            # never created, crashing every promotion after the first
+            # one for that artifact (once live_path already existed).
+            # Flattening the name for the backup filename avoids
+            # creating any nested directory structure under
+            # staging_root that stage()'s own atomic-write path wasn't
+            # designed to need.
+            previous_backup = staging_root / f".{artifact.name.replace('/', '__')}.previous"
             shutil.copy2(live_path, previous_backup)
         _atomic_write(live_path, artifact.content)
         results.append(
@@ -177,7 +188,9 @@ def stage_validate_promote(
     previous_backup: Optional[Path] = None
     had_previous = live_path.exists()
     if had_previous:
-        previous_backup = staging_root / f".{name}.previous"
+        # Same fix as stage_validate_promote_all's own identical backup
+        # path construction -- see its comment.
+        previous_backup = staging_root / f".{name.replace('/', '__')}.previous"
         shutil.copy2(live_path, previous_backup)
 
     _atomic_write(live_path, content)

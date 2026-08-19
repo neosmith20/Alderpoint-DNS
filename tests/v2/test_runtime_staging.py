@@ -256,3 +256,42 @@ class TestStageValidatePromoteAll:
         assert all(r.promoted for r in results)
         assert live_a.read_text() == "V2-A"
         assert live_b.read_text() == "V2-B"
+
+
+class TestArtifactNameWithSlash:
+    """Real defect found live during Gate #3 multi-context BIND
+    acceptance testing: an artifact name containing '/' (used for each
+    BIND context's own promoted config, e.g. "ctx0/named.conf") crashed
+    on the SECOND promotion of that artifact (once a previous version
+    existed to back up) -- the backup path's parent directory was never
+    created."""
+
+    def test_second_promotion_of_slash_named_artifact_succeeds(self, tmp_path):
+        staging_root = tmp_path / "staging"
+        staging_root.mkdir()
+        live = tmp_path / "live" / "ctx0" / "named.conf"
+        # First promotion: live_path doesn't exist yet, no backup needed.
+        r1 = stage_validate_promote_all(
+            staging_root,
+            [Artifact(name="ctx0/named.conf", content="v1", live_path=live, validator=_always_ok)],
+        )
+        assert r1[0].promoted
+        assert live.read_text() == "v1"
+        # Second promotion: live_path now exists -- this is exactly what
+        # crashed before the fix (backup path ".ctx0/named.conf.previous"
+        # with no parent directory).
+        r2 = stage_validate_promote_all(
+            staging_root,
+            [Artifact(name="ctx0/named.conf", content="v2", live_path=live, validator=_always_ok)],
+        )
+        assert r2[0].promoted
+        assert live.read_text() == "v2"
+
+    def test_second_promotion_via_stage_validate_promote_single(self, tmp_path):
+        staging_root = tmp_path / "staging"
+        staging_root.mkdir()
+        live = tmp_path / "live" / "ctx0" / "named.conf"
+        stage_validate_promote(staging_root, "ctx0/named.conf", "v1", live, _always_ok)
+        result = stage_validate_promote(staging_root, "ctx0/named.conf", "v2", live, _always_ok)
+        assert result.promoted
+        assert live.read_text() == "v2"
