@@ -541,6 +541,39 @@ def run_migration(
     return state
 
 
+def _chown_live_runtime_owner(path: Path) -> None:
+    """Best-effort chown of a freshly (re)written live runtime file to the
+    ``alderpointdns-v2`` service account -- the same account every V2
+    systemd unit runs as (see ``packaging/v2/*.service``) and the same
+    account the package's own postinst recursively chowns
+    ``/var/lib/alderpointdns-v2`` to after a fresh install.
+
+    ``promote_to_live`` always runs as root (a real operator's
+    ``alderpointdns-v2-ctl migrate --promote`` invocation, or a future
+    root-run postinst hook), so files it writes -- like ``control.db`` via
+    write-to-tmp + atomic rename -- come out root-owned unless explicitly
+    fixed up here. Found by the real package-level migration test
+    (docs/v2/migration-real-package-gate.md): a root-owned live control.db
+    left every unprivileged V2 service (replication/discovery among them)
+    unable to write it ("attempt to write a readonly database") after a
+    real promoted migration, even though the migration itself reported
+    success. Silently no-ops if the account doesn't exist or this process
+    lacks permission (e.g. tests running unprivileged) -- matches
+    ``app/v2/config.py``'s ``harden_parent_directory``'s own best-effort
+    chown contract.
+    """
+    import grp
+    import os
+    import pwd
+
+    try:
+        uid = pwd.getpwnam("alderpointdns-v2").pw_uid
+        gid = grp.getgrnam("alderpointdns-v2").gr_gid
+        os.chown(path, uid, gid)
+    except (KeyError, PermissionError, FileNotFoundError):
+        pass
+
+
 class PromotionError(RuntimeError):
     """Raised when promoting a committed staged migration onto the live
     install fails or is refused. Distinct from ``MigrationError`` (which
@@ -635,6 +668,7 @@ def promote_to_live(
     tmp_db = live_control_db.with_name(live_control_db.name + ".migrating.tmp")
     _shutil.copy2(state.target_control_db(), tmp_db)
     os.replace(tmp_db, live_control_db)
+    _chown_live_runtime_owner(live_control_db)
     promoted["control_db"] = str(live_control_db)
 
     # 2. secrets: merge (not replace -- the live secrets dir already holds

@@ -13,6 +13,8 @@ import shutil
 
 import pytest
 
+import os as _os
+
 from app.v2 import control_db, migration as mig
 from app.v2 import notification_store as nstore
 from app.v2 import policy_store as pstore
@@ -46,6 +48,48 @@ def _run_committed_migration(tmp_path, **fixture_kwargs):
 
 @REAL_BINARIES
 class TestPromoteToLive:
+    def test_promote_chowns_control_db_to_the_live_service_account(self, tmp_path, monkeypatch):
+        # Real package-level migration test (docs/v2/migration-real-package-
+        # gate.md): promote_to_live always runs as root, so the control.db
+        # it writes via write-to-tmp + atomic rename came out root-owned --
+        # leaving every unprivileged V2 service (replication/discovery
+        # among them) unable to write it ("attempt to write a readonly
+        # database") even though migration itself reported success. Proves
+        # promote_to_live asks to chown the live control.db to the exact
+        # account every V2 systemd unit runs as, without needing a real
+        # system account/root privilege in this test environment.
+        calls = []
+
+        class _Pw:
+            pw_uid = 4242
+
+        class _Gr:
+            gr_gid = 4242
+
+        monkeypatch.setattr("pwd.getpwnam", lambda name: calls.append(("user", name)) or _Pw())
+        monkeypatch.setattr("grp.getgrnam", lambda name: calls.append(("group", name)) or _Gr())
+        monkeypatch.setattr(_os, "chown", lambda path, uid, gid: calls.append(("chown", str(path), uid, gid)))
+
+        state = _run_committed_migration(tmp_path)
+        live = _live_paths(tmp_path)
+        mig.promote_to_live(state, **live)
+
+        assert ("user", "alderpointdns-v2") in calls
+        assert ("group", "alderpointdns-v2") in calls
+        assert ("chown", str(live["live_control_db"]), 4242, 4242) in calls
+
+    def test_promote_chown_failure_is_best_effort_not_fatal(self, tmp_path, monkeypatch):
+        # No "alderpointdns-v2" system account (e.g. a dev/test host) must
+        # not fail promotion -- matches app/v2/config.py's
+        # harden_parent_directory's own best-effort chown contract.
+        monkeypatch.setattr("pwd.getpwnam", lambda name: (_ for _ in ()).throw(KeyError(name)))
+
+        state = _run_committed_migration(tmp_path)
+        live = _live_paths(tmp_path)
+        result = mig.promote_to_live(state, **live)  # must not raise
+        assert live["live_control_db"].exists()
+        assert result["control_db"] == str(live["live_control_db"])
+
     def test_promote_writes_control_db_secrets_and_runtime(self, tmp_path):
         state = _run_committed_migration(tmp_path)
         live = _live_paths(tmp_path)

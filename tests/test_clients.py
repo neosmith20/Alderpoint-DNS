@@ -7,6 +7,7 @@ from __future__ import annotations
 import ipaddress
 import shutil
 import sqlite3
+import re
 import subprocess
 import sys
 import tempfile
@@ -526,8 +527,18 @@ class DnsdistRenderingSafetyTest(ClientsTestBase):
         minimal = outdir / "minimal.conf"
         minimal.write_text(f'dofile("{outdir / "access-policy.conf"}")\n')
         result = subprocess.run(["dnsdist", "--check-config", "-C", str(minimal)], capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("Configuration OK", result.stdout + result.stderr)
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        # The actual contract is "dnsdist accepted this config" (returncode
+        # 0), not one exact wording -- supported dnsdist builds legitimately
+        # phrase this differently: stock Debian 13's dnsdist 1.9.16 prints
+        # "Configuration '<path>' OK!" while the PowerDNS-repo enhanced
+        # 2.1.1 build prints a structured "...msg=\"Configuration OK\"...".
+        # Match either instead of hardcoding one build's cosmetic string.
+        self.assertTrue(
+            re.search(r"[Cc]onfiguration.*OK", output),
+            f"dnsdist --check-config succeeded (returncode 0) but printed no recognizable OK confirmation: {output!r}",
+        )
 
     def test_malicious_client_name_cannot_reach_lua(self) -> None:
         # A malicious *client name* never appears in the compiled Lua/data
