@@ -87,3 +87,30 @@ class TestFailureLeavesLiveRuntimeUntouched:
                 dnsdist_binary="/nonexistent/dnsdist",
             )
         assert live_path.read_text() == original
+
+
+class TestBindStateRootNotCompiledDir:
+    """Real defect found live during Gate #3 acceptance testing (failure-
+    domain proof, real installed package): omitting live_bind_state_root
+    made every BIND context's own writable `directory` clause default to
+    the COMPILED artifact root, which the packaged systemd unit's
+    ReadOnlyPaths deliberately makes read-only -- named failed to
+    (re)start with "directory ... is not writable" the moment it needed
+    to write there for real."""
+
+    def test_directory_clause_uses_state_root_not_compiled_dir(self, conn, tmp_path):
+        compiled_bind_dir = tmp_path / "compiled" / "bind"
+        state_root = tmp_path / "state" / "bind"
+        rpz_path = compiled_bind_dir / "alderpointdns-v2.rpz"
+        rpz_path.parent.mkdir(parents=True, exist_ok=True)
+        rpz_path.write_text("$TTL 300\n@ IN SOA localhost. hostmaster.localhost. 1 3600 900 604800 300\n@ IN NS localhost.\n")
+
+        recompile_and_promote(
+            conn, tmp_path / "staging", tmp_path / "dnsdist.conf",
+            listen_address="127.0.0.1:15401",
+            live_bind_conf_path=compiled_bind_dir, rpz_zone_path=rpz_path,
+            live_bind_state_root=state_root,
+        )
+        ctx0_conf = (compiled_bind_dir / "ctx0" / "named.conf").read_text()
+        assert f'directory "{state_root / "ctx0"}"' in ctx0_conf
+        assert str(compiled_bind_dir) not in ctx0_conf.split("directory")[1].split(";")[0]

@@ -198,6 +198,17 @@ def recompile_and_promote(
     rpz_zone_path: "Path | None" = None,
     named_checkconf_binary: str = "named-checkconf",
     live_doh_egress_dir: "Path | None" = None,
+    # Real defect found live during Gate #3 acceptance testing (failure-
+    # domain proof): omitting this made every BIND context's own
+    # `directory` (its writable working dir for stats/journal files)
+    # default to the COMPILED artifact root -- which
+    # alderpointdns-v2-bind@.service's own ReadOnlyPaths=.../compiled
+    # deliberately makes read-only, so named failed to (re)start with
+    # "directory ... is not writable" the moment it needed to actually
+    # write there (masked on first start in some cases; caught for real
+    # on a subsequent restart). Real installs must always pass the real
+    # writable state root (STATE_DIR / "bind").
+    live_bind_state_root: "Path | None" = None,
 ) -> RuntimeCompileResult:
     """The real, single code path from "control.db changed" to "compiled
     dnsdist (and, when wired, BIND) config on disk validated by the real
@@ -335,6 +346,7 @@ def recompile_and_promote(
                 )
             bind_root = Path(live_bind_conf_path)
             log_root = Path(live_bind_log_root) if live_bind_log_root is not None else bind_root
+            state_root = Path(live_bind_state_root) if live_bind_state_root is not None else bind_root
             artifacts = []
             if doh_egress_contexts and live_doh_egress_dir is not None:
                 egress_root = Path(live_doh_egress_dir)
@@ -348,7 +360,7 @@ def recompile_and_promote(
                         )
                     )
             for ctx in bind_contexts:
-                ctx_state_dir = bind_root / ctx.name
+                ctx_state_dir = state_root / ctx.name
                 ctx_log_path = log_root / ctx.name / "named.log"
                 ctx_state_dir.mkdir(parents=True, exist_ok=True)
                 ctx_log_path.parent.mkdir(parents=True, exist_ok=True)
