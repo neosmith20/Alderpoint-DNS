@@ -34,7 +34,7 @@ SOURCE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 # appropriate to this branch." 2.0.0~privateN-1: "~" sorts before the
 # final 2.0.0-1 this candidate is a pre-release of, same convention V1's
 # own build-deb.sh already uses for beta/dev/rc tags.
-DEB_VERSION="2.0.0~rc29-1"
+DEB_VERSION="2.0.0~rc30-1"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -150,6 +150,42 @@ cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-dnsdist-reload.path" "$PKG/lib/sys
 cp "$SOURCE_DIR/LICENSE" "$PKG/usr/share/doc/alderpointdns-v2/LICENSE"
 cp "$SOURCE_DIR/COPYRIGHT" "$PKG/usr/share/doc/alderpointdns-v2/copyright"
 chmod 0644 "$PKG/usr/share/doc/alderpointdns-v2/"*
+
+# Real build-reproducibility defect found and fixed live during Gate #3
+# artifact recovery: every file above is staged via plain `cp`, which
+# stamps each file's mtime with the wall-clock time the build happened
+# to run at, not any value derived from the source itself. dpkg-deb
+# --build preserves those mtimes into control.tar.xz/data.tar.xz, so
+# two builds of the exact same source commit produced byte-identical
+# *content* (confirmed: `diff -rq` between two consecutive rebuilds'
+# extracted trees found zero differences) but different final .deb
+# SHA-256 hashes purely from mtime drift -- meaning the single
+# artifact Dex Gate #3 review depends on could never be reproduced or
+# independently re-verified from source alone. Fixed the standard
+# reproducible-builds way: every staged file's mtime is normalized to
+# SOURCE_DATE_EPOCH (https://reproducible-builds.org/specs/source-date-epoch/),
+# derived from the exact source commit being built (its own commit
+# timestamp) rather than a build-time value -- so the same source SHA
+# always produces the same mtimes, and (verified) the same final
+# package hash, regardless of when or how many times it's built.
+#
+# Normalizing the staged files' own mtimes (above) was NOT sufficient
+# by itself -- confirmed live: after that fix alone, two consecutive
+# builds' inner control.tar.xz/data.tar.xz/debian-binary members were
+# already byte-identical (verified via direct sha256sum of each
+# extracted ar member), but the two final .deb files still differed.
+# Root cause: dpkg-deb --build separately stamps the *outer* ar(5)
+# container's own per-member timestamp with the real build wall-clock
+# time, independent of the inner tar mtimes. dpkg-deb (>= 1.18.8)
+# natively honors the same SOURCE_DATE_EPOCH environment variable for
+# exactly this -- both "the timestamp in the deb's ar(5) container"
+# and "clamp the mtime in the tar(5) file entries" per dpkg-deb(1) --
+# so exporting it here is the complete, correct fix; the explicit
+# find/touch above is kept anyway as an explicit, easy-to-audit
+# statement of intent, not load-bearing on its own.
+SOURCE_DATE_EPOCH="$(cd "$SOURCE_DIR" && git log -1 --format=%ct HEAD 2>/dev/null || echo 0)"
+find "$PKG" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
+export SOURCE_DATE_EPOCH
 
 mkdir -p "$OUTPUT_DIR"
 dpkg-deb --build --root-owner-group "$PKG" "$OUTPUT_DIR/alderpointdns-v2_${DEB_VERSION}_all.deb" >/dev/null
