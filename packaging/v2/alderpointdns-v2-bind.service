@@ -41,7 +41,19 @@ ProtectHome=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# AF_NETLINK is required (real defect found live during Gate #3 clean-
+# install acceptance testing): named calls getifaddrs()/opens a route
+# socket at startup to enumerate real interfaces, even when every
+# listen-on address is already an explicit loopback literal (never a
+# wildcard) -- without AF_NETLINK this fails ("interfaceiter.c:
+# isc_interfaceiter_create(): unexpected error", "not listening on any
+# interfaces") and the whole unit comes up with NO listeners at all
+# (systemd reports it "active (running)" the entire time, since named
+# itself never crashes -- only a real port-level check catches this, not
+# systemctl status). Confirmed live: identical config started correctly
+# outside this unit's sandboxing, isolating the restriction itself as
+# the cause, not the config or the target environment.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 ReadOnlyPaths=/var/lib/alderpointdns-v2/compiled
 ReadWritePaths=/var/lib/alderpointdns-v2/bind /var/log/alderpointdns-v2/bind
 UMask=0027
