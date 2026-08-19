@@ -1,0 +1,44 @@
+[Unit]
+Description=Alderpoint DNS V2 packaged BIND recursive-cache backend, context %i (private candidate)
+Documentation=man:named(8)
+After=network.target
+Before=alderpointdns-v2-dnsdist.service
+ConditionPathExists=/var/lib/alderpointdns-v2/compiled/bind/%i/named.conf
+StartLimitIntervalSec=60
+StartLimitBurst=200
+
+[Service]
+Type=notify
+Environment=HOME=/var/lib/alderpointdns-v2
+# Multi-context BIND (Gate #3 acceptance closure): one independent named
+# process per distinct plain upstream selection (default profile, each
+# custom upstream profile, each domain-routing rule with its own plain
+# forwarders), each on its own disjoint port pair -- see
+# app/v2/bind_gen.py's own module docstring on why this is port-based
+# rather than one process with multiple views/loopback aliases.
+ExecStart=/usr/sbin/named -c /var/lib/alderpointdns-v2/compiled/bind/%i/named.conf -u alderpointdns-v2 -f
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=20
+TimeoutStopSec=15
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+# AF_NETLINK required (real defect found and fixed live during Gate #3
+# clean-install acceptance -- see alderpointdns-v2-bind.service's own
+# comment / docs/v2/bind-backend-v2.md): named needs it at startup to
+# enumerate interfaces even with only explicit loopback listen-on
+# addresses.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+ReadOnlyPaths=/var/lib/alderpointdns-v2/compiled
+ReadWritePaths=/var/lib/alderpointdns-v2/bind/%i /var/log/alderpointdns-v2/bind/%i
+UMask=0027
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

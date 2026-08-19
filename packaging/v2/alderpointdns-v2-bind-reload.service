@@ -1,17 +1,20 @@
 [Unit]
 Description=Reload Alderpoint DNS V2 packaged BIND after runtime promotion
-After=alderpointdns-v2-bind.service
-# Same real defect/fix as alderpointdns-v2-dnsdist-reload.service's own
-# comment -- matches its identical generous-but-bounded start-rate limit.
 StartLimitIntervalSec=60
 StartLimitBurst=200
 
 [Service]
 Type=oneshot
-# Restart BIND *before* dnsdist's own reload unit fires for the same
-# generation (both watch files written together by
-# app/v2/runtime_staging.py's stage_validate_promote_all, in the same
-# coherent promotion) -- an admin change that also touches BIND's
-# forwarders/RPZ must never leave dnsdist pointed at a BIND instance that
-# hasn't picked up the new config yet.
-ExecStart=/bin/systemctl restart alderpointdns-v2-bind.service
+# Multi-context BIND (Gate #3 acceptance closure): a bounded, fixed set
+# of possible context instances (see app/v2/bind_gen.py's
+# MAX_BIND_CONTEXTS) are restarted unconditionally on every promotion.
+# Each instance's own ConditionPathExists (packaging/v2/
+# alderpointdns-v2-bind@.service) makes this safe and correct for
+# contexts NOT in the current generation -- systemd's restart verb stops
+# whatever was previously running for that instance, then skips the
+# start half when the condition fails, so a context that existed in a
+# previous generation but not this one is correctly torn down, not left
+# stale. Restarted before dnsdist so a generation that also touched
+# dnsdist.conf never has dnsdist pointed at a BIND context that hasn't
+# picked up its new config yet.
+ExecStart=/bin/systemctl restart alderpointdns-v2-bind@ctx0.service alderpointdns-v2-bind@ctx1.service alderpointdns-v2-bind@ctx2.service alderpointdns-v2-bind@ctx3.service

@@ -193,6 +193,7 @@ def recompile_and_promote(
     # (None, the default) preserves the exact prior behavior (dnsdist.conf
     # only) for any caller not yet updated to pass it -- no regression.
     live_bind_conf_path: "Path | None" = None,
+    live_bind_log_root: "Path | None" = None,
     rpz_zone_path: "Path | None" = None,
     named_checkconf_binary: str = "named-checkconf",
 ) -> RuntimeCompileResult:
@@ -213,61 +214,93 @@ def recompile_and_promote(
         # whether to surface it rather than it vanishing with no signal.
         ptr_records_skipped = sum(1 for r in local_dns_records if r[1] == "PTR")
 
-        # The appliance-wide default policy (the catch-all 0.0.0.0/0
-        # binding build_bindings() always appends, global layer only) is
-        # "the" default upstream selection by construction -- no separate
-        # profile lookup needed. Only plain-transport, non-ECS default
-        # endpoints are ever treated as BIND's forwarder set (see
-        # dnsdist_policy_runtime._route_via_bind's own docstring for why
-        # ECS/dot/doh are excluded); anything else means BIND routing
-        # stays off for this compile, same as before this pass.
+        # Multi-context BIND (Gate #3 acceptance closure): every distinct
+        # plain, non-ECS forwarder set actually in use anywhere in this
+        # compile (the appliance-wide default binding, any other
+        # binding's own upstream selection, any domain-routing rule's
+        # endpoints) gets its own real BIND context/cache -- not just the
+        # single default selection. The default binding's set is ordered
+        # first so it keeps the well-known default ports/back-compat
+        # address (app/v2/bind_gen.BIND_BACKEND_ADDRESS) whenever it's
+        # present, matching every prior RC's behavior for the common
+        # case; the rest are ordered deterministically (sorted) so the
+        # same control.db state always allocates the same ports
+        # regardless of dict/iteration order (§2H). ECS pools (BIND has
+        # no EDNS Client Subnet support at all -- verified against the
+        # installed binary) and DoT/DoH pools (cert-hostname-verified
+        # forwarding not yet validated -- see docs/v2/bind-backend-v2.md)
+        # never contribute a forwarder set here; they keep going direct,
+        # exactly as before this pass.
+        def _plain_non_ecs_sets(binding) -> list[tuple[str, ...]]:
+            sets = []
+            if binding.upstream_transport == "plain" and not server_uses_client_subnet(binding.ecs_policy):
+                sets.append(tuple(sorted(ep.address for ep in binding.upstream_endpoints)))
+            for _suffix, route_endpoints, route_transport, _strategy in binding.domain_routes:
+                if route_transport == "plain" and not server_uses_client_subnet(binding.ecs_policy):
+                    sets.append(tuple(sorted(ep.address for ep in route_endpoints)))
+            return sets
+
         default_binding = next((b for b in bindings if b.network.network_id == _DEFAULT_NETWORK_ID), None)
-        bind_forwarders: frozenset = frozenset()
-        if (
-            live_bind_conf_path is not None
-            and default_binding is not None
-            and default_binding.upstream_transport == "plain"
-            and not server_uses_client_subnet(default_binding.ecs_policy)
-        ):
-            bind_forwarders = frozenset(ep.address for ep in default_binding.upstream_endpoints)
+        ordered_sets: list[tuple[str, ...]] = []
+        seen: set = set()
+        if live_bind_conf_path is not None:
+            if default_binding is not None:
+                for s in _plain_non_ecs_sets(default_binding):
+                    if s and s not in seen:
+                        ordered_sets.append(s)
+                        seen.add(s)
+            for b in sorted(bindings, key=lambda b: b.network.network_id):
+                for s in sorted(_plain_non_ecs_sets(b)):
+                    if s and s not in seen:
+                        ordered_sets.append(s)
+                        seen.add(s)
+
+        bind_contexts = bind_gen.allocate_bind_contexts(ordered_sets)
+        bind_context_addresses = {
+            frozenset(ctx.forwarders): bind_gen.context_backend_address(ctx) for ctx in bind_contexts
+        }
 
         config_text = compile_multi_policy_dnsdist_config(
             listen_address, bindings, local_dns_records=local_dns_records,
             dot=dot, doh=doh, doq=doq, doh3=doh3, dnscrypt=dnscrypt,
-            bind_forwarders=bind_forwarders,
+            bind_context_addresses=bind_context_addresses,
         )
     except PolicyRuntimeError as exc:
         raise RuntimeCompileError(f"policy runtime compile failed: {exc}") from exc
 
     staging_dir.mkdir(parents=True, exist_ok=True)
     try:
-        if live_bind_conf_path is not None and bind_forwarders:
+        if live_bind_conf_path is not None and bind_contexts:
             if rpz_zone_path is None:
                 raise RuntimeCompileError(
                     "live_bind_conf_path was given but rpz_zone_path was not -- "
                     "BIND's named.conf must reference an already-promoted RPZ zone file"
                 )
-            bind_state_dir = Path(live_bind_conf_path).parent.parent / "bind"
-            bind_log_path = Path(live_bind_conf_path).parent.parent.parent / "log" / "bind" / "named.log"
-            bind_state_dir.mkdir(parents=True, exist_ok=True)
-            bind_log_path.parent.mkdir(parents=True, exist_ok=True)
-            bind_conf_text = bind_gen.render_named_conf(
-                sorted(bind_forwarders), str(rpz_zone_path),
-                directory=str(bind_state_dir), log_path=str(bind_log_path),
-            )
-            results = stage_validate_promote_all(
-                staging_dir,
-                [
+            bind_root = Path(live_bind_conf_path)
+            log_root = Path(live_bind_log_root) if live_bind_log_root is not None else bind_root
+            artifacts = []
+            for ctx in bind_contexts:
+                ctx_state_dir = bind_root / ctx.name
+                ctx_log_path = log_root / ctx.name / "named.log"
+                ctx_state_dir.mkdir(parents=True, exist_ok=True)
+                ctx_log_path.parent.mkdir(parents=True, exist_ok=True)
+                ctx_conf_text = bind_gen.render_named_conf_for_context(
+                    ctx, str(rpz_zone_path), directory=str(ctx_state_dir), log_path=str(ctx_log_path),
+                )
+                artifacts.append(
                     Artifact(
-                        name="named.conf", content=bind_conf_text, live_path=live_bind_conf_path,
+                        name=f"{ctx.name}/named.conf", content=ctx_conf_text,
+                        live_path=bind_root / ctx.name / "named.conf",
                         validator=bind_gen.named_checkconf_validator(named_checkconf_binary),
-                    ),
-                    Artifact(
-                        name="dnsdist.conf", content=config_text, live_path=live_dnsdist_conf_path,
-                        validator=dnsdist_check_config_validator(dnsdist_binary),
-                    ),
-                ],
+                    )
+                )
+            artifacts.append(
+                Artifact(
+                    name="dnsdist.conf", content=config_text, live_path=live_dnsdist_conf_path,
+                    validator=dnsdist_check_config_validator(dnsdist_binary),
+                )
             )
+            results = stage_validate_promote_all(staging_dir, artifacts)
             result = results[-1]
         else:
             result: PromotionResult = stage_validate_promote(

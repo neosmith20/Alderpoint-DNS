@@ -63,6 +63,19 @@ BIND_PLAIN_PORT = 5453   # unproxied loopback recursion, health/recovery checks 
 BIND_PROXY_PORT = 5553   # requires PROXYv2 from dnsdist; real per-query client identity
 BIND_STATISTICS_PORT = 8153
 
+# Multi-context BIND (Gate #3 acceptance closure): a fixed, bounded number
+# of simultaneous distinct plain-upstream BIND contexts -- see
+# packaging/v2/alderpointdns-v2-bind@.service (a systemd template unit,
+# one real instance per context) and alderpointdns-v2-bind-reload.service
+# (unconditionally restarts exactly this many instance names every
+# promotion; each instance's own ConditionPathExists makes restarting an
+# unused slot a safe no-op). A 5th+ distinct plain upstream selection in
+# one compile is a real, documented, conservative bound -- it continues
+# dispatching direct-to-upstream exactly as before this pass, the same
+# documented exception already applied to DoT/DoH/ECS, rather than
+# silently growing an unbounded number of live processes per compile.
+MAX_BIND_CONTEXTS = 4
+
 # The address dnsdist's default/"ordinary" pool must forward to once this
 # module's config is promoted -- see app/v2/dnsdist_gen.py's
 # BIND_BACKEND_ADDRESS, which is this same literal, kept independent
@@ -173,6 +186,119 @@ def render_named_conf(
         "};",
     ]
     return "\n".join(lines) + "\n"
+
+
+# --- multi-context (custom upstream profiles / domain routing) ----------
+#
+# Gate #3 acceptance closure: a genuinely different plain upstream
+# selection (a custom upstream profile, a domain-routing rule) must get
+# its own real BIND-backed recursive cache, not silently bypass BIND or
+# share a cache with an unrelated upstream choice. Real, verified-live
+# investigation ruled out BIND "views" matched by ``match-destinations``
+# on distinct loopback addresses: a process explicitly ``listen-on``-ing
+# a non-.1 loopback address (127.0.0.2, ...) needs that address actually
+# assigned to an interface first (confirmed live: named silently failed
+# to bind it, `ip addr add ...` requires CAP_NET_ADMIN the live
+# management-API's own unprivileged runtime user does not have, and a
+# dynamic per-compile set of contexts can't be pre-provisioned by a
+# static systemd unit). The port-based design below needs no extra
+# infrastructure at all -- confirmed live, zero setup beyond what a
+# single BIND instance already needs.
+#
+# One independent ``named`` process per context, each on 127.0.0.1 (and
+# ::1) with its own disjoint port pair, each with its own state/log
+# subdirectory and its own real, independent RAM recursive cache. A
+# systemd template unit (``alderpointdns-v2-bind@.service``) runs however
+# many contexts a given compile actually needs.
+
+
+@dataclass(frozen=True)
+class BindContext:
+    """One isolated BIND recursive-cache context (its own forwarder set,
+    own process, own ports, own cache) -- see this module's own note
+    above for why this is port-based, not view-based.
+    """
+
+    name: str
+    forwarders: tuple[str, ...]
+    plain_port: int
+    proxy_port: int
+
+    def __post_init__(self) -> None:
+        if not self.forwarders:
+            raise BindGenError(f"context {self.name!r} has no forwarders")
+        for f in self.forwarders:
+            _validate_forwarder(f)
+        if self.plain_port == self.proxy_port:
+            raise BindGenError(f"context {self.name!r} plain_port and proxy_port must differ")
+
+
+def allocate_bind_contexts(forwarder_sets: list[tuple[str, ...]]) -> list[BindContext]:
+    """Deterministic context/port allocation for a list of distinct
+    forwarder sets (already de-duplicated and ordered by the caller --
+    see ``dnsdist_policy_runtime.py``'s own deterministic ordering
+    requirement, §2H): the first gets the well-known default ports
+    (``BIND_PLAIN_PORT``/``BIND_PROXY_PORT``, i.e. ``BIND_BACKEND_ADDRESS``
+    stays valid for the common single-context case), each subsequent
+    context gets the next disjoint port pair 2 apart. Same inputs in the
+    same order always produce the same ports, so a caller can regenerate
+    without invalidating other already-running contexts' identities
+    unnecessarily. Only the first ``MAX_BIND_CONTEXTS`` are allocated --
+    callers must keep any excess forwarder sets routed direct-to-upstream
+    (see this module's own ``MAX_BIND_CONTEXTS`` docstring).
+    """
+    contexts = []
+    for i, forwarders in enumerate(forwarder_sets[:MAX_BIND_CONTEXTS]):
+        contexts.append(
+            BindContext(
+                name=f"ctx{i}",
+                forwarders=forwarders,
+                plain_port=BIND_PLAIN_PORT + 2 * i,
+                proxy_port=BIND_PROXY_PORT + 2 * i,
+            )
+        )
+    return contexts
+
+
+def context_backend_address(ctx: BindContext) -> str:
+    """The address dnsdist's pool for this context must forward to
+    (PROXYv2, matching ``BIND_BACKEND_ADDRESS``'s own convention)."""
+    return f"127.0.0.1:{ctx.proxy_port}"
+
+
+def render_named_conf_for_context(
+    ctx: BindContext,
+    rpz_zone_path: str,
+    zone_name: str = RPZ_ZONE_NAME,
+    dnssec_validation: bool = True,
+    statistics_port: int | None = None,
+    directory: str | None = None,
+    log_path: str | None = None,
+) -> str:
+    """One context's ``named.conf`` -- thin wrapper over the proven
+    single-context ``render_named_conf``, just parameterized by the
+    context's own allocated ports/directory/log path so multiple
+    contexts' processes never collide on any file or port.
+    """
+    return render_named_conf(
+        list(ctx.forwarders),
+        rpz_zone_path,
+        zone_name=zone_name,
+        dnssec_validation=dnssec_validation,
+        plain_port=ctx.plain_port,
+        proxy_port=ctx.proxy_port,
+        statistics_port=statistics_port if statistics_port is not None else (BIND_STATISTICS_PORT + list_index_of(ctx)),
+        directory=directory or f"/var/lib/alderpointdns-v2/bind/{ctx.name}",
+        log_path=log_path or f"/var/log/alderpointdns-v2/bind/{ctx.name}/named.log",
+    )
+
+
+def list_index_of(ctx: BindContext) -> int:
+    # Derived from the context's own plain_port offset rather than
+    # threading a separate index parameter through every caller --
+    # allocate_bind_contexts() always assigns plain_port =
+    # BIND_PLAIN_PORT + 2*i, so this recovers i exactly.
+    return (ctx.plain_port - BIND_PLAIN_PORT) // 2
 
 
 def named_checkconf_validator(binary: str = "named-checkconf") -> Validator:

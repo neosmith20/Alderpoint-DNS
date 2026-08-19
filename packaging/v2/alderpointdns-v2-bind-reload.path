@@ -1,12 +1,15 @@
 [Unit]
 Description=Watch Alderpoint DNS V2 promoted BIND runtime for reload
-After=alderpointdns-v2-bind.service
 StartLimitIntervalSec=60
 StartLimitBurst=200
 
 [Path]
-PathChanged=/var/lib/alderpointdns-v2/compiled/bind/named.conf
-PathModified=/var/lib/alderpointdns-v2/compiled/bind/named.conf
+# Multi-context BIND: watch the whole compiled bind directory (its mtime
+# changes whenever any context's named.conf, or the shared RPZ zone, is
+# (re)written by stage_validate_promote_all) rather than one fixed
+# filename -- the exact set of context subdirectories present varies
+# per compile.
+PathChanged=/var/lib/alderpointdns-v2/compiled/bind
 Unit=alderpointdns-v2-bind-reload.service
 
 [Install]

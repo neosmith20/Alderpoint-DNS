@@ -1,4 +1,7 @@
 # Alderpoint DNS V2 generated BIND state/log paths (private candidate).
+# Multi-context (Gate #3 acceptance closure): each context has its own
+# subdirectory (ctx0, ctx1, ...) under these roots -- the ** glob covers
+# all of them without needing a per-context marker line.
 /var/lib/alderpointdns-v2/bind/ rw,
 /var/lib/alderpointdns-v2/bind/** rw,
 /var/lib/alderpointdns-v2/compiled/bind/ r,

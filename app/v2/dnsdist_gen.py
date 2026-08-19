@@ -83,6 +83,22 @@ def generate_dnsdist_config(
     # the admin's first policy mutation replaces this bootstrap config
     # with the real compiler's output.
     query_log_address: str | None = "127.0.0.1:5391",
+    # Gate #3 acceptance closure: the locked RAM-first hot path
+    # (docs/v2/architecture-map.md) begins with the dnsdist packet cache,
+    # not just BIND's own recursive cache -- real defect found live
+    # during this pass: this bootstrap generator (the config a fresh
+    # install actually runs until an admin's first policy mutation
+    # replaces it with dnsdist_policy_runtime.py's real per-pool-cache
+    # compiler output) wired zero packet caches at all, so a genuinely
+    # clean-installed, never-yet-configured appliance had NEITHER RAM
+    # cache layer meaningfully warm for repeated queries (BIND's own
+    # cache still applied post-fix, but the dnsdist-layer cache -- ~225x
+    # faster per docs/v2/cache-hit-latency-investigation.md -- did not
+    # exist at all). Defaults to True so every existing caller gets the
+    # fix automatically.
+    enable_packet_cache: bool = True,
+    max_cache_entries: int = 10000,
+    max_cache_ttl_seconds: int = 86400,
 ) -> str:
     """Pure function: same inputs -> byte-identical config text. Only
     accepts already-validated ``NetworkScope``/``UpstreamServer`` value
@@ -142,6 +158,16 @@ def generate_dnsdist_config(
             if srv.use_proxy_protocol:
                 kwargs += ", useProxyProtocol=true"
             lines.append(f"newServer({{{kwargs}}})")
+        lines.append("")
+
+    if enable_packet_cache and pools:
+        lines.append("-- dnsdist RAM packet cache (docs/v2/architecture-map.md locked hot path,")
+        lines.append("-- first tier: client -> dnsdist packet cache -> ... -> BIND -> upstream)")
+        for i, pool_name in enumerate(pools):
+            var = f"pc_{i}"
+            lines.append(f'{var} = newPacketCache({max_cache_entries}, {{maxTTL={max_cache_ttl_seconds}}})')
+            pool_ref = _lua_string(pool_name) if pool_name else '""'
+            lines.append(f"getPool({pool_ref}):setCache({var})")
         lines.append("")
 
     refused_lines = render_refused_block_rules(refused_domains or [])

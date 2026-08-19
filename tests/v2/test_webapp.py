@@ -291,6 +291,70 @@ class TestLoginRateLimiting:
         assert r.status_code == 429
 
 
+class TestBindHealth:
+    """Gate #3 acceptance closure §9: BIND recursive-backend health must
+    be independently reported, and must never claim full health when a
+    configured context is actually unreachable."""
+
+    def test_no_bind_dir_reports_unconfigured_not_ok(self, app_client):
+        webapp, client = app_client
+        r = client.get("/api/health")
+        assert r.status_code == 200
+        bind = r.json()["components"]["bind"]
+        assert bind["status"] == "unconfigured"
+        assert bind["contexts"] == {}
+
+    def test_configured_but_unreachable_context_degrades_overall_status(self, app_client, tmp_path):
+        webapp, client = app_client
+        ctx_dir = webapp.COMPILED_BIND_DIR / "ctx0"
+        ctx_dir.mkdir(parents=True, exist_ok=True)
+        (ctx_dir / "named.conf").write_text("// test\n")
+        try:
+            r = client.get("/api/health")
+            body = r.json()
+            assert body["components"]["bind"]["status"] == "degraded"
+            assert body["components"]["bind"]["contexts"]["ctx0"]["reachable"] is False
+            assert body["status"] == "degraded"
+        finally:
+            (ctx_dir / "named.conf").unlink()
+
+    def test_configured_and_reachable_context_reports_ok(self, app_client):
+        import socket as _socket
+        import threading
+
+        webapp, client = app_client
+        ctx_dir = webapp.COMPILED_BIND_DIR / "ctx0"
+        ctx_dir.mkdir(parents=True, exist_ok=True)
+        (ctx_dir / "named.conf").write_text("// test\n")
+        srv = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        srv.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 8153))
+        srv.listen(1)
+        stop = threading.Event()
+
+        def _accept_loop():
+            srv.settimeout(0.2)
+            while not stop.is_set():
+                try:
+                    conn, _ = srv.accept()
+                    conn.close()
+                except OSError:
+                    continue
+
+        t = threading.Thread(target=_accept_loop, daemon=True)
+        t.start()
+        try:
+            r = client.get("/api/health")
+            body = r.json()
+            assert body["components"]["bind"]["contexts"]["ctx0"]["reachable"] is True
+            assert body["components"]["bind"]["status"] == "ok"
+        finally:
+            stop.set()
+            srv.close()
+            t.join(timeout=1)
+            (ctx_dir / "named.conf").unlink()
+
+
 class TestSecurityHeaders:
     def test_security_headers_present(self, app_client):
         webapp, client = app_client

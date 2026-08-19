@@ -158,7 +158,14 @@ cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-dnsdist-reload.path" "$PKG/lib/sys
 # appended to the shared /etc/apparmor.d/local/usr.sbin.named file, not
 # a standalone V2-only profile -- apparmor's usr.sbin.named profile is
 # keyed by binary path, and V1/V2 both run /usr/sbin/named).
-cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-bind.service" "$PKG/lib/systemd/system/alderpointdns-v2-bind.service"
+# Multi-context BIND (Gate #3 acceptance closure): a systemd TEMPLATE
+# unit, one real named process per distinct plain upstream selection --
+# see app/v2/bind_gen.py's own module docstring on why this is
+# port-based (one process per context) rather than one process with
+# multiple views/loopback aliases (that design was tried live and found
+# to need CAP_NET_ADMIN loopback-alias provisioning the live
+# management-API's own unprivileged runtime user does not have).
+cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-bind@.service" "$PKG/lib/systemd/system/alderpointdns-v2-bind@.service"
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-bind-reload.service" "$PKG/lib/systemd/system/alderpointdns-v2-bind-reload.service"
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-bind-reload.path" "$PKG/lib/systemd/system/alderpointdns-v2-bind-reload.path"
 cp "$SOURCE_DIR/packaging/v2/apparmor-named-v2.local" "$PKG/opt/alderpointdns-v2/packaging/apparmor-named-v2.local"

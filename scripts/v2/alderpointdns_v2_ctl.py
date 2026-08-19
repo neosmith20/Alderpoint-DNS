@@ -542,13 +542,17 @@ def _default_dnsdist_config_text() -> str:
     return dnsdist_gen.generate_dnsdist_config(_configured_listen_address(), acls, upstreams)
 
 
-def _default_bind_config_text(rpz_zone_path: Path) -> str:
-    forwarders = [addr for _name, addr in _DEFAULT_UPSTREAMS]
-    return bind_gen.render_named_conf(
-        forwarders,
+def _default_bind_context() -> "bind_gen.BindContext":
+    forwarders = tuple(addr for _name, addr in _DEFAULT_UPSTREAMS)
+    return bind_gen.allocate_bind_contexts([forwarders])[0]
+
+
+def _default_bind_config_text(ctx: "bind_gen.BindContext", rpz_zone_path: Path) -> str:
+    return bind_gen.render_named_conf_for_context(
+        ctx,
         str(rpz_zone_path),
-        directory=str(STATE_DIR / "bind"),
-        log_path=str(LOG_DIR / "bind" / "named.log"),
+        directory=str(STATE_DIR / "bind" / ctx.name),
+        log_path=str(LOG_DIR / "bind" / ctx.name / "named.log"),
     )
 
 
@@ -576,13 +580,15 @@ def cmd_generate_runtime(args: argparse.Namespace) -> int:
     """
     STAGING_DIR.mkdir(parents=True, exist_ok=True)
     COMPILED_DIR.mkdir(parents=True, exist_ok=True)
-    (STATE_DIR / "bind").mkdir(parents=True, exist_ok=True)
-    (LOG_DIR / "bind").mkdir(parents=True, exist_ok=True)
+
+    ctx = _default_bind_context()
+    (STATE_DIR / "bind" / ctx.name).mkdir(parents=True, exist_ok=True)
+    (LOG_DIR / "bind" / ctx.name).mkdir(parents=True, exist_ok=True)
 
     rpz_path = COMPILED_DIR / "bind" / "alderpointdns-v2.rpz"
     rpz_text = bind_rpz_gen.render_rpz_zone({}, [], serial=int(time.time()))
     dnsdist_text = _default_dnsdist_config_text()
-    bind_text = _default_bind_config_text(rpz_path)
+    bind_text = _default_bind_config_text(ctx, rpz_path)
 
     artifacts = [
         Artifact(
@@ -592,9 +598,9 @@ def cmd_generate_runtime(args: argparse.Namespace) -> int:
             validator=bind_rpz_gen.named_checkzone_validator(args.named_checkzone_binary),
         ),
         Artifact(
-            name="named.conf",
+            name=f"{ctx.name}/named.conf",
             content=bind_text,
-            live_path=COMPILED_DIR / "bind" / "named.conf",
+            live_path=COMPILED_DIR / "bind" / ctx.name / "named.conf",
             validator=bind_gen.named_checkconf_validator(args.named_checkconf_binary),
         ),
         Artifact(

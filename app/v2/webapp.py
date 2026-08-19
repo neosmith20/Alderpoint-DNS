@@ -73,6 +73,7 @@ from app.v2.secret_store import SecretStore, SecretStoreMissingError
 APP_ROOT = Path(os.environ.get("ALDERPOINTDNS_V2_APP_ROOT", "/opt/alderpointdns-v2"))
 CONFIG_DIR = Path(os.environ.get("ALDERPOINTDNS_V2_CONFIG_ROOT", "/etc/alderpointdns-v2"))
 STATE_DIR = Path(os.environ.get("ALDERPOINTDNS_V2_STATE_ROOT", "/var/lib/alderpointdns-v2"))
+LOG_DIR = Path(os.environ.get("ALDERPOINTDNS_V2_LOG_ROOT", "/var/log/alderpointdns-v2"))
 MODULE_DIR = Path(__file__).resolve().parent
 UI_DIR = MODULE_DIR / "ui"
 
@@ -83,8 +84,9 @@ ANALYTICS_PARQUET_DIR = STATE_DIR / "analytics" / "queries"
 ANALYTICS_AGGREGATES_DB = STATE_DIR / "analytics" / "aggregates.db"
 STAGING_DIR = STATE_DIR / "staging"
 COMPILED_DNSDIST_CONF = STATE_DIR / "compiled" / "dnsdist.conf"
-COMPILED_BIND_CONF = STATE_DIR / "compiled" / "bind" / "named.conf"
+COMPILED_BIND_DIR = STATE_DIR / "compiled" / "bind"  # multi-context: per-context subdirs under this root
 COMPILED_RPZ_ZONE = STATE_DIR / "compiled" / "bind" / "alderpointdns-v2.rpz"
+LOG_BIND_DIR = LOG_DIR / "bind"
 CERTS_DIR = STATE_DIR / "certs"
 ACTIVE_CERT_PATH = CERTS_DIR / "server.crt"
 ACTIVE_KEY_PATH = CERTS_DIR / "server.key"
@@ -627,6 +629,45 @@ def health():
             if COMPILED_DNSDIST_CONF.exists() else None
         ),
     }
+
+    # BIND recursive-backend health (Gate #3 acceptance closure §9): the
+    # locked hot path's second RAM-cache tier gets its own independently
+    # reported status, distinct from dnsdist/analytics/management, so an
+    # operator (or an automated check) can tell "BIND context down,
+    # recursive misses will fail" apart from "management API degraded" --
+    # health must never claim the appliance is fully healthy while a
+    # configured recursive backend is actually unreachable. Real, live
+    # per-context reachability (a socket connect to each context's own
+    # statistics-channel port -- see app/v2/bind_gen.py's per-context
+    # port allocation), not inferred from config files alone.
+    bind_contexts_status: dict[str, dict] = {}
+    if COMPILED_BIND_DIR.exists():
+        for ctx_dir in sorted(p for p in COMPILED_BIND_DIR.iterdir() if p.is_dir()):
+            conf_path = ctx_dir / "named.conf"
+            if not conf_path.exists():
+                continue
+            idx = int(ctx_dir.name.removeprefix("ctx")) if ctx_dir.name.startswith("ctx") and ctx_dir.name[3:].isdigit() else 0
+            stats_port = 8153 + idx
+            reachable = False
+            try:
+                import socket as _socket
+
+                with _socket.create_connection(("127.0.0.1", stats_port), timeout=0.5):
+                    reachable = True
+            except OSError:
+                reachable = False
+            bind_contexts_status[ctx_dir.name] = {"reachable": reachable, "statistics_port": stats_port}
+    result["components"]["bind"] = {
+        "contexts": bind_contexts_status,
+        "status": "ok" if bind_contexts_status and all(c["reachable"] for c in bind_contexts_status.values())
+        else ("unconfigured" if not bind_contexts_status else "degraded"),
+    }
+    if bind_contexts_status and not all(c["reachable"] for c in bind_contexts_status.values()):
+        # A configured BIND context is down: recursive misses through it
+        # will fail even though dnsdist's own packet-cache hits may
+        # continue to answer from already-cached TTLs -- real, accurate
+        # degradation, never silently reported as fully healthy.
+        result["status"] = "degraded"
     result["components"]["tier_b"] = {"state_present": TIER_B_STATE_FILE.exists()}
     result["components"]["schedule_worker"] = {"state_present": SCHEDULE_STATE_FILE.exists()}
     try:
@@ -778,22 +819,26 @@ def _mutate_and_promote(mutate_fn) -> runtime_compile.RuntimeCompileResult:
         try:
             mutate_fn(conn)
             dot, doh, doq, doh3, dnscrypt = _encrypted_transport_configs(conn)
-            # BIND architecture correction (Gate #3): live policy mutations
-            # also recompile+validate+coherently-promote the V2 BIND
-            # recursive-cache backend's named.conf whenever the appliance's
-            # default policy is a plain, non-ECS upstream selection -- see
-            # dnsdist_policy_runtime._route_via_bind's docstring for the
-            # exact, conservative condition. This is only attempted once
-            # COMPILED_RPZ_ZONE already exists: real installs always have
-            # it (generate-runtime / postinst creates it, even empty,
-            # before any policy mutation is possible), and a test/dev root
-            # that hasn't bootstrapped it yet gets exactly the prior
-            # dnsdist-only compile behavior rather than a hard failure --
-            # BIND wiring turns on the moment its real prerequisite exists,
-            # it never silently blocks unrelated policy mutations.
+            # BIND architecture correction (Gate #3, multi-context
+            # acceptance closure): live policy mutations recompile+
+            # validate+coherently-promote every distinct plain, non-ECS
+            # upstream selection's own BIND context (default policy, any
+            # other network's own selection, any domain-routing rule) --
+            # see runtime_compile.recompile_and_promote's own docstring.
+            # Only attempted once COMPILED_RPZ_ZONE already exists: real
+            # installs always have it (generate-runtime / postinst
+            # creates it, even empty, before any policy mutation is
+            # possible), and a test/dev root that hasn't bootstrapped it
+            # yet gets exactly the prior dnsdist-only compile behavior
+            # rather than a hard failure -- BIND wiring turns on the
+            # moment its real prerequisite exists, it never silently
+            # blocks unrelated policy mutations.
             bind_kwargs = {}
             if COMPILED_RPZ_ZONE.exists():
-                bind_kwargs = dict(live_bind_conf_path=COMPILED_BIND_CONF, rpz_zone_path=COMPILED_RPZ_ZONE)
+                bind_kwargs = dict(
+                    live_bind_conf_path=COMPILED_BIND_DIR, live_bind_log_root=LOG_BIND_DIR,
+                    rpz_zone_path=COMPILED_RPZ_ZONE,
+                )
             result = runtime_compile.recompile_and_promote(
                 conn, STAGING_DIR, COMPILED_DNSDIST_CONF,
                 listen_address=_configured_listen_address(), dot=dot, doh=doh, doq=doq, doh3=doh3, dnscrypt=dnscrypt,
