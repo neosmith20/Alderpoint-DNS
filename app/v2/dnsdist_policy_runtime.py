@@ -118,35 +118,73 @@ def _route_via_bind(
     straight to their configured upstream addresses.
 
     Deliberately conservative (§ preserve upstream/routing/ECS
-    semantics): only ever true when the transport is plain and ECS is
-    not in use for this pool. Real, verified-live limitations, not
-    assumptions (see ``docs/v2/bind-backend-v2.md``): the installed BIND
-    9.20 binary has no EDNS Client Subnet support at all (no
-    ``client-subnet``/``ecs-zones`` directive exists in the binary), so
-    an ECS-using pool categorically cannot be routed through BIND without
-    silently dropping its ECS behavior -- it keeps going direct, always.
-    DoT-transport forwarding through BIND is real and verified working
-    (``forwarders { <ip> port 853 tls <profile>; }``), but certificate-
-    hostname-verified forwarding was not fully validated in this pass
-    (see docs/v2/bind-backend-v2.md) so DoT/DoH pools also keep going
-    direct, unchanged from before this pass, rather than shipping
-    unverified TLS-verification behavior.
+    semantics): only ever true for ``plain`` or ``dot`` transport, and
+    ECS not in use for this pool. Real, verified-live limitations, not
+    assumptions (see ``docs/v2/bind-backend-v2.md``):
 
-    ``bind_context_addresses`` maps each distinct plain, non-ECS
-    forwarder-address-set (as an unordered ``frozenset``) actually
-    allocated a real BIND context (``app/v2/bind_gen.allocate_bind_contexts``,
+    - ECS: ISC confirms open-source BIND has no resolver-side EDNS
+      Client Subnet support at all (only the commercial Subscription
+      Edition does; verified independently against the installed binary
+      -- no ``client-subnet``/``ecs-zones`` directive exists in it). An
+      ECS-using pool categorically cannot be routed through BIND without
+      silently dropping its ECS behavior -- it keeps going direct,
+      always. This is a narrow, explicit, documented architecture
+      exception, not a general BIND bypass.
+    - DoT: real, verified, certificate-hostname-verified forwarding
+      through BIND 9.20 works (``forwarders { <ip> port 853 tls
+      <profile>; }`` + ``tls <profile> { remote-hostname "<host>"; }``,
+      proven live with a real DNSSEC-validated answer -- see
+      ``app/v2/bind_gen.py``'s ``tls_hostname`` support). Routed through
+      BIND like plain, keyed by ``(forwarders, tls_hostname)`` so a DoT
+      selection is never merged with an unrelated plain or differently-
+      verified DoT selection.
+    - DoH: BIND has no native DoH-forwarder capability at all (not a
+      configuration gap, an actual missing feature) -- DoH pools keep
+      going direct-to-upstream from dnsdist, unchanged. See
+      ``docs/v2/bind-backend-v2.md`` for the local-egress-transport
+      alternative under consideration for DoH.
+
+    ``bind_context_addresses`` maps each distinct, allocated
+    ``(forwarders_frozenset, tls_hostname)`` key (see
+    ``app/v2/bind_gen.UpstreamSelection``/``allocate_bind_contexts``,
     called by the compiler's caller) to that context's backend address.
-    A pool whose exact endpoint set was allocated a context routes
-    through it; any pool whose set wasn't allocated one (beyond
+    A pool whose exact key was allocated a context routes through it;
+    any pool whose key wasn't allocated one (beyond
     ``bind_gen.MAX_BIND_CONTEXTS``, a documented, conservative bound)
     keeps going direct -- collapsing two different upstream choices onto
     one shared BIND forwarder list would silently change which upstream
     actually answers a given client's queries, which this compiler must
     never do.
     """
-    if transport != "plain" or use_ecs or not bind_context_addresses:
+    if transport not in ("plain", "dot") or use_ecs or not bind_context_addresses:
         return None
-    return bind_context_addresses.get(frozenset(ep.address for ep in endpoints))
+    tls_hostname = None
+    if transport == "dot":
+        hostnames = {ep.tls_hostname for ep in endpoints}
+        if len(hostnames) != 1 or None in hostnames:
+            return None  # mixed/missing hostnames within one pool: not a safe single tls block
+        tls_hostname = hostnames.pop()
+    key = (frozenset(ep.address for ep in endpoints), tls_hostname)
+    return bind_context_addresses.get(key)
+
+
+def _route_doh_via_bind(endpoints: tuple, transport: str, use_ecs: bool, doh_bind_context_addresses: dict) -> "str | None":
+    """DoH-through-BIND (Gate #3 acceptance closure #4): BIND has no
+    native DoH-forwarder capability at all, so a DoH pool can only reach
+    BIND's recursive cache indirectly, via a local DoH-egress dnsdist
+    process (``app/v2/doh_egress_gen.py``) that BIND's own forwarders
+    point at (plain DNS, loopback-only) and which re-encrypts to the
+    real DoH upstream -- proven live end-to-end (real Cloudflare DoH
+    answer, DNSSEC-validated, through this exact chain). ``endpoints``
+    are keyed by ``(address, doh_path, tls_hostname)`` since all three
+    identify a distinct DoH upstream; a DoH selection with no allocated
+    egress+BIND context pair keeps going direct, same conservative
+    bound as plain/DoT.
+    """
+    if transport != "doh" or use_ecs or not doh_bind_context_addresses:
+        return None
+    key = frozenset((ep.address, getattr(ep, "doh_path", None), ep.tls_hostname) for ep in endpoints)
+    return doh_bind_context_addresses.get(key)
 
 
 def _refused_or_spoof_action(response: BlockingResponse) -> str:
@@ -417,6 +455,7 @@ def compile_multi_policy_dnsdist_config(
     doh3: Doh3Config | None = None,
     dnscrypt: DnscryptConfig | None = None,
     bind_context_addresses: dict = None,
+    doh_bind_context_addresses: dict = None,
 ) -> str:
     """Deterministic (§2H requires reproducible behavior regardless of
     query order): bindings are processed most-specific-network-first
@@ -428,6 +467,7 @@ def compile_multi_policy_dnsdist_config(
     if not bindings:
         raise PolicyRuntimeError("at least one client policy binding is required")
     bind_context_addresses = bind_context_addresses or {}
+    doh_bind_context_addresses = doh_bind_context_addresses or {}
 
     ordered = sorted(
         bindings,
@@ -506,12 +546,19 @@ def compile_multi_policy_dnsdist_config(
             lines.extend(ecs_directives)
         lines.append(f"-- upstream servers for effective policy pool: {pool_name}")
         bind_addr = _route_via_bind(binding.upstream_endpoints, binding.upstream_transport, use_ecs, bind_context_addresses)
+        doh_bind_addr = _route_doh_via_bind(binding.upstream_endpoints, binding.upstream_transport, use_ecs, doh_bind_context_addresses)
         if bind_addr:
             lines.append(
                 "-- ordinary recursion: routed through the packaged V2 BIND "
                 "recursive-cache tier (docs/v2/architecture-map.md locked hot path)"
             )
             lines.append(_bind_server_line(pool_name, bind_addr))
+        elif doh_bind_addr:
+            lines.append(
+                "-- DoH recursion: routed through the packaged V2 BIND recursive-cache "
+                "tier via a local DoH-egress transport (app/v2/doh_egress_gen.py)"
+            )
+            lines.append(_bind_server_line(pool_name, doh_bind_addr))
         else:
             for ep in binding.upstream_endpoints:
                 lines.append(
@@ -527,9 +574,13 @@ def compile_multi_policy_dnsdist_config(
                 raise PolicyRuntimeError(f"invalid domain routing suffix {suffix!r}: {exc}") from exc
             route_pool = f"{pool_name}__route_{validated_suffix.replace('.', '_')}"
             route_bind_addr = _route_via_bind(route_endpoints, route_transport, use_ecs, bind_context_addresses)
+            route_doh_bind_addr = _route_doh_via_bind(route_endpoints, route_transport, use_ecs, doh_bind_context_addresses)
             if route_bind_addr:
                 lines.append(f"-- domain route {validated_suffix}: routed through the packaged V2 BIND recursive-cache tier")
                 lines.append(_bind_server_line(route_pool, route_bind_addr))
+            elif route_doh_bind_addr:
+                lines.append(f"-- domain route {validated_suffix}: routed through the packaged V2 BIND recursive-cache tier via local DoH-egress")
+                lines.append(_bind_server_line(route_pool, route_doh_bind_addr))
             else:
                 for ep in route_endpoints:
                     lines.append(

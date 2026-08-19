@@ -1,0 +1,42 @@
+[Unit]
+Description=Alderpoint DNS V2 local DoH-egress transport, context %i (private candidate)
+Documentation=man:dnsdist(1)
+After=network.target
+Before=alderpointdns-v2-bind@.service
+ConditionPathExists=/var/lib/alderpointdns-v2/compiled/doh-egress/%i/dnsdist.conf
+StartLimitIntervalSec=60
+StartLimitBurst=200
+
+[Service]
+Type=simple
+User=alderpointdns-v2
+Group=alderpointdns-v2
+Environment=HOME=/var/lib/alderpointdns-v2
+# Gate #3 acceptance closure #4: BIND has no native DoH-forwarder
+# capability, so a DoH upstream selection preserves the locked BIND
+# recursive-cache tier via this small, bounded, package-managed (no
+# Python/FastAPI) local egress process instead -- see
+# app/v2/doh_egress_gen.py's own module docstring. Reuses the same real,
+# already-proven dnsdist DoH backend syntax the client-facing path uses.
+ExecStart=/usr/bin/dnsdist -C /var/lib/alderpointdns-v2/compiled/doh-egress/%i/dnsdist.conf --supervised --disable-syslog
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=20
+TimeoutStopSec=15
+
+AmbientCapabilities=
+CapabilityBoundingSet=
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadOnlyPaths=/var/lib/alderpointdns-v2/compiled
+UMask=0027
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

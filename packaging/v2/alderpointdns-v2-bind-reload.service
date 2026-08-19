@@ -17,4 +17,9 @@ Type=oneshot
 # stale. Restarted before dnsdist so a generation that also touched
 # dnsdist.conf never has dnsdist pointed at a BIND context that hasn't
 # picked up its new config yet.
-ExecStart=/bin/systemctl restart alderpointdns-v2-bind@ctx0.service alderpointdns-v2-bind@ctx1.service alderpointdns-v2-bind@ctx2.service alderpointdns-v2-bind@ctx3.service
+# DoH-egress instances (Gate #3 acceptance closure #4) are restarted
+# FIRST -- they must be up before any BIND context that forwards to one
+# picks up its new config, same coherence reasoning as BIND-before-
+# dnsdist. Also safe/idempotent for slots not in the current generation
+# (ConditionPathExists).
+ExecStart=/bin/systemctl restart alderpointdns-v2-doh-egress@dohctx0.service alderpointdns-v2-doh-egress@dohctx1.service alderpointdns-v2-doh-egress@dohctx2.service alderpointdns-v2-doh-egress@dohctx3.service alderpointdns-v2-bind@ctx0.service alderpointdns-v2-bind@ctx1.service alderpointdns-v2-bind@ctx2.service alderpointdns-v2-bind@ctx3.service

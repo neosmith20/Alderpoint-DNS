@@ -48,7 +48,7 @@ def _binding(cidr, profile_id, endpoints, **kwargs):
 
 def _context_addresses(*forwarder_sets):
     contexts = bind_gen.allocate_bind_contexts(list(forwarder_sets))
-    return {frozenset(ctx.forwarders): bind_gen.context_backend_address(ctx) for ctx in contexts}
+    return {(frozenset(ctx.forwarders), ctx.tls_hostname): bind_gen.context_backend_address(ctx) for ctx in contexts}
 
 
 class TestDefaultBootstrapRoutesThroughBind:
@@ -90,8 +90,8 @@ class TestPolicyCompilerBindRouting:
         b1 = _binding("10.0.0.0/24", "p1", (UpstreamEndpointRecord("1.1.1.1:53", None, 0, 1, None),))
         b2 = _binding("10.0.1.0/24", "p2", (UpstreamEndpointRecord("9.9.9.9:53", None, 0, 1, None),))
         text = compile_multi_policy_dnsdist_config("0.0.0.0:53", [b1, b2], bind_context_addresses=addrs)
-        ctx0_addr = addrs[frozenset({"1.1.1.1:53"})]
-        ctx1_addr = addrs[frozenset({"9.9.9.9:53"})]
+        ctx0_addr = addrs[(frozenset({"1.1.1.1:53"}), None)]
+        ctx1_addr = addrs[(frozenset({"9.9.9.9:53"}), None)]
         assert ctx0_addr != ctx1_addr
         assert f'address="{ctx0_addr}"' in text
         assert f'address="{ctx1_addr}"' in text
@@ -111,29 +111,66 @@ class TestPolicyCompilerBindRouting:
         for ctx_addr in addrs.values():
             assert f'address="{ctx_addr}"' not in text
 
-    def test_ecs_pool_bypasses_bind(self):
-        # Verified-live technical limitation (docs/v2/bind-backend-v2.md):
-        # the installed BIND 9.20 binary has no EDNS Client Subnet support
-        # at all -- an ECS pool must never be routed through it.
+    def test_ecs_exception_pool_bypasses_bind(self):
+        # The documented, narrow, explicit ECS architecture exception
+        # (owner decision, docs/v2/bind-backend-v2.md): ISC confirms
+        # open-source BIND provides no resolver-side EDNS Client Subnet
+        # support at all (only the commercial Subscription Edition does)
+        # -- verified independently against the installed binary (no
+        # client-subnet/ecs-zones directive exists in it). An ECS pool
+        # must never be routed through BIND -- it stays on the existing,
+        # safe, already-proven dnsdist-direct path, which DOES preserve
+        # ECS correctly (useClientSubnet=true, asserted below). This is
+        # the ONLY category excluded for a real, verified technical
+        # reason, not a general BIND bypass -- every other transport
+        # (plain, DoT, DoH-via-egress) routes through BIND.
         addrs = _context_addresses(("1.1.1.1:53",))
         eps = (UpstreamEndpointRecord("1.1.1.1:53", None, 0, 1, None),)
         b = _binding("10.0.0.0/24", "p3", eps, ecs_policy=EcsPolicy(mode="preserve"))
         text = compile_multi_policy_dnsdist_config("0.0.0.0:53", [b], bind_context_addresses=addrs)
         for ctx_addr in addrs.values():
             assert f'address="{ctx_addr}"' not in text
+        # The exception preserves real functionality, not just "skips
+        # BIND silently" -- ECS is genuinely applied on the direct path.
+        assert "useClientSubnet=true" in text
+        assert '"1.1.1.1:53"' in text
 
-    def test_dot_transport_bypasses_bind(self):
-        # DoT-forwarding through BIND is real and verified working in
-        # principle (forwarders { <ip> port 853 tls <profile>; }), but
-        # certificate-hostname-verified forwarding was not fully
-        # validated this pass (docs/v2/bind-backend-v2.md) -- kept direct.
-        addrs = _context_addresses(("1.1.1.1:853",))
+    def test_dot_with_matching_context_routes_via_bind(self):
+        # Real, verified-live DoT-through-BIND (BIND 9.20's own
+        # certificate-hostname-verified TLS forwarding) -- when a context
+        # was allocated for this exact (forwarders, tls_hostname) pair,
+        # DoT routes through it just like plain.
+        addrs = _context_addresses(
+            bind_gen.UpstreamSelection(forwarders=("1.1.1.1:853",), tls_hostname="cloudflare-dns.com"),
+        )
+        eps = (UpstreamEndpointRecord("1.1.1.1:853", "cloudflare-dns.com", 0, 1, None),)
+        b = _binding("10.0.0.0/24", "p4", eps, upstream_transport="dot")
+        text = compile_multi_policy_dnsdist_config("0.0.0.0:53", [b], bind_context_addresses=addrs)
+        ctx_addr = list(addrs.values())[0]
+        assert f'address="{ctx_addr}"' in text
+        assert 'tls="openssl"' not in text  # not dispatched direct
+
+    def test_dot_without_matching_context_bypasses_bind(self):
+        # No context allocated for this DoT selection -- must keep going
+        # direct, never silently merged with an unrelated context.
+        addrs = _context_addresses(("1.1.1.1:853",))  # plain context, not DoT
         eps = (UpstreamEndpointRecord("1.1.1.1:853", "cloudflare-dns.com", 0, 1, None),)
         b = _binding("10.0.0.0/24", "p4", eps, upstream_transport="dot")
         text = compile_multi_policy_dnsdist_config("0.0.0.0:53", [b], bind_context_addresses=addrs)
         for ctx_addr in addrs.values():
             assert f'address="{ctx_addr}"' not in text
         assert 'tls="openssl"' in text
+
+    def test_doh_transport_always_bypasses_bind(self):
+        # BIND has no DoH-forwarder capability at all -- DoH pools never
+        # route through BIND regardless of what contexts are allocated.
+        addrs = _context_addresses(("1.1.1.1:443",))
+        eps = (UpstreamEndpointRecord("1.1.1.1:443", "cloudflare-dns.com", 0, 1, None),)
+        b = _binding("10.0.0.0/24", "p6", eps, upstream_transport="doh")
+        text = compile_multi_policy_dnsdist_config("0.0.0.0:53", [b], bind_context_addresses=addrs)
+        for ctx_addr in addrs.values():
+            assert f'address="{ctx_addr}"' not in text
+        assert 'dohPath' in text
 
     def test_no_bind_contexts_configured_never_routes_via_bind(self):
         # Backward compatibility: a caller that hasn't wired BIND

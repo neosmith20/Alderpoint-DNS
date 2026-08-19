@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.v2 import bind_gen
+from app.v2 import doh_egress_gen
 from app.v2 import policy_store as store
 from app.v2 import safesearch
 from app.v2.blocking_response import BlockingResponse
@@ -196,6 +197,7 @@ def recompile_and_promote(
     live_bind_log_root: "Path | None" = None,
     rpz_zone_path: "Path | None" = None,
     named_checkconf_binary: str = "named-checkconf",
+    live_doh_egress_dir: "Path | None" = None,
 ) -> RuntimeCompileResult:
     """The real, single code path from "control.db changed" to "compiled
     dnsdist (and, when wired, BIND) config on disk validated by the real
@@ -215,55 +217,110 @@ def recompile_and_promote(
         ptr_records_skipped = sum(1 for r in local_dns_records if r[1] == "PTR")
 
         # Multi-context BIND (Gate #3 acceptance closure): every distinct
-        # plain, non-ECS forwarder set actually in use anywhere in this
-        # compile (the appliance-wide default binding, any other
-        # binding's own upstream selection, any domain-routing rule's
-        # endpoints) gets its own real BIND context/cache -- not just the
-        # single default selection. The default binding's set is ordered
-        # first so it keeps the well-known default ports/back-compat
-        # address (app/v2/bind_gen.BIND_BACKEND_ADDRESS) whenever it's
-        # present, matching every prior RC's behavior for the common
-        # case; the rest are ordered deterministically (sorted) so the
-        # same control.db state always allocates the same ports
-        # regardless of dict/iteration order (§2H). ECS pools (BIND has
-        # no EDNS Client Subnet support at all -- verified against the
-        # installed binary) and DoT/DoH pools (cert-hostname-verified
-        # forwarding not yet validated -- see docs/v2/bind-backend-v2.md)
-        # never contribute a forwarder set here; they keep going direct,
-        # exactly as before this pass.
-        def _plain_non_ecs_sets(binding) -> list[tuple[str, ...]]:
-            sets = []
-            if binding.upstream_transport == "plain" and not server_uses_client_subnet(binding.ecs_policy):
-                sets.append(tuple(sorted(ep.address for ep in binding.upstream_endpoints)))
+        # plain OR DoT, non-ECS upstream selection actually in use
+        # anywhere in this compile (the appliance-wide default binding,
+        # any other binding's own upstream selection, any domain-routing
+        # rule's endpoints) gets its own real BIND context/cache -- not
+        # just the single default selection. The default binding's
+        # selection is ordered first so it keeps the well-known default
+        # ports/back-compat address (app/v2/bind_gen.BIND_BACKEND_ADDRESS)
+        # whenever it's present, matching every prior RC's behavior for
+        # the common case; the rest are ordered deterministically
+        # (sorted) so the same control.db state always allocates the
+        # same ports regardless of dict/iteration order (§2H). ECS pools
+        # (BIND has no EDNS Client Subnet support at all -- an explicit,
+        # documented, narrow architecture exception, see
+        # dnsdist_policy_runtime._route_via_bind's own docstring) and DoH
+        # pools (BIND has no DoH-forwarder capability at all) never
+        # contribute a selection here; they keep going direct.
+        def _bind_eligible_selections(binding) -> list[bind_gen.UpstreamSelection]:
+            sels = []
+            if binding.upstream_transport in ("plain", "dot") and not server_uses_client_subnet(binding.ecs_policy):
+                hostnames = {ep.tls_hostname for ep in binding.upstream_endpoints}
+                if binding.upstream_transport == "plain" or (len(hostnames) == 1 and None not in hostnames):
+                    sels.append(bind_gen.UpstreamSelection(
+                        forwarders=tuple(sorted(ep.address for ep in binding.upstream_endpoints)),
+                        tls_hostname=(hostnames.pop() if binding.upstream_transport == "dot" else None),
+                    ))
             for _suffix, route_endpoints, route_transport, _strategy in binding.domain_routes:
-                if route_transport == "plain" and not server_uses_client_subnet(binding.ecs_policy):
-                    sets.append(tuple(sorted(ep.address for ep in route_endpoints)))
-            return sets
+                if route_transport in ("plain", "dot") and not server_uses_client_subnet(binding.ecs_policy):
+                    route_hostnames = {ep.tls_hostname for ep in route_endpoints}
+                    if route_transport == "plain" or (len(route_hostnames) == 1 and None not in route_hostnames):
+                        sels.append(bind_gen.UpstreamSelection(
+                            forwarders=tuple(sorted(ep.address for ep in route_endpoints)),
+                            tls_hostname=(route_hostnames.pop() if route_transport == "dot" else None),
+                        ))
+            return sels
 
         default_binding = next((b for b in bindings if b.network.network_id == _DEFAULT_NETWORK_ID), None)
-        ordered_sets: list[tuple[str, ...]] = []
+        ordered_selections: list[bind_gen.UpstreamSelection] = []
         seen: set = set()
         if live_bind_conf_path is not None:
             if default_binding is not None:
-                for s in _plain_non_ecs_sets(default_binding):
-                    if s and s not in seen:
-                        ordered_sets.append(s)
-                        seen.add(s)
+                for sel in _bind_eligible_selections(default_binding):
+                    if sel.forwarders and sel not in seen:
+                        ordered_selections.append(sel)
+                        seen.add(sel)
             for b in sorted(bindings, key=lambda b: b.network.network_id):
-                for s in sorted(_plain_non_ecs_sets(b)):
-                    if s and s not in seen:
-                        ordered_sets.append(s)
-                        seen.add(s)
+                for sel in sorted(_bind_eligible_selections(b), key=lambda s: (s.forwarders, s.tls_hostname or "")):
+                    if sel.forwarders and sel not in seen:
+                        ordered_selections.append(sel)
+                        seen.add(sel)
 
-        bind_contexts = bind_gen.allocate_bind_contexts(ordered_sets)
+        # DoH-through-BIND (Gate #3 acceptance closure #4): every distinct
+        # DoH selection gets a local egress process (app/v2/doh_egress_gen.py)
+        # plus its own BIND context whose forwarders point at that egress
+        # process -- only attempted when the caller also wires
+        # live_doh_egress_dir (backward-compatible: omitted means DoH
+        # pools simply keep going direct, exactly as before this pass).
+        def _doh_selections(binding) -> list[tuple[str, str, str]]:
+            sels = []
+            if binding.upstream_transport == "doh" and not server_uses_client_subnet(binding.ecs_policy):
+                for ep in binding.upstream_endpoints:
+                    if ep.tls_hostname and getattr(ep, "doh_path", None):
+                        sels.append((ep.address, ep.doh_path, ep.tls_hostname))
+            for _suffix, route_endpoints, route_transport, _strategy in binding.domain_routes:
+                if route_transport == "doh" and not server_uses_client_subnet(binding.ecs_policy):
+                    for ep in route_endpoints:
+                        if ep.tls_hostname and getattr(ep, "doh_path", None):
+                            sels.append((ep.address, ep.doh_path, ep.tls_hostname))
+            return sels
+
+        doh_egress_contexts = []
+        doh_bind_context_addresses: dict = {}
+        if live_bind_conf_path is not None and live_doh_egress_dir is not None:
+            ordered_doh: list[tuple[str, str, str]] = []
+            seen_doh: set = set()
+            for b in sorted(bindings, key=lambda b: b.network.network_id):
+                for sel in sorted(_doh_selections(b)):
+                    if sel not in seen_doh:
+                        ordered_doh.append(sel)
+                        seen_doh.add(sel)
+            doh_egress_contexts = doh_egress_gen.allocate_doh_egress_contexts(ordered_doh)
+            # Each egress context needs its own BIND context too, appended
+            # after the plain/DoT ones within the same MAX_BIND_CONTEXTS
+            # bound (a DoH selection beyond that bound keeps going direct,
+            # same conservative rule as everything else).
+            doh_egress_backends = [bind_gen.UpstreamSelection(forwarders=(doh_egress_gen.egress_backend_address(ec),)) for ec in doh_egress_contexts]
+            ordered_selections = ordered_selections + doh_egress_backends
+
+        bind_contexts = bind_gen.allocate_bind_contexts(ordered_selections)
         bind_context_addresses = {
-            frozenset(ctx.forwarders): bind_gen.context_backend_address(ctx) for ctx in bind_contexts
+            (frozenset(ctx.forwarders), ctx.tls_hostname): bind_gen.context_backend_address(ctx)
+            for ctx in bind_contexts
         }
+        if doh_egress_contexts:
+            plain_bind_context_count = len(bind_contexts) - len(doh_egress_contexts)
+            for i, ec in enumerate(doh_egress_contexts):
+                bctx = bind_contexts[plain_bind_context_count + i] if plain_bind_context_count + i < len(bind_contexts) else None
+                if bctx is not None:
+                    doh_bind_context_addresses[frozenset({(ec.upstream_address, ec.doh_path, ec.tls_hostname)})] = bind_gen.context_backend_address(bctx)
 
         config_text = compile_multi_policy_dnsdist_config(
             listen_address, bindings, local_dns_records=local_dns_records,
             dot=dot, doh=doh, doq=doq, doh3=doh3, dnscrypt=dnscrypt,
             bind_context_addresses=bind_context_addresses,
+            doh_bind_context_addresses=doh_bind_context_addresses,
         )
     except PolicyRuntimeError as exc:
         raise RuntimeCompileError(f"policy runtime compile failed: {exc}") from exc
@@ -279,6 +336,17 @@ def recompile_and_promote(
             bind_root = Path(live_bind_conf_path)
             log_root = Path(live_bind_log_root) if live_bind_log_root is not None else bind_root
             artifacts = []
+            if doh_egress_contexts and live_doh_egress_dir is not None:
+                egress_root = Path(live_doh_egress_dir)
+                for ec in doh_egress_contexts:
+                    artifacts.append(
+                        Artifact(
+                            name=f"{ec.name}/dnsdist.conf",
+                            content=doh_egress_gen.render_egress_config(ec),
+                            live_path=egress_root / ec.name / "dnsdist.conf",
+                            validator=dnsdist_check_config_validator(dnsdist_binary),
+                        )
+                    )
             for ctx in bind_contexts:
                 ctx_state_dir = bind_root / ctx.name
                 ctx_log_path = log_root / ctx.name / "named.log"

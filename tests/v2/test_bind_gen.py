@@ -61,7 +61,10 @@ class TestRenderNamedConf:
 
     def test_forwarders_appear_verbatim(self, tmp_path):
         conf = bind_gen.render_named_conf(["1.2.3.4:53", "5.6.7.8:53"], str(_rpz_path(tmp_path)))
-        assert "1.2.3.4; 5.6.7.8;" in conf
+        # Real defect found live (Gate #3 DoH-egress testing): forwarders
+        # must always carry an explicit port, not be silently truncated
+        # to a bare host (which BIND then defaults to port 53).
+        assert "1.2.3.4 port 53; 5.6.7.8 port 53;" in conf
 
     def test_rpz_zone_referenced(self, tmp_path):
         rpz = _rpz_path(tmp_path)
@@ -97,3 +100,24 @@ class TestStageAndValidate:
                 tmp_path / "staging", "options { this is not valid bind syntax", live,
             )
         assert live.read_text() == "-- previous good config --\n"
+
+
+class TestForwarderPortPreserved:
+    """Real defect found live during Gate #3 DoH-egress acceptance
+    testing: plain forwarders silently dropped any non-53 port (BIND
+    defaults forwarders with no port to 53), masked until a real
+    non-standard-port forwarder (the local DoH-egress transport) was
+    tested end-to-end."""
+
+    def test_non_standard_port_forwarder_preserved(self, tmp_path):
+        rpz = _rpz_path(tmp_path)
+        conf = bind_gen.render_named_conf(["127.0.0.1:5653"], str(rpz))
+        forwarders_line = next(line for line in conf.splitlines() if line.strip().startswith("forwarders"))
+        assert "127.0.0.1 port 5653" in forwarders_line
+        assert forwarders_line.strip() != "forwarders { 127.0.0.1; };"  # never silently truncated
+
+    def test_multiple_forwarders_each_keep_own_port(self, tmp_path):
+        rpz = _rpz_path(tmp_path)
+        conf = bind_gen.render_named_conf(["1.1.1.1:53", "127.0.0.1:5653"], str(rpz))
+        assert "1.1.1.1 port 53" in conf
+        assert "127.0.0.1 port 5653" in conf

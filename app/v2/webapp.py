@@ -85,6 +85,7 @@ ANALYTICS_AGGREGATES_DB = STATE_DIR / "analytics" / "aggregates.db"
 STAGING_DIR = STATE_DIR / "staging"
 COMPILED_DNSDIST_CONF = STATE_DIR / "compiled" / "dnsdist.conf"
 COMPILED_BIND_DIR = STATE_DIR / "compiled" / "bind"  # multi-context: per-context subdirs under this root
+COMPILED_DOH_EGRESS_DIR = STATE_DIR / "compiled" / "doh-egress"
 COMPILED_RPZ_ZONE = STATE_DIR / "compiled" / "bind" / "alderpointdns-v2.rpz"
 LOG_BIND_DIR = LOG_DIR / "bind"
 CERTS_DIR = STATE_DIR / "certs"
@@ -837,7 +838,7 @@ def _mutate_and_promote(mutate_fn) -> runtime_compile.RuntimeCompileResult:
             if COMPILED_RPZ_ZONE.exists():
                 bind_kwargs = dict(
                     live_bind_conf_path=COMPILED_BIND_DIR, live_bind_log_root=LOG_BIND_DIR,
-                    rpz_zone_path=COMPILED_RPZ_ZONE,
+                    rpz_zone_path=COMPILED_RPZ_ZONE, live_doh_egress_dir=COMPILED_DOH_EGRESS_DIR,
                 )
             result = runtime_compile.recompile_and_promote(
                 conn, STAGING_DIR, COMPILED_DNSDIST_CONF,

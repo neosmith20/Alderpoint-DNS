@@ -166,6 +166,7 @@ cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-dnsdist-reload.path" "$PKG/lib/sys
 # to need CAP_NET_ADMIN loopback-alias provisioning the live
 # management-API's own unprivileged runtime user does not have).
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-bind@.service" "$PKG/lib/systemd/system/alderpointdns-v2-bind@.service"
+cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-doh-egress@.service" "$PKG/lib/systemd/system/alderpointdns-v2-doh-egress@.service"
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-bind-reload.service" "$PKG/lib/systemd/system/alderpointdns-v2-bind-reload.service"
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-bind-reload.path" "$PKG/lib/systemd/system/alderpointdns-v2-bind-reload.path"
 cp "$SOURCE_DIR/packaging/v2/apparmor-named-v2.local" "$PKG/opt/alderpointdns-v2/packaging/apparmor-named-v2.local"
