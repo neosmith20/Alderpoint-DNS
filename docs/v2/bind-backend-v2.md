@@ -37,7 +37,29 @@ dnsdist's own config: `stage_validate_promote_all` stages+validates every artifa
 `named.conf`, dnsdist `dnsdist.conf`) before promoting any of them, so a BIND validation failure
 never leaves a mismatched dnsdist generation live, and vice versa.
 
-## Update: multi-context BIND (Gate #3 acceptance closure)
+## dnsdist package-source decision (Gate #3 acceptance closure)
+
+Investigated on request: whether V2 packaging drifted from an earlier
+deliberate PowerDNS-repository dnsdist choice back to Debian stock.
+Finding: **no drift occurred.** V2's `Depends: dnsdist (>= 1.9.0)` is a
+deliberate floor, satisfied by Debian 13's own stock archive build
+(currently `1.9.16`), by design (`docs/v2/doh3-transport-implemented.md`):
+QUIC (DoQ/DoH3) is not available in the stock build, so it is reached
+only via the explicit, root-only, opt-in `alderpointdns-v2-ctl
+install-enhanced-dnsdist` command, which adds the official PowerDNS repo
+(`repo.powerdns.com`, currently `2.1.1`). This is intentional, not
+accidental: DoQ/DoH3 must never become a mandatory base-package
+dependency (re-confirmed as an explicit owner decision earlier in this
+same Gate #3 pass). Verified live: stock `1.9.16` (Debian's own archive)
+already supports everything this pass's BIND work needed --
+`useProxyProtocol`, DoT backend syntax, and DoH backend syntax (its own
+`--version` output lists `dns-over-tls`/`dns-over-https` as enabled) --
+so none of the BIND-architecture work in this pass depends on the
+enhanced/PowerDNS-repo build at all. BIND itself has never used a
+non-Debian-archive source anywhere in this project's history (no
+ISC/vendor BIND repo reference exists in any script, doc, or commit).
+
+## Multi-context BIND (Gate #3 acceptance closure)
 
 RC31 (above design) only routed the single appliance-default plain
 upstream selection through BIND; a Dex acceptance-closure pass correctly
@@ -98,6 +120,46 @@ only. Regression coverage:
   (which does verify `subjectName`), so DoT/DoH upstream profiles
   continue routing direct-to-upstream -- a genuine, bounded, time-limited
   gap, not a technical impossibility, and not silently dropped.
+
+## Acceptance-closure round 2: two more real defects found and fixed live
+
+Both found during this pass's own real HTTPS/API-driven, multi-network
+cross-policy acceptance testing (three real networks, two distinct
+custom upstream profiles, one ECS-exception network, real client IPs,
+warmed + reversed query order) -- not found by inspection:
+
+1. **Generic `named.service`/`dnsdist.service` port-53 race.** `bind9`
+   and `dnsdist` (both real V2 `Depends:`) each ship their own generic,
+   package-enabled systemd unit that starts automatically post-install
+   against their own stock config (`/etc/bind/named.conf`,
+   `/etc/dnsdist/dnsdist.conf`) -- neither of which V2 ever uses. Both
+   bind port 53 by their own stock defaults and raced V2's own
+   `alderpointdns-v2-dnsdist` for it, won inconsistently depending on
+   start ordering. Fixed: `packaging/v2/postinst` now unconditionally
+   stops+disables both generic units on every V2 install (safe by
+   construction -- `Conflicts: alderpointdns` already guarantees V1's own
+   legitimate use of the same unit names can never coexist with a
+   successful V2 postinst run).
+2. **BIND client ACL too narrow for PROXYv2-forwarded real clients.**
+   `allow-query`/`allow-query-cache`/`allow-recursion` were restricted to
+   loopback (correct for `allow-proxy`/`allow-proxy-on`, which really
+   should stay loopback-only -- only dnsdist itself may speak PROXYv2 to
+   BIND) but PROXYv2 deliberately forwards the REAL original client
+   address through to BIND, which then evaluates those ACLs against that
+   real address. A genuine LAN client's query through a BIND-routed pool
+   was REFUSED the instant PROXYv2 correctly exposed a non-loopback
+   source -- masked whenever a query happened to be answered entirely by
+   dnsdist itself (e.g. a SafeSearch `SpoofCNAMEAction`) without ever
+   reaching BIND, which is exactly what every earlier acceptance pass's
+   proof queries happened to hit. Fixed: the client ACL now includes the
+   same private ranges the appliance's own dnsdist ACL uses
+   (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`, plus
+   loopback), while `allow-proxy`/`allow-proxy-on` correctly stay
+   loopback-only.
+
+Regression coverage: `tests/v2/test_bind_gen.py`'s
+`TestClientAclCoversRealLanRanges` (also asserts the proxy-source ACL
+did NOT widen).
 
 ## Routing scope (deliberately bounded)
 

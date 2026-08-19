@@ -35,6 +35,37 @@ case "$1" in
         --ingroup alderpointdns-v2 --disabled-login alderpointdns-v2
     fi
 
+    # Real race found live during Gate #3 acceptance testing: bind9 (a
+    # V2 Depends:, needed only for its named-checkconf/named-checkzone
+    # tooling and the alderpointdns-v2-bind@ template unit's own
+    # /usr/sbin/named binary) ships a generic, package-enabled
+    # named.service that binds port 53 on ALL interfaces by its own
+    # stock /etc/bind/named.conf.options default (no listen-on
+    # restriction) -- a real, observed race against V2's own dnsdist for
+    # port 53 on a fresh install, won inconsistently depending on
+    # service start ordering. V2 never uses the generic named.service --
+    # every V2 BIND instance is its own isolated, loopback-only
+    # alderpointdns-v2-bind@<ctx> instance -- so it is stopped and
+    # disabled here unconditionally. Safe by construction: this package
+    # Conflicts: alderpointdns (V1), so apt refuses to let this postinst
+    # ever run on a host where V1's own live named.service (the same
+    # unit name, V1's own config) could legitimately be depended on.
+    if systemctl list-unit-files named.service >/dev/null 2>&1; then
+      systemctl stop named.service >/dev/null 2>&1 || true
+      systemctl disable named.service >/dev/null 2>&1 || true
+    fi
+    # Same real race, same fix, for the dnsdist package's own generic
+    # dnsdist.service (found live in the same acceptance pass): it also
+    # auto-starts post-install (against /etc/dnsdist/dnsdist.conf, not
+    # V2's compiled config) and races alderpointdns-v2-dnsdist for port
+    # 53. V2 never uses it -- same Conflicts:alderpointdns safety
+    # argument applies (V1's own legitimate use of this same unit name
+    # can never coexist with a successful V2 postinst run).
+    if systemctl list-unit-files dnsdist.service >/dev/null 2>&1; then
+      systemctl stop dnsdist.service >/dev/null 2>&1 || true
+      systemctl disable dnsdist.service >/dev/null 2>&1 || true
+    fi
+
     # BIND architecture correction (Gate #3): apparmor's usr.sbin.named
     # profile is keyed by the binary path (/usr/sbin/named), which V1 and
     # V2 both use -- the same real defect V1's own postinst already found

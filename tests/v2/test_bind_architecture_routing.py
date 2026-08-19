@@ -205,3 +205,40 @@ class TestContextAllocation:
         assert contexts[0].plain_port == bind_gen.BIND_PLAIN_PORT
         assert contexts[0].proxy_port == bind_gen.BIND_PROXY_PORT
         assert bind_gen.context_backend_address(contexts[0]) == bind_gen.BIND_BACKEND_ADDRESS
+
+
+class TestEcsExceptionBounded:
+    """Owner acceptance closure §3: the ECS exception is narrow and
+    explicit -- ECS-enabled pools use the existing dnsdist-direct path
+    (verified open-source BIND limitation), and nothing else is allowed
+    to piggyback on that exception. These tests fail if the exception
+    were ever accidentally widened (e.g. a future edit relaxes the
+    `use_ecs` check to also skip BIND for an unrelated reason)."""
+
+    def test_ecs_is_the_only_condition_that_bypasses_bind_for_plain_transport(self):
+        # A plain, non-ECS pool with a matching context MUST route via
+        # BIND -- proves ECS is checked as its own independent condition,
+        # not folded into some broader "sometimes skip BIND" rule.
+        from app.v2.dnsdist_policy_runtime import _route_via_bind
+
+        eps = (UpstreamEndpointRecord("1.1.1.1:53", None, 0, 1, None),)
+        addrs = {(frozenset({"1.1.1.1:53"}), None): "127.0.0.1:5553"}
+        assert _route_via_bind(eps, "plain", False, addrs) == "127.0.0.1:5553"
+        assert _route_via_bind(eps, "plain", True, addrs) is None  # ECS true -> bypass, only reason
+
+    def test_ecs_disabled_pool_with_same_endpoints_as_ecs_enabled_pool_still_routes_via_bind(self):
+        # Two pools sharing the exact same upstream endpoints, differing
+        # ONLY by ECS mode, must be treated independently: one bypasses
+        # BIND (ECS), the other doesn't (no ECS) -- proves the exception
+        # is keyed on the real ECS flag per pool, not accidentally shared
+        # context-wide.
+        addrs = _context_addresses(("1.1.1.1:53",))
+        eps = (UpstreamEndpointRecord("1.1.1.1:53", None, 0, 1, None),)
+        b_no_ecs = _binding("10.0.0.0/24", "pA", eps)
+        b_ecs = _binding("10.0.1.0/24", "pB", eps, ecs_policy=EcsPolicy(mode="preserve"))
+        text = compile_multi_policy_dnsdist_config("0.0.0.0:53", [b_no_ecs, b_ecs], bind_context_addresses=addrs)
+        ctx_addr = list(addrs.values())[0]
+        # non-ECS pool routed via BIND
+        assert f'newServer({{address="{ctx_addr}", pool="profile_pA"' in text
+        # ECS pool routed direct, with real ECS applied
+        assert 'newServer({address="1.1.1.1:53", pool="profile_pB", useClientSubnet=true})' in text

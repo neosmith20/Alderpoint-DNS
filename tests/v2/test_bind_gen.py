@@ -74,8 +74,10 @@ class TestRenderNamedConf:
 
     def test_loopback_only_listeners(self, tmp_path):
         conf = bind_gen.render_named_conf(["1.1.1.1:53"], str(_rpz_path(tmp_path)))
-        assert "127.0.0.1" in conf
-        assert "0.0.0.0" not in conf
+        listen_lines = [l for l in conf.splitlines() if l.strip().startswith("listen-on")]
+        assert listen_lines
+        assert all("127.0.0.1" in l or "::1" in l for l in listen_lines)
+        assert not any("0.0.0.0" in l for l in listen_lines)
 
 
 class TestStageAndValidate:
@@ -121,3 +123,33 @@ class TestForwarderPortPreserved:
         conf = bind_gen.render_named_conf(["1.1.1.1:53", "127.0.0.1:5653"], str(rpz))
         assert "1.1.1.1 port 53" in conf
         assert "127.0.0.1 port 5653" in conf
+
+
+class TestClientAclCoversRealLanRanges:
+    """Real defect found live during Gate #3 cross-policy E2E acceptance
+    testing: allow-query/allow-query-cache/allow-recursion were
+    restricted to loopback, but PROXYv2 (dnsdist -> BIND) deliberately
+    forwards the REAL original client address, which BIND then evaluates
+    against those same ACLs -- a real LAN client's query through a
+    BIND-routed pool was REFUSED the moment PROXYv2 correctly exposed
+    its true, non-loopback source address (masked whenever a query
+    happened to be answered entirely by dnsdist itself, e.g. a
+    SpoofCNAMEAction, without ever reaching BIND)."""
+
+    def test_client_acl_includes_private_lan_ranges(self, tmp_path):
+        rpz = _rpz_path(tmp_path)
+        conf = bind_gen.render_named_conf(["1.1.1.1:53"], str(rpz))
+        acl_block = conf.split('acl "alderpointdns_v2_clients" {')[1].split("};")[0]
+        for net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"):
+            assert net in acl_block, f"{net} missing from BIND client ACL"
+
+    def test_proxy_source_still_restricted_to_loopback(self, tmp_path):
+        # allow-proxy/allow-proxy-on (who may SPEAK PROXYv2 to BIND) is a
+        # different, correctly-narrower restriction than the client ACL
+        # above (whose real identity PROXYv2 then carries) -- must stay
+        # loopback-only: only dnsdist itself may use the proxy protocol.
+        rpz = _rpz_path(tmp_path)
+        conf = bind_gen.render_named_conf(["1.1.1.1:53"], str(rpz))
+        proxy_lines = [l for l in conf.splitlines() if l.strip().startswith("allow-proxy")]
+        assert len(proxy_lines) == 2
+        assert all("127.0.0.1" in l and "10.0.0.0" not in l for l in proxy_lines)
