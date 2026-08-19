@@ -101,6 +101,28 @@ class TestRealValidation:
         text = generate_dnsdist_config("127.0.0.1:15302", _acl(), _upstreams(), query_log_address=None)
         assert "RemoteLogger" not in text
 
+    def test_discovery_ingress_wired_and_passes_real_check_config(self, tmp_path):
+        # Real regression, same class of gap as the analytics test above
+        # (see docs/v2/two-node-replication-discovery-acceptance.md): a
+        # fresh, never-yet-configured install runs THIS bootstrap
+        # generator's output -- real client discovery from real DNS
+        # traffic did not work on a freshly installed appliance even
+        # after dnsdist_policy_runtime.py's own fix, since that fix only
+        # covers the config the real per-policy compiler emits after an
+        # admin's first policy mutation.
+        text = generate_dnsdist_config("127.0.0.1:15303", _acl(), _upstreams())
+        assert 'TeeAction("127.0.0.1:1053", false)' in text
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        live = tmp_path / "live" / "dnsdist.conf"
+        result = stage_and_validate_dnsdist_config(staging, text, live)
+        assert result.promoted
+        assert result.validation.ok
+
+    def test_discovery_ingress_can_be_disabled(self, tmp_path):
+        text = generate_dnsdist_config("127.0.0.1:15304", _acl(), _upstreams(), discovery_ingress_address=None)
+        assert "TeeAction" not in text
+
     def test_malformed_config_fails_real_check_and_never_promotes(self, tmp_path):
         staging = tmp_path / "staging"
         staging.mkdir()

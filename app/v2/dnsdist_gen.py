@@ -83,6 +83,17 @@ def generate_dnsdist_config(
     # the admin's first policy mutation replaces this bootstrap config
     # with the real compiler's output.
     query_log_address: str | None = "127.0.0.1:5391",
+    # Same address/rationale as
+    # dnsdist_policy_runtime.DISCOVERY_INGRESS_ADDRESS -- real defect
+    # found live during two-node discovery acceptance testing (see
+    # docs/v2/two-node-replication-discovery-acceptance.md): a fresh,
+    # never-yet-configured install runs THIS bootstrap generator's
+    # output, not dnsdist_policy_runtime.py's, until an admin's first
+    # policy mutation -- so real client discovery from real DNS traffic
+    # did not work on a freshly installed appliance even after that
+    # fix, exactly the same class of gap query_log_address above already
+    # exists to prevent for analytics.
+    discovery_ingress_address: str | None = "127.0.0.1:1053",
     # Gate #3 acceptance closure: the locked RAM-first hot path
     # (docs/v2/architecture-map.md) begins with the dnsdist packet cache,
     # not just BIND's own recursive cache -- real defect found live
@@ -136,6 +147,16 @@ def generate_dnsdist_config(
             # either way -- see app/v2/dnsdist_protobuf.py.
             "addAction(AllRule(), RemoteLogAction(query_log_rl))",
             "addResponseAction(AllRule(), RemoteLogResponseAction(query_log_rl))",
+            "",
+        ]
+
+    if discovery_ingress_address:
+        # Fire-and-forget mirror to the dns-observer ingress -- never
+        # blocks on or uses the target's response, so this cannot slow
+        # down or affect a real client's own answer (same safety
+        # property RemoteLogger already gives query_log_address above).
+        lines += [
+            f'addAction(AllRule(), TeeAction("{discovery_ingress_address}", false))',
             "",
         ]
 
