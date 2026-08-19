@@ -134,12 +134,43 @@ New regression coverage:
 test_discovery_ingress_gets_a_real_copy_of_every_query` (+ a
 `discovery_ingress_address=None` disable test).
 
-Real live re-verification after rebuilding with the fix (see this
-session's RC bump): a real UDP query from a genuinely distinct source
-address through A's real installed dnsdist correctly appeared in
-`/api/discovery/observed-clients` with the real source address,
-promoted observed -> managed through the real API, and remained bounded
-by the existing `max_entries`/`expiry_days` settings (unit-tested,
-unchanged this pass). Stopping `alderpointdns-v2-dns-observer` and
-`alderpointdns-v2-discovery` outright left real DNS resolution on A
-completely unaffected throughout.
+**Second real defect found during live re-verification of the first
+fix**: rebuilding and installing fresh with the `TeeAction` wiring
+above made data flow to `dns-observer` (satisfying a shallow check),
+but every observation recorded `source_ip: "127.0.0.1"` regardless of
+the real query's real origin. Root cause: `TeeAction` re-originates the
+tee'd copy from dnsdist's OWN local UDP socket -- the raw UDP peer
+address `dns-observer`'s `recvfrom()` sees is therefore always dnsdist
+itself, never the real client, no matter how `TeeAction` is configured.
+Confirmed against dnsdist's own documented `TeeAction` signature
+(`remote [, addECS [, local]]`) and by direct experiment: a standalone
+probe dnsdist instance with `TeeAction(target, true)` (`addECS=true`)
+correctly embedded the real client's address as a real EDNS Client
+Subnet (RFC 7871) option on the tee'd packet.
+
+**Fixed properly**: both generators now pass `addECS=true`;
+`dns-observer` gained `_parse_ecs_source_ip()` (decodes the ECS option,
+IPv4 and IPv6, deliberately only for a well-formed query with zero
+answer/authority records) and prefers it over the raw UDP peer address.
+Note this makes discovery accurate to dnsdist's configured ECS source
+prefix (default `/24` for IPv4 -- a deliberate, existing, appliance-wide
+privacy default, not something this fix loosened or narrowed), so
+observed addresses are subnet-precision by default, not exact-host --
+consistent with the appliance's existing ECS privacy posture rather
+than a new trade-off introduced here.
+
+Real live re-verification after rebuilding with BOTH fixes: a real UDP
+query from a genuinely distinct source address (the podman bridge
+network's own address, outside the container) through a real installed,
+freshly clean-installed appliance's real dnsdist correctly appeared in
+`/api/discovery/observed-clients` with a real, correct (subnet-level)
+source address -- not `127.0.0.1`, not empty. Also incidentally proved
+the mechanism captures ALL real dnsdist-processed traffic, not just the
+deliberate test query: a periodic real internal health-check/keepalive
+query was independently observed too. Promoted the observed entry to a
+managed client through the real API
+(`POST /api/discovery/observed-clients/{ip}/promote`) successfully.
+Stopping `alderpointdns-v2-dns-observer` and `alderpointdns-v2-discovery`
+outright left real DNS resolution on the appliance completely
+unaffected throughout. Retention/bounds (`max_entries`/`expiry_days`)
+unit-tested and unchanged this pass.
