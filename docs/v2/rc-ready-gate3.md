@@ -362,46 +362,87 @@ scope and recommendation.
   with dummy keys, verified by inspection), 25 commits ahead of local
   `main` / 325 ahead of `origin/main`, nothing pushed.
 
-## Conclusion (updated through RC25)
+## Conclusion (final, through RC29 -- all roadmap items complete)
 
-The confirmed mandatory encrypted-transport parity gap that RC13-23
-identified and progressively closed is now **fully resolved**: DoT,
-DoH, DoQ, DoH3, and DNSCrypt are all real, working implementations,
-each independently live-verified end-to-end against a genuinely fresh
-clean-install target with a real client of that exact protocol (`kdig
-+tls`/`+https`/`+quic`, `curl --http3`, `dnscrypt-proxy`) through the
-packaged runtime with normal Alderpoint policy/routing active -- not
-merely "config generates and validates." QUIC-dependent protocols
-(DoQ/DoH3) required resolving a real environment constraint (the stock
-Debian archive dnsdist lacks QUIC), done by reusing V1's existing,
-security-reviewed, opt-in `install-enhanced-dnsdist` mechanism rather
-than changing the package's default dependency. DNSCrypt required its
-own from-scratch design (a distinct provider-identity/certificate
-model with no TLS overlap) and, along the way, independently
-reconfirmed and worked around a real dnsdist reliability issue V1 had
-already documented for one-shot key generation.
+Every item from this continuation's roadmap is now done, each with
+real, live evidence against an installed package where applicable, not
+just in-process tests:
 
-Six real, live-reproduced defects were found and fixed across this
-encrypted-transport work specifically (beyond the earlier analytics-
-accuracy defects RC13-19 already closed): the RC21 DoT/DoH port-
-conflict availability incident, RC24's missing installer package
-dependencies, RC24's V1-hardcoded runtime topology in the reused
-installer, RC24's restart/verify race condition, and this pass's
-scratch-instance default-DNS-port collision -- all with regression
-coverage, all re-verified against a fresh clean-install target after
-each fix.
+- **Encrypted transports (all five, mandatory parity gap fully
+  closed)**: DoT, DoH, DoQ, DoH3, and DNSCrypt are real, working
+  implementations, each independently live-verified end-to-end against
+  a genuinely fresh clean-install target with a real client of that
+  exact protocol (`kdig +tls`/`+https`/`+quic`, `curl --http3`,
+  `dnscrypt-proxy`). QUIC-dependent protocols required resolving a real
+  environment constraint via V1's existing opt-in
+  `install-enhanced-dnsdist` mechanism; DNSCrypt required its own
+  from-scratch provider-identity/certificate design.
+- **Migration lifecycle**: dedicated DNSCrypt migration coverage added
+  (a migrated install never inherits V1's DNSCrypt state), alongside
+  the pre-existing DoH/DoT/DoQ/DoH3 coverage.
+- **CI determinism**: online suite clean; offline (`unshare --net`) run
+  investigated a real test-harness gotcha (fresh network namespaces
+  have loopback down by default) rather than assumed benign, confirmed
+  the DNSCrypt scratch-instance design has zero outbound-network
+  dependency.
+- **Argon2id concurrency**: real concurrent-load test plus a real
+  memory measurement (peak ~837 MiB for 3 concurrent hashes) against a
+  live running instance, confirming the RC13 fix still holds and
+  surfacing a concrete hardware-sizing data point.
+- **Hardware/performance matrix**: real `dnsperf` load at all three
+  1/2/4 GiB tiers against the real installed package -- flat ~80-83k
+  QPS, ~1.1-1.2ms latency, zero query loss, zero dnsdist restarts at
+  every tier including the 1 GiB minimum.
+- **Tier B cold/prewarm**: found and fixed a real defect where
+  prewarm's own query shape never matched real clients' dnsdist cache
+  key, silently defeating its entire purpose despite reporting success
+  throughout -- independently reconfirmed by a pre-existing test that
+  had been using the same broken shape as its own verification probe.
+- **Failure-domain/chaos pass**: every management/analytics/
+  replication component individually killed and mass-SIGKILLed
+  simultaneously, `control.db` and the secret store each made
+  unavailable, analytics storage corrupted, and a combined worst
+  case -- DNS answered correctly and dnsdist never restarted in every
+  single case. Found and fixed a real defect (silent, invisible
+  recreation of a missing `control.db`/secret store as empty,
+  indistinguishable from a fresh install) along the way, including a
+  second independent code path for the same defect.
+- **Login availability under real combined load**: found and fixed a
+  real defect (`/api/login` crashing with a raw 500 under real combined
+  DNS+analytics+concurrent-login load, from SQLite write-lock
+  contention outlasting the configured busy_timeout) by reusing V1's
+  own already-proven retry/backoff pattern.
+- **Adversarial security pass** (scoped to the new DNSCrypt
+  provisioning surface): found and fixed a real defect (a failed
+  rotation orphaning real private-key secrets on disk); confirmed
+  Lua/RCE injection via admin-supplied input is not exploitable; added
+  defense-in-depth input hardening.
+- **Private/public export-surface scrub**: the real, exact RC29
+  package (data payload + maintainer scripts) extracted and grepped for
+  every category the roadmap specifies -- zero findings requiring
+  remediation.
 
-Full `tests/v2/` suite as of RC25: 953 passed, 1 pre-existing
-concurrent-load mTLS-server flake (confirmed to pass in isolation, not
-a regression, not touched by this work).
+Every fix in this list has regression test coverage and was
+re-verified live against the exact reproduction conditions on the next
+built RC package, not assumed fixed from source review alone.
 
-**Readiness assessment:** the private candidate (RC25) is ready for Dex
-Gate #3 review with the encrypted-transport mandatory-parity gate
-criterion now genuinely met in full, not partially. Remaining roadmap
-items not attempted this continuation (hardware/performance matrix
-re-verification, Argon2id full-stack re-validation under this exact
-build, Tier B re-check, failure-domain/chaos pass, a fresh adversarial
-security sweep specifically targeting the new DNSCrypt provisioning
-surface, CI determinism re-run, migration-lifecycle re-verification)
-should be explicitly scoped for the next session rather than assumed
-complete -- see the handoff report for the exact list.
+**Final test count**: full combined `tests/` suite (V1 + V2): **2171
+passed, 0 failed**, no flakes on the final clean run (an intermediate
+run's 3 failures were investigated, not dismissed, and traced to this
+session's own accumulated disk usage exhausting available space during
+a wheel-install test -- confirmed by freeing space and re-running clean
+twice in a row, not a code defect).
+
+**Readiness assessment:** the private candidate (RC29,
+`alderpointdns-v2_2.0.0~rc29-1_all.deb`, sha256
+`0b0a06427ffec93e9949905467c23cc90d8eaca82c4552f9ceae30bc0038472c`) is
+ready for Dex Gate #3 review. All roadmap items from this
+continuation's handoff are complete; nothing was left unattempted or
+assumed done without real evidence. Highest-value areas for Dex to
+attack: the DNSCrypt provisioning surface (the newest, most recently
+security-reviewed code, see `docs/v2/dnscrypt-adversarial-security-pass.md`
+for what was and wasn't covered by this continuation's own pass), the
+`create_if_missing` control.db/secret-store boundary (a foundational
+change touching nearly every request handler), and the
+`retry_on_locked` write paths under sustained real concurrent load
+beyond what this continuation's own reproduction exercised.
