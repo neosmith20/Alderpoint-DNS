@@ -246,6 +246,23 @@ def _local_dns_rule_lines(local_dns_records: list[tuple]) -> list[str]:
 # always safe to emit even before/without the receiver service running.
 ANALYTICS_PROTOBUF_LOG_ADDRESS = "127.0.0.1:5391"
 
+# Local-only UDP address for the real client-discovery observer (roadmap
+# Priority 12 continuation -- see docs/v2/two-node-replication-discovery-
+# acceptance.md for the gap this closes: alderpointdns-v2-dns-observer's
+# own ingress on 1053 was real, tested, and running from a fresh install
+# onward, but nothing in this generator ever sent it a copy of real
+# client traffic -- observational discovery from real DNS-originated
+# packets genuinely did not work end to end until this was wired in,
+# confirmed live by a real two-node acceptance pass finding
+# /api/discovery/observed-clients stayed empty under real dnsdist
+# traffic. dnsdist's TeeAction duplicates the query datagram to a
+# second UDP target and never blocks on or uses that target's response
+# -- the same fire-and-forget safety property RemoteLogger already
+# gives the analytics producer above, so this cannot slow down or
+# affect a real client's own answer even if dns-observer is
+# unreachable, degraded, or slow.
+DISCOVERY_INGRESS_ADDRESS = "127.0.0.1:1053"
+
 
 @dataclass(frozen=True)
 class DotConfig:
@@ -449,6 +466,7 @@ def compile_multi_policy_dnsdist_config(
     max_cache_entries: int = DEFAULT_MAX_CACHE_ENTRIES,
     local_dns_records: list[tuple] | None = None,
     analytics_log_address: str | None = ANALYTICS_PROTOBUF_LOG_ADDRESS,
+    discovery_ingress_address: str | None = DISCOVERY_INGRESS_ADDRESS,
     dot: DotConfig | None = None,
     doh: DohConfig | None = None,
     doq: DoqConfig | None = None,
@@ -519,6 +537,18 @@ def compile_multi_policy_dnsdist_config(
             f'analytics_rl = newRemoteLogger("{analytics_log_address}")',
             "addAction(AllRule(), RemoteLogAction(analytics_rl))",
             "addResponseAction(AllRule(), RemoteLogResponseAction(analytics_rl))",
+            "",
+        ]
+
+    if discovery_ingress_address:
+        # Real client-discovery producer: mirrors every query datagram
+        # to the dns-observer ingress (see DISCOVERY_INGRESS_ADDRESS's
+        # own comment above for why this is safe to always emit).
+        # addECS=false: dns-observer only needs the packet's real source
+        # address (already the UDP peer address TeeAction preserves),
+        # not an EDNS Client Subnet option.
+        lines += [
+            f'addAction(AllRule(), TeeAction("{discovery_ingress_address}", false))',
             "",
         ]
 

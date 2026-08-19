@@ -400,9 +400,12 @@ def cmd_issue_peer_cert(args: argparse.Namespace) -> int:
         print(f"enrollment bundle written to {args.out} -- copy it to {args.remote_node_id}'s administrator, "
               f"who pastes ca_pem/expected_cert_sha256/client_cert_pem/client_key_pem into "
               f"PUT /api/replication/peers/{ident.node_id} on that node (direction='push'); for a "
-              f"bidirectional relationship they also need this bundle's issued_cert_sha256 as THEIR "
-              f"own peer-record-for-{ident.node_id}'s expected_incoming_cert_sha256 -- see this "
-              f"command's own --help/docstring")
+              f"bidirectional relationship, that administrator ALSO needs a bundle THEY issue "
+              f"themselves (run this same command on their own node, issuing for {ident.node_id}) -- "
+              f"THEIR OWN bundle's issued_cert_sha256 (not this one's) is what goes in their own "
+              f"peer-record-for-{ident.node_id}'s expected_incoming_cert_sha256, since that's the cert "
+              f"they issued for you to present when you push to them -- see this command's own "
+              f"--help/docstring")
     else:
         print(json.dumps(bundle, indent=2))
     return 0

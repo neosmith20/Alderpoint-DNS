@@ -36,6 +36,26 @@ class TestBasicGeneration:
         with pytest.raises(PolicyRuntimeError):
             compile_multi_policy_dnsdist_config("127.0.0.1:5300", [])
 
+    def test_discovery_ingress_gets_a_real_copy_of_every_query(self):
+        # Real defect found live during two-node discovery acceptance
+        # testing: alderpointdns-v2-dns-observer's own ingress (1053)
+        # was real and running from a fresh install onward, but nothing
+        # in this generator ever sent it a copy of real client queries
+        # -- /api/discovery/observed-clients stayed empty forever under
+        # real dnsdist traffic. TeeAction is dnsdist's documented
+        # fire-and-forget mirror (never blocks on or uses the target's
+        # response), matching RemoteLogger's existing safety contract
+        # for the analytics producer just above it.
+        b = _binding("10.0.1.0/24", "p1")
+        text = compile_multi_policy_dnsdist_config("127.0.0.1:5300", [b])
+        assert 'TeeAction("127.0.0.1:1053", false)' in text
+        assert "addAction(AllRule(), TeeAction(" in text
+
+    def test_discovery_ingress_address_can_be_disabled(self):
+        b = _binding("10.0.1.0/24", "p1")
+        text = compile_multi_policy_dnsdist_config("127.0.0.1:5300", [b], discovery_ingress_address=None)
+        assert "TeeAction" not in text
+
     def test_deterministic_output(self):
         b1 = _binding("10.0.1.0/24", "p1")
         b2 = _binding("10.0.2.0/24", "p2")

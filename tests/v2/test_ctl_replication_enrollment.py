@@ -106,3 +106,32 @@ class TestIssuePeerCertCommand:
         assert (out_path.stat().st_mode & 0o777) == 0o600
         bundle = json.loads(out_path.read_text())
         assert bundle["issued_for_node_id"] == "remote-node-7"
+
+    def test_out_file_guidance_tells_recipient_to_use_their_own_bundle_for_incoming(self, ctl_module, tmp_path, capsys):
+        # Real defect found live during a real two-node bidirectional
+        # replication acceptance test: this printed guidance previously
+        # told the recipient to use the fingerprint from the bundle THEY
+        # JUST RECEIVED as their own expected_incoming_cert_sha256 -- but
+        # that fingerprint is the cert the recipient presents OUTGOING
+        # (already covered by client_cert_pem/client_key_pem above), not
+        # the cert the sender presents when pushing INCOMING to the
+        # recipient. A real administrator following that instruction
+        # literally would set expected_incoming_cert_sha256 to a
+        # completely unrelated cert, and every real incoming push from
+        # the sender would then fail closed with "peer certificate
+        # fingerprint mismatch" (see replication_v2._validate_message).
+        # Proven correct end-to-end: a real two-node bidirectional
+        # replication test using the CORRECTED mapping (each node's OWN
+        # issued bundle's issued_cert_sha256 for its own
+        # expected_incoming_cert_sha256) applied cleanly in both
+        # directions; using the old wrong mapping does not.
+        ctl_module.cmd_init_replication_cert(argparse.Namespace())
+        capsys.readouterr()
+        out_path = tmp_path / "bundle.json"
+        ctl_module.cmd_issue_peer_cert(
+            argparse.Namespace(remote_node_id="remote-node-9", server_name="localhost", out=str(out_path))
+        )
+        message = capsys.readouterr().out
+        assert "their own bundle's issued_cert_sha256" in message.lower() \
+            or "own bundle's issued_cert_sha256" in message.lower()
+        assert "this bundle's issued_cert_sha256 as their own" not in message.lower()
