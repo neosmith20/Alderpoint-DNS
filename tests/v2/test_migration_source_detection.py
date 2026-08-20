@@ -18,6 +18,7 @@ from app.v2.migration_convert import (
     MigrationConvertError,
     UnsupportedSourceSchemaError,
     detect_source,
+    resolve_source_db_path,
 )
 from tests.v2._v1_fixture import build_v1_fixture
 
@@ -213,3 +214,44 @@ class TestSchemaContractIsRealAndExhaustive:
         # V1 source genuinely lacks it -- optional, not required.
         assert "notification_providers" in OPTIONAL_TABLES_AND_COLUMNS
         assert "notification_providers" not in REQUIRED_TABLES_AND_COLUMNS
+
+
+class TestSourcePathAcceptsBothFileAndDirectory:
+    """RC42 owner-reported regression: the V2 UI supplies the real V1
+    installed database FILE path,
+    ``/var/lib/alderpointdns/alderpointdns.db``, but ``detect_source``
+    unconditionally treated its argument as a directory and appended
+    ``alderpointdns.db`` again, looking for the non-existent
+    ``.../alderpointdns.db/alderpointdns.db`` and failing with
+    ``unsupported_source`` against a completely real, present V1 install.
+    """
+
+    def test_exact_rc42_reproduction_direct_file_path_is_accepted(self, tmp_path):
+        db_file = tmp_path / "alderpointdns.db"
+        build_v1_fixture(db_file)
+        # Exactly the path RC42's UI sent -- the database FILE itself,
+        # not its containing directory.
+        info = detect_source(db_file)
+        assert info.classification == "supported_complete"
+
+    def test_source_root_directory_still_works(self, tmp_path):
+        source_root = tmp_path / "src"
+        build_v1_fixture(source_root / "alderpointdns.db")
+        info = detect_source(source_root)
+        assert info.classification == "supported_complete"
+
+    def test_resolve_source_db_path_directly(self, tmp_path):
+        db_file = tmp_path / "alderpointdns.db"
+        build_v1_fixture(db_file)
+        assert resolve_source_db_path(db_file) == db_file
+        assert resolve_source_db_path(tmp_path) == db_file
+
+    def test_nonexistent_path_fails_with_a_clear_diagnostic(self, tmp_path):
+        with pytest.raises(MigrationConvertError, match="source path not found"):
+            detect_source(tmp_path / "does-not-exist")
+
+    def test_directory_missing_the_database_fails_with_a_clear_diagnostic(self, tmp_path):
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        with pytest.raises(MigrationConvertError, match="does not contain alderpointdns.db"):
+            detect_source(empty_dir)

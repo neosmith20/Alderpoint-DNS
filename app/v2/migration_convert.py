@@ -103,6 +103,41 @@ def _real_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
+def resolve_source_db_path(source_path: Path) -> Path:
+    """Explicit source-root/source-database contract (real defect closed:
+    RC42's UI supplied V1's real installed database FILE,
+    ``/var/lib/alderpointdns/alderpointdns.db``, but this function
+    unconditionally treated its argument as a DIRECTORY and appended
+    ``alderpointdns.db`` again -- looking for the non-existent
+    ``.../alderpointdns.db/alderpointdns.db`` and failing with
+    ``unsupported_source`` on a completely real, present V1 install).
+
+    ``source_path`` may be either:
+    - a direct path to the source database FILE itself (a real V1
+      install's ``alderpointdns.db``, or a restored copy of one), or
+    - a source ROOT directory that CONTAINS ``alderpointdns.db``.
+
+    Both are validated explicitly and unambiguously here, once, so every
+    caller (API, CLI, tests) gets the same resolution instead of each
+    guessing independently.
+    """
+    source_path = Path(source_path)
+    if source_path.is_file():
+        return source_path
+    if source_path.is_dir():
+        candidate = source_path / "alderpointdns.db"
+        if candidate.is_file():
+            return candidate
+        raise MigrationConvertError(
+            f"source root {source_path} does not contain alderpointdns.db"
+        )
+    raise MigrationConvertError(
+        f"source path not found: {source_path} (expected either the source "
+        "database file itself, e.g. /var/lib/alderpointdns/alderpointdns.db, "
+        "or a directory containing it)"
+    )
+
+
 def detect_source(source_root: Path) -> SourceInfo:
     """Real, exhaustive pre-flight schema validation (§5A-5B): every table
     and column the real migration conversion functions actually read is
@@ -112,9 +147,7 @@ def detect_source(source_root: Path) -> SourceInfo:
 
     Never opens the source for writing.
     """
-    db_path = Path(source_root) / "alderpointdns.db"
-    if not db_path.exists():
-        raise MigrationConvertError(f"source database not found at {db_path}")
+    db_path = resolve_source_db_path(Path(source_root))
     try:
         uri = f"file:{db_path}?mode=ro"
         conn = sqlite3.connect(uri, uri=True)
