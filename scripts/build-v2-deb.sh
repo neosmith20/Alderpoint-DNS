@@ -97,7 +97,7 @@ Section: net
 Priority: optional
 Architecture: ${DEB_ARCH}
 Maintainer: Alderpoint DNS Maintainers <maintainers@example.invalid>
-Depends: dnsdist (>= 1.9.0), bind9, bind9-utils, bind9-dnsutils, curl, gnupg, python3 (>= 3.11), python3-argon2, python3-cryptography, python3-yaml, python3-pip, python3-fastapi, python3-itsdangerous, python3-pydantic, uvicorn, sqlite3
+Depends: dnsdist (>= 1.9.0), bind9, bind9-utils, bind9-dnsutils, curl, gnupg, python3 (>= 3.11), python3-argon2, python3-cryptography, python3-yaml, python3-pip, python3-fastapi, python3-itsdangerous, python3-pydantic, python3-openpyxl, uvicorn, sqlite3
 Conflicts: alderpointdns
 Description: Alderpoint DNS V2 -- PRIVATE RELEASE CANDIDATE (not for production)
  Private, pre-release Workstream 4A/4B packaging of Alderpoint DNS V2.
