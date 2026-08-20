@@ -183,6 +183,25 @@ cp "$SOURCE_DIR/app/backup.py" "$PKG/opt/alderpointdns-v2/app/backup.py"
 # module's own docstring); only the low-level, tool-wrapping functions
 # are reused.
 cp "$SOURCE_DIR/app/software_updates.py" "$PKG/opt/alderpointdns-v2/app/software_updates.py"
+# Beta-rescue priority 4 (Network Configuration): app/v2/network_config.py
+# reuses V1's already-tested app/network_config.py wholesale (backend
+# detection/staging/validation/apply/auto-rollback safety logic for
+# networkd/netplan/NetworkManager/ifupdown) rather than reimplementing a
+# second, unproven copy of a safety-critical subsystem -- see that
+# module's own docstring. Real defect found live during this candidate's
+# own clean-install acceptance testing (same class of gap RC44's fix
+# closed for the import/software-updates reuse below): this file was
+# never added here, so a genuinely fresh install crashed
+# alderpointdns-v2-ctl's own module-load with
+# "ImportError: cannot import name 'network_config' from 'app'" on
+# every single invocation, including the postinst state-init call that
+# every other unit depends on -- installing this package could never
+# have completed on a real host. Confirmed by the same AST-inspection
+# standard as every other exception on this list: no dangerous
+# module-level side effects (a docstring, stdlib-only imports, and one
+# late in-function `import sqlite3` for an unrelated legacy V1-only
+# request-queue helper this wrapper never calls).
+cp "$SOURCE_DIR/app/network_config.py" "$PKG/opt/alderpointdns-v2/app/network_config.py"
 tar -C "$SOURCE_DIR" --exclude __pycache__ --exclude '*.pyc' -cf - app/v2 | \
   tar -C "$PKG/opt/alderpointdns-v2" -xf -
 tar -C "$SOURCE_DIR" -cf - vendor/v2-analytics | \
