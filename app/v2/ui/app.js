@@ -25,6 +25,7 @@
     ["DNS", "upstreams", "DNS Settings", "U"],
     ["DNS", "cache", "Cache", "K"],
     ["Security", "filtering", "Filters / Security", "F"],
+    ["Security", "blocklists", "Blocklists", "X"],
     ["Operations", "importexport", "Import", "I"],
     ["Operations", "backup", "Backup & Restore", "B"],
     ["Operations", "replication", "Replication", "R"],
@@ -626,6 +627,36 @@
       </div></div></section>`);
   }
 
+  async function blocklists() {
+    const data = await api("/api/blocklists");
+    const rows = (data.subscriptions || []).map((s) => `
+      <tr>
+        <td>${esc(s.name)}<br><span class="muted mono">${esc(s.subscription_id)}</span></td>
+        <td class="truncate" title="${esc(s.url)}">${esc(s.url)}</td>
+        <td><span class="badge ${s.enabled ? "ok" : "inherit"}">${s.enabled ? "enabled" : "disabled"}</span></td>
+        <td><span class="badge ${tone(s.last_status)}">${esc(s.last_status)}</span>${s.last_error ? `<br><span class="muted">${esc(s.last_error)}</span>` : ""}</td>
+        <td>${esc(s.rule_count)}</td>
+        <td>${esc(s.last_refresh_at || "never")}</td>
+        <td class="field-row">
+          <button data-blocklist-refresh="${esc(s.subscription_id)}">Refresh</button>
+          <button data-blocklist-toggle="${esc(s.subscription_id)}">${s.enabled ? "Disable" : "Enable"}</button>
+          <button data-blocklist-delete="${esc(s.subscription_id)}" class="danger">Delete</button>
+        </td>
+      </tr>`).join("");
+    return page("Blocklists", "Subscribed, refreshable domain-block feeds. A failed refresh keeps the previous valid list enforced -- it never clears filtering on error. Refreshed automatically every 24h, or on demand below.", `<button data-refresh>Refresh page</button>`, `
+      <section class="panel"><div class="panel__head"><h2>Subscriptions</h2></div><div class="panel__body">
+        ${(data.subscriptions || []).length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>URL</th><th>Enabled</th><th>Last status</th><th>Rules</th><th>Last refresh</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty">No blocklist subscriptions yet.</div>`}
+      </div></section>
+      <section class="panel"><div class="panel__head"><h2>Add Subscription</h2></div><div class="panel__body">
+        <form data-form="blocklist-create"><div class="form-grid">
+          <label>ID<input name="subscription_id" required placeholder="stevenblack-hosts"></label>
+          <label>Name<input name="name" required placeholder="StevenBlack Unified Hosts"></label>
+          <label>Category<input name="category" placeholder="ads_trackers"></label>
+        </div><label>URL<input name="url" required placeholder="https://example.com/hosts.txt"></label>
+        <button class="primary">Add subscription</button></form>
+      </div></section>`);
+  }
+
   async function cache() {
     const status = await api("/api/cache/status");
     const bindRows = (status.bind || []).map((b) => `
@@ -745,7 +776,7 @@
       <tr><td>${j.id}</td><td><span class="badge ${tone(j.status)}">${esc(j.status)}</span></td><td>${esc(j.detail.candidate_version || "")}</td><td>${esc(j.started_at || "")}</td><td>${esc(j.finished_at || "")}</td><td>${j.status === "staged" ? `<button data-apply-update="${j.id}" class="danger">Apply</button>` : ""}${j.detail.apply_result && j.detail.apply_result.error ? `<span class="muted">${esc(j.detail.apply_result.error)}</span>` : ""}</td></tr>`).join("")}</tbody></table></div>`;
   }
 
-  const renderers = { dashboard, analytics, clients, policies, filtering, upstreams, localdns, cache, replication, backup, settings, health, importexport, updates };
+  const renderers = { dashboard, analytics, clients, policies, filtering, blocklists, upstreams, localdns, cache, replication, backup, settings, health, importexport, updates };
 
   // Real defect fixed here (found by the expanded stateful-navigation
   // regression, priority 1 of the beta-rescue brief): loadPage() had no
@@ -941,6 +972,31 @@
         toast(`${res.revoked_count} other session(s) revoked`, "ok");
         return;
       }
+      const blRefresh = ev.target.closest("[data-blocklist-refresh]");
+      if (blRefresh) {
+        const id = blRefresh.dataset.blocklistRefresh;
+        const res = await api(`/api/blocklists/${encodeURIComponent(id)}/refresh`, { method: "POST" });
+        await loadPage("blocklists");
+        toast(`${id}: ${res.message}`, res.status === "succeeded" ? "ok" : "bad");
+        return;
+      }
+      const blToggle = ev.target.closest("[data-blocklist-toggle]");
+      if (blToggle) {
+        const id = blToggle.dataset.blocklistToggle;
+        await api(`/api/blocklists/${encodeURIComponent(id)}/toggle`, { method: "POST" });
+        await loadPage("blocklists");
+        toast("Subscription updated", "ok");
+        return;
+      }
+      const blDelete = ev.target.closest("[data-blocklist-delete]");
+      if (blDelete) {
+        const id = blDelete.dataset.blocklistDelete;
+        if (!confirm(`Delete subscription ${id}? Its domains will stop being blocked.`)) return;
+        await api(`/api/blocklists/${encodeURIComponent(id)}`, { method: "DELETE" });
+        await loadPage("blocklists");
+        toast("Subscription deleted", "ok");
+        return;
+      }
     });
 
     document.body.addEventListener("change", (ev) => {
@@ -1087,6 +1143,8 @@
     } else if (type === "change-password") {
       await api("/api/session/password", { method: "POST", body: JSON.stringify({ current_password: body.current_password, new_password: body.new_password }) });
       form.reset();
+    } else if (type === "blocklist-create") {
+      await api("/api/blocklists", { method: "POST", body: JSON.stringify(body) });
     } else if (type === "cache-flush") {
       const layer = form.dataset.layer;
       const payload = { layer };

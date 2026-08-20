@@ -208,6 +208,7 @@ async function main() {
         importexport: "Import",
         updates: "Software Updates",
         cache: "Cache",
+        blocklists: "Blocklists",
       };
       await evalJs(`document.querySelector('[data-route="${name}"]').click(); true`);
       await waitFor(`document.querySelector('.page-head h1') && document.querySelector('.page-head h1').textContent === ${JSON.stringify(titles[name])} && !document.body.innerText.includes("Page unavailable")`, name);

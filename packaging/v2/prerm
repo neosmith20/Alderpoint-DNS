@@ -8,7 +8,7 @@ set -e
 # §17 remove-vs-purge contract (see postrm).
 case "$1" in
   remove|upgrade|deconfigure)
-    systemctl stop alderpointdns-v2-bind-reload.path alderpointdns-v2-doh-egress@dohctx0.service alderpointdns-v2-doh-egress@dohctx1.service alderpointdns-v2-doh-egress@dohctx2.service alderpointdns-v2-doh-egress@dohctx3.service alderpointdns-v2-bind@ctx0.service alderpointdns-v2-bind@ctx1.service alderpointdns-v2-bind@ctx2.service alderpointdns-v2-bind@ctx3.service alderpointdns-v2-dnsdist-reload.path alderpointdns-v2-dnsdist alderpointdns-v2-analytics alderpointdns-v2-analytics-protobuf-receiver alderpointdns-v2-tierb alderpointdns-v2-schedule alderpointdns-v2-web alderpointdns-v2-discovery alderpointdns-v2-dns-observer alderpointdns-v2-replication alderpointdns-v2-update-apply.path >/dev/null 2>&1 || true
+    systemctl stop alderpointdns-v2-bind-reload.path alderpointdns-v2-doh-egress@dohctx0.service alderpointdns-v2-doh-egress@dohctx1.service alderpointdns-v2-doh-egress@dohctx2.service alderpointdns-v2-doh-egress@dohctx3.service alderpointdns-v2-bind@ctx0.service alderpointdns-v2-bind@ctx1.service alderpointdns-v2-bind@ctx2.service alderpointdns-v2-bind@ctx3.service alderpointdns-v2-dnsdist-reload.path alderpointdns-v2-dnsdist alderpointdns-v2-analytics alderpointdns-v2-analytics-protobuf-receiver alderpointdns-v2-tierb alderpointdns-v2-schedule alderpointdns-v2-web alderpointdns-v2-discovery alderpointdns-v2-dns-observer alderpointdns-v2-replication alderpointdns-v2-update-apply.path alderpointdns-v2-blocklist-refresh.timer >/dev/null 2>&1 || true
     ;;
 esac
 

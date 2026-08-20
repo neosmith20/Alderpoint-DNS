@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodic Alderpoint DNS V2 subscribed Blocklist refresh
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=24h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

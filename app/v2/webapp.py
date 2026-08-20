@@ -46,6 +46,7 @@ from app import dnsdist_upgrade
 from app.db_retry import DatabaseBusyError, is_lock_error, retry_on_locked
 from app.v2 import analytics_deps
 from app.v2 import backup_restore
+from app.v2 import blocklist_subscriptions
 from app.v2 import control_db
 from app.v2 import dnscrypt_provisioning
 from app.v2 import import_migration
@@ -2304,6 +2305,74 @@ def cache_flush_route(req: CacheFlushRequest, admin=Depends(current_admin), x_cs
             raise ApiError(400, "validation_error", str(exc)) from exc
         results.append({"context": r.context, "scope": r.scope, "target": r.target, "ok": r.ok, "message": r.message})
     return {"results": results}
+
+
+# --- subscribed Blocklists (beta-rescue priority 3B) -------------------------
+
+
+class BlocklistSubscriptionCreate(BaseModel):
+    subscription_id: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=128)
+    url: str = Field(min_length=1, max_length=2048)
+    category: str = ""
+
+
+@app.get("/api/blocklists")
+def list_blocklist_subscriptions_route(admin=Depends(current_admin)):
+    with _db() as conn:
+        return {"subscriptions": store.list_blocklist_subscriptions(conn)}
+
+
+@app.post("/api/blocklists")
+def create_blocklist_subscription_route(req: BlocklistSubscriptionCreate, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    try:
+        with _db() as conn:
+            store.create_blocklist_subscription(conn, req.subscription_id, req.name, req.url, req.category)
+    except PolicyStoreError as exc:
+        raise ApiError(409, "conflict", str(exc)) from exc
+    return {"status": "created"}
+
+
+@app.post("/api/blocklists/{subscription_id}/toggle")
+def toggle_blocklist_subscription_route(subscription_id: str, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    with _db() as conn:
+        sub = store.get_blocklist_subscription(conn, subscription_id)
+        if sub is None:
+            raise ApiError(404, "not_found", "unknown subscription")
+        store.set_blocklist_subscription_enabled(conn, subscription_id, not sub["enabled"])
+    return {"status": "updated"}
+
+
+@app.delete("/api/blocklists/{subscription_id}")
+def delete_blocklist_subscription_route(subscription_id: str, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+
+    def _mutate(conn):
+        sub = store.get_blocklist_subscription(conn, subscription_id)
+        if sub is None:
+            raise ApiError(404, "not_found", "unknown subscription")
+        blocklist_subscriptions.remove_subscription_service(conn, subscription_id)
+        store.delete_blocklist_subscription(conn, subscription_id)
+
+    _mutate_and_promote(_mutate)
+    return {"status": "deleted"}
+
+
+@app.post("/api/blocklists/{subscription_id}/refresh")
+def refresh_blocklist_subscription_route(subscription_id: str, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    holder: dict = {}
+
+    def _mutate(conn):
+        if store.get_blocklist_subscription(conn, subscription_id) is None:
+            raise ApiError(404, "not_found", "unknown subscription")
+        holder["result"] = blocklist_subscriptions.refresh_subscription(conn, subscription_id)
+
+    result = _mutate_and_promote(_mutate)
+    r = holder["result"]
+    return {"status": "succeeded" if r.ok else "failed", "rule_count": r.rule_count, "message": r.message, "runtime": {"promoted": result.promoted}}
 
 
 # --- software updates (beta-rescue priority 4) ------------------------------

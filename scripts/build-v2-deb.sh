@@ -211,6 +211,12 @@ cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-update-apply.service" "$PKG/lib/sy
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-update-apply.path" "$PKG/lib/systemd/system/alderpointdns-v2-update-apply.path"
 cp "$SOURCE_DIR/scripts/v2/alderpointdns_v2_update_apply.py" "$PKG/opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_update_apply.py"
 chmod 0755 "$PKG/opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_update_apply.py"
+# Subscribed Blocklists periodic refresh (beta-rescue priority 3B): same
+# unprivileged account as the web service, no new privilege.
+cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-blocklist-refresh.service" "$PKG/lib/systemd/system/alderpointdns-v2-blocklist-refresh.service"
+cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-blocklist-refresh.timer" "$PKG/lib/systemd/system/alderpointdns-v2-blocklist-refresh.timer"
+cp "$SOURCE_DIR/scripts/v2/alderpointdns_v2_blocklist_refresh.py" "$PKG/opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_blocklist_refresh.py"
+chmod 0755 "$PKG/opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_blocklist_refresh.py"
 # BIND architecture correction (Gate #3): the real packaged V2 BIND
 # recursive-cache backend unit + its AppArmor local override (see
 # packaging/v2/postinst's own apparmor block for why this must be

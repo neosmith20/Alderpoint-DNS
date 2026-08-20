@@ -1093,3 +1093,90 @@ def save_update_settings(conn: sqlite3.Connection, private_feed_dir: str | None)
         """,
         (private_feed_dir, now),
     )
+
+
+# --- subscribed blocklist feeds (beta-rescue priority 3B) --------------------
+#
+# Distinct from the one-time, import-derived block domains
+# app/v2/import_migration.py already writes (those are a snapshot taken
+# once, at import time). A subscription is a URL that gets re-fetched on
+# a schedule; each subscription's own domains live in their own service
+# (so a broken/removed subscription only ever touches its own domains),
+# accumulated into a shared ruleset the same way import jobs already do.
+
+def ensure_blocklist_subscription_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS blocklist_subscriptions (
+            id INTEGER PRIMARY KEY,
+            subscription_id TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            url TEXT NOT NULL,
+            category TEXT NOT NULL DEFAULT '',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            last_refresh_at TEXT,
+            last_status TEXT NOT NULL DEFAULT 'never_refreshed',
+            last_error TEXT NOT NULL DEFAULT '',
+            rule_count INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+
+
+def create_blocklist_subscription(conn: sqlite3.Connection, subscription_id: str, name: str, url: str, category: str = "") -> None:
+    ensure_blocklist_subscription_schema(conn)
+    try:
+        conn.execute(
+            "INSERT INTO blocklist_subscriptions (subscription_id, name, url, category, enabled, created_at) VALUES (?, ?, ?, ?, 1, ?)",
+            (subscription_id, name, url, category, _now()),
+        )
+    except sqlite3.IntegrityError as exc:
+        raise PolicyStoreError(f"duplicate subscription_id: {exc}") from exc
+
+
+def list_blocklist_subscriptions(conn: sqlite3.Connection) -> list[dict]:
+    ensure_blocklist_subscription_schema(conn)
+    cols = ["id", "subscription_id", "name", "url", "category", "enabled", "created_at", "last_refresh_at", "last_status", "last_error", "rule_count"]
+    rows = conn.execute(f"SELECT {', '.join(cols)} FROM blocklist_subscriptions ORDER BY subscription_id").fetchall()
+    out = [dict(zip(cols, row)) for row in rows]
+    for row in out:
+        row["enabled"] = bool(row["enabled"])
+    return out
+
+
+def get_blocklist_subscription(conn: sqlite3.Connection, subscription_id: str) -> dict | None:
+    ensure_blocklist_subscription_schema(conn)
+    cols = ["id", "subscription_id", "name", "url", "category", "enabled", "created_at", "last_refresh_at", "last_status", "last_error", "rule_count"]
+    row = conn.execute(f"SELECT {', '.join(cols)} FROM blocklist_subscriptions WHERE subscription_id = ?", (subscription_id,)).fetchone()
+    if row is None:
+        return None
+    result = dict(zip(cols, row))
+    result["enabled"] = bool(result["enabled"])
+    return result
+
+
+def set_blocklist_subscription_enabled(conn: sqlite3.Connection, subscription_id: str, enabled: bool) -> None:
+    ensure_blocklist_subscription_schema(conn)
+    conn.execute("UPDATE blocklist_subscriptions SET enabled = ? WHERE subscription_id = ?", (int(enabled), subscription_id))
+
+
+def delete_blocklist_subscription(conn: sqlite3.Connection, subscription_id: str) -> None:
+    ensure_blocklist_subscription_schema(conn)
+    conn.execute("DELETE FROM blocklist_subscriptions WHERE subscription_id = ?", (subscription_id,))
+
+
+def record_blocklist_refresh_result(
+    conn: sqlite3.Connection, subscription_id: str, status: str, error: str = "", rule_count: int | None = None,
+) -> None:
+    ensure_blocklist_subscription_schema(conn)
+    if rule_count is None:
+        conn.execute(
+            "UPDATE blocklist_subscriptions SET last_refresh_at = ?, last_status = ?, last_error = ? WHERE subscription_id = ?",
+            (_now(), status, error, subscription_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE blocklist_subscriptions SET last_refresh_at = ?, last_status = ?, last_error = ?, rule_count = ? WHERE subscription_id = ?",
+            (_now(), status, error, rule_count, subscription_id),
+        )
