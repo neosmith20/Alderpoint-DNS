@@ -1192,6 +1192,26 @@ def put_dns_transports(
     return {"status": "updated", "runtime": {"promoted": result.promoted, "binding_count": result.binding_count}}
 
 
+# --- Apple .mobileconfig enrollment profiles (beta-rescue priority 3D) -----
+
+
+@app.get("/api/dns-transports/mobileconfig/{protocol}")
+def dns_transport_mobileconfig(protocol: str, admin=Depends(current_admin)):
+    from app.v2 import mobileconfig
+
+    with _db() as conn:
+        transport = store.load_dns_transport_settings(conn)
+    cert = tls_cert.load_active_cert_info(ACTIVE_CERT_PATH, ACTIVE_KEY_PATH)
+    try:
+        profile_bytes = mobileconfig.build_mobileconfig(protocol, transport, cert)
+    except mobileconfig.MobileconfigError as exc:
+        raise ApiError(400, "unavailable", str(exc)) from exc
+    return Response(
+        content=profile_bytes, media_type="application/x-apple-aspen-config",
+        headers={"Content-Disposition": f"attachment; filename=alderpointdns-v2-{protocol}.mobileconfig"},
+    )
+
+
 class DnscryptRotateRequest(BaseModel):
     rotate_provider: bool = False
 

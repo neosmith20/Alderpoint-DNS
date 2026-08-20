@@ -613,12 +613,37 @@
   }
 
   async function settings() {
-    const [tls, notifications] = await Promise.all([api("/api/tls/status"), api("/api/notifications")]);
+    const [tls, notifications, transports] = await Promise.all([api("/api/tls/status"), api("/api/notifications"), api("/api/dns-transports")]);
     return page("HTTPS / Notifications", "Certificate replacement uses stage, validate, promote. Provider secrets are write-only and redacted.", "", `
       <div class="grid two">
         <section class="panel"><div class="panel__head"><h2>HTTPS Certificate</h2><span class="badge ${tls.is_self_signed ? "warn" : "ok"}">${tls.active ? (tls.is_self_signed ? "self-signed" : "active") : "missing"}</span></div><div class="panel__body">${tableFromRows([tls], 1)}${tlsForm()}</div></section>
         <section class="panel"><div class="panel__head"><h2>Notifications</h2></div><div class="panel__body">${tableFromRows(notifications.providers || [], 50)}${notificationForm()}</div></section>
-      </div>`);
+      </div>
+      <section class="panel"><div class="panel__head"><h2>Encrypted DNS Transports</h2></div><div class="panel__body">
+        ${dnsTransportForm(transports)}
+        <div style="margin-top:12px"><p class="muted">Apple enrollment profiles (.mobileconfig) for whichever transport below is enabled, using the active HTTPS certificate's own hostname -- never advertised for a disabled transport.</p>
+          <div class="field-row">
+            <a class="btn ${transports.doh_enabled ? "" : "muted"}" href="/api/dns-transports/mobileconfig/doh">Download DoH profile</a>
+            <a class="btn ${transports.dot_enabled ? "" : "muted"}" href="/api/dns-transports/mobileconfig/dot">Download DoT profile</a>
+          </div>
+        </div>
+      </div></section>`);
+  }
+
+  function dnsTransportForm(t) {
+    return `<form data-form="dns-transports"><div class="form-grid">
+      <label><span>DoT</span><select name="dot_enabled" data-bool="1"><option value="true" ${t.dot_enabled ? "selected" : ""}>enabled</option><option value="false" ${!t.dot_enabled ? "selected" : ""}>disabled</option></select></label>
+      <label>DoT port<input name="dot_port" value="${esc(t.dot_port)}" data-number="1"></label>
+      <label><span>DoH</span><select name="doh_enabled" data-bool="1"><option value="true" ${t.doh_enabled ? "selected" : ""}>enabled</option><option value="false" ${!t.doh_enabled ? "selected" : ""}>disabled</option></select></label>
+      <label>DoH port<input name="doh_port" value="${esc(t.doh_port)}" data-number="1"></label>
+      <label>DoH path<input name="doh_path" value="${esc(t.doh_path)}"></label>
+      <label><span>DoQ</span><select name="doq_enabled" data-bool="1"><option value="true" ${t.doq_enabled ? "selected" : ""}>enabled</option><option value="false" ${!t.doq_enabled ? "selected" : ""}>disabled</option></select></label>
+      <label>DoQ port<input name="doq_port" value="${esc(t.doq_port)}" data-number="1"></label>
+      <label><span>DoH3</span><select name="doh3_enabled" data-bool="1"><option value="true" ${t.doh3_enabled ? "selected" : ""}>enabled</option><option value="false" ${!t.doh3_enabled ? "selected" : ""}>disabled</option></select></label>
+      <label>DoH3 port<input name="doh3_port" value="${esc(t.doh3_port)}" data-number="1"></label>
+      <input type="hidden" name="dnscrypt_enabled" value="${t.dnscrypt_enabled ? "true" : "false"}" data-bool="1">
+      <input type="hidden" name="dnscrypt_port" value="${esc(t.dnscrypt_port)}" data-number="1">
+    </div><button class="primary">Save and promote runtime</button></form>`;
   }
 
   function tlsForm() {
@@ -1111,6 +1136,8 @@
     } else if (type === "appliance-restore") {
       const name = form.dataset.backupName;
       await api(`/api/backup/appliance/${encodeURIComponent(name)}/restore`, { method: "POST", body: JSON.stringify(body) });
+    } else if (type === "dns-transports") {
+      await api("/api/dns-transports", { method: "PUT", body: JSON.stringify(body) });
     } else if (type === "tls") {
       await api("/api/tls/replace", { method: "POST", body: JSON.stringify(body) });
     } else if (type === "notification") {
