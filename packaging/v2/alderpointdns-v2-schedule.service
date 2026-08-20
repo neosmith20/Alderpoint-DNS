@@ -26,10 +26,23 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-# Needs write access to compiled/ and staging/ (recompiles+promotes the
-# generated dnsdist/RPZ runtime artifacts) in addition to its own state
-# file, unlike the other two workers.
-ReadWritePaths=/var/lib/alderpointdns-v2/compiled /var/lib/alderpointdns-v2/staging /var/lib/alderpointdns-v2/schedule /var/log/alderpointdns-v2
+# Real defect found live during a real V1->V2 migration/restart
+# acceptance test (beta-rescue continuation): this worker's on_start()
+# unconditionally recompiles from the actual current control.db policy
+# state on every single service start (app/v2/schedule_runtime.py's own
+# §26 contract -- startup itself is treated as an implicit transition),
+# so it needs the same broad read/write access to control.db, secrets,
+# certs, and BIND's own working directory that a real policy mutation
+# through the management API needs (see alderpointdns-v2-web.service's
+# own ReadWritePaths) -- not just compiled/ and staging/. Under the
+# previous narrower list, every restart of this unit (i.e. every
+# reboot) would have failed to even read control.db, or -- worse, the
+# actual defect this pass found and fixed alongside this -- silently
+# recompiled from an empty bootstrap default instead of real policy,
+# wiping every configured block domain/upstream/encrypted-transport
+# setting back to nothing on every restart with no error surfaced
+# anywhere.
+ReadWritePaths=/var/lib/alderpointdns-v2 /var/log/alderpointdns-v2
 UMask=0027
 CapabilityBoundingSet=
 MemoryMax=256M

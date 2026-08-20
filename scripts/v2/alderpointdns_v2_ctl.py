@@ -1562,12 +1562,46 @@ def cmd_schedule_worker(args: argparse.Namespace) -> int:
     """Periodic schedule transition tick (§25-27). ``on_transition`` here
     is exactly the runtime-recompile hook the module's own docstring
     calls for: regenerate + stage + validate + promote the compiled
-    runtime -- reusing generate-runtime's own compiler so there is only
-    one real code path that ever writes COMPILED_DIR."""
+    runtime from the REAL current control.db policy state.
+
+    Real, severe defect found live during a real V1->V2 migration/
+    restart acceptance test (beta-rescue continuation): this used to
+    call ``cmd_generate_runtime`` -- the install-time BOOTSTRAP compiler,
+    which its own docstring says unconditionally generates "an empty (no
+    blocked/allowed domains yet ... none are configured on a fresh
+    install)" RPZ zone and a bare default dnsdist config, completely
+    ignoring control.db. ``ScheduleTransitionRuntime.on_start()`` (see
+    app/v2/schedule_runtime.py's own §26 docstring) unconditionally
+    treats every single service start as an implicit transition and
+    calls ``on_transition`` -- meaning every restart of this unit (i.e.
+    every reboot, every crash-restart) silently wiped every real
+    configured block domain, upstream, and encrypted-transport setting
+    back to the empty bootstrap defaults, with no error surfaced
+    anywhere (the recompile itself "succeeds" -- it is just recompiling
+    the wrong thing). Confirmed live: a real migrated appliance answered
+    real DNS queries correctly for a blocked domain immediately after
+    migration, then stopped blocking it and started leaking local DNS
+    records to real upstream resolution after nothing more than a plain
+    container/service restart.
+
+    Fixed to reuse app.v2.webapp._mutate_and_promote with a no-op
+    mutation -- the exact same encrypted-transport-config-gathering,
+    multi-context-BIND-aware, commit-guarded recompile+promote path
+    every real policy mutation through the management API already uses
+    (see that function's own docstring), rather than a second,
+    materially different "recompile" implementation that only looked
+    equivalent. A lazy import: webapp.py's own module-level app
+    construction is heavier than this worker otherwise needs, but
+    reusing the one real, already-tested compile path here is safer
+    than a parallel reimplementation quietly drifting out of sync with
+    it again.
+    """
 
     def on_transition(now: datetime, active_ids: frozenset) -> bool:
         try:
-            cmd_generate_runtime(argparse.Namespace(dnsdist_binary="dnsdist", named_checkzone_binary="named-checkzone", named_checkconf_binary="named-checkconf"))
+            from app.v2 import webapp
+
+            webapp._mutate_and_promote(lambda conn: None)
             return True
         except Exception as exc:  # noqa: BLE001 -- must not crash the worker loop
             log.error("schedule transition recompile failed: %s", exc)
