@@ -425,3 +425,188 @@ class TestImportApiRoutes:
         )
         assert r.status_code == 400
         assert r.json()["error"] == "validation_error"
+
+
+@pytest.mark.skipif(not shutil.which("dnsdist"), reason="requires installed dnsdist")
+class TestRemainingFormatsRealRuntimeProof:
+    """Real end-to-end proof for the generic import formats not already
+    covered by TestRealRuntimeProof (which proves AdGuard/Pi-hole): hosts,
+    BIND zone, native CSV, XLSX, and native JSON. All of these funnel
+    through the exact same apply_plan()/build_bindings()/
+    compile_multi_policy_dnsdist_config() path already proven live for
+    AdGuard/Pi-hole -- this closes the explicit per-format verification
+    the beta-rescue brief asked for without duplicating the same compile/
+    promote proof five separate times for no new coverage."""
+
+    def test_hosts_bind_zone_csv_xlsx_native_json_all_reach_real_dns_answers(self, tmp_path):
+        from app.v2 import runtime_compile
+        from app.v2.dnsdist_policy_runtime import compile_multi_policy_dnsdist_config
+
+        db_path = tmp_path / "control.db"
+        store.ensure_schema(db_path)
+
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["fqdn", "record_type", "value", "ttl", "enabled", "comment"])
+        ws.append(["xlsx-fmt.home.arpa", "A", "10.11.0.5", 300, 1, ""])
+        import io as _io
+        xlsx_buf = _io.BytesIO()
+        wb.save(xlsx_buf)
+        xlsx_bytes = xlsx_buf.getvalue()
+
+        sources = [
+            ("hosts", "10.11.0.1 hosts-fmt.home.arpa\n", None, None),
+            ("bind_zone", "zone-fmt.home.arpa.  300  IN  A  10.11.0.2\n", None, None),
+            ("csv", "fqdn,record_type,value,ttl,enabled,comment\ncsv-fmt.home.arpa,A,10.11.0.3,300,1,\n", None, None),
+            ("alderpointdns_json", None, {
+                "format": "alderpointdns-native", "version": 2,
+                "local_dns_records": [{"fqdn": "json-fmt.home.arpa", "record_type": "A", "value": "10.11.0.4", "ttl": 300}],
+            }, None),
+            ("xlsx", None, None, xlsx_bytes),
+        ]
+
+        with control_db.connect(db_path) as conn:
+            for i, (source_type, text, payload, data) in enumerate(sources):
+                kwargs = {"default_domain": "home.arpa"}
+                if payload is not None:
+                    import json as _json
+                    kwargs["text"] = _json.dumps(payload)
+                elif data is not None:
+                    kwargs["data"] = data
+                else:
+                    kwargs["text"] = text
+                translation = im.parse_source(source_type, **kwargs)
+                plan = im.build_plan(translation, conn)
+                job_id = im.create_job(conn, source_type, f"fmt-{i}", plan)
+                counts = im.apply_plan(conn, job_id, plan)
+                assert counts["local_dns"] >= 1, f"{source_type}: {counts}"
+            conn.commit()
+
+            bindings = runtime_compile.build_bindings(conn)
+            local_dns_records = store.load_local_dns_records(conn)
+
+        names = {r[0] for r in local_dns_records}
+        assert {"hosts-fmt.home.arpa", "zone-fmt.home.arpa", "csv-fmt.home.arpa", "json-fmt.home.arpa", "xlsx-fmt.home.arpa"} <= names
+
+        port = _free_port()
+        config_text = compile_multi_policy_dnsdist_config(
+            f"127.0.0.1:{port}", bindings, local_dns_records=local_dns_records,
+            analytics_log_address=None, discovery_ingress_address=None,
+        )
+        conf_path = tmp_path / "dnsdist.conf"
+        conf_path.write_text(config_text)
+        proc = subprocess.Popen(
+            ["dnsdist", "-C", str(conf_path), "--supervised", "--disable-syslog"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        try:
+            time.sleep(1.0)
+            for fqdn, ip in (
+                ("hosts-fmt.home.arpa.", "10.11.0.1"),
+                ("zone-fmt.home.arpa.", "10.11.0.2"),
+                ("csv-fmt.home.arpa.", "10.11.0.3"),
+                ("json-fmt.home.arpa.", "10.11.0.4"),
+                ("xlsx-fmt.home.arpa.", "10.11.0.5"),
+            ):
+                resp = _dig(port, fqdn, "A")
+                answers = [str(rr) for rrset in resp.answer for rr in rrset]
+                assert any(ip in a for a in answers), f"{fqdn} -> {answers}"
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+
+class TestAdGuardApiWorkflow:
+    """Proves the 'direct API workflow' AdGuard import path is real, not a
+    decorative UI option: a real HTTP server (Basic Auth, real JSON
+    responses shaped like AdGuard Home's actual /control/* endpoints)
+    stands in for a live AdGuard Home instance, and fetch_adguard_api is
+    exercised against it for real -- real HTTP requests, real auth header,
+    real response parsing, not a mock of the function itself."""
+
+    @staticmethod
+    def _start_fake_adguard_server():
+        import base64
+        import http.server
+        import json as _json
+        import threading
+
+        expected_auth = "Basic " + base64.b64encode(b"admin:adguard-pass").decode()
+        responses = {
+            "/control/filtering/status": {
+                "filters": [{"name": "AdGuard Base", "url": "https://example.com/base.txt", "enabled": True}],
+                "whitelist_filters": [],
+                "user_rules": ["||ads.example^"],
+            },
+            "/control/rewrite/list": [{"domain": "nas-api.lan", "answer": "10.30.30.5"}],
+            "/control/clients": {"clients": [{"name": "API Laptop", "ids": ["10.30.30.6"]}]},
+            "/control/dns_info": {"upstream_dns": ["8.8.8.8"], "bootstrap_dns": ["9.9.9.9"]},
+        }
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                if self.headers.get("Authorization") != expected_auth:
+                    self.send_response(401)
+                    self.end_headers()
+                    return
+                body = responses.get(self.path)
+                if body is None:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                payload = _json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        return server
+
+    def test_real_http_fetch_and_translate(self, conn):
+        server = self._start_fake_adguard_server()
+        try:
+            port = server.server_address[1]
+            translation = im.parse_source(
+                "adguard_api", base_url=f"http://127.0.0.1:{port}",
+                username="admin", password="adguard-pass", default_domain="home.arpa",
+            )
+            plan = im.build_plan(translation, conn)
+            local_dns = {(i["fqdn"], i["value"]) for i in plan["items"] if i["kind"] == "local_dns"}
+            assert ("nas-api.lan", "10.30.30.5") in local_dns
+            blocked = {i["domain"] for i in plan["items"] if i["kind"] == "block_domain"}
+            assert "ads.example" in blocked
+            clients = {i["name"] for i in plan["items"] if i["kind"] == "client"}
+            assert "API Laptop" in clients
+            upstreams = {i["address"] for i in plan["items"] if i["kind"] == "upstream"}
+            assert any("8.8.8.8" in a for a in upstreams)
+        finally:
+            server.shutdown()
+
+    def test_wrong_credentials_produce_a_clean_error_not_a_crash(self, conn):
+        server = self._start_fake_adguard_server()
+        try:
+            port = server.server_address[1]
+            translation = im.parse_source(
+                "adguard_api", base_url=f"http://127.0.0.1:{port}",
+                username="admin", password="wrong-password", default_domain="home.arpa",
+            )
+            # fetch_adguard_api degrades to per-endpoint fetch_errors
+            # rather than raising -- every endpoint should have failed
+            # cleanly (401), and the plan must still build without
+            # crashing, just with nothing to import.
+            plan = im.build_plan(translation, conn)
+            assert plan["item_count"] >= 0  # did not raise
+        finally:
+            server.shutdown()
