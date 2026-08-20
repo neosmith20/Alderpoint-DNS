@@ -24,16 +24,27 @@
     ["System", "health", "System / Health", "H"],
   ];
 
+  // One canonical model, matching app/v2/policy_model.py's own
+  // _VALID_* sets exactly -- real defect fixed here: these previously
+  // showed placeholder text that didn't match any real accepted value
+  // ("sinkhole" is not a real response mode; ECS's real values are
+  // disabled/preserve/custom, not "off | privacy | full"; fallback's
+  // real values are none/on_failure/always_parallel, not
+  // "ordered | failover"). Enum-valued fields render as a real <select>
+  // (4th element) so an operator can only ever submit a value the
+  // backend actually accepts; id-referencing fields stay free text.
   const policyFields = [
     ["filtering_profile_id", "Filtering profile", "default"],
-    ["safesearch_mode", "SafeSearch", "off | moderate | strict"],
+    ["safesearch_mode", "SafeSearch", "off | moderate | strict", ["off", "moderate", "strict"]],
     ["parental_policy_id", "Parental policy", "none | family"],
     ["security_policy_id", "Security policy", "none | standard"],
     ["service_blocking_ruleset_id", "Service ruleset", "ruleset id"],
-    ["blocking_response_mode", "Response mode", "refused | nxdomain | sinkhole"],
+    ["blocking_response_mode", "Response mode", "", ["nxdomain", "refused", "null_ip", "custom_ip"]],
+    ["custom_ipv4", "Custom block IPv4", "only used when response mode is custom_ip"],
+    ["custom_ipv6", "Custom block IPv6", "only used when response mode is custom_ip"],
     ["upstream_profile_id", "Upstream profile", "profile id"],
-    ["fallback_strategy", "Fallback", "ordered | failover"],
-    ["ecs_mode", "ECS", "off | privacy | full"],
+    ["fallback_strategy", "Fallback", "", ["none", "on_failure", "always_parallel"]],
+    ["ecs_mode", "ECS (client subnet)", "", ["disabled", "preserve", "custom"]],
     ["domain_routing_ruleset_id", "Domain routes", "ruleset id"],
   ];
 
@@ -182,8 +193,17 @@
       api("/api/upstreams").catch(() => ({ upstreams: [] })),
     ]);
     const rows = recent.rows || [];
-    const blocked = rows.filter((r) => String(JSON.stringify(r)).toLowerCase().includes("block")).length;
-    const bars = (top.rows || []).slice(0, 10).map((r) => Number(Object.values(r).find((v) => typeof v === "number")) || 1);
+    // Real defect fixed here: this previously counted "blocked" by
+    // searching each row's serialized JSON text for the substring
+    // "block" -- a false-positive-prone heuristic (matches domain names,
+    // cache-status/block_reason text, etc. regardless of the row's real
+    // `blocked` value) instead of reading the canonical typed boolean
+    // field the backend already returns. All dashboard/query-log metrics
+    // must use typed fields, not string heuristics.
+    const blockedIdx = (recent.columns || []).indexOf("blocked");
+    const blocked = blockedIdx === -1 ? 0 : rows.filter((r) => r[blockedIdx] === true).length;
+    const countIdx = (top.columns || []).indexOf("count");
+    const bars = (top.rows || []).slice(0, 10).map((r) => Number(countIdx === -1 ? 1 : r[countIdx]) || 1);
     const max = Math.max(1, ...bars);
     return page("Dashboard", "Operational state from the real V2 HTTPS APIs.", `<button data-refresh>Refresh</button>`, `
       <div class="strip">
@@ -195,7 +215,7 @@
       </div>
       ${recent.degraded ? `<div class="alert warn">Analytics degraded: ${esc(recent.degraded_reason || "query data unavailable")}. DNS status is reported separately.</div>` : ""}
       <div class="grid two">
-        <section class="panel"><div class="panel__head"><h2>Top Domains</h2><span class="badge ${top.degraded ? "warn" : "ok"}">${top.degraded ? "degraded" : "live"}</span></div><div class="panel__body">${chart(bars, max)}${tableFromRows(top.rows || [], 6)}</div></section>
+        <section class="panel"><div class="panel__head"><h2>Top Domains</h2><span class="badge ${top.degraded ? "warn" : "ok"}">${top.degraded ? "degraded" : "live"}</span></div><div class="panel__body">${chart(bars, max)}${tableFromRows(top.rows || [], 6, top.columns)}</div></section>
         <section class="panel"><div class="panel__head"><h2>Runtime Components</h2></div><div class="panel__body">${componentList(c.health.components || {})}</div></section>
         <section class="panel"><div class="panel__head"><h2>Clients</h2></div><div class="panel__body">${clientMini(clients.clients || [])}</div></section>
         <section class="panel"><div class="panel__head"><h2>Upstreams</h2></div><div class="panel__body">${upstreams.upstreams?.length ? tableFromRows(upstreams.upstreams, 5) : `<div class="empty">No upstream profiles configured.</div>`}</div></section>
@@ -211,8 +231,19 @@
     return `<div class="grid">${Object.entries(components).map(([k, v]) => `<div class="field-row"><span class="mono">${esc(k)}</span><span class="badge ${tone(v.status || (v.present === false ? "warn" : "ok"))}">${esc(v.status || (v.present === false ? "missing" : "ok"))}</span><span class="muted">${esc(v.detail || "")}</span></div>`).join("") || `<div class="empty">No component data.</div>`}</div>`;
   }
 
-  function tableFromRows(rows, limit) {
-    const list = rows.slice(0, limit || 50);
+  // ``columns``, when given, is the API's own explicit named-column list
+  // for a POSITIONAL row source (app/v2/analytics_query.py's
+  // QueryResult) -- real defect fixed here: this previously always
+  // derived column headers via Object.keys(row), which is correct for a
+  // list of real objects but silently produces "0", "1", "2", ... against
+  // a list of plain arrays, exactly what a positional analytics row is.
+  // Named analytics rows are zipped into real objects here, once, rather
+  // than asking every caller to guess the row shape.
+  function tableFromRows(rows, limit, columns) {
+    let list = rows.slice(0, limit || 50);
+    if (columns && columns.length) {
+      list = list.map((r) => Object.fromEntries(columns.map((c, i) => [c, r[i]])));
+    }
     if (!list.length) return `<div class="empty">No records.</div>`;
     const cols = Object.keys(list[0]).slice(0, 8);
     return `<div class="table-wrap"><table><thead><tr>${cols.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>${list.map((r) => `<tr>${cols.map((c) => `<td class="truncate" title="${esc(r[c])}">${pretty(r[c])}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
@@ -232,8 +263,8 @@
       <button data-refresh>Refresh</button>`, `
       ${recent.degraded ? `<div class="alert warn">Recent query log degraded: ${esc(recent.degraded_reason || "unavailable")}</div>` : ""}
       <div class="grid two">
-        <section class="panel"><div class="panel__head"><h2>Recent Queries</h2><span class="badge">${recent.rows.length} rows</span></div><div class="panel__body">${queryFilters()}<div id="query-active">${activeFilters(recent.filters || {})}</div><div id="query-results">${tableFromRows(recent.rows || [], 100)}</div></div></section>
-        <section class="panel"><div class="panel__head"><h2>Top Domains</h2></div><div class="panel__body">${tableFromRows(top.rows || [], 30)}</div></section>
+        <section class="panel"><div class="panel__head"><h2>Recent Queries</h2><span class="badge">${recent.rows.length} rows</span></div><div class="panel__body">${queryFilters()}<div id="query-active">${activeFilters(recent.filters || {})}</div><div id="query-results">${tableFromRows(recent.rows || [], 100, recent.columns)}</div></div></section>
+        <section class="panel"><div class="panel__head"><h2>Top Domains</h2></div><div class="panel__body">${tableFromRows(top.rows || [], 30, top.columns)}</div></section>
       </div>`);
   }
 
@@ -331,7 +362,16 @@
 
   function policyEditor(scope, ref, policy) {
     return `<form data-form="policy" data-scope="${esc(scope)}" data-ref="${esc(ref)}">
-      <div class="form-grid">${policyFields.map(([key, label, ph]) => `<label>${esc(label)}<input name="${esc(key)}" value="${esc(policy[key] || "")}" placeholder="${esc(ph)}" data-omit-empty="1"></label>`).join("")}</div>
+      <div class="form-grid">${policyFields.map(([key, label, ph, options]) => {
+        const current = policy[key] || "";
+        if (options) {
+          const opts = [`<option value="">inherit</option>`].concat(
+            options.map((o) => `<option value="${esc(o)}" ${o === current ? "selected" : ""}>${esc(o)}</option>`)
+          ).join("");
+          return `<label>${esc(label)}<select name="${esc(key)}" data-omit-empty="1">${opts}</select></label>`;
+        }
+        return `<label>${esc(label)}<input name="${esc(key)}" value="${esc(current)}" placeholder="${esc(ph)}" data-omit-empty="1"></label>`;
+      }).join("")}</div>
       ${triState("query_log_enabled", "Query log", policy.query_log_enabled)}
       ${triState("statistics_enabled", "Statistics", policy.statistics_enabled)}
       <button class="primary">Save policy and promote runtime</button>
@@ -669,7 +709,7 @@
       }
       const res = await api(`/api/analytics/query-log?${q}`);
       document.getElementById("query-active").innerHTML = activeFilters(res.filters || {});
-      document.getElementById("query-results").innerHTML = tableFromRows(res.rows || [], Number(body.limit || 100));
+      document.getElementById("query-results").innerHTML = tableFromRows(res.rows || [], Number(body.limit || 100), res.columns);
       return;
     } else if (type === "service") {
       await api("/api/services", { method: "POST", body: JSON.stringify({ service_id: body.service_id, display_name: body.display_name, category: body.category || "", domains: body.domain ? [{ match_kind: body.match_kind, domain: body.domain }] : [] }) });

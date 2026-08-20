@@ -79,3 +79,35 @@ class TestBuildReproducibility:
             assert (extract_a / name).read_bytes() == (extract_b / name).read_bytes(), (
                 f"ar member {name!r} differs between two builds of the same source"
             )
+
+
+class TestPackageArchitectureMetadata:
+    """Real defect closed (beta-rescue pass): RC42 declared "Architecture:
+    all" while the package contains real x86_64/CPython 3.13 binary
+    payloads (vendor/v2-analytics/'s pyarrow/duckdb wheels) -- inaccurate
+    Debian metadata for a package that is not actually portable.
+    """
+
+    def test_package_declares_amd64_not_all(self, tmp_path):
+        deb = _build(tmp_path / "arch")
+        assert deb.name.endswith("_amd64.deb"), deb.name
+        result = subprocess.run(
+            ["dpkg-deb", "--field", str(deb), "Architecture"],
+            capture_output=True, text=True, check=True,
+        )
+        assert result.stdout.strip() == "amd64"
+
+    def test_vendored_analytics_wheels_are_genuinely_architecture_specific(self):
+        # Sanity check on the premise itself: confirms *why* "all" would
+        # be inaccurate, so this test fails loudly (not silently) if the
+        # vendored wheels are ever swapped for genuinely portable ones,
+        # at which point Architecture: all would become correct again.
+        vendor_dir = REPO_ROOT / "vendor" / "v2-analytics"
+        wheels = list(vendor_dir.glob("*.whl"))
+        assert wheels, "expected vendored analytics wheels to exist"
+        assert any("x86_64" in w.name for w in wheels), (
+            "no architecture-specific wheel found -- if the vendored analytics "
+            "dependencies are now genuinely portable (py3-none-any), Architecture: "
+            "all would be accurate again and this premise (and the amd64 fix "
+            "above) should be revisited"
+        )

@@ -39,7 +39,7 @@ from app.v2 import bind_gen
 from app.v2 import doh_egress_gen
 from app.v2 import policy_store as store
 from app.v2 import safesearch
-from app.v2.blocking_response import BlockingResponse
+from app.v2.blocking_response import BlockingResponse, InvalidBlockingResponseError
 from app.v2.dnsdist_gen import dnsdist_check_config_validator
 from app.v2.dnsdist_policy_runtime import (
     ClientPolicyBinding,
@@ -90,8 +90,28 @@ def _domains_for_ruleset(conn: sqlite3.Connection, ruleset_id: str) -> list[str]
     return [row[0] for row in rows]
 
 
+def _blocking_response_for_policy(policy) -> BlockingResponse:
+    """Real defect closed: this previously constructed
+    ``BlockingResponse(mode=policy.blocking_response_mode)`` alone, never
+    passing the effective ``custom_ipv4``/``custom_ipv6`` fields through
+    -- so any policy resolving to ``custom_ip`` mode crashed the entire
+    compile the instant BlockingResponse's own constructor (correctly)
+    rejected a custom_ip response with no address, regardless of whether
+    a real address had been configured. "" is PolicyLayer's "not
+    configured" sentinel (see policy_model.py); translated to None here
+    to match BlockingResponse's own convention rather than passing "" in
+    and getting an ipaddress-parse error for an address nobody set.
+    """
+    mode = policy.blocking_response_mode
+    return BlockingResponse(
+        mode=mode,
+        custom_ipv4=(policy.custom_ipv4 or None) if mode == "custom_ip" else None,
+        custom_ipv6=(policy.custom_ipv6 or None) if mode == "custom_ip" else None,
+    )
+
+
 def _blocked_domains_for_policy(conn: sqlite3.Connection, policy) -> dict:
-    response = BlockingResponse(mode=policy.blocking_response_mode)
+    response = _blocking_response_for_policy(policy)
     blocked: dict[str, BlockingResponse] = {}
     # filtering_profile_id joins the same three ruleset-shaped fields
     # (real defect closed: this field's docstring previously read "not yet
@@ -141,6 +161,14 @@ def _safesearch_providers_for_policy(policy) -> tuple[str, ...]:
     return ()
 
 
+def _safesearch_level_for_policy(policy) -> str:
+    # Real defect closed: "moderate" and "strict" previously produced
+    # byte-identical runtime rewrites because nothing downstream of this
+    # policy field ever distinguished them (see safesearch.py's own
+    # per-provider audit of which providers can genuinely differ).
+    return policy.safesearch_mode if policy.safesearch_mode in ("moderate", "strict") else "strict"
+
+
 def _default_upstream_endpoints() -> tuple:
     from app.v2.policy_store import UpstreamEndpointRecord
 
@@ -167,6 +195,7 @@ def _binding_for_scope(conn: sqlite3.Connection, network: NetworkScope, policy) 
         network=network,
         cache_profile_id=cache_profile.profile_id,
         safesearch_providers=_safesearch_providers_for_policy(policy),
+        safesearch_level=_safesearch_level_for_policy(policy),
         blocked_domains=_blocked_domains_for_policy(conn, policy),
         domain_routes=_domain_routes_for_policy(conn, policy),
         upstream_endpoints=endpoints,
@@ -484,6 +513,13 @@ def recompile_and_promote(
         )
     except PolicyRuntimeError as exc:
         raise RuntimeCompileError(f"policy runtime compile failed: {exc}") from exc
+    except InvalidBlockingResponseError as exc:
+        # e.g. an effective policy resolved to blocking_response_mode=
+        # "custom_ip" with no custom_ipv4/custom_ipv6 configured at any
+        # layer -- a real, reportable configuration error, not an
+        # unhandled crash. §18's "known-good runtime remains active on
+        # failure" applies here exactly like any other compile failure.
+        raise RuntimeCompileError(f"blocking response configuration invalid: {exc}") from exc
 
     staging_dir.mkdir(parents=True, exist_ok=True)
     try:

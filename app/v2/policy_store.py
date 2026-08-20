@@ -48,6 +48,8 @@ _MIGRATION_V2: list[str] = [
         security_policy_id TEXT,
         service_blocking_ruleset_id TEXT,
         blocking_response_mode TEXT,
+        custom_ipv4 TEXT,
+        custom_ipv6 TEXT,
         upstream_profile_id TEXT,
         fallback_strategy TEXT,
         ecs_mode TEXT,
@@ -201,8 +203,25 @@ def ensure_schema(path: str | Path) -> None:
         already_present = _table_exists(conn, "policy_layers")
     if not already_present:
         control_db.apply_migration_in_transaction(path, _MIGRATION_V2, POLICY_STORE_SCHEMA_VERSION)
+    _ensure_policy_layers_custom_ip_columns(path)
     _ensure_dns_transport_settings_table(path)
     _ensure_dnscrypt_settings_table(path)
+
+
+def _ensure_policy_layers_custom_ip_columns(path: str | Path) -> None:
+    """Incremental migration (real defect closed, beta-rescue pass):
+    custom_ip blocking response mode had no columns to store its address
+    in at all. Runs unconditionally on every ensure_schema() call, like
+    _ensure_dns_transport_settings_table below, so it reaches an already-
+    migrated install upgrading from a prior RC, not only a fresh one.
+    """
+    with control_db.connect(path) as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(policy_layers)").fetchall()}
+        if "custom_ipv4" not in cols:
+            conn.execute("ALTER TABLE policy_layers ADD COLUMN custom_ipv4 TEXT")
+        if "custom_ipv6" not in cols:
+            conn.execute("ALTER TABLE policy_layers ADD COLUMN custom_ipv6 TEXT")
+        conn.commit()
 
 
 def _ensure_dns_transport_settings_table(path: str | Path) -> None:

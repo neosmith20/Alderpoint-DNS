@@ -25,14 +25,39 @@ _PROVIDER_TABLE: dict[str, tuple[str, ...]] = {
     "duckduckgo": ("duckduckgo.com",),
 }
 
-_SAFE_CNAME_TARGET: dict[str, str] = {
-    "google": "forcesafesearch.google.com",
-    "youtube": "restrict.youtube.com",
-    "bing": "strict.bing.com",
-    "duckduckgo": "safe.duckduckgo.com",
+# Real defect closed (beta-rescue pass, owner-reported): "moderate" and
+# "strict" previously mapped to the exact same single CNAME target per
+# provider, so the two exposed modes always produced byte-identical
+# runtime rewrites -- fake differentiation. Audited against each
+# provider's own published DNS-level SafeSearch documentation:
+#
+# - YouTube genuinely publishes two distinct enforcement hostnames --
+#   restrictmoderate.youtube.com and restrictstrict.youtube.com -- so
+#   "moderate" and "strict" now really differ for YouTube.
+# - Google, Bing, and DuckDuckGo do NOT publish a distinct "moderate"
+#   DNS-enforcement hostname at all -- each publishes exactly one real
+#   enforcement CNAME, which behaves like "strict" no matter which mode
+#   selects it. Both levels intentionally map to that same real target
+#   for these three: this is the true DNS-level product contract, not a
+#   bug -- inventing a fictional "moderate" target for them would be the
+#   fake differentiation this fix is closing, in the other direction.
+_SAFE_CNAME_TARGET: dict[str, dict[str, str]] = {
+    "google": {"moderate": "forcesafesearch.google.com", "strict": "forcesafesearch.google.com"},
+    "youtube": {"moderate": "restrictmoderate.youtube.com", "strict": "restrictstrict.youtube.com"},
+    "bing": {"moderate": "strict.bing.com", "strict": "strict.bing.com"},
+    "duckduckgo": {"moderate": "safe.duckduckgo.com", "strict": "safe.duckduckgo.com"},
 }
 
+# Providers whose "moderate" target genuinely differs from "strict" --
+# used by the management-plane Explain surface to tell an administrator
+# the truth about which providers actually differentiate, rather than
+# implying uniform behavior across every provider.
+PROVIDERS_WITH_REAL_MODERATE_DIFFERENTIATION = tuple(
+    sorted(p for p, targets in _SAFE_CNAME_TARGET.items() if targets["moderate"] != targets["strict"])
+)
+
 SUPPORTED_PROVIDERS = tuple(sorted(_PROVIDER_TABLE))
+_VALID_LEVELS = ("moderate", "strict")
 
 
 def is_supported_provider(provider: str) -> bool:
@@ -46,18 +71,21 @@ class SafeSearchRewrite:
     cname_target: str
 
 
-def rewrites_for_providers(providers: list[str]) -> list[SafeSearchRewrite]:
-    """Returns one rewrite per (provider, domain) pair. Raises if any
-    requested provider isn't in the supported table -- deliberately loud
-    rather than silently skipping a provider the admin thinks is enforced.
+def rewrites_for_providers(providers: list[str], level: str = "strict") -> list[SafeSearchRewrite]:
+    """Returns one rewrite per (provider, domain) pair for the given
+    SafeSearch level ("moderate" or "strict"). Raises if any requested
+    provider isn't in the supported table -- deliberately loud rather
+    than silently skipping a provider the admin thinks is enforced.
     """
+    if level not in _VALID_LEVELS:
+        raise ValueError(f"invalid SafeSearch level: {level!r} (valid: {_VALID_LEVELS})")
     out = []
     for provider in providers:
         if provider not in _PROVIDER_TABLE:
             raise ValueError(
                 f"unsupported SafeSearch provider: {provider!r} (supported: {SUPPORTED_PROVIDERS})"
             )
-        target = _SAFE_CNAME_TARGET[provider]
+        target = _SAFE_CNAME_TARGET[provider][level]
         for domain in _PROVIDER_TABLE[provider]:
             out.append(SafeSearchRewrite(provider=provider, domain=domain, cname_target=target))
     return out

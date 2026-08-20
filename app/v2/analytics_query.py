@@ -35,6 +35,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+# Real, physical Parquet column order (app/v2/parquet_writer.py's own
+# pyarrow schema) -- reused here so a ``SELECT *`` result's positional
+# rows can be given real names in the same order DuckDB actually returns
+# them, instead of the API contract leaving ``columns: []`` and letting a
+# caller (previously the UI, via Object.keys(row)) guess column identity
+# from row position. Real defect closed: independent execution against a
+# real, populated query-history dataset found exactly this -- named
+# fields, not frontend guessing, per the beta-rescue analytics contract.
+from app.v2.parquet_writer import _COLUMN_NAMES as _QUERY_LOG_COLUMNS
+
 DEFAULT_LIMIT = 200
 MAX_LIMIT = 2000
 
@@ -231,6 +241,7 @@ class PartitionPruningReader:
 
         if columns is None:
             projection = "*"
+            result_columns = list(_QUERY_LOG_COLUMNS)
         else:
             invalid = [c for c in columns if c not in _PROJECTABLE_COLUMNS]
             if invalid:
@@ -238,6 +249,7 @@ class PartitionPruningReader:
             if not columns:
                 raise ValueError("columns, if given, must not be empty")
             projection = ", ".join(columns)
+            result_columns = list(columns)
 
         if sort_direction not in _SORT_DIRECTIONS:
             raise ValueError(f"sort_direction must be one of {sorted(_SORT_DIRECTIONS)}")
@@ -246,7 +258,7 @@ class PartitionPruningReader:
 
         files = self._files_for_range(start_ts, end_ts)
         if not files:
-            return QueryResult(rows=[], files_considered=0)
+            return QueryResult(rows=[], files_considered=0, columns=result_columns)
 
         con = self._connect()
         src = self._scan_source(files)
@@ -262,7 +274,7 @@ class PartitionPruningReader:
             sql += f" ORDER BY {sort_column} {sort_direction}"
         sql += f" LIMIT {limit} OFFSET {offset}"
         rows = con.execute(sql, params).fetchall()
-        return QueryResult(rows=rows, files_considered=len(files))
+        return QueryResult(rows=rows, files_considered=len(files), columns=result_columns)
 
     def query_recent(
         self, *, minutes: float, filters: dict[str, Any] | None = None,
@@ -280,9 +292,10 @@ class PartitionPruningReader:
         if column not in _FILTERABLE_COLUMNS:
             raise ValueError(f"unsupported column: {column!r}")
         limit = max(1, min(limit, MAX_LIMIT))
+        result_columns = [column, "count"]
         files = self._files_for_range(start_ts, end_ts)
         if not files:
-            return QueryResult(rows=[], files_considered=0)
+            return QueryResult(rows=[], files_considered=0, columns=result_columns)
         con = self._connect()
         src = self._scan_source(files)
         where = "ts >= ? AND ts < ?"
@@ -294,22 +307,24 @@ class PartitionPruningReader:
             f"GROUP BY {column} ORDER BY c DESC LIMIT {limit}"
         )
         rows = con.execute(sql, params).fetchall()
-        return QueryResult(rows=rows, files_considered=len(files))
+        return QueryResult(rows=rows, files_considered=len(files), columns=result_columns)
 
     def rcode_distribution(self, start_ts: float, end_ts: float) -> QueryResult:
+        result_columns = ["rcode", "count"]
         files = self._files_for_range(start_ts, end_ts)
         if not files:
-            return QueryResult(rows=[], files_considered=0)
+            return QueryResult(rows=[], files_considered=0, columns=result_columns)
         con = self._connect()
         src = self._scan_source(files)
         sql = f"SELECT rcode, COUNT(*) FROM {src} WHERE ts >= ? AND ts < ? GROUP BY rcode"
         rows = con.execute(sql, [start_ts, end_ts]).fetchall()
-        return QueryResult(rows=rows, files_considered=len(files))
+        return QueryResult(rows=rows, files_considered=len(files), columns=result_columns)
 
     def latency_percentiles(self, start_ts: float, end_ts: float) -> QueryResult:
+        result_columns = ["median_ms", "p95_ms", "p99_ms"]
         files = self._files_for_range(start_ts, end_ts)
         if not files:
-            return QueryResult(rows=[], files_considered=0)
+            return QueryResult(rows=[], files_considered=0, columns=result_columns)
         con = self._connect()
         src = self._scan_source(files)
         sql = (
@@ -317,4 +332,4 @@ class PartitionPruningReader:
             f"quantile_cont(latency_ms, 0.99) FROM {src} WHERE ts >= ? AND ts < ?"
         )
         rows = con.execute(sql, [start_ts, end_ts]).fetchall()
-        return QueryResult(rows=rows, files_considered=len(files))
+        return QueryResult(rows=rows, files_considered=len(files), columns=result_columns)

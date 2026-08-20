@@ -901,6 +901,8 @@ class PolicyLayerUpdate(BaseModel):
     security_policy_id: Optional[str] = None
     service_blocking_ruleset_id: Optional[str] = None
     blocking_response_mode: Optional[str] = None
+    custom_ipv4: Optional[str] = None
+    custom_ipv6: Optional[str] = None
     upstream_profile_id: Optional[str] = None
     fallback_strategy: Optional[str] = None
     ecs_mode: Optional[str] = None

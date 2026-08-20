@@ -75,6 +75,7 @@ class ClientPolicyBinding:
     network: NetworkScope
     cache_profile_id: str
     safesearch_providers: tuple[str, ...] = ()  # subset of safesearch.SUPPORTED_PROVIDERS
+    safesearch_level: str = "strict"  # "moderate" or "strict" -- see safesearch.py
     blocked_domains: dict = field(default_factory=dict)  # domain -> BlockingResponse
     allowed_domains: frozenset = frozenset()
     domain_routes: tuple = ()  # (suffix_domain, upstream_endpoints, transport, strategy, match_kind)
@@ -668,7 +669,9 @@ def compile_multi_policy_dnsdist_config(
         # consistent with malware/security being checked first in
         # filtering_decision.py).
         if binding.safesearch_providers:
-            rewrites = safesearch_mod.rewrites_for_providers(list(binding.safesearch_providers))
+            rewrites = safesearch_mod.rewrites_for_providers(
+                list(binding.safesearch_providers), level=binding.safesearch_level
+            )
             for rw in sorted(rewrites, key=lambda r: r.domain):
                 # safesearch.py's provider table is hardcoded, not
                 # caller-supplied -- validated here anyway as defense in

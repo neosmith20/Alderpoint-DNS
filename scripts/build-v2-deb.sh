@@ -35,6 +35,19 @@ SOURCE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 # final 2.0.0-1 this candidate is a pre-release of, same convention V1's
 # own build-deb.sh already uses for beta/dev/rc tags.
 DEB_VERSION="2.0.0~rc42-1"
+# Real defect closed (beta-rescue pass): this package was declared
+# "Architecture: all" (built once, installs on any architecture) but
+# vendor/v2-analytics/ ships REAL architecture-specific binary payloads
+# -- pyarrow/duckdb wheels built for CPython 3.13 on x86_64
+# (manylinux_2_28_x86_64) -- which is only accurate metadata for amd64.
+# V1's own package (scripts/build-deb.sh) legitimately stays
+# "Architecture: all": its own vendor/ directory carries only a
+# py3-none-any wheel, no compiled extension. Determined from current
+# project requirements: V2 is only built/tested for x86_64 as of this
+# pass, so this reflects real support, not an ARM claim this project
+# cannot back up (dpkg's own architecture name for that target is
+# "amd64", not the Rust/LLVM-style "x86_64").
+DEB_ARCH="amd64"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -82,7 +95,7 @@ Package: alderpointdns-v2
 Version: ${DEB_VERSION}
 Section: net
 Priority: optional
-Architecture: all
+Architecture: ${DEB_ARCH}
 Maintainer: Alderpoint DNS Maintainers <maintainers@example.invalid>
 Depends: dnsdist (>= 1.9.0), bind9, bind9-utils, bind9-dnsutils, curl, gnupg, python3 (>= 3.11), python3-argon2, python3-cryptography, python3-yaml, python3-pip, python3-fastapi, python3-itsdangerous, python3-pydantic, uvicorn, sqlite3
 Conflicts: alderpointdns
@@ -212,5 +225,5 @@ find "$PKG" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
 export SOURCE_DATE_EPOCH
 
 mkdir -p "$OUTPUT_DIR"
-dpkg-deb --build --root-owner-group "$PKG" "$OUTPUT_DIR/alderpointdns-v2_${DEB_VERSION}_all.deb" >/dev/null
-echo "$OUTPUT_DIR/alderpointdns-v2_${DEB_VERSION}_all.deb"
+dpkg-deb --build --root-owner-group "$PKG" "$OUTPUT_DIR/alderpointdns-v2_${DEB_VERSION}_${DEB_ARCH}.deb" >/dev/null
+echo "$OUTPUT_DIR/alderpointdns-v2_${DEB_VERSION}_${DEB_ARCH}.deb"

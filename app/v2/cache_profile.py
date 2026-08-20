@@ -42,7 +42,13 @@ from dataclasses import asdict, dataclass, field
 # self-identified review risk from the prior pass). The version bump means
 # every previously-computed profile id is invalidated, which is correct: the
 # dimension set genuinely changed shape.
-CACHE_PROFILE_SCHEMA_VERSION = 2
+#
+# Bumped to 3 in the beta-rescue pass: added `custom_ipv4`/`custom_ipv6`.
+# A `custom_ip` blocking response's actual address is answer-affecting (two
+# clients configured with different custom-block addresses must never share
+# a cache profile/pool) but previously had no field here at all, so the
+# address was never part of cache-profile identity.
+CACHE_PROFILE_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -62,6 +68,8 @@ class CachePolicyDimensions:
     security_policy_id: str = "none"
     service_blocking_ruleset_id: str = "none"
     blocking_response_mode: str = "nxdomain"
+    custom_ipv4: str = ""
+    custom_ipv6: str = ""
     upstream_profile_id: str = "default"
     fallback_strategy: str = "none"
     ecs_mode: str = "disabled"

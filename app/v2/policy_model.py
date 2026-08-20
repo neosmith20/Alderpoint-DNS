@@ -21,6 +21,7 @@ Fields split into two groups:
 
 from __future__ import annotations
 
+import ipaddress
 from dataclasses import dataclass, fields
 from typing import Optional
 
@@ -31,6 +32,19 @@ _ANSWER_AFFECTING_FIELDS = (
     "security_policy_id",
     "service_blocking_ruleset_id",
     "blocking_response_mode",
+    # Real defect closed: custom_ip response mode was selectable/storable
+    # in the API contract (webapp.py) but had nowhere in PolicyLayer to
+    # actually store the address, so runtime_compile.py's
+    # BlockingResponse(mode=policy.blocking_response_mode) construction
+    # always omitted custom_ipv4/custom_ipv6 -- which
+    # BlockingResponse.__post_init__ (app/v2/blocking_response.py)
+    # correctly rejects for mode="custom_ip", crashing the ENTIRE compile
+    # for every policy the moment any administrator picked custom_ip,
+    # regardless of whether they'd have supplied a real address through a
+    # real UI control. Answer-affecting: two different configured
+    # addresses must never share a cache profile.
+    "custom_ipv4",
+    "custom_ipv6",
     "upstream_profile_id",
     "fallback_strategy",
     "ecs_mode",
@@ -55,6 +69,8 @@ class PolicyLayer:
     security_policy_id: Optional[str] = None
     service_blocking_ruleset_id: Optional[str] = None
     blocking_response_mode: Optional[str] = None
+    custom_ipv4: Optional[str] = None
+    custom_ipv6: Optional[str] = None
     upstream_profile_id: Optional[str] = None
     fallback_strategy: Optional[str] = None
     ecs_mode: Optional[str] = None
@@ -74,6 +90,15 @@ _ANSWER_DEFAULTS = {
     "security_policy_id": "none",
     "service_blocking_ruleset_id": "none",
     "blocking_response_mode": "nxdomain",
+    # "" is the "not configured" sentinel -- consistent with every other
+    # field's DEFAULTS entry here being a real, always-resolvable value
+    # rather than None (see this module's own docstring). Callers that
+    # build a real BlockingResponse (app/v2/runtime_compile.py) treat ""
+    # as "no address supplied," matching BlockingResponse's own None
+    # convention, rather than passing "" through and getting an
+    # ipaddress-parse error for an address nobody configured.
+    "custom_ipv4": "",
+    "custom_ipv6": "",
     "upstream_profile_id": "default",
     "fallback_strategy": "none",
     "ecs_mode": "disabled",
@@ -112,6 +137,24 @@ def validate_layer(layer: PolicyLayer) -> None:
         raise InvalidPolicyError(f"invalid ecs_mode: {layer.ecs_mode!r}")
     if layer.fallback_strategy is not None and layer.fallback_strategy not in _VALID_FALLBACK:
         raise InvalidPolicyError(f"invalid fallback_strategy: {layer.fallback_strategy!r}")
+    # Format-validated at every layer save, independent of which mode a
+    # (possibly different) layer ultimately resolves to -- catches a bad
+    # address at save time rather than only at compile time. Whether
+    # custom_ip mode has a real address available at ALL (i.e. at least
+    # one of these is non-empty) is an EFFECTIVE-policy concern, not a
+    # single-layer one (mode and address can come from different layers),
+    # and is enforced where the effective values are actually consumed:
+    # app/v2/blocking_response.py's BlockingResponse construction.
+    if layer.custom_ipv4:
+        try:
+            ipaddress.IPv4Address(layer.custom_ipv4)
+        except ValueError as exc:
+            raise InvalidPolicyError(f"invalid custom_ipv4: {layer.custom_ipv4!r}") from exc
+    if layer.custom_ipv6:
+        try:
+            ipaddress.IPv6Address(layer.custom_ipv6)
+        except ValueError as exc:
+            raise InvalidPolicyError(f"invalid custom_ipv6: {layer.custom_ipv6!r}") from exc
 
 
 @dataclass(frozen=True)

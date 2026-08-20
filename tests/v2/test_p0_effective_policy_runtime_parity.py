@@ -247,3 +247,69 @@ class TestUpstreamStrategyActuallyDiffers:
         lb_text = compile_multi_policy_dnsdist_config("127.0.0.1:15503", bindings2)
         assert "setPoolServerPolicy(wrandom" in lb_text
         assert "setPoolServerPolicy(firstAvailable" not in lb_text
+
+
+class TestCustomIpBlockingResponseNowWiredToRuntime:
+    """RC42 reproduction: custom_ip could be selected/stored while
+    runtime compilation lacked the required address and crashed. custom_
+    ipv4/custom_ipv6 now have real storage in PolicyLayer/policy_layers,
+    and the compiler passes the effective address through instead of
+    silently omitting it.
+    """
+
+    def test_custom_ip_with_address_compiles_a_real_spoof_action(self, conn):
+        store.create_service(conn, "svc-ads", "Ads", [("suffix", "ads.example")])
+        store.create_service_ruleset(conn, "rs-1", ["svc-ads"])
+        store.save_policy_layer(
+            conn, "global", "singleton",
+            PolicyLayer(
+                service_blocking_ruleset_id="rs-1",
+                blocking_response_mode="custom_ip",
+                custom_ipv4="10.9.9.9",
+                custom_ipv6="fd00::9",
+            ),
+        )
+        bindings = build_bindings(conn)  # must not raise
+        config_text = compile_multi_policy_dnsdist_config("127.0.0.1:15504", bindings)
+        assert 'SpoofAction({"10.9.9.9", "fd00::9"})' in config_text
+
+    def test_custom_ip_with_no_configured_address_fails_the_compile_cleanly(self, conn):
+        from app.v2.blocking_response import InvalidBlockingResponseError
+
+        store.create_service(conn, "svc-ads", "Ads", [("suffix", "ads.example")])
+        store.create_service_ruleset(conn, "rs-1", ["svc-ads"])
+        store.save_policy_layer(
+            conn, "global", "singleton",
+            PolicyLayer(service_blocking_ruleset_id="rs-1", blocking_response_mode="custom_ip"),
+        )
+        with pytest.raises(InvalidBlockingResponseError):
+            build_bindings(conn)
+
+    def test_custom_ip_survives_a_real_store_round_trip(self, conn):
+        store.save_policy_layer(
+            conn, "global", "singleton",
+            PolicyLayer(blocking_response_mode="custom_ip", custom_ipv4="203.0.113.5"),
+        )
+        loaded = store.load_policy_layer(conn, "global", "singleton")
+        assert loaded.custom_ipv4 == "203.0.113.5"
+        assert loaded.blocking_response_mode == "custom_ip"
+
+
+class TestSafeSearchModerateVsStrictActuallyDiffer:
+    """RC42 reproduction: "moderate" and "strict" produced byte-identical
+    runtime rewrites despite being exposed as distinct modes.
+    """
+
+    def test_youtube_moderate_and_strict_compile_different_targets(self, conn):
+        store.save_policy_layer(conn, "global", "singleton", PolicyLayer(safesearch_mode="moderate"))
+        moderate_text = compile_multi_policy_dnsdist_config(
+            "127.0.0.1:15505", build_bindings(conn)
+        )
+        store.save_policy_layer(conn, "global", "singleton", PolicyLayer(safesearch_mode="strict"))
+        strict_text = compile_multi_policy_dnsdist_config(
+            "127.0.0.1:15506", build_bindings(conn)
+        )
+        assert "restrictmoderate.youtube.com" in moderate_text
+        assert "restrictstrict.youtube.com" not in moderate_text
+        assert "restrictstrict.youtube.com" in strict_text
+        assert "restrictmoderate.youtube.com" not in strict_text
