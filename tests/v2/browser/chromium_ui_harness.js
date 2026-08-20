@@ -4,7 +4,6 @@ const net = require("net");
 const crypto = require("crypto");
 
 const base = process.env.APDNS_UI_BASE || "http://127.0.0.1:18080";
-const token = process.env.APDNS_UI_SETUP_TOKEN || "";
 const chromeBin = process.env.APDNS_CHROMIUM || "chromium";
 const port = Number(process.env.APDNS_CHROME_PORT || "9223");
 const userData = process.env.APDNS_CHROME_PROFILE || "/tmp/apdns-v2-ui-chrome";
@@ -183,8 +182,8 @@ async function main() {
     await waitFor(`document.body && (document.querySelector('[data-route="clients"]') || document.body.innerText.includes("Create first administrator") || document.body.innerText.includes("Sign in"))`, "auth or dashboard screen");
     if (!(await evalJs(`Boolean(document.querySelector('[data-route="clients"]'))`))) {
       await evalJs(`(() => {
-        const tok = document.querySelector('[name=setup_token]');
-        if (tok) tok.value = ${JSON.stringify(token)};
+        // Owner-approved removal of the RC42 setup-token flow: the
+        // first-run form no longer has a setup_token field at all.
         document.querySelector('[name=username]').value = 'admin';
         document.querySelector('[name=password]').value = 'correcthorsebattery12';
         document.querySelector('form[data-auth]').requestSubmit();

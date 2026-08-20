@@ -40,9 +40,7 @@ def app_client(tmp_path, monkeypatch):
 
 
 def _setup_and_login(webapp, client, username="admin", password="correcthorsebattery12"):
-    webapp.BOOTSTRAP_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-    webapp.BOOTSTRAP_TOKEN_PATH.write_text("tok-abc")
-    r = client.post("/api/setup", json={"setup_token": "tok-abc", "username": username, "password": password})
+    r = client.post("/api/setup", json={"username": username, "password": password})
     assert r.status_code == 200, r.text
     r = client.post("/api/login", json={"username": username, "password": password})
     assert r.status_code == 200, r.text
@@ -50,33 +48,53 @@ def _setup_and_login(webapp, client, username="admin", password="correcthorsebat
 
 
 class TestSetupBootstrap:
+    """Owner-approved removal of RC42's mandatory SSH-retrieved setup-
+    token flow: first-admin creation is gated purely on "no admin account
+    exists yet," the same conventional first-run contract V1.1.1 already
+    had -- no token file to generate, read, or invalidate.
+    """
+
     def test_setup_required_true_on_fresh_db(self, app_client):
         webapp, client = app_client
         assert client.get("/api/setup/status").json()["setup_required"] is True
 
-    def test_wrong_token_rejected(self, app_client):
+    def test_no_setup_token_field_required(self, app_client):
         webapp, client = app_client
-        webapp.BOOTSTRAP_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-        webapp.BOOTSTRAP_TOKEN_PATH.write_text("real-token")
-        r = client.post("/api/setup", json={"setup_token": "wrong", "username": "a", "password": "correcthorsebattery12"})
-        assert r.status_code == 403
+        r = client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12"})
+        assert r.status_code == 200, r.text
 
-    def test_token_invalidated_after_success(self, app_client):
+    def test_setup_required_false_after_first_admin_created(self, app_client):
         webapp, client = app_client
         _setup_and_login(webapp, client)
-        assert not webapp.BOOTSTRAP_TOKEN_PATH.exists()
+        assert client.get("/api/setup/status").json()["setup_required"] is False
 
     def test_setup_rejected_once_already_configured(self, app_client):
         webapp, client = app_client
         _setup_and_login(webapp, client)
-        webapp.BOOTSTRAP_TOKEN_PATH.write_text("another-token")
-        r = client.post("/api/setup", json={"setup_token": "another-token", "username": "b", "password": "correcthorsebattery12"})
+        r = client.post("/api/setup", json={"username": "b", "password": "correcthorsebattery12"})
         assert r.status_code == 409
 
-    def test_setup_missing_token_file_rejected(self, app_client):
+    def test_second_admin_cannot_be_created_via_setup_even_with_new_credentials(self, app_client):
+        # Transactional, not merely "first call wins": once an admin
+        # exists, /api/setup can never be used again for any credentials,
+        # matching "setup cannot be reused" from the beta-rescue brief.
         webapp, client = app_client
-        r = client.post("/api/setup", json={"setup_token": "anything", "username": "a", "password": "correcthorsebattery12"})
+        _setup_and_login(webapp, client)
+        r = client.post("/api/setup", json={"username": "totally-different", "password": "correcthorsebattery12"})
         assert r.status_code == 409
+        assert client.get("/api/setup/status").json()["setup_required"] is False
+
+    def test_missing_control_db_fails_safely_rather_than_reopening_setup(self, app_client, tmp_path):
+        webapp, client = app_client
+        _setup_and_login(webapp, client)
+        webapp.CONTROL_DB.unlink()
+        r = client.get("/api/setup/status")
+        # create_if_missing=False (see _db()'s own docstring): a real,
+        # already-initialized appliance's control.db going missing must
+        # error, never silently look like a fresh, uninitialized
+        # appliance that reopens the first-run setup flow.
+        assert r.status_code >= 500
+        assert r.json().get("setup_required") is not True
 
 
 class TestAuthRequired:
@@ -103,9 +121,7 @@ class TestLoginLogoutSessions:
 
     def test_cookie_flags_httponly_samesite(self, app_client):
         webapp, client = app_client
-        webapp.BOOTSTRAP_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-        webapp.BOOTSTRAP_TOKEN_PATH.write_text("tok")
-        client.post("/api/setup", json={"setup_token": "tok", "username": "admin", "password": "correcthorsebattery12"})
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12"})
         r = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
         cookie_header = r.headers.get("set-cookie", "")
         assert "HttpOnly" in cookie_header
@@ -121,9 +137,7 @@ class TestLoginLogoutSessions:
 
     def test_session_rotates_on_each_login(self, app_client):
         webapp, client = app_client
-        webapp.BOOTSTRAP_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-        webapp.BOOTSTRAP_TOKEN_PATH.write_text("tok")
-        client.post("/api/setup", json={"setup_token": "tok", "username": "admin", "password": "correcthorsebattery12"})
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12"})
         r1 = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
         r2 = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
         assert r1.json()["csrf"] != r2.json()["csrf"]
@@ -162,9 +176,7 @@ class TestLoginLogoutSessions:
         from unittest import mock
 
         webapp, client = app_client
-        webapp.BOOTSTRAP_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-        webapp.BOOTSTRAP_TOKEN_PATH.write_text("tok")
-        client.post("/api/setup", json={"setup_token": "tok", "username": "admin", "password": "correcthorsebattery12"})
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12"})
 
         real_record = webapp._record_login_attempt
         calls = {"n": 0}
@@ -188,9 +200,7 @@ class TestLoginLogoutSessions:
         from unittest import mock
 
         webapp, client = app_client
-        webapp.BOOTSTRAP_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-        webapp.BOOTSTRAP_TOKEN_PATH.write_text("tok")
-        client.post("/api/setup", json={"setup_token": "tok", "username": "admin", "password": "correcthorsebattery12"})
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12"})
 
         with mock.patch.object(
             webapp, "_record_login_attempt", side_effect=sqlite3.OperationalError("database is locked")

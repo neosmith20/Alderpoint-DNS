@@ -494,9 +494,13 @@
   }
 
   function authScreen(setupRequired) {
-    return `<main class="auth"><section class="auth-card"><div class="mark">A</div><h1>${setupRequired ? "Create first administrator" : "Sign in"}</h1><p>${setupRequired ? "Use the bootstrap setup token from the installed appliance state directory." : "Use your Alderpoint DNS administrator account."}</p>
+    // Owner-approved removal of RC42's mandatory SSH-retrieved setup-
+    // token flow: first-run setup is now the conventional "create the
+    // first administrator right here" screen -- no token field, no
+    // instruction to go retrieve a secret from the appliance's state
+    // directory.
+    return `<main class="auth"><section class="auth-card"><div class="mark">A</div><h1>${setupRequired ? "Create first administrator" : "Sign in"}</h1><p>${setupRequired ? "This appliance has not been set up yet. Create the first administrator account to continue." : "Use your Alderpoint DNS administrator account."}</p>
       <form data-auth="${setupRequired ? "setup" : "login"}">
-        ${setupRequired ? `<label>Setup token<input name="setup_token" required autocomplete="one-time-code"></label>` : ""}
         <label>Username<input name="username" required autocomplete="username"></label>
         <label>Password<input name="password" type="password" required minlength="${setupRequired ? 12 : 1}" autocomplete="${setupRequired ? "new-password" : "current-password"}"></label>
         <button class="primary">${setupRequired ? "Create administrator" : "Sign in"}</button>

@@ -92,7 +92,6 @@ LOG_BIND_DIR = LOG_DIR / "bind"
 CERTS_DIR = STATE_DIR / "certs"
 ACTIVE_CERT_PATH = CERTS_DIR / "server.crt"
 ACTIVE_KEY_PATH = CERTS_DIR / "server.key"
-BOOTSTRAP_TOKEN_PATH = STATE_DIR / "bootstrap-setup-token"
 TIER_B_STATE_FILE = STATE_DIR / "tierb" / "working-set.json"
 # Mirrors scripts/v2/alderpointdns_v2_ctl.py's own REPLICATION_* paths --
 # this node's own replication mTLS material, needed by the
@@ -450,9 +449,9 @@ def check_csrf(admin: dict, x_csrf_token: Optional[str]) -> None:
     # narrow (an attacker needs an already-valid session cookie to reach
     # this check at all, at which point CSRF is one of several problems),
     # but every other secret-equality check in this codebase already uses
-    # hmac.compare_digest (see /api/setup's bootstrap-token check) -- this
-    # was the one inconsistent case, fixed for defense in depth rather than
-    # left as an unexplained exception to that pattern.
+    # hmac.compare_digest -- this was the one inconsistent case, fixed for
+    # defense in depth rather than left as an unexplained exception to
+    # that pattern.
     if not x_csrf_token or not hmac.compare_digest(x_csrf_token, admin["csrf"]):
         raise ApiError(403, "invalid_csrf_token", "missing or incorrect X-CSRF-Token header")
 
@@ -481,13 +480,22 @@ def ui_app(path: str = ""):
 
 
 class SetupRequest(BaseModel):
-    setup_token: str
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=12, max_length=256)
 
 
 @app.get("/api/setup/status")
 def setup_status():
+    # Owner-approved removal of the RC42 SSH-retrieved-setup-token UX:
+    # the ONLY thing that gates first-run setup is "does this genuinely
+    # never-initialized appliance have zero admin accounts" -- the exact
+    # same real, transactional condition setup() below re-checks inside
+    # its own write transaction. _db()'s create_if_missing=False (see its
+    # own docstring/docs/v2/control-db-silent-recreation-fix.md) already
+    # makes a missing/corrupt control.db fail loudly here rather than
+    # silently behaving like a fresh, uninitialized appliance and
+    # reopening setup -- this endpoint adds no separate secret/token
+    # gate on top of that real state.
     with _db() as conn:
         count = conn.execute("SELECT count(*) FROM admins").fetchone()[0]
     return {"setup_required": count == 0}
@@ -495,26 +503,29 @@ def setup_status():
 
 @app.post("/api/setup")
 def setup(req: SetupRequest, request: Request):
+    # Owner-approved removal of RC42's mandatory SSH-retrieved setup-
+    # token flow (docs/v2/management-plane.md "Known limitations" no
+    # longer applies to this endpoint): first-admin creation is gated
+    # only on the real, transactional "zero admin accounts exist yet"
+    # check below -- the same conventional first-run flow V1.1.1 already
+    # had. No token file is generated, read, or required. This is not a
+    # weaker gate than the token was: the token only ever proved
+    # possession of root/SSH access to the appliance, which creating the
+    # very first admin account already requires nothing beyond (an
+    # attacker who can reach this HTTPS endpoint before a real
+    # administrator does could already have raced the token file the
+    # same way); what actually matters -- this can only ever succeed
+    # once, atomically, before any admin exists -- is unchanged.
     with _db() as conn:
         count = conn.execute("SELECT count(*) FROM admins").fetchone()[0]
         if count > 0:
             raise ApiError(409, "already_configured", "initial setup has already been completed")
-        if not BOOTSTRAP_TOKEN_PATH.exists():
-            raise ApiError(409, "setup_unavailable", "no bootstrap setup token is available")
-        expected = BOOTSTRAP_TOKEN_PATH.read_text(encoding="utf-8").strip()
-        if not expected or not hmac.compare_digest(expected, req.setup_token.strip()):
-            raise ApiError(403, "invalid_setup_token", "incorrect setup token")
         password_hash = hash_password(req.password, limiter=_hash_limiter)
         now = datetime.now(timezone.utc).isoformat()
         conn.execute(
             "INSERT INTO admins(username, password_hash, created_at) VALUES (?, ?, ?)",
             (req.username, password_hash, now),
         )
-    # One-time: invalidate immediately after successful use (§11).
-    try:
-        BOOTSTRAP_TOKEN_PATH.unlink()
-    except FileNotFoundError:
-        pass
     return {"status": "created"}
 
 

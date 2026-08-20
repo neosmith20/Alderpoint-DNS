@@ -105,8 +105,8 @@ REPLICATION_DIR = STATE_DIR / "replication"
 REPLICATION_SERVER_CERT_PATH = REPLICATION_DIR / "server.crt"
 REPLICATION_SERVER_KEY_PATH = REPLICATION_DIR / "server.key"
 REPLICATION_CA_PATH = REPLICATION_DIR / "trust-ca.pem"
-BOOTSTRAP_TOKEN_PATH = STATE_DIR / "bootstrap-setup-token"
 SCHEDULE_STATE_FILE = STATE_DIR / "schedule" / "schedule-transition-state.json"
+MANAGEMENT_HTTPS_PORT = 8443  # packaging/v2/alderpointdns-v2-web.service's real listener
 
 SERVICE_USER = "alderpointdns-v2"
 SERVICE_GROUP = "alderpointdns-v2"
@@ -276,36 +276,53 @@ def cmd_init_state(args: argparse.Namespace) -> int:
 
     _chown_best_effort(SECRETS_DIR, 0o700)  # SecretStore.__init__ already set 0700; reasserted for clarity
 
-    # First-admin bootstrap token (§11): generated once, only while no
-    # admin account exists yet. Deliberately NEVER printed to stdout
-    # (postinst output can end up in a world-readable apt/dpkg log) --
-    # only the fact that a token file was written, at a root-only 0600
-    # path the operator must read themselves (e.g. `sudo cat`).
-    with control_db.connect(CONTROL_DB) as conn:
-        admin_count = conn.execute("SELECT count(*) FROM admins").fetchone()[0]
-    if admin_count == 0 and not BOOTSTRAP_TOKEN_PATH.exists():
-        import secrets as _secrets_mod
-
-        token = _secrets_mod.token_urlsafe(32)
-        fd = os.open(str(BOOTSTRAP_TOKEN_PATH), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as fh:
-            fh.write(token)
-        _chown_best_effort(BOOTSTRAP_TOKEN_PATH.parent, 0o750)
-        try:
-            import pwd as _pwd, grp as _grp
-
-            os.chown(BOOTSTRAP_TOKEN_PATH, _pwd.getpwnam(SERVICE_USER).pw_uid, _grp.getgrnam(SERVICE_GROUP).gr_gid)
-        except KeyError:
-            pass
-        print(f"first-admin bootstrap setup token written to {BOOTSTRAP_TOKEN_PATH} (root-only, 0600) -- read it there to complete initial setup, it is never printed here")
-    elif admin_count == 0:
-        print(f"bootstrap setup token already present at {BOOTSTRAP_TOKEN_PATH}")
-    else:
-        print("an admin account already exists; no bootstrap token needed")
-
     cmd_ensure_tls_cert(args)
 
+    # First-run install UX (owner-approved removal of RC42's mandatory
+    # SSH-retrieved setup-token flow, §11 superseded): a fresh appliance
+    # no longer needs a secret scavenger hunt to create the first
+    # administrator -- app/v2/webapp.py's /api/setup is gated purely on
+    # "zero admin accounts exist yet." What operators genuinely could not
+    # tell from RC42's postinst output was that V2 management moved from
+    # V1's HTTP :3000 to HTTPS :8443 at all -- print that clearly instead,
+    # and print nothing secret (no token, no password) into what can end
+    # up in a world-readable apt/dpkg log.
+    with control_db.connect(CONTROL_DB) as conn:
+        admin_count = conn.execute("SELECT count(*) FROM admins").fetchone()[0]
+    address = _best_effort_management_address()
+    print("")
+    print("Alderpoint DNS installed successfully.")
+    print("")
+    print(f"Management UI:  https://{address}:{MANAGEMENT_HTTPS_PORT}/")
+    print("A browser certificate warning may appear until a trusted management")
+    print("certificate is configured (Administration -> Encryption).")
+    if admin_count == 0:
+        print("No administrator account exists yet -- the management UI will walk")
+        print("you through creating the first one.")
+    print("")
+
     return 0
+
+
+def _best_effort_management_address() -> str:
+    """A real, reachable address to show the operator, best-effort. Never
+    fatal if discovery fails (a fresh container/VM with unusual
+    networking) -- falls back to a placeholder the operator can trivially
+    replace, rather than blocking or failing the install over a cosmetic
+    message.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            # No packet is actually sent (UDP connect() is local-only) --
+            # this is the standard portable way to ask the OS which local
+            # address it would use to reach the outside world.
+            s.connect(("198.51.100.1", 80))
+            return s.getsockname()[0]
+    except OSError:
+        try:
+            return socket.gethostbyname(socket.gethostname())
+        except OSError:
+            return "<this-appliance-ip>"
 
 
 def cmd_init_replication_cert(args: argparse.Namespace) -> int:

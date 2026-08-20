@@ -45,7 +45,6 @@ def test_chromium_management_ui_harness(tmp_path):
 
     control_db.initialize(state / "control.db")
     policy_store.ensure_schema(state / "control.db")
-    (state / "bootstrap-setup-token").write_text("setup-token", encoding="utf-8")
 
     port = _free_port()
     env = os.environ.copy()
@@ -70,7 +69,6 @@ def test_chromium_management_ui_harness(tmp_path):
         harness_env = env.copy()
         harness_env.update({
             "APDNS_UI_BASE": f"http://127.0.0.1:{port}",
-            "APDNS_UI_SETUP_TOKEN": "setup-token",
             "APDNS_CHROME_PORT": str(_free_port()),
             "APDNS_CHROME_PROFILE": str(tmp_path / "chrome-profile"),
         })
