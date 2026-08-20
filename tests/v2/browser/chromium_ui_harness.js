@@ -143,7 +143,8 @@ async function main() {
         if (await evalJs(expression)) return;
         await sleep(200);
       }
-      throw new Error(`timeout waiting for ${label}`);
+      const snapshot = await evalJs(`document.body.innerText.slice(0, 600)`).catch(() => "<no snapshot>");
+      throw new Error(`timeout waiting for ${label}\n--- snapshot ---\n${snapshot}`);
     }
     async function route(name) {
       const titles = {
@@ -158,6 +159,8 @@ async function main() {
         backup: "Backup / Restore / Migration",
         settings: "HTTPS / Notifications",
         health: "System / Health",
+        importexport: "Import",
+        updates: "Software Updates",
       };
       await evalJs(`document.querySelector('[data-route="${name}"]').click(); true`);
       await waitFor(`document.querySelector('.page-head h1') && document.querySelector('.page-head h1').textContent === ${JSON.stringify(titles[name])} && !document.body.innerText.includes("Page unavailable")`, name);
@@ -197,14 +200,57 @@ async function main() {
     await evalJs(`{ const b = document.querySelector('[data-refresh]'); if (b) { b.click(); b.click(); } true }`);
     await sleep(1200);
     await waitFor(`document.querySelector('.page-head h1') && document.querySelector('.page-head h1').textContent === "Dashboard"`, "dashboard rapid refresh settled");
-    for (const r of ["analytics", "clients", "policies", "filtering", "upstreams", "localdns", "replication", "backup", "settings", "health"]) await route(r);
+    for (const r of ["analytics", "clients", "policies", "filtering", "upstreams", "localdns", "replication", "backup", "settings", "health", "importexport", "updates"]) await route(r);
     proof.push("dashboard-navigation");
 
-    const beforeTheme = await evalJs(`document.documentElement.dataset.theme || ""`);
-    await evalJs(`document.querySelector('[data-action="theme"]').click(); true`);
-    await waitFor(`document.documentElement.dataset.theme !== ${JSON.stringify(beforeTheme)}`, "theme switch");
+    // Sidebar geometry must stay identical across every major route (owner-
+    // reported RC42/RC43 defect class: content-driven shell movement).
+    // Sample the sidebar's left edge/width on several routes and assert
+    // they never move.
+    const sidebarBoxes = [];
+    for (const r of ["dashboard", "analytics", "backup", "health"]) {
+      await route(r);
+      const box = await evalJs(`(() => { const s = document.querySelector('.sidebar'); const b = s.getBoundingClientRect(); return JSON.stringify({ x: b.x, width: b.width }); })()`);
+      sidebarBoxes.push(box);
+    }
+    if (new Set(sidebarBoxes).size !== 1) throw new Error(`sidebar geometry moved across routes: ${sidebarBoxes.join(" | ")}`);
+    proof.push("sidebar-geometry-stable");
+
+    // Repeated sidebar collapse/expand must not accumulate stacked
+    // listeners (same defect class RC43 fixed for the theme toggle) and
+    // must persist across a reload.
+    const collapsedBeforeFour = await evalJs(`document.getElementById('app').classList.contains('nav-collapsed')`);
+    for (let i = 0; i < 4; i++) {
+      await evalJs(`document.querySelector('[data-action="collapse"]').click(); true`);
+    }
+    const collapsedAfterFour = await evalJs(`document.getElementById('app').classList.contains('nav-collapsed')`);
+    if (collapsedAfterFour !== collapsedBeforeFour) throw new Error(`sidebar collapse state wrong after 4 (even) clicks -- should return to the starting state: before=${collapsedBeforeFour} after=${collapsedAfterFour}`);
+    await evalJs(`document.querySelector('[data-action="collapse"]').click(); true`);
+    const collapsedAfterFive = await evalJs(`document.getElementById('app').classList.contains('nav-collapsed')`);
+    if (collapsedAfterFive === collapsedBeforeFour) throw new Error(`sidebar did not toggle on the 5th (odd) click`);
     await cdp("Page.navigate", { url: base + "/ui/dashboard" });
-    await waitFor(`document.documentElement.dataset.theme !== ${JSON.stringify(beforeTheme)} && document.querySelector('[data-route="clients"]')`, "theme persisted after reload");
+    await waitFor(`document.getElementById('app') && document.getElementById('app').classList.contains('nav-collapsed') === ${collapsedAfterFive}`, "sidebar collapse persisted after reload");
+    await evalJs(`document.querySelector('[data-action="collapse"]').click(); true`);
+    await waitFor(`document.getElementById('app') && document.getElementById('app').classList.contains('nav-collapsed') === ${collapsedBeforeFour}`, "sidebar returns to starting state");
+    proof.push("sidebar-collapse-repeated");
+
+    const beforeTheme = await evalJs(`document.documentElement.dataset.theme || ""`);
+    // Repeated dark -> light -> dark toggling across route changes, not
+    // just a single toggle, since the double-attach regression class only
+    // reproduces on an even number of re-renders.
+    let lastTheme = beforeTheme;
+    for (let i = 0; i < 3; i++) {
+      await evalJs(`document.querySelector('[data-action="theme"]').click(); true`);
+      await waitFor(`document.documentElement.dataset.theme !== ${JSON.stringify(lastTheme)}`, `theme toggle ${i}`);
+      lastTheme = await evalJs(`document.documentElement.dataset.theme || ""`);
+      await route(i % 2 === 0 ? "clients" : "backup");
+    }
+    const afterThreeToggles = await evalJs(`document.documentElement.dataset.theme || ""`);
+    if (afterThreeToggles === beforeTheme) throw new Error(`theme did not change after an odd number of toggles across routes (before=${beforeTheme}, after=${afterThreeToggles})`);
+    await evalJs(`document.querySelector('[data-action="theme"]').click(); true`);
+    await waitFor(`document.documentElement.dataset.theme !== ${JSON.stringify(afterThreeToggles)}`, "theme switch");
+    await cdp("Page.navigate", { url: base + "/ui/dashboard" });
+    await waitFor(`document.documentElement.dataset.theme === ${JSON.stringify(beforeTheme)} && document.querySelector('[data-route="clients"]')`, "theme persisted after reload");
     proof.push("theme-persistence");
 
     await route("clients");

@@ -83,17 +83,37 @@ button, input, select, textarea { font: inherit; color: inherit; }
 
 .layout { min-height: 100vh; display: grid; grid-template-columns: var(--nav-w) minmax(0, 1fr); }
 .sidebar { position: sticky; top: 0; height: 100vh; background: var(--bg-2); border-right: 1px solid var(--line); display: grid; grid-template-rows: auto 1fr auto; min-width: 0; }
-.brand { display: flex; align-items: center; gap: var(--s-3); padding: var(--s-5); border-bottom: 1px solid var(--line); min-width: 0; }
+.brand { display: flex; align-items: center; gap: var(--s-3); padding: var(--s-5); border-bottom: 1px solid var(--line); min-width: 0; position: relative; }
 .brand strong { display: block; font-size: 15px; letter-spacing: .02em; }
 .brand span:last-child { min-width: 0; }
 .brand small { display: block; color: var(--muted); font-size: 12px; margin-top: 1px; }
+.collapse-toggle { margin-left: auto; width: 26px; min-height: 26px; padding: 0; border-radius: var(--r-1); flex: 0 0 auto; }
 .nav { padding: var(--s-3); overflow-y: auto; }
 .nav button { width: 100%; min-height: 38px; display: flex; align-items: center; gap: var(--s-2); margin: 0 0 var(--s-1); padding: 8px 10px; border: 1px solid transparent; border-radius: var(--r-2); color: var(--muted); background: transparent; cursor: pointer; text-align: left; }
 .nav button:hover { background: var(--surface-2); color: var(--text); }
 .nav button.active { background: color-mix(in srgb, var(--accent) 12%, var(--surface)); color: var(--text); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); box-shadow: inset 3px 0 0 var(--accent); }
+.nav button.nav-top { font-weight: 700; margin-bottom: var(--s-3); }
 .nav .section-label { margin: var(--s-4) var(--s-2) var(--s-2); color: var(--faint); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
-.nav .glyph { width: 1.8ch; font-family: var(--mono); color: var(--accent-2); }
+.nav .glyph { width: 1.8ch; font-family: var(--mono); color: var(--accent-2); flex: 0 0 auto; }
 .side-footer { padding: var(--s-3); border-top: 1px solid var(--line); display: grid; gap: var(--s-2); }
+
+/* Collapsed nav: fixed icon-rail width, same DOM/labels (kept for a11y and
+   for the tooltip title= already on every nav button), text hidden via
+   CSS only -- so collapse never re-fetches or re-derives page content,
+   only changes the grid's own track width. This is what keeps geometry
+   stable (no content-driven shell movement) while still letting the owner
+   reclaim horizontal space on dense pages. */
+.app-shell.nav-collapsed .layout { grid-template-columns: 60px minmax(0, 1fr); }
+.app-shell.nav-collapsed .brand span:not(.collapse-toggle), .app-shell.nav-collapsed .brand small { display: none; }
+.app-shell.nav-collapsed .brand { justify-content: center; padding: var(--s-4) var(--s-2); }
+.app-shell.nav-collapsed .collapse-toggle { margin-left: 0; }
+.app-shell.nav-collapsed .nav .section-label { display: none; }
+.app-shell.nav-collapsed .nav button span:not(.glyph) { display: none; }
+.app-shell.nav-collapsed .nav button { justify-content: center; }
+.app-shell.nav-collapsed .side-footer button span:not(.glyph) { display: none; }
+.app-shell.nav-collapsed .side-footer button { justify-content: center; }
+.side-footer button { display: flex; align-items: center; gap: var(--s-2); justify-content: flex-start; }
+.side-footer .glyph { width: 1.8ch; flex: 0 0 auto; text-align: center; }
 
 .topbar { display: none; min-height: 54px; align-items: center; justify-content: space-between; gap: var(--s-3); padding: 0 var(--s-3); border-bottom: 1px solid var(--line); background: var(--bg-2); position: sticky; top: 0; z-index: 10; }
 .topbar button { white-space: nowrap; }

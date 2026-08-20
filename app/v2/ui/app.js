@@ -6,23 +6,32 @@
     user: "",
     route: "dashboard",
     theme: localStorage.getItem("apdnsTheme") || "dark",
+    navCollapsed: localStorage.getItem("apdnsNavCollapsed") === "1",
     cache: {},
     busy: new Set(),
   };
 
+  // Grouping/order intentionally mirrors V1.1.1's information architecture
+  // (docs/v2/... parity work, priority 1 of the beta-rescue brief) rather
+  // than V2's prior ad hoc "Operations/Policy/DNS/System" split, which mixed
+  // unrelated concerns (e.g. Replication and Backup living under the same
+  // group as Dashboard) and gave the owner no stable mental model to
+  // navigate by. Dashboard stays a standalone top-level item, matching V1.
   const pages = [
-    ["Operations", "dashboard", "Dashboard", "#"],
-    ["Operations", "analytics", "Query Log / Analytics", "Q"],
-    ["Policy", "clients", "Clients", "C"],
-    ["Policy", "policies", "Policies / Explain", "P"],
-    ["Policy", "filtering", "Filtering / Security", "F"],
-    ["DNS", "upstreams", "Upstreams / Routing", "U"],
+    ["DNS", "analytics", "Query Log", "Q"],
+    ["DNS", "clients", "Clients", "C"],
+    ["DNS", "policies", "Clients & Access", "P"],
     ["DNS", "localdns", "Local DNS", "L"],
+    ["DNS", "upstreams", "DNS Settings", "U"],
+    ["Security", "filtering", "Filters / Security", "F"],
+    ["Operations", "importexport", "Import", "I"],
+    ["Operations", "backup", "Backup & Restore", "B"],
     ["Operations", "replication", "Replication", "R"],
-    ["Operations", "backup", "Backup / Migration", "B"],
-    ["System", "settings", "HTTPS / Notifications", "S"],
-    ["System", "health", "System / Health", "H"],
+    ["System", "health", "System Status", "Y"],
+    ["System", "settings", "Notifications / HTTPS", "N"],
+    ["System", "updates", "Software Updates", "V"],
   ];
+  const GROUP_ORDER = ["DNS", "Security", "Operations", "System"];
 
   // One canonical model, matching app/v2/policy_model.py's own
   // _VALID_* sets exactly -- real defect fixed here: these previously
@@ -141,19 +150,28 @@
 
   function shell() {
     const grouped = pages.reduce((acc, p) => ((acc[p[0]] = acc[p[0]] || []).push(p), acc), {});
+    // Dashboard is a standalone top-level entry above every group, matching
+    // V1.1.1 -- it is never itself inside a collapsible section, so it is
+    // always exactly one click away regardless of nav-collapse state.
+    const dashboardBtn = `<button data-route="dashboard" class="nav-top ${state.route === "dashboard" ? "active" : ""}"><span class="glyph">#</span><span>Dashboard</span></button>`;
     return `
       <div class="layout">
         <aside class="sidebar">
-          <div class="brand"><div class="mark">A</div><span><strong>Alderpoint DNS</strong><small>V2 management console</small></span></div>
+          <div class="brand">
+            <div class="mark">A</div>
+            <span><strong>Alderpoint DNS</strong><small>V2 management console</small></span>
+            <button class="collapse-toggle" data-action="collapse" aria-pressed="${state.navCollapsed}" title="${state.navCollapsed ? "Expand" : "Collapse"} navigation">${state.navCollapsed ? "»" : "«"}</button>
+          </div>
           <nav class="nav" aria-label="Main navigation">
-            ${Object.entries(grouped).map(([group, items]) => `
+            ${dashboardBtn}
+            ${GROUP_ORDER.filter((g) => grouped[g]).map((group) => `
               <div class="section-label">${esc(group)}</div>
-              ${items.map(([, id, label, glyph]) => `<button data-route="${id}" class="${state.route === id ? "active" : ""}"><span class="glyph">${esc(glyph)}</span><span>${esc(label)}</span></button>`).join("")}
+              ${grouped[group].map(([, id, label, glyph]) => `<button data-route="${id}" class="${state.route === id ? "active" : ""}" title="${esc(label)}"><span class="glyph">${esc(glyph)}</span><span>${esc(label)}</span></button>`).join("")}
             `).join("")}
           </nav>
           <div class="side-footer">
-            <button data-action="theme">${state.theme === "dark" ? "Light theme" : "Dark theme"}</button>
-            <button data-action="logout" class="danger">Log out</button>
+            <button data-action="theme" title="${state.theme === "dark" ? "Light theme" : "Dark theme"}"><span class="glyph">${state.theme === "dark" ? "☀" : "☽"}</span><span>${state.theme === "dark" ? "Light theme" : "Dark theme"}</span></button>
+            <button data-action="logout" class="danger" title="Log out"><span class="glyph">→</span><span>Log out</span></button>
           </div>
         </aside>
         <main class="main">
@@ -161,6 +179,17 @@
           <section id="page"></section>
         </main>
       </div>`;
+  }
+
+  // Single choke point for (re)rendering the shell so the nav-collapsed
+  // state (a CSS class, not a JS reflow of geometry) is always reapplied
+  // consistently -- theme toggling and collapse toggling both replace
+  // #app's innerHTML, and previously only one of the two paths remembered
+  // to keep the collapsed class in sync.
+  function renderShell() {
+    const app = document.getElementById("app");
+    app.innerHTML = shell();
+    app.classList.toggle("nav-collapsed", state.navCollapsed);
   }
 
   function page(title, intro, actions, body) {
@@ -518,17 +547,42 @@
       <div class="grid two"><section class="panel"><div class="panel__head"><h2>Components</h2></div><div class="panel__body">${componentList(h.components || {})}</div></section><section class="panel"><div class="panel__head"><h2>Node Identity</h2></div><div class="panel__body">${tableFromRows([n], 1)}</div></section></div>`);
   }
 
-  const renderers = { dashboard, analytics, clients, policies, filtering, upstreams, localdns, replication, backup, settings, health };
+  async function importexport() {
+    return page("Import", "AdGuard Home, Pi-hole, hosts/BIND/CSV/XLSX, and Alderpoint-native import with preview before apply.", "", `<div class="empty">Import is being restored to V2 in this beta-rescue pass and is not wired up on this page yet.</div>`);
+  }
 
+  async function updates() {
+    return page("Software Updates", "Installed version, update channel, and manual package updates.", "", `<div class="empty">Software Updates is being restored to V2 in this beta-rescue pass and is not wired up on this page yet.</div>`);
+  }
+
+  const renderers = { dashboard, analytics, clients, policies, filtering, upstreams, localdns, replication, backup, settings, health, importexport, updates };
+
+  // Real defect fixed here (found by the expanded stateful-navigation
+  // regression, priority 1 of the beta-rescue brief): loadPage() had no
+  // guard against out-of-order async completion. A theme toggle re-renders
+  // the shell and then re-awaits loadPage(state.route) for whichever route
+  // was active *at that moment*; if the operator clicks a different nav
+  // item before that in-flight fetch resolves, state.route moves on but
+  // the stale fetch still unconditionally overwrote #page with the old
+  // route's content once it finally settled -- silently reverting a
+  // completed, more-recent navigation. `token` makes every load request
+  // self-identifying so a load only ever writes the DOM if it is still the
+  // most recently requested one.
+  let loadToken = 0;
   async function loadPage(id) {
-    state.route = id || "dashboard";
+    const requested = id || "dashboard";
+    const token = ++loadToken;
+    state.route = requested;
     document.querySelectorAll("[data-route]").forEach((b) => b.classList.toggle("active", b.dataset.route === state.route));
     const target = document.getElementById("page");
     target.innerHTML = page("Loading", "Fetching live appliance state.", "", `<div class="empty">Loading...</div>`);
     try {
-      target.innerHTML = await renderers[state.route]();
-      history.replaceState(null, "", `/ui/${state.route}`);
+      const html = await renderers[requested]();
+      if (token !== loadToken) return;
+      target.innerHTML = html;
+      history.replaceState(null, "", `/ui/${requested}`);
     } catch (err) {
+      if (token !== loadToken) return;
       if (err.status === 401) return boot();
       target.innerHTML = page("Page unavailable", "The backend rejected or failed this request.", `<button data-refresh>Retry</button>`, `<div class="alert bad">${esc(err.message)}</div>`);
     }
@@ -571,7 +625,7 @@
       state.user = session.username;
       const app = document.getElementById("app");
       app.className = "app-shell";
-      app.innerHTML = shell();
+      renderShell();
       // wire() attaches delegated click/submit listeners on
       // document.body, which is never replaced by any re-render (only
       // #app's innerHTML changes) -- so it must be attached exactly
@@ -614,7 +668,8 @@
       const route = ev.target.closest("[data-route]");
       if (route) { document.body.classList.remove("nav-open"); await loadPage(route.dataset.route); return; }
       if (ev.target.closest("[data-action='menu']")) { document.body.classList.toggle("nav-open"); return; }
-      if (ev.target.closest("[data-action='theme']")) { setTheme(state.theme === "dark" ? "light" : "dark"); document.getElementById("app").innerHTML = shell(); await loadPage(state.route); return; }
+      if (ev.target.closest("[data-action='theme']")) { setTheme(state.theme === "dark" ? "light" : "dark"); renderShell(); await loadPage(state.route); return; }
+      if (ev.target.closest("[data-action='collapse']")) { state.navCollapsed = !state.navCollapsed; localStorage.setItem("apdnsNavCollapsed", state.navCollapsed ? "1" : "0"); renderShell(); await loadPage(state.route); return; }
       if (ev.target.closest("[data-action='logout']")) { await api("/api/logout", { method: "POST" }).catch(() => {}); state.csrf = ""; await boot(); return; }
       if (ev.target.closest("[data-refresh]")) { await loadPage(state.route); return; }
       const tri = ev.target.closest("[data-tri] button");
