@@ -48,7 +48,14 @@ from dataclasses import asdict, dataclass, field
 # clients configured with different custom-block addresses must never share
 # a cache profile/pool) but previously had no field here at all, so the
 # address was never part of cache-profile identity.
-CACHE_PROFILE_SCHEMA_VERSION = 3
+#
+# Bumped to 4 in the same beta-rescue pass: added
+# `fallback_upstream_profile_id`, closing the real fallback_strategy/
+# fallback_dns.py wiring gap (see app/v2/runtime_compile.py's
+# _apply_fallback). Which profile a client falls back to can change the
+# real answer on primary failure, so it must be part of cache-profile
+# identity like every other upstream-affecting field.
+CACHE_PROFILE_SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -72,6 +79,7 @@ class CachePolicyDimensions:
     custom_ipv6: str = ""
     upstream_profile_id: str = "default"
     fallback_strategy: str = "none"
+    fallback_upstream_profile_id: str = "none"
     ecs_mode: str = "disabled"
     domain_routing_ruleset_id: str = "none"
 

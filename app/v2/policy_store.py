@@ -52,6 +52,7 @@ _MIGRATION_V2: list[str] = [
         custom_ipv6 TEXT,
         upstream_profile_id TEXT,
         fallback_strategy TEXT,
+        fallback_upstream_profile_id TEXT,
         ecs_mode TEXT,
         domain_routing_ruleset_id TEXT,
         query_log_enabled INTEGER,
@@ -203,12 +204,12 @@ def ensure_schema(path: str | Path) -> None:
         already_present = _table_exists(conn, "policy_layers")
     if not already_present:
         control_db.apply_migration_in_transaction(path, _MIGRATION_V2, POLICY_STORE_SCHEMA_VERSION)
-    _ensure_policy_layers_custom_ip_columns(path)
+    _ensure_policy_layers_beta_rescue_columns(path)
     _ensure_dns_transport_settings_table(path)
     _ensure_dnscrypt_settings_table(path)
 
 
-def _ensure_policy_layers_custom_ip_columns(path: str | Path) -> None:
+def _ensure_policy_layers_beta_rescue_columns(path: str | Path) -> None:
     """Incremental migration (real defect closed, beta-rescue pass):
     custom_ip blocking response mode had no columns to store its address
     in at all. Runs unconditionally on every ensure_schema() call, like
@@ -221,6 +222,8 @@ def _ensure_policy_layers_custom_ip_columns(path: str | Path) -> None:
             conn.execute("ALTER TABLE policy_layers ADD COLUMN custom_ipv4 TEXT")
         if "custom_ipv6" not in cols:
             conn.execute("ALTER TABLE policy_layers ADD COLUMN custom_ipv6 TEXT")
+        if "fallback_upstream_profile_id" not in cols:
+            conn.execute("ALTER TABLE policy_layers ADD COLUMN fallback_upstream_profile_id TEXT")
         conn.commit()
 
 
@@ -663,6 +666,21 @@ def create_upstream_profile(
 ) -> None:
     if transport not in ("plain", "dot", "doh"):
         raise PolicyStoreError(f"invalid transport: {transport!r}")
+    # Real defect closed (beta-rescue pass): "ordered" and "load_balanced"
+    # previously compiled equivalently because nothing downstream ever
+    # read `strategy` at all (see app/v2/runtime_compile.py's real fix).
+    # "failover" is accepted as a synonym of "ordered" (both compile to
+    # dnsdist's real order-respecting firstAvailable policy) rather than
+    # forcing a rename of already-stored real profiles. "parallel_first_
+    # success" is rejected here: genuine simultaneous multi-server fan-
+    # out with first-response-wins is not a real dnsdist server-selection
+    # policy and is not implemented -- per "wire every advertised control
+    # into the real runtime or remove/disable controls that are genuinely
+    # unsupported," it must not be selectable, not silently no-op.
+    if strategy not in ("ordered", "failover", "load_balanced"):
+        raise PolicyStoreError(
+            f"unsupported upstream strategy: {strategy!r} (supported: ordered, failover, load_balanced)"
+        )
     if not endpoints:
         raise PolicyStoreError("upstream profile requires at least one endpoint")
     for ep in endpoints:

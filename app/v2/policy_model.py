@@ -47,6 +47,12 @@ _ANSWER_AFFECTING_FIELDS = (
     "custom_ipv6",
     "upstream_profile_id",
     "fallback_strategy",
+    # Real defect closed: fallback_strategy was stored but the runtime
+    # never invoked any real fallback decision logic, and app/v2/
+    # fallback_dns.py's evaluate_fallback() was written but never called
+    # from anywhere real -- fully disconnected. Nothing named WHICH
+    # profile to fall back to either; that reference is this field.
+    "fallback_upstream_profile_id",
     "ecs_mode",
     "domain_routing_ruleset_id",
 )
@@ -73,6 +79,7 @@ class PolicyLayer:
     custom_ipv6: Optional[str] = None
     upstream_profile_id: Optional[str] = None
     fallback_strategy: Optional[str] = None
+    fallback_upstream_profile_id: Optional[str] = None
     ecs_mode: Optional[str] = None
     domain_routing_ruleset_id: Optional[str] = None
     query_log_enabled: Optional[bool] = None
@@ -101,6 +108,7 @@ _ANSWER_DEFAULTS = {
     "custom_ipv6": "",
     "upstream_profile_id": "default",
     "fallback_strategy": "none",
+    "fallback_upstream_profile_id": "none",
     "ecs_mode": "disabled",
     "domain_routing_ruleset_id": "none",
 }

@@ -905,6 +905,7 @@ class PolicyLayerUpdate(BaseModel):
     custom_ipv6: Optional[str] = None
     upstream_profile_id: Optional[str] = None
     fallback_strategy: Optional[str] = None
+    fallback_upstream_profile_id: Optional[str] = None
     ecs_mode: Optional[str] = None
     domain_routing_ruleset_id: Optional[str] = None
     query_log_enabled: Optional[bool] = None

@@ -44,6 +44,7 @@
     ["custom_ipv6", "Custom block IPv6", "only used when response mode is custom_ip"],
     ["upstream_profile_id", "Upstream profile", "profile id"],
     ["fallback_strategy", "Fallback", "", ["none", "on_failure", "always_parallel"]],
+    ["fallback_upstream_profile_id", "Fallback upstream profile", "profile id (must use the same transport as the primary)"],
     ["ecs_mode", "ECS (client subnet)", "", ["disabled", "preserve", "custom"]],
     ["domain_routing_ruleset_id", "Domain routes", "ruleset id"],
   ];
@@ -438,7 +439,7 @@
   }
 
   function upstreamForm() {
-    return `<form data-form="upstream"><div class="form-grid"><label>Profile ID<input name="upstream_profile_id" required></label><label>Name<input name="name" required></label><label>Transport<select name="transport"><option>plain</option><option>dot</option><option>doh</option></select></label><label>Strategy<select name="strategy"><option>ordered</option><option>failover</option><option>load_balanced</option><option>parallel_first_success</option></select></label><label>Address<input name="address" required placeholder="1.1.1.1:53"></label><label>TLS hostname<input name="tls_hostname" placeholder="cloudflare-dns.com"></label><label>DoH path<input name="doh_path" placeholder="/dns-query"></label></div><button>Create upstream</button></form>`;
+    return `<form data-form="upstream"><div class="form-grid"><label>Profile ID<input name="upstream_profile_id" required></label><label>Name<input name="name" required></label><label>Transport<select name="transport"><option>plain</option><option>dot</option><option>doh</option></select></label><label>Strategy<select name="strategy"><option>ordered</option><option>failover</option><option>load_balanced</option></select></label><label>Address<input name="address" required placeholder="1.1.1.1:53"></label><label>TLS hostname<input name="tls_hostname" placeholder="cloudflare-dns.com"></label><label>DoH path<input name="doh_path" placeholder="/dns-query"></label></div><button>Create upstream</button></form>`;
   }
 
   function routeForm(upstreams) {

@@ -100,7 +100,11 @@ class ClientPolicyBinding:
 # no separate Python-side health-tracking loop required.
 # "load_balanced" -> wrandom: weighted-random selection across all
 # up servers using each server's configured weight.
-_POOL_SERVER_POLICY = {"ordered": "firstAvailable", "load_balanced": "wrandom"}
+_POOL_SERVER_POLICY = {
+    "ordered": "firstAvailable",
+    "failover": "firstAvailable",  # accepted synonym of "ordered" -- same real behavior
+    "load_balanced": "wrandom",
+}
 
 
 def _endpoint_server_line(address: str, pool: str, transport: str, tls_hostname, doh_path, use_ecs: bool) -> str:
