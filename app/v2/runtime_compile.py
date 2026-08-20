@@ -1,23 +1,28 @@
 """V2 management-plane -> real compiled DNS runtime (Workstream 4B §18,
-§46). The missing link between the HTTPS management API and the already-
-proven-correct policy runtime compiler
+§46; beta-rescue pass). The missing link between the HTTPS management API
+and the already-proven-correct policy runtime compiler
 (``app/v2/dnsdist_policy_runtime.py``): reads real control.db state
-(networks, the global policy layer, upstream profiles, service-blocking
-rulesets), builds one ``ClientPolicyBinding`` per configured network plus
-a default/global binding, and stages -> validates (real ``dnsdist
---check-config``) -> promotes the result.
+(networks, managed clients/groups/schedules, the global policy layer,
+upstream/fallback profiles, domain-routing rules, service-blocking
+rulesets), builds one ``ClientPolicyBinding`` per configured network, one
+per real client IP identifier (resolving that client's full
+global -> network -> group(s) -> client -> active-schedule inheritance
+stack through the exact same ``policy_compiler.compile_effective_policy``
+the management-plane Explain endpoint uses), plus a default/global
+binding, and stages -> validates (real ``dnsdist --check-config``) ->
+promotes the result.
 
-Scope, stated plainly: this maps ``safesearch_mode`` (all supported
-providers when not "off" -- a real, documented simplification; the model
-does not yet support per-provider selection) and the three
-service-blocking-ruleset-shaped fields (``parental_policy_id``,
-``security_policy_id``, ``service_blocking_ruleset_id`` -- all three
-already share one real domain-membership mechanism,
-``policy_store.create_service_ruleset``/``is_domain_service_blocked``, see
-``app/v2/filtering_decision.py``'s own docstring) into real per-network
-dnsdist rules. ``filtering_profile_id`` (ordinary allow/block lists, not
-yet wired to a distinct storage/CRUD surface as of this pass) is not yet
-mapped -- see ``docs/v2/management-plane.md`` "Known limitations."
+Scope, stated plainly: ``safesearch_mode`` maps to "all supported
+providers" when not "off" -- a real, documented simplification; the model
+does not yet support per-provider selection, though the moderate/strict
+*level* is real and provider-audited (see ``app/v2/safesearch.py``).
+``filtering_profile_id``, the three service-blocking-ruleset-shaped
+fields (``parental_policy_id``, ``security_policy_id``,
+``service_blocking_ruleset_id``), and ``domain_routing_ruleset_id`` all
+now reach real per-binding dnsdist rules -- see
+``docs/v2/management-plane.md`` "Known limitations" for what remains
+genuinely unimplemented (product-parity gaps like AdGuard Home/Pi-hole
+import and a native Software Updates surface, not runtime-wiring gaps).
 
 Report success only after real promotion succeeds (§18's "do not report
 success before runtime promotion succeeds" requirement) -- callers must

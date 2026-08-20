@@ -87,18 +87,33 @@ services/blocking rulesets, schedules, analytics (recent log, top domains — vi
 unmodified), a secrets backup trigger, migration source detection (read-only), system status, and
 TLS status/replace.
 
-**Known limitations, stated honestly:**
-- `filtering_profile_id` (ordinary allow/block lists) is not yet mapped into the runtime compiler
-  — only the three service-blocking-ruleset-shaped fields (`parental_policy_id`,
-  `security_policy_id`, `service_blocking_ruleset_id`) and `safesearch_mode` are (see
-  `app/v2/runtime_compile.py`'s own docstring for the exact scope statement).
-- `safesearch_mode` maps to "all supported providers" when not `"off"` — the policy model has no
-  per-provider selection field yet, so `"strict"` and `"moderate"` currently produce the same
-  provider set.
-- Backup/restore/migration APIs are intentionally thin in this pass: backup covers secrets only
-  (not a full control.db snapshot), migration exposes detection only (real preview/run/rollback
-  wiring was out of scope for this specific pass, per its own "preview remains read-only, do not
-  run migration merely because a page is opened" instruction — nothing here runs a migration).
+**Known limitations, stated honestly (updated during the beta-rescue pass):**
+- ~~`filtering_profile_id` not mapped into the runtime compiler~~ — CLOSED. It now shares the same
+  ruleset-membership mechanism as `parental_policy_id`/`security_policy_id`/
+  `service_blocking_ruleset_id` (see `app/v2/runtime_compile.py::_blocked_domains_for_policy`).
+- ~~`safesearch_mode` "moderate"/"strict" produce the same provider set~~ — CLOSED for providers
+  that genuinely publish a distinct DNS-level moderate target (YouTube). Google/Bing/DuckDuckGo
+  intentionally still map both levels to their one real published enforcement hostname — see
+  `app/v2/safesearch.py`'s own per-provider audit, not remaining fake differentiation.
+- ~~`domain_routing_ruleset_id` never reaches a binding~~ — CLOSED (`app/v2/runtime_compile.py`'s
+  `_domain_routes_for_policy`, preserving each rule's own exact/suffix match kind).
+  ~~`upstream_profile.strategy` (ordered/load_balanced/failover) discarded before reaching a
+  binding~~ — CLOSED (`setPoolServerPolicy`). ~~`fallback_strategy`/`fallback_dns.py` fully
+  disconnected~~ — CLOSED (`_apply_fallback`; `fallback_upstream_profile_id` is the new field
+  naming which profile to fall back to; same-transport pools only, by design).
+  ~~`custom_ip` blocking response mode had nowhere to store its address, crashing compilation~~ —
+  CLOSED (`custom_ipv4`/`custom_ipv6` policy-layer fields).
+  ~~Managed-client/group/schedule effective policy never reached the compiled runtime at all
+  (only per-network + default bindings existed)~~ — CLOSED, the P0 of the beta-rescue pass:
+  `build_bindings()` now also materializes one binding per real client IP identifier, resolving
+  the full global→network→group(s)→client→active-schedule stack through the same
+  `policy_compiler.compile_effective_policy` the Explain endpoint uses.
+- Backup/restore/migration APIs remain thin as of this pass: backup covers secrets only (not a
+  full control.db/appliance snapshot), migration exposes detection only (real preview/run/rollback
+  wiring remains out of scope). AdGuard Home/Pi-hole/generic import, and a native Software Updates
+  surface, do not exist yet at all. These are real, acknowledged product-parity gaps against
+  V1.1.1 that the beta-rescue pass did not reach — see the handoff notes for the exact remaining
+  delta, not a claim that they're done.
 - No group/tag CRUD endpoints, no RBAC beyond "authenticated admin" (the spec's stated minimum).
 
 ## Real defects found and fixed this pass

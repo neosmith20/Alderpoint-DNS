@@ -482,6 +482,34 @@ class TestPolicyApiReachesRuntime:
         r = client.get("/api/policy/explain", params={"client_id": 1})
         assert r.status_code == 401
 
+    def test_custom_ip_response_mode_with_address_promotes_successfully(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        r = client.put(
+            "/api/policy/global",
+            json={"blocking_response_mode": "custom_ip", "custom_ipv4": "10.9.9.9"},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["runtime"]["promoted"] is True
+
+    def test_custom_ip_response_mode_without_address_fails_cleanly_not_500(self, app_client):
+        # Real defect closed: RC42 crashed the compile with an unhandled
+        # exception the moment a policy resolved to custom_ip with no
+        # configured address. Must be a clean, reportable failure with the
+        # previous configuration left promoted, never a raw 500.
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        r = client.put(
+            "/api/policy/global", json={"blocking_response_mode": "custom_ip"}, headers={"X-CSRF-Token": csrf},
+        )
+        assert r.status_code == 409, r.text
+        assert r.json()["error"] == "runtime_promotion_failed"
+        # Rolled back: the stored policy must NOT have been left in the
+        # broken state either.
+        r2 = client.get("/api/policy/global", headers={"X-CSRF-Token": csrf})
+        assert r2.json()["policy"]["blocking_response_mode"] != "custom_ip"
+
 
 class TestDnsTransports:
     # Real defect this closes (docs/v2/encrypted-transport-parity-gap.md):

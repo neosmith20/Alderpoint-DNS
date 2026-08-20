@@ -708,14 +708,14 @@ def migrate_filtering_to_control_db(blocked_domains: list[str], target_control_d
     compiled runtime, not just present in a staged report.
 
     V2's real per-effective-policy compiler (``app/v2/runtime_compile.py``
-    -> ``app/v2/dnsdist_policy_runtime.py``) only ever enforces domains
-    reachable through the ``service_blocking_ruleset`` mechanism (parental/
-    security/service rulesets, ``policy_store.create_service_ruleset``) --
-    there is no separate "plain ad-hoc block list" storage/CRUD surface in
-    the live product yet (``runtime_compile.py``'s own docstring: "ordinary
-    allow/block lists... not yet mapped"). Rather than inventing a new
-    storage mechanism under migration, this reuses the existing, already-
-    wired ruleset mechanism: every migrated blocked domain becomes one
+    -> ``app/v2/dnsdist_policy_runtime.py``) enforces domains reachable
+    through the ``service_blocking_ruleset`` mechanism (parental/security/
+    service rulesets plus ``filtering_profile_id``, all sharing
+    ``policy_store.create_service_ruleset``) -- there is still no separate
+    "plain ad-hoc block list" storage/CRUD surface distinct from that
+    mechanism. Rather than inventing a new storage mechanism under
+    migration, this reuses the existing, already-wired ruleset mechanism:
+    every migrated blocked domain becomes one
     ``service_definitions`` row (exact match) inside one synthetic service
     named ``migrated-v1-custom-blocklist``, grouped into one ruleset
     (``migrated-v1-custom-blocklist``) that the global policy layer's
