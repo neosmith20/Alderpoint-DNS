@@ -470,6 +470,69 @@ async function main() {
     await waitFor(`document.body.innerText.includes("succeeded")`, "restore status");
     proof.push("backup-restore-workflow");
 
+    // Real full appliance backup -> mutate -> restore, driven through
+    // the UI. Local DNS is the mutation target since it's cheap to
+    // create and to check for/against by name.
+    await route("localdns");
+    await waitFor(`document.querySelector('form[data-form="localdns"]')`, "local dns form (pre-backup)");
+    await evalJs(`(() => {
+      const f = document.querySelector('form[data-form="localdns"]');
+      f.querySelector('[name=name]').value = 'before-backup-${suffix}.lan';
+      f.querySelector('[name=value]').value = '10.0.0.44';
+      f.requestSubmit();
+      return true;
+    })()`);
+    await waitFor(`document.body.innerText.includes("before-backup-${suffix}.lan")`, "pre-backup record saved");
+
+    await route("backup");
+    await waitFor(`document.querySelector('[data-appliance-backup]')`, "appliance backup controls");
+    await evalJs(`document.querySelector('[data-appliance-backup]').click(); true`);
+    await waitFor(`document.body.innerText.includes(".apdnsbak")`, "appliance backup created");
+    const applianceBackupName = await evalJs(`document.querySelector('[data-validate-appliance-backup]')?.dataset.validateApplianceBackup || ""`);
+    if (!applianceBackupName) throw new Error("appliance backup name not found");
+    await evalJs(`document.querySelector('[data-validate-appliance-backup]').click(); true`);
+    await waitFor(`document.body.innerText.includes("is valid")`, "appliance backup validation");
+    proof.push("appliance-backup-created");
+
+    // Same settle-time rationale as the import section above: appliance
+    // backup/validate does real tar+Fernet work over the whole
+    // control.db, not a trivial mutation.
+    await sleep(2000);
+
+    // Mutate the live appliance after the backup: add a record that
+    // must NOT survive the restore.
+    await route("localdns");
+    await waitFor(`document.querySelector('form[data-form="localdns"]')`, "local dns form (post-backup)");
+    await evalJs(`(() => {
+      const f = document.querySelector('form[data-form="localdns"]');
+      f.querySelector('[name=name]').value = 'after-backup-${suffix}.lan';
+      f.querySelector('[name=value]').value = '10.0.0.45';
+      f.requestSubmit();
+      return true;
+    })()`);
+    await waitFor(`document.body.innerText.includes("after-backup-${suffix}.lan")`, "post-backup record saved");
+
+    await route("backup");
+    await waitFor(`document.querySelector('[data-validate-appliance-backup]')`, "appliance backup list (pre-restore)");
+    await evalJs(`(() => {
+      const f = document.querySelector('form[data-form="appliance-restore"]');
+      f.querySelector('[name=confirmation]').value = ${JSON.stringify(applianceBackupName)};
+      f.requestSubmit();
+      return true;
+    })()`);
+    await waitForOkOrError(`document.body.innerText.includes("succeeded") && document.body.innerText.includes(${JSON.stringify(applianceBackupName)})`, "appliance restore status");
+    proof.push("appliance-restore-applied");
+
+    // The pre-backup record must be back; the post-backup mutation must
+    // be gone -- proves the RESTORED state is what is live, not the
+    // mutated state.
+    await route("localdns");
+    await waitFor(`document.body.innerText.includes("before-backup-${suffix}.lan")`, "restored record present");
+    if (await evalJs(`document.body.innerText.includes("after-backup-${suffix}.lan")`)) {
+      throw new Error("post-backup mutation survived the restore -- restore did not actually revert live state");
+    }
+    proof.push("appliance-restore-reverted-mutation");
+
     await route("replication");
     await waitFor(`document.body.innerText.includes("Node identity")`, "replication status");
     await route("settings");

@@ -526,15 +526,27 @@
   }
 
   async function backup() {
-    const [backups, migration] = await Promise.all([
+    const [applianceBackups, backups, migration] = await Promise.all([
+      api("/api/backup/appliance").catch((e) => ({ backups: [], restore_jobs: [], error: e.message })),
       api("/api/backup/secrets").catch((e) => ({ backups: [], restore_jobs: [], error: e.message })),
       api("/api/migration/detect?source_path=/var/lib/alderpointdns/alderpointdns.db").catch((e) => ({ error: e.message })),
     ]);
     return page("Backup / Restore / Migration", "Safe entry points for backup and migration preview. Opening this page does not start destructive work.", "", `
+      <section class="panel"><div class="panel__head"><h2>Appliance Backup / Restore</h2></div><div class="panel__body">
+        <p class="muted">A full encrypted snapshot: control database (clients, groups, networks, policies, filtering, Local DNS, upstream profiles, domain routing, schedules, DNS-transport/encryption settings, notifications, replication identity/peers), protected secrets, and the active HTTPS/DNSCrypt certificates. Raw query history is never included -- control.db cannot hold it. Restore is staged and validated before anything live changes, and the prior appliance state is snapshotted first so a failed restore leaves it untouched.</p>
+        <button data-appliance-backup class="primary">Create appliance backup</button>
+        ${applianceBackupTable(applianceBackups.backups || [])}
+        ${restoreJobs(applianceBackups.restore_jobs || [])}
+      </div></section>
       <div class="grid two">
-        <section class="panel"><div class="panel__head"><h2>Secret Backup / Restore</h2></div><div class="panel__body"><p class="muted">Creates encrypted server-side backups. Restore requires validation plus exact file-name confirmation. Secret values are never displayed.</p><button data-backup class="primary">Create secret backup</button>${backupTable(backups.backups || [])}${restoreJobs(backups.restore_jobs || [])}</div></section>
+        <section class="panel"><div class="panel__head"><h2>Secret Backup / Restore</h2></div><div class="panel__body"><p class="muted">One component of the appliance backup above, also available standalone: encrypted protected secrets only. Secret values are never displayed.</p><button data-backup class="primary">Create secret-only backup</button>${backupTable(backups.backups || [])}${restoreJobs(backups.restore_jobs || [])}</div></section>
         <section class="panel"><div class="panel__head"><h2>Migration Detection</h2></div><div class="panel__body">${migration.error ? `<div class="alert warn">${esc(migration.error)}</div>` : tableFromRows([migration], 1)}<form data-form="migration"><label>Source path<input name="source_path" value="/var/lib/alderpointdns/alderpointdns.db"></label><button>Detect source</button></form><div id="migration-result"></div></div></section>
       </div>`);
+  }
+
+  function applianceBackupTable(backups) {
+    if (!backups.length) return `<div class="empty">No appliance backups.</div>`;
+    return `<div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>Name</th><th>Created</th><th>Size</th><th>Restore</th></tr></thead><tbody>${backups.map((b) => `<tr><td class="mono">${esc(b.name)}</td><td>${esc(b.created_at)}</td><td>${esc(b.size_bytes)}</td><td><button data-validate-appliance-backup="${esc(b.name)}">Validate</button><form data-form="appliance-restore" data-backup-name="${esc(b.name)}" class="field-row"><input name="confirmation" placeholder="type exact file name"><button class="danger">Restore</button></form></td></tr>`).join("")}</tbody></table></div>`;
   }
 
   function backupTable(backups) {
@@ -793,16 +805,31 @@
       const backup = ev.target.closest("[data-backup]");
       if (backup) {
         const res = await api("/api/backup/secrets", { method: "POST" });
-        toast(`Encrypted backup created for ${res.secret_count} secrets`, "ok");
         await loadPage("backup");
+        toast(`Encrypted backup created for ${res.secret_count} secrets`, "ok");
         return;
       }
       const validate = ev.target.closest("[data-validate-backup]");
       if (validate) {
         const name = validate.dataset.validateBackup;
         const res = await api(`/api/backup/secrets/${encodeURIComponent(name)}/validate`, { method: "POST" });
-        toast(`Backup ${res.backup_name} is valid (${res.secret_count} secrets)`, "ok");
         await loadPage("backup");
+        toast(`Backup ${res.backup_name} is valid (${res.secret_count} secrets)`, "ok");
+        return;
+      }
+      const applianceBackup = ev.target.closest("[data-appliance-backup]");
+      if (applianceBackup) {
+        const res = await api("/api/backup/appliance", { method: "POST" });
+        await loadPage("backup");
+        toast(`Appliance backup created (${res.contents.join(", ")})`, "ok");
+        return;
+      }
+      const validateAppliance = ev.target.closest("[data-validate-appliance-backup]");
+      if (validateAppliance) {
+        const name = validateAppliance.dataset.validateApplianceBackup;
+        const res = await api(`/api/backup/appliance/${encodeURIComponent(name)}/validate`, { method: "POST" });
+        await loadPage("backup");
+        toast(`Backup ${res.backup_name} is valid (${res.contents.join(", ")})`, "ok");
         return;
       }
     });
@@ -903,6 +930,9 @@
     } else if (type === "restore") {
       const name = form.dataset.backupName;
       await api(`/api/backup/secrets/${encodeURIComponent(name)}/restore`, { method: "POST", body: JSON.stringify(body) });
+    } else if (type === "appliance-restore") {
+      const name = form.dataset.backupName;
+      await api(`/api/backup/appliance/${encodeURIComponent(name)}/restore`, { method: "POST", body: JSON.stringify(body) });
     } else if (type === "tls") {
       await api("/api/tls/replace", { method: "POST", body: JSON.stringify(body) });
     } else if (type === "notification") {

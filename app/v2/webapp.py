@@ -28,6 +28,7 @@ import hmac
 import ipaddress
 import json
 import os
+import shutil
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -44,6 +45,7 @@ from pydantic import BaseModel, Field
 from app import dnsdist_upgrade
 from app.db_retry import DatabaseBusyError, is_lock_error, retry_on_locked
 from app.v2 import analytics_deps
+from app.v2 import backup_restore
 from app.v2 import control_db
 from app.v2 import dnscrypt_provisioning
 from app.v2 import import_migration
@@ -1970,6 +1972,200 @@ def restore_secret_backup(name: str, req: SecretRestoreRequest, admin=Depends(cu
             (finished, "succeeded", json.dumps({"secret_count": restored, "overwrite": req.overwrite}), job_id),
         )
     return {"status": "succeeded", "job_id": job_id, "backup_name": name, "secret_count": restored}
+
+
+# --- full appliance backup/restore (beta-rescue priority 3) -----------------
+#
+# The secrets-only backup above is preserved (a real, still-useful
+# component: protected secrets on their own), but it is not "the backup
+# feature" -- this is. See app/v2/backup_restore.py for the full
+# contract (control.db snapshot + secrets + certs, one encrypted
+# archive, staged validate -> apply, rollback on a failed promotion).
+
+
+def _appliance_backup_path_from_name(name: str) -> Path:
+    if "/" in name or "\\" in name or name.startswith(".") or not name.endswith(".apdnsbak"):
+        raise ApiError(400, "validation_error", "invalid backup name")
+    path = (_backup_dir() / name).resolve()
+    if path.parent != _backup_dir().resolve():
+        raise ApiError(400, "validation_error", "invalid backup name")
+    return path
+
+
+def _appliance_cert_files() -> list[backup_restore.CertFile]:
+    return [
+        backup_restore.CertFile(ACTIVE_CERT_PATH, "server.crt"),
+        backup_restore.CertFile(ACTIVE_KEY_PATH, "server.key"),
+        backup_restore.CertFile(DNSCRYPT_CERT_PATH, "dnscrypt-resolver.cert"),
+        backup_restore.CertFile(DNSCRYPT_KEY_PATH, "dnscrypt-resolver.key"),
+    ]
+
+
+def _appliance_source_version() -> str:
+    version_file = APP_ROOT / "VERSION"
+    return version_file.read_text().strip() if version_file.exists() else "unknown"
+
+
+@app.get("/api/backup/appliance")
+def list_appliance_backups(admin=Depends(current_admin)):
+    rows = []
+    for p in sorted(_backup_dir().glob("*.apdnsbak"), key=lambda x: x.stat().st_mtime, reverse=True):
+        stat = p.stat()
+        rows.append({
+            "name": p.name, "size_bytes": stat.st_size,
+            "created_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+        })
+    with _db() as conn:
+        jobs = conn.execute(
+            "SELECT id, started_at, finished_at, status, backup_path, detail_json "
+            "FROM restore_jobs WHERE backup_path LIKE '%.apdnsbak' ORDER BY id DESC LIMIT 20"
+        ).fetchall()
+    return {
+        "backups": rows,
+        "restore_jobs": [
+            {
+                "id": r[0], "started_at": r[1], "finished_at": r[2], "status": r[3],
+                "backup_name": Path(r[4]).name if r[4] else "", "detail": json.loads(r[5] or "{}"),
+            }
+            for r in jobs
+        ],
+    }
+
+
+@app.post("/api/backup/appliance")
+def create_appliance_backup_route(admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    secrets = _secrets()
+    key = _backup_key(secrets)
+    backup_path = _backup_dir() / f"appliance-{int(time.time())}.apdnsbak"
+    result = backup_restore.create_appliance_backup(
+        CONTROL_DB, secrets, key, backup_path,
+        cert_files=_appliance_cert_files(), source_version=_appliance_source_version(),
+    )
+    with _db() as conn:
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "INSERT INTO backup_jobs(started_at, finished_at, status, path, detail_json) VALUES (?, ?, ?, ?, ?)",
+            (now, now, "succeeded", str(backup_path), json.dumps({"contents": result.contents, "secret_count": result.secret_count})),
+        )
+    return {
+        "status": "created", "name": backup_path.name, "created_at": result.created_at,
+        "contents": result.contents, "secret_count": result.secret_count,
+        "control_db_schema_version": result.control_db_schema_version, "size_bytes": result.size_bytes,
+    }
+
+
+@app.post("/api/backup/appliance/{name}/validate")
+def validate_appliance_backup_route(name: str, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    path = _appliance_backup_path_from_name(name)
+    if not path.exists():
+        raise ApiError(404, "not_found", "backup not found")
+    try:
+        manifest = backup_restore.validate_appliance_backup(path, _backup_key(_secrets()))
+    except (backup_restore.ApplianceBackupError, backup_restore.ApplianceRestoreError) as exc:
+        raise ApiError(400, "backup_invalid", str(exc)) from exc
+    return {
+        "status": "valid", "backup_name": name, "created_at": manifest.created_at,
+        "source_version": manifest.source_version, "contents": manifest.contents,
+        "secret_count": manifest.secret_count, "cert_files": manifest.cert_files,
+        "control_db_schema_version": manifest.control_db_schema_version,
+        "size_bytes": path.stat().st_size,
+    }
+
+
+class ApplianceRestoreRequest(BaseModel):
+    confirmation: str
+
+
+@app.post("/api/backup/appliance/{name}/restore")
+def restore_appliance_backup_route(name: str, req: ApplianceRestoreRequest, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    if req.confirmation != name:
+        raise ApiError(400, "confirmation_required", "type the exact backup file name to restore")
+    path = _appliance_backup_path_from_name(name)
+    if not path.exists():
+        raise ApiError(404, "not_found", "backup not found")
+
+    # Real defect fixed here (found while proving this out): restore_jobs
+    # bookkeeping lives in control.db, which a *successful* restore
+    # unconditionally replaces -- a "running" row inserted before staging
+    # and later UPDATEd by id is silently gone once the swap has
+    # happened, because that id no longer exists in the just-restored
+    # control.db (it exists in the OLD one, which is no longer live).
+    # There is therefore no pre-restore "running" row at all; each branch
+    # below does exactly one INSERT, into whichever control.db is
+    # actually current at that moment -- the pre-restore one on failure
+    # (nothing was swapped), the post-restore one on success.
+    started = datetime.now(timezone.utc).isoformat()
+
+    def _record_failure(exc: Exception, error_kind: str) -> None:
+        finished = datetime.now(timezone.utc).isoformat()
+        with _db() as conn:
+            conn.execute(
+                "INSERT INTO restore_jobs(started_at, finished_at, status, backup_path, detail_json) VALUES (?, ?, ?, ?, ?)",
+                (started, finished, "failed", str(path), json.dumps({"error": str(exc)})),
+            )
+        raise ApiError(400, error_kind, str(exc)) from exc
+
+    key = _backup_key(_secrets())
+    staging_dir = STATE_DIR / "restore-staging" / f"job-{int(time.time() * 1000)}"
+    try:
+        staged = backup_restore.stage_appliance_restore(path, key, staging_dir)
+    except backup_restore.ApplianceBackupKeyError as exc:
+        _record_failure(exc, "backup_invalid")
+        return  # pragma: no cover -- _record_failure always raises
+    except backup_restore.ApplianceRestoreError as exc:
+        _record_failure(exc, "restore_failed")
+        return  # pragma: no cover -- _record_failure always raises
+
+    rollback_root = STATE_DIR / "restore-rollback" / f"job-{int(time.time() * 1000)}"
+    try:
+        promo = backup_restore.promote_appliance_restore(
+            staged, CONTROL_DB, SECRETS_DIR, _appliance_cert_files(), rollback_root=rollback_root,
+        )
+    except Exception as exc:
+        # The live appliance was already rolled back by
+        # promote_appliance_restore itself before this exception reached
+        # here -- report the failure, but the prior valid appliance is
+        # still the one actually live.
+        _record_failure(exc, "restore_failed")
+        return  # pragma: no cover -- _record_failure always raises
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+    # Recompile/promote the runtime against the just-restored control.db
+    # so the restored state is actually live, not just present on disk.
+    # A recompile failure here is a real, reportable failure -- surfaced
+    # to the operator -- but does not itself roll back the already-
+    # promoted control.db/secrets/certs (those are already validated,
+    # real, consistent state; a compile failure means the *runtime*
+    # couldn't pick it up yet, most likely because the restored
+    # configuration references something -- an upstream, a certificate --
+    # not actually present on this host, which the operator needs to see
+    # and fix, not have silently reverted out from under them).
+    runtime_promoted = False
+    runtime_error = None
+    try:
+        result = _mutate_and_promote(lambda conn: None)
+        runtime_promoted = result.promoted
+    except Exception as exc:  # noqa: BLE001 -- reported, not swallowed
+        runtime_error = str(exc)
+
+    finished = datetime.now(timezone.utc).isoformat()
+    detail = {
+        "control_db_restored": promo.control_db_restored, "secret_count_restored": promo.secret_count_restored,
+        "certs_restored": promo.certs_restored, "runtime_promoted": runtime_promoted, "runtime_error": runtime_error,
+    }
+    # Inserted into the NOW-current control.db -- the one the restore
+    # itself just promoted, if control_db was part of this backup.
+    with _db() as conn:
+        cur = conn.execute(
+            "INSERT INTO restore_jobs(started_at, finished_at, status, backup_path, detail_json) VALUES (?, ?, ?, ?, ?)",
+            (started, finished, "succeeded", str(path), json.dumps(detail)),
+        )
+        job_id = cur.lastrowid
+    return {"status": "succeeded", "job_id": job_id, "backup_name": name, **detail}
 
 
 # --- replication (§4C) ------------------------------------------------------
