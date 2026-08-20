@@ -614,6 +614,65 @@ def session_status(admin=Depends(current_admin)):
     return {"authenticated": True, "username": row[0] if row else "", "csrf": admin["csrf"]}
 
 
+# --- administration: password change / session revocation
+# (beta-rescue priority 5 -- a real gap, not a stylistic one: V1.1.1 has
+# always had these two actions and RC43 shipped with no way for an
+# operator to change their own password or revoke other sessions at all)
+# ------------------------------------------------------------------------
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=12, max_length=256)
+
+
+@app.post("/api/session/password")
+def change_password(req: PasswordChangeRequest, request: Request, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    from app.v2.auth_hash import verify_password
+
+    ip = request.client.host if request.client else None
+    now = datetime.now(timezone.utc).isoformat()
+    with _db() as conn:
+        row = conn.execute("SELECT username, password_hash FROM admins WHERE id=?", (admin["admin_id"],)).fetchone()
+        if row is None:
+            raise ApiError(401, "unauthenticated", "account no longer exists")
+        username, password_hash = row
+        result = verify_password(password_hash, req.current_password, limiter=_hash_limiter)
+        if not result.ok:
+            conn.execute(
+                "INSERT INTO admin_audit_log(at, admin_id, username, action, success, ip, detail) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (now, admin["admin_id"], username, "password_change", 0, ip, "current password incorrect"),
+            )
+            raise ApiError(400, "incorrect_password", "current password is incorrect")
+        new_hash = hash_password(req.new_password, limiter=_hash_limiter)
+        conn.execute("UPDATE admins SET password_hash=? WHERE id=?", (new_hash, admin["admin_id"]))
+        conn.execute(
+            "INSERT INTO admin_audit_log(at, admin_id, username, action, success, ip, detail) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (now, admin["admin_id"], username, "password_change", 1, ip, ""),
+        )
+    return {"status": "changed"}
+
+
+@app.post("/api/session/revoke-others")
+def revoke_other_sessions(request: Request, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    ip = request.client.host if request.client else None
+    now = datetime.now(timezone.utc).isoformat()
+    with _db() as conn:
+        row = conn.execute("SELECT username FROM admins WHERE id=?", (admin["admin_id"],)).fetchone()
+        username = row[0] if row else ""
+        cur = conn.execute(
+            "DELETE FROM sessions WHERE admin_id = ? AND id != ?", (admin["admin_id"], admin["session_id"]),
+        )
+        revoked = cur.rowcount
+        conn.execute(
+            "INSERT INTO admin_audit_log(at, admin_id, username, action, success, ip, detail) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (now, admin["admin_id"], username, "sessions_revoked", 1, ip, f"{revoked} other session(s) revoked"),
+        )
+    return {"status": "revoked", "revoked_count": revoked}
+
+
 # --- health (§16) ------------------------------------------------------------
 
 

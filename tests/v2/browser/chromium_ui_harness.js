@@ -596,6 +596,29 @@ async function main() {
     await route("settings");
     await waitFor(`document.body.innerText.includes("HTTPS Certificate")`, "settings page");
 
+    // Administration: password change + revoke-other-sessions, driven
+    // through the UI (priority 5 parity fix). Changing the password
+    // near the end since nothing after this re-authenticates with the
+    // original one.
+    await route("health");
+    await waitFor(`document.querySelector('form[data-form="change-password"]')`, "administration form");
+    await evalJs(`document.querySelectorAll('.toast').forEach((n) => n.remove()); true`);
+    await evalJs(`(() => {
+      const f = document.querySelector('form[data-form="change-password"]');
+      f.querySelector('[name=current_password]').value = 'correcthorsebattery12';
+      f.querySelector('[name=new_password]').value = 'reharnessed-password-99';
+      f.requestSubmit();
+      return true;
+    })()`);
+    await waitForOkOrError(`document.body.innerText.includes("Operation completed")`, "password change");
+    proof.push("administration-password-changed");
+
+    await waitFor(`document.querySelector('[data-revoke-sessions]')`, "administration panel re-rendered after password change");
+    await evalJs(`document.querySelectorAll('.toast').forEach((n) => n.remove()); true`);
+    await evalJs(`(() => { window.confirm = () => true; document.querySelector('[data-revoke-sessions]').click(); return true; })()`);
+    await waitForOkOrError(`document.body.innerText.includes("other session")`, "revoke other sessions");
+    proof.push("administration-sessions-revoked");
+
     await evalJs(`document.querySelector('[data-action="logout"]').click(); true`);
     await waitFor(`document.body.innerText.includes("Sign in") || document.body.innerText.includes("Create first administrator")`, "logout invalidates session");
     proof.push("logout-session-invalidation");

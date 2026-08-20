@@ -95,7 +95,19 @@
       try {
         await api("/api/session");
         toast("Reconnected", "ok");
-        await loadPage("updates");
+        // Real defect fixed here (found via the browser harness, beta-
+        // rescue priority 5/8): this polling loop runs in the
+        // background while the caller's click handler has already
+        // returned, so the operator is free to navigate elsewhere while
+        // it's still waiting to reconnect. Reloading "updates"
+        // unconditionally here would silently yank them back to a page
+        // they may have long since left -- and would also race/clobber
+        // whatever they navigated to next (loadPage's own stale-token
+        // guard doesn't help: this call is simply issued *late*, not
+        // stale, so it would legitimately "win" and overwrite the
+        // current, correct page). Only refresh if the operator is still
+        // actually on the page this reconnect was for.
+        if (state.route === "updates") await loadPage("updates");
         return;
       } catch (_) {
         await sleep(2000);
@@ -606,7 +618,11 @@
     const [h, s, n, d] = await Promise.all([api("/api/health"), api("/api/system/status"), api("/api/node-identity"), api("/api/discovery/status")]);
     return page("System / Health", "Operational status separates DNS/runtime health from optional subsystem degradation.", `<button data-refresh>Refresh</button>`, `
       <div class="strip"><div class="metric"><strong>${esc(h.status)}</strong><span>Overall</span></div><div class="metric"><strong>${esc(s.version)}</strong><span>Version</span></div><div class="metric"><strong>${s.compiled_runtime_present ? "yes" : "no"}</strong><span>Compiled runtime</span></div><div class="metric"><strong>${esc(d.observed_count ?? 0)}</strong><span>Observed clients</span></div></div>
-      <div class="grid two"><section class="panel"><div class="panel__head"><h2>Components</h2></div><div class="panel__body">${componentList(h.components || {})}</div></section><section class="panel"><div class="panel__head"><h2>Node Identity</h2></div><div class="panel__body">${tableFromRows([n], 1)}</div></section></div>`);
+      <div class="grid two"><section class="panel"><div class="panel__head"><h2>Components</h2></div><div class="panel__body">${componentList(h.components || {})}</div></section><section class="panel"><div class="panel__head"><h2>Node Identity</h2></div><div class="panel__body">${tableFromRows([n], 1)}</div></section></div>
+      <section class="panel"><div class="panel__head"><h2>Administration</h2></div><div class="panel__body"><div class="grid two">
+        <form data-form="change-password"><label>Current password<input name="current_password" type="password" autocomplete="current-password" required></label><label>New password (min. 12 characters)<input name="new_password" type="password" autocomplete="new-password" minlength="12" required></label><button class="primary">Change password</button></form>
+        <div><p class="muted">Signs out every other active session for your account (not this one). Use after a shared/compromised session.</p><button data-revoke-sessions class="danger">Revoke other sessions</button></div>
+      </div></div></section>`);
   }
 
   const IMPORT_SOURCE_LABELS = {
@@ -895,6 +911,13 @@
         await waitForReconnectAfterUpdate();
         return;
       }
+      const revokeSessions = ev.target.closest("[data-revoke-sessions]");
+      if (revokeSessions) {
+        if (!confirm("Sign out every other active session for your account?")) return;
+        const res = await api("/api/session/revoke-others", { method: "POST" });
+        toast(`${res.revoked_count} other session(s) revoked`, "ok");
+        return;
+      }
     });
 
     document.body.addEventListener("change", (ev) => {
@@ -1038,6 +1061,9 @@
       await loadPage("importexport");
       toast(`Import applied: ${Object.entries(res.counts).map(([k, v]) => `${k}=${v}`).join(", ")}`, "ok");
       return "skip-reload";
+    } else if (type === "change-password") {
+      await api("/api/session/password", { method: "POST", body: JSON.stringify({ current_password: body.current_password, new_password: body.new_password }) });
+      form.reset();
     } else if (type === "update-settings") {
       await api("/api/updates/settings", { method: "PUT", body: JSON.stringify({ private_feed_dir: body.private_feed_dir || null }) });
     } else if (type === "update-upload") {
