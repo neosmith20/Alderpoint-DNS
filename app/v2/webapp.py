@@ -1927,6 +1927,26 @@ def statistics_clear_route(req: StatisticsClearRequest, admin=Depends(current_ad
     }
 
 
+# --- in-app log viewer (beta-rescue priority 3E) -----------------------
+
+
+@app.get("/api/logs/units")
+def list_log_units(admin=Depends(current_admin)):
+    from app.v2 import log_viewer
+
+    return {"units": list(log_viewer.ALLOWED_UNITS)}
+
+
+@app.get("/api/logs/{unit}")
+def get_unit_logs(unit: str, severity: str = "all", lines: int = 100, admin=Depends(current_admin)):
+    from app.v2 import log_viewer
+
+    try:
+        return log_viewer.view_logs(unit, severity, lines)
+    except log_viewer.LogViewerError as exc:
+        raise ApiError(400, "validation_error", str(exc)) from exc
+
+
 # --- notifications (§29) ------------------------------------------------
 
 

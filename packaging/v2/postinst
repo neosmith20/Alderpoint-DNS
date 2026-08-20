@@ -55,6 +55,16 @@ case "$1" in
         --ingroup alderpointdns-v2 --disabled-login alderpointdns-v2
     fi
 
+    # In-app log viewer (beta-rescue priority 3E): real, minimal,
+    # read-only journal access via the standard systemd-journal group --
+    # never root, never sudo, never a general file-read capability. See
+    # app/v2/log_viewer.py's own docstring for the full contract
+    # (fixed unit allowlist, journalctl only, secret redaction reused
+    # from app.service_logs).
+    if getent group systemd-journal >/dev/null; then
+      usermod -aG systemd-journal alderpointdns-v2 || true
+    fi
+
     # Real race found live during Gate #3 acceptance testing: bind9 (a
     # V2 Depends:, needed only for its named-checkconf/named-checkzone
     # tooling and the alderpointdns-v2-bind@ template unit's own

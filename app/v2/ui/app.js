@@ -662,7 +662,27 @@
       <section class="panel"><div class="panel__head"><h2>Administration</h2></div><div class="panel__body"><div class="grid two">
         <form data-form="change-password"><label>Current password<input name="current_password" type="password" autocomplete="current-password" required></label><label>New password (min. 12 characters)<input name="new_password" type="password" autocomplete="new-password" minlength="12" required></label><button class="primary">Change password</button></form>
         <div><p class="muted">Signs out every other active session for your account (not this one). Use after a shared/compromised session.</p><button data-revoke-sessions class="danger">Revoke other sessions</button></div>
-      </div></div></section>`);
+      </div></div></section>
+      <section class="panel"><div class="panel__head"><h2>Service Logs</h2></div><div class="panel__body">
+        <form data-form="logs-view" class="query-filter">
+          <label>Service<select name="unit">${LOG_UNITS.map((u) => `<option value="${esc(u)}">${esc(u)}</option>`).join("")}</select></label>
+          <label>Severity<select name="severity"><option value="all">all</option><option value="error">error</option><option value="warning">warning</option><option value="info">info</option><option value="debug">debug</option></select></label>
+          <label>Lines<input name="lines" value="100" data-number="1"></label>
+          <button>View</button>
+        </form>
+        <div id="log-results" class="empty">Choose a service and click View.</div>
+      </div></section>`);
+  }
+
+  const LOG_UNITS = [
+    "alderpointdns-v2-web", "alderpointdns-v2-dnsdist", "alderpointdns-v2-bind@ctx0",
+    "alderpointdns-v2-analytics", "alderpointdns-v2-discovery", "alderpointdns-v2-replication",
+    "alderpointdns-v2-tierb", "alderpointdns-v2-schedule",
+  ];
+
+  function logEntriesTable(entries) {
+    if (!entries.length) return `<div class="empty">No log entries for this window.</div>`;
+    return `<div class="table-wrap"><table><thead><tr><th>Time</th><th>Severity</th><th>Message</th></tr></thead><tbody>${entries.map((e) => `<tr><td class="mono">${esc(e.ts)}</td><td><span class="badge ${e.severity === "error" || e.severity === "crit" || e.severity === "alert" || e.severity === "emerg" ? "bad" : e.severity === "warning" ? "warn" : "info"}">${esc(e.severity)}</span></td><td class="mono">${esc(e.message)}</td></tr>`).join("")}</tbody></table></div>`;
   }
 
   async function blocklists() {
@@ -1179,6 +1199,12 @@
       // still mid-refresh.
       await loadPage("importexport");
       toast(`Import applied: ${Object.entries(res.counts).map(([k, v]) => `${k}=${v}`).join(", ")}`, "ok");
+      return "skip-reload";
+    } else if (type === "logs-view") {
+      const q = new URLSearchParams({ severity: body.severity || "all", lines: String(body.lines || 100) });
+      const res = await api(`/api/logs/${encodeURIComponent(body.unit)}?${q}`);
+      const target = document.getElementById("log-results");
+      if (target) target.innerHTML = logEntriesTable(res.entries || []);
       return "skip-reload";
     } else if (type === "change-password") {
       await api("/api/session/password", { method: "POST", body: JSON.stringify({ current_password: body.current_password, new_password: body.new_password }) });
