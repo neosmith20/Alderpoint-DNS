@@ -1114,6 +1114,45 @@ class TestReplicationPeerCertEnrollment:
         assert ca_key_pem not in json.dumps(body)
 
 
+class TestReplicationSyncErrorHandling:
+    """Real defect found live during Gate #3 two-node replication
+    failure-isolation testing: a peer being unreachable (its
+    replication service stopped) is already a foreseeable outcome that
+    push_to_peer records into the peer's own last_error, but the sync
+    endpoint had nothing catching that exception -- it fell through to
+    the generic unhandled-exception handler and returned an opaque
+    {"error": "internal_error"} 500 to whoever called /sync, including
+    the admin UI's own "Sync now" action. Now mapped to a specific,
+    actionable ApiError instead."""
+
+    def test_sync_against_unreachable_peer_returns_specific_error_not_generic_500(self, app_client, monkeypatch):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        from app.v2 import replication_v2
+
+        def _raise_connection_refused(*_a, **_kw):
+            raise ConnectionRefusedError("[Errno 111] Connection refused")
+
+        monkeypatch.setattr(replication_v2, "push_to_peer", _raise_connection_refused)
+        r = client.post("/api/replication/peers/some-peer/sync", headers={"X-CSRF-Token": csrf})
+        assert r.status_code == 502, r.text
+        assert r.json()["error"] == "peer_unreachable"
+
+    def test_sync_against_peer_cert_mismatch_returns_specific_error_not_generic_500(self, app_client, monkeypatch):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        from app.v2 import replication_v2
+
+        def _raise_auth_error(*_a, **_kw):
+            raise replication_v2.ReplicationAuthError("peer server certificate fingerprint mismatch")
+
+        monkeypatch.setattr(replication_v2, "push_to_peer", _raise_auth_error)
+        r = client.post("/api/replication/peers/some-peer/sync", headers={"X-CSRF-Token": csrf})
+        assert r.status_code == 502, r.text
+        assert r.json()["error"] == "peer_sync_failed"
+        assert "fingerprint mismatch" in r.json()["detail"]
+
+
 class TestTlsStatusApi:
     def test_tls_status_reports_no_active_cert_when_none_provisioned(self, app_client):
         webapp, client = app_client

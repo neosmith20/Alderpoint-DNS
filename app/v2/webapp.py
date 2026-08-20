@@ -2049,8 +2049,25 @@ def replication_sync(peer_node_id: str, admin=Depends(current_admin), x_csrf_tok
     check_csrf(admin, x_csrf_token)
     _ensure_extended_schemas()
     temp_root = STATE_DIR / "replication" / "tmp"
-    with _db() as conn:
-        result = replication_v2.push_to_peer(conn, _secrets(), peer_node_id, temp_root)
+    # A peer being unreachable, a cert-fingerprint mismatch, or the peer
+    # returning a bad HTTP status are all foreseeable sync outcomes --
+    # push_to_peer already records the exact same message into the
+    # peer's own last_error (visible via GET /api/replication/peers) --
+    # so surface that same information to the caller of this endpoint
+    # as a specific, actionable error instead of letting it fall through
+    # to the generic unhandled-exception 500 (real defect found live
+    # during Gate #3 two-node replication failure-isolation testing:
+    # stopping a peer's replication service correctly recorded
+    # last_error but made this endpoint itself return an opaque
+    # {"error": "internal_error"} 500 to whatever called it, including
+    # the admin UI's own "Sync now" action).
+    try:
+        with _db() as conn:
+            result = replication_v2.push_to_peer(conn, _secrets(), peer_node_id, temp_root)
+    except replication_v2.ReplicationError as exc:
+        raise ApiError(502, "peer_sync_failed", str(exc)) from exc
+    except OSError as exc:
+        raise ApiError(502, "peer_unreachable", str(exc)) from exc
     return {"status": "ok", "result": result}
 
 
