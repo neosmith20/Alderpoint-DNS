@@ -50,6 +50,29 @@ class PurgeCleanupTest(unittest.TestCase):
         self.assertIn("rmdir /opt/alderpointdns/app /opt/alderpointdns", self.postrm)
 
 
+class RemoveStopsEveryTimerPostrmPurgeKnowsAboutTest(unittest.TestCase):
+    """Regression for a real defect found live during a real V1.1.1 -> V2
+    in-place package migration (beta-rescue continuation): apt's
+    Conflicts/Replaces relationship triggers exactly the `remove` prerm
+    path, and alderpointdns-notify.timer was never added to its stop/
+    disable list even though postrm's `purge` case already knew about it
+    (its timers.target.wants symlink cleanup) -- a real removal left the
+    timer "not-found failed" in systemd's own view, its unit file
+    already deleted by dpkg but systemd never told to stop it first.
+    Ties prerm's list to postrm's own already-correct knowledge of every
+    timer this package ships, so a future new timer can't reintroduce
+    the same gap.
+    """
+
+    def test_every_timer_postrm_purge_cleans_up_is_stopped_and_disabled_in_prerm(self) -> None:
+        postrm = (ROOT / "packaging" / "debian" / "postrm").read_text()
+        prerm = (ROOT / "packaging" / "debian" / "prerm").read_text()
+        timers = set(re.findall(r"timers\.target\.wants/(alderpointdns-[\w-]+\.timer)", postrm))
+        self.assertTrue(timers, "expected at least one timer in postrm's timers.target.wants cleanup")
+        for timer in timers:
+            self.assertIn(timer, prerm, f"{timer} is cleaned up by postrm's purge case but never stopped in prerm's remove case")
+
+
 class ServiceSandboxWritePathsTest(unittest.TestCase):
     """app/network_config.py writes backend persistent config files
     directly from the alderpointdns.service-sandboxed request path (no
