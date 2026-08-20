@@ -47,6 +47,7 @@ from app.db_retry import DatabaseBusyError, is_lock_error, retry_on_locked
 from app.v2 import analytics_deps
 from app.v2 import backup_restore
 from app.v2 import blocklist_subscriptions
+from app.v2 import statistics_control
 from app.v2 import control_db
 from app.v2 import dnscrypt_provisioning
 from app.v2 import import_migration
@@ -1869,6 +1870,41 @@ def analytics_top_domains(minutes: float = 60.0, limit: int = 20, admin=Depends(
         return _query_result_to_dict(svc.top_domains(now - minutes * 60, now, limit=limit))
     finally:
         svc.close()
+
+
+# --- statistics export/clear (beta-rescue priority 3C) -----------------------
+
+
+@app.get("/api/statistics/export")
+def statistics_export_route(admin=Depends(current_admin)):
+    return Response(
+        content=statistics_control.export_statistics_json(ANALYTICS_AGGREGATES_DB),
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=alderpointdns-v2-statistics-export.json"},
+    )
+
+
+class StatisticsClearRequest(BaseModel):
+    confirmation: str
+    include_raw_history: bool = True
+
+
+@app.post("/api/statistics/clear")
+def statistics_clear_route(req: StatisticsClearRequest, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    if req.confirmation != "CLEAR":
+        raise ApiError(400, "confirmation_required", "type CLEAR to confirm clearing statistics")
+    result = statistics_control.clear_statistics(
+        ANALYTICS_AGGREGATES_DB, include_raw_history=req.include_raw_history,
+        raw_history_root=ANALYTICS_PARQUET_DIR if req.include_raw_history else None,
+    )
+    return {
+        "status": "cleared",
+        "aggregate_buckets_cleared": result.aggregate_buckets_cleared,
+        "aggregate_dimension_rows_cleared": result.aggregate_dimension_rows_cleared,
+        "raw_history_cleared": result.raw_history_cleared,
+        "raw_partition_files_removed": result.raw_partition_files_removed,
+    }
 
 
 # --- notifications (§29) ------------------------------------------------

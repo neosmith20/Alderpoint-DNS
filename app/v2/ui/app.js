@@ -359,7 +359,20 @@
       <div class="grid two">
         <section class="panel"><div class="panel__head"><h2>Recent Queries</h2><span class="badge">${recent.rows.length} rows</span></div><div class="panel__body">${queryFilters()}<div id="query-active">${activeFilters(recent.filters || {})}</div><div id="query-results">${tableFromRows(recent.rows || [], 100, recent.columns)}</div></div></section>
         <section class="panel"><div class="panel__head"><h2>Top Domains</h2></div><div class="panel__body">${tableFromRows(top.rows || [], 30, top.columns)}</div></section>
-      </div>`);
+      </div>
+      <section class="panel"><div class="panel__head"><h2>Statistics Export / Clear</h2></div><div class="panel__body">
+        <p class="muted">Export covers the aggregate rollups only (fast dashboard/top-domain data), never the raw per-query history -- use the filters above to export raw query data in bulk instead. Clear can optionally also remove the raw per-query history; the result always states exactly what was cleared.</p>
+        <div class="field-row">
+          <a class="btn" href="/api/statistics/export">Export aggregate statistics (JSON)</a>
+        </div>
+        <form data-form="statistics-clear" style="margin-top:12px">
+          <div class="field-row">
+            <label>Type CLEAR to confirm<input name="confirmation" placeholder="CLEAR" required></label>
+            <label><span>Also clear raw query history</span><select name="include_raw_history" data-bool="1"><option value="true" selected>yes</option><option value="false">no, aggregates only</option></select></label>
+          </div>
+          <button class="danger">Clear statistics</button>
+        </form>
+      </div></section>`);
   }
 
   function activeFilters(filters) {
@@ -1143,6 +1156,9 @@
     } else if (type === "change-password") {
       await api("/api/session/password", { method: "POST", body: JSON.stringify({ current_password: body.current_password, new_password: body.new_password }) });
       form.reset();
+    } else if (type === "statistics-clear") {
+      const res = await api("/api/statistics/clear", { method: "POST", body: JSON.stringify(body) });
+      toast(`Cleared ${res.aggregate_buckets_cleared} aggregate bucket(s), ${res.aggregate_dimension_rows_cleared} dimension row(s)${res.raw_history_cleared ? `, ${res.raw_partition_files_removed} raw history file(s)` : " (raw history kept)"}`, "ok");
     } else if (type === "blocklist-create") {
       await api("/api/blocklists", { method: "POST", body: JSON.stringify(body) });
     } else if (type === "cache-flush") {
