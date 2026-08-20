@@ -34,7 +34,7 @@ SOURCE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 # appropriate to this branch." 2.0.0~privateN-1: "~" sorts before the
 # final 2.0.0-1 this candidate is a pre-release of, same convention V1's
 # own build-deb.sh already uses for beta/dev/rc tags.
-DEB_VERSION="2.0.0~rc42-1"
+DEB_VERSION="2.0.0~rc43-1"
 # Real defect closed (beta-rescue pass): this package was declared
 # "Architecture: all" (built once, installs on any architecture) but
 # vendor/v2-analytics/ ships REAL architecture-specific binary payloads
