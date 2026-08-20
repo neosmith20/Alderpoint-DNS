@@ -85,8 +85,14 @@ git ls-files | while IFS= read -r tracked_file; do
   fi
   # "open source"/"open-source" and unrestricted-commercial-use claims are
   # checked separately: a *negated* mention ("is not open source") is the
-  # correct, intended phrasing and must not trip this gate.
-  if grep -nEi '\bopen[- ]source\b' "$tracked_file" 2>/dev/null | grep -viE 'not (an? )?open[- ]source' >/tmp/alderpointdns-open-source-hits 2>/dev/null; then
+  # correct, intended phrasing and must not trip this gate. Likewise, a
+  # mention that is plainly about a named third-party dependency (e.g.
+  # "open-source BIND") is a factual statement about that dependency, not
+  # a licensing claim about this project, and must not trip this gate
+  # either.
+  if grep -nEi '\bopen[- ]source\b' "$tracked_file" 2>/dev/null \
+      | grep -viE 'not (an? )?open[- ]source' \
+      | grep -viE '\bopen[- ]source (bind9?)\b' >/tmp/alderpointdns-open-source-hits 2>/dev/null; then
     if [ -s /tmp/alderpointdns-open-source-hits ]; then
       echo "unqualified 'open source' claim in $tracked_file:" >&2
       cat /tmp/alderpointdns-open-source-hits >&2
