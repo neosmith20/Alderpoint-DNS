@@ -77,10 +77,29 @@ class ClientPolicyBinding:
     safesearch_providers: tuple[str, ...] = ()  # subset of safesearch.SUPPORTED_PROVIDERS
     blocked_domains: dict = field(default_factory=dict)  # domain -> BlockingResponse
     allowed_domains: frozenset = frozenset()
-    domain_routes: tuple = ()  # (suffix_domain, upstream_endpoints, transport, strategy)
+    domain_routes: tuple = ()  # (suffix_domain, upstream_endpoints, transport, strategy, match_kind)
     upstream_endpoints: tuple = ()  # policy_store.UpstreamEndpointRecord-shaped tuples
     upstream_transport: str = "plain"
+    # policy_store.UpstreamProfileRecord.strategy ("ordered" or
+    # "load_balanced") -- real defect closed: prior to this pass this
+    # value was loaded from control.db and then discarded before it ever
+    # reached a binding, so every pool used dnsdist's built-in default
+    # policy (leastOutstanding) regardless of what was configured/stored.
+    # See _POOL_SERVER_POLICY below for the real per-pool wiring.
+    upstream_strategy: str = "ordered"
     ecs_policy: EcsPolicy = field(default_factory=lambda: EcsPolicy(mode="disabled"))
+
+
+# Real dnsdist built-in pool server-selection policies (dnsdist 2.1.1 Lua
+# API). "ordered" -> firstAvailable: tries servers in the order they were
+# added to the pool and picks the first one currently up -- combined with
+# upstream_endpoints already being loaded in ascending-priority order
+# (policy_store.load_upstream_profile's own ORDER BY), this gives real
+# primary/fallback behavior using dnsdist's own live health checks, with
+# no separate Python-side health-tracking loop required.
+# "load_balanced" -> wrandom: weighted-random selection across all
+# up servers using each server's configured weight.
+_POOL_SERVER_POLICY = {"ordered": "firstAvailable", "load_balanced": "wrandom"}
 
 
 def _endpoint_server_line(address: str, pool: str, transport: str, tls_hostname, doh_path, use_ecs: bool) -> str:
@@ -601,7 +620,10 @@ def compile_multi_policy_dnsdist_config(
                         ep.tls_hostname, getattr(ep, "doh_path", None), use_ecs,
                     )
                 )
-        for suffix, route_endpoints, route_transport, _strategy in binding.domain_routes:
+        server_policy = _POOL_SERVER_POLICY.get(binding.upstream_strategy)
+        if server_policy:
+            lines.append(f'setPoolServerPolicy({server_policy}, {_lua_string(pool_name)})')
+        for suffix, route_endpoints, route_transport, route_strategy, _match_kind in binding.domain_routes:
             try:
                 validated_suffix = validate_dns_name(suffix)
             except InvalidDnsNameError as exc:
@@ -623,6 +645,9 @@ def compile_multi_policy_dnsdist_config(
                             ep.tls_hostname, getattr(ep, "doh_path", None), use_ecs,
                         )
                     )
+            route_policy = _POOL_SERVER_POLICY.get(route_strategy)
+            if route_policy:
+                lines.append(f'setPoolServerPolicy({route_policy}, {_lua_string(route_pool)})')
         lines.append("")
 
     lines.append("-- per-effective-policy-pool packet caches (never shared across pools)")
@@ -670,14 +695,26 @@ def compile_multi_policy_dnsdist_config(
         # 3. Domain-specific routing -- terminal PoolAction, most-specific
         # suffix first (same precedence fix as Blocker/P0-C).
         routes_sorted = sorted(binding.domain_routes, key=lambda r: (-len(r[0].strip(".")), r[0]))
-        for suffix, _eps, _transport, _strategy in routes_sorted:
+        for suffix, _eps, _transport, _strategy, match_kind in routes_sorted:
             try:
                 validated_suffix = validate_dns_name(suffix)
             except InvalidDnsNameError as exc:
                 raise PolicyRuntimeError(f"invalid domain routing suffix {suffix!r}: {exc}") from exc
             route_pool = f"{pool_name}__route_{validated_suffix.replace('.', '_')}"
             trigger = validated_suffix + "."
-            matcher = f'AndRule({{{net_matcher}, SuffixMatchNodeRule({{{_lua_string(trigger)}}})}})'
+            # "exact" rules must never also match subdomains -- a
+            # QNameRule only matches the literal name, unlike
+            # SuffixMatchNodeRule which matches the name and everything
+            # under it. Preserving this distinction is required by the
+            # ruleset's own stored match_kind (validated at
+            # policy_store.add_domain_routing_rule write time); silently
+            # treating every stored rule as a suffix rule would route
+            # unrelated subdomains the administrator never selected.
+            domain_matcher = (
+                f'QNameRule({_lua_string(trigger)})' if match_kind == "exact"
+                else f'SuffixMatchNodeRule({{{_lua_string(trigger)}}})'
+            )
+            matcher = f'AndRule({{{net_matcher}, {domain_matcher}}})'
             lines.append(f'addAction({matcher}, PoolAction({_lua_string(route_pool)}))')
 
         # 4. Catch-all -> this binding's policy pool.

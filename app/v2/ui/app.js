@@ -503,18 +503,47 @@
       </form></section></main>`;
   }
 
+  // Post-bootstrap application lifecycle (real defect fixed here, owner-
+  // reported: the root #app container kept its initial "boot-screen"
+  // class -- a centered, content-sized layout meant only for the loading
+  // splash/auth card -- forever after the real app shell replaced its
+  // contents. Since "boot-screen" is `display:grid; place-items:center`,
+  // its child (the real .layout grid) was never stretched to fill the
+  // viewport, so the whole sidebar+shell visibly resized and re-centered
+  // itself depending on how wide each route's own content happened to
+  // be. #app's class is now set explicitly and exactly once per state
+  // transition -- "app-shell" (stable, full-viewport, see app.css) for
+  // the real management console, "boot-screen" (centered card) for the
+  // loading splash and the login/setup screen -- instead of relying on
+  // whatever class happened to be left over from page load.
+  let wired = false;
+
   async function boot() {
     setTheme(state.theme);
     try {
       const session = await api("/api/session");
       state.csrf = session.csrf;
       state.user = session.username;
-      document.getElementById("app").innerHTML = shell();
-      wire();
+      const app = document.getElementById("app");
+      app.className = "app-shell";
+      app.innerHTML = shell();
+      // wire() attaches delegated click/submit listeners on
+      // document.body, which is never replaced by any re-render (only
+      // #app's innerHTML changes) -- so it must be attached exactly
+      // once per page load, never per render. Attaching it again on
+      // every rerender (real defect fixed here, owner-reported: dark ->
+      // light worked, light -> dark silently did nothing) stacked a new
+      // listener on top of every prior one, so a single click ran every
+      // still-attached handler in sequence -- each one toggling
+      // state.theme again -- and an even total of stacked handlers left
+      // the theme back where it started.
+      if (!wired) { wire(); wired = true; }
       await loadPage(location.pathname.startsWith("/ui/") ? location.pathname.slice(4) || "dashboard" : "dashboard");
     } catch (_) {
       const setup = await api("/api/setup/status").catch(() => ({ setup_required: false }));
-      document.getElementById("app").innerHTML = authScreen(setup.setup_required);
+      const app = document.getElementById("app");
+      app.className = "boot-screen";
+      app.innerHTML = authScreen(setup.setup_required);
       wireAuth();
     }
   }
@@ -540,7 +569,7 @@
       const route = ev.target.closest("[data-route]");
       if (route) { document.body.classList.remove("nav-open"); await loadPage(route.dataset.route); return; }
       if (ev.target.closest("[data-action='menu']")) { document.body.classList.toggle("nav-open"); return; }
-      if (ev.target.closest("[data-action='theme']")) { setTheme(state.theme === "dark" ? "light" : "dark"); document.getElementById("app").innerHTML = shell(); wire(); await loadPage(state.route); return; }
+      if (ev.target.closest("[data-action='theme']")) { setTheme(state.theme === "dark" ? "light" : "dark"); document.getElementById("app").innerHTML = shell(); await loadPage(state.route); return; }
       if (ev.target.closest("[data-action='logout']")) { await api("/api/logout", { method: "POST" }).catch(() => {}); state.csrf = ""; await boot(); return; }
       if (ev.target.closest("[data-refresh]")) { await loadPage(state.route); return; }
       const tri = ev.target.closest("[data-tri] button");

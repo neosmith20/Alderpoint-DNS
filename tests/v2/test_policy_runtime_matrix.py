@@ -67,7 +67,7 @@ def _build_config(port: int, backend: str) -> str:
             "custom-block.example": BlockingResponse(mode="custom_ip", custom_ipv4="10.9.9.9"),
         },
         domain_routes=(
-            ("routed.example", (UpstreamEndpointRecord(backend, None, 0, 1, None),), "plain", "ordered"),
+            ("routed.example", (UpstreamEndpointRecord(backend, None, 0, 1, None),), "plain", "ordered", "suffix"),
         ),
         upstream_endpoints=(UpstreamEndpointRecord(backend, None, 0, 1, None),),
         upstream_transport="plain",

@@ -82,7 +82,7 @@ class TestPolicyRuntimeGeneration:
         net = NetworkScope.create("n1", "10.0.0.0/24", "x")
         binding = ClientPolicyBinding(
             network=net, cache_profile_id="p1",
-            domain_routes=((MALICIOUS, (UpstreamEndpointRecord("1.1.1.1:53", None, 0, 1, None),), "plain", "ordered"),),
+            domain_routes=((MALICIOUS, (UpstreamEndpointRecord("1.1.1.1:53", None, 0, 1, None),), "plain", "ordered", "suffix"),),
             upstream_endpoints=(UpstreamEndpointRecord("1.1.1.1:53", None, 0, 1, None),),
         )
         with pytest.raises(PolicyRuntimeError):

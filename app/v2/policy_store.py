@@ -763,6 +763,25 @@ def resolve_domain_route(
     return best_profile
 
 
+def list_domain_routing_rules(
+    conn: sqlite3.Connection, ruleset_id: str
+) -> list[tuple[str, str, str]]:
+    """All rules in one domain-routing ruleset, as (match_kind, domain,
+    upstream_profile_id) -- the control.db-backed source the real runtime
+    compiler (``app/v2/runtime_compile.py``) reads to materialize a
+    policy's ``domain_routing_ruleset_id`` into real per-binding
+    ``domain_routes``. Deterministically ordered (domain, match_kind) so
+    repeated compiles of identical control.db state are byte-identical,
+    matching every other list-shaped compiler input in this module.
+    """
+    rows = conn.execute(
+        "SELECT match_kind, domain, upstream_profile_id FROM domain_routing_rules "
+        "WHERE ruleset_id = ? ORDER BY domain ASC, match_kind ASC",
+        (ruleset_id,),
+    ).fetchall()
+    return [(match_kind, domain, profile_id) for match_kind, domain, profile_id in rows]
+
+
 # --------------------------------------------------------------------------
 # Service definitions / blocking rulesets
 # --------------------------------------------------------------------------

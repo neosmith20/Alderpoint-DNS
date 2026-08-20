@@ -31,7 +31,9 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from app.v2 import bind_gen
 from app.v2 import doh_egress_gen
@@ -58,6 +60,16 @@ from app.v2.runtime_staging import Artifact, PromotionResult, stage_validate_pro
 _ECS_MODE_MAP = {"disabled": "disabled", "preserve": "preserve", "custom": "custom"}
 _DEFAULT_NETWORK_ID = "__default__"
 
+# client_identifiers.kind values that name a real IP/CIDR the dnsdist
+# runtime can match against (see app/v2/control_db.py's schema). "clientid"
+# (DHCP client-id/MAC) has no IP-based runtime matcher -- Alderpoint DNS is
+# DNS-only and deliberately never gains DHCP integration (see AGENTS.md/
+# project scope), so a client identified only by clientid cannot be
+# materialized into a real dnsdist binding; such clients keep whatever
+# policy their matched network/group/global layers already give them, same
+# as an unrecognized source address always has.
+_IP_IDENTIFIER_SUFFIX = {"ipv4": "/32", "ipv6": "/128", "ipv4_cidr": "", "ipv6_cidr": ""}
+
 
 class RuntimeCompileError(RuntimeError):
     pass
@@ -81,13 +93,46 @@ def _domains_for_ruleset(conn: sqlite3.Connection, ruleset_id: str) -> list[str]
 def _blocked_domains_for_policy(conn: sqlite3.Connection, policy) -> dict:
     response = BlockingResponse(mode=policy.blocking_response_mode)
     blocked: dict[str, BlockingResponse] = {}
+    # filtering_profile_id joins the same three ruleset-shaped fields
+    # (real defect closed: this field's docstring previously read "not yet
+    # mapped" -- see docs/v2/management-plane.md "Known limitations",
+    # superseded by this pass). All four dimensions already share one real
+    # domain-membership mechanism (policy_store.create_service_ruleset /
+    # _domains_for_ruleset above); a ruleset_id with no matching row
+    # (including every field's own documented "none"/"default" no-op
+    # value) simply contributes zero domains, so leaving an unconfigured
+    # field at its default remains a true no-op.
     for ruleset_id in filter(
         None,
-        (policy.parental_policy_id, policy.security_policy_id, policy.service_blocking_ruleset_id),
+        (
+            policy.filtering_profile_id,
+            policy.parental_policy_id,
+            policy.security_policy_id,
+            policy.service_blocking_ruleset_id,
+        ),
     ):
         for domain in _domains_for_ruleset(conn, ruleset_id):
             blocked[domain] = response
     return blocked
+
+
+def _domain_routes_for_policy(conn: sqlite3.Connection, policy) -> tuple:
+    """Materializes ``policy.domain_routing_ruleset_id`` into real
+    ``ClientPolicyBinding.domain_routes`` entries. Real defect closed:
+    prior to this pass no caller ever populated this field at all, so
+    stored domain-routing rules never reached the compiled runtime
+    regardless of how they were configured (owner-reported P0).
+    """
+    ruleset_id = policy.domain_routing_ruleset_id
+    if not ruleset_id or ruleset_id == "none":
+        return ()
+    routes = []
+    for match_kind, domain, upstream_profile_id in store.list_domain_routing_rules(conn, ruleset_id):
+        profile = store.load_upstream_profile(conn, upstream_profile_id)
+        if profile is None:
+            continue  # dangling reference: never silently route into nothing
+        routes.append((domain, profile.endpoints, profile.transport, profile.strategy, match_kind))
+    return tuple(routes)
 
 
 def _safesearch_providers_for_policy(policy) -> tuple[str, ...]:
@@ -102,12 +147,12 @@ def _default_upstream_endpoints() -> tuple:
     return (UpstreamEndpointRecord("1.1.1.1:53", None, 0, 1, None), UpstreamEndpointRecord("9.9.9.9:53", None, 0, 1, None))
 
 
-def _upstream_for_policy(conn: sqlite3.Connection, policy) -> tuple[tuple, str]:
+def _upstream_for_policy(conn: sqlite3.Connection, policy) -> tuple[tuple, str, str]:
     if policy.upstream_profile_id:
         profile = store.load_upstream_profile(conn, policy.upstream_profile_id)
         if profile is not None:
-            return profile.endpoints, profile.transport
-    return _default_upstream_endpoints(), "plain"
+            return profile.endpoints, profile.transport, profile.strategy
+    return _default_upstream_endpoints(), "plain", "ordered"
 
 
 def _ecs_for_policy(policy) -> EcsPolicy:
@@ -117,36 +162,133 @@ def _ecs_for_policy(policy) -> EcsPolicy:
 
 def _binding_for_scope(conn: sqlite3.Connection, network: NetworkScope, policy) -> ClientPolicyBinding:
     cache_profile = compile_cache_profile(policy)
-    endpoints, transport = _upstream_for_policy(conn, policy)
+    endpoints, transport, strategy = _upstream_for_policy(conn, policy)
     return ClientPolicyBinding(
         network=network,
         cache_profile_id=cache_profile.profile_id,
         safesearch_providers=_safesearch_providers_for_policy(policy),
         blocked_domains=_blocked_domains_for_policy(conn, policy),
+        domain_routes=_domain_routes_for_policy(conn, policy),
         upstream_endpoints=endpoints,
         upstream_transport=transport,
+        upstream_strategy=strategy,
         ecs_policy=_ecs_for_policy(policy),
     )
 
 
-def build_bindings(conn: sqlite3.Connection) -> list[ClientPolicyBinding]:
-    """One binding per configured network (network-layer policy merged
-    over the global layer), plus a catch-all default binding covering
-    everything else (0.0.0.0/0) using the global layer alone. Real control
-    state, no synthetic/test-only shortcuts."""
+def _active_schedule(conn: sqlite3.Connection, now: datetime) -> tuple[Optional[str], Optional[PolicyLayer]]:
+    """The single active-schedule layer for this compile pass, resolved
+    once and applied uniformly to every binding below -- matching
+    ``policy_service.compile_effective_policy_from_store``'s own
+    per-client resolution exactly, so a schedule that Explain reports as
+    active is the same schedule the compiled runtime actually applies.
+    Deterministic first-match (schedules table has no declared priority),
+    the same tie-break policy_service.py already documents.
+    """
+    for (schedule_id,) in conn.execute("SELECT schedule_id FROM policy_schedules").fetchall():
+        schedule = store.load_schedule(conn, schedule_id)
+        if schedule is not None and schedule.is_active(now):
+            return schedule_id, store.load_policy_layer(conn, "schedule", schedule_id)
+    return None, None
+
+
+def _managed_client_scopes(conn: sqlite3.Connection) -> list[tuple[int, NetworkScope]]:
+    """One ``NetworkScope`` per real IP/CIDR identifier of every enabled
+    managed client -- always a /32 or /128 (or the identifier's own CIDR,
+    for an ``ipv4_cidr``/``ipv6_cidr`` identifier), so it is always at
+    least as specific as any configured network and therefore always wins
+    ``network_match.CompiledNetworkTable``'s most-specific-first
+    precedence over a plain network-level binding, giving real
+    "client overrides network" behavior with no change to the matching
+    algorithm itself. ``clientid``-kind identifiers (no real IP) are
+    skipped -- see ``_IP_IDENTIFIER_SUFFIX``'s docstring.
+    """
+    scopes: list[tuple[int, NetworkScope]] = []
+    rows = conn.execute(
+        """
+        SELECT c.id, ci.kind, ci.value
+        FROM clients c
+        JOIN client_identifiers ci ON ci.client_id = c.id
+        WHERE c.enabled = 1
+        ORDER BY c.id ASC, ci.kind ASC, ci.value ASC
+        """
+    ).fetchall()
+    for client_id, kind, value in rows:
+        suffix = _IP_IDENTIFIER_SUFFIX.get(kind)
+        if suffix is None:
+            continue
+        cidr = value if "/" in value else f"{value}{suffix}"
+        network_id = f"client:{client_id}:{value}"
+        try:
+            scope = NetworkScope.create(network_id, cidr, policy_ref=network_id)
+        except Exception:
+            continue  # invalid/corrupt identifier: never let one bad row break the whole compile
+        scopes.append((client_id, scope))
+    return scopes
+
+
+def build_bindings(conn: sqlite3.Connection, now: Optional[datetime] = None) -> list[ClientPolicyBinding]:
+    """The real, complete effective-policy -> runtime-binding materialization
+    (owner-reported P0 fixed by this pass): one binding per configured
+    network (network layer merged over global), a catch-all default
+    binding (0.0.0.0/0, global layer alone), AND one binding per real IP
+    identifier of every enabled managed client -- resolving that client's
+    full inheritance stack (global -> matched network -> group(s) ->
+    client -> active schedule override) through the exact same
+    ``policy_compiler.compile_effective_policy`` the management-plane
+    Explain endpoint uses (``app/v2/policy_service.py``), so there is
+    never a second, competing definition of "effective policy" between
+    what the UI explains and what the DNS runtime enforces. Real control
+    state, no synthetic/test-only shortcuts.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
     global_layer = store.load_policy_layer(conn, "global", "singleton")
+    network_table = store.load_network_table(conn)
+    schedule_id, schedule_layer = _active_schedule(conn, now)
 
     bindings: list[ClientPolicyBinding] = []
     for network_id, cidr in conn.execute("SELECT network_id, cidr FROM policy_networks").fetchall():
         scope = NetworkScope.create(network_id, cidr, policy_ref=network_id)
         network_layer = store.load_policy_layer(conn, "network", network_id)
         policy = compile_effective_policy(
-            global_layer=global_layer, network_layer=network_layer, network_source=network_id
+            global_layer=global_layer,
+            network_layer=network_layer,
+            network_source=network_id,
+            schedule_layer=schedule_layer,
+            schedule_id=schedule_id,
+            schedule_active=schedule_id is not None,
         )
         bindings.append(_binding_for_scope(conn, scope, policy))
 
+    for client_id, client_scope in _managed_client_scopes(conn):
+        network_layer = None
+        network_source = None
+        match = network_table.match(str(client_scope._net.network_address))
+        if match is not None:
+            network_layer = store.load_policy_layer(conn, "network", match.network_id)
+            network_source = match.network_id
+        groups = store.load_groups_for_client(conn, client_id)
+        client_layer = store.load_policy_layer(conn, "client", str(client_id))
+        policy = compile_effective_policy(
+            global_layer=global_layer,
+            network_layer=network_layer,
+            network_source=network_source,
+            groups=groups,
+            client_layer=client_layer,
+            schedule_layer=schedule_layer,
+            schedule_id=schedule_id,
+            schedule_active=schedule_id is not None,
+        )
+        bindings.append(_binding_for_scope(conn, client_scope, policy))
+
     default_scope = NetworkScope.create(_DEFAULT_NETWORK_ID, "0.0.0.0/0", policy_ref=_DEFAULT_NETWORK_ID)
-    default_policy = compile_effective_policy(global_layer=global_layer)
+    default_policy = compile_effective_policy(
+        global_layer=global_layer,
+        schedule_layer=schedule_layer,
+        schedule_id=schedule_id,
+        schedule_active=schedule_id is not None,
+    )
     bindings.append(_binding_for_scope(conn, default_scope, default_policy))
     return bindings
 
@@ -163,6 +305,13 @@ def recompile_and_promote(
     conn: sqlite3.Connection,
     staging_dir: Path,
     live_dnsdist_conf_path: Path,
+    # Real "now" this compile pass resolves active-schedule overrides
+    # against (see ``_active_schedule``). Omitted (None) uses real wall-
+    # clock time, exactly matching every real caller's expectation and
+    # ``policy_service.explain_policy_for_client``'s own default; tests
+    # pass a fixed value so schedule-boundary behavior is deterministic
+    # rather than depending on when the suite happens to run.
+    now: "datetime | None" = None,
     # Defense-in-depth default only -- every real caller (webapp.py,
     # replication_v2.py, scripts/v2/alderpointdns_v2_ctl.py) explicitly
     # passes the appliance's real configured listener. A loopback-only
@@ -218,7 +367,7 @@ def recompile_and_promote(
     failure, per §18.
     """
     try:
-        bindings = build_bindings(conn)
+        bindings = build_bindings(conn, now=now)
         local_dns_records = store.load_local_dns_records(conn)
         # compile_multi_policy_dnsdist_config()'s local-DNS compiler
         # silently skips PTR rows (needs a different matcher than the
@@ -253,7 +402,7 @@ def recompile_and_promote(
                         forwarders=tuple(sorted(ep.address for ep in binding.upstream_endpoints)),
                         tls_hostname=(hostnames.pop() if binding.upstream_transport == "dot" else None),
                     ))
-            for _suffix, route_endpoints, route_transport, _strategy in binding.domain_routes:
+            for _suffix, route_endpoints, route_transport, _strategy, _match_kind in binding.domain_routes:
                 if route_transport in ("plain", "dot") and not server_uses_client_subnet(binding.ecs_policy):
                     route_hostnames = {ep.tls_hostname for ep in route_endpoints}
                     if route_transport == "plain" or (len(route_hostnames) == 1 and None not in route_hostnames):
@@ -290,7 +439,7 @@ def recompile_and_promote(
                 for ep in binding.upstream_endpoints:
                     if ep.tls_hostname and getattr(ep, "doh_path", None):
                         sels.append((ep.address, ep.doh_path, ep.tls_hostname))
-            for _suffix, route_endpoints, route_transport, _strategy in binding.domain_routes:
+            for _suffix, route_endpoints, route_transport, _strategy, _match_kind in binding.domain_routes:
                 if route_transport == "doh" and not server_uses_client_subnet(binding.ecs_policy):
                     for ep in route_endpoints:
                         if ep.tls_hostname and getattr(ep, "doh_path", None):
