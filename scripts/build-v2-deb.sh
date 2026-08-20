@@ -146,6 +146,43 @@ cp "$SOURCE_DIR/app/dnsdist_upgrade.py" "$PKG/opt/alderpointdns-v2/app/dnsdist_u
 # locked" crash under real combined DNS+login load) rather than
 # reimplementing V1's own already-proven pattern.
 cp "$SOURCE_DIR/app/db_retry.py" "$PKG/opt/alderpointdns-v2/app/db_retry.py"
+# Beta-rescue priority 2 (Import): app/v2/import_migration.py
+# deliberately reuses V1's mature, already-tested, source-format-shaped
+# parsing/rule-classification functions (parse_adguard_yaml,
+# fetch_adguard_api, parse_pihole_text, parse_hosts_text, parse_zone_text,
+# parse_alderpointdns_csv/native_json, parse_xlsx_bytes, custom_rules.
+# parse_rule) rather than reimplementing them -- see that module's own
+# docstring. Those functions live in app/importer.py + app/custom_rules.py,
+# which import app/local_dns.py, app/upstream_dns.py, and app/clients.py
+# at module scope. All five are shipped here as further deliberate,
+# documented exceptions to "only app/v2/ ships": confirmed by AST
+# inspection to have no dangerous module-level side effects (no DB
+# connection opened at import time), and V2 code only ever calls their
+# pure parsing functions -- never any of their DB-mutating entry points,
+# never their own DB_PATH/connect() helpers. This does not reintroduce
+# V1 storage/runtime architecture: V2 still only ever writes through its
+# own control.db/policy_store schema (see import_migration.py's own
+# apply layer).
+cp "$SOURCE_DIR/app/local_dns.py" "$PKG/opt/alderpointdns-v2/app/local_dns.py"
+cp "$SOURCE_DIR/app/upstream_dns.py" "$PKG/opt/alderpointdns-v2/app/upstream_dns.py"
+cp "$SOURCE_DIR/app/clients.py" "$PKG/opt/alderpointdns-v2/app/clients.py"
+cp "$SOURCE_DIR/app/importer.py" "$PKG/opt/alderpointdns-v2/app/importer.py"
+cp "$SOURCE_DIR/app/custom_rules.py" "$PKG/opt/alderpointdns-v2/app/custom_rules.py"
+# Transitive module-scope imports of the above (app/local_dns.py and
+# app/upstream_dns.py both import app.service_logs; app/software_updates.py
+# below imports app.backup, which itself only needs app.upstream_dns +
+# app.service_logs -- no further cascade, confirmed by inspection).
+cp "$SOURCE_DIR/app/service_logs.py" "$PKG/opt/alderpointdns-v2/app/service_logs.py"
+cp "$SOURCE_DIR/app/backup.py" "$PKG/opt/alderpointdns-v2/app/backup.py"
+# Beta-rescue priority 4 (Software Updates): app/v2/software_updates.py
+# similarly reuses V1's already-tested, source-agnostic package-
+# inspection primitives (inspect_deb, dpkg_compare, sha256_file,
+# source_version_to_deb_form) from app/software_updates.py -- confirmed
+# by AST inspection to have no dangerous module-level side effects.
+# V2's own channel/job/apply logic is implemented from scratch (see that
+# module's own docstring); only the low-level, tool-wrapping functions
+# are reused.
+cp "$SOURCE_DIR/app/software_updates.py" "$PKG/opt/alderpointdns-v2/app/software_updates.py"
 tar -C "$SOURCE_DIR" --exclude __pycache__ --exclude '*.pyc' -cf - app/v2 | \
   tar -C "$PKG/opt/alderpointdns-v2" -xf -
 tar -C "$SOURCE_DIR" -cf - vendor/v2-analytics | \
