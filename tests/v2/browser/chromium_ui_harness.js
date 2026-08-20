@@ -168,7 +168,8 @@ async function main() {
         await sleep(300);
       }
       const snapshot = await evalJs(`document.body.innerText.slice(-1200)`).catch(() => "<no snapshot>");
-      throw new Error(`timeout waiting for ${label}\n--- snapshot (last 1200 chars, includes toasts) ---\n${snapshot}`);
+      const errs = await evalJs(`JSON.stringify(window.__harnessErrors || [])`).catch(() => "[]");
+      throw new Error(`timeout waiting for ${label}\n--- snapshot (last 1200 chars, includes toasts) ---\n${snapshot}\n--- captured uncaught JS errors/rejections ---\n${errs}`);
     }
     // Like waitFor, but also fails fast (with the real API error message)
     // if a "bad" toast appears before the success condition does, instead
@@ -209,6 +210,7 @@ async function main() {
         updates: "Software Updates",
         cache: "Cache",
         blocklists: "Blocklists",
+        network: "Network Configuration",
       };
       await evalJs(`document.querySelector('[data-route="${name}"]').click(); true`);
       await waitFor(`document.querySelector('.page-head h1') && document.querySelector('.page-head h1').textContent === ${JSON.stringify(titles[name])} && !document.body.innerText.includes("Page unavailable")`, name);
@@ -300,6 +302,12 @@ async function main() {
     await cdp("Page.navigate", { url: base + "/ui/dashboard" });
     await waitFor(`document.documentElement.dataset.theme === ${JSON.stringify(beforeTheme)} && document.querySelector('[data-route="clients"]')`, "theme persisted after reload");
     proof.push("theme-persistence");
+    // Real, permanent diagnostic value (not one-off debug scaffolding):
+    // captures uncaught exceptions/unhandled promise rejections for
+    // waitFor's own timeout report, so a future failure here shows the
+    // actual client-side error instead of only a blind text-mismatch
+    // timeout.
+    await evalJs(`window.onerror = (msg) => { window.__harnessErrors = window.__harnessErrors || []; window.__harnessErrors.push(String(msg)); }; window.addEventListener('unhandledrejection', (e) => { window.__harnessErrors = window.__harnessErrors || []; window.__harnessErrors.push('unhandledrejection: ' + (e.reason && e.reason.stack || e.reason)); }); true`);
 
     await route("clients");
     await waitFor(`document.querySelector('form[data-form="client"]')`, "client form");
@@ -597,6 +605,106 @@ async function main() {
     await waitFor(`document.body.innerText.includes("Node identity")`, "replication status");
     await route("settings");
     await waitFor(`document.body.innerText.includes("HTTPS Certificate")`, "settings page");
+    // DNS transport (encrypted DNS) toggle panel restored this pass --
+    // read-only proof it actually renders real current state (no
+    // mutation here: DoT/DoH/DoQ toggles trigger a real cert-touching
+    // compile/promote, redundant with the policy-mutation proof above
+    // and not worth the extra runtime in this shared harness).
+    await waitFor(`document.querySelector('form[data-form="dns-transports"]')`, "dns transports form");
+    proof.push("dns-transports-panel-visible");
+
+    // DNS Cache (beta-rescue priority 3A): view + a real dnsdist-layer
+    // flush attempt. No compiled runtime exists in this harness's
+    // ephemeral env, so this proves the real, honest "nothing to
+    // flush yet" / "no compiled context" paths, not a crash.
+    await route("cache");
+    await waitFor(`document.body.innerText.includes("RAM cache layers")`, "cache page");
+    await evalJs(`document.querySelectorAll('.toast').forEach((n) => n.remove()); true`);
+    await evalJs(`document.querySelector('form[data-form="cache-flush"][data-layer="dnsdist"]').requestSubmit(); true`);
+    // Either a real success or a real, clean "nothing to flush yet"
+    // failure is a correct answer in this harness's ephemeral env
+    // (no compiled dnsdist runtime exists here) -- what must never
+    // happen is no toast at all (a crash/unhandled state).
+    await waitFor(`document.querySelector('.toast')`, "dnsdist cache flush attempted");
+    proof.push("cache-flush-attempted");
+
+    // Subscribed Blocklists (beta-rescue priority 3B): create a real
+    // subscription, then exercise the real FAILURE path explicitly
+    // (an unreachable URL) -- item 4's checklist calls out
+    // "add/refresh/failure" by name, not just the happy path.
+    await route("blocklists");
+    await waitFor(`document.querySelector('form[data-form="blocklist-create"]')`, "blocklist create form");
+    await evalJs(`(() => {
+      const f = document.querySelector('form[data-form="blocklist-create"]');
+      f.querySelector('[name=subscription_id]').value = 'browser-blocklist-${suffix}';
+      f.querySelector('[name=name]').value = 'Browser Test Blocklist ${suffix}';
+      f.querySelector('[name=category]').value = 'test';
+      f.querySelector('[name=url]').value = 'http://blocklist-refresh-${suffix}.invalid/list.txt';
+      f.requestSubmit();
+      return true;
+    })()`);
+    await waitFor(`document.body.innerText.includes("Browser Test Blocklist ${suffix}")`, "blocklist subscription created");
+    proof.push("blocklist-subscription-created");
+    await evalJs(`document.querySelectorAll('.toast').forEach((n) => n.remove()); true`);
+    await evalJs(`document.querySelector('[data-blocklist-refresh="browser-blocklist-${suffix}"]').click(); true`);
+    await waitFor(`document.body.innerText.includes("failed") || document.querySelector('.toast.bad')`, "blocklist refresh failure surfaced cleanly");
+    proof.push("blocklist-refresh-failure-handled");
+    // Real defect this works around (found via this very extension,
+    // beta-rescue continuation): the refresh click handler's own
+    // `await loadPage("blocklists")` reload can still be in flight
+    // (its /api/blocklists GET not yet resolved) at the exact moment
+    // this assertion's own condition first turns true from the toast
+    // half of the `||` -- so navigating away immediately afterward can
+    // let that reload's fetch resolve mid-navigation. loadPage's own
+    // token guard prevents it from clobbering the *next* page's DOM,
+    // but it still races for the fetch itself; letting it settle here
+    // avoids relying on that guard's timing under real backend
+    // latency, same rationale as the settle waits already used above
+    // for import/backup.
+    await sleep(1000);
+
+    // Network Configuration (beta-rescue priority 4): read-only
+    // discoverability/status proof. Deliberately never submits the
+    // apply form in this shared, real-networked harness environment --
+    // actually reconfiguring the host's interface from an automated
+    // script is not something to risk against a real live sandbox;
+    // the real apply/confirm/rollback orchestration already has full
+    // proof at the API/unit level (tests/v2/test_network_config.py).
+    await route("network");
+    await waitFor(`document.body.innerText.includes("Detected Backend")`, "network configuration page");
+    proof.push("network-configuration-page-visible");
+
+    // In-app log viewer (beta-rescue priority 3E): a real allowlisted
+    // unit, real journalctl invocation (this harness's own web process
+    // is not itself started via systemd, so an empty real result is
+    // the expected honest answer -- what matters is no crash and a
+    // real request/response cycle, not a mocked one).
+    await route("health");
+    await waitFor(`document.querySelector('form[data-form="logs-view"]')`, "log viewer form");
+    await evalJs(`(() => {
+      const f = document.querySelector('form[data-form="logs-view"]');
+      f.querySelector('[name=unit]').value = 'alderpointdns-v2-web';
+      f.requestSubmit();
+      return true;
+    })()`);
+    await waitFor(`document.getElementById('log-results') && document.getElementById('log-results').innerText !== 'Choose a service and click View.'`, "log viewer results rendered");
+    proof.push("log-viewer-queried");
+
+    // Statistics export/clear (beta-rescue priority 3C).
+    await route("analytics");
+    await waitFor(`document.querySelector('form[data-form="statistics-clear"]')`, "statistics export/clear panel");
+    const exportRes = await pageApi("/api/statistics/export");
+    if (!exportRes.ok) throw new Error(`statistics export failed: ${JSON.stringify(exportRes)}`);
+    proof.push("statistics-exported");
+    await evalJs(`document.querySelectorAll('.toast').forEach((n) => n.remove()); true`);
+    await evalJs(`(() => {
+      const f = document.querySelector('form[data-form="statistics-clear"]');
+      f.querySelector('[name=confirmation]').value = 'CLEAR';
+      f.requestSubmit();
+      return true;
+    })()`);
+    await waitForOkOrError(`document.querySelector('.toast')`, "statistics cleared");
+    proof.push("statistics-cleared");
 
     // Administration: password change + revoke-other-sessions, driven
     // through the UI (priority 5 parity fix). Changing the password
