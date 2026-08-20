@@ -1,0 +1,15 @@
+[Unit]
+Description=Apply a validated Alderpoint DNS V2 Software Update package
+# Real privilege boundary (beta-rescue priority 4): the unprivileged
+# alderpointdns-v2-web process only ever validates a candidate .deb and
+# writes the marker this unit's .path watches for; this oneshot unit
+# (root) is the only thing that ever runs apt-get for a Software Updates
+# apply. See scripts/v2/alderpointdns_v2_update_apply.py for the
+# re-verification this performs before installing anything.
+StartLimitIntervalSec=60
+StartLimitBurst=200
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_update_apply.py
+User=root

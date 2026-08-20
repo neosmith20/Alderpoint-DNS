@@ -57,6 +57,7 @@ from app.v2 import policy_service
 from app.v2 import policy_store as store
 from app.v2 import replication_v2
 from app.v2 import runtime_compile
+from app.v2 import software_updates
 from app.v2 import tls_cert
 from app.v2.analytics_service import AnalyticsService
 from app.v2.auth_concurrency import HashConcurrencyLimiter, TooManyConcurrentHashesError
@@ -2166,6 +2167,154 @@ def restore_appliance_backup_route(name: str, req: ApplianceRestoreRequest, admi
         )
         job_id = cur.lastrowid
     return {"status": "succeeded", "job_id": job_id, "backup_name": name, **detail}
+
+
+# --- software updates (beta-rescue priority 4) ------------------------------
+#
+# V2 remains private: there is no public release channel, and this
+# surface must never claim one exists. See app/v2/software_updates.py
+# for the validation contract and scripts/v2/alderpointdns_v2_update_apply.py
+# for the privileged apply helper (a root-owned systemd .path/.service
+# pair, not sudo/setuid inside this process).
+
+
+def _update_dir() -> Path:
+    path = STATE_DIR / "updates"
+    path.mkdir(parents=True, exist_ok=True, mode=0o750)
+    return path
+
+
+@app.get("/api/updates/status")
+def updates_status(admin=Depends(current_admin)):
+    with _db() as conn:
+        settings = store.load_update_settings(conn)
+    feed_dir = Path(settings["private_feed_dir"]) if settings["private_feed_dir"] else None
+    feed = software_updates.check_private_feed(feed_dir)
+    return {
+        "installed_source_version": software_updates.installed_source_version(APP_ROOT),
+        "installed_package_version": software_updates.installed_package_version(),
+        "private_feed_dir": settings["private_feed_dir"],
+        **feed,
+    }
+
+
+class UpdateSettingsUpdate(BaseModel):
+    private_feed_dir: Optional[str] = None
+
+
+@app.put("/api/updates/settings")
+def put_update_settings(req: UpdateSettingsUpdate, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    with _db() as conn:
+        store.save_update_settings(conn, req.private_feed_dir)
+    return {"status": "updated"}
+
+
+@app.get("/api/updates/jobs")
+def list_update_jobs(admin=Depends(current_admin)):
+    update_dir = _update_dir()
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT id, started_at, finished_at, status, detail_json FROM update_jobs ORDER BY id DESC LIMIT 30"
+        ).fetchall()
+        jobs = []
+        for r in rows:
+            job = {"id": r[0], "started_at": r[1], "finished_at": r[2], "status": r[3], "detail": json.loads(r[4] or "{}")}
+            # Reconcile: if a privileged apply's result file has appeared
+            # since the last poll, fold it into this job's row now,
+            # rather than needing a persistent background thread in this
+            # unprivileged process.
+            if job["status"] == "apply_requested":
+                result = software_updates.read_apply_result(update_dir, job["id"])
+                if result is not None:
+                    new_status = "succeeded" if result.get("status") == "succeeded" else "failed"
+                    finished = datetime.now(timezone.utc).isoformat()
+                    with _db() as conn2:
+                        conn2.execute(
+                            "UPDATE update_jobs SET finished_at = ?, status = ?, detail_json = ? WHERE id = ?",
+                            (finished, new_status, json.dumps({**job["detail"], "apply_result": result}), job["id"]),
+                        )
+                    job.update({"status": new_status, "finished_at": finished, "detail": {**job["detail"], "apply_result": result}})
+            jobs.append(job)
+    return {"jobs": jobs}
+
+
+class UpdateUploadRequest(BaseModel):
+    filename: str
+    data_base64: str
+
+
+@app.post("/api/updates/upload")
+def upload_update_package(req: UpdateUploadRequest, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    import base64 as _b64
+    import tempfile
+
+    try:
+        data = _b64.b64decode(req.data_base64)
+    except Exception as exc:
+        raise ApiError(400, "validation_error", f"invalid data_base64: {exc}")
+    if not data:
+        raise ApiError(400, "validation_error", "empty upload")
+
+    with tempfile.NamedTemporaryFile(suffix=".deb", delete=False) as tmp:
+        tmp.write(data)
+        tmp_path = Path(tmp.name)
+    try:
+        installed_pkg = software_updates.installed_package_version()
+        try:
+            validated = software_updates.validate_candidate_package(tmp_path, installed_pkg)
+        except software_updates.SoftwareUpdateError as exc:
+            raise ApiError(400, "package_invalid", str(exc)) from exc
+
+        update_dir = _update_dir()
+        software_updates.stage_for_apply(update_dir, tmp_path, validated)
+        now = datetime.now(timezone.utc).isoformat()
+        detail = {
+            "filename": req.filename, "candidate_version": validated.candidate_version,
+            "sha256": validated.sha256, "fields": validated.fields,
+        }
+        with _db() as conn:
+            cur = conn.execute(
+                "INSERT INTO update_jobs(started_at, status, detail_json) VALUES (?, ?, ?)",
+                (now, "staged", json.dumps(detail)),
+            )
+            job_id = cur.lastrowid
+        return {"status": "staged", "job_id": job_id, **detail}
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+@app.post("/api/updates/jobs/{job_id}/apply")
+def apply_update_job(job_id: int, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    with _db() as conn:
+        row = conn.execute("SELECT status, detail_json FROM update_jobs WHERE id = ?", (job_id,)).fetchone()
+    if row is None:
+        raise ApiError(404, "not_found", "unknown update job")
+    status, detail_json = row
+    if status != "staged":
+        raise ApiError(400, "invalid_state", f"job is {status!r}, not 'staged' -- upload a package first")
+    detail = json.loads(detail_json or "{}")
+    update_dir = _update_dir()
+    staged_path = update_dir / software_updates.STAGED_DEB_NAME
+    if not staged_path.exists():
+        raise ApiError(400, "invalid_state", "staged package is missing; re-upload")
+
+    validated = software_updates.ValidatedPackage(
+        fields=detail.get("fields", {}), sha256=detail.get("sha256", ""), candidate_version=detail.get("candidate_version", ""),
+    )
+    software_updates.request_apply(update_dir, job_id, validated)
+    now = datetime.now(timezone.utc).isoformat()
+    with _db() as conn:
+        conn.execute(
+            "UPDATE update_jobs SET status = ?, detail_json = ? WHERE id = ?",
+            ("apply_requested", json.dumps({**detail, "apply_requested_at": now}), job_id),
+        )
+    return {
+        "status": "apply_requested", "job_id": job_id,
+        "message": "the privileged update-apply service has been notified; the web service will restart if the install succeeds",
+    }
 
 
 # --- replication (§4C) ------------------------------------------------------

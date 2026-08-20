@@ -82,6 +82,32 @@
     document.documentElement.dataset.theme = state.theme;
   }
 
+  // After a real Software Update apply, the packaged postinst restarts
+  // alderpointdns-v2-web -- the very process serving this request. The
+  // apply-request call above already returned (the privileged helper
+  // runs asynchronously via the .path/.service unit), so this polls
+  // /api/session until the appliance is reachable again rather than
+  // leaving the operator on a page that silently stopped updating.
+  async function waitForReconnectAfterUpdate() {
+    toast("Update in progress -- the appliance may become briefly unreachable while it restarts", "info");
+    await sleep(1500);
+    for (let attempt = 0; attempt < 60; attempt++) {
+      try {
+        await api("/api/session");
+        toast("Reconnected", "ok");
+        await loadPage("updates");
+        return;
+      } catch (_) {
+        await sleep(2000);
+      }
+    }
+    toast("Still waiting to reconnect -- refresh the page manually if this persists", "warn");
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
   function toast(message, kind) {
     let host = document.querySelector(".toast-host");
     if (!host) {
@@ -649,7 +675,35 @@
   }
 
   async function updates() {
-    return page("Software Updates", "Installed version, update channel, and manual package updates.", "", `<div class="empty">Software Updates is being restored to V2 in this beta-rescue pass and is not wired up on this page yet.</div>`);
+    const [status, jobs] = await Promise.all([
+      api("/api/updates/status"),
+      api("/api/updates/jobs").catch(() => ({ jobs: [] })),
+    ]);
+    return page("Software Updates", "V2 is private: there is no public release channel. Check a configured private feed, or upload and apply a package manually.", `<button data-refresh>Refresh</button>`, `
+      <div class="strip">
+        <div class="metric"><strong class="mono">${esc(status.installed_source_version)}</strong><span>Installed (source)</span></div>
+        <div class="metric"><strong class="mono">${esc(status.installed_package_version || "unmanaged")}</strong><span>Installed (package)</span></div>
+        <div class="metric"><strong>${esc(status.channel)}</strong><span>Channel</span></div>
+        <div class="metric"><strong class="badge ${status.public_release_available ? 'ok' : 'warn'}">${status.public_release_available ? "candidate available" : "none available"}</strong><span>Private feed</span></div>
+      </div>
+      <div class="alert ${status.public_release_available ? 'ok' : 'info'}">${esc(status.message)}</div>
+      <div class="grid two">
+        <section class="panel"><div class="panel__head"><h2>Private Update Feed</h2></div><div class="panel__body">
+          <p class="muted">Point at a directory (e.g. a mounted private artifact share) containing a <code>metadata.json</code> describing one candidate package. Leave empty for "no public release available."</p>
+          <form data-form="update-settings"><label>Feed directory<input name="private_feed_dir" value="${esc(status.private_feed_dir || "")}" placeholder="/mnt/private-updates"></label><button>Save</button></form>
+        </div></section>
+        <section class="panel"><div class="panel__head"><h2>Manual Package Upload</h2></div><div class="panel__body">
+          <p class="muted">Validated before anything is staged: package name, amd64 architecture, and a version strictly newer than what's installed. Nothing is installed until you explicitly confirm Apply below -- an unprivileged process never runs apt itself.</p>
+          <form data-form="update-upload"><label>Package (.deb)<input type="file" name="file" accept=".deb"></label><button class="primary">Validate and stage</button></form>
+        </div></section>
+      </div>
+      <section class="panel"><div class="panel__head"><h2>Update Jobs</h2></div><div class="panel__body" id="update-jobs">${updateJobsTable(jobs.jobs || [])}</div></section>`);
+  }
+
+  function updateJobsTable(jobs) {
+    if (!jobs.length) return `<div class="empty">No update jobs yet.</div>`;
+    return `<div class="table-wrap"><table><thead><tr><th>ID</th><th>Status</th><th>Version</th><th>Started</th><th>Finished</th><th>Actions</th></tr></thead><tbody>${jobs.map((j) => `
+      <tr><td>${j.id}</td><td><span class="badge ${tone(j.status)}">${esc(j.status)}</span></td><td>${esc(j.detail.candidate_version || "")}</td><td>${esc(j.started_at || "")}</td><td>${esc(j.finished_at || "")}</td><td>${j.status === "staged" ? `<button data-apply-update="${j.id}" class="danger">Apply</button>` : ""}${j.detail.apply_result && j.detail.apply_result.error ? `<span class="muted">${esc(j.detail.apply_result.error)}</span>` : ""}</td></tr>`).join("")}</tbody></table></div>`;
   }
 
   const renderers = { dashboard, analytics, clients, policies, filtering, upstreams, localdns, replication, backup, settings, health, importexport, updates };
@@ -832,6 +886,15 @@
         toast(`Backup ${res.backup_name} is valid (${res.contents.join(", ")})`, "ok");
         return;
       }
+      const applyUpdate = ev.target.closest("[data-apply-update]");
+      if (applyUpdate) {
+        if (!confirm("Apply this update? The web service will restart automatically if the install succeeds.")) return;
+        const id = applyUpdate.dataset.applyUpdate;
+        await api(`/api/updates/jobs/${encodeURIComponent(id)}/apply`, { method: "POST" });
+        toast("Update apply requested -- the appliance will reconnect automatically once it restarts", "ok");
+        await waitForReconnectAfterUpdate();
+        return;
+      }
     });
 
     document.body.addEventListener("change", (ev) => {
@@ -975,6 +1038,14 @@
       await loadPage("importexport");
       toast(`Import applied: ${Object.entries(res.counts).map(([k, v]) => `${k}=${v}`).join(", ")}`, "ok");
       return "skip-reload";
+    } else if (type === "update-settings") {
+      await api("/api/updates/settings", { method: "PUT", body: JSON.stringify({ private_feed_dir: body.private_feed_dir || null }) });
+    } else if (type === "update-upload") {
+      const fileInput = form.querySelector('input[type=file]');
+      const file = fileInput && fileInput.files[0];
+      if (!file) throw new Error("choose a .deb package to upload");
+      const data_base64 = await fileToBase64(file);
+      await api("/api/updates/upload", { method: "POST", body: JSON.stringify({ filename: file.name, data_base64 }) });
     }
   }
 

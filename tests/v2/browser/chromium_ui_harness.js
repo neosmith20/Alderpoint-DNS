@@ -1,7 +1,23 @@
-const { spawn } = require("child_process");
+const { spawn, execFileSync } = require("child_process");
 const fs = require("fs");
+const os = require("os");
+const path = require("path");
 const net = require("net");
 const crypto = require("crypto");
+
+// Builds a real, minimal, valid .deb (via the actually-installed
+// dpkg-deb) for the Software Updates upload/stage/apply-request test
+// below -- a real package, not a mock, matching this harness's own
+// "real proof" standard for every other workflow it exercises.
+function buildFakeDeb(version) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "apdns-fake-deb-"));
+  const debianDir = path.join(tmp, "root", "DEBIAN");
+  fs.mkdirSync(debianDir, { recursive: true });
+  fs.writeFileSync(path.join(debianDir, "control"), `Package: alderpointdns-v2\nVersion: ${version}\nArchitecture: amd64\nMaintainer: test\nDescription: test package\n`);
+  const outPath = path.join(tmp, "alderpointdns-v2-fake.deb");
+  execFileSync("dpkg-deb", ["--build", "--root-owner-group", path.join(tmp, "root"), outPath]);
+  return outPath;
+}
 
 const base = process.env.APDNS_UI_BASE || "http://127.0.0.1:18080";
 const chromeBin = process.env.APDNS_CHROMIUM || "chromium";
@@ -532,6 +548,48 @@ async function main() {
       throw new Error("post-backup mutation survived the restore -- restore did not actually revert live state");
     }
     proof.push("appliance-restore-reverted-mutation");
+
+    // Real Software Updates upload -> validate/stage -> apply-request,
+    // driven through the UI with a real (dpkg-deb-built) package. This
+    // installs nothing (V2 is private and this container has no real
+    // "alderpointdns-v2" apt package to upgrade to) -- it proves the web
+    // side of the contract: validation, staging, and that requesting
+    // apply actually notifies the privileged helper (the marker file it
+    // watches for).
+    const fakeDebPath = buildFakeDeb("2.0.0~fake-upload-1");
+    const fakeDebB64 = fs.readFileSync(fakeDebPath).toString("base64");
+    await route("updates");
+    await waitFor(`document.querySelector('form[data-form="update-upload"]')`, "update upload form");
+    if (!await evalJs(`document.body.innerText.includes("no public release available") || document.body.innerText.includes("private")`)) {
+      throw new Error("Software Updates page did not disclose the private-channel status honestly");
+    }
+    await evalJs(`(async () => {
+      const b64 = ${JSON.stringify(fakeDebB64)};
+      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const file = new File([bytes], 'alderpointdns-v2-fake.deb', { type: 'application/vnd.debian.binary-package' });
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      const f = document.querySelector('form[data-form="update-upload"]');
+      f.querySelector('input[type=file]').files = dt.files;
+      f.requestSubmit();
+      return true;
+    })()`);
+    await waitForOkOrError(`document.querySelectorAll('#update-jobs tbody tr').length >= 1 && document.body.innerText.includes("staged")`, "update package staged");
+    proof.push("software-update-staged");
+
+    await evalJs(`(() => {
+      window.confirm = () => true;
+      document.querySelector('[data-apply-update]').click();
+      return true;
+    })()`);
+    await waitFor(`document.body.innerText.includes("apply requested")`, "update apply requested");
+    proof.push("software-update-apply-requested");
+    if (!await evalJs(`(async () => {
+      const r = await fetch('/api/updates/jobs', { credentials: 'same-origin' });
+      const body = await r.json();
+      return body.jobs[0] && body.jobs[0].status === 'apply_requested';
+    })()`)) throw new Error("update job did not move to apply_requested after the apply request");
+    proof.push("software-update-marker-confirmed");
 
     await route("replication");
     await waitFor(`document.body.innerText.includes("Node identity")`, "replication status");

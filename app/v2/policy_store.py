@@ -1061,3 +1061,35 @@ def mark_import_job(conn: sqlite3.Connection, job_id: int, status: str, result_j
             "UPDATE import_jobs SET status = ?, result_json = ? WHERE id = ?",
             (status, result_json, job_id),
         )
+
+
+# --- software updates settings (beta-rescue priority 4) ---------------------
+
+def ensure_update_settings_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS update_settings (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            private_feed_dir TEXT,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+def load_update_settings(conn: sqlite3.Connection) -> dict:
+    ensure_update_settings_schema(conn)
+    row = conn.execute("SELECT private_feed_dir FROM update_settings WHERE id = 1").fetchone()
+    return {"private_feed_dir": row[0] if row else None}
+
+
+def save_update_settings(conn: sqlite3.Connection, private_feed_dir: str | None) -> None:
+    ensure_update_settings_schema(conn)
+    now = _now()
+    conn.execute(
+        """
+        INSERT INTO update_settings (id, private_feed_dir, updated_at) VALUES (1, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET private_feed_dir = excluded.private_feed_dir, updated_at = excluded.updated_at
+        """,
+        (private_feed_dir, now),
+    )

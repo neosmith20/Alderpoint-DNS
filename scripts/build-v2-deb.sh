@@ -165,6 +165,15 @@ cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-replication.service" "$PKG/lib/sys
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-dnsdist.service" "$PKG/lib/systemd/system/alderpointdns-v2-dnsdist.service"
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-dnsdist-reload.service" "$PKG/lib/systemd/system/alderpointdns-v2-dnsdist-reload.service"
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-dnsdist-reload.path" "$PKG/lib/systemd/system/alderpointdns-v2-dnsdist-reload.path"
+# Software Updates privileged apply helper (beta-rescue priority 4): the
+# same watch-a-marker-file/oneshot-root-service pattern as the dnsdist
+# reload above, so the unprivileged web process never gains apt/root
+# access itself. See app/v2/software_updates.py + scripts/v2/
+# alderpointdns_v2_update_apply.py.
+cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-update-apply.service" "$PKG/lib/systemd/system/alderpointdns-v2-update-apply.service"
+cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-update-apply.path" "$PKG/lib/systemd/system/alderpointdns-v2-update-apply.path"
+cp "$SOURCE_DIR/scripts/v2/alderpointdns_v2_update_apply.py" "$PKG/opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_update_apply.py"
+chmod 0755 "$PKG/opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_update_apply.py"
 # BIND architecture correction (Gate #3): the real packaged V2 BIND
 # recursive-cache backend unit + its AppArmor local override (see
 # packaging/v2/postinst's own apparmor block for why this must be
