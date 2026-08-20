@@ -2362,7 +2362,7 @@ def cache_flush_route(req: CacheFlushRequest, admin=Depends(current_admin), x_cs
     from app.v2 import cache_control
 
     if req.layer == "dnsdist":
-        result = cache_control.flush_dnsdist_cache()
+        result = cache_control.flush_dnsdist_cache(compiled_conf_path=COMPILED_DNSDIST_CONF)
         return {"results": [{"context": "dnsdist", "scope": "all", "target": None, "ok": result.ok, "message": result.message}]}
     if req.layer != "bind":
         raise ApiError(400, "validation_error", "layer must be 'bind' or 'dnsdist'")
@@ -2381,6 +2381,96 @@ def cache_flush_route(req: CacheFlushRequest, admin=Depends(current_admin), x_cs
             raise ApiError(400, "validation_error", str(exc)) from exc
         results.append({"context": r.context, "scope": r.scope, "target": r.target, "ok": r.ok, "message": r.message})
     return {"results": results}
+
+
+# --- Network Configuration (beta-rescue priority 4) --------------------------
+#
+# Managing the Alderpoint appliance's OWN interface/address/DNS-server
+# host configuration -- distinct from turning Alderpoint into a router.
+# No DHCP server, no NAT, no firewall, no routing/gateway functionality
+# is added here or anywhere else in V2. Reuses V1's already-tested
+# app/network_config.py wholesale via app/v2/network_config.py (see that
+# module's own docstring), redirected to V2's own state namespace.
+#
+# This process (alderpointdns-v2, NoNewPrivileges=true) can never itself
+# reconfigure a host network interface, so apply/confirm are async,
+# root-owned-.path-unit-triggered privileged operations -- same
+# convention as Software Updates apply just above and DNS Cache flush:
+# this route only validates and stages a request marker; a dedicated
+# root oneshot unit performs the real change and writes a result marker
+# this route's counterpart GET route polls.
+
+
+class NetworkApplyRequest(BaseModel):
+    interface: str = Field(min_length=1, max_length=64)
+    ipv4_mode: str = "unchanged"
+    ipv4_address: Optional[str] = None
+    ipv4_prefix: Optional[int] = None
+    ipv4_gateway: Optional[str] = None
+    ipv6_mode: str = "unchanged"
+    ipv6_address: Optional[str] = None
+    ipv6_prefix: Optional[int] = None
+    ipv6_gateway: Optional[str] = None
+
+
+@app.get("/api/network/status")
+def network_status_route(admin=Depends(current_admin)):
+    from app.v2 import network_config as nc
+
+    try:
+        current = nc.read_current_config()
+    except nc.NetworkConfigError as exc:
+        current = {"error": str(exc)}
+    pending = nc.read_rollback_state()
+    return {"current": current, "pending": pending}
+
+
+@app.post("/api/network/apply")
+def network_apply_route(req: NetworkApplyRequest, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    from app.v2 import network_config as nc
+
+    try:
+        nc.validate_proposed(
+            req.interface, req.ipv4_mode, req.ipv4_address, req.ipv4_prefix, req.ipv4_gateway,
+            req.ipv6_mode, req.ipv6_address, req.ipv6_prefix, req.ipv6_gateway,
+        )
+    except nc.NetworkConfigError as exc:
+        raise ApiError(400, "validation_error", str(exc)) from exc
+    if nc.read_rollback_state() is not None:
+        raise ApiError(409, "conflict", "a network configuration change is already pending confirmation")
+    requested_at = datetime.now(timezone.utc).isoformat()
+    payload = {**req.model_dump(), "requested_at": requested_at}
+    nc.STATE_DIR.mkdir(parents=True, exist_ok=True)
+    request_file = nc.STATE_DIR / "apply-requested.json"
+    tmp = request_file.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload))
+    tmp.chmod(0o600)
+    tmp.replace(request_file)
+    return {
+        "status": "apply_requested", "requested_at": requested_at,
+        "message": "the privileged network-apply service has been notified; poll GET /api/network/status",
+    }
+
+
+@app.post("/api/network/confirm")
+def network_confirm_route(admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    from app.v2 import network_config as nc
+
+    if nc.read_rollback_state() is None:
+        raise ApiError(400, "invalid_state", "no pending network configuration change to confirm")
+    requested_at = datetime.now(timezone.utc).isoformat()
+    nc.STATE_DIR.mkdir(parents=True, exist_ok=True)
+    request_file = nc.STATE_DIR / "confirm-requested.json"
+    tmp = request_file.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"requested_at": requested_at}))
+    tmp.chmod(0o600)
+    tmp.replace(request_file)
+    return {
+        "status": "confirm_requested", "requested_at": requested_at,
+        "message": "the privileged network-confirm service has been notified; poll GET /api/network/status",
+    }
 
 
 # --- subscribed Blocklists (beta-rescue priority 3B) -------------------------

@@ -1,0 +1,11 @@
+[Unit]
+Description=Watch Alderpoint DNS V2 network config confirm-requested marker
+StartLimitIntervalSec=60
+StartLimitBurst=200
+
+[Path]
+PathChanged=/var/lib/alderpointdns-v2/network/confirm-requested.json
+Unit=alderpointdns-v2-network-confirm.service
+
+[Install]
+WantedBy=multi-user.target

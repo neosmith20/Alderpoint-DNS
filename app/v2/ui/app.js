@@ -30,6 +30,7 @@
     ["Operations", "backup", "Backup & Restore", "B"],
     ["Operations", "replication", "Replication", "R"],
     ["System", "health", "System Status", "Y"],
+    ["System", "network", "Network Configuration", "W"],
     ["System", "settings", "Notifications / HTTPS", "N"],
     ["System", "updates", "Software Updates", "V"],
   ];
@@ -91,7 +92,11 @@
   // /api/session until the appliance is reachable again rather than
   // leaving the operator on a page that silently stopped updating.
   async function waitForReconnectAfterUpdate() {
-    toast("Update in progress -- the appliance may become briefly unreachable while it restarts", "info");
+    await waitForReconnect("updates", "Update in progress -- the appliance may become briefly unreachable while it restarts");
+  }
+
+  async function waitForReconnect(forRoute, inProgressMessage) {
+    toast(inProgressMessage, "info");
     await sleep(1500);
     for (let attempt = 0; attempt < 60; attempt++) {
       try {
@@ -101,15 +106,15 @@
         // rescue priority 5/8): this polling loop runs in the
         // background while the caller's click handler has already
         // returned, so the operator is free to navigate elsewhere while
-        // it's still waiting to reconnect. Reloading "updates"
-        // unconditionally here would silently yank them back to a page
-        // they may have long since left -- and would also race/clobber
-        // whatever they navigated to next (loadPage's own stale-token
-        // guard doesn't help: this call is simply issued *late*, not
-        // stale, so it would legitimately "win" and overwrite the
-        // current, correct page). Only refresh if the operator is still
-        // actually on the page this reconnect was for.
-        if (state.route === "updates") await loadPage("updates");
+        // it's still waiting to reconnect. Reloading unconditionally
+        // here would silently yank them back to a page they may have
+        // long since left -- and would also race/clobber whatever they
+        // navigated to next (loadPage's own stale-token guard doesn't
+        // help: this call is simply issued *late*, not stale, so it
+        // would legitimately "win" and overwrite the current, correct
+        // page). Only refresh if the operator is still actually on the
+        // page this reconnect was for.
+        if (state.route === forRoute) await loadPage(forRoute);
         return;
       } catch (_) {
         await sleep(2000);
@@ -737,6 +742,61 @@
       </div>`);
   }
 
+  async function network() {
+    const status = await api("/api/network/status");
+    const current = status.current || {};
+    const pending = status.pending;
+    const ifaceOptions = (current.interfaces || []).map((i) => `<option value="${esc(i)}" ${i === current.interface ? "selected" : ""}>${esc(i)}</option>`).join("");
+    const row = (label, value) => `<tr><td>${esc(label)}</td><td class="mono">${esc(value ?? "unknown")}</td></tr>`;
+    const changeForm = current.backend && current.backend !== "unsupported" && !pending ? `
+      <section class="panel"><div class="panel__head"><h2>Change Network Configuration</h2></div><div class="panel__body">
+        <p class="muted">Changing this appliance's IP address may disconnect your browser. The previous configuration is automatically restored if the new settings are not confirmed within about 120 seconds -- no reboot required.</p>
+        <form data-form="network-apply">
+          <label>Interface<select name="interface">${ifaceOptions}</select></label>
+          <div class="form-grid">
+            <label>IPv4 mode<select name="ipv4_mode"><option value="unchanged">Leave unchanged</option><option value="dhcp">DHCP</option><option value="static">Static</option></select></label>
+            <label>Static IPv4 address<input name="ipv4_address" placeholder="192.168.1.10"></label>
+            <label>Prefix length<input name="ipv4_prefix" type="number" min="0" max="32" placeholder="24"></label>
+            <label>Gateway<input name="ipv4_gateway" placeholder="192.168.1.1"></label>
+          </div>
+          <details><summary>IPv6 (optional)</summary><div class="form-grid">
+            <label>IPv6 mode<select name="ipv6_mode"><option value="unchanged">Leave unchanged</option><option value="slaac">SLAAC</option><option value="dhcp">DHCPv6</option><option value="static">Static</option></select></label>
+            <label>Static IPv6 address<input name="ipv6_address" placeholder="2001:db8::10"></label>
+            <label>Prefix length<input name="ipv6_prefix" type="number" min="0" max="128" placeholder="64"></label>
+            <label>Gateway<input name="ipv6_gateway" placeholder="2001:db8::1"></label>
+          </div></details>
+          <button class="primary">Apply</button>
+        </form>
+      </div></section>` : (!pending ? `<div class="empty">${esc(current.backend_detail || "Network configuration is read-only on this host.")}</div>` : "");
+    const pendingPanel = pending ? `
+      <section class="panel"><div class="panel__head"><h2>Network configuration changed</h2><span class="badge warn">Awaiting confirmation</span></div><div class="panel__body">
+        <p>New address: <span class="mono">${esc((pending.proposed || {}).ipv4 ? `${pending.proposed.ipv4.address}/${pending.proposed.ipv4.prefix}` : "-")}</span></p>
+        <p class="muted">Confirm before <span class="mono">${esc(pending.rollback_deadline)}</span> (about 120 seconds after it was applied), or the previous configuration is automatically restored -- no reboot required. If you are reading this from the <strong>new</strong> address, everything is working; confirm below to make it permanent.</p>
+        <form data-form="network-confirm"><button class="primary">Keep Configuration</button></form>
+      </div></section>` : "";
+    return page("Network Configuration", "This appliance's own interface/address (DHCP or static IP, gateway) -- separate from DNS upstream/resolver settings. Alderpoint DNS is DNS-only: no DHCP server, NAT, firewall, or router functionality is added here.", `<button data-refresh>Refresh</button>`, `
+      ${pendingPanel}
+      <div class="grid two">
+        <section class="panel"><div class="panel__head"><h2>Detected Backend</h2></div><div class="panel__body">
+          <span class="badge ${current.backend && current.backend !== "unsupported" ? "ok" : "bad"}">${esc(current.backend || "unknown")}</span>
+          <p class="muted">${esc(current.backend_detail || "")}</p>
+          ${current.ambiguous ? `<p class="alert error">Multiple networking backends appear active on this host. Settings are shown read-only until this is resolved.</p>` : ""}
+        </section>
+        <section class="panel"><div class="panel__head"><h2>Active Interface</h2></div><div class="panel__body"><p class="mono">${esc(current.interface || "none detected")}</p></section>
+      </div>
+      <section class="panel"><div class="panel__head"><h2>Current Network Settings</h2></div><div class="panel__body">
+        <div class="table-wrap"><table><tbody>
+          ${row("IPv4 mode", current.ipv4 && current.ipv4.mode)}
+          ${row("Current IPv4 address", current.ipv4 && current.ipv4.address ? `${current.ipv4.address}/${current.ipv4.prefixlen}` : "none")}
+          ${row("Default gateway (IPv4)", current.ipv4 && current.ipv4.gateway)}
+          ${row("IPv6 mode", current.ipv6 && current.ipv6.mode)}
+          ${row("Current IPv6 address", current.ipv6 && current.ipv6.address ? `${current.ipv6.address}/${current.ipv6.prefixlen}` : "none")}
+          ${row("Default gateway (IPv6)", current.ipv6 && current.ipv6.gateway)}
+        </tbody></table></div>
+      </div></section>
+      ${changeForm}`);
+  }
+
   const IMPORT_SOURCE_LABELS = {
     adguard_yaml: "AdGuard Home (YAML config file)",
     adguard_api: "AdGuard Home (live API connection)",
@@ -834,7 +894,7 @@
       <tr><td>${j.id}</td><td><span class="badge ${tone(j.status)}">${esc(j.status)}</span></td><td>${esc(j.detail.candidate_version || "")}</td><td>${esc(j.started_at || "")}</td><td>${esc(j.finished_at || "")}</td><td>${j.status === "staged" ? `<button data-apply-update="${j.id}" class="danger">Apply</button>` : ""}${j.detail.apply_result && j.detail.apply_result.error ? `<span class="muted">${esc(j.detail.apply_result.error)}</span>` : ""}</td></tr>`).join("")}</tbody></table></div>`;
   }
 
-  const renderers = { dashboard, analytics, clients, policies, filtering, blocklists, upstreams, localdns, cache, replication, backup, settings, health, importexport, updates };
+  const renderers = { dashboard, analytics, clients, policies, filtering, blocklists, upstreams, localdns, cache, network, replication, backup, settings, health, importexport, updates };
 
   // Real defect fixed here (found by the expanded stateful-navigation
   // regression, priority 1 of the beta-rescue brief): loadPage() had no
@@ -1225,6 +1285,26 @@
       const res = await api("/api/cache/flush", { method: "POST", body: JSON.stringify(payload) });
       await loadPage("cache");
       toast(res.results.map((r) => `${r.context}: ${r.ok ? "ok" : "failed"} (${r.message})`).join("; "), res.results.every((r) => r.ok) ? "ok" : "bad");
+      return "skip-reload";
+    } else if (type === "network-apply") {
+      if (!confirm("Apply this network configuration? Alderpoint DNS will automatically roll back if it is not confirmed within about 2 minutes.")) return "skip-reload";
+      const payload = {
+        interface: body.interface, ipv4_mode: body.ipv4_mode || "unchanged",
+        ipv4_address: body.ipv4_address || null, ipv4_prefix: body.ipv4_prefix ? Number(body.ipv4_prefix) : null, ipv4_gateway: body.ipv4_gateway || null,
+        ipv6_mode: body.ipv6_mode || "unchanged",
+        ipv6_address: body.ipv6_address || null, ipv6_prefix: body.ipv6_prefix ? Number(body.ipv6_prefix) : null, ipv6_gateway: body.ipv6_gateway || null,
+      };
+      await api("/api/network/apply", { method: "POST", body: JSON.stringify(payload) });
+      // Applying may change the browser's own route to this appliance
+      // (a real address change), so the standard "wait for the network
+      // to notice, then reconnect" flow -- not an immediate reload --
+      // matches Software Update apply's own real-world-tested pattern.
+      await waitForReconnect("network", "Network configuration change requested -- the appliance may become briefly unreachable while it applies");
+      return "skip-reload";
+    } else if (type === "network-confirm") {
+      await api("/api/network/confirm", { method: "POST" });
+      await loadPage("network");
+      toast("Network configuration confirmed; automatic rollback cancelled", "ok");
       return "skip-reload";
     } else if (type === "update-settings") {
       await api("/api/updates/settings", { method: "PUT", body: JSON.stringify({ private_feed_dir: body.private_feed_dir || null }) });

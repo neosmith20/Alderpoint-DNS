@@ -1,0 +1,19 @@
+[Unit]
+Description=Apply a validated Alderpoint DNS V2 host network configuration change
+# Real privilege boundary (beta-rescue priority 4/"Network
+# Configuration"): the unprivileged alderpointdns-v2-web process
+# (NoNewPrivileges=true, no root capability, no sudoers grant) only ever
+# validates the proposed interface/address change and writes the marker
+# this unit's .path watches for; this oneshot unit (root) is the only
+# thing that ever calls the real, backend-specific
+# app.v2.network_config.apply_change. Same convention as
+# alderpointdns-v2-update-apply.service (Software Updates) and the
+# alderpointdns-v2-dnsdist-reload / alderpointdns-v2-bind-reload .path
+# units (DNS Cache flush, policy promotion).
+StartLimitIntervalSec=60
+StartLimitBurst=200
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_ctl.py network-apply
+User=root

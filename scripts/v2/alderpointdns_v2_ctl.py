@@ -55,6 +55,7 @@ from app.v2 import control_db  # noqa: E402
 from app.v2 import dnsdist_gen  # noqa: E402
 from app.v2 import dnsdist_protobuf  # noqa: E402
 from app.v2 import policy_store  # noqa: E402
+from app.v2 import network_config as v2_network_config  # noqa: E402
 from app.v2 import node_identity  # noqa: E402
 from app.v2 import observed_clients  # noqa: E402
 from app.v2 import replication_v2  # noqa: E402
@@ -574,6 +575,100 @@ def _default_bind_config_text(ctx: "bind_gen.BindContext", rpz_zone_path: Path) 
         directory=str(STATE_DIR / "bind" / ctx.name),
         log_path=str(LOG_DIR / "bind" / ctx.name / "named.log"),
     )
+
+
+def cmd_network_rollback_check(args: argparse.Namespace) -> int:
+    """The callback the network-config safety watchdog actually invokes
+    (beta-rescue priority 4/"Network Configuration"). Scheduled by
+    ``app.v2.network_config.schedule_rollback_timer`` as a transient
+    ``systemd-run`` timer, owned by PID 1 and independent of the web
+    request/browser that triggered the change surviving -- exactly V1's
+    own apply-then-auto-rollback-unless-confirmed safety model
+    (``app/network_config.py``), just pointed at V2's own state/log/unit
+    namespace. If a pending change was never confirmed (the operator's
+    browser lost connectivity, or the new address genuinely doesn't
+    work), this reverts the interface to its last-known-good
+    configuration; if the change was already confirmed, this is a no-op.
+    """
+    v2_network_config.rollback_check()
+    return 0
+
+
+# Root-owned .path-unit-triggered request/result files -- the same
+# privilege-separation convention already established for Software
+# Updates apply (packaging/v2/alderpointdns-v2-update-apply.path/
+# .service, app/v2/software_updates.py's request_apply/read_apply_result)
+# and, after this pass's fix, DNS Cache flush (app/v2/cache_control.py's
+# flush_dnsdist_cache riding the existing dnsdist-reload .path unit):
+# the unprivileged web process (alderpointdns-v2, NoNewPrivileges=true,
+# no root capability, no sudoers grant) only ever writes a validated-
+# shape JSON marker; a dedicated root-owned oneshot systemd unit whose
+# .path unit watches that exact marker file is the only thing that ever
+# calls the real, privileged network_config.apply_change/confirm_change.
+# No sudo, no argv-injection surface (every value arrives via a file
+# this process wrote itself, never argv), and no bespoke second sqlite
+# database the way V1's own network_config.py needed one before this
+# convention existed.
+NETWORK_APPLY_REQUEST_FILE = v2_network_config.STATE_DIR / "apply-requested.json"
+NETWORK_APPLY_RESULT_FILE = v2_network_config.STATE_DIR / "apply-result.json"
+NETWORK_CONFIRM_REQUEST_FILE = v2_network_config.STATE_DIR / "confirm-requested.json"
+NETWORK_CONFIRM_RESULT_FILE = v2_network_config.STATE_DIR / "confirm-result.json"
+
+
+def _write_network_result(result_file: Path, requested_at: str, result: dict) -> None:
+    result_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp = result_file.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"requested_at": requested_at, **result}, default=str))
+    tmp.chmod(0o600)
+    tmp.replace(result_file)
+
+
+def cmd_network_apply(args: argparse.Namespace) -> int:
+    """Privileged half of an interface/address change (beta-rescue
+    priority 4). Reads the exact payload the unprivileged web process
+    already validated and staged at ``NETWORK_APPLY_REQUEST_FILE`` --
+    never trusts argv -- and performs the real backend-specific apply
+    via ``app.v2.network_config.apply_change`` (already-tested V1 logic,
+    just redirected to V2's own state namespace). Always writes a result
+    file, success or failure, so the caller never has to guess whether a
+    privileged operation silently died.
+    """
+    requested_at = "unknown"
+    try:
+        payload = json.loads(NETWORK_APPLY_REQUEST_FILE.read_text())
+        requested_at = payload.get("requested_at", requested_at)
+        result = v2_network_config.apply_change(
+            interface=payload["interface"],
+            ipv4_mode=payload.get("ipv4_mode", "unchanged"),
+            ipv4_address=payload.get("ipv4_address"),
+            ipv4_prefix=payload.get("ipv4_prefix"),
+            ipv4_gateway=payload.get("ipv4_gateway"),
+            ipv6_mode=payload.get("ipv6_mode", "unchanged"),
+            ipv6_address=payload.get("ipv6_address"),
+            ipv6_prefix=payload.get("ipv6_prefix"),
+            ipv6_gateway=payload.get("ipv6_gateway"),
+            rollback_timeout_seconds=int(payload.get("rollback_timeout_seconds", v2_network_config.ROLLBACK_TIMEOUT_SECONDS)),
+        )
+        _write_network_result(NETWORK_APPLY_RESULT_FILE, requested_at, {"status": "done", "result": result})
+    except Exception as exc:  # noqa: BLE001 -- must always report, never crash silently
+        _write_network_result(NETWORK_APPLY_RESULT_FILE, requested_at, {"status": "failed", "error": str(exc)})
+        return 1
+    return 0
+
+
+def cmd_network_confirm(args: argparse.Namespace) -> int:
+    """Privileged half of confirming a pending network change permanent
+    (cancels the auto-rollback watchdog). See ``cmd_network_apply``."""
+    requested_at = "unknown"
+    try:
+        payload = json.loads(NETWORK_CONFIRM_REQUEST_FILE.read_text())
+        requested_at = payload.get("requested_at", requested_at)
+        message = v2_network_config.confirm_change()
+        _write_network_result(NETWORK_CONFIRM_RESULT_FILE, requested_at, {"status": "done", "result": {"message": message}})
+    except Exception as exc:  # noqa: BLE001
+        _write_network_result(NETWORK_CONFIRM_RESULT_FILE, requested_at, {"status": "failed", "error": str(exc)})
+        return 1
+    return 0
 
 
 def cmd_generate_runtime(args: argparse.Namespace) -> int:
@@ -1557,6 +1652,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dnsdist-binary", default="dnsdist")
     p.add_argument("--named-checkzone-binary", default="named-checkzone")
     p.set_defaults(func=cmd_migrate)
+
+    p = sub.add_parser("network-rollback-check",
+                        help="watchdog callback: revert a pending, unconfirmed network config change")
+    p.set_defaults(func=cmd_network_rollback_check)
+
+    p = sub.add_parser("network-apply",
+                        help="privileged: apply the interface/address change staged in the pending-apply-request file")
+    p.set_defaults(func=cmd_network_apply)
+
+    p = sub.add_parser("network-confirm",
+                        help="privileged: confirm a pending network config change permanent, cancelling auto-rollback")
+    p.set_defaults(func=cmd_network_confirm)
 
     p = sub.add_parser("generate-runtime")
     p.add_argument("--dnsdist-binary", default="dnsdist")

@@ -1,0 +1,9 @@
+[Unit]
+Description=Confirm a pending Alderpoint DNS V2 network configuration change, cancelling auto-rollback
+StartLimitIntervalSec=60
+StartLimitBurst=200
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_ctl.py network-confirm
+User=root

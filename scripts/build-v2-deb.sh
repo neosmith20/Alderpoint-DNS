@@ -209,6 +209,14 @@ cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-dnsdist-reload.path" "$PKG/lib/sys
 # alderpointdns_v2_update_apply.py.
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-update-apply.service" "$PKG/lib/systemd/system/alderpointdns-v2-update-apply.service"
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-update-apply.path" "$PKG/lib/systemd/system/alderpointdns-v2-update-apply.path"
+
+# Network Configuration (beta-rescue priority 4): same unprivileged-
+# web-process/root-owned-.path-unit privilege split as Software Updates
+# apply just above.
+cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-network-apply.service" "$PKG/lib/systemd/system/alderpointdns-v2-network-apply.service"
+cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-network-apply.path" "$PKG/lib/systemd/system/alderpointdns-v2-network-apply.path"
+cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-network-confirm.service" "$PKG/lib/systemd/system/alderpointdns-v2-network-confirm.service"
+cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-network-confirm.path" "$PKG/lib/systemd/system/alderpointdns-v2-network-confirm.path"
 cp "$SOURCE_DIR/scripts/v2/alderpointdns_v2_update_apply.py" "$PKG/opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_update_apply.py"
 chmod 0755 "$PKG/opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_update_apply.py"
 # Subscribed Blocklists periodic refresh (beta-rescue priority 3B): same

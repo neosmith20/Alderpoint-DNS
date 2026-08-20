@@ -182,43 +182,46 @@ class TestRealRndcFlush:
 
 
 class TestDnsdistFlushCoalescing:
-    def test_rapid_repeated_flush_is_coalesced_not_restarted_twice(self, tmp_path, monkeypatch):
-        calls = []
+    """Real file I/O, no mocking: since the fix for the real privilege-
+    model gap found during beta-rescue priority 4 (an unprivileged,
+    NoNewPrivileges=true, non-sudoers-granted process can never really
+    call `systemctl restart` on a system unit), a flush is nothing more
+    than rewriting the compiled dnsdist.conf with its own content to
+    trigger the already-root-owned `.path` unit's inotify watch -- there
+    is no subprocess call left to mock."""
 
-        def fake_run(cmd, **kwargs):
-            calls.append(cmd)
-
-            class R:
-                returncode = 0
-                stdout = ""
-                stderr = ""
-            return R()
-
-        monkeypatch.setattr(cache_control.subprocess, "run", fake_run)
+    def test_rapid_repeated_flush_is_coalesced_not_rewritten_twice(self, tmp_path):
         state_path = tmp_path / "last-flush"
-        r1 = cache_control.flush_dnsdist_cache(state_path=state_path, min_interval=5.0)
-        r2 = cache_control.flush_dnsdist_cache(state_path=state_path, min_interval=5.0)
+        conf_path = tmp_path / "dnsdist.conf"
+        conf_path.write_text("-- compiled config --\n")
+        mtime_before = conf_path.stat().st_mtime_ns
+        r1 = cache_control.flush_dnsdist_cache(state_path=state_path, min_interval=5.0, compiled_conf_path=conf_path)
+        mtime_after_first = conf_path.stat().st_mtime_ns
+        time.sleep(0.05)
+        r2 = cache_control.flush_dnsdist_cache(state_path=state_path, min_interval=5.0, compiled_conf_path=conf_path)
+        mtime_after_second = conf_path.stat().st_mtime_ns
         assert r1.ok and r2.ok
-        assert len(calls) == 1, "second rapid flush must not trigger a second real restart"
+        assert mtime_after_first != mtime_before, "first flush must touch the compiled config"
+        assert mtime_after_second == mtime_after_first, "second rapid flush must not touch the file again"
 
-    def test_flush_after_interval_elapses_restarts_again(self, tmp_path, monkeypatch):
-        calls = []
-
-        def fake_run(cmd, **kwargs):
-            calls.append(cmd)
-
-            class R:
-                returncode = 0
-                stdout = ""
-                stderr = ""
-            return R()
-
-        monkeypatch.setattr(cache_control.subprocess, "run", fake_run)
+    def test_flush_after_interval_elapses_touches_again(self, tmp_path):
         state_path = tmp_path / "last-flush"
-        cache_control.flush_dnsdist_cache(state_path=state_path, min_interval=0.05)
+        conf_path = tmp_path / "dnsdist.conf"
+        conf_path.write_text("-- compiled config --\n")
+        r1 = cache_control.flush_dnsdist_cache(state_path=state_path, min_interval=0.05, compiled_conf_path=conf_path)
+        mtime_after_first = conf_path.stat().st_mtime_ns
         time.sleep(0.1)
-        cache_control.flush_dnsdist_cache(state_path=state_path, min_interval=0.05)
-        assert len(calls) == 2
+        r2 = cache_control.flush_dnsdist_cache(state_path=state_path, min_interval=0.05, compiled_conf_path=conf_path)
+        mtime_after_second = conf_path.stat().st_mtime_ns
+        assert r1.ok and r2.ok
+        assert mtime_after_second != mtime_after_first
+
+    def test_missing_compiled_config_is_a_clean_failure_not_a_crash(self, tmp_path):
+        state_path = tmp_path / "last-flush"
+        conf_path = tmp_path / "does-not-exist" / "dnsdist.conf"
+        result = cache_control.flush_dnsdist_cache(state_path=state_path, min_interval=5.0, compiled_conf_path=conf_path)
+        assert result.ok is False
+        assert result.message
 
 
 @pytest.mark.skipif(not (NAMED_INSTALLED and RNDC_INSTALLED), reason="requires named and rndc")

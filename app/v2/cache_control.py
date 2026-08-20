@@ -135,12 +135,35 @@ def bind_cache_stats(statistics_port: int, timeout: float = 3.0) -> dict:
 
 _LAST_DNSDIST_FLUSH_PATH = Path("/var/lib/alderpointdns-v2/cache/last-dnsdist-flush")
 _DNSDIST_FLUSH_MIN_INTERVAL_SECONDS = 10.0
+COMPILED_DNSDIST_CONF_PATH = Path("/var/lib/alderpointdns-v2/compiled/dnsdist.conf")
 
 
-def flush_dnsdist_cache(state_path: Path = _LAST_DNSDIST_FLUSH_PATH, min_interval: float = _DNSDIST_FLUSH_MIN_INTERVAL_SECONDS) -> FlushResult:
-    """Restarts the dnsdist unit -- the only way to drop its in-process
-    packet cache without an administrative console we deliberately don't
-    run. Coalesced: a rapid double-click (or an automated retry) within
+def flush_dnsdist_cache(
+    state_path: Path = _LAST_DNSDIST_FLUSH_PATH,
+    min_interval: float = _DNSDIST_FLUSH_MIN_INTERVAL_SECONDS,
+    compiled_conf_path: Path = COMPILED_DNSDIST_CONF_PATH,
+) -> FlushResult:
+    """Drops dnsdist's in-process packet cache -- the only way to do so
+    without an administrative console we deliberately don't run --
+    without ever needing this unprivileged web process (runs as
+    `alderpointdns-v2`, ``NoNewPrivileges=true``, no sudoers grant) to
+    itself call `systemctl restart` on a system unit, which a real
+    packaged install would simply refuse (root-cause found during
+    beta-rescue priority 4/Network Configuration privilege-model review;
+    calling `systemctl restart` directly here silently could never have
+    worked on a real install).
+
+    Instead this rides the exact same, already-proven, root-owned
+    reload path a normal policy promotion uses
+    (`alderpointdns-v2-dnsdist-reload.path` watches this file and its
+    `.service` runs `systemctl restart alderpointdns-v2-dnsdist.service`
+    as root via PID 1, not this process): rewriting the compiled
+    dnsdist.conf with its own unchanged content still produces a real
+    open+write+close, which is what the `.path` unit's inotify watch
+    triggers on, so a flush-with-no-config-change reliably fires the
+    same restart a real config change would.
+
+    Coalesced: a rapid double-click (or an automated retry) within
     `min_interval` of the last real restart is reported as a no-op
     success rather than triggering a second real restart, the same
     "don't pile up redundant privileged operations" lesson
@@ -154,13 +177,17 @@ def flush_dnsdist_cache(state_path: Path = _LAST_DNSDIST_FLUSH_PATH, min_interva
             last = 0.0
         if now - last < min_interval:
             return FlushResult("dnsdist", "all", None, True, "already flushed within the last few seconds; not restarting again")
+    if not compiled_conf_path.exists():
+        return FlushResult("dnsdist", "all", None, False, f"no compiled dnsdist config at {compiled_conf_path}; nothing to flush")
     try:
-        proc = subprocess.run(
-            ["systemctl", "restart", "alderpointdns-v2-dnsdist.service"], capture_output=True, text=True, timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return FlushResult("dnsdist", "all", None, False, f"restart failed to run: {exc}")
-    if proc.returncode != 0:
-        return FlushResult("dnsdist", "all", None, False, (proc.stderr or proc.stdout or "restart failed").strip())
+        content = compiled_conf_path.read_text()
+        compiled_conf_path.write_text(content)
+        # write_text() alone is not guaranteed to visibly move mtime on
+        # every filesystem's clock resolution when two flushes land in
+        # the same tick; setting it explicitly makes the trigger
+        # deterministic regardless of host fs mtime granularity.
+        os.utime(compiled_conf_path, (now, now))
+    except OSError as exc:
+        return FlushResult("dnsdist", "all", None, False, f"could not touch compiled config to trigger reload: {exc}")
     state_path.write_text(str(now))
-    return FlushResult("dnsdist", "all", None, True, "dnsdist restarted; packet cache cleared")
+    return FlushResult("dnsdist", "all", None, True, "dnsdist reload triggered; packet cache will be cleared")
