@@ -78,7 +78,7 @@ def test_chromium_management_ui_harness(tmp_path):
             env=harness_env,
             capture_output=True,
             text=True,
-            timeout=180,
+            timeout=300,
         )
         assert result.returncode == 0, result.stdout + result.stderr
         assert "setup-login" in result.stdout

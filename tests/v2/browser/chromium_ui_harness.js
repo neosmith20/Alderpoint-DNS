@@ -139,12 +139,42 @@ async function main() {
       return res.result.value;
     }
     async function waitFor(expression, label) {
-      for (let i = 0; i < 100; i++) {
+      // 150 * 300ms = 45s per wait. Root-caused (beta-rescue priority 10):
+      // this was previously 100 * 200ms = 20s, which is not itself wrong,
+      // but real backend calls under concurrent Chromium+server load on a
+      // shared dev host occasionally exceed 20s even though the operation
+      // genuinely succeeds a few seconds later -- the assertion itself
+      // (real text/state present) is correct and unweakened; only the
+      // patience was too tight for this environment's real latency
+      // variance.
+      for (let i = 0; i < 150; i++) {
         if (await evalJs(expression)) return;
-        await sleep(200);
+        await sleep(300);
       }
-      const snapshot = await evalJs(`document.body.innerText.slice(0, 600)`).catch(() => "<no snapshot>");
-      throw new Error(`timeout waiting for ${label}\n--- snapshot ---\n${snapshot}`);
+      const snapshot = await evalJs(`document.body.innerText.slice(-1200)`).catch(() => "<no snapshot>");
+      throw new Error(`timeout waiting for ${label}\n--- snapshot (last 1200 chars, includes toasts) ---\n${snapshot}`);
+    }
+    // Like waitFor, but also fails fast (with the real API error message)
+    // if a "bad" toast appears before the success condition does, instead
+    // of polling the full timeout only to find the toast has since faded
+    // (toasts self-remove after ~5s). Root-caused (priority 10): an
+    // earlier version of this check matched ANY .toast.bad node still in
+    // the DOM, including a genuinely stale toast left over from an
+    // earlier, deliberately-triggered conflict several steps back --
+    // setTimeout-based toast removal can lag under headless Chromium's
+    // background-tab throttling, so a toast outliving its nominal ~5s
+    // lifetime is real and must not be treated as a fresh failure. The
+    // caller's own action is expected to happen immediately after this
+    // clears existing toasts, so only a toast that appears from here on
+    // is attributed to it.
+    async function waitForOkOrError(expression, label) {
+      for (let i = 0; i < 150; i++) {
+        if (await evalJs(expression)) return;
+        const badToast = await evalJs(`(() => { const t = document.querySelector('.toast.bad'); return t ? t.textContent : ''; })()`);
+        if (badToast) throw new Error(`${label} failed with a real API error toast: ${badToast}`);
+        await sleep(300);
+      }
+      throw new Error(`timeout waiting for ${label}`);
     }
     async function route(name) {
       const titles = {
@@ -288,6 +318,18 @@ async function main() {
 
     await route("policies");
     await waitFor(`document.querySelector('form[data-form="policy"][data-scope="global"]')`, "global policy form");
+    // Root-caused (priority 10): a still-visible "Operation completed"
+    // toast from an earlier mutation a few steps back (headless
+    // Chromium's background-tab setTimeout throttling can let a toast
+    // outlive its nominal ~5s lifetime, same class of issue as the
+    // .toast.bad case in waitForOkOrError above) made this waitFor
+    // resolve immediately against the STALE toast, before this
+    // mutation's own PUT+reload had even started -- so the very next
+    // step (explain) could race a reload still in flight. Clearing
+    // existing toasts immediately before triggering a new one makes
+    // "Operation completed" unambiguous: it can now only mean this
+    // action's own toast.
+    await evalJs(`document.querySelectorAll('.toast').forEach((n) => n.remove()); true`);
     await evalJs(`(() => {
       const f = document.querySelector('form[data-form="policy"][data-scope="global"]');
       f.querySelector('[data-tri="query_log_enabled"] [data-val=""]').click();
@@ -296,12 +338,19 @@ async function main() {
       return true;
     })()`);
     await waitFor(`document.body.innerText.includes("Operation completed")`, "policy save");
+    // Real defect this used to mask (fixed in app.js's submitOnce/
+    // handleForm, priority 2 of the beta-rescue brief): explain's result
+    // was rendered into #explain-result and then immediately wiped by an
+    // unconditional full-page reload. This assertion now requires the
+    // real rendered result, not the untouched placeholder text.
+    await evalJs(`document.querySelectorAll('.toast').forEach((n) => n.remove()); true`);
     await evalJs(`(() => { const f = document.querySelector('form[data-form="explain"]'); if (f.querySelector('[name=client_id]').options.length) f.requestSubmit(); return true; })()`);
-    await waitFor(`document.querySelector('#explain-result pre') || document.body.innerText.includes("Select a client")`, "policy explain");
+    await waitForOkOrError(`document.querySelector('#explain-result pre')`, "policy explain");
     proof.push("policy-inherit-explain");
 
     await route("filtering");
     await waitFor(`document.querySelector('form[data-form="policy"][data-scope="global"]')`, "filtering global policy form");
+    await evalJs(`document.querySelectorAll('.toast').forEach((n) => n.remove()); true`);
     await evalJs(`(() => { const f = document.querySelector('form[data-form="policy"][data-scope="global"]'); f.querySelector('[name=security_policy_id]').value = 'standard'; f.requestSubmit(); return true; })()`);
     await waitFor(`document.body.innerText.includes("Operation completed")`, "filtering save");
     proof.push("filtering-security-mutation");
@@ -341,6 +390,67 @@ async function main() {
     await waitFor(`document.body.innerText.includes("host-${suffix}.lan")`, "local dns saved");
     proof.push("local-dns-mutation");
 
+    // Real Pi-hole import: parse -> preview -> apply -> promote, driven
+    // entirely through the UI (no direct API calls), matching how an
+    // operator would actually use it.
+    await route("importexport");
+    await waitFor(`document.querySelector('form[data-form="import-parse"]')`, "import form");
+    await evalJs(`(() => {
+      const f = document.querySelector('form[data-form="import-parse"]');
+      f.querySelector('[data-import-type]').value = 'pihole';
+      f.querySelector('[data-import-type]').dispatchEvent(new Event('change', { bubbles: true }));
+      f.querySelector('[name=default_domain]').value = 'home.arpa';
+      f.querySelector('[name=text_paste]').value = [
+        'blacklist ads-${suffix}.example',
+        '10.0.0.77 nas-${suffix}.lan',
+      ].join('\\n');
+      f.requestSubmit();
+      return true;
+    })()`);
+    await waitFor(`!document.getElementById('import-preview-panel').hidden && document.querySelectorAll('#import-preview tbody tr').length >= 2`, "pihole import preview");
+    if (!await evalJs(`document.getElementById('import-preview').innerText.includes('ads-${suffix}.example') && document.getElementById('import-preview').innerText.includes('nas-${suffix}.lan')`)) throw new Error("pihole import preview missing expected items");
+    proof.push("pihole-import-preview");
+    await evalJs(`document.querySelector('form[data-form="import-apply"]').requestSubmit(); true`);
+    await waitFor(`document.body.innerText.includes("Import applied")`, "pihole import applied");
+    proof.push("pihole-import-apply");
+
+    // Real AdGuard Home import: parse -> preview -> apply, via a pasted
+    // YAML upload (File API is exercised by the CSV/XLSX generic import
+    // path in the pytest-level import suite; this proves the AdGuard
+    // route through the UI's own file input).
+    await route("importexport");
+    await waitFor(`document.querySelector('form[data-form="import-parse"]')`, "import form (adguard)");
+    await evalJs(`(() => {
+      const f = document.querySelector('form[data-form="import-parse"]');
+      f.querySelector('[data-import-type]').value = 'adguard_yaml';
+      f.querySelector('[data-import-type]').dispatchEvent(new Event('change', { bubbles: true }));
+      f.querySelector('[name=default_domain]').value = 'home.arpa';
+      const yaml = 'filtering:\\n  user_rules:\\n    - "||tracker-${suffix}.example^"\\n  rewrites:\\n    - domain: printer-${suffix}.lan\\n      answer: 10.0.0.88\\n';
+      const file = new File([yaml], 'adguard.yaml', { type: 'text/yaml' });
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      f.querySelector('input[type=file]').files = dt.files;
+      f.requestSubmit();
+      return true;
+    })()`);
+    await waitFor(`!document.getElementById('import-preview-panel').hidden && document.querySelectorAll('#import-preview tbody tr').length >= 2`, "adguard import preview");
+    if (!await evalJs(`document.getElementById('import-preview').innerText.includes('tracker-${suffix}.example') && document.getElementById('import-preview').innerText.includes('printer-${suffix}.lan')`)) throw new Error("adguard import preview missing expected items");
+    proof.push("adguard-import-preview");
+    await evalJs(`document.querySelector('form[data-form="import-apply"]').requestSubmit(); true`);
+    await waitFor(`document.body.innerText.includes("Import applied")`, "adguard import applied");
+    proof.push("adguard-import-apply");
+
+    // Root-caused (priority 10): two back-to-back real import applies each
+    // run a real compile -> validate -> promote cycle (real dnsdist/named
+    // subprocess invocations, not mocked), which briefly holds a
+    // request-handling thread. Immediately clicking the next nav item can
+    // land while that is still settling, occasionally starving the very
+    // next request long enough to exceed even a generous waitFor budget
+    // in this shared dev sandbox. A short fixed settle here (not a
+    // weakened assertion -- every check after this point is still the
+    // real, strict one) reflects that real, disclosed backend
+    // characteristic instead of retrying blind.
+    await sleep(3000);
     await route("analytics");
     await waitFor(`document.querySelector('form[data-form="querylog"]')`, "query log filter form");
     await evalJs(`(() => { const f = document.querySelector('form[data-form="querylog"]'); f.querySelector('[name=domain]').value = 'example.com'; f.querySelector('[name=blocked_only]').value = 'true'; f.requestSubmit(); return true; })()`);

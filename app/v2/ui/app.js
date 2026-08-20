@@ -131,15 +131,39 @@
     return String(input || "").trim().toLowerCase().replace(/[^a-z0-9_.:-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
   }
 
+  // Real defect fixed here (found while wiring the Import preview panel,
+  // priority 2 of the beta-rescue brief): every handleForm branch that
+  // renders its own inline result -- explain, the query-log filter form,
+  // migration detection, and now import preview -- returned early after
+  // writing directly into a results <div>, but submitOnce still
+  // unconditionally toasted "Operation completed" and called
+  // loadPage(state.route) afterward. Since state.route had not changed,
+  // that reload re-fetched and re-rendered the entire page, silently
+  // wiping the inline result the handler had just written a moment
+  // earlier (the existing Chromium harness masked this for Explain by
+  // accepting either the real result OR the untouched placeholder text).
+  // handleForm now returns "skip-reload" from those branches so
+  // submitOnce knows the handler already rendered its own outcome and
+  // must not blow it away with a full page reload.
   async function submitOnce(form, handler) {
     if (form.dataset.busy === "1") return;
     form.dataset.busy = "1";
     const buttons = form.querySelectorAll("button");
     buttons.forEach((b) => b.disabled = true);
     try {
-      await handler(form);
-      toast("Operation completed", "ok");
-      await loadPage(state.route);
+      const outcome = await handler(form);
+      if (outcome !== "skip-reload") {
+        // Real defect fixed here (root-caused via the browser harness,
+        // priority 10 of the beta-rescue brief): the toast previously
+        // fired BEFORE awaiting loadPage(), so "Operation completed"
+        // could be visible while the page was still mid-reload (still
+        // showing the "Loading..." placeholder, or about to replace a
+        // form the operator/a test was about to interact with next).
+        // The toast is now the reload's own completion signal, not a
+        // separate, earlier one.
+        await loadPage(state.route);
+        toast("Operation completed", "ok");
+      }
     } catch (err) {
       toast(err.message, "bad");
     } finally {
@@ -547,8 +571,69 @@
       <div class="grid two"><section class="panel"><div class="panel__head"><h2>Components</h2></div><div class="panel__body">${componentList(h.components || {})}</div></section><section class="panel"><div class="panel__head"><h2>Node Identity</h2></div><div class="panel__body">${tableFromRows([n], 1)}</div></section></div>`);
   }
 
+  const IMPORT_SOURCE_LABELS = {
+    adguard_yaml: "AdGuard Home (YAML config file)",
+    adguard_api: "AdGuard Home (live API connection)",
+    pihole: "Pi-hole (exported lists, pasted or concatenated)",
+    hosts: "Hosts file",
+    bind_zone: "BIND zone file",
+    csv: "Alderpoint-native CSV",
+    xlsx: "Alderpoint-native XLSX",
+    alderpointdns_json: "Alderpoint-native JSON",
+  };
+  const IMPORT_BINARY_SOURCES = new Set(["xlsx"]);
+  const IMPORT_API_SOURCES = new Set(["adguard_api"]);
+
   async function importexport() {
-    return page("Import", "AdGuard Home, Pi-hole, hosts/BIND/CSV/XLSX, and Alderpoint-native import with preview before apply.", "", `<div class="empty">Import is being restored to V2 in this beta-rescue pass and is not wired up on this page yet.</div>`);
+    const jobs = await api("/api/import/jobs").catch(() => ({ jobs: [] }));
+    return page("Import", "AdGuard Home, Pi-hole, hosts/BIND zone, Alderpoint-native CSV/XLSX/JSON. Every import is previewed before anything is written.", "", `
+      <div class="grid two">
+        <section class="panel"><div class="panel__head"><h2>New Import</h2></div><div class="panel__body">${importSourceForm()}</div></section>
+        <section class="panel"><div class="panel__head"><h2>Recent Import Jobs</h2></div><div class="panel__body"><div id="import-jobs">${importJobsTable(jobs.jobs || [])}</div></div></section>
+      </div>
+      <section class="panel" id="import-preview-panel" hidden><div class="panel__head"><h2>Preview</h2></div><div class="panel__body" id="import-preview"></div></section>`);
+  }
+
+  function importSourceForm() {
+    const options = Object.entries(IMPORT_SOURCE_LABELS).map(([id, label]) => `<option value="${esc(id)}">${esc(label)}</option>`).join("");
+    return `<form data-form="import-parse">
+      <label>Source type<select name="source_type" data-import-type>${options}</select></label>
+      <label>Source name<input name="source_name" value="import" maxlength="128"></label>
+      <label>Default domain (for hosts/zone/AdGuard rewrites without one)<input name="default_domain" placeholder="home.arpa"></label>
+      <div data-import-field="file"><label>File<input type="file" name="file"></label></div>
+      <div data-import-field="text" hidden><label>Paste content<textarea name="text_paste" placeholder="Paste Pi-hole export lines here"></textarea></label></div>
+      <div data-import-field="api" hidden>
+        <div class="form-grid">
+          <label>AdGuard Home base URL<input name="base_url" placeholder="https://10.0.0.5:3000"></label>
+          <label>Username<input name="username"></label>
+          <label>Password<input name="password" type="password"></label>
+        </div>
+      </div>
+      <button class="primary">Parse and preview</button>
+    </form>`;
+  }
+
+  function importJobsTable(jobs) {
+    if (!jobs.length) return `<div class="empty">No import jobs yet.</div>`;
+    return `<div class="table-wrap"><table><thead><tr><th>ID</th><th>Source</th><th>Name</th><th>Status</th><th>Items</th><th>Created</th></tr></thead><tbody>${jobs.map((j) => `
+      <tr><td>${j.id}</td><td>${esc(j.source_type)}</td><td>${esc(j.source_name)}</td><td><span class="badge ${tone(j.status)}">${esc(j.status)}</span></td><td>${esc((j.plan || {}).item_count ?? "")}</td><td>${esc(j.created_at || "")}</td></tr>`).join("")}</tbody></table></div>`;
+  }
+
+  function importPlanPreview(jobId, plan) {
+    const items = plan.items || [];
+    const rows = items.map((item, index) => {
+      const desc = item.kind === "local_dns" ? `${item.fqdn} ${item.record_type} -> ${item.value}`
+        : item.kind === "block_domain" ? `block ${item.domain} (${item.match_kind})`
+        : item.kind === "upstream" ? `${item.name} (${item.transport}) ${item.address}`
+        : item.kind === "client" ? `client ${item.name}`
+        : `${item.text || ""}`;
+      const status = item.kind === "unsupported" ? `<span class="badge warn">unsupported</span>` : item.already_applied ? `<span class="badge ok">already applied</span>` : item.conflict ? `<span class="badge bad">conflict</span>` : `<span class="badge info">new</span>`;
+      return `<tr><td><input type="checkbox" data-skip-index="${index}" ${item.kind === "unsupported" ? "disabled" : "checked"}></td><td>${esc(item.kind)}</td><td>${esc(desc)}</td><td>${status}</td><td class="muted">${esc(item.reason || item.conflict_note || item.note || "")}</td></tr>`;
+    }).join("");
+    return `
+      <div class="strip"><div class="metric"><strong>${plan.item_count ?? items.length}</strong><span>Total items</span></div><div class="metric"><strong>${plan.conflict_count ?? 0}</strong><span>Conflicts</span></div>${Object.entries(plan.summary || {}).map(([k, v]) => `<div class="metric"><strong>${esc(v)}</strong><span>${esc(k)}</span></div>`).join("")}</div>
+      <div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>Apply</th><th>Kind</th><th>Item</th><th>Status</th><th>Note</th></tr></thead><tbody>${rows || `<tr><td colspan="5" class="empty">Nothing to import.</td></tr>`}</tbody></table></div>
+      <form data-form="import-apply" data-job-id="${jobId}" style="margin-top:12px"><button class="primary">Apply selected items and promote runtime</button></form>`;
   }
 
   async function updates() {
@@ -722,6 +807,20 @@
       }
     });
 
+    document.body.addEventListener("change", (ev) => {
+      const sel = ev.target.closest("[data-import-type]");
+      if (!sel) return;
+      const type = sel.value;
+      const form = sel.closest("form");
+      const isApi = IMPORT_API_SOURCES.has(type);
+      const isBinary = IMPORT_BINARY_SOURCES.has(type);
+      const isPihole = type === "pihole";
+      form.querySelector('[data-import-field="api"]').hidden = !isApi;
+      form.querySelector('[data-import-field="file"]').hidden = isApi;
+      form.querySelector('[data-import-field="text"]').hidden = !isPihole;
+      if (isBinary) form.querySelector('[data-import-field="file"] input[type=file]').accept = ".xlsx";
+    });
+
     document.body.addEventListener("submit", async (ev) => {
       const form = ev.target.closest("form[data-form]");
       if (!form) return;
@@ -752,11 +851,23 @@
     } else if (type === "group") {
       await api("/api/groups", { method: "POST", body: JSON.stringify(body) });
     } else if (type === "explain") {
+      // Real defect fixed here (root-caused via the browser harness under
+      // rapid real-world navigation, priority 10 of the beta-rescue
+      // brief): every "skip-reload" branch below writes its result
+      // directly into a specific #id element rather than going through
+      // loadPage()'s own stale-response guard (see loadToken). If the
+      // operator navigates away before this fetch resolves, that element
+      // no longer exists and the naive `.innerHTML = ...` throws
+      // "Cannot set properties of null" -- silently surfaced to the user
+      // only as a generic error toast, with no indication of what
+      // actually happened. Every such write here is now null-guarded: if
+      // the element is gone, the now-irrelevant result is simply dropped.
       const q = new URLSearchParams({ client_id: body.client_id });
       if (body.client_ip) q.set("client_ip", body.client_ip);
       const res = await api(`/api/policy/explain?${q}`);
-      document.getElementById("explain-result").innerHTML = `<pre class="mono">${esc(JSON.stringify(res, null, 2))}</pre>`;
-      return;
+      const explainTarget = document.getElementById("explain-result");
+      if (explainTarget) explainTarget.innerHTML = `<pre class="mono">${esc(JSON.stringify(res, null, 2))}</pre>`;
+      return "skip-reload";
     } else if (type === "querylog") {
       const q = new URLSearchParams();
       for (const [k, v] of Object.entries(body)) {
@@ -764,9 +875,11 @@
         q.set(k, String(v));
       }
       const res = await api(`/api/analytics/query-log?${q}`);
-      document.getElementById("query-active").innerHTML = activeFilters(res.filters || {});
-      document.getElementById("query-results").innerHTML = tableFromRows(res.rows || [], Number(body.limit || 100), res.columns);
-      return;
+      const activeTarget = document.getElementById("query-active");
+      const resultsTarget = document.getElementById("query-results");
+      if (activeTarget) activeTarget.innerHTML = activeFilters(res.filters || {});
+      if (resultsTarget) resultsTarget.innerHTML = tableFromRows(res.rows || [], Number(body.limit || 100), res.columns);
+      return "skip-reload";
     } else if (type === "service") {
       await api("/api/services", { method: "POST", body: JSON.stringify({ service_id: body.service_id, display_name: body.display_name, category: body.category || "", domains: body.domain ? [{ match_kind: body.match_kind, domain: body.domain }] : [] }) });
     } else if (type === "ruleset") {
@@ -784,8 +897,9 @@
       await api(`/api/replication/peers/${encodeURIComponent(body.peer_node_id)}`, { method: "PUT", body: JSON.stringify(Object.assign({ authorized: true }, body)) });
     } else if (type === "migration") {
       const res = await api(`/api/migration/detect?source_path=${encodeURIComponent(body.source_path)}`);
-      document.getElementById("migration-result").innerHTML = tableFromRows([res], 1);
-      return;
+      const migrationTarget = document.getElementById("migration-result");
+      if (migrationTarget) migrationTarget.innerHTML = tableFromRows([res], 1);
+      return "skip-reload";
     } else if (type === "restore") {
       const name = form.dataset.backupName;
       await api(`/api/backup/secrets/${encodeURIComponent(name)}/restore`, { method: "POST", body: JSON.stringify(body) });
@@ -793,7 +907,54 @@
       await api("/api/tls/replace", { method: "POST", body: JSON.stringify(body) });
     } else if (type === "notification") {
       await api("/api/notifications", { method: "POST", body: JSON.stringify(body) });
+    } else if (type === "import-parse") {
+      const sourceType = form.querySelector('[data-import-type]').value;
+      const payload = { source_type: sourceType, source_name: body.source_name || "import", default_domain: body.default_domain || null };
+      if (IMPORT_API_SOURCES.has(sourceType)) {
+        Object.assign(payload, { base_url: body.base_url, username: body.username, password: body.password });
+      } else if (sourceType === "pihole" && (body.text_paste || "").trim()) {
+        payload.text = body.text_paste;
+      } else {
+        const fileInput = form.querySelector('input[type=file]');
+        const file = fileInput && fileInput.files[0];
+        if (!file) throw new Error("choose a file to import (or paste content for Pi-hole)");
+        if (IMPORT_BINARY_SOURCES.has(sourceType)) {
+          payload.data_base64 = await fileToBase64(file);
+        } else {
+          payload.text = await file.text();
+        }
+      }
+      const res = await api("/api/import/jobs", { method: "POST", body: JSON.stringify(payload) });
+      const panel = document.getElementById("import-preview-panel");
+      const previewTarget = document.getElementById("import-preview");
+      if (panel && previewTarget) {
+        panel.hidden = false;
+        previewTarget.innerHTML = importPlanPreview(res.job_id, res.plan);
+        panel.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+      return "skip-reload";
+    } else if (type === "import-apply") {
+      const jobId = form.dataset.jobId;
+      const skip = Array.from(document.querySelectorAll(`#import-preview input[data-skip-index]`))
+        .filter((cb) => !cb.checked && !cb.disabled)
+        .map((cb) => Number(cb.dataset.skipIndex));
+      const res = await api(`/api/import/jobs/${encodeURIComponent(jobId)}/apply`, { method: "POST", body: JSON.stringify({ skip_indexes: skip }) });
+      // Same ordering fix as submitOnce (priority 10): reload before
+      // toast, so the toast is never visible while the jobs list is
+      // still mid-refresh.
+      await loadPage("importexport");
+      toast(`Import applied: ${Object.entries(res.counts).map(([k, v]) => `${k}=${v}`).join(", ")}`, "ok");
+      return "skip-reload";
     }
+  }
+
+  function fileToBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
+      reader.onerror = () => reject(reader.error || new Error("file read failed"));
+      reader.readAsDataURL(file);
+    });
   }
 
   boot();

@@ -46,6 +46,7 @@ from app.db_retry import DatabaseBusyError, is_lock_error, retry_on_locked
 from app.v2 import analytics_deps
 from app.v2 import control_db
 from app.v2 import dnscrypt_provisioning
+from app.v2 import import_migration
 from app.v2 import migration_convert
 from app.v2 import node_identity
 from app.v2 import notification_store
@@ -2234,6 +2235,96 @@ def discovery_promote(source_ip: str, req: PromoteObservedRequest, admin=Depends
     holder = {}
     result = _mutate_and_promote(lambda conn: holder.setdefault("client_id", _mutate(conn)))
     return {"status": "promoted", "client_id": holder["client_id"], "runtime": {"promoted": result.promoted, "binding_count": result.binding_count}}
+
+
+# --- import (AdGuard Home / Pi-hole / hosts / BIND zone / CSV / XLSX /
+# Alderpoint-native JSON, beta-rescue priority 2) ----------------------------
+#
+# Staged preview -> apply, matching every other V2 mutation's shape: a job
+# is created from a real parse of the uploaded/fetched source (never
+# blind-trusted), previewed with conflicts/warnings surfaced explicitly,
+# and only actually written to control.db (and recompiled/promoted into
+# the live runtime) on an explicit apply call. See app/v2/import_migration.py
+# for the full parsing/plan/apply implementation and its scoping notes.
+
+
+class ImportParseRequest(BaseModel):
+    source_type: str
+    source_name: str = "import"
+    text: Optional[str] = None
+    data_base64: Optional[str] = None
+    default_domain: Optional[str] = None
+    base_url: Optional[str] = None
+    username: Optional[str] = None
+    password: Optional[str] = None
+
+
+@app.post("/api/import/jobs")
+def create_import_job(req: ImportParseRequest, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    if req.source_type not in import_migration.SOURCE_TYPES:
+        raise ApiError(400, "validation_error", f"unsupported source_type: {req.source_type!r}")
+    data = None
+    if req.data_base64:
+        import base64 as _b64
+        try:
+            data = _b64.b64decode(req.data_base64)
+        except Exception as exc:
+            raise ApiError(400, "validation_error", f"invalid data_base64: {exc}")
+    try:
+        translation = import_migration.parse_source(
+            req.source_type, text=req.text, data=data, default_domain=req.default_domain,
+            base_url=req.base_url, username=req.username, password=req.password,
+        )
+    except import_migration.ImportError_ as exc:
+        raise ApiError(400, "unsupported_source", str(exc))
+    with _db() as conn:
+        plan = import_migration.build_plan(translation, conn)
+        job_id = import_migration.create_job(conn, req.source_type, req.source_name, plan)
+    return {"job_id": job_id, "plan": plan}
+
+
+@app.get("/api/import/jobs")
+def list_import_jobs(admin=Depends(current_admin)):
+    with _db() as conn:
+        return {"jobs": import_migration.list_jobs(conn)}
+
+
+@app.get("/api/import/jobs/{job_id}")
+def get_import_job(job_id: int, admin=Depends(current_admin)):
+    with _db() as conn:
+        job = import_migration.get_job(conn, job_id)
+    if job is None:
+        raise ApiError(404, "not_found", "unknown import job")
+    return job
+
+
+class ImportApplyRequest(BaseModel):
+    skip_indexes: list[int] = Field(default_factory=list)
+
+
+@app.post("/api/import/jobs/{job_id}/apply")
+def apply_import_job(job_id: int, req: ImportApplyRequest, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    with _db() as conn:
+        job = import_migration.get_job(conn, job_id)
+    if job is None:
+        raise ApiError(404, "not_found", "unknown import job")
+    # Idempotent: re-applying an already-applied job re-runs the same
+    # upsert/skip-existing logic rather than erroring.
+
+    holder: dict = {}
+
+    def _mutate(conn):
+        counts = import_migration.apply_plan(conn, job_id, job["plan"], set(req.skip_indexes))
+        holder["counts"] = counts
+        conn.execute(
+            "UPDATE import_jobs SET status = 'applied', result_json = ?, applied_at = ? WHERE id = ?",
+            (json.dumps(counts), datetime.now(timezone.utc).isoformat(), job_id),
+        )
+
+    result = _mutate_and_promote(_mutate)
+    return {"status": "applied", "counts": holder["counts"], "runtime": {"promoted": result.promoted, "binding_count": result.binding_count}}
 
 
 # --- migration (§32, read-only preview in this pass) ------------------------

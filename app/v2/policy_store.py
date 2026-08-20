@@ -879,6 +879,42 @@ def create_service_ruleset(
         )
 
 
+def service_ruleset_exists(conn: sqlite3.Connection, ruleset_id: str) -> bool:
+    return bool(conn.execute("SELECT 1 FROM service_blocking_rulesets WHERE ruleset_id = ?", (ruleset_id,)).fetchone())
+
+
+def list_service_ruleset_member_service_ids(conn: sqlite3.Connection, ruleset_id: str) -> list[str]:
+    """Member service_ids of ``ruleset_id`` in insertion order, or an empty
+    list if the ruleset does not exist. Used to accumulate imports into a
+    shared ruleset (append, never silently replace)."""
+    return [
+        row[0]
+        for row in conn.execute(
+            """
+            SELECT sd.service_id FROM service_blocking_ruleset_members m
+            JOIN service_definitions sd ON sd.id = m.service_row_id
+            JOIN service_blocking_rulesets r ON r.id = m.ruleset_row_id
+            WHERE r.ruleset_id = ?
+            ORDER BY sd.id
+            """,
+            (ruleset_id,),
+        ).fetchall()
+    ]
+
+
+def replace_service_ruleset(conn: sqlite3.Connection, ruleset_id: str, service_ids: list[str]) -> None:
+    """Idempotent create-or-replace: deletes ``ruleset_id`` if it already
+    exists (members only -- member services' own service_definitions rows
+    are left alone) and recreates it with exactly ``service_ids``."""
+    conn.execute(
+        "DELETE FROM service_blocking_ruleset_members WHERE ruleset_row_id IN "
+        "(SELECT id FROM service_blocking_rulesets WHERE ruleset_id = ?)",
+        (ruleset_id,),
+    )
+    conn.execute("DELETE FROM service_blocking_rulesets WHERE ruleset_id = ?", (ruleset_id,))
+    create_service_ruleset(conn, ruleset_id, service_ids)
+
+
 def is_domain_service_blocked(conn: sqlite3.Connection, ruleset_id: str, qname: str) -> Optional[str]:
     """Returns the blocking service_id if ``qname`` matches any service in
     the ruleset, else None. Exact matches and suffix matches are both
@@ -956,3 +992,72 @@ def upsert_local_dns_record(
         """,
         (name, record_type, value, ttl, int(enabled), now, now),
     )
+
+
+# --- import/migration jobs (staged preview -> apply, see
+# app/v2/import_migration.py) ------------------------------------------------
+
+def ensure_import_job_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS import_jobs (
+            id INTEGER PRIMARY KEY,
+            source_type TEXT NOT NULL,
+            source_name TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'previewed',
+            plan_json TEXT NOT NULL DEFAULT '{}',
+            result_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            applied_at TEXT
+        )
+        """
+    )
+
+
+def create_import_job(conn: sqlite3.Connection, source_type: str, source_name: str, plan_json: str) -> int:
+    ensure_import_job_schema(conn)
+    now = _now()
+    cur = conn.execute(
+        "INSERT INTO import_jobs (source_type, source_name, status, plan_json, created_at) VALUES (?, ?, 'previewed', ?, ?)",
+        (source_type, source_name, plan_json, now),
+    )
+    return int(cur.lastrowid)
+
+
+def get_import_job(conn: sqlite3.Connection, job_id: int) -> dict | None:
+    ensure_import_job_schema(conn)
+    row = conn.execute(
+        "SELECT id, source_type, source_name, status, plan_json, result_json, created_at, applied_at "
+        "FROM import_jobs WHERE id = ?",
+        (job_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    cols = ["id", "source_type", "source_name", "status", "plan_json", "result_json", "created_at", "applied_at"]
+    return dict(zip(cols, row))
+
+
+def list_import_jobs(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
+    ensure_import_job_schema(conn)
+    rows = conn.execute(
+        "SELECT id, source_type, source_name, status, plan_json, result_json, created_at, applied_at "
+        "FROM import_jobs ORDER BY id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    cols = ["id", "source_type", "source_name", "status", "plan_json", "result_json", "created_at", "applied_at"]
+    return [dict(zip(cols, row)) for row in rows]
+
+
+def mark_import_job(conn: sqlite3.Connection, job_id: int, status: str, result_json: str, applied: bool = False) -> None:
+    ensure_import_job_schema(conn)
+    now = _now()
+    if applied:
+        conn.execute(
+            "UPDATE import_jobs SET status = ?, result_json = ?, applied_at = ? WHERE id = ?",
+            (status, result_json, now, job_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE import_jobs SET status = ?, result_json = ? WHERE id = ?",
+            (status, result_json, job_id),
+        )
