@@ -62,6 +62,8 @@ from app.v2.runtime_staging import (
 BIND_PLAIN_PORT = 5453   # unproxied loopback recursion, health/recovery checks only
 BIND_PROXY_PORT = 5553   # requires PROXYv2 from dnsdist; real per-query client identity
 BIND_STATISTICS_PORT = 8153
+BIND_RNDC_PORT = 9553    # DNS Cache view/flush (beta-rescue priority 3A): loopback-only rndc control channel
+RNDC_KEY_NAME = "alderpointdns-v2-rndc-key"
 
 # Multi-context BIND (Gate #3 acceptance closure): a fixed, bounded number
 # of simultaneous distinct plain-upstream BIND contexts -- see
@@ -148,6 +150,8 @@ def render_named_conf(
     # earlier, unrelated test occupied the same directory/port -- not a
     # BIND/config limitation (see docs/v2/bind-backend-v2.md).
     tls_hostname: str | None = None,
+    rndc_port: int | None = None,
+    rndc_key_secret: str | None = None,
 ) -> str:
     """Pure function: same inputs -> byte-identical self-contained
     ``named.conf`` text (options + the RPZ zone clause in one file, no
@@ -160,6 +164,8 @@ def render_named_conf(
     """
     if not forwarders:
         raise BindGenError("at least one forwarder is required")
+    if (rndc_port is None) != (rndc_key_secret is None):
+        raise BindGenError("rndc_port and rndc_key_secret must be given together")
     forwarders = [_validate_forwarder(f) for f in forwarders]
     fwd_hosts = [f.rsplit(":", 1)[0] for f in forwarders]
     fwd_ports = [f.rsplit(":", 1)[1] for f in forwarders]
@@ -224,6 +230,24 @@ def render_named_conf(
         f"\tinet 127.0.0.1 port {statistics_port} allow {{ 127.0.0.1; }};",
         "};",
         "",
+    ] + (
+        [
+            # DNS Cache view/flush (beta-rescue priority 3A): a real,
+            # loopback-only rndc control channel so the web process's
+            # privileged helper can issue `rndc flush`/`flushname`/
+            # `flushtree` against this exact context -- no other channel
+            # exists for this in the packaged runtime.
+            f'key "{RNDC_KEY_NAME}" {{',
+            "\talgorithm hmac-sha256;",
+            f'\tsecret "{rndc_key_secret}";',
+            "};",
+            "",
+            "controls {",
+            f'\tinet 127.0.0.1 port {rndc_port} allow {{ 127.0.0.1; }} keys {{ "{RNDC_KEY_NAME}"; }};',
+            "};",
+            "",
+        ] if rndc_port is not None else []
+    ) + [
         "logging {",
         '\tchannel alderpointdns_v2_default {',
         f'\t\tfile "{log_path}" versions 5 size 10m;',
@@ -360,6 +384,7 @@ def render_named_conf_for_context(
     statistics_port: int | None = None,
     directory: str | None = None,
     log_path: str | None = None,
+    rndc_key_secret: str | None = None,
 ) -> str:
     """One context's ``named.conf`` -- thin wrapper over the proven
     single-context ``render_named_conf``, just parameterized by the
@@ -377,6 +402,8 @@ def render_named_conf_for_context(
         directory=directory or f"/var/lib/alderpointdns-v2/bind/{ctx.name}",
         log_path=log_path or f"/var/log/alderpointdns-v2/bind/{ctx.name}/named.log",
         tls_hostname=ctx.tls_hostname,
+        rndc_port=(BIND_RNDC_PORT + list_index_of(ctx)) if rndc_key_secret is not None else None,
+        rndc_key_secret=rndc_key_secret,
     )
 
 

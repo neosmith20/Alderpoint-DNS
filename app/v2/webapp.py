@@ -93,6 +93,7 @@ COMPILED_DOH_EGRESS_DIR = STATE_DIR / "compiled" / "doh-egress"
 BIND_STATE_ROOT = STATE_DIR / "bind"  # BIND's own writable working dir per context -- never COMPILED_BIND_DIR (read-only)
 COMPILED_RPZ_ZONE = STATE_DIR / "compiled" / "bind" / "alderpointdns-v2.rpz"
 LOG_BIND_DIR = LOG_DIR / "bind"
+RNDC_CONF_PATH = CONFIG_DIR / "rndc.conf"  # DNS Cache view/flush (beta-rescue priority 3A)
 CERTS_DIR = STATE_DIR / "certs"
 ACTIVE_CERT_PATH = CERTS_DIR / "server.crt"
 ACTIVE_KEY_PATH = CERTS_DIR / "server.key"
@@ -911,10 +912,14 @@ def _mutate_and_promote(mutate_fn) -> runtime_compile.RuntimeCompileResult:
             # blocks unrelated policy mutations.
             bind_kwargs = {}
             if COMPILED_RPZ_ZONE.exists():
+                from app.v2 import cache_control
+
                 bind_kwargs = dict(
                     live_bind_conf_path=COMPILED_BIND_DIR, live_bind_log_root=LOG_BIND_DIR,
                     live_bind_state_root=BIND_STATE_ROOT,
                     rpz_zone_path=COMPILED_RPZ_ZONE, live_doh_egress_dir=COMPILED_DOH_EGRESS_DIR,
+                    rndc_key_secret=cache_control.ensure_rndc_key(_secrets()),
+                    live_rndc_conf_path=RNDC_CONF_PATH,
                 )
             result = runtime_compile.recompile_and_promote(
                 conn, STAGING_DIR, COMPILED_DNSDIST_CONF,
@@ -2226,6 +2231,79 @@ def restore_appliance_backup_route(name: str, req: ApplianceRestoreRequest, admi
         )
         job_id = cur.lastrowid
     return {"status": "succeeded", "job_id": job_id, "backup_name": name, **detail}
+
+
+# --- DNS Cache view/flush (beta-rescue priority 3A) --------------------------
+#
+# Two distinct layers, never conflated (see app/v2/cache_control.py's own
+# docstring for the full architecture rationale): BIND's real recursive
+# cache (per context, via a real rndc control channel) and dnsdist's
+# packet cache (reported/flushed as its own thing -- a coalesced service
+# restart, since no administrative channel to it exists by design).
+
+
+def _bind_context_ports() -> list[tuple[str, int, int]]:
+    """[(context_name, statistics_port, rndc_port), ...] for every
+    currently-compiled BIND context."""
+    out = []
+    if not COMPILED_BIND_DIR.exists():
+        return out
+    for ctx_dir in sorted(p for p in COMPILED_BIND_DIR.iterdir() if p.is_dir()):
+        if not (ctx_dir / "named.conf").exists():
+            continue
+        idx = int(ctx_dir.name.removeprefix("ctx")) if ctx_dir.name.startswith("ctx") and ctx_dir.name[3:].isdigit() else 0
+        out.append((ctx_dir.name, 8153 + idx, 9553 + idx))
+    return out
+
+
+@app.get("/api/cache/status")
+def cache_status_route(admin=Depends(current_admin)):
+    from app.v2 import cache_control
+
+    bind_layer = []
+    for name, stats_port, _rndc_port in _bind_context_ports():
+        bind_layer.append({"context": name, **cache_control.bind_cache_stats(stats_port)})
+    return {
+        "bind": bind_layer,
+        "dnsdist": {
+            "note": "the dnsdist packet cache has no live administrative channel by design; "
+                    "flush restarts the dnsdist service, which drops all in-memory cache state",
+        },
+    }
+
+
+class CacheFlushRequest(BaseModel):
+    layer: str  # "bind" or "dnsdist"
+    scope: str = "all"  # "all" | "name" | "tree" (bind only)
+    target: Optional[str] = None
+    context: Optional[str] = None  # bind only; omitted = every context
+
+
+@app.post("/api/cache/flush")
+def cache_flush_route(req: CacheFlushRequest, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    from app.v2 import cache_control
+
+    if req.layer == "dnsdist":
+        result = cache_control.flush_dnsdist_cache()
+        return {"results": [{"context": "dnsdist", "scope": "all", "target": None, "ok": result.ok, "message": result.message}]}
+    if req.layer != "bind":
+        raise ApiError(400, "validation_error", "layer must be 'bind' or 'dnsdist'")
+    if not RNDC_CONF_PATH.exists():
+        raise ApiError(400, "invalid_state", "rndc is not configured yet -- promote a policy change first so the BIND control channel is compiled")
+    contexts = _bind_context_ports()
+    if req.context:
+        contexts = [c for c in contexts if c[0] == req.context]
+        if not contexts:
+            raise ApiError(404, "not_found", f"unknown BIND context: {req.context!r}")
+    results = []
+    for name, _stats_port, rndc_port in contexts:
+        try:
+            r = cache_control.flush_bind_context(RNDC_CONF_PATH, name, rndc_port, req.scope, req.target)
+        except cache_control.CacheControlError as exc:
+            raise ApiError(400, "validation_error", str(exc)) from exc
+        results.append({"context": r.context, "scope": r.scope, "target": r.target, "ok": r.ok, "message": r.message})
+    return {"results": results}
 
 
 # --- software updates (beta-rescue priority 4) ------------------------------

@@ -60,7 +60,7 @@ from app.v2.ecs_policy import EcsPolicy, server_uses_client_subnet
 from app.v2.network_match import NetworkScope
 from app.v2.policy_compiler import compile_cache_profile, compile_effective_policy
 from app.v2.policy_model import PolicyLayer
-from app.v2.runtime_staging import Artifact, PromotionResult, stage_validate_promote, stage_validate_promote_all
+from app.v2.runtime_staging import Artifact, PromotionResult, ValidationResult, stage_validate_promote, stage_validate_promote_all
 
 _ECS_MODE_MAP = {"disabled": "disabled", "preserve": "preserve", "custom": "custom"}
 _DEFAULT_NETWORK_ID = "__default__"
@@ -458,6 +458,14 @@ def recompile_and_promote(
     live_bind_conf_path: "Path | None" = None,
     live_bind_log_root: "Path | None" = None,
     rpz_zone_path: "Path | None" = None,
+    # DNS Cache view/flush (beta-rescue priority 3A): when given, every
+    # BIND context's named.conf gets a real, loopback-only rndc control
+    # channel (see bind_gen.py) and this rndc.conf is promoted so the
+    # privileged cache-control helper can actually reach it. Omitted
+    # (None) preserves prior behavior exactly -- no rndc channel, same as
+    # every BIND context before this pass.
+    rndc_key_secret: "str | None" = None,
+    live_rndc_conf_path: "Path | None" = None,
     named_checkconf_binary: str = "named-checkconf",
     live_doh_egress_dir: "Path | None" = None,
     # Real defect found live during Gate #3 acceptance testing (failure-
@@ -635,12 +643,23 @@ def recompile_and_promote(
                 ctx_log_path.parent.mkdir(parents=True, exist_ok=True)
                 ctx_conf_text = bind_gen.render_named_conf_for_context(
                     ctx, str(rpz_zone_path), directory=str(ctx_state_dir), log_path=str(ctx_log_path),
+                    rndc_key_secret=rndc_key_secret,
                 )
                 artifacts.append(
                     Artifact(
                         name=f"{ctx.name}/named.conf", content=ctx_conf_text,
                         live_path=bind_root / ctx.name / "named.conf",
                         validator=bind_gen.named_checkconf_validator(named_checkconf_binary),
+                    )
+                )
+            if rndc_key_secret is not None and live_rndc_conf_path is not None:
+                from app.v2 import cache_control
+
+                artifacts.append(
+                    Artifact(
+                        name="rndc.conf", content=cache_control.render_rndc_conf(rndc_key_secret),
+                        live_path=Path(live_rndc_conf_path),
+                        validator=lambda _p: ValidationResult(ok=True, output=""),
                     )
                 )
             artifacts.append(

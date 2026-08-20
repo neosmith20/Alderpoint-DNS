@@ -23,6 +23,7 @@
     ["DNS", "policies", "Clients & Access", "P"],
     ["DNS", "localdns", "Local DNS", "L"],
     ["DNS", "upstreams", "DNS Settings", "U"],
+    ["DNS", "cache", "Cache", "K"],
     ["Security", "filtering", "Filters / Security", "F"],
     ["Operations", "importexport", "Import", "I"],
     ["Operations", "backup", "Backup & Restore", "B"],
@@ -625,6 +626,28 @@
       </div></div></section>`);
   }
 
+  async function cache() {
+    const status = await api("/api/cache/status");
+    const bindRows = (status.bind || []).map((b) => `
+      <tr><td class="mono">${esc(b.context)}</td><td>${b.available ? `${esc(b.hits)} / ${esc(b.misses)}` : '<span class="badge bad">unavailable</span>'}</td><td>${b.available && b.hit_ratio != null ? esc(Math.round(b.hit_ratio * 100)) + "%" : "-"}</td><td>
+        <form data-form="cache-flush" data-layer="bind" data-context="${esc(b.context)}" class="field-row">
+          <select name="scope"><option value="all">entire context</option><option value="name">exact name</option><option value="tree">subtree</option></select>
+          <input name="target" placeholder="name (for name/subtree scope)">
+          <button class="danger">Flush</button>
+        </form>
+      </td></tr>`).join("");
+    return page("Cache", "Two independent RAM cache layers: dnsdist's packet cache (per query, in front of policy) and BIND's recursive cache (per context, behind it). A flush always targets one layer explicitly.", `<button data-refresh>Refresh</button>`, `
+      <div class="grid two">
+        <section class="panel"><div class="panel__head"><h2>BIND Recursive Cache</h2></div><div class="panel__body">
+          ${(status.bind || []).length ? `<div class="table-wrap"><table><thead><tr><th>Context</th><th>Hits / Misses</th><th>Hit ratio</th><th>Flush</th></tr></thead><tbody>${bindRows}</tbody></table></div>` : `<div class="empty">No compiled BIND context yet -- promote a policy change first.</div>`}
+        </section>
+        <section class="panel"><div class="panel__head"><h2>dnsdist Packet Cache</h2></div><div class="panel__body">
+          <p class="muted">${esc((status.dnsdist || {}).note || "")}</p>
+          <form data-form="cache-flush" data-layer="dnsdist"><button class="danger">Flush (restarts dnsdist)</button></form>
+        </section>
+      </div>`);
+  }
+
   const IMPORT_SOURCE_LABELS = {
     adguard_yaml: "AdGuard Home (YAML config file)",
     adguard_api: "AdGuard Home (live API connection)",
@@ -722,7 +745,7 @@
       <tr><td>${j.id}</td><td><span class="badge ${tone(j.status)}">${esc(j.status)}</span></td><td>${esc(j.detail.candidate_version || "")}</td><td>${esc(j.started_at || "")}</td><td>${esc(j.finished_at || "")}</td><td>${j.status === "staged" ? `<button data-apply-update="${j.id}" class="danger">Apply</button>` : ""}${j.detail.apply_result && j.detail.apply_result.error ? `<span class="muted">${esc(j.detail.apply_result.error)}</span>` : ""}</td></tr>`).join("")}</tbody></table></div>`;
   }
 
-  const renderers = { dashboard, analytics, clients, policies, filtering, upstreams, localdns, replication, backup, settings, health, importexport, updates };
+  const renderers = { dashboard, analytics, clients, policies, filtering, upstreams, localdns, cache, replication, backup, settings, health, importexport, updates };
 
   // Real defect fixed here (found by the expanded stateful-navigation
   // regression, priority 1 of the beta-rescue brief): loadPage() had no
@@ -1064,6 +1087,18 @@
     } else if (type === "change-password") {
       await api("/api/session/password", { method: "POST", body: JSON.stringify({ current_password: body.current_password, new_password: body.new_password }) });
       form.reset();
+    } else if (type === "cache-flush") {
+      const layer = form.dataset.layer;
+      const payload = { layer };
+      if (layer === "bind") {
+        payload.scope = body.scope;
+        payload.target = body.target || null;
+        payload.context = form.dataset.context || null;
+      }
+      const res = await api("/api/cache/flush", { method: "POST", body: JSON.stringify(payload) });
+      await loadPage("cache");
+      toast(res.results.map((r) => `${r.context}: ${r.ok ? "ok" : "failed"} (${r.message})`).join("; "), res.results.every((r) => r.ok) ? "ok" : "bad");
+      return "skip-reload";
     } else if (type === "update-settings") {
       await api("/api/updates/settings", { method: "PUT", body: JSON.stringify({ private_feed_dir: body.private_feed_dir || null }) });
     } else if (type === "update-upload") {
