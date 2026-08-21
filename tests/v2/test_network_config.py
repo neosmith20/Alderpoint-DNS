@@ -296,7 +296,7 @@ class TestWebappNetworkRoutes(unittest.TestCase):
         from fastapi.testclient import TestClient
 
         client = TestClient(self.webapp.app)
-        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12"})
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12"})
         r = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
         return client, r.json()["csrf"]
 

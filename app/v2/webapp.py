@@ -489,6 +489,17 @@ def ui_app(path: str = ""):
 class SetupRequest(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=12, max_length=256)
+    confirm_password: str = Field(min_length=12, max_length=256)
+    # V1.1.1-baseline first-run fields (owner RC45 finding, priority 2 of
+    # the beta-rescue brief: setup had regressed to bare username/password
+    # -- see docs/v2/beta-rescue-setup-fields.md). server_ip is left
+    # optional and, when blank, auto-detected from the real current
+    # interface address via app.network_config -- V1.1.1's own
+    # local_dns.detect_server_ip() equivalent -- never hard-coded to
+    # V1's 192.168.1.101 documentation example.
+    create_local_dns: bool = True
+    server_hostname: str = Field(default="alderpointdns", max_length=63)
+    server_ip: str = ""
 
 
 @app.get("/api/setup/status")
@@ -523,6 +534,12 @@ def setup(req: SetupRequest, request: Request):
     # administrator does could already have raced the token file the
     # same way); what actually matters -- this can only ever succeed
     # once, atomically, before any admin exists -- is unchanged.
+    # Server-side mismatch enforcement (owner RC45 finding, priority 2):
+    # the client also checks this live, but the server is the actual
+    # gate -- never trust the browser alone for the one action that
+    # creates the appliance's only account.
+    if req.password != req.confirm_password:
+        raise ApiError(400, "validation_error", "password and confirm password do not match")
     with _db() as conn:
         count = conn.execute("SELECT count(*) FROM admins").fetchone()[0]
         if count > 0:
@@ -533,7 +550,31 @@ def setup(req: SetupRequest, request: Request):
             "INSERT INTO admins(username, password_hash, created_at) VALUES (?, ?, ?)",
             (req.username, password_hash, now),
         )
-    return {"status": "created"}
+    local_dns_result = None
+    if req.create_local_dns:
+        # V1.1.1 parity (docs/install.md "first-run"): create an A record
+        # for the appliance's own hostname plus a friendly alias, using
+        # the real detected interface address when the operator left
+        # server_ip blank -- never V1's static documentation-example IP.
+        # Best-effort: a local-DNS failure must not undo the admin
+        # account that was just durably created above.
+        try:
+            ip = req.server_ip.strip()
+            if not ip:
+                from app.v2 import network_config as nc
+
+                current = nc.read_current_config()
+                ip = ((current.get("ipv4") or {}).get("address")) or ""
+            host = (req.server_hostname.strip() or "alderpointdns").strip(".").lower()
+            if ip:
+                ipaddress.IPv4Address(ip)
+                _insert_local_dns_record(host, "A", ip, ttl=300, enabled=True)
+                local_dns_result = {"hostname": host, "address": ip}
+            else:
+                local_dns_result = {"error": "no server address could be detected; add a Local DNS record manually"}
+        except Exception as exc:  # noqa: BLE001 - best-effort, must not fail account creation
+            local_dns_result = {"error": str(exc)}
+    return {"status": "created", "local_dns": local_dns_result}
 
 
 # --- login / logout (§10, §12, §14) -----------------------------------------
@@ -1753,23 +1794,25 @@ def list_local_dns(admin=Depends(current_admin)):
     return {"records": [{"id": r[0], "name": r[1], "record_type": r[2], "value": r[3], "ttl": r[4], "enabled": bool(r[5])} for r in rows]}
 
 
-@app.post("/api/local-dns")
-def create_local_dns(req: LocalDnsRecordCreate, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
-    check_csrf(admin, x_csrf_token)
-    if req.record_type not in ("A", "AAAA", "CNAME", "PTR"):
+def _insert_local_dns_record(name: str, record_type: str, value: str, ttl: int = 300, enabled: bool = True):
+    """Shared by the authenticated /api/local-dns route and first-run
+    setup's best-effort local-DNS seeding (owner RC45 finding, priority 2)
+    -- one real validation+insert path, not a route-only copy the setup
+    flow would otherwise have to reimplement and could drift from."""
+    if record_type not in ("A", "AAAA", "CNAME", "PTR"):
         raise ApiError(400, "validation_error", "invalid record type")
-    if req.record_type == "A":
-        ipaddress.IPv4Address(req.value)
-    elif req.record_type == "AAAA":
-        ipaddress.IPv6Address(req.value)
-    elif req.record_type in ("CNAME", "PTR"):
+    if record_type == "A":
+        ipaddress.IPv4Address(value)
+    elif record_type == "AAAA":
+        ipaddress.IPv6Address(value)
+    elif record_type in ("CNAME", "PTR"):
         from app.v2.dns_name_validate import validate_dns_name
 
-        validate_dns_name(req.value)
+        validate_dns_name(value)
 
     from app.v2.dns_name_validate import validate_dns_name
 
-    validate_dns_name(req.name)
+    validate_dns_name(name)
 
     def _mutate(conn):
         _ensure_local_dns_schema(conn)
@@ -1778,12 +1821,18 @@ def create_local_dns(req: LocalDnsRecordCreate, admin=Depends(current_admin), x_
             conn.execute(
                 "INSERT INTO local_dns_records(name, record_type, value, ttl, enabled, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (req.name.strip(".").lower(), req.record_type, req.value, req.ttl, int(req.enabled), now, now),
+                (name.strip(".").lower(), record_type, value, ttl, int(enabled), now, now),
             )
         except sqlite3.IntegrityError as exc:
             raise ApiError(409, "duplicate_record", "that Local DNS record already exists") from exc
 
-    result = _mutate_and_promote(_mutate)
+    return _mutate_and_promote(_mutate)
+
+
+@app.post("/api/local-dns")
+def create_local_dns(req: LocalDnsRecordCreate, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    result = _insert_local_dns_record(req.name, req.record_type, req.value, req.ttl, req.enabled)
     return {"status": "created", "runtime": {"promoted": result.promoted, "binding_count": result.binding_count}}
 
 

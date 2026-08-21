@@ -25,7 +25,7 @@ def _client(webapp):
 def _setup_login(webapp, client):
     r = client.post(
         "/api/setup",
-        json={"username": "admin", "password": "correcthorsebattery12"},
+        json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12"},
     )
     assert r.status_code == 200, r.text
     r = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})

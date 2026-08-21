@@ -367,7 +367,7 @@ class TestImportApiRoutes:
 
         webapp = self._fresh_webapp(tmp_path, monkeypatch)
         client = TestClient(webapp.app)
-        r = client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12"})
+        r = client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12"})
         assert r.status_code == 200, r.text
         r = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
         assert r.status_code == 200, r.text
@@ -417,7 +417,7 @@ class TestImportApiRoutes:
 
         webapp = self._fresh_webapp(tmp_path, monkeypatch)
         client = TestClient(webapp.app)
-        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12"})
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12"})
         r = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
         csrf = r.json()["csrf"]
         r = client.post(

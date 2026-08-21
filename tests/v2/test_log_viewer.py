@@ -106,7 +106,7 @@ class TestLogApiRoutes:
 
         webapp = self._fresh_webapp(tmp_path, monkeypatch)
         client = TestClient(webapp.app)
-        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12"})
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12"})
         client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
         r = client.get("/api/logs/sshd")
         assert r.status_code == 400
@@ -116,7 +116,7 @@ class TestLogApiRoutes:
 
         webapp = self._fresh_webapp(tmp_path, monkeypatch)
         client = TestClient(webapp.app)
-        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12"})
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12"})
         client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
         r = client.get("/api/logs/alderpointdns-v2-web")
         assert r.status_code == 200

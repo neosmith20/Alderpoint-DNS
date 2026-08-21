@@ -87,7 +87,7 @@ class TestMobileconfigApiRoute:
 
         webapp = self._fresh_webapp(tmp_path, monkeypatch)
         client = TestClient(webapp.app)
-        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12"})
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12"})
         client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
         r = client.get("/api/dns-transports/mobileconfig/doh")
         assert r.status_code == 400
@@ -98,7 +98,7 @@ class TestMobileconfigApiRoute:
 
         webapp = self._fresh_webapp(tmp_path, monkeypatch)
         client = TestClient(webapp.app)
-        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12"})
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12"})
         r = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
         csrf = r.json()["csrf"]
 

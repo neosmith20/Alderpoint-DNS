@@ -31,7 +31,7 @@ def _client(webapp):
 
 
 def _setup_login(client):
-    client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12"})
+    client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12"})
     r = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
     return r.json()["csrf"]
 

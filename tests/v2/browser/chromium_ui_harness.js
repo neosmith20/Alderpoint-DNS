@@ -232,13 +232,26 @@ async function main() {
     await cdp("Page.enable");
     await cdp("Runtime.enable");
     await cdp("Page.navigate", { url: base + "/" });
-    await waitFor(`document.body && (document.querySelector('[data-route="clients"]') || document.body.innerText.includes("Create first administrator") || document.body.innerText.includes("Sign in"))`, "auth or dashboard screen");
+    // Selector-based, not inner-text-based (real defect fixed here: this
+    // previously matched on the literal heading text "Create first
+    // administrator", which broke the moment the beta-rescue setup-fields
+    // restoration changed the first-run heading to match V1.1.1's own
+    // "Initial administrator setup" wording -- a wording change silently
+    // made this harness hang for the full timeout instead of failing
+    // fast on the real thing it cares about, which is which screen
+    // rendered, not what its heading says).
+    await waitFor(`document.body && (document.querySelector('[data-route="clients"]') || document.querySelector('form[data-auth]'))`, "auth or dashboard screen");
     if (!(await evalJs(`Boolean(document.querySelector('[data-route="clients"]'))`))) {
       await evalJs(`(() => {
         // Owner-approved removal of the RC42 setup-token flow: the
         // first-run form no longer has a setup_token field at all.
+        // V1.1.1-parity fields restored (beta-rescue priority 2): setup
+        // also has confirm_password plus Local DNS fields with sane
+        // defaults, which plain login does not -- only fill what exists.
         document.querySelector('[name=username]').value = 'admin';
         document.querySelector('[name=password]').value = 'correcthorsebattery12';
+        const confirmField = document.querySelector('[name=confirm_password]');
+        if (confirmField) confirmField.value = 'correcthorsebattery12';
         document.querySelector('form[data-auth]').requestSubmit();
         document.querySelector('form[data-auth]').requestSubmit();
         return true;

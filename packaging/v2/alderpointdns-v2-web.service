@@ -40,6 +40,41 @@ TimeoutStopSec=15
 #    request can legitimately mutate. /opt/alderpointdns-v2 itself is
 #    read-only at runtime (ProtectSystem=strict default): this process
 #    never modifies its own installed code.
+#  - /etc/alderpointdns-v2 is now also a ReadWritePath (real defect found
+#    live via a KVM acceptance boot, not by unit tests: EVERY policy
+#    mutation that goes through _mutate_and_promote() -- Local DNS,
+#    clients, filtering, blocklists, upstream profiles, schedules, 16
+#    call sites total -- passes RNDC_CONF_PATH under CONFIG_DIR
+#    (/etc/alderpointdns-v2/rndc.conf) to runtime_compile so DNS Cache
+#    flush (beta-rescue priority 3A) keeps working off the freshly
+#    promoted rndc key. Writing it failed silently as a read-only-
+#    filesystem OSError under this unit's own ProtectSystem=strict, which
+#    _mutate_and_promote's all-or-nothing transaction correctly treated
+#    as "promotion failed, roll back the control.db write too" -- so the
+#    control.db side effect was never left half-applied, but literally no
+#    operator-driven policy change could ever be saved through the web
+#    UI/API on a real install. The scheduled recompile path (see
+#    alderpointdns-v2-schedule.service) never hit this because it never
+#    passes live_rndc_conf_path; only this unit's *interactive* mutations
+#    do. This grants write access to the appliance's own DNS runtime
+#    config directory, not secret material -- real secrets stay under
+#    /var/lib/alderpointdns-v2/secrets, already writable above with its
+#    own separate 0600/dedicated-directory protection.
+#  - AF_NETLINK is in RestrictAddressFamilies (real defect found live via
+#    a KVM acceptance boot, not by unit tests: app.network_config's
+#    read-only interface/address detection -- used by both GET
+#    /api/network/status and first-run setup's local-DNS IP auto-detect
+#    -- shells out to `ip`, which opens an AF_NETLINK socket even for a
+#    plain read. Without it here, that subprocess call fails silently
+#    under this unit's own seccomp filter and every caller sees "no
+#    interface detected", not an error -- the Network Configuration page
+#    always showed empty current state and first-run setup could never
+#    auto-detect the appliance's own address. This grants only a
+#    read-capable socket family, never a new capability -- the process
+#    still cannot itself apply a network change (CapabilityBoundingSet=
+#    stays empty below; real interface changes remain the separate,
+#    privileged network-apply/-confirm oneshot units this one only
+#    requests via a state-file marker).
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
@@ -47,8 +82,8 @@ ProtectHome=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ReadWritePaths=/var/lib/alderpointdns-v2 /var/log/alderpointdns-v2
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+ReadWritePaths=/var/lib/alderpointdns-v2 /var/log/alderpointdns-v2 /etc/alderpointdns-v2
 UMask=0027
 CapabilityBoundingSet=
 MemoryMax=768M

@@ -260,7 +260,7 @@ class TestApplianceBackupApiRoutes:
 
         webapp = self._fresh_webapp(tmp_path, monkeypatch)
         client = TestClient(webapp.app)
-        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12"})
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12", "create_local_dns": False})
         r = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
         csrf = r.json()["csrf"]
 
@@ -303,7 +303,7 @@ class TestApplianceBackupApiRoutes:
 
         webapp = self._fresh_webapp(tmp_path, monkeypatch)
         client = TestClient(webapp.app)
-        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12"})
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12", "create_local_dns": False})
         r = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
         csrf = r.json()["csrf"]
         client.post("/api/local-dns", json={"name": "stays.lan", "record_type": "A", "value": "10.6.6.1", "ttl": 300}, headers={"X-CSRF-Token": csrf})

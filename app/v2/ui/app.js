@@ -36,6 +36,26 @@
   ];
   const GROUP_ORDER = ["DNS", "Security", "Operations", "System"];
 
+  // Real per-section expand/collapse state (owner RC45 finding, priority
+  // 1 of the beta-rescue brief: the sidebar previously rendered
+  // GROUP_ORDER as plain, non-interactive `.section-label` divs above a
+  // flat button list -- visually grouped but not an actual disclosure
+  // widget. Matching V1.1.1's behavior: each group is its own toggle,
+  // independent of the others, persisted per-section across reloads, and
+  // a group containing the active route auto-expands unless the operator
+  // has explicitly collapsed it.
+  const NAV_SECTION_KEY_PREFIX = "apdnsNavSectionOpen:";
+  function navSectionOpen(group, activeInGroup) {
+    try {
+      const stored = localStorage.getItem(NAV_SECTION_KEY_PREFIX + group);
+      if (stored !== null) return stored === "1";
+    } catch (_) {}
+    return activeInGroup;
+  }
+  function setNavSectionOpen(group, open) {
+    try { localStorage.setItem(NAV_SECTION_KEY_PREFIX + group, open ? "1" : "0"); } catch (_) {}
+  }
+
   // One canonical model, matching app/v2/policy_model.py's own
   // _VALID_* sets exactly -- real defect fixed here: these previously
   // showed placeholder text that didn't match any real accepted value
@@ -233,10 +253,23 @@
           </div>
           <nav class="nav" aria-label="Main navigation">
             ${dashboardBtn}
-            ${GROUP_ORDER.filter((g) => grouped[g]).map((group) => `
-              <div class="section-label">${esc(group)}</div>
-              ${grouped[group].map(([, id, label, glyph]) => `<button data-route="${id}" class="${state.route === id ? "active" : ""}" title="${esc(label)}"><span class="glyph">${esc(glyph)}</span><span>${esc(label)}</span></button>`).join("")}
-            `).join("")}
+            ${GROUP_ORDER.filter((g) => grouped[g]).map((group) => {
+              const items = grouped[group];
+              const activeInGroup = items.some(([, id]) => state.route === id);
+              const open = navSectionOpen(group, activeInGroup);
+              const panelId = `nav-panel-${group.toLowerCase()}`;
+              return `
+              <section class="nav-section${activeInGroup ? " is-active" : ""}" data-nav-section="${group}">
+                <button type="button" class="nav-section__toggle" data-nav-section-toggle aria-expanded="${open}" aria-controls="${panelId}" ${activeInGroup ? 'aria-current="true"' : ""}>
+                  <span class="glyph">${activeInGroup ? "*" : "-"}</span>
+                  <span class="nav-section__label">${esc(group)}</span>
+                  <span class="nav-section__chevron" aria-hidden="true">${open ? "▾" : "▸"}</span>
+                </button>
+                <div class="nav-section__panel" id="${panelId}" ${open ? "" : "hidden"}>
+                  ${items.map(([, id, label, glyph]) => `<button data-route="${id}" class="nav-subitem${state.route === id ? " active" : ""}" title="${esc(label)}" ${state.route === id ? 'aria-current="page"' : ""}><span class="glyph">${esc(glyph)}</span><span>${esc(label)}</span></button>`).join("")}
+                </div>
+              </section>`;
+            }).join("")}
           </nav>
           <div class="side-footer">
             <button data-action="theme" title="${state.theme === "dark" ? "Light theme" : "Dark theme"}"><span class="glyph">${state.theme === "dark" ? "☀" : "☽"}</span><span>${state.theme === "dark" ? "Light theme" : "Dark theme"}</span></button>
@@ -912,7 +945,32 @@
     const requested = id || "dashboard";
     const token = ++loadToken;
     state.route = requested;
-    document.querySelectorAll("[data-route]").forEach((b) => b.classList.toggle("active", b.dataset.route === state.route));
+    document.querySelectorAll("[data-route]").forEach((b) => {
+      const isActive = b.dataset.route === state.route;
+      b.classList.toggle("active", isActive);
+      if (isActive) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
+    });
+    // Navigating (via a link, a promote/back action, or a deep link) into
+    // a section that is currently collapsed must reveal the newly active
+    // item rather than leaving the sidebar showing no visible selection --
+    // same real-navigation expectation as V1.1.1's server-rendered nav,
+    // where the active section is always expanded regardless of prior
+    // collapsed state. Only the containing section is touched; every
+    // other section's open/closed state (and its persisted preference)
+    // is left exactly as the operator left it.
+    document.querySelectorAll("[data-nav-section]").forEach((section) => {
+      const inSection = section.querySelector(`[data-route="${CSS.escape(requested)}"]`);
+      section.classList.toggle("is-active", !!inSection);
+      if (!inSection) return;
+      const toggle = section.querySelector("[data-nav-section-toggle]");
+      const panel = document.getElementById(toggle.getAttribute("aria-controls"));
+      toggle.setAttribute("aria-expanded", "true");
+      toggle.setAttribute("aria-current", "true");
+      panel.hidden = false;
+      const chevron = toggle.querySelector(".nav-section__chevron");
+      if (chevron) chevron.textContent = "▾";
+      setNavSectionOpen(section.getAttribute("data-nav-section"), true);
+    });
     const target = document.getElementById("page");
     target.innerHTML = page("Loading", "Fetching live appliance state.", "", `<div class="empty">Loading...</div>`);
     try {
@@ -929,15 +987,43 @@
 
   function authScreen(setupRequired) {
     // Owner-approved removal of RC42's mandatory SSH-retrieved setup-
-    // token flow: first-run setup is now the conventional "create the
-    // first administrator right here" screen -- no token field, no
-    // instruction to go retrieve a secret from the appliance's state
-    // directory.
-    return `<main class="auth"><section class="auth-card"><div class="mark">A</div><h1>${setupRequired ? "Create first administrator" : "Sign in"}</h1><p>${setupRequired ? "This appliance has not been set up yet. Create the first administrator account to continue." : "Use your Alderpoint DNS administrator account."}</p>
-      <form data-auth="${setupRequired ? "setup" : "login"}">
-        <label>Username<input name="username" required autocomplete="username"></label>
-        <label>Password<input name="password" type="password" required minlength="${setupRequired ? 12 : 1}" autocomplete="${setupRequired ? "new-password" : "current-password"}"></label>
-        <button class="primary">${setupRequired ? "Create administrator" : "Sign in"}</button>
+    // token flow: first-run setup is still "create the first administrator
+    // right here" -- no token field, no instruction to go retrieve a
+    // secret from the appliance's state directory. But the RC45 owner
+    // finding (priority 2 of the beta-rescue brief) was that setup had
+    // regressed to username+password alone; V1.1.1's actual first-run
+    // fields (confirm password, appliance hostname/address for Local DNS)
+    // are restored here, adapted to V2 -- see docs/v2/beta-rescue-setup-fields.md.
+    if (!setupRequired) {
+      return `<main class="auth"><section class="auth-card"><div class="mark">A</div><h1>Sign in</h1><p>Use your Alderpoint DNS administrator account.</p>
+        <form data-auth="login">
+          <label>Username<input name="username" required autocomplete="username"></label>
+          <label>Password<input name="password" type="password" required minlength="1" autocomplete="current-password"></label>
+          <button class="primary">Sign in</button>
+        </form></section></main>`;
+    }
+    return `<main class="auth"><section class="auth-card auth-card--setup"><div class="mark">A</div><h1>Initial administrator setup</h1><p>Create the first local administrator. No default password exists.</p>
+      <div class="alert bad" data-setup-error hidden></div>
+      <form data-auth="setup" data-password-match>
+        <fieldset><legend>Administration</legend>
+          <label>Username<input name="username" value="admin" required autocomplete="username"></label>
+          <label>Password
+            <span class="password-field"><input name="password" type="password" minlength="12" required autocomplete="new-password" data-password-input>
+              <button type="button" class="password-toggle" data-password-toggle aria-pressed="false" aria-label="Show password">Show</button></span>
+          </label>
+          <label>Confirm password
+            <span class="password-field"><input name="confirm_password" type="password" minlength="12" required autocomplete="new-password" data-password-input>
+              <button type="button" class="password-toggle" data-password-toggle aria-pressed="false" aria-label="Show password">Show</button></span>
+          </label>
+          <p class="muted" data-password-hint>Minimum 12 characters.</p>
+        </fieldset>
+        <fieldset><legend>Local DNS</legend>
+          <label class="row"><input type="checkbox" name="create_local_dns" value="1" checked> Create Alderpoint DNS local DNS records</label>
+          <label>Alderpoint DNS hostname<input name="server_hostname" value="alderpointdns"></label>
+          <label>Alderpoint DNS IP address<input name="server_ip" placeholder="detected automatically if left blank"></label>
+          <p class="muted">Creates an A record for the appliance's hostname. The address is detected automatically when left blank and can be changed later from Local DNS or Network Configuration.</p>
+        </fieldset>
+        <button class="primary">Create administrator</button>
       </form></section></main>`;
   }
 
@@ -987,17 +1073,67 @@
   }
 
   function wireAuth() {
-    document.querySelector("[data-auth]").addEventListener("submit", async (ev) => {
+    const form = document.querySelector("[data-auth]");
+    // Password visibility toggle (V1.1.1 parity + owner-approved
+    // improvement -- V1's setup screen never had one).
+    form.querySelectorAll("[data-password-toggle]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const input = btn.previousElementSibling;
+        const showing = input.type === "text";
+        input.type = showing ? "password" : "text";
+        btn.setAttribute("aria-pressed", String(!showing));
+        btn.textContent = showing ? "Show" : "Hide";
+        btn.setAttribute("aria-label", showing ? "Show password" : "Hide password");
+      });
+    });
+    // Client-side mismatch feedback (owner RC45 finding, priority 2):
+    // live as-you-type, in addition to the server's own enforcement in
+    // /api/setup -- neither replaces the other.
+    if (form.dataset.passwordMatch !== undefined) {
+      const pw = form.querySelector('[name="password"]');
+      const confirm = form.querySelector('[name="confirm_password"]');
+      if (pw && confirm) {
+        const checkMatch = () => {
+          const mismatched = confirm.value.length > 0 && pw.value !== confirm.value;
+          confirm.setCustomValidity(mismatched ? "Passwords do not match." : "");
+        };
+        pw.addEventListener("input", checkMatch);
+        confirm.addEventListener("input", checkMatch);
+      }
+    }
+    form.addEventListener("submit", async (ev) => {
       ev.preventDefault();
-      const form = ev.currentTarget;
+      const errorBox = form.querySelector("[data-setup-error]");
+      if (errorBox) errorBox.hidden = true;
       await submitOnce(form, async () => {
-        const body = jsonForm(form);
-        if (form.dataset.auth === "setup") {
-          await api("/api/setup", { method: "POST", body: JSON.stringify(body) });
+        const username = form.elements.username.value;
+        const password = form.elements.password.value;
+        try {
+          if (form.dataset.auth === "setup") {
+            const confirmPassword = form.elements.confirm_password.value;
+            if (password !== confirmPassword) {
+              throw new Error("Passwords do not match.");
+            }
+            await api("/api/setup", {
+              method: "POST",
+              body: JSON.stringify({
+                username,
+                password,
+                confirm_password: confirmPassword,
+                create_local_dns: form.elements.create_local_dns.checked,
+                server_hostname: form.elements.server_hostname.value,
+                server_ip: form.elements.server_ip.value,
+              }),
+            });
+          }
+          const login = await api("/api/login", { method: "POST", body: JSON.stringify({ username, password }) });
+          state.csrf = login.csrf;
+          await boot();
+          return "skip-reload";
+        } catch (err) {
+          if (errorBox) { errorBox.hidden = false; errorBox.textContent = err.message; }
+          throw err;
         }
-        const login = await api("/api/login", { method: "POST", body: JSON.stringify({ username: body.username, password: body.password }) });
-        state.csrf = login.csrf;
-        await boot();
       });
     });
   }
@@ -1009,6 +1145,15 @@
       if (ev.target.closest("[data-action='menu']")) { document.body.classList.toggle("nav-open"); return; }
       if (ev.target.closest("[data-action='theme']")) { setTheme(state.theme === "dark" ? "light" : "dark"); renderShell(); await loadPage(state.route); return; }
       if (ev.target.closest("[data-action='collapse']")) { state.navCollapsed = !state.navCollapsed; localStorage.setItem("apdnsNavCollapsed", state.navCollapsed ? "1" : "0"); renderShell(); await loadPage(state.route); return; }
+      const sectionToggle = ev.target.closest("[data-nav-section-toggle]");
+      if (sectionToggle) {
+        const section = sectionToggle.closest("[data-nav-section]");
+        const group = section && section.getAttribute("data-nav-section");
+        const open = sectionToggle.getAttribute("aria-expanded") !== "true";
+        if (group) setNavSectionOpen(group, open);
+        renderShell();
+        return;
+      }
       if (ev.target.closest("[data-action='logout']")) { await api("/api/logout", { method: "POST" }).catch(() => {}); state.csrf = ""; await boot(); return; }
       if (ev.target.closest("[data-refresh]")) { await loadPage(state.route); return; }
       const tri = ev.target.closest("[data-tri] button");

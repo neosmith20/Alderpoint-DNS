@@ -40,7 +40,7 @@ def app_client(tmp_path, monkeypatch):
 
 
 def _setup_and_login(webapp, client, username="admin", password="correcthorsebattery12"):
-    r = client.post("/api/setup", json={"username": username, "password": password})
+    r = client.post("/api/setup", json={"username": username, "password": password, "confirm_password": password})
     assert r.status_code == 200, r.text
     r = client.post("/api/login", json={"username": username, "password": password})
     assert r.status_code == 200, r.text
@@ -60,7 +60,7 @@ class TestSetupBootstrap:
 
     def test_no_setup_token_field_required(self, app_client):
         webapp, client = app_client
-        r = client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12"})
+        r = client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12"})
         assert r.status_code == 200, r.text
 
     def test_setup_required_false_after_first_admin_created(self, app_client):
@@ -71,7 +71,7 @@ class TestSetupBootstrap:
     def test_setup_rejected_once_already_configured(self, app_client):
         webapp, client = app_client
         _setup_and_login(webapp, client)
-        r = client.post("/api/setup", json={"username": "b", "password": "correcthorsebattery12"})
+        r = client.post("/api/setup", json={"username": "b", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12"})
         assert r.status_code == 409
 
     def test_second_admin_cannot_be_created_via_setup_even_with_new_credentials(self, app_client):
@@ -80,7 +80,7 @@ class TestSetupBootstrap:
         # matching "setup cannot be reused" from the beta-rescue brief.
         webapp, client = app_client
         _setup_and_login(webapp, client)
-        r = client.post("/api/setup", json={"username": "totally-different", "password": "correcthorsebattery12"})
+        r = client.post("/api/setup", json={"username": "totally-different", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12"})
         assert r.status_code == 409
         assert client.get("/api/setup/status").json()["setup_required"] is False
 
@@ -121,7 +121,7 @@ class TestLoginLogoutSessions:
 
     def test_cookie_flags_httponly_samesite(self, app_client):
         webapp, client = app_client
-        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12"})
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12"})
         r = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
         cookie_header = r.headers.get("set-cookie", "")
         assert "HttpOnly" in cookie_header
@@ -137,7 +137,7 @@ class TestLoginLogoutSessions:
 
     def test_session_rotates_on_each_login(self, app_client):
         webapp, client = app_client
-        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12"})
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12"})
         r1 = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
         r2 = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
         assert r1.json()["csrf"] != r2.json()["csrf"]
@@ -176,7 +176,7 @@ class TestLoginLogoutSessions:
         from unittest import mock
 
         webapp, client = app_client
-        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12"})
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12"})
 
         real_record = webapp._record_login_attempt
         calls = {"n": 0}
@@ -200,7 +200,7 @@ class TestLoginLogoutSessions:
         from unittest import mock
 
         webapp, client = app_client
-        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12"})
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12"})
 
         with mock.patch.object(
             webapp, "_record_login_attempt", side_effect=sqlite3.OperationalError("database is locked")
