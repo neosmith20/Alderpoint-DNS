@@ -4,6 +4,7 @@ import pytest
 
 from app.v2.blocking_response import BlockingResponse
 from app.v2.dnsdist_policy_runtime import (
+    _safe_lua_token,
     ClientPolicyBinding,
     DohConfig,
     Doh3Config,
@@ -133,7 +134,7 @@ class TestBlockedDomainsAtRealBlocklistScale:
         assert 'SuffixMatchNodeRule({"x.example."})' not in text
         assert "newSuffixMatchNode()" in text
         assert "alderpointdnsDomainLines(" in text
-        data_file = tmp_path / "blocked-domains" / f"{b.network.network_id}__0.txt"
+        data_file = tmp_path / "blocked-domains" / f"{_safe_lua_token(b.network.network_id)}__0.txt"
         assert data_file.exists()
         assert data_file.read_text().strip().splitlines() == ["x.example."]
 
@@ -148,10 +149,35 @@ class TestBlockedDomainsAtRealBlocklistScale:
         # The whole point: no domain string appears as a literal Lua
         # table entry in the generated config text at all.
         assert "blocked-99999.example" not in text
-        data_file = tmp_path / "blocked-domains" / f"{b.network.network_id}__0.txt"
+        data_file = tmp_path / "blocked-domains" / f"{_safe_lua_token(b.network.network_id)}__0.txt"
         lines = data_file.read_text().splitlines()
         assert len(lines) == 100_000
         assert "blocked-99999.example." in lines
+
+    def test_network_id_with_lua_unsafe_characters_still_compiles(self, tmp_path):
+        """Real defect found live during the owner-beta closure migration
+        acceptance test: a real migrated network_id can be arbitrary free
+        text (e.g. a source-address identity like "client:1:10.0.0.50"),
+        and the bare Lua local variable this generator builds from it
+        used to only strip hyphens -- a colon (or any other non-
+        identifier character) produced invalid Lua syntax
+        ("unexpected symbol near ':'"), confirmed live via a real
+        `dnsdist --check-config` rejection. _safe_lua_token fixes this
+        for both the Lua identifier and the on-disk filename."""
+        net = NetworkScope.create("client:1:10.0.0.50", "10.0.0.50/32", "x")
+        b = ClientPolicyBinding(
+            network=net, cache_profile_id="p1",
+            upstream_endpoints=(UpstreamEndpointRecord("1.1.1.1:53", None, 0, 1, None),),
+            upstream_transport="plain",
+            blocked_domains={"x.example": BlockingResponse(mode="nxdomain")},
+        )
+        text = compile_multi_policy_dnsdist_config("127.0.0.1:5300", [b], blocked_domains_data_dir=tmp_path)
+        assert ":" not in "".join(
+            line for line in text.splitlines() if line.startswith("local blocked_")
+        )
+        data_files = list((tmp_path / "blocked-domains").glob("*.txt"))
+        assert len(data_files) == 1
+        assert "x.example." in data_files[0].read_text().splitlines()
 
     @pytest.mark.skipif(not DNSDIST_INSTALLED, reason="requires the real dnsdist binary")
     def test_real_dnsdist_check_config_accepts_a_config_at_this_scale(self, tmp_path):

@@ -63,8 +63,17 @@ class TestServiceBlockingMapping:
         store.create_network(conn, "lan", "10.0.0.0/24")
         recompile_and_promote(conn, tmp_path / "staging", tmp_path / "dnsdist.conf", listen_address="127.0.0.1:15404")
         text = (tmp_path / "dnsdist.conf").read_text()
-        assert "ads.example" in text
+        # The blocked domain itself is no longer a literal in dnsdist.conf
+        # -- app/v2/dnsdist_policy_runtime.py routes it through a runtime-
+        # loaded data file instead (real Lua constant-ceiling fix, see
+        # that module's own docstring); this asserts the real end-to-end
+        # result the old literal-text assertion meant to prove: the
+        # compiled runtime actually references and contains the domain.
+        assert "alderpointdnsDomainLines(" in text
         assert "RCodeAction(DNSRCode.REFUSED)" in text
+        data_files = list((tmp_path / "blocked-domains").glob("*.txt"))
+        assert len(data_files) == 1
+        assert "ads.example." in data_files[0].read_text().splitlines()
 
 
 class TestFailureLeavesLiveRuntimeUntouched:

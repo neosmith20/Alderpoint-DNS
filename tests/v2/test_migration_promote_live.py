@@ -194,9 +194,19 @@ class TestPromoteToLive:
 
         # Baseline 'ads.example' block plus alternating extras should be
         # compiled as a real terminal block action (default response mode
-        # is nxdomain).
-        assert "ads.example" in text
+        # is nxdomain). The domains themselves are no longer literals in
+        # dnsdist.conf -- routed through a runtime-loaded data file (real
+        # Lua constant-ceiling fix, see dnsdist_policy_runtime.py's own
+        # docstring) -- so this checks the real end-to-end result: the
+        # compiled runtime references a loader, and the data file(s) it
+        # references actually contain the migrated blocked domains.
+        assert "alderpointdnsDomainLines(" in text
         assert "RCodeAction(DNSRCode.NXDOMAIN)" in text
+        blocked_domain_text = "\n".join(
+            f.read_text() for f in (live["live_compiled_dir"] / "blocked-domains").glob("*.txt")
+        )
+        assert "ads.example." in blocked_domain_text.splitlines()
+        assert "rule3.example." in blocked_domain_text.splitlines()
 
         with control_db.connect(live["live_control_db"]) as conn:
             layer = pstore.load_policy_layer(conn, "global", "singleton")

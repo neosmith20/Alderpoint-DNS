@@ -101,9 +101,21 @@ def test_schedule_worker_on_start_recompiles_from_real_control_db_not_empty_boot
     dnsdist_conf_path = env / "state" / "compiled" / "dnsdist.conf"
     assert dnsdist_conf_path.exists(), "schedule-worker's on_start tick must produce a compiled dnsdist.conf"
     dnsdist_conf_text = dnsdist_conf_path.read_text()
-    assert "blocked.schedule-worker-test.example" in dnsdist_conf_text, (
+    # The blocked domain itself is no longer a literal in dnsdist.conf --
+    # it's routed through a runtime-loaded data file (real Lua constant-
+    # ceiling fix, see dnsdist_policy_runtime.py's own docstring); check
+    # the real end-to-end result instead: the compiled runtime references
+    # a loader, and the data file it references actually has the domain.
+    assert "alderpointdnsDomainLines(" in dnsdist_conf_text, (
         "schedule-worker's on_start recompile dropped the real configured blocked domain -- "
         f"got the empty install-time bootstrap config instead:\n{dnsdist_conf_text}"
+    )
+    blocked_domain_files = list((env / "state" / "compiled" / "blocked-domains").glob("*.txt"))
+    assert any(
+        "blocked.schedule-worker-test.example." in f.read_text().splitlines() for f in blocked_domain_files
+    ), (
+        "schedule-worker's on_start recompile dropped the real configured blocked domain from "
+        f"its data file(s): {[f.read_text() for f in blocked_domain_files]}"
     )
     assert "PROTOTYPE" not in dnsdist_conf_text, (
         "schedule-worker's on_start recompile left the install-time bootstrap default in place "

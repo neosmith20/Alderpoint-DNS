@@ -46,6 +46,7 @@ layer for domains that are blocked for literally everyone (see
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -252,6 +253,24 @@ end
 """
 
 
+def _safe_lua_token(raw: str) -> str:
+    """A version of ``raw`` safe to use as both a bare Lua identifier
+    fragment and a filesystem path component -- real defect found live
+    during the owner-beta closure migration acceptance test: a real
+    migrated network_id can be arbitrary free text (e.g. a source-address
+    identity like "client:1:10.0.0.50"), and the prior `.replace("-",
+    "_")` only ever handled hyphens, producing invalid Lua syntax
+    ("blocked_client:1:10.0.0.50_0") the moment a colon (or any other
+    non-identifier character) showed up. Every character outside
+    [A-Za-z0-9_] becomes "_"; a result starting with a digit (also
+    invalid as a bare Lua identifier) gets an "n" prefix.
+    """
+    safe = re.sub(r"[^A-Za-z0-9_]", "_", raw)
+    if not safe or safe[0].isdigit():
+        safe = f"n{safe}"
+    return safe
+
+
 def _blocked_domain_group_lines(
     net_matcher: str, network_id: str, blocked_domains: dict, allowed_domains: set,
     data_dir: "Path | None",
@@ -288,12 +307,20 @@ def _blocked_domain_group_lines(
             domain_list = ", ".join(_lua_string(t) for t in sorted(triggers))
             out.append(f"addAction(AndRule({{{net_matcher}, SuffixMatchNodeRule({{{domain_list}}})}}), {action})")
             continue
-        rel_name = f"blocked-domains/{network_id}__{i}.txt"
+        # network_id is admin/migration-sourced free text (real example
+        # hit live during the migration acceptance test: a source-address
+        # identity like "client:1:10.0.0.50", colons included) -- not
+        # guaranteed filesystem- or Lua-identifier-safe as-is. _safe_token
+        # below is used for BOTH the on-disk filename and the bare Lua
+        # local variable name, so neither can ever produce invalid Lua
+        # syntax or escape data_dir.
+        safe_id = _safe_lua_token(network_id)
+        rel_name = f"blocked-domains/{safe_id}__{i}.txt"
         target = data_dir / rel_name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("\n".join(sorted(triggers)) + "\n", encoding="utf-8")
         path_literal = _lua_string(str(target))
-        var = f"blocked_{network_id}_{i}".replace("-", "_")
+        var = f"blocked_{safe_id}_{i}"
         out.append(f"local {var} = newSuffixMatchNode()")
         out.append(f"for _, entry in ipairs(alderpointdnsDomainLines({path_literal})) do {var}:add(newDNSName(entry)) end")
         out.append(f"addAction(AndRule({{{net_matcher}, SuffixMatchNodeRule({var})}}), {action})")
