@@ -777,7 +777,20 @@ async function main() {
       // just "no longer pending".
       let applyResult = null;
       for (let i = 0; i < 60; i++) {
-        const jobs = await pageApi("/api/updates/jobs");
+        // The real apply this polls for is exactly what replaces/
+        // restarts this appliance's own web service (see the
+        // journalctl evidence in docs/v2/owner-beta-closure-real-
+        // defects-found.md) -- a `fetch` landing in that real few-
+        // second restart window throws a real, expected "Failed to
+        // fetch", not a harness defect. Treat it the same as "job not
+        // done yet", not a reason to abort the whole poll loop.
+        let jobs;
+        try {
+          jobs = await pageApi("/api/updates/jobs");
+        } catch (_) {
+          await sleep(2000);
+          continue;
+        }
         const job = jobs.ok && jobs.body.jobs && jobs.body.jobs[0];
         if (job && job.status !== "apply_requested") { applyResult = job; break; }
         await sleep(2000);
