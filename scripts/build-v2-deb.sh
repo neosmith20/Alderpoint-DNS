@@ -304,5 +304,16 @@ find "$PKG" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
 export SOURCE_DATE_EPOCH
 
 mkdir -p "$OUTPUT_DIR"
-dpkg-deb --build --root-owner-group "$PKG" "$OUTPUT_DIR/alderpointdns-v2_${DEB_VERSION}_${DEB_ARCH}.deb" >/dev/null
+# --threads-max=1 (real defect found live via this pass's own
+# reproducibility test, tests/v2/test_build_reproducibility.py --
+# SOURCE_DATE_EPOCH alone was NOT sufficient): dpkg-deb >= 1.21 picks a
+# default compressor thread count from the build host's own core count
+# (nproc), and multi-threaded xz splits its input into blocks whose
+# boundaries depend on compression timing, not just content -- so two
+# builds of the identical, mtime-normalized input still produced
+# different data.tar.xz bytes whenever run on a host with more than one
+# core. Forcing exactly one thread makes the compressor's output a pure
+# function of its input again, independent of the build host's
+# hardware.
+dpkg-deb --build --root-owner-group --threads-max=1 "$PKG" "$OUTPUT_DIR/alderpointdns-v2_${DEB_VERSION}_${DEB_ARCH}.deb" >/dev/null
 echo "$OUTPUT_DIR/alderpointdns-v2_${DEB_VERSION}_${DEB_ARCH}.deb"

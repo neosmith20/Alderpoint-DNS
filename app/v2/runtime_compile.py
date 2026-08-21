@@ -175,9 +175,21 @@ def _safesearch_level_for_policy(policy) -> str:
 
 
 def _default_upstream_endpoints() -> tuple:
+    """Emergency bootstrap/recovery fallback ONLY (owner product decision,
+    second beta-rescue pass) -- used below purely as defense in depth for
+    a policy row with no upstream_profile_id set at all (should not
+    happen on any appliance past fresh-install: scripts/v2/
+    alderpointdns_v2_ctl.py's _seed_fresh_install_defaults() always seeds
+    a real "cloudflare" upstream_profiles row and assigns it to the
+    global policy during the genuinely-fresh-install window). This must
+    never be what an operator's Dashboard/DNS Settings/compiled runtime
+    silently disagree about -- if this path is ever actually hit, that is
+    itself a bug (missing/corrupted global policy), not steady-state
+    configuration. Matches the same Cloudflare pair seeded as real state,
+    not a different, surprising pair."""
     from app.v2.policy_store import UpstreamEndpointRecord
 
-    return (UpstreamEndpointRecord("1.1.1.1:53", None, 0, 1, None), UpstreamEndpointRecord("9.9.9.9:53", None, 0, 1, None))
+    return (UpstreamEndpointRecord("1.1.1.1:53", None, 0, 1, None), UpstreamEndpointRecord("1.0.0.1:53", None, 1, 1, None))
 
 
 def _upstream_for_policy(conn: sqlite3.Connection, policy) -> tuple[tuple, str, str]:

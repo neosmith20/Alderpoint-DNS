@@ -17,6 +17,18 @@
   // unrelated concerns (e.g. Replication and Backup living under the same
   // group as Dashboard) and gave the owner no stable mental model to
   // navigate by. Dashboard stays a standalone top-level item, matching V1.
+  // IA split (owner RC45 finding, priority 1 of the second beta-rescue
+  // pass: Statistics was buried under Query Log, Administration was
+  // buried inside System Status, and Encryption was mixed in with
+  // Notifications under one "Notifications / HTTPS" page -- concept
+  // soup, not V1.1.1's actual page architecture, which gives each of
+  // these its own destination. See statistics()/encryption()/
+  // notifications()/administration()/logs() below: each used to be a
+  // section stapled onto analytics()/settings()/health() and is now its
+  // own page with its own nav entry, matching V1.1.1's own
+  // System group (statistics_settings.html, administration.html,
+  // encryption.html, notifications.html, system_logs_results.html are
+  // five separate V1 templates, not one).
   const pages = [
     ["DNS", "analytics", "Query Log", "Q"],
     ["DNS", "clients", "Clients", "C"],
@@ -24,15 +36,19 @@
     ["DNS", "localdns", "Local DNS", "L"],
     ["DNS", "upstreams", "DNS Settings", "U"],
     ["DNS", "cache", "Cache", "K"],
-    ["Security", "filtering", "Filters / Security", "F"],
+    ["Security", "filtering", "Filters", "F"],
     ["Security", "blocklists", "Blocklists", "X"],
+    ["Security", "encryption", "Encryption", "E"],
     ["Operations", "importexport", "Import", "I"],
     ["Operations", "backup", "Backup & Restore", "B"],
     ["Operations", "replication", "Replication", "R"],
+    ["System", "statistics", "Statistics", "T"],
     ["System", "health", "System Status", "Y"],
+    ["System", "administration", "Administration", "A"],
     ["System", "network", "Network Configuration", "W"],
-    ["System", "settings", "Notifications / HTTPS", "N"],
+    ["System", "notifications", "Notifications", "N"],
     ["System", "updates", "Software Updates", "V"],
+    ["System", "logs", "Logs", "G"],
   ];
   const GROUP_ORDER = ["DNS", "Security", "Operations", "System"];
 
@@ -317,11 +333,21 @@
   }
 
   async function dashboard() {
-    const [c, recent, top, clients, upstreams] = await Promise.all([
+    const [c, recent, top, clients, observed, upstreams] = await Promise.all([
       common(),
       api("/api/analytics/recent?minutes=60").catch((e) => ({ rows: [], degraded: true, degraded_reason: e.message })),
       api("/api/analytics/top-domains?minutes=60&limit=10").catch((e) => ({ rows: [], degraded: true, degraded_reason: e.message })),
       api("/api/clients").catch(() => ({ clients: [] })),
+      // Owner RC45 finding, priority 3 of the second beta-rescue pass: a
+      // real client was actively querying Alderpoint, but Dashboard
+      // showed no clients at all -- because this panel only ever asked
+      // for MANAGED clients (an explicit, operator-created record), even
+      // though the "Observed clients" count just above it already came
+      // from the real, asynchronous discovery pipeline (never the DNS
+      // hot path) and was genuinely non-zero. A fresh appliance must
+      // show devices actually using it before the operator has
+      // configured anything.
+      api("/api/discovery/observed-clients?limit=8").catch(() => ({ items: [] })),
       api("/api/upstreams").catch(() => ({ upstreams: [] })),
     ]);
     const rows = recent.rows || [];
@@ -349,7 +375,7 @@
       <div class="grid two">
         <section class="panel"><div class="panel__head"><h2>Top Domains</h2><span class="badge ${top.degraded ? "warn" : "ok"}">${top.degraded ? "degraded" : "live"}</span></div><div class="panel__body">${chart(bars, max)}${tableFromRows(top.rows || [], 6, top.columns)}</div></section>
         <section class="panel"><div class="panel__head"><h2>Runtime Components</h2></div><div class="panel__body">${componentList(c.health.components || {})}</div></section>
-        <section class="panel"><div class="panel__head"><h2>Clients</h2></div><div class="panel__body">${clientMini(clients.clients || [])}</div></section>
+        <section class="panel"><div class="panel__head"><h2>Clients</h2><button class="link" data-route="clients">Manage</button></div><div class="panel__body">${clientMini(clients.clients || [], observed.items || observed.observed_clients || observed.clients || [])}</div></section>
         <section class="panel"><div class="panel__head"><h2>Upstreams</h2></div><div class="panel__body">${upstreams.upstreams?.length ? tableFromRows(upstreams.upstreams, 5) : `<div class="empty">No upstream profiles configured.</div>`}</div></section>
       </div>`);
   }
@@ -381,9 +407,21 @@
     return `<div class="table-wrap"><table><thead><tr>${cols.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>${list.map((r) => `<tr>${cols.map((c) => `<td class="truncate" title="${esc(r[c])}">${pretty(r[c])}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
   }
 
-  function clientMini(clients) {
-    if (!clients.length) return `<div class="empty">No managed clients.</div>`;
-    return `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Identifiers</th><th>Groups</th></tr></thead><tbody>${clients.slice(0, 8).map((c) => `<tr><td>${esc(c.name)}</td><td>${(c.identifiers || []).map((i) => `<span class="badge">${esc(i.value)}</span>`).join(" ") || '<span class="muted">none</span>'}</td><td>${(c.groups || []).map((g) => `<span class="badge info">${esc(g.name)}</span>`).join(" ") || '<span class="muted">none</span>'}</td></tr>`).join("")}</tbody></table></div>`;
+  // Owner RC45 finding, priority 3 of the second beta-rescue pass: shows
+  // both MANAGED clients (explicit operator-created records) and
+  // ACTIVE/OBSERVED clients (real DNS activity seen via the real,
+  // asynchronous discovery pipeline -- never synchronously in the DNS
+  // hot path) so a fresh appliance with real traffic and zero managed
+  // clients shows the truth ("a real device is querying this
+  // appliance") instead of "No managed clients." Observed rows carry
+  // the same one-click Promote action as the full Clients page (wired
+  // globally in wire()'s [data-promote] handler).
+  function clientMini(managed, observed) {
+    if (!managed.length && !observed.length) return `<div class="empty">No managed clients, and no DNS activity observed yet.</div>`;
+    const managedRows = managed.slice(0, 5).map((c) => `<tr><td><span class="badge ok">managed</span></td><td>${esc(c.name)}</td><td>${(c.identifiers || []).map((i) => `<span class="badge">${esc(i.value)}</span>`).join(" ") || '<span class="muted">none</span>'}</td><td></td></tr>`).join("");
+    const observedRows = observed.slice(0, 5).filter((o) => !o.managed_client_id).map((o) => `<tr><td><span class="badge inherit">observed</span></td><td class="mono">${esc(o.hostname_candidate || o.source_ip)}</td><td class="mono">${esc(o.source_ip)}<span class="muted"> -- ${esc(o.query_count || o.observation_count || 0)} queries</span></td><td><button data-promote="${esc(o.source_ip)}">Promote</button></td></tr>`).join("");
+    if (!managedRows && !observedRows) return `<div class="empty">No managed clients, and no DNS activity observed yet.</div>`;
+    return `<div class="table-wrap"><table><thead><tr><th>State</th><th>Name / hostname</th><th>Identifier</th><th></th></tr></thead><tbody>${managedRows}${observedRows}</tbody></table></div>`;
   }
 
   async function analytics() {
@@ -391,15 +429,23 @@
       api("/api/analytics/query-log?minutes=1440&limit=100").catch((e) => ({ rows: [], degraded: true, degraded_reason: e.message, filters: {} })),
       api("/api/analytics/top-domains?minutes=1440&limit=30").catch((e) => ({ rows: [], degraded: true, degraded_reason: e.message })),
     ]);
-    return page("Query Log / Analytics", "Bounded recent query and top-domain views. Degraded analytics does not imply DNS outage.", `
+    return page("Query Log", "Bounded recent query and top-domain views. Degraded analytics does not imply DNS outage.", `
       <button data-refresh>Refresh</button>`, `
       ${recent.degraded ? `<div class="alert warn">Recent query log degraded: ${esc(recent.degraded_reason || "unavailable")}</div>` : ""}
       <div class="grid two">
         <section class="panel"><div class="panel__head"><h2>Recent Queries</h2><span class="badge">${recent.rows.length} rows</span></div><div class="panel__body">${queryFilters()}<div id="query-active">${activeFilters(recent.filters || {})}</div><div id="query-results">${tableFromRows(recent.rows || [], 100, recent.columns)}</div></div></section>
         <section class="panel"><div class="panel__head"><h2>Top Domains</h2></div><div class="panel__body">${tableFromRows(top.rows || [], 30, top.columns)}</div></section>
-      </div>
+      </div>`);
+  }
+
+  // Statistics is its own destination (owner RC45 finding: it was
+  // stapled onto the bottom of Query Log). Same real /api/statistics
+  // export/clear endpoints as before -- this is a page move, not new
+  // backend surface.
+  async function statistics() {
+    return page("Statistics", "Aggregate rollup export and reset -- separate from the raw Query Log above.", "", `
       <section class="panel"><div class="panel__head"><h2>Statistics Export / Clear</h2></div><div class="panel__body">
-        <p class="muted">Export covers the aggregate rollups only (fast dashboard/top-domain data), never the raw per-query history -- use the filters above to export raw query data in bulk instead. Clear can optionally also remove the raw per-query history; the result always states exactly what was cleared.</p>
+        <p class="muted">Export covers the aggregate rollups only (fast dashboard/top-domain data), never the raw per-query history -- use Query Log's own filters to export raw query data in bulk instead. Clear can optionally also remove the raw per-query history; the result always states exactly what was cleared.</p>
         <div class="field-row">
           <a class="btn" href="/api/statistics/export">Export aggregate statistics (JSON)</a>
         </div>
@@ -529,11 +575,11 @@
   }
 
   function networkForm() {
-    return `<form data-form="network" class="field-row"><label>Network ID<input name="network_id" required></label><label>CIDR<input name="cidr" required placeholder="10.0.0.0/24"></label><button>Create network</button></form>`;
+    return `<form data-form="network" class="field-row"><label>Name<input name="name" required placeholder="Office"></label><label>CIDR<input name="cidr" required placeholder="10.0.0.0/24"></label><button>Create network</button></form>`;
   }
 
   function groupForm() {
-    return `<form data-form="group" class="field-row"><label>Group ID<input name="group_id" required></label><label>Name<input name="name" required></label><label>Priority<input name="priority" value="100" data-number="1"></label><button>Create group</button></form>`;
+    return `<form data-form="group" class="field-row"><label>Name<input name="name" required placeholder="Kids"></label><label>Priority<input name="priority" value="100" data-number="1"></label><button>Create group</button></form>`;
   }
 
   function explainForm(clients) {
@@ -557,7 +603,7 @@
   }
 
   function serviceForm() {
-    return `<form data-form="service"><div class="form-grid"><label>Service ID<input name="service_id" required></label><label>Display name<input name="display_name" required></label><label>Category<input name="category"></label><label>Domain<input name="domain" placeholder="example.com"></label><label>Match<select name="match_kind"><option>suffix</option><option>exact</option></select></label></div><button>Create service</button></form>`;
+    return `<form data-form="service"><div class="form-grid"><label>Display name<input name="display_name" required placeholder="TikTok"></label><label>Category<input name="category"></label><label>Domain<input name="domain" placeholder="example.com"></label><label>Match<select name="match_kind"><option>suffix</option><option>exact</option></select></label></div><button>Create service</button></form>`;
   }
 
   function serviceTable(services) {
@@ -566,11 +612,11 @@
   }
 
   function rulesetForm(services) {
-    return `<form data-form="ruleset"><label>Ruleset ID<input name="ruleset_id" required></label><label>Services<select name="service_ids" multiple size="6">${services.map((s) => `<option value="${esc(s.service_id)}">${esc(s.display_name)}</option>`).join("")}</select></label><button>Create ruleset</button></form>`;
+    return `<form data-form="ruleset"><label>Name<input name="name" required placeholder="Social media"></label><label>Services<select name="service_ids" multiple size="6">${services.map((s) => `<option value="${esc(s.service_id)}">${esc(s.display_name)}</option>`).join("")}</select></label><button>Create ruleset</button></form>`;
   }
 
   function scheduleForm() {
-    return `<form data-form="schedule"><div class="form-grid"><label>Schedule ID<input name="schedule_id" required></label><label>Timezone<input name="timezone" value="UTC"></label><label>Start<input name="start" value="08:00"></label><label>End<input name="end" value="17:00"></label><label>Weekdays<input name="weekdays" value="0,1,2,3,4"></label></div><button>Create schedule</button></form>`;
+    return `<form data-form="schedule"><div class="form-grid"><label>Name<input name="name" required placeholder="School hours"></label><label>Timezone<input name="timezone" value="UTC"></label><label>Start<input name="start" value="08:00"></label><label>End<input name="end" value="17:00"></label><label>Weekdays<input name="weekdays" value="0,1,2,3,4"></label></div><button>Create schedule</button></form>`;
   }
 
   async function upstreams() {
@@ -583,11 +629,16 @@
   }
 
   function upstreamForm() {
-    return `<form data-form="upstream"><div class="form-grid"><label>Profile ID<input name="upstream_profile_id" required></label><label>Name<input name="name" required></label><label>Transport<select name="transport"><option>plain</option><option>dot</option><option>doh</option></select></label><label>Strategy<select name="strategy"><option>ordered</option><option>failover</option><option>load_balanced</option></select></label><label>Address<input name="address" required placeholder="1.1.1.1:53"></label><label>TLS hostname<input name="tls_hostname" placeholder="cloudflare-dns.com"></label><label>DoH path<input name="doh_path" placeholder="/dns-query"></label></div><button>Create upstream</button></form>`;
+    return `<form data-form="upstream"><div class="form-grid"><label>Name<input name="name" required placeholder="Cloudflare"></label><label>Transport<select name="transport"><option>plain</option><option>dot</option><option>doh</option></select></label><label>Strategy<select name="strategy"><option>ordered</option><option>failover</option><option>load_balanced</option></select></label><label>Address<input name="address" required placeholder="1.1.1.1:53"></label><label>TLS hostname<input name="tls_hostname" placeholder="cloudflare-dns.com"></label><label>DoH path<input name="doh_path" placeholder="/dns-query"></label></div><button>Create upstream</button></form>`;
   }
 
   function routeForm(upstreams) {
-    return `<form data-form="route"><label>Ruleset ID<input name="rule_id" required></label><label>Domain suffix<input name="suffix_domain" required placeholder="corp.example"></label><label>Upstream<select name="upstream_profile_id">${upstreams.map((u) => `<option value="${esc(u.upstream_profile_id)}">${esc(u.name)}</option>`).join("")}</select></label><button>Create route and promote runtime</button></form>`;
+    // "Routing group" (not "Ruleset ID"): a free-text label the operator
+    // chooses and reuses across several route rules to group them --
+    // genuinely operator-authored, unlike the synthetic ids removed
+    // elsewhere on this pass, so it stays free text rather than being
+    // generated from another field.
+    return `<form data-form="route"><label>Routing group<input name="rule_id" required placeholder="corp-split"></label><label>Domain suffix<input name="suffix_domain" required placeholder="corp.example"></label><label>Upstream<select name="upstream_profile_id">${upstreams.map((u) => `<option value="${esc(u.upstream_profile_id)}">${esc(u.name)}</option>`).join("")}</select></label><button>Create route and promote runtime</button></form>`;
   }
 
   async function localdns() {
@@ -613,7 +664,7 @@
   }
 
   function peerForm() {
-    return `<form data-form="peer"><label>Peer node ID<input name="peer_node_id" required></label><label>Display name<input name="display_name"></label><label>URL<input name="url" required placeholder="https://10.0.0.2:9443/replication/v1/apply"></label><label>Expected cert SHA-256<input name="expected_cert_sha256" required minlength="64" maxlength="64"></label><label>Trusted CA PEM<textarea name="ca_pem" required></textarea></label><label>Client certificate PEM<textarea name="client_cert_pem"></textarea></label><label>Client key PEM<textarea name="client_key_pem"></textarea></label><label>Direction<select name="direction"><option>bidirectional</option><option>push</option><option>pull</option></select></label><button class="primary">Save peer</button></form>`;
+    return `<form data-form="peer"><label>Peer's node identity<input name="peer_node_id" required placeholder="from the peer's own Node Identity panel"></label><label>Display name<input name="display_name" placeholder="Backup site"></label><label>URL<input name="url" required placeholder="https://10.0.0.2:9443/replication/v1/apply"></label><label>Expected cert SHA-256<input name="expected_cert_sha256" required minlength="64" maxlength="64"></label><label>Trusted CA PEM<textarea name="ca_pem" required></textarea></label><label>Client certificate PEM<textarea name="client_cert_pem"></textarea></label><label>Client key PEM<textarea name="client_key_pem"></textarea></label><label>Direction<select name="direction"><option>bidirectional</option><option>push</option><option>pull</option></select></label><button class="primary">Save peer</button></form>`;
   }
 
   async function backup() {
@@ -650,13 +701,15 @@
     return `<div style="margin-top:12px"><h3>Restore Status</h3>${tableFromRows(jobs, 20)}</div>`;
   }
 
-  async function settings() {
-    const [tls, notifications, transports] = await Promise.all([api("/api/tls/status"), api("/api/notifications"), api("/api/dns-transports")]);
-    return page("HTTPS / Notifications", "Certificate replacement uses stage, validate, promote. Provider secrets are write-only and redacted.", "", `
-      <div class="grid two">
-        <section class="panel"><div class="panel__head"><h2>HTTPS Certificate</h2><span class="badge ${tls.is_self_signed ? "warn" : "ok"}">${tls.active ? (tls.is_self_signed ? "self-signed" : "active") : "missing"}</span></div><div class="panel__body">${tableFromRows([tls], 1)}${tlsForm()}</div></section>
-        <section class="panel"><div class="panel__head"><h2>Notifications</h2></div><div class="panel__body">${tableFromRows(notifications.providers || [], 50)}${notificationForm()}</div></section>
-      </div>
+  // Encryption and Notifications are now two separate destinations
+  // (owner RC45 finding, priority 1 of the second beta-rescue pass: they
+  // were mixed into one "HTTPS / Notifications" page -- unrelated
+  // concepts, exactly the "concept soup" callout). Matches V1.1.1's own
+  // separate encryption.html / notifications.html templates.
+  async function encryption() {
+    const [tls, transports] = await Promise.all([api("/api/tls/status"), api("/api/dns-transports")]);
+    return page("Encryption", "HTTPS management certificate and encrypted DNS transports (DoT/DoH/DoQ/DoH3). Certificate replacement uses stage, validate, promote.", "", `
+      <section class="panel"><div class="panel__head"><h2>HTTPS Certificate</h2><span class="badge ${tls.is_self_signed ? "warn" : "ok"}">${tls.active ? (tls.is_self_signed ? "self-signed" : "active") : "missing"}</span></div><div class="panel__body">${tableFromRows([tls], 1)}${tlsForm()}</div></section>
       <section class="panel"><div class="panel__head"><h2>Encrypted DNS Transports</h2></div><div class="panel__body">
         ${dnsTransportForm(transports)}
         <div style="margin-top:12px"><p class="muted">Apple enrollment profiles (.mobileconfig) for whichever transport below is enabled, using the active HTTPS certificate's own hostname -- never advertised for a disabled transport.</p>
@@ -666,6 +719,12 @@
           </div>
         </div>
       </div></section>`);
+  }
+
+  async function notifications() {
+    const data = await api("/api/notifications");
+    return page("Notifications", "Provider secrets are write-only and redacted once saved.", "", `
+      <section class="panel"><div class="panel__head"><h2>Providers</h2></div><div class="panel__body">${tableFromRows(data.providers || [], 50)}${notificationForm()}</div></section>`);
   }
 
   function dnsTransportForm(t) {
@@ -689,18 +748,32 @@
   }
 
   function notificationForm() {
-    return `<form data-form="notification"><div class="form-grid"><label>Provider ID<input name="provider_id" required></label><label>Kind<input name="kind" value="webhook"></label><label>Display name<input name="display_name" required></label><label>Endpoint<input name="endpoint" required></label></div><label>Secret value<input name="secret_value" type="password" autocomplete="new-password"></label><button>Create provider</button></form>`;
+    return `<form data-form="notification"><div class="form-grid"><label>Display name<input name="display_name" required placeholder="Ops Slack"></label><label>Kind<select name="kind"><option value="webhook">webhook</option><option value="email_smtp">email_smtp</option><option value="pushover">pushover</option><option value="slack">slack</option></select></label><label>Endpoint<input name="endpoint" required></label></div><label>Secret value<input name="secret_value" type="password" autocomplete="new-password"></label><button>Create provider</button></form>`;
   }
 
+  // Administration and Logs are now their own destinations (owner RC45
+  // finding, priority 1 of the second beta-rescue pass: Administration
+  // was buried inside System Status, which is really about DNS/runtime
+  // component health -- an unrelated concern from changing your own
+  // password). Matches V1.1.1's own separate administration.html /
+  // system_logs_results.html templates.
   async function health() {
     const [h, s, n, d] = await Promise.all([api("/api/health"), api("/api/system/status"), api("/api/node-identity"), api("/api/discovery/status")]);
-    return page("System / Health", "Operational status separates DNS/runtime health from optional subsystem degradation.", `<button data-refresh>Refresh</button>`, `
+    return page("System Status", "Operational status separates DNS/runtime health from optional subsystem degradation.", `<button data-refresh>Refresh</button>`, `
       <div class="strip"><div class="metric"><strong>${esc(h.status)}</strong><span>Overall</span></div><div class="metric"><strong>${esc(s.version)}</strong><span>Version</span></div><div class="metric"><strong>${s.compiled_runtime_present ? "yes" : "no"}</strong><span>Compiled runtime</span></div><div class="metric"><strong>${esc(d.observed_count ?? 0)}</strong><span>Observed clients</span></div></div>
-      <div class="grid two"><section class="panel"><div class="panel__head"><h2>Components</h2></div><div class="panel__body">${componentList(h.components || {})}</div></section><section class="panel"><div class="panel__head"><h2>Node Identity</h2></div><div class="panel__body">${tableFromRows([n], 1)}</div></section></div>
-      <section class="panel"><div class="panel__head"><h2>Administration</h2></div><div class="panel__body"><div class="grid two">
+      <div class="grid two"><section class="panel"><div class="panel__head"><h2>Components</h2></div><div class="panel__body">${componentList(h.components || {})}</div></section><section class="panel"><div class="panel__head"><h2>Node Identity</h2></div><div class="panel__body">${tableFromRows([n], 1)}</div></section></div>`);
+  }
+
+  async function administration() {
+    return page("Administration", "Your own account and session controls.", "", `
+      <section class="panel"><div class="panel__head"><h2>Account</h2></div><div class="panel__body"><div class="grid two">
         <form data-form="change-password"><label>Current password<input name="current_password" type="password" autocomplete="current-password" required></label><label>New password (min. 12 characters)<input name="new_password" type="password" autocomplete="new-password" minlength="12" required></label><button class="primary">Change password</button></form>
         <div><p class="muted">Signs out every other active session for your account (not this one). Use after a shared/compromised session.</p><button data-revoke-sessions class="danger">Revoke other sessions</button></div>
-      </div></div></section>
+      </div></div></section>`);
+  }
+
+  async function logs() {
+    return page("Logs", "Service logs, on demand and bounded.", "", `
       <section class="panel"><div class="panel__head"><h2>Service Logs</h2></div><div class="panel__body">
         <form data-form="logs-view" class="query-filter">
           <label>Service<select name="unit">${LOG_UNITS.map((u) => `<option value="${esc(u)}">${esc(u)}</option>`).join("")}</select></label>
@@ -745,7 +818,6 @@
       </div></section>
       <section class="panel"><div class="panel__head"><h2>Add Subscription</h2></div><div class="panel__body">
         <form data-form="blocklist-create"><div class="form-grid">
-          <label>ID<input name="subscription_id" required placeholder="stevenblack-hosts"></label>
           <label>Name<input name="name" required placeholder="StevenBlack Unified Hosts"></label>
           <label>Category<input name="category" placeholder="ads_trackers"></label>
         </div><label>URL<input name="url" required placeholder="https://example.com/hosts.txt"></label>
@@ -927,7 +999,7 @@
       <tr><td>${j.id}</td><td><span class="badge ${tone(j.status)}">${esc(j.status)}</span></td><td>${esc(j.detail.candidate_version || "")}</td><td>${esc(j.started_at || "")}</td><td>${esc(j.finished_at || "")}</td><td>${j.status === "staged" ? `<button data-apply-update="${j.id}" class="danger">Apply</button>` : ""}${j.detail.apply_result && j.detail.apply_result.error ? `<span class="muted">${esc(j.detail.apply_result.error)}</span>` : ""}</td></tr>`).join("")}</tbody></table></div>`;
   }
 
-  const renderers = { dashboard, analytics, clients, policies, filtering, blocklists, upstreams, localdns, cache, network, replication, backup, settings, health, importexport, updates };
+  const renderers = { dashboard, analytics, clients, policies, filtering, blocklists, encryption, upstreams, localdns, cache, network, replication, backup, statistics, notifications, administration, health, importexport, updates, logs };
 
   // Real defect fixed here (found by the expanded stateful-navigation
   // regression, priority 1 of the beta-rescue brief): loadPage() had no
@@ -1171,7 +1243,10 @@
         if (name) {
           await api(`/api/discovery/observed-clients/${encodeURIComponent(ip)}/promote`, { method: "POST", body: JSON.stringify({ display_name: name }) });
           toast("Observed client promoted", "ok");
-          await loadPage("clients");
+          // Reload wherever the operator actually is (Dashboard now has
+          // its own promote action, not just the Clients page) rather
+          // than always redirecting to Clients.
+          await loadPage(state.route);
         }
         return;
       }
@@ -1179,7 +1254,7 @@
       if (forget && confirm(`Forget observed client ${forget.dataset.forget}?`)) {
         await api(`/api/discovery/observed-clients/${encodeURIComponent(forget.dataset.forget)}`, { method: "DELETE" });
         toast("Observed client forgotten", "ok");
-        await loadPage("clients");
+        await loadPage(state.route);
         return;
       }
       const sync = ev.target.closest("[data-sync]");
@@ -1336,14 +1411,16 @@
       if (resultsTarget) resultsTarget.innerHTML = tableFromRows(res.rows || [], Number(body.limit || 100), res.columns);
       return "skip-reload";
     } else if (type === "service") {
-      await api("/api/services", { method: "POST", body: JSON.stringify({ service_id: body.service_id, display_name: body.display_name, category: body.category || "", domains: body.domain ? [{ match_kind: body.match_kind, domain: body.domain }] : [] }) });
+      // No service_id from the form -- the backend generates a stable id
+      // from display_name (see _unique_id in app/v2/webapp.py).
+      await api("/api/services", { method: "POST", body: JSON.stringify({ display_name: body.display_name, category: body.category || "", domains: body.domain ? [{ match_kind: body.match_kind, domain: body.domain }] : [] }) });
     } else if (type === "ruleset") {
       const selected = Array.from(form.elements.service_ids.selectedOptions).map((o) => o.value);
-      await api("/api/service-rulesets", { method: "POST", body: JSON.stringify({ ruleset_id: body.ruleset_id, service_ids: selected }) });
+      await api("/api/service-rulesets", { method: "POST", body: JSON.stringify({ name: body.name, service_ids: selected }) });
     } else if (type === "schedule") {
-      await api("/api/schedules", { method: "POST", body: JSON.stringify({ schedule_id: body.schedule_id, timezone: body.timezone || "UTC", windows: [{ start: body.start, end: body.end, weekdays: String(body.weekdays || "").split(",").map((x) => Number(x.trim())).filter((x) => Number.isInteger(x)) }] }) });
+      await api("/api/schedules", { method: "POST", body: JSON.stringify({ name: body.name, timezone: body.timezone || "UTC", windows: [{ start: body.start, end: body.end, weekdays: String(body.weekdays || "").split(",").map((x) => Number(x.trim())).filter((x) => Number.isInteger(x)) }] }) });
     } else if (type === "upstream") {
-      await api("/api/upstreams", { method: "POST", body: JSON.stringify({ upstream_profile_id: body.upstream_profile_id, name: body.name, transport: body.transport, strategy: body.strategy, endpoints: [{ address: body.address, tls_hostname: body.tls_hostname || null, doh_path: body.doh_path || null }] }) });
+      await api("/api/upstreams", { method: "POST", body: JSON.stringify({ name: body.name, transport: body.transport, strategy: body.strategy, endpoints: [{ address: body.address, tls_hostname: body.tls_hostname || null, doh_path: body.doh_path || null }] }) });
     } else if (type === "route") {
       await api("/api/domain-routing", { method: "POST", body: JSON.stringify(body) });
     } else if (type === "localdns") {

@@ -113,7 +113,17 @@ SERVICE_USER = "alderpointdns-v2"
 SERVICE_GROUP = "alderpointdns-v2"
 
 _DEFAULT_ACL_CIDRS = ("127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
-_DEFAULT_UPSTREAMS = (("cloudflare-a", "1.1.1.1:53"), ("quad9-a", "9.9.9.9:53"))
+# Bootstrap/recovery only (owner product decision, second beta-rescue
+# pass): this seeds the BIND backend's forwarders for the very first
+# compile at install time, before _seed_fresh_install_defaults() below
+# has run and before any real upstream_profiles row can exist yet -- it
+# is NOT itself the steady-state configuration an operator sees or
+# edits. Kept identical to the real "Cloudflare" profile
+# _seed_fresh_install_defaults() seeds into control state (rather than a
+# different, mismatched pair like the historical quad9-a fallback) so
+# the very first compiled runtime already matches what the UI will show
+# moments later once setup completes.
+_DEFAULT_UPSTREAMS = (("cloudflare-a", "1.1.1.1:53"), ("cloudflare-b", "1.0.0.1:53"))
 
 
 def _import_optional_generators():
@@ -223,6 +233,66 @@ def cmd_dnsdist_capabilities(args: argparse.Namespace) -> int:
     return 0
 
 
+def _seed_fresh_install_defaults(conn) -> None:
+    """Real, visible, editable fresh-install defaults (owner product
+    decision, second beta-rescue pass) -- called only from cmd_init_state's
+    own "zero admin accounts yet" gate above, exactly once per appliance
+    lifetime. Two separate concerns, each independently idempotent:
+
+    Upstreams: seeds two real upstream_profiles rows (Cloudflare, Google)
+    so DNS resolution is never silently backed by the loopback/bootstrap-
+    only constants above or runtime_compile.py's own emergency fallback
+    -- what the UI shows is what the compiled runtime actually uses, from
+    the first boot onward. Cloudflare is wired as the actual default via
+    the global policy layer; Google is seeded as a second real, selectable
+    profile, not merely documented.
+
+    Blocklists: seeds the exact V1.1.1 DEFAULT_FRESH_INSTALL_SOURCES three
+    (AdGuard DNS filter, StevenBlack Unified Hosts, HaGeZi Multi Normal),
+    same URLs V1 itself already fixed (HaGeZi via jsdelivr -- the
+    raw.githubusercontent.com mirror 404s) -- not the full, much larger
+    optional PUBLIC_SOURCES catalog, which was never enabled by default in
+    V1 either.
+    """
+    import dataclasses
+
+    from app.v2.policy_store import UpstreamEndpointRecord
+
+    if not conn.execute("SELECT 1 FROM upstream_profiles LIMIT 1").fetchone():
+        policy_store.create_upstream_profile(
+            conn, "cloudflare", "Cloudflare", "plain",
+            [
+                UpstreamEndpointRecord("1.1.1.1:53", None, 0, 1, None),
+                UpstreamEndpointRecord("1.0.0.1:53", None, 1, 1, None),
+            ],
+            strategy="ordered",
+        )
+        policy_store.create_upstream_profile(
+            conn, "google", "Google", "plain",
+            [
+                UpstreamEndpointRecord("8.8.8.8:53", None, 0, 1, None),
+                UpstreamEndpointRecord("8.8.4.4:53", None, 1, 1, None),
+            ],
+            strategy="ordered",
+        )
+        global_layer = policy_store.load_policy_layer(conn, "global", "singleton")
+        policy_store.save_policy_layer(
+            conn, "global", "singleton",
+            dataclasses.replace(global_layer, upstream_profile_id="cloudflare"),
+        )
+        print("seeded default upstreams: cloudflare (active), google")
+
+    policy_store.ensure_blocklist_subscription_schema(conn)
+    if not conn.execute("SELECT 1 FROM blocklist_subscriptions LIMIT 1").fetchone():
+        for subscription_id, name, url in (
+            ("adguard-dns-filter", "AdGuard DNS filter", "https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt"),
+            ("stevenblack-unified-hosts", "StevenBlack Unified Hosts", "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"),
+            ("hagezi-multi-normal", "HaGeZi Multi Normal", "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/multi.txt"),
+        ):
+            policy_store.create_blocklist_subscription(conn, subscription_id, name, url, "ads_trackers")
+        print("seeded default blocklists: adguard-dns-filter, stevenblack-unified-hosts, hagezi-multi-normal")
+
+
 def cmd_init_state(args: argparse.Namespace) -> int:
     """Idempotent fresh-install / every-boot state bootstrap (§5). Safe to
     call on every package configure and every service start -- creates
@@ -290,6 +360,18 @@ def cmd_init_state(args: argparse.Namespace) -> int:
     # up in a world-readable apt/dpkg log.
     with control_db.connect(CONTROL_DB) as conn:
         admin_count = conn.execute("SELECT count(*) FROM admins").fetchone()[0]
+        if admin_count == 0:
+            # Genuinely-fresh-install window only, same real gate
+            # app/v2/webapp.py's /api/setup itself uses ("zero admin
+            # accounts yet") -- never fires again once setup has
+            # happened once, so a later `dpkg --configure`/service
+            # restart/upgrade can never re-seed over an operator's own
+            # choices. Each half is additionally its own defense-in-
+            # depth no-op if that table is already non-empty (e.g. a
+            # completed V1 migration that ran before the first admin was
+            # created), matching "migration preserves imported/
+            # operator-customized choices, never overwrites them."
+            _seed_fresh_install_defaults(conn)
     address = _best_effort_management_address()
     print("")
     print("Alderpoint DNS installed successfully.")

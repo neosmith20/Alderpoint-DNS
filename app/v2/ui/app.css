@@ -144,6 +144,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-3); min-width: 0; }
 .panel__head { display: flex; align-items: center; justify-content: space-between; gap: var(--s-3); padding: var(--s-4); border-bottom: 1px solid var(--line); }
 .panel__head h2 { margin: 0; font-size: 15px; }
+.panel__head .link { min-height: auto; border: 0; background: transparent; color: var(--accent-2); padding: 0; font-size: 13px; }
+.panel__head .link:hover { text-decoration: underline; background: transparent; }
 .panel__body { padding: var(--s-4); }
 .panel.compact .panel__body { padding: var(--s-3); }
 .metric { display: grid; gap: 2px; min-width: 0; }

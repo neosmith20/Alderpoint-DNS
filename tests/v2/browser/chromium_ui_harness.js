@@ -196,7 +196,8 @@ async function main() {
     async function route(name) {
       const titles = {
         dashboard: "Dashboard",
-        analytics: "Query Log / Analytics",
+        analytics: "Query Log",
+        statistics: "Statistics",
         clients: "Clients",
         policies: "Policies / Explain",
         filtering: "Filtering / Security",
@@ -204,8 +205,11 @@ async function main() {
         localdns: "Local DNS",
         replication: "Replication",
         backup: "Backup / Restore / Migration",
-        settings: "HTTPS / Notifications",
-        health: "System / Health",
+        encryption: "Encryption",
+        notifications: "Notifications",
+        health: "System Status",
+        administration: "Administration",
+        logs: "Logs",
         importexport: "Import",
         updates: "Software Updates",
         cache: "Cache",
@@ -263,7 +267,7 @@ async function main() {
     await evalJs(`{ const b = document.querySelector('[data-refresh]'); if (b) { b.click(); b.click(); } true }`);
     await sleep(1200);
     await waitFor(`document.querySelector('.page-head h1') && document.querySelector('.page-head h1').textContent === "Dashboard"`, "dashboard rapid refresh settled");
-    for (const r of ["analytics", "clients", "policies", "filtering", "upstreams", "localdns", "replication", "backup", "settings", "health", "importexport", "updates"]) await route(r);
+    for (const r of ["analytics", "statistics", "clients", "policies", "filtering", "blocklists", "encryption", "upstreams", "localdns", "replication", "backup", "notifications", "administration", "health", "importexport", "updates", "logs"]) await route(r);
     proof.push("dashboard-navigation");
 
     // Sidebar geometry must stay identical across every major route (owner-
@@ -616,8 +620,8 @@ async function main() {
 
     await route("replication");
     await waitFor(`document.body.innerText.includes("Node identity")`, "replication status");
-    await route("settings");
-    await waitFor(`document.body.innerText.includes("HTTPS Certificate")`, "settings page");
+    await route("encryption");
+    await waitFor(`document.body.innerText.includes("HTTPS Certificate")`, "encryption page");
     // DNS transport (encrypted DNS) toggle panel restored this pass --
     // read-only proof it actually renders real current state (no
     // mutation here: DoT/DoH/DoQ toggles trigger a real cert-touching
@@ -692,7 +696,7 @@ async function main() {
     // is not itself started via systemd, so an empty real result is
     // the expected honest answer -- what matters is no crash and a
     // real request/response cycle, not a mocked one).
-    await route("health");
+    await route("logs");
     await waitFor(`document.querySelector('form[data-form="logs-view"]')`, "log viewer form");
     await evalJs(`(() => {
       const f = document.querySelector('form[data-form="logs-view"]');
@@ -704,7 +708,7 @@ async function main() {
     proof.push("log-viewer-queried");
 
     // Statistics export/clear (beta-rescue priority 3C).
-    await route("analytics");
+    await route("statistics");
     await waitFor(`document.querySelector('form[data-form="statistics-clear"]')`, "statistics export/clear panel");
     const exportRes = await pageApi("/api/statistics/export");
     if (!exportRes.ok) throw new Error(`statistics export failed: ${JSON.stringify(exportRes)}`);
@@ -723,7 +727,7 @@ async function main() {
     // through the UI (priority 5 parity fix). Changing the password
     // near the end since nothing after this re-authenticates with the
     // original one.
-    await route("health");
+    await route("administration");
     await waitFor(`document.querySelector('form[data-form="change-password"]')`, "administration form");
     await evalJs(`document.querySelectorAll('.toast').forEach((n) => n.remove()); true`);
     await evalJs(`(() => {

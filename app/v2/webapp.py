@@ -28,6 +28,7 @@ import hmac
 import ipaddress
 import json
 import os
+import re
 import shutil
 import sqlite3
 import time
@@ -924,6 +925,39 @@ def _encrypted_transport_configs(conn) -> tuple[
     return dot, doh, doq, doh3, dnscrypt
 
 
+# --- friendly-name -> stable internal id (owner finding, priority 2 of the
+# second beta-rescue pass) --------------------------------------------------
+#
+# Several object types (networks, groups, schedules, services, service
+# rulesets, upstream profiles, notification providers, blocklist
+# subscriptions, replication peers) used to require the operator to
+# personally invent and type their own internal identifier -- "Group ID",
+# "Schedule ID", "Upstream Profile ID", etc. -- in the same ordinary
+# creation form as the actual configuration. Normal UI now asks only for
+# a human-friendly name (or, for replication peers, reuses display_name)
+# and generates a stable, collision-safe id from it here. The id remains
+# a real, addressable column: every list/detail response, the API
+# (advanced/scripted callers may still pass an id explicitly -- see each
+# Create model's own id field, still accepted, just no longer required
+# from the ordinary form), and every dropdown that references these
+# objects elsewhere in the UI show the friendly name, not the id.
+def _slugify(text: str) -> str:
+    value = re.sub(r"[^a-z0-9]+", "-", text.strip().lower()).strip("-")
+    return value or "item"
+
+
+def _unique_id(conn: sqlite3.Connection, table: str, column: str, base_text: str, max_length: int = 64) -> str:
+    """table/column are always this module's own hard-coded literals at
+    every call site below, never operator input -- safe to interpolate."""
+    base = _slugify(base_text)[: max(1, max_length - 8)]
+    candidate = base
+    suffix = 2
+    while conn.execute(f"SELECT 1 FROM {table} WHERE {column}=?", (candidate,)).fetchone() is not None:  # noqa: S608
+        candidate = f"{base}-{suffix}"[:max_length]
+        suffix += 1
+    return candidate
+
+
 def _mutate_and_promote(mutate_fn) -> runtime_compile.RuntimeCompileResult:
     """Runs ``mutate_fn(conn)`` (a control.db write) and
     runtime_compile.recompile_and_promote() inside ONE transaction: the
@@ -980,7 +1014,11 @@ def _mutate_and_promote(mutate_fn) -> runtime_compile.RuntimeCompileResult:
 
 
 class NetworkCreate(BaseModel):
-    network_id: str = Field(min_length=1, max_length=64)
+    # Ordinary UI sends `name`; network_id is generated from it (see
+    # _unique_id) and is not itself a normal-form field any more.
+    # Advanced/scripted callers may still pass network_id explicitly.
+    name: str = Field(default="", max_length=64)
+    network_id: str = Field(default="", max_length=64)
     cidr: str
 
 
@@ -998,7 +1036,14 @@ def list_networks(admin=Depends(current_admin)):
 @app.post("/api/networks")
 def create_network(req: NetworkCreate, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
     check_csrf(admin, x_csrf_token)
-    result = _mutate_and_promote(lambda conn: store.create_network(conn, req.network_id, req.cidr))
+    if not req.network_id.strip() and not req.name.strip():
+        raise ApiError(400, "validation_error", "name is required")
+
+    def _mutate(conn):
+        network_id = req.network_id.strip() or _unique_id(conn, "policy_networks", "network_id", req.name)
+        store.create_network(conn, network_id, req.cidr)
+
+    result = _mutate_and_promote(_mutate)
     return {"status": "created", "runtime": {"promoted": result.promoted, "binding_count": result.binding_count}}
 
 
@@ -1377,9 +1422,11 @@ def put_network_policy(network_id: str, req: PolicyLayerUpdate, admin=Depends(cu
 
 
 class GroupCreate(BaseModel):
-    group_id: str = Field(min_length=1, max_length=64)
     name: str = Field(min_length=1, max_length=128)
     priority: int = 100
+    # Not a normal-form field any more: group_id is generated from name.
+    # Advanced/scripted callers may still pass it explicitly.
+    group_id: str = Field(default="", max_length=64)
 
 
 @app.get("/api/groups")
@@ -1415,8 +1462,9 @@ def list_groups(admin=Depends(current_admin)):
 def create_group(req: GroupCreate, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
     check_csrf(admin, x_csrf_token)
     with _db() as conn:
-        store.create_group(conn, req.group_id, req.name, req.priority)
-    return {"status": "created"}
+        group_id = req.group_id.strip() or _unique_id(conn, "policy_groups", "group_id", req.name)
+        store.create_group(conn, group_id, req.name, req.priority)
+    return {"status": "created", "group_id": group_id}
 
 
 @app.put("/api/policy/group/{group_id}")
@@ -1543,11 +1591,13 @@ class UpstreamEndpointIn(BaseModel):
 
 
 class UpstreamProfileCreate(BaseModel):
-    upstream_profile_id: str = Field(min_length=1, max_length=64)
     name: str
     transport: str
     strategy: str = "ordered"
     endpoints: list[UpstreamEndpointIn]
+    # Not a normal-form field any more: generated from name. Advanced/
+    # scripted callers may still pass it explicitly.
+    upstream_profile_id: str = Field(default="", max_length=64)
 
 
 @app.get("/api/upstreams")
@@ -1585,8 +1635,9 @@ def create_upstream(req: UpstreamProfileCreate, admin=Depends(current_admin), x_
         for e in req.endpoints
     ]
     with _db() as conn:
-        store.create_upstream_profile(conn, req.upstream_profile_id, req.name, req.transport, endpoints, strategy=req.strategy)
-    return {"status": "created"}
+        upstream_profile_id = req.upstream_profile_id.strip() or _unique_id(conn, "upstream_profiles", "upstream_profile_id", req.name)
+        store.create_upstream_profile(conn, upstream_profile_id, req.name, req.transport, endpoints, strategy=req.strategy)
+    return {"status": "created", "upstream_profile_id": upstream_profile_id}
 
 
 class DomainRoutingCreate(BaseModel):
@@ -1629,18 +1680,21 @@ class ServiceDomainIn(BaseModel):
 
 
 class ServiceCreate(BaseModel):
-    service_id: str
     display_name: str
     category: str = ""
     domains: list[ServiceDomainIn]
+    # Not a normal-form field any more: generated from display_name.
+    # Advanced/scripted callers may still pass it explicitly.
+    service_id: str = ""
 
 
 @app.post("/api/services")
 def create_service(req: ServiceCreate, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
     check_csrf(admin, x_csrf_token)
     with _db() as conn:
-        store.create_service(conn, req.service_id, req.display_name, [(d.match_kind, d.domain) for d in req.domains], category=req.category)
-    return {"status": "created"}
+        service_id = req.service_id.strip() or _unique_id(conn, "service_definitions", "service_id", req.display_name)
+        store.create_service(conn, service_id, req.display_name, [(d.match_kind, d.domain) for d in req.domains], category=req.category)
+    return {"status": "created", "service_id": service_id}
 
 
 @app.get("/api/services")
@@ -1665,16 +1719,24 @@ def list_services(admin=Depends(current_admin)):
 
 
 class ServiceRulesetCreate(BaseModel):
-    ruleset_id: str
+    # service_blocking_rulesets has no separate name column -- ruleset_id
+    # is its only identity, same as network_id/schedule_id below. Ordinary
+    # UI sends `name`, which becomes the id; advanced/scripted callers may
+    # still pass ruleset_id explicitly.
+    name: str = ""
+    ruleset_id: str = ""
     service_ids: list[str]
 
 
 @app.post("/api/service-rulesets")
 def create_service_ruleset(req: ServiceRulesetCreate, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
     check_csrf(admin, x_csrf_token)
+    if not req.ruleset_id.strip() and not req.name.strip():
+        raise ApiError(400, "validation_error", "name is required")
     with _db() as conn:
-        store.create_service_ruleset(conn, req.ruleset_id, req.service_ids)
-    return {"status": "created"}
+        ruleset_id = req.ruleset_id.strip() or _unique_id(conn, "service_blocking_rulesets", "ruleset_id", req.name)
+        store.create_service_ruleset(conn, ruleset_id, req.service_ids)
+    return {"status": "created", "ruleset_id": ruleset_id}
 
 
 @app.get("/api/service-rulesets")
@@ -1707,7 +1769,12 @@ class ScheduleWindowIn(BaseModel):
 
 
 class ScheduleCreate(BaseModel):
-    schedule_id: str
+    # policy_schedules has no separate name column -- schedule_id is its
+    # only identity, same as network_id/ruleset_id. Ordinary UI sends
+    # `name`, which becomes the id; advanced/scripted callers may still
+    # pass schedule_id explicitly.
+    name: str = ""
+    schedule_id: str = ""
     timezone: str
     windows: list[ScheduleWindowIn]
 
@@ -1724,9 +1791,12 @@ def create_schedule_route(req: ScheduleCreate, admin=Depends(current_admin), x_c
         h1, m1 = (int(x) for x in w.start.split(":"))
         h2, m2 = (int(x) for x in w.end.split(":"))
         windows.append(ScheduleWindow(start=dt_time(h1, m1), end=dt_time(h2, m2), weekdays=frozenset(w.weekdays)))
+    if not req.schedule_id.strip() and not req.name.strip():
+        raise ApiError(400, "validation_error", "name is required")
     with _db() as conn:
-        store.create_schedule(conn, req.schedule_id, req.timezone, windows)
-    return {"status": "created"}
+        schedule_id = req.schedule_id.strip() or _unique_id(conn, "policy_schedules", "schedule_id", req.name)
+        store.create_schedule(conn, schedule_id, req.timezone, windows)
+    return {"status": "created", "schedule_id": schedule_id}
 
 
 @app.get("/api/schedules")
@@ -2000,11 +2070,13 @@ def get_unit_logs(unit: str, severity: str = "all", lines: int = 100, admin=Depe
 
 
 class NotificationProviderCreate(BaseModel):
-    provider_id: str
     kind: str
     display_name: str
     endpoint: str
     secret_value: Optional[str] = None
+    # Not a normal-form field any more: generated from display_name.
+    # Advanced/scripted callers may still pass it explicitly.
+    provider_id: str = ""
 
 
 @app.get("/api/notifications")
@@ -2021,8 +2093,9 @@ def create_notification(req: NotificationProviderCreate, admin=Depends(current_a
     secrets = _secrets()
     with _db() as conn:
         notification_store.ensure_schema(CONTROL_DB)
+        provider_id = req.provider_id.strip() or _unique_id(conn, "notification_providers", "provider_id", req.display_name)
         metadata = notification_store.create_provider(
-            conn, secrets, req.provider_id, req.kind, req.display_name, req.endpoint, secret_value=req.secret_value
+            conn, secrets, provider_id, req.kind, req.display_name, req.endpoint, secret_value=req.secret_value
         )
     return {"status": "created", "provider": metadata.redacted()}
 
@@ -2526,10 +2599,12 @@ def network_confirm_route(admin=Depends(current_admin), x_csrf_token: Optional[s
 
 
 class BlocklistSubscriptionCreate(BaseModel):
-    subscription_id: str = Field(min_length=1, max_length=64)
     name: str = Field(min_length=1, max_length=128)
     url: str = Field(min_length=1, max_length=2048)
     category: str = ""
+    # Not a normal-form field any more: generated from name. Advanced/
+    # scripted callers may still pass it explicitly.
+    subscription_id: str = Field(default="", max_length=64)
 
 
 @app.get("/api/blocklists")
@@ -2543,7 +2618,9 @@ def create_blocklist_subscription_route(req: BlocklistSubscriptionCreate, admin=
     check_csrf(admin, x_csrf_token)
     try:
         with _db() as conn:
-            store.create_blocklist_subscription(conn, req.subscription_id, req.name, req.url, req.category)
+            store.ensure_blocklist_subscription_schema(conn)
+            subscription_id = req.subscription_id.strip() or _unique_id(conn, "blocklist_subscriptions", "subscription_id", req.name)
+            store.create_blocklist_subscription(conn, subscription_id, req.name, req.url, req.category)
     except PolicyStoreError as exc:
         raise ApiError(409, "conflict", str(exc)) from exc
     return {"status": "created"}
