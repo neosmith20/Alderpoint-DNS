@@ -104,6 +104,19 @@
   function pretty(value) {
     if (value === null || value === undefined || value === "") return '<span class="badge inherit">inherit</span>';
     if (typeof value === "boolean") return value ? '<span class="badge ok">enabled</span>' : '<span class="badge warn">disabled</span>';
+    // Real defect fixed here (owner-beta visual pass): a plain
+    // String(value) on a row field that is an array of objects (e.g. an
+    // upstream profile's `endpoints`) stringifies each element via its
+    // default Object.prototype.toString(), rendering literally
+    // "[object Object],[object Object]" in the Dashboard/Upstreams
+    // tables. Render each endpoint's own address when present, and fall
+    // back to real JSON for any other object shape, rather than JS's
+    // default (and useless) object-to-string coercion.
+    if (Array.isArray(value)) {
+      if (!value.length) return '<span class="badge inherit">inherit</span>';
+      return esc(value.map((v) => (v && typeof v === "object" ? (v.address ?? JSON.stringify(v)) : v)).join(", "));
+    }
+    if (typeof value === "object") return esc(JSON.stringify(value));
     return esc(value);
   }
 
