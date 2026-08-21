@@ -614,6 +614,14 @@ def recompile_and_promote(
             dot=dot, doh=doh, doq=doq, doh3=doh3, dnscrypt=dnscrypt,
             bind_context_addresses=bind_context_addresses,
             doh_bind_context_addresses=doh_bind_context_addresses,
+            # Real production caller: switches blocked-domain rules to
+            # the data-file-backed form (real blocklist scale -- see
+            # dnsdist_policy_runtime.py's own docstring for the crash
+            # this fixes). Written to the same directory dnsdist.conf
+            # itself is promoted to, since that's the absolute path the
+            # generated Lua's io.open() calls will actually be executed
+            # against once live.
+            blocked_domains_data_dir=Path(live_dnsdist_conf_path).parent,
         )
     except PolicyRuntimeError as exc:
         raise RuntimeCompileError(f"policy runtime compile failed: {exc}") from exc

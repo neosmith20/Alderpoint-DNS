@@ -93,10 +93,62 @@ def run(command: list[str], check: bool = True) -> subprocess.CompletedProcess[s
     return subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=check)
 
 
-def _normalize_domain(raw: str) -> str | None:
-    from app.alderpointdns_compiler import normalize_domain
+# Mirrors app/alderpointdns_compiler.py's own normalize_domain (that
+# module's own DOMAIN_RE/_looks_like_ip_literal) verbatim, inlined here
+# rather than imported.
+#
+# Real defect found live during the owner-beta closure soak/acceptance
+# pass: this used to `from app.alderpointdns_compiler import
+# normalize_domain` -- fine for V1 (which ships the whole app/ tree) and
+# invisible to the unit suite (which always runs against the full source
+# tree on PYTHONPATH), but scripts/build-v2-deb.sh deliberately does NOT
+# ship app/alderpointdns_compiler.py: at module scope it itself imports
+# app.dns_cache/encryption/filter_schedule/replication, none of which V2
+# ships either (shipping the whole cascade would reintroduce a large,
+# unrelated slice of V1's own runtime into V2, against every other
+# documented exception on that script's own shipped-files list). The
+# result on a real, fresh install: every blocklist subscription refresh
+# -- this parser's only real V2 caller, via parse_rule() below --
+# 500'd with `ModuleNotFoundError: No module named
+# 'app.alderpointdns_compiler'`, confirmed live triggering a real
+# refresh against a real installed V2 appliance's real management API.
+# custom_rules.py's OTHER lazy `alderpointdns_compiler` import
+# (_rpz_status, used only by V1's own "explain a custom rule" endpoint)
+# is untouched: V2 never calls that function, so it was never reached.
+#
+# tests/test_custom_rules_normalize_domain_matches_compiler.py keeps
+# this copy honest against the canonical definition it mirrors.
+_DOMAIN_RE = re.compile(r"^(?=.{1,253}\.?$)([a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?\.)+[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?\.?$")
 
-    return normalize_domain(raw)
+
+def _looks_like_ip_literal(value: str) -> bool:
+    if ":" in value:
+        return True
+    if "." not in value:
+        return False
+    return all(part.isdigit() for part in value.split(".") if part)
+
+
+def _normalize_domain(raw: str) -> str | None:
+    value = raw.strip().strip(".").lower()
+    if not value or len(value) > 253:
+        return None
+    if "://" in value or "/" in value or ":" in value or "@" in value:
+        return None
+    if not value.isascii():
+        try:
+            value = value.encode("idna").decode("ascii")
+        except UnicodeError:
+            return None
+    if not _DOMAIN_RE.match(value + "."):
+        return None
+    if _looks_like_ip_literal(value):
+        try:
+            ipaddress.ip_address(value)
+            return None
+        except ValueError:
+            pass
+    return value
 
 
 def _ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:

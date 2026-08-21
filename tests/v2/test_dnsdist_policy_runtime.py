@@ -106,6 +106,69 @@ class TestBlockingAndAllowOverride:
         assert "RCodeAction(DNSRCode.REFUSED)" in text
 
 
+class TestBlockedDomainsAtRealBlocklistScale:
+    """Real defect found live during the owner-beta closure blocklist-
+    refresh acceptance pass: refreshing the V1.1.1-parity default
+    StevenBlack Unified Hosts subscription (~150k domains) crashed
+    dnsdist outright ("main function has more than 65536 constants") --
+    every blocked domain was a literal Lua constant in one big
+    `addAction` per domain. Fixed by routing blocked-domain rules
+    through a runtime-loaded data file (see
+    dnsdist_policy_runtime.py's own docstring) whenever a real
+    ``blocked_domains_data_dir`` is given -- this is the direct
+    regression test for that path; every OTHER test in this file
+    (passing no data dir) still proves the small-scale literal path is
+    completely unchanged."""
+
+    def test_without_data_dir_keeps_the_prior_literal_output(self):
+        """Backward compatibility: every existing caller/test (no
+        blocked_domains_data_dir) must see byte-identical behavior."""
+        b = _binding("10.0.1.0/24", "p1", blocked_domains={"x.example": BlockingResponse(mode="refused")})
+        text = compile_multi_policy_dnsdist_config("127.0.0.1:5300", [b])
+        assert 'SuffixMatchNodeRule({"x.example."})' in text
+
+    def test_with_data_dir_writes_a_real_file_and_loads_it_at_runtime(self, tmp_path):
+        b = _binding("10.0.1.0/24", "p1", blocked_domains={"x.example": BlockingResponse(mode="refused")})
+        text = compile_multi_policy_dnsdist_config("127.0.0.1:5300", [b], blocked_domains_data_dir=tmp_path)
+        assert 'SuffixMatchNodeRule({"x.example."})' not in text
+        assert "newSuffixMatchNode()" in text
+        assert "alderpointdnsDomainLines(" in text
+        data_file = tmp_path / "blocked-domains" / f"{b.network.network_id}__0.txt"
+        assert data_file.exists()
+        assert data_file.read_text().strip().splitlines() == ["x.example."]
+
+    def test_a_domain_count_that_would_have_exceeded_the_lua_constant_ceiling_compiles(self, tmp_path):
+        """The actual regression: 100,000 blocked domains (well past
+        Lua's 65536-constants-per-chunk ceiling) must compile without
+        error and produce a real, complete data file -- this is what a
+        real StevenBlack-sized subscription looks like."""
+        domains = {f"blocked-{i}.example": BlockingResponse(mode="nxdomain") for i in range(100_000)}
+        b = _binding("10.0.1.0/24", "p1", blocked_domains=domains)
+        text = compile_multi_policy_dnsdist_config("127.0.0.1:5300", [b], blocked_domains_data_dir=tmp_path)
+        # The whole point: no domain string appears as a literal Lua
+        # table entry in the generated config text at all.
+        assert "blocked-99999.example" not in text
+        data_file = tmp_path / "blocked-domains" / f"{b.network.network_id}__0.txt"
+        lines = data_file.read_text().splitlines()
+        assert len(lines) == 100_000
+        assert "blocked-99999.example." in lines
+
+    @pytest.mark.skipif(not DNSDIST_INSTALLED, reason="requires the real dnsdist binary")
+    def test_real_dnsdist_check_config_accepts_a_config_at_this_scale(self, tmp_path):
+        """The real regression, proven against the real binary: this is
+        exactly what crashed with 'main function has more than 65536
+        constants' before the fix."""
+        import subprocess
+
+        domains = {f"blocked-{i}.example": BlockingResponse(mode="nxdomain") for i in range(100_000)}
+        b = _binding("10.0.1.0/24", "p1", blocked_domains=domains)
+        text = compile_multi_policy_dnsdist_config("127.0.0.1:5300", [b], blocked_domains_data_dir=tmp_path)
+        conf = tmp_path / "dnsdist.conf"
+        conf.write_text(text)
+        result = subprocess.run(["dnsdist", "--check-config", "-C", str(conf)], capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
 class TestSafeSearchRendering:
     def test_safesearch_generates_cname_spoof_scoped_to_network(self):
         b = _binding("10.0.1.0/24", "p1", safesearch_providers=("google",))

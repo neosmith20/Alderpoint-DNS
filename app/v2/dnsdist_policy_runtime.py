@@ -47,6 +47,7 @@ layer for domains that are blocked for literally everyone (see
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from app.v2.blocking_response import BlockingResponse
@@ -209,6 +210,94 @@ def _route_doh_via_bind(endpoints: tuple, transport: str, use_ecs: bool, doh_bin
         return None
     key = frozenset((ep.address, getattr(ep, "doh_path", None), ep.tls_hostname) for ep in endpoints)
     return doh_bind_context_addresses.get(key)
+
+
+# Lua chunks (dnsdist's config is compiled as one) have a hard ceiling of
+# 65536 constants per function -- confirmed live during the owner-beta
+# closure blocklist-refresh acceptance pass: refreshing the V1.1.1-parity
+# default StevenBlack Unified Hosts subscription (~150k domains) and
+# promoting it crashed dnsdist outright ("main function has more than
+# 65536 constants") the moment its domains were compiled as literal
+# per-domain `addAction(...)` statements below -- each domain string is
+# itself a Lua constant, so any policy binding with more blocked domains
+# than that ceiling could never be promoted at all, real or synthetic.
+# real refresh failed safe (the previously-working config stayed live,
+# per §18), but the subscription could never actually be applied.
+#
+# Mirrors app/custom_rules.py's own already-proven, already-shipped
+# fix for the identical problem (its own custom-rule regex/exact lists,
+# via render_dnsdist_lua/ensure_dnsdist_custom_include): domains for a
+# whole (network, action) group are written to one plain data file
+# instead, read line-by-line at Lua *runtime* (io.open/:lines()), so they
+# become runtime string values, never compile-time constants -- there is
+# no ceiling on how many lines a data file can hold. A missing/unreadable
+# file degrades to "this group blocks nothing", matching V1's identical
+# `if handle then ... end` guard, never a crash -- and since dnsdist only
+# executes a dofile'd/io.open'd read once, at config (re)load time, a
+# data file rewritten after the currently-live config already loaded
+# never affects the running process, only the next successful reload.
+_LUA_DOMAIN_FILE_LOADER = """local function alderpointdnsDomainLines(path)
+  local entries = {}
+  local handle = io.open(path, "r")
+  if handle then
+    for line in handle:lines() do
+      if line ~= "" then
+        table.insert(entries, line)
+      end
+    end
+    handle:close()
+  end
+  return entries
+end
+"""
+
+
+def _blocked_domain_group_lines(
+    net_matcher: str, network_id: str, blocked_domains: dict, allowed_domains: set,
+    data_dir: "Path | None",
+) -> list[str]:
+    """Groups this binding's blocked domains by their resulting action
+    (several domains -> the identical RCodeAction/SpoofAction are the
+    overwhelmingly common real-world case: one whole subscribed
+    blocklist).
+
+    ``data_dir`` is None: preserves the exact prior literal-per-domain
+    ``addAction`` output (correct and simplest for the small domain
+    counts every existing caller/test uses; no filesystem I/O). Given a
+    real directory (the one real production caller,
+    ``app/v2/runtime_compile.py``, always provides one): writes each
+    group's domains to a real data file under it and emits a
+    runtime-loaded ``SuffixMatchNodeRule`` instead -- see
+    ``_LUA_DOMAIN_FILE_LOADER``'s own docstring for why only this second
+    form survives at real blocklist scale."""
+    groups: dict[str, list[str]] = {}
+    for domain in sorted(blocked_domains):
+        if domain in allowed_domains:
+            continue  # explicit allow always overrides a block (P0-A precedence)
+        response = blocked_domains[domain]
+        try:
+            trigger = validate_dns_name(domain) + "."
+        except InvalidDnsNameError as exc:
+            raise PolicyRuntimeError(f"invalid blocked domain {domain!r}: {exc}") from exc
+        action = _refused_or_spoof_action(response)
+        groups.setdefault(action, []).append(trigger)
+
+    out: list[str] = []
+    for i, (action, triggers) in enumerate(sorted(groups.items())):
+        if data_dir is None:
+            domain_list = ", ".join(_lua_string(t) for t in sorted(triggers))
+            out.append(f"addAction(AndRule({{{net_matcher}, SuffixMatchNodeRule({{{domain_list}}})}}), {action})")
+            continue
+        rel_name = f"blocked-domains/{network_id}__{i}.txt"
+        target = data_dir / rel_name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("\n".join(sorted(triggers)) + "\n", encoding="utf-8")
+        path_literal = _lua_string(str(target))
+        var = f"blocked_{network_id}_{i}".replace("-", "_")
+        out.append(f"local {var} = newSuffixMatchNode()")
+        out.append(f"for _, entry in ipairs(alderpointdnsDomainLines({path_literal})) do {var}:add(newDNSName(entry)) end")
+        out.append(f"addAction(AndRule({{{net_matcher}, SuffixMatchNodeRule({var})}}), {action})")
+    return out
 
 
 def _refused_or_spoof_action(response: BlockingResponse) -> str:
@@ -498,6 +587,7 @@ def compile_multi_policy_dnsdist_config(
     dnscrypt: DnscryptConfig | None = None,
     bind_context_addresses: dict = None,
     doh_bind_context_addresses: dict = None,
+    blocked_domains_data_dir: "str | Path | None" = None,
 ) -> str:
     """Deterministic (§2H requires reproducible behavior regardless of
     query order): bindings are processed most-specific-network-first
@@ -505,11 +595,20 @@ def compile_multi_policy_dnsdist_config(
     Blocker/P0-C), and every emitted rule set is internally sorted so two
     calls with the same input, regardless of list order, produce
     byte-identical output.
+
+    ``blocked_domains_data_dir``: None (every existing caller/test)
+    preserves the exact prior in-Lua-literal blocked-domain output. The
+    one real production caller (``app/v2/runtime_compile.py``) passes a
+    real directory, switching blocked-domain rules to the data-file-
+    backed form real blocklist scale requires -- see
+    ``_blocked_domain_group_lines``'s own docstring.
     """
     if not bindings:
         raise PolicyRuntimeError("at least one client policy binding is required")
     bind_context_addresses = bind_context_addresses or {}
     doh_bind_context_addresses = doh_bind_context_addresses or {}
+    if blocked_domains_data_dir is not None:
+        blocked_domains_data_dir = Path(blocked_domains_data_dir)
 
     ordered = sorted(
         bindings,
@@ -519,6 +618,7 @@ def compile_multi_policy_dnsdist_config(
     lines = [
         "-- Generated by app/v2/dnsdist_policy_runtime.py -- V2 real per-effective-policy runtime.",
         "-- Do not hand-edit; regenerate from the effective policy compiler.",
+        _LUA_DOMAIN_FILE_LOADER,
         f'setLocal("{listen_address}")',
         "",
     ]
@@ -687,17 +787,18 @@ def compile_multi_policy_dnsdist_config(
                     f'addAction({matcher}, SpoofCNAMEAction({_lua_string(validated_target + ".")}))'
                 )
 
-        # 2. Block rules -- terminal.
-        for domain in sorted(binding.blocked_domains):
-            if domain in binding.allowed_domains:
-                continue  # explicit allow always overrides a block (P0-A precedence)
-            response = binding.blocked_domains[domain]
-            try:
-                trigger = validate_dns_name(domain) + "."
-            except InvalidDnsNameError as exc:
-                raise PolicyRuntimeError(f"invalid blocked domain {domain!r}: {exc}") from exc
-            matcher = f'AndRule({{{net_matcher}, SuffixMatchNodeRule({{{_lua_string(trigger)}}})}})'
-            lines.append(f"addAction({matcher}, {_refused_or_spoof_action(response)})")
+        # 2. Block rules -- terminal. Batched per (network, action) group
+        # and loaded from a data file at Lua runtime, not emitted as
+        # literal per-domain addAction() statements -- see
+        # _LUA_DOMAIN_FILE_LOADER's own docstring for the real crash this
+        # fixes at real-world blocklist scale.
+        if binding.blocked_domains:
+            lines.extend(
+                _blocked_domain_group_lines(
+                    net_matcher, binding.network.network_id, binding.blocked_domains,
+                    binding.allowed_domains, blocked_domains_data_dir,
+                )
+            )
 
         # 3. Domain-specific routing -- terminal PoolAction, most-specific
         # suffix first (same precedence fix as Blocker/P0-C).
