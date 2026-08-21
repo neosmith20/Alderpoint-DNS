@@ -163,3 +163,41 @@ class TestApiClientAgainstRealWebapp:
                 server.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 server.kill()
+
+
+class TestApiClientConnectionFailureResilience:
+    """Real defect fixed this pass (found live: a real multi-tick soak
+    run under real concurrent host load hit a real HTTP read timeout
+    and the whole process died -- losing every sample already gathered
+    -- instead of recording it as one more tick error and continuing,
+    exactly the kind of transient hiccup this harness exists to survive
+    and characterize). A connection-level failure must come back as a
+    real (status, body) result, the same shape as any other response,
+    never an uncaught exception."""
+
+    def test_connection_refused_does_not_raise(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()  # nothing listens on this port once closed
+        client = soak_harness.ApiClient(f"http://127.0.0.1:{port}", verify_tls=True)
+        status, body = client.get("/api/health")
+        assert status == 0
+        assert body["error"] == "connection_failed"
+
+    def test_run_tick_survives_a_connection_failure(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        client = soak_harness.ApiClient(f"http://127.0.0.1:{port}", verify_tls=True)
+        cfg = soak_harness.SoakConfig(
+            base_url=f"http://127.0.0.1:{port}", admin_user=None, admin_password=None,
+            dns_address="127.0.0.1", dns_port=1, duration_seconds=1, sample_interval_seconds=1,
+            verify_tls=True, synthetic_client_count=1,
+        )
+        totals = soak_harness.SoakTotals()
+        soak_harness._run_tick(cfg, client, totals, ["/api/health"], tick=1)  # must not raise
+        assert totals.api_attempted == 1
+        assert totals.api_succeeded == 0
+        assert any("GET /api/health -> 0" in e for e in totals.errors)

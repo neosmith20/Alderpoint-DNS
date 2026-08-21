@@ -183,6 +183,18 @@ class ApiClient:
                 return exc.code, json.loads(payload)
             except ValueError:
                 return exc.code, None
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+            # Real robustness gap fixed here (found live: this crashed
+            # a real multi-tick soak run stone dead on one transient
+            # read timeout under real concurrent host load -- exactly
+            # the kind of transient hiccup this harness exists to
+            # survive and characterize, not die on). A connection-level
+            # failure (timeout, connection refused, reset, DNS failure)
+            # is real, recordable evidence the same way a non-200 HTTP
+            # status already is -- status 0 with the exception text as
+            # the body -- not a reason to abort the entire run and lose
+            # every sample gathered so far.
+            return 0, {"error": "connection_failed", "detail": str(exc)}
 
     def login(self, username: str, password: str) -> bool:
         status, body = self._request("POST", "/api/login", {"username": username, "password": password})
@@ -214,6 +226,26 @@ def sample_control_db_wal(state_dir: Path) -> dict[str, Any]:
     return result
 
 
+def _run_tick(cfg: SoakConfig, client: ApiClient, totals: SoakTotals, read_paths: list[str], tick: int) -> None:
+    # Real DNS queries from several synthetic client identities (source
+    # port varies, name varies) -- exercises the real dnsdist listener,
+    # real analytics ingestion, and real observed-client update path
+    # each tick.
+    for i in range(cfg.synthetic_client_count):
+        qname = f"soak-client-{i}-tick-{tick}.soak.test"
+        totals.dns_attempted += 1
+        if dns_query(cfg.dns_address, cfg.dns_port, qname):
+            totals.dns_succeeded += 1
+
+    for path in read_paths:
+        totals.api_attempted += 1
+        status, _ = client.get(path)
+        if status == 200:
+            totals.api_succeeded += 1
+        else:
+            totals.errors.append(f"tick {tick}: GET {path} -> {status}")
+
+
 def run_soak(cfg: SoakConfig, state_dir: Path, report_path: Path) -> SoakTotals:
     totals = SoakTotals()
     client = ApiClient(cfg.base_url, cfg.verify_tls)
@@ -235,23 +267,16 @@ def run_soak(cfg: SoakConfig, state_dir: Path, report_path: Path) -> SoakTotals:
 
     while time.monotonic() < deadline:
         tick += 1
-        # Real DNS queries from several synthetic client identities
-        # (source port varies, name varies) -- exercises the real
-        # dnsdist listener, real analytics ingestion, and real
-        # observed-client update path each tick.
-        for i in range(cfg.synthetic_client_count):
-            qname = f"soak-client-{i}-tick-{tick}.soak.test"
-            totals.dns_attempted += 1
-            if dns_query(cfg.dns_address, cfg.dns_port, qname):
-                totals.dns_succeeded += 1
-
-        for path in read_paths:
-            totals.api_attempted += 1
-            status, _ = client.get(path)
-            if status == 200:
-                totals.api_succeeded += 1
-            else:
-                totals.errors.append(f"tick {tick}: GET {path} -> {status}")
+        try:
+            _run_tick(cfg, client, totals, read_paths, tick)
+        except Exception as exc:  # noqa: BLE001 - see comment below
+            # Belt-and-suspenders on top of the real ApiClient._request
+            # fix above: nothing in one tick's real work (DNS queries,
+            # API reads, process/WAL sampling) may ever be allowed to
+            # take down the whole multi-hour soak run and lose every
+            # sample gathered so far. Recorded as real evidence, same as
+            # any other tick error, not swallowed silently.
+            totals.errors.append(f"tick {tick}: unexpected error: {exc!r}")
 
         if time.monotonic() >= next_sample:
             sample = {
