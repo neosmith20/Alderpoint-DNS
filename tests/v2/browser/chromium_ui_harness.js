@@ -400,9 +400,14 @@ async function main() {
 
     await route("upstreams");
     await waitFor(`document.querySelector('form[data-form="upstream"]')`, "upstream form");
+    // upstream_profile_id is no longer an operator-entered field (central
+    // internal ID generation, owner-beta rescue pass) -- the create form
+    // only takes name/address, and the server assigns the id. This harness
+    // used to hardcode the id it expected the server to assign, a stale
+    // assumption from before that change; it now looks the created
+    // upstream up by its own visible name instead of assuming an id.
     await evalJs(`(() => {
       const f = document.querySelector('form[data-form="upstream"]');
-      f.querySelector('[name=upstream_profile_id]').value = 'browser-upstream-${suffix}';
       f.querySelector('[name=name]').value = 'Browser Upstream ${suffix}';
       f.querySelector('[name=address]').value = '1.1.1.1:53';
       f.requestSubmit();
@@ -414,7 +419,10 @@ async function main() {
       const f = document.querySelector('form[data-form="route"]');
       f.querySelector('[name=rule_id]').value = 'browser-route-${suffix}';
       f.querySelector('[name=suffix_domain]').value = 'route-${suffix}.test';
-      f.querySelector('[name=upstream_profile_id]').value = 'browser-upstream-${suffix}';
+      const select = f.querySelector('[name=upstream_profile_id]');
+      const match = [...select.options].find((o) => o.textContent.includes('Browser Upstream ${suffix}'));
+      if (!match) throw new Error('created upstream not found in route form select');
+      select.value = match.value;
       f.requestSubmit();
       return true;
     })()`);
@@ -651,9 +659,14 @@ async function main() {
     // "add/refresh/failure" by name, not just the happy path.
     await route("blocklists");
     await waitFor(`document.querySelector('form[data-form="blocklist-create"]')`, "blocklist create form");
+    // subscription_id is also no longer operator-entered (same central
+    // internal ID generation pass as upstream_profile_id above) -- the
+    // create form only takes name/category/url; the server assigns the
+    // id, surfaced back in the table's own data-blocklist-refresh
+    // attribute, which is what this harness now reads instead of
+    // assuming an id it chose itself.
     await evalJs(`(() => {
       const f = document.querySelector('form[data-form="blocklist-create"]');
-      f.querySelector('[name=subscription_id]').value = 'browser-blocklist-${suffix}';
       f.querySelector('[name=name]').value = 'Browser Test Blocklist ${suffix}';
       f.querySelector('[name=category]').value = 'test';
       f.querySelector('[name=url]').value = 'http://blocklist-refresh-${suffix}.invalid/list.txt';
@@ -663,7 +676,12 @@ async function main() {
     await waitFor(`document.body.innerText.includes("Browser Test Blocklist ${suffix}")`, "blocklist subscription created");
     proof.push("blocklist-subscription-created");
     await evalJs(`document.querySelectorAll('.toast').forEach((n) => n.remove()); true`);
-    await evalJs(`document.querySelector('[data-blocklist-refresh="browser-blocklist-${suffix}"]').click(); true`);
+    await evalJs(`(() => {
+      const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Browser Test Blocklist ${suffix}'));
+      if (!row) throw new Error('created blocklist row not found');
+      row.querySelector('[data-blocklist-refresh]').click();
+      return true;
+    })()`);
     await waitFor(`document.body.innerText.includes("failed") || document.querySelector('.toast.bad')`, "blocklist refresh failure surfaced cleanly");
     proof.push("blocklist-refresh-failure-handled");
     // Real defect this works around (found via this very extension,

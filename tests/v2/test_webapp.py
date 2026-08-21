@@ -365,6 +365,56 @@ class TestBindHealth:
             (ctx_dir / "named.conf").unlink()
 
 
+class TestBackgroundWorkerHealth:
+    """Owner-beta aging/liveness hardening (closure item 1): /api/health
+    must report each background worker's real progress, not just whether
+    its state file exists -- see app/v2/worker_heartbeat.py's docstring
+    for the V1.1.1 field-report failure class this defends against."""
+
+    def test_no_heartbeat_yet_is_reported_stale_not_silently_ok(self, app_client):
+        webapp, client = app_client
+        r = client.get("/api/health")
+        body = r.json()
+        workers = body["components"]["background_workers"]
+        assert set(workers) == {"analytics-worker", "discovery-worker", "tier-b-worker", "schedule-worker"}
+        for name, state in workers.items():
+            assert state["status"] == "unknown", name
+            assert state["stale"] is True, name
+        assert body["status"] == "degraded"
+
+    def test_a_recently_healthy_worker_is_reported_ok_not_stale(self, app_client):
+        webapp, client = app_client
+        webapp.worker_heartbeat.record_tick_start(webapp.STATE_DIR, "analytics-worker", tick_count=1)
+        webapp.worker_heartbeat.record_tick_success(webapp.STATE_DIR, "analytics-worker", tick_count=1, result=7)
+        r = client.get("/api/health")
+        worker = r.json()["components"]["background_workers"]["analytics-worker"]
+        assert worker["status"] == "ok"
+        assert worker["stale"] is False
+        assert worker["last_result"] == 7
+
+    def test_a_worker_stuck_mid_tick_far_past_its_interval_is_reported_stale(self, app_client):
+        """This is the exact failure class: the process never exited (no
+        systemd restart, nothing in dmesg), but the loop itself stopped
+        making progress -- health must not report this as healthy just
+        because a heartbeat file exists at all."""
+        webapp, client = app_client
+        path = webapp.STATE_DIR / "worker-heartbeats" / "schedule-worker.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        import json as _json
+        import time as _time
+
+        path.write_text(_json.dumps({
+            "worker": "schedule-worker", "status": "running", "tick_count": 1,
+            "tick_started_at": _time.time() - 10_000, "last_success_at": None,
+            "last_result": None, "last_error": None,
+        }))
+        r = client.get("/api/health")
+        worker = r.json()["components"]["background_workers"]["schedule-worker"]
+        assert worker["status"] == "running"
+        assert worker["stale"] is True
+        assert r.json()["status"] == "degraded"
+
+
 class TestSecurityHeaders:
     def test_security_headers_present(self, app_client):
         webapp, client = app_client

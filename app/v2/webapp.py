@@ -58,6 +58,7 @@ from app.v2 import notification_store
 from app.v2 import observed_clients
 from app.v2 import policy_service
 from app.v2 import policy_store as store
+from app.v2 import worker_heartbeat
 from app.v2 import replication_v2
 from app.v2 import runtime_compile
 from app.v2 import software_updates
@@ -791,6 +792,35 @@ def health():
         result["status"] = "degraded"
     result["components"]["tier_b"] = {"state_present": TIER_B_STATE_FILE.exists()}
     result["components"]["schedule_worker"] = {"state_present": SCHEDULE_STATE_FILE.exists()}
+
+    # Real background-worker progress, not just "the unit hasn't exited"
+    # (app/v2/worker_heartbeat.py) -- owner-beta aging hardening item 1.
+    # Each of these runs as its own systemd unit built around
+    # scripts/v2/alderpointdns_v2_ctl.py's shared _run_loop; a unit whose
+    # process is still running but whose loop has stopped making progress
+    # (the exact V1.1.1 field-report failure class this defends against)
+    # is reported here as degraded, not silently folded into "ok".
+    workers: dict[str, Any] = {}
+    any_stale = False
+    for name, interval in worker_heartbeat.WORKER_INTERVALS_SECONDS.items():
+        hb = worker_heartbeat.read_heartbeat(STATE_DIR, name) or worker_heartbeat.unknown(name)
+        stale = hb.is_stale(interval_seconds=interval)
+        any_stale = any_stale or stale
+        workers[name] = {
+            "status": hb.status,
+            "stale": stale,
+            "tick_count": hb.tick_count,
+            "last_success_at": hb.last_success_at,
+            "last_result": hb.last_result,
+            "last_error": hb.last_error,
+        }
+    result["components"]["background_workers"] = workers
+    if any_stale:
+        # A stalled worker never demotes overall status below "degraded"
+        # -- same rule as analytics dependency degradation above: DNS
+        # answering itself is reported separately and is what actually
+        # governs "healthy" for the appliance.
+        result["status"] = "degraded" if result["status"] == "ok" else result["status"]
     try:
         _ensure_extended_schemas()
         with _db() as conn:

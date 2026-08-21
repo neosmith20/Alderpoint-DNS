@@ -1074,7 +1074,7 @@ def cmd_analytics_worker(args: argparse.Namespace) -> int:
         return 0
 
     try:
-        _run_loop(lambda: _drain_once(), args.interval_seconds)
+        _run_loop(lambda: _drain_once(), args.interval_seconds, worker_name="analytics-worker")
     finally:
         # Graceful stop (SIGTERM/SIGINT, handled inside _run_loop) must not
         # lose whatever is still sitting in the current open segment.
@@ -1120,7 +1120,7 @@ def cmd_discovery_worker(args: argparse.Namespace) -> int:
         n = _drain_once()
         print(f"discovery-worker: processed {n} observations")
         return 0
-    _run_loop(_drain_once, args.interval_seconds)
+    _run_loop(_drain_once, args.interval_seconds, worker_name="discovery-worker")
     return 0
 
 
@@ -1633,7 +1633,7 @@ def cmd_tier_b_worker(args: argparse.Namespace) -> int:
         n = _tick_once()
         print(f"tier-b-worker: attempted {n} prewarm resolutions")
         return 0
-    _run_loop(_tick_once, args.interval_seconds)
+    _run_loop(_tick_once, args.interval_seconds, worker_name="tier-b-worker")
     return 0
 
 
@@ -1703,14 +1703,27 @@ def cmd_schedule_worker(args: argparse.Namespace) -> int:
         n = _tick_once()
         print(f"schedule-worker: transition fired={bool(n)}")
         return 0
-    _run_loop(_tick_once, args.interval_seconds)
+    _run_loop(_tick_once, args.interval_seconds, worker_name="schedule-worker")
     return 0
 
 
 # --- loop plumbing -----------------------------------------------------
 
 
-def _run_loop(tick_fn, interval_seconds: float) -> None:
+def _run_loop(tick_fn, interval_seconds: float, *, worker_name: str | None = None) -> None:
+    """Runs ``tick_fn`` on a real interval until SIGTERM/SIGINT.
+
+    ``worker_name``, when given, additionally records a real progress
+    heartbeat (``app/v2/worker_heartbeat.py``) around every tick: this is
+    what lets a health check tell "this unit's process has not exited" (all
+    systemd's own view can ever say) apart from "this unit's loop is
+    actually still ticking" -- the exact gap a real V1.1.1 field report
+    (days of uptime, UI looks empty, only a full restart fixes it) exposed
+    in V1's own background collector threads. See that module's docstring
+    for the full rationale.
+    """
+    from app.v2 import worker_heartbeat
+
     stop = {"flag": False}
 
     def _handle_signal(signum, frame):
@@ -1718,11 +1731,22 @@ def _run_loop(tick_fn, interval_seconds: float) -> None:
 
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
+    tick_count = 0
     while not stop["flag"]:
+        tick_count += 1
+        if worker_name is not None:
+            worker_heartbeat.record_tick_start(STATE_DIR, worker_name, tick_count=tick_count)
         try:
-            tick_fn()
-        except Exception:  # noqa: BLE001 -- one bad tick must not kill the worker
+            result = tick_fn()
+        except Exception as exc:  # noqa: BLE001 -- one bad tick must not kill the worker
             log.exception("worker tick failed")
+            if worker_name is not None:
+                worker_heartbeat.record_tick_failure(STATE_DIR, worker_name, tick_count=tick_count, error=str(exc))
+        else:
+            if worker_name is not None:
+                worker_heartbeat.record_tick_success(
+                    STATE_DIR, worker_name, tick_count=tick_count, result=int(result) if isinstance(result, (int, bool)) else 0
+                )
         for _ in range(int(interval_seconds)):
             if stop["flag"]:
                 break
