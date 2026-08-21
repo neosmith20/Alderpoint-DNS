@@ -204,6 +204,16 @@ cp "$SOURCE_DIR/app/software_updates.py" "$PKG/opt/alderpointdns-v2/app/software
 cp "$SOURCE_DIR/app/network_config.py" "$PKG/opt/alderpointdns-v2/app/network_config.py"
 tar -C "$SOURCE_DIR" --exclude __pycache__ --exclude '*.pyc' -cf - app/v2 | \
   tar -C "$PKG/opt/alderpointdns-v2" -xf -
+# Real defect fixed here (owner-beta visual pass): APP_ROOT/VERSION was
+# never written by this script, so app/v2/webapp.py's own
+# `version_file.exists()` check silently fell through to "unknown" on
+# every real installed appliance -- reproduced live on both System
+# Status ("Version: unknown") and Software Updates ("Installed
+# (source): unknown"). The package's own Debian control Version is the
+# one real, single-sourced version string this build already has
+# (DEB_VERSION above); write it here so both pages report the real
+# installed version instead of a permanent "unknown".
+printf '%s\n' "$DEB_VERSION" > "$PKG/opt/alderpointdns-v2/VERSION"
 tar -C "$SOURCE_DIR" -cf - vendor/v2-analytics | \
   tar -C "$PKG/opt/alderpointdns-v2" -xf -
 cp "$SOURCE_DIR/scripts/v2/alderpointdns_v2_ctl.py" "$PKG/opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_ctl.py"
