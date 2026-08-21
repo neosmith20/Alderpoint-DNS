@@ -178,6 +178,24 @@ if UI_DIR.exists():
 # chunked transfer encoding -- a real remaining gap for a future pass,
 # not claimed as full protection here.
 MAX_REQUEST_BODY_BYTES = 1_000_000
+# Real defect fixed here (owner-beta closure item 3, found live via the
+# Chromium harness's own real-package Software Updates apply proof):
+# the blanket 1 MB cap above was applied to every route including
+# /api/updates/upload, whose real, documented job is to accept an
+# entire Alderpoint DNS V2 candidate .deb -- tens of MB even before
+# webapp.upload_update_package's real base64-JSON encoding inflates it
+# ~33% further (see app.js's fileToBase64 -> data_base64 client side).
+# So the real "Manual Package Upload" feature -- the only self-update
+# path this private, no-public-release build has at all -- could never
+# accept any real V2 package it would ever actually be asked to accept;
+# every real attempt failed closed with this same 413 before even
+# reaching the endpoint's own real name/architecture/version
+# validation. Give this one real large-binary-upload route real
+# headroom over the current real package size (~70 MB); every other
+# route (JSON bodies, PEM certs/keys at most a few KB) keeps the
+# original 1 MB cap and its original rationale unchanged.
+MAX_UPDATE_UPLOAD_BODY_BYTES = 250_000_000
+_LARGE_UPLOAD_PATHS = {"/api/updates/upload"}
 
 
 @app.middleware("http")
@@ -188,7 +206,8 @@ async def _reject_oversized_requests(request: Request, call_next):
             declared_size = int(content_length)
         except ValueError:
             declared_size = None
-        if declared_size is not None and declared_size > MAX_REQUEST_BODY_BYTES:
+        limit = MAX_UPDATE_UPLOAD_BODY_BYTES if request.url.path in _LARGE_UPLOAD_PATHS else MAX_REQUEST_BODY_BYTES
+        if declared_size is not None and declared_size > limit:
             return JSONResponse(
                 status_code=413,
                 content={"error": "payload_too_large", "detail": "request body exceeds the maximum accepted size"},

@@ -21,9 +21,18 @@ set -eu
 
 usage() {
   cat <<'EOF'
-Usage: build-v2-deb.sh [--output-dir DIR]
+Usage: build-v2-deb.sh [--output-dir DIR] [--version VERSION]
 
 Build the private Alderpoint DNS V2 candidate .deb with dpkg-deb.
+
+--version overrides the package's own Debian Version field (default:
+this script's own DEB_VERSION). Real use case: the stateful Chromium
+harness's Software Updates apply test needs a genuinely real, complete,
+harmless package that is strictly newer than whatever is currently
+installed to safely exercise the real privileged apply path end-to-end
+(see tests/v2/browser/chromium_ui_harness.js) -- not a hand-built stub
+package, which a real defect this pass found actually reaches a real
+`apt-get install` once staged and confirmed, same as any real candidate.
 EOF
 }
 
@@ -52,6 +61,7 @@ DEB_ARCH="amd64"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --output-dir) shift; OUTPUT_DIR="${1:?missing output dir}" ;;
+    --version) shift; DEB_VERSION="${1:?missing version}" ;;
     --help|-h) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac

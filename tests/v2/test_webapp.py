@@ -473,6 +473,39 @@ class TestOversizedRequestRejected:
         )
         assert r.status_code == 200, r.text
 
+    def test_update_upload_path_gets_real_headroom_over_the_generic_cap(self, app_client):
+        """Real defect fixed this pass (owner-beta closure item 3, found
+        live): the blanket 1 MB cap above also covered
+        /api/updates/upload, whose real job is accepting an entire V2
+        candidate .deb (tens of MB) base64-encoded into JSON -- so the
+        one real self-update path this private build has could never
+        accept any real package it would ever actually be asked to
+        accept. A body just over the generic cap, but still comfortably
+        under the real package-upload ceiling, must reach the real
+        endpoint (and fail there on its own real validation, e.g. bad
+        base64/not a real .deb -- never a blanket 413) rather than being
+        rejected by the generic body-size middleware."""
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        oversized_for_generic_cap = "x" * (webapp.MAX_REQUEST_BODY_BYTES + 1000)
+        r = client.post(
+            "/api/updates/upload",
+            json={"filename": "candidate.deb", "data_base64": oversized_for_generic_cap},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert r.status_code != 413, r.text
+        assert r.status_code == 400, r.text  # real endpoint validation rejects the bogus base64/content, not the middleware
+
+    def test_update_upload_path_still_has_a_real_ceiling(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        r = client.post(
+            "/api/updates/upload",
+            json={"filename": "candidate.deb", "data_base64": "x" * (webapp.MAX_UPDATE_UPLOAD_BODY_BYTES + 1000)},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert r.status_code == 413, r.text
+
 
 class TestPolicyApiReachesRuntime:
     def test_creating_network_promotes_real_compiled_runtime(self, app_client):

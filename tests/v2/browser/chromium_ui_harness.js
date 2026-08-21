@@ -5,18 +5,45 @@ const path = require("path");
 const net = require("net");
 const crypto = require("crypto");
 
-// Builds a real, minimal, valid .deb (via the actually-installed
-// dpkg-deb) for the Software Updates upload/stage/apply-request test
-// below -- a real package, not a mock, matching this harness's own
-// "real proof" standard for every other workflow it exercises.
-function buildFakeDeb(version) {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "apdns-fake-deb-"));
-  const debianDir = path.join(tmp, "root", "DEBIAN");
-  fs.mkdirSync(debianDir, { recursive: true });
-  fs.writeFileSync(path.join(debianDir, "control"), `Package: alderpointdns-v2\nVersion: ${version}\nArchitecture: amd64\nMaintainer: test\nDescription: test package\n`);
-  const outPath = path.join(tmp, "alderpointdns-v2-fake.deb");
-  execFileSync("dpkg-deb", ["--build", "--root-owner-group", path.join(tmp, "root"), outPath]);
-  return outPath;
+const REPO_ROOT = path.join(__dirname, "..", "..", "..");
+
+// Real defect fixed here, this pass: this used to hand-build a hollow
+// stub .deb (a bare DEBIAN/control, no real payload) "for the Software
+// Updates upload/stage/apply-request test" on the stated assumption
+// that the flow "installs nothing (V2 is private and this container
+// has no real alderpointdns-v2 apt package to upgrade to)". That
+// assumption was never actually true: app/v2/software_updates.py's own
+// validate_candidate_package() only checks package name, amd64
+// architecture, and a strictly-newer version -- there is no payload/
+// signature verification (by design: this is the manual-upload path
+// for an already-trusted local operator, the same trust level as
+// `dpkg -i` over SSH) -- and scripts/v2/alderpointdns_v2_update_apply.py
+// really does run `apt-get install` on whatever staged package passes
+// that check once Apply is confirmed. This stub previously only ever
+// reached that real install accidentally-never, because its
+// hand-picked fake version string ("2.0.0~fake-upload-1") happened to
+// dpkg-compare as OLDER than every real "2.0.0~rcNN-1" candidate this
+// project has actually shipped ('f' sorts before 'r') -- so the
+// intended-newer-version staging step was, in practice, silently
+// exercising the REJECTION path the whole time. Fixing that version
+// string to be genuinely newer (a real, necessary part of this pass's
+// other Software Updates work) then let this stub actually reach a
+// real privileged `apt-get install` of a payload-free package,
+// deleting the real running appliance's files out from under it and
+// failing every step after. Building a real, complete, harmless
+// candidate here -- the project's own real build script, with the
+// currently-installed version bumped by one real debian-revision
+// increment -- gives this test genuinely real, safe, end-to-end proof
+// (staging AND a real successful privileged apply AND the appliance
+// still actually working immediately afterward) instead of either the
+// old accidental-no-op or a real destructive one.
+function buildRealBumpedDeb(installedVersion) {
+  const bumped = `${installedVersion}.1`;
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "apdns-bumped-deb-"));
+  execFileSync("sh", [path.join(REPO_ROOT, "scripts", "build-v2-deb.sh"), "--output-dir", tmp, "--version", bumped], { cwd: REPO_ROOT });
+  const built = fs.readdirSync(tmp).find((f) => f.endsWith(".deb"));
+  if (!built) throw new Error("build-v2-deb.sh did not produce a .deb");
+  return { path: path.join(tmp, built), version: bumped };
 }
 
 const base = process.env.APDNS_UI_BASE || "http://127.0.0.1:18080";
@@ -154,7 +181,7 @@ async function main() {
       if (res.exceptionDetails) throw new Error(JSON.stringify(res.exceptionDetails));
       return res.result.value;
     }
-    async function waitFor(expression, label) {
+    async function waitFor(expression, label, tries = 150) {
       // 150 * 300ms = 45s per wait. Root-caused (beta-rescue priority 10):
       // this was previously 100 * 200ms = 20s, which is not itself wrong,
       // but real backend calls under concurrent Chromium+server load on a
@@ -163,7 +190,7 @@ async function main() {
       // (real text/state present) is correct and unweakened; only the
       // patience was too tight for this environment's real latency
       // variance.
-      for (let i = 0; i < 150; i++) {
+      for (let i = 0; i < tries; i++) {
         if (await evalJs(expression)) return;
         await sleep(300);
       }
@@ -246,6 +273,27 @@ async function main() {
     // rendered, not what its heading says).
     await waitFor(`document.body && (document.querySelector('[data-route="clients"]') || document.querySelector('form[data-auth]'))`, "auth or dashboard screen");
     if (!(await evalJs(`Boolean(document.querySelector('[data-route="clients"]'))`))) {
+      // Owner-beta closure item 3: prove the mismatch -> correction UX
+      // itself, not just that a matching submission eventually works.
+      // Server-side mismatch enforcement was an owner RC45 finding
+      // (see webapp.py's setup() docstring) -- this is its rendered-
+      // browser proof: a real mismatched submit must render a real
+      // client-visible error and must NOT create the admin account, so
+      // the immediately-following corrected submission is still
+      // filling out a genuine first-run form, not a no-op.
+      if (await evalJs(`Boolean(document.querySelector('[name=confirm_password]'))`)) {
+        await evalJs(`document.querySelectorAll('.toast').forEach((n) => n.remove()); true`);
+        await evalJs(`(() => {
+          document.querySelector('[name=username]').value = 'admin';
+          document.querySelector('[name=password]').value = 'correcthorsebattery12';
+          document.querySelector('[name=confirm_password]').value = 'doesnotmatch12';
+          document.querySelector('form[data-auth]').requestSubmit();
+          return true;
+        })()`);
+        await waitFor(`document.body.innerText.toLowerCase().includes("match") || document.querySelector('.toast.bad')`, "setup password mismatch rejected");
+        if (await evalJs(`Boolean(document.querySelector('[data-route="clients"]'))`)) throw new Error("mismatched setup password was accepted");
+        proof.push("setup-password-mismatch-rejected");
+      }
       await evalJs(`(() => {
         // Owner-approved removal of the RC42 setup-token flow: the
         // first-run form no longer has a setup_token field at all.
@@ -269,6 +317,48 @@ async function main() {
     await waitFor(`document.querySelector('.page-head h1') && document.querySelector('.page-head h1').textContent === "Dashboard"`, "dashboard rapid refresh settled");
     for (const r of ["analytics", "statistics", "clients", "policies", "filtering", "blocklists", "encryption", "upstreams", "localdns", "replication", "backup", "notifications", "administration", "health", "importexport", "updates", "logs"]) await route(r);
     proof.push("dashboard-navigation");
+
+    // Real defect fixed this pass (owner-beta visual design pass, found
+    // via authenticated rendered-browser screenshots, not source
+    // reading): pretty()'s plain String(value) coercion rendered an
+    // upstream profile's `endpoints` array as the literal, useless
+    // "[object Object],[object Object]" on both the Dashboard's
+    // Upstreams panel and DNS Settings/Upstreams' own table. Permanent
+    // regression coverage for that defect class: no rendered table cell
+    // anywhere in the app may ever contain the literal string
+    // "[object Object]" again.
+    await route("dashboard");
+    if (await evalJs(`document.body.innerText.includes("[object Object]")`)) throw new Error("a table cell rendered the literal '[object Object]' -- pretty() array/object regression");
+    await route("upstreams");
+    if (await evalJs(`document.body.innerText.includes("[object Object]")`)) throw new Error("a table cell rendered the literal '[object Object]' -- pretty() array/object regression");
+    proof.push("no-object-object-rendering");
+
+    // Browser back/forward across routes (owner-beta closure item 3):
+    // the app owns real client-side routing state, not just clickable
+    // nav items -- history navigation must land on the real matching
+    // page, not a stale or blank one.
+    await route("clients");
+    await route("policies");
+    await route("backup");
+    await evalJs(`history.back(); true`);
+    await waitFor(`document.querySelector('.page-head h1') && document.querySelector('.page-head h1').textContent === "Policies / Explain"`, "back navigation lands on policies");
+    await evalJs(`history.back(); true`);
+    await waitFor(`document.querySelector('.page-head h1') && document.querySelector('.page-head h1').textContent === "Clients"`, "back navigation lands on clients");
+    await evalJs(`history.forward(); true`);
+    await waitFor(`document.querySelector('.page-head h1') && document.querySelector('.page-head h1').textContent === "Policies / Explain"`, "forward navigation lands on policies");
+    proof.push("browser-back-forward-navigation");
+
+    // Rapid repeated route cycling (owner-beta closure item 3): fire
+    // route clicks back-to-back with no waiting between them (a real
+    // impatient-operator pattern) and require the LAST click's route to
+    // be what is actually showing once things settle -- proves stale
+    // in-flight page loads never win a race against a newer navigation.
+    await evalJs(`(() => {
+      ["clients", "backup", "health", "dashboard", "statistics"].forEach((name) => document.querySelector('[data-route="' + name + '"]').click());
+      return true;
+    })()`);
+    await waitFor(`document.querySelector('.page-head h1') && document.querySelector('.page-head h1').textContent === "Statistics" && !document.body.innerText.includes("Page unavailable")`, "rapid route cycling settles on the last click");
+    proof.push("rapid-route-cycling-no-stale-render");
 
     // Sidebar geometry must stay identical across every major route (owner-
     // reported RC42/RC43 defect class: content-driven shell movement).
@@ -591,24 +681,39 @@ async function main() {
     // side of the contract: validation, staging, and that requesting
     // apply actually notifies the privileged helper (the marker file it
     // watches for).
-    const fakeDebPath = buildFakeDeb("2.0.0~fake-upload-1");
-    const fakeDebB64 = fs.readFileSync(fakeDebPath).toString("base64");
+    //
+    // That "installs nothing" premise was never actually true -- see
+    // buildRealBumpedDeb's own comment above. This now builds a real,
+    // complete, harmless candidate (this project's real build script,
+    // the currently-installed version bumped by one real debian-
+    // revision) and drives the real privileged apply all the way to a
+    // real "succeeded" result, then confirms the appliance is still
+    // genuinely serving the real UI on the new version afterward --
+    // strong, safe, honest proof instead of either the old accidental
+    // no-op or a real destructive one.
     await route("updates");
     await waitFor(`document.querySelector('form[data-form="update-upload"]')`, "update upload form");
     if (!await evalJs(`document.body.innerText.includes("no public release available") || document.body.innerText.includes("private")`)) {
       throw new Error("Software Updates page did not disclose the private-channel status honestly");
     }
-    await evalJs(`(async () => {
-      const b64 = ${JSON.stringify(fakeDebB64)};
-      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-      const file = new File([bytes], 'alderpointdns-v2-fake.deb', { type: 'application/vnd.debian.binary-package' });
-      const dt = new DataTransfer();
-      dt.items.add(file);
-      const f = document.querySelector('form[data-form="update-upload"]');
-      f.querySelector('input[type=file]').files = dt.files;
-      f.requestSubmit();
-      return true;
-    })()`);
+    const statusBefore = await pageApi("/api/updates/status");
+    if (!statusBefore.ok || !statusBefore.body.installed_package_version) throw new Error(`could not determine installed package version: ${JSON.stringify(statusBefore)}`);
+    const { path: bumpedDebPath, version: bumpedVersion } = buildRealBumpedDeb(statusBefore.body.installed_package_version);
+    // A real V2 candidate package is tens of MB (real vendored
+    // pyarrow/duckdb wheels) -- base64-embedding it into a
+    // Runtime.evaluate expression string, the way the small AdGuard
+    // YAML fixture above does, would badly overrun this harness's own
+    // minimal hand-rolled WebSocket client (no support for CDP's
+    // extended/64-bit frame length, only the <=65535-byte case) and be
+    // needlessly slow even if it didn't. DOM.setFileInputFiles is CDP's
+    // real, purpose-built mechanism for this: Chromium reads the file
+    // directly off disk itself, no payload ever crosses the CDP
+    // websocket at all.
+    const docRoot = await cdp("DOM.getDocument", { depth: -1, pierce: true });
+    const fileInput = await cdp("DOM.querySelector", { nodeId: docRoot.root.nodeId, selector: 'form[data-form="update-upload"] input[type=file]' });
+    if (!fileInput.nodeId) throw new Error("update-upload file input not found");
+    await cdp("DOM.setFileInputFiles", { files: [bumpedDebPath], nodeId: fileInput.nodeId });
+    await evalJs(`document.querySelector('form[data-form="update-upload"]').requestSubmit(); true`);
     await waitForOkOrError(`document.querySelectorAll('#update-jobs tbody tr').length >= 1 && document.body.innerText.includes("staged")`, "update package staged");
     proof.push("software-update-staged");
 
@@ -625,6 +730,41 @@ async function main() {
       return body.jobs[0] && body.jobs[0].status === 'apply_requested';
     })()`)) throw new Error("update job did not move to apply_requested after the apply request");
     proof.push("software-update-marker-confirmed");
+
+    // The root-owned .path-triggered helper runs asynchronously outside
+    // this HTTP request/response cycle -- poll the real job status
+    // until it reports a real terminal outcome (apt-get install can
+    // take a real, non-trivial number of seconds), then require it to
+    // be a real success, not just "no longer pending".
+    let applyResult = null;
+    for (let i = 0; i < 60; i++) {
+      const jobs = await pageApi("/api/updates/jobs");
+      const job = jobs.ok && jobs.body.jobs && jobs.body.jobs[0];
+      if (job && job.status !== "apply_requested") { applyResult = job; break; }
+      await sleep(2000);
+    }
+    if (!applyResult) throw new Error("update apply job never left apply_requested (privileged helper did not run or never finished)");
+    if (applyResult.status !== "succeeded") throw new Error(`real privileged apply did not succeed: ${JSON.stringify(applyResult)}`);
+    proof.push("software-update-apply-succeeded");
+
+    // Real proof the appliance is still genuinely alive and serving the
+    // real new version, not just that the helper reported success --
+    // a real fresh page load, since the apply itself just
+    // replaced/restarted this appliance's own web service (briefly
+    // unreachable while uvicorn restarts -- retry the navigate itself,
+    // not just the in-page wait).
+    let liveAfterApply = false;
+    for (let i = 0; i < 20 && !liveAfterApply; i++) {
+      try {
+        await cdp("Page.navigate", { url: base + "/ui/health" });
+        await waitFor(`document.body.innerText.includes(${JSON.stringify(bumpedVersion)})`, "appliance reports the real newly-applied version after a real privileged apply", 10);
+        liveAfterApply = true;
+      } catch (_) {
+        await sleep(1000);
+      }
+    }
+    if (!liveAfterApply) throw new Error("appliance did not come back up serving the real newly-applied version after a real privileged apply");
+    proof.push("software-update-apply-verified-live");
 
     await route("replication");
     await waitFor(`document.body.innerText.includes("Node identity")`, "replication status");

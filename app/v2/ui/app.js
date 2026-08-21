@@ -1026,9 +1026,21 @@
   // self-identifying so a load only ever writes the DOM if it is still the
   // most recently requested one.
   let loadToken = 0;
-  async function loadPage(id) {
+  async function loadPage(id, opts = {}) {
     const requested = id || "dashboard";
     const token = ++loadToken;
+    // Real defect fixed here (owner-beta closure item 3, found live via
+    // the Chromium harness's own browser back/forward proof): every
+    // navigation -- a real route change from a sidebar click AND a
+    // same-route re-render from a theme toggle or sidebar collapse --
+    // called history.replaceState, so the SPA never accumulated more
+    // than the one history entry the browser started on. Back/forward
+    // did nothing (or, worse, navigated the browser straight out of the
+    // app). Only an actual route change earns a new history entry;
+    // same-route re-renders and popstate-driven loads (opts.replace)
+    // still replace in place, so toggling the theme or collapsing the
+    // sidebar doesn't spam back with no-op entries.
+    const routeChanged = state.route !== requested;
     state.route = requested;
     document.querySelectorAll("[data-route]").forEach((b) => {
       const isActive = b.dataset.route === state.route;
@@ -1062,7 +1074,9 @@
       const html = await renderers[requested]();
       if (token !== loadToken) return;
       target.innerHTML = html;
-      history.replaceState(null, "", `/ui/${requested}`);
+      const url = `/ui/${requested}`;
+      if (!opts.replace && routeChanged) history.pushState(null, "", url);
+      else history.replaceState(null, "", url);
     } catch (err) {
       if (token !== loadToken) return;
       if (err.status === 401) return boot();
@@ -1126,6 +1140,7 @@
   // loading splash and the login/setup screen -- instead of relying on
   // whatever class happened to be left over from page load.
   let wired = false;
+  let popstateWired = false;
 
   async function boot() {
     setTheme(state.theme);
@@ -1147,7 +1162,17 @@
       // state.theme again -- and an even total of stacked handlers left
       // the theme back where it started.
       if (!wired) { wire(); wired = true; }
-      await loadPage(location.pathname.startsWith("/ui/") ? location.pathname.slice(4) || "dashboard" : "dashboard");
+      await loadPage(location.pathname.startsWith("/ui/") ? location.pathname.slice(4) || "dashboard" : "dashboard", { replace: true });
+      if (!popstateWired) {
+        // Real browser back/forward support (owner-beta closure item
+        // 3): the browser itself already moved the history cursor by
+        // the time this fires -- just render whatever route the URL
+        // now names, in place, without pushing yet another entry.
+        window.addEventListener("popstate", () => {
+          loadPage(location.pathname.startsWith("/ui/") ? location.pathname.slice(4) || "dashboard" : "dashboard", { replace: true });
+        });
+        popstateWired = true;
+      }
     } catch (_) {
       const setup = await api("/api/setup/status").catch(() => ({ setup_required: false }));
       const app = document.getElementById("app");
