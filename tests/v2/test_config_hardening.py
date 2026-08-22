@@ -157,5 +157,77 @@ class TestUnknownKeyRejection(unittest.TestCase):
             v2config.loads("schema_version: 1\nanalytics:\n  bogus_field: 1\n")
 
 
+class TestInitStateConfigDirRemainsGroupWritableAcrossRepeatedCalls(unittest.TestCase):
+    """Regression guard for a real defect found live during a real
+    KVM reboot acceptance: alderpointdns-v2-state-init.service now runs
+    the same `init-state` entry point on every real boot (previously
+    only ever run once, at package install time, by postinst -- see
+    that unit's own comment for the full story). `cmd_init_state`
+    calls `harden_parent_directory()`, which unconditionally resets
+    the config directory to 0750 (group read+traverse only) --
+    postinst used to fix that back up to 0770 (group write+create,
+    needed so the web service can write a promoted rndc.conf there)
+    with its own separate one-time step, run once, after the original
+    single install-time `init-state` call. With `init-state` now
+    re-run on every boot and nothing re-running that fixup afterward,
+    every subsequent reboot silently reverted the directory back to
+    0750, breaking every real policy mutation with a real, live
+    ``PermissionError`` (reproduced live: a real Local DNS mutation
+    submitted through the real management API on a real KVM install's
+    second boot failed with exactly this). Fixed by folding the fixup
+    directly into `cmd_init_state` itself (see its own comment) so it
+    is correct on every call, not just the first -- this test calls
+    the real entry point twice in a row (simulating install, then a
+    reboot) and asserts the config directory stays group-writable
+    after each one, not just the first.
+    """
+
+    def test_config_dir_group_writable_after_first_and_second_init_state_call(self):
+        import argparse
+        import importlib
+
+        with tempfile.TemporaryDirectory() as td:
+            env_overrides = {
+                "ALDERPOINTDNS_V2_APP_ROOT": str(Path(td) / "opt"),
+                "ALDERPOINTDNS_V2_CONFIG_ROOT": str(Path(td) / "etc"),
+                "ALDERPOINTDNS_V2_STATE_ROOT": str(Path(td) / "state"),
+                "ALDERPOINTDNS_V2_COOKIE_SECURE": "0",
+            }
+            old_env = {k: os.environ.get(k) for k in env_overrides}
+            os.environ.update(env_overrides)
+            try:
+                sys.path.insert(0, str(ROOT / "scripts" / "v2"))
+                import alderpointdns_v2_ctl as ctl
+
+                importlib.reload(ctl)
+                args = argparse.Namespace()
+
+                def _real_boot_mode() -> int:
+                    return ctl.cmd_init_state(args)
+
+                self.assertEqual(_real_boot_mode(), 0, "first (install-time) init-state call failed")
+                config_dir = Path(env_overrides["ALDERPOINTDNS_V2_CONFIG_ROOT"])
+                mode_after_first = config_dir.stat().st_mode & 0o777
+                self.assertTrue(
+                    mode_after_first & 0o020,
+                    f"config dir not group-writable after the first init-state call: {oct(mode_after_first)}",
+                )
+
+                self.assertEqual(_real_boot_mode(), 0, "second (simulated-reboot) init-state call failed")
+                mode_after_second = config_dir.stat().st_mode & 0o777
+                self.assertTrue(
+                    mode_after_second & 0o020,
+                    f"config dir reverted to non-group-writable after a second init-state call "
+                    f"(the real reboot-time regression this test guards against): {oct(mode_after_second)}",
+                )
+            finally:
+                for k, v in old_env.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
+                sys.path.remove(str(ROOT / "scripts" / "v2"))
+
+
 if __name__ == "__main__":
     unittest.main()

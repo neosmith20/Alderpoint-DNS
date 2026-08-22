@@ -319,6 +319,32 @@ def cmd_init_state(args: argparse.Namespace) -> int:
     _chown_best_effort(LOG_DIR, 0o750)
 
     v2config.harden_parent_directory(CONFIG_FILE, owner_group=SERVICE_GROUP)
+    # Real defect found live during a real KVM reboot acceptance:
+    # harden_parent_directory() unconditionally chmods CONFIG_FILE's
+    # parent (/etc/alderpointdns-v2) to 0750 (group read+traverse
+    # only). Every real policy mutation through the management API
+    # writes a promoted rndc.conf into this same directory (see
+    # alderpointdns-v2-web.service's own comment on its
+    # ReadWritePaths=), which needs the alderpointdns-v2 *group* to
+    # also have write+create on the directory entry itself -- postinst
+    # used to fix this up with its own one-time "final ownership pass"
+    # (chmod 0770) that ran once, after this same init-state call, at
+    # install time only. Introducing alderpointdns-v2-state-init.service
+    # (this same init-state entry point, now also run once per real
+    # boot -- see that unit's own comment) meant every subsequent
+    # reboot silently re-ran harden_parent_directory()'s 0750 reset
+    # with nothing to fix it back up afterward, since postinst's own
+    # fixup only ever ran once. Folding the fixup directly into this
+    # function (which already documents itself as "safe to call on
+    # every service start") makes it correct on every call site, not
+    # just the original install-time one -- 0770 does not make
+    # CONFIG_FILE itself group-writable, only the directory entry
+    # (creating new files next to it); CONFIG_FILE keeps its own
+    # separate, unaffected 0640 below.
+    try:
+        CONFIG_FILE.parent.chmod(0o770)
+    except OSError:
+        pass
     if not CONFIG_FILE.exists():
         default_cfg = v2config.AlderpointV2Config(
             listeners=[v2config.Listener(protocol="udp", address="0.0.0.0", port=53)],
