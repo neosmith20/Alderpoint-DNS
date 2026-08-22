@@ -47,7 +47,29 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 ReadOnlyPaths=/var/lib/alderpointdns-v2/compiled
 ReadWritePaths=/var/log/alderpointdns-v2
 UMask=0027
-MemoryMax=512M
+# Real defect found live during KVM clean-install/reboot acceptance
+# (owner-beta closure pass): this cap was 512M, sized without ever
+# actually measuring dnsdist's own steady-state footprint with the
+# real, default three-blocklist configuration this exact package seeds
+# on first install (AdGuard DNS filter + StevenBlack Unified Hosts +
+# HaGeZi Multi Normal, ~450k+ combined domains compiled into dnsdist's
+# in-memory ruleset). Measured live (MemoryMax temporarily lifted to
+# `infinity` via `systemctl set-property` on a real fresh KVM install,
+# real DNS traffic still flowing throughout): steady state is ~569M
+# RSS with the full default ruleset loaded, before any query-cache
+# growth on top of that. 512M was therefore *always* going to be
+# exceeded by dnsdist's own default configuration, not just under
+# load -- systemd's memory cgroup killed the real dnsdist process
+# every single time it tried to load the real default ruleset,
+# producing an unconditional crash loop (`Failed with result
+# 'oom-kill'`, `restart counter` climbing without bound) with DNS
+# answering never coming up at all. 1024M keeps a real, bounded cap
+# (this is deliberately still not "unlimited") with real headroom
+# above the measured ~569M baseline for the query-cache growth the
+# aging/soak evidence already showed (up to ~303M RSS growth toward
+# its own configured 10,000-entry cap) plus a safety margin, while
+# still protecting the host from genuine unbounded runaway growth.
+MemoryMax=1024M
 
 [Install]
 WantedBy=multi-user.target

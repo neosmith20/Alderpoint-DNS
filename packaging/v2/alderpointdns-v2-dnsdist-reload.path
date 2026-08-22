@@ -1,12 +1,29 @@
 [Unit]
 Description=Watch Alderpoint DNS V2 promoted dnsdist runtime for reload
-After=alderpointdns-v2-dnsdist.service
-# Same real defect/fix as alderpointdns-v2-dnsdist-reload.service's own
-# comment: when the triggered .service unit hits systemd's start-rate
-# limit, this .path unit's own activation is reported failed too and it
-# stops watching entirely -- matching the triggered unit's generous
-# bounded limit here as well, defense in depth against the same failure
-# mode reaching this unit through a different path.
+# Real defect found live during KVM clean-install/reboot acceptance
+# (owner-beta closure pass): this used to declare
+# `After=alderpointdns-v2-dnsdist.service`, on the assumption the watch
+# should only start once dnsdist itself is up. That is not actually
+# required for correctness (this unit only needs to be watching by the
+# time a future promotion happens, not before dnsdist's own first
+# start), and it created a real boot-time systemd ordering cycle: this
+# .path unit (default-dependency-pulled into paths.target, which
+# basic.target depends on) After'd alderpointdns-v2-dnsdist.service,
+# while that service itself (via alderpointdns-v2-bind@.service's own
+# `Before=alderpointdns-v2-dnsdist.service`, plus every normal
+# service's implicit default dependency on basic.target) needed
+# basic.target's own chain to resolve first. Every real fresh boot hit
+# this cycle (`systemd[1]: ... Found ordering cycle on
+# alderpointdns-v2-dnsdist.service/start`) and systemd broke it by
+# silently deleting dnsdist.service's own start job entirely --
+# real DNS answering never came up at all after a genuine reboot,
+# with no failed-unit signal (the job was deleted, not failed).
+# Matching the sibling alderpointdns-v2-bind-reload.path unit (which
+# never declared this ordering and has never hit this), dropping the
+# unnecessary `After=` here removes the cycle; systemd starts this
+# path watcher and alderpointdns-v2-dnsdist.service independently and
+# in parallel, and the watch is fully armed well before any operator
+# mutation could plausibly promote a new runtime.
 StartLimitIntervalSec=60
 StartLimitBurst=200
 
