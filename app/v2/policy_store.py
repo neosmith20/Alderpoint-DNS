@@ -215,16 +215,22 @@ def _ensure_policy_layers_beta_rescue_columns(path: str | Path) -> None:
     in at all. Runs unconditionally on every ensure_schema() call, like
     _ensure_dns_transport_settings_table below, so it reaches an already-
     migrated install upgrading from a prior RC, not only a fresh one.
+
+    Real defect found live during a real KVM clean-install/reboot
+    acceptance: this used its own unprotected read-then-ALTER sequence
+    (no transaction), which raced under real concurrency -- see
+    app/v2/control_db.py's own add_columns_if_missing() docstring for
+    the full root cause and fix.
     """
-    with control_db.connect(path) as conn:
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(policy_layers)").fetchall()}
-        if "custom_ipv4" not in cols:
-            conn.execute("ALTER TABLE policy_layers ADD COLUMN custom_ipv4 TEXT")
-        if "custom_ipv6" not in cols:
-            conn.execute("ALTER TABLE policy_layers ADD COLUMN custom_ipv6 TEXT")
-        if "fallback_upstream_profile_id" not in cols:
-            conn.execute("ALTER TABLE policy_layers ADD COLUMN fallback_upstream_profile_id TEXT")
-        conn.commit()
+    control_db.add_columns_if_missing(
+        path,
+        "policy_layers",
+        {
+            "custom_ipv4": "TEXT",
+            "custom_ipv6": "TEXT",
+            "fallback_upstream_profile_id": "TEXT",
+        },
+    )
 
 
 def _ensure_dns_transport_settings_table(path: str | Path) -> None:
@@ -260,32 +266,33 @@ def _ensure_dns_transport_settings_table(path: str | Path) -> None:
             )
             """
         )
-        # Incremental columns added after the table's first release
-        # (DoH support) -- ALTER TABLE ADD COLUMN, not a CREATE TABLE
-        # change, since CREATE TABLE IF NOT EXISTS is a no-op against a
-        # table an earlier package version already created (same
-        # incremental-migration need app/v2/replication_v2.py's
-        # ensure_schema documents for the exact same reason).
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(dns_transport_settings)").fetchall()}
-        if "doh_enabled" not in cols:
-            conn.execute("ALTER TABLE dns_transport_settings ADD COLUMN doh_enabled INTEGER NOT NULL DEFAULT 0")
-        if "doh_port" not in cols:
-            conn.execute("ALTER TABLE dns_transport_settings ADD COLUMN doh_port INTEGER NOT NULL DEFAULT 443")
-        if "doh_path" not in cols:
-            conn.execute("ALTER TABLE dns_transport_settings ADD COLUMN doh_path TEXT NOT NULL DEFAULT '/dns-query'")
-        if "doq_enabled" not in cols:
-            conn.execute("ALTER TABLE dns_transport_settings ADD COLUMN doq_enabled INTEGER NOT NULL DEFAULT 0")
-        if "doq_port" not in cols:
-            conn.execute("ALTER TABLE dns_transport_settings ADD COLUMN doq_port INTEGER NOT NULL DEFAULT 853")
-        # DoH3 (roadmap continuation: closes the last QUIC-dependent row
-        # of the confirmed mandatory-parity gap alongside DoQ -- see
-        # docs/v2/doh3-transport-implemented.md). Same incremental-
-        # migration pattern as every prior protocol added to this table.
-        if "doh3_enabled" not in cols:
-            conn.execute("ALTER TABLE dns_transport_settings ADD COLUMN doh3_enabled INTEGER NOT NULL DEFAULT 0")
-        if "doh3_port" not in cols:
-            conn.execute("ALTER TABLE dns_transport_settings ADD COLUMN doh3_port INTEGER NOT NULL DEFAULT 443")
-        conn.commit()
+    # Incremental columns added after the table's first release (DoH
+    # support onward) -- ALTER TABLE ADD COLUMN, not a CREATE TABLE
+    # change, since CREATE TABLE IF NOT EXISTS is a no-op against a
+    # table an earlier package version already created (same
+    # incremental-migration need app/v2/replication_v2.py's
+    # ensure_schema documents for the exact same reason). Real defect
+    # found live during a real KVM clean-install/reboot acceptance:
+    # this used its own unprotected read-then-ALTER sequence (no
+    # transaction), which raced under real concurrency -- see
+    # app/v2/control_db.py's own add_columns_if_missing() docstring for
+    # the full root cause and fix.
+    control_db.add_columns_if_missing(
+        path,
+        "dns_transport_settings",
+        {
+            "doh_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "doh_port": "INTEGER NOT NULL DEFAULT 443",
+            "doh_path": "TEXT NOT NULL DEFAULT '/dns-query'",
+            "doq_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "doq_port": "INTEGER NOT NULL DEFAULT 853",
+            # DoH3 (roadmap continuation: closes the last QUIC-dependent
+            # row of the confirmed mandatory-parity gap alongside DoQ --
+            # see docs/v2/doh3-transport-implemented.md).
+            "doh3_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "doh3_port": "INTEGER NOT NULL DEFAULT 443",
+        },
+    )
 
 
 @dataclass

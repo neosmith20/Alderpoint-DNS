@@ -1,0 +1,37 @@
+[Unit]
+Description=Alderpoint DNS V2 deterministic control-plane state/schema initialization
+Documentation=man:sqlite3(1)
+# Real defect found live during a real KVM clean-install/reboot
+# acceptance: nothing previously re-ran control.db schema
+# initialization at boot -- only packaging/v2/postinst's own
+# `init-state` call did, and that runs once, at package
+# install/upgrade time only. Every V2 worker's own ensure_schema()
+# (idempotent by design, safe to call from anywhere) was therefore the
+# *only* thing establishing/verifying schema on an ordinary reboot,
+# and several workers all independently called their own
+# ensure_schema() chain at their own startup, all racing to start at
+# once -- SQLite allows only one writer at a time, so this was real,
+# repeated write-lock contention on every single boot, not a
+# hypothetical one. This unit reuses the exact same, already-tested,
+# idempotent `init-state` entry point postinst already calls, running
+# it deterministically once per boot, ordered before every worker that
+# depends on control.db already being correctly initialized -- see
+# each dependent worker's own `Requires=`/`After=` on this unit. A
+# worker's own ensure_schema() call still runs after this (defense in
+# depth if a worker is later started independently, e.g. `systemctl
+# restart` of just one unit) but by then finds nothing to do -- see
+# app/v2/control_db.py's own `initialize()` docstring for the matching
+# fast-path fix that makes that defense-in-depth call itself cheap and
+# non-blocking rather than another redundant write transaction.
+After=network.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3 -B /opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_ctl.py init-state
+User=root
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

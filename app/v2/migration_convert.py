@@ -105,7 +105,7 @@ def _real_columns(conn: sqlite3.Connection, table: str) -> set[str]:
 
 def resolve_source_db_path(source_path: Path) -> Path:
     """Explicit source-root/source-database contract (real defect closed:
-    RC42's UI supplied V1's real installed database FILE,
+    the migration UI supplied V1's real installed database FILE,
     ``/var/lib/alderpointdns/alderpointdns.db``, but this function
     unconditionally treated its argument as a DIRECTORY and appended
     ``alderpointdns.db`` again -- looking for the non-existent
@@ -366,7 +366,7 @@ def build_preview(backup_db_path: Path) -> dict:
                 # add_rules_bulk, the importer) ever writes to it -- every
                 # real custom filter rule a real V1 admin has ever created
                 # lives in custom_filter_rules instead (found live during
-                # RC2 migration acceptance testing: a real V1 install with
+                # real migration acceptance testing: a real V1 install with
                 # 20 real rules created through the real add_rule() API
                 # previewed and migrated as 0 rules with the old query).
                 "custom_rules_block": conn.execute(
@@ -669,7 +669,7 @@ def migrate_filtering(backup_db_path: Path) -> dict:
     is dead schema no current V1 code path ever writes to; every real V1
     admin's real custom rules (via the actual /rules UI, custom_rules.py's
     add_rule()/add_rules_bulk(), or the importer) live in
-    custom_filter_rules instead. Found live during RC2 migration
+    custom_filter_rules instead. Found live during real migration
     acceptance testing: a real V1 install with 20 real rules migrated as
     zero with the old query, silently.
 

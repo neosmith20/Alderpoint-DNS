@@ -236,58 +236,84 @@ def test_no_unit_scopes_readwritepaths_to_a_narrow_subdirectory_that_races_at_bo
             )
 
 
-def test_no_shipped_file_references_an_internal_private_rc_identifier():
-    """Regression guard for a real privacy-scrub defect this pass's own
-    scrub caught before it ever shipped: this pass's own defect-history
-    comments (added directly to alderpointdns-v2-schedule.service,
-    alderpointdns-v2-tierb.service, alderpointdns-v2-web.service, and
-    app/v2/blocklist_subscriptions.py while explaining a real live-found
-    defect and its fix) used the literal private candidate identifiers
-    "RC46"/"RC47" -- internal, sequential, pre-release QA-pass markers,
-    not meant to ever reach a real customer's installed system. A real
-    operator seeing "RC46" in their own installed systemd unit file is
-    both confusing and an unintended disclosure of this project's
-    internal release-candidate churn. This never actually shipped (the
-    pre-build private scrub caught it, see this pass's own RC48/RC49
-    manifest), but must not silently regress: every future defect-
-    history comment must describe *what* was found and fixed without
-    embedding a private "RC<N>" token. The real, intentional Debian
-    package version string (e.g. "2.0.0~rc48-1", always lowercase
-    "~rcNN-1") is exempt -- only a bare uppercase "RC" + digits token,
-    the internal prose-reference form, is checked here.
+def test_every_packaging_unit_file_is_copied_by_the_build_script():
+    """Regression guard: scripts/build-v2-deb.sh copies each
+    packaging/v2/*.service and *.path file into the built package via
+    an explicit, individually-listed `cp` line (not a glob) -- adding a
+    new unit file (as this pass's own alderpointdns-v2-state-init.service
+    did) is silently a no-op in the actual shipped package unless that
+    line is also added here. A missing unit file is invisible at build
+    time (the build still succeeds) and only surfaces as a real
+    "systemctl: unit not found" failure on a real installed appliance.
+    """
+    build_script = (ROOT / "scripts/build-v2-deb.sh").read_text()
+    unit_files = sorted(
+        p.name
+        for p in (ROOT / "packaging/v2").iterdir()
+        if p.suffix in (".service", ".path")
+    )
+    missing = [name for name in unit_files if name not in build_script]
+    assert not missing, (
+        f"packaging/v2 unit file(s) {missing} are not referenced anywhere in "
+        "scripts/build-v2-deb.sh -- add a `cp` line for each so they actually "
+        "ship in the built .deb"
+    )
 
-    Scope note: this check is intentionally limited to the specific
-    files this pass itself touched (below), not a repo-wide sweep --
-    a repo-wide grep for this same bare 'RC\\d+' pattern turns up
-    pre-existing references in several other shipped files going back
-    to earlier RCs (e.g. app/v2/auth_hash.py, app/dnsdist_upgrade.py),
-    which is a genuine, real, *pre-existing* instance of this same
-    defect class this pass did not introduce and did not attempt to
-    remediate repo-wide (out of scope for this pass's specific fixes;
-    flagged in this pass's own final report as a real remaining item
-    for a future privacy-scrub pass, not silently dropped). A repo-wide
-    version of this test would need to first reconcile all of those
-    pre-existing hits, which is real, separate work.
+
+def test_no_shipped_file_references_an_internal_private_rc_identifier():
+    """Regression guard for a real privacy-scrub defect class: shipped
+    defect-history comments across this codebase used to reference
+    literal, internal, sequential, pre-release private candidate
+    identifiers ("RC9", "RC42", "RC45", etc. -- private QA-pass
+    markers never meant to reach a real customer's installed system).
+    First caught narrowly (this pass's own new comments, "RC46"/"RC47",
+    before they ever shipped in RC48); on the following pass, audited
+    and cleaned repo-wide -- every "found live during RC<N> ..."-style
+    reference across app/, packaging/v2/, and scripts/v2/ (the actual
+    shipped payload) was reworded to describe *what* was found and
+    fixed without a private candidate number, e.g. "found live during
+    real clean-install acceptance testing". This is now a genuine,
+    repo-wide, zero-exceptions check, not a scoped one -- a future
+    defect-history comment that reintroduces a bare "RC<N>" token
+    anywhere in the shipped payload fails this test.
+
+    The real, intentional Debian package version string (e.g.
+    "2.0.0~rc50-1", always lowercase "~rcNN-1") is exempt -- only a
+    bare uppercase "RC" + digits token, the internal prose-reference
+    form, is checked. A legitimate technical term that happens to
+    match the same shape (the RC4 cipher name, "!aNULL:!MD5:!RC4") is
+    exempt too -- see the ``allowed_context`` substrings below.
     """
     import re
 
     prohibited = re.compile(r"\bRC\d+\b")
-    touched_files = (
-        "app/v2/blocklist_subscriptions.py",
-        "packaging/v2/alderpointdns-v2-schedule.service",
-        "packaging/v2/alderpointdns-v2-tierb.service",
-        "packaging/v2/alderpointdns-v2-web.service",
-        "packaging/v2/alderpointdns-v2-dnsdist.service",
-        "packaging/v2/alderpointdns-v2-dnsdist-reload.path",
-    )
+    # Substrings where a "RC<N>"-shaped match is a real, legitimate,
+    # non-private technical term, not an internal candidate reference.
+    allowed_context = ("RC4",)  # the RC4 stream cipher, in a TLS cipher list
+    shipped_dirs = ("app", "packaging/v2", "scripts/v2")
     hits = []
-    for rel_path in touched_files:
-        path = ROOT / rel_path
-        if prohibited.search(path.read_text(encoding="utf-8")):
-            hits.append(rel_path)
+    for rel_dir in shipped_dirs:
+        for path in (ROOT / rel_dir).rglob("*"):
+            if not path.is_file() or "__pycache__" in path.parts:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            for m in prohibited.finditer(text):
+                token = m.group()
+                if token in allowed_context and "RC4" in token:
+                    # Only exempt an exact "RC4" match, and only when
+                    # it's genuinely the cipher name, not e.g. "RC42"
+                    # (which also contains "RC4" as a substring but is
+                    # a distinct, longer token -- \b already ensures
+                    # `token` here is the *whole* matched word, so
+                    # "RC42" would never equal "RC4").
+                    continue
+                hits.append(f"{path.relative_to(ROOT)}: {token!r}")
     assert not hits, (
-        f"found internal private RC-identifier reference(s) (e.g. 'RC46') in "
-        f"shipped file(s): {hits} -- reword to describe the defect without "
+        f"found internal private RC-identifier reference(s) in shipped "
+        f"file(s): {hits} -- reword to describe the defect without "
         "embedding a private release-candidate number"
     )
 

@@ -1,6 +1,15 @@
 [Unit]
 Description=Alderpoint DNS V2 mTLS replication service
-After=network.target
+# Same real defect/fix as alderpointdns-v2-discovery.service's own
+# comment: this worker's own startup calls
+# replication_v2.ensure_schema() directly (which itself cascades into
+# policy_store/notification_store/node_identity's own ensure_schema()
+# too), taking real write locks against control.db with no boot-time
+# ordering guarantee against every other schema-touching worker's own
+# startup. See alderpointdns-v2-state-init.service's own comment for
+# the full root cause and fix.
+After=network.target alderpointdns-v2-state-init.service
+Requires=alderpointdns-v2-state-init.service
 
 [Service]
 Type=simple

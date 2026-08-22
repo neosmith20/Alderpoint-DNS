@@ -511,7 +511,7 @@ class SetupRequest(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=12, max_length=256)
     confirm_password: str = Field(min_length=12, max_length=256)
-    # V1.1.1-baseline first-run fields (owner RC45 finding, priority 2 of
+    # V1.1.1-baseline first-run fields (a real owner-reported finding, priority 2 of
     # the beta-rescue brief: setup had regressed to bare username/password
     # -- see docs/v2/beta-rescue-setup-fields.md). server_ip is left
     # optional and, when blank, auto-detected from the real current
@@ -525,7 +525,7 @@ class SetupRequest(BaseModel):
 
 @app.get("/api/setup/status")
 def setup_status():
-    # Owner-approved removal of the RC42 SSH-retrieved-setup-token UX:
+    # Owner-approved removal of a prior SSH-retrieved-setup-token UX:
     # the ONLY thing that gates first-run setup is "does this genuinely
     # never-initialized appliance have zero admin accounts" -- the exact
     # same real, transactional condition setup() below re-checks inside
@@ -542,7 +542,7 @@ def setup_status():
 
 @app.post("/api/setup")
 def setup(req: SetupRequest, request: Request):
-    # Owner-approved removal of RC42's mandatory SSH-retrieved setup-
+    # Owner-approved removal of a prior mandatory SSH-retrieved setup-
     # token flow (docs/v2/management-plane.md "Known limitations" no
     # longer applies to this endpoint): first-admin creation is gated
     # only on the real, transactional "zero admin accounts exist yet"
@@ -555,7 +555,7 @@ def setup(req: SetupRequest, request: Request):
     # administrator does could already have raced the token file the
     # same way); what actually matters -- this can only ever succeed
     # once, atomically, before any admin exists -- is unchanged.
-    # Server-side mismatch enforcement (owner RC45 finding, priority 2):
+    # Server-side mismatch enforcement (a real owner-reported finding, priority 2):
     # the client also checks this live, but the server is the actual
     # gate -- never trust the browser alone for the one action that
     # creates the appliance's only account.
@@ -681,7 +681,7 @@ def session_status(admin=Depends(current_admin)):
 
 # --- administration: password change / session revocation
 # (beta-rescue priority 5 -- a real gap, not a stylistic one: V1.1.1 has
-# always had these two actions and RC43 shipped with no way for an
+# always had these two actions and a prior release shipped with no way for an
 # operator to change their own password or revoke other sessions at all)
 # ------------------------------------------------------------------------
 
@@ -865,7 +865,7 @@ def _configured_listen_address() -> str:
     ("127.0.0.1:53") instead of the configured listener -- rebinding
     dnsdist to loopback-only and cutting off every real LAN client the
     next time an admin changes any policy, without any error or warning
-    (found live during RC1 clean-install acceptance testing)."""
+    (found live during real clean-install acceptance testing)."""
     cfg = v2config.load_file(CONFIG_FILE) if CONFIG_FILE.exists() else v2config.AlderpointV2Config()
     listener = cfg.listeners[0] if cfg.listeners else v2config.Listener(protocol="udp", address="0.0.0.0", port=53)
     return f"{listener.address}:{listener.port}"
@@ -1216,7 +1216,7 @@ def get_dns_transports(admin=Depends(current_admin)):
     }
 
 
-# Real defect found live during RC21 acceptance testing: requesting a
+# Real defect found live during real acceptance testing: requesting a
 # DoT/DoH port that collides with an already-bound appliance port
 # (tried the management API's own 8443) passed real dnsdist --check-
 # config validation (a syntax check, not a bind attempt) and got
@@ -1249,7 +1249,7 @@ def _validate_dns_transport_ports(req: "DnsTransportSettingsUpdate") -> None:
     # plain DNS listener (conservative -- treated as reserved even
     # where the real conflict would only be TCP-side, since being
     # overly cautious here is safe and being wrong the other way took
-    # down real DNS live on RC21).
+    # down real DNS live in a real incident).
     tcp_requested: list[tuple[str, int]] = []
     all_requested: list[tuple[str, int]] = []
     if req.dot_enabled:
@@ -1269,7 +1269,7 @@ def _validate_dns_transport_ports(req: "DnsTransportSettingsUpdate") -> None:
         # dnsdist's real addDNSCryptBind binds BOTH UDP and TCP on the
         # same port -- checked against the TCP pairwise-conflict set too
         # (not just DoQ/DoH3's UDP-only treatment), conservative in the
-        # same direction RC21's real live incident already proved is the
+        # same direction a real prior live incident already proved is the
         # safe one to err on.
         tcp_requested.append(("dnscrypt_port", req.dnscrypt_port))
         all_requested.append(("dnscrypt_port", req.dnscrypt_port))
@@ -1915,7 +1915,7 @@ def list_local_dns(admin=Depends(current_admin)):
 
 def _insert_local_dns_record(name: str, record_type: str, value: str, ttl: int = 300, enabled: bool = True):
     """Shared by the authenticated /api/local-dns route and first-run
-    setup's best-effort local-DNS seeding (owner RC45 finding, priority 2)
+    setup's best-effort local-DNS seeding (a real owner-reported finding, priority 2)
     -- one real validation+insert path, not a route-only copy the setup
     flow would otherwise have to reimplement and could drift from."""
     if record_type not in ("A", "AAAA", "CNAME", "PTR"):
@@ -2983,7 +2983,7 @@ class IssuePeerCertRequest(BaseModel):
     # deliberately a little more permissive than strict UUID (allows
     # future non-UUID identifiers) while still refusing to embed
     # arbitrary attacker-controlled text into a real X.509 certificate's
-    # CN field -- found live during RC11 security spot-checking: a
+    # CN field -- found live during real security spot-checking: a
     # value like "../../etc/passwd" was accepted and issued into a real
     # cert with no functional exploit path found (never used as a
     # filesystem path or interpreted by anything other than being
@@ -2996,7 +2996,7 @@ class IssuePeerCertRequest(BaseModel):
 @app.post("/api/replication/issue-peer-cert")
 def replication_issue_peer_cert(req: IssuePeerCertRequest, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
     """The real replication peer-enrollment step (previously missing
-    entirely -- found live during RC3 replication acceptance testing,
+    entirely -- found live during real replication acceptance testing,
     see docs/v2/replication-real-two-node-acceptance.md): issues a cert
     signed by THIS node's own replication CA for req.remote_node_id to
     use as its client cert when connecting to THIS node. Returns

@@ -6,7 +6,16 @@ Description=Alderpoint DNS V2 schedule transition worker (private candidate)
 # without raising, per app/v2/schedule_runtime.py's own contract) -- it
 # never un-promotes a working config, so this worker can never regress an
 # already-answering DNS runtime, only fail to advance it.
-After=network.target
+# Defensive ordering (same real defect class as
+# alderpointdns-v2-discovery.service's own comment, audited for every
+# V2 service during that same pass): this worker's own on_start/tick
+# writes to control.db via webapp._mutate_and_promote(), which does
+# not itself call ensure_schema() (schema is assumed already
+# established) -- ordering after schema is deterministically
+# established removes any dependency on that assumption being true by
+# luck of boot timing.
+After=network.target alderpointdns-v2-state-init.service
+Requires=alderpointdns-v2-state-init.service
 
 [Service]
 Type=simple

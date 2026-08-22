@@ -174,7 +174,7 @@ def cmd_install_enhanced_dnsdist(args: argparse.Namespace) -> int:
     must be explicitly turned on afterward."""
     _require_root()
     try:
-        # Real defect found live during RC24 clean-install acceptance
+        # Real defect found live during real clean-install acceptance
         # testing: app.dnsdist_upgrade's default check-config/restart/
         # verify topology is V1's own (`dnsdist.service`, `/etc/dnsdist/
         # dnsdist.conf`) -- wrong for V2, whose real live dnsdist runtime
@@ -349,12 +349,12 @@ def cmd_init_state(args: argparse.Namespace) -> int:
 
     cmd_ensure_tls_cert(args)
 
-    # First-run install UX (owner-approved removal of RC42's mandatory
+    # First-run install UX (owner-approved removal of a prior mandatory
     # SSH-retrieved setup-token flow, §11 superseded): a fresh appliance
     # no longer needs a secret scavenger hunt to create the first
     # administrator -- app/v2/webapp.py's /api/setup is gated purely on
     # "zero admin accounts exist yet." What operators genuinely could not
-    # tell from RC42's postinst output was that V2 management moved from
+    # tell from a prior postinst output was that V2 management moved from
     # V1's HTTP :3000 to HTTPS :8443 at all -- print that clearly instead,
     # and print nothing secret (no token, no password) into what can end
     # up in a world-readable apt/dpkg log.
@@ -843,7 +843,7 @@ def _effective_flags_for_client(conn, client_ip: str, now):
     per-qname blocked/allowed/rewritten decision (see
     ``_action_for_event``) without a second, separate policy compile.
 
-    Real defect found live during the RC13/RC14/RC15 continuation
+    Real defect found live during a real continuation
     (docs/v2/cache-profile-id-not-populated-fix.md): every real
     dnsdist-sourced analytics event's ``cache_profile_id`` was always
     "" -- a real, admin-facing filterable/sortable query-log column
@@ -904,7 +904,7 @@ def _action_for_event(conn, policy, qname: str) -> tuple[str, str]:
     """Resolves the real (action, block_reason) for one event's qname
     against its client's already-compiled effective policy.
 
-    Real defect found live during the RC13-RC16 continuation
+    Real defect found live during a real continuation
     (docs/v2/blocked-action-not-populated-fix.md): every real
     dnsdist-sourced analytics event defaulted to
     ``action="allowed"``/``block_reason=""`` unconditionally --
@@ -981,7 +981,7 @@ def cmd_analytics_worker(args: argparse.Namespace) -> int:
     def _drain_once() -> int:
         processed = 0
         flag_cache: dict[str, tuple[bool, bool]] = {}
-        # Real regression found live during RC9 clean-install acceptance
+        # Real regression found live during real clean-install acceptance
         # testing: this service's systemd unit (like every other V2
         # worker) is deliberately hardened with ProtectSystem=strict and
         # a narrow ReadWritePaths= that never included control.db --
@@ -1291,7 +1291,7 @@ def _event_from_response(decoded: "dnsdist_protobuf.DecodedResponse") -> dict:
 def _event_from_unmatched_query(decoded: "dnsdist_protobuf.DecodedQuery", recent_answer: tuple[str, bool] | None = None) -> dict:
     # A query message with no matching response ever arrived within the
     # correlation window. Real, verified dnsdist 2.1.1 behavior confirmed
-    # live during the RC13 continuation covers TWO distinct real cases
+    # live during a real continuation covers TWO distinct real cases
     # this shape can mean, not one:
     #
     # 1. A terminally-spoofed query (SpoofAction/SpoofCNAMEAction:

@@ -17,7 +17,7 @@
   // unrelated concerns (e.g. Replication and Backup living under the same
   // group as Dashboard) and gave the owner no stable mental model to
   // navigate by. Dashboard stays a standalone top-level item, matching V1.
-  // IA split (owner RC45 finding, priority 1 of the second beta-rescue
+  // IA split (a real owner-reported finding, priority 1 of the second beta-rescue
   // pass: Statistics was buried under Query Log, Administration was
   // buried inside System Status, and Encryption was mixed in with
   // Notifications under one "Notifications / HTTPS" page -- concept
@@ -52,7 +52,7 @@
   ];
   const GROUP_ORDER = ["DNS", "Security", "Operations", "System"];
 
-  // Real per-section expand/collapse state (owner RC45 finding, priority
+  // Real per-section expand/collapse state (a real owner-reported finding, priority
   // 1 of the beta-rescue brief: the sidebar previously rendered
   // GROUP_ORDER as plain, non-interactive `.section-label` divs above a
   // flat button list -- visually grouped but not an actual disclosure
@@ -351,7 +351,7 @@
       api("/api/analytics/recent?minutes=60").catch((e) => ({ rows: [], degraded: true, degraded_reason: e.message })),
       api("/api/analytics/top-domains?minutes=60&limit=10").catch((e) => ({ rows: [], degraded: true, degraded_reason: e.message })),
       api("/api/clients").catch(() => ({ clients: [] })),
-      // Owner RC45 finding, priority 3 of the second beta-rescue pass: a
+      // Owner-reported finding, priority 3 of the second beta-rescue pass: a
       // real client was actively querying Alderpoint, but Dashboard
       // showed no clients at all -- because this panel only ever asked
       // for MANAGED clients (an explicit, operator-created record), even
@@ -420,7 +420,7 @@
     return `<div class="table-wrap"><table><thead><tr>${cols.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>${list.map((r) => `<tr>${cols.map((c) => `<td class="truncate" title="${esc(r[c])}">${pretty(r[c])}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
   }
 
-  // Owner RC45 finding, priority 3 of the second beta-rescue pass: shows
+  // Owner-reported finding, priority 3 of the second beta-rescue pass: shows
   // both MANAGED clients (explicit operator-created records) and
   // ACTIVE/OBSERVED clients (real DNS activity seen via the real,
   // asynchronous discovery pipeline -- never synchronously in the DNS
@@ -451,7 +451,7 @@
       </div>`);
   }
 
-  // Statistics is its own destination (owner RC45 finding: it was
+  // Statistics is its own destination (a real owner-reported finding: it was
   // stapled onto the bottom of Query Log). Same real /api/statistics
   // export/clear endpoints as before -- this is a page move, not new
   // backend surface.
@@ -715,7 +715,7 @@
   }
 
   // Encryption and Notifications are now two separate destinations
-  // (owner RC45 finding, priority 1 of the second beta-rescue pass: they
+  // (a real owner-reported finding, priority 1 of the second beta-rescue pass: they
   // were mixed into one "HTTPS / Notifications" page -- unrelated
   // concepts, exactly the "concept soup" callout). Matches V1.1.1's own
   // separate encryption.html / notifications.html templates.
@@ -764,8 +764,8 @@
     return `<form data-form="notification"><div class="form-grid"><label>Display name<input name="display_name" required placeholder="Ops Slack"></label><label>Kind<select name="kind"><option value="webhook">webhook</option><option value="email_smtp">email_smtp</option><option value="pushover">pushover</option><option value="slack">slack</option></select></label><label>Endpoint<input name="endpoint" required></label></div><label>Secret value<input name="secret_value" type="password" autocomplete="new-password"></label><button>Create provider</button></form>`;
   }
 
-  // Administration and Logs are now their own destinations (owner RC45
-  // finding, priority 1 of the second beta-rescue pass: Administration
+  // Administration and Logs are now their own destinations (a real
+  // owner-reported finding, priority 1 of the second beta-rescue pass: Administration
   // was buried inside System Status, which is really about DNS/runtime
   // component health -- an unrelated concern from changing your own
   // password). Matches V1.1.1's own separate administration.html /
@@ -1085,10 +1085,10 @@
   }
 
   function authScreen(setupRequired) {
-    // Owner-approved removal of RC42's mandatory SSH-retrieved setup-
+    // Owner-approved removal of a prior mandatory SSH-retrieved setup-
     // token flow: first-run setup is still "create the first administrator
     // right here" -- no token field, no instruction to go retrieve a
-    // secret from the appliance's state directory. But the RC45 owner
+    // secret from the appliance's state directory. But the owner
     // finding (priority 2 of the beta-rescue brief) was that setup had
     // regressed to username+password alone; V1.1.1's actual first-run
     // fields (confirm password, appliance hostname/address for Local DNS)
@@ -1196,7 +1196,7 @@
         btn.setAttribute("aria-label", showing ? "Show password" : "Hide password");
       });
     });
-    // Client-side mismatch feedback (owner RC45 finding, priority 2):
+    // Client-side mismatch feedback (a real owner-reported finding, priority 2):
     // live as-you-type, in addition to the server's own enforcement in
     // /api/setup -- neither replaces the other.
     if (form.dataset.passwordMatch !== undefined) {

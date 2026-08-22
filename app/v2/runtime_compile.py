@@ -442,7 +442,7 @@ def recompile_and_promote(
     # passes the appliance's real configured listener. A loopback-only
     # default here previously meant any caller that forgot to pass
     # listen_address would silently cut dnsdist off from real LAN
-    # clients with no error (found live during RC1 acceptance testing --
+    # clients with no error (found live during real acceptance testing --
     # webapp.py's own live policy-mutation path was exactly that missing
     # caller). "0.0.0.0:53" matches what every real install actually
     # needs, so an omitted argument now fails toward "still reachable"

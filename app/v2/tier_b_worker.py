@@ -33,7 +33,7 @@ from app.v2.tier_b_prewarm import WorkingSetEntry
 
 _QTYPE_NUMBERS = {"A": 1, "AAAA": 28, "CNAME": 5, "MX": 15, "TXT": 16, "NS": 2}
 
-# Real defect found live during the RC13/RC14 continuation
+# Real defect found live during a real continuation
 # (docs/v2/prewarm-analytics-pollution-fix.md): prewarm deliberately
 # replays every query through the real, live DNS path (this module's
 # own docstring, "never a bypass") -- which means the appliance's own

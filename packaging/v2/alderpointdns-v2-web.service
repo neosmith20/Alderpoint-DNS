@@ -7,7 +7,15 @@ Description=Alderpoint DNS V2 management/API service (private candidate, native 
 # by alderpointdns-v2-schedule.service on transitions) is completely
 # unaffected -- nothing about DNS answering depends on this process being
 # up.
-After=network.target
+# Same real defect/fix as alderpointdns-v2-discovery.service's own
+# comment: nearly every request handler in app/v2/webapp.py calls
+# _ensure_extended_schemas() (node_identity/observed_clients/
+# replication_v2's own ensure_schema()), which can take a real write
+# lock against control.db. Ordering this unit after schema is
+# deterministically established removes any chance of this unit's own
+# very first request racing another worker's own startup schema touch.
+After=network.target alderpointdns-v2-state-init.service
+Requires=alderpointdns-v2-state-init.service
 
 [Service]
 Type=simple

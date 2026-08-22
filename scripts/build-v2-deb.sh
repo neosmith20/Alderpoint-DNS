@@ -85,7 +85,7 @@ mkdir -p \
   "$PKG/lib/systemd/system" \
   "$PKG/usr/share/doc/alderpointdns-v2"
 
-# Real defect found live during RC24 clean-install acceptance testing:
+# Real defect found live during real clean-install acceptance testing:
 # alderpointdns-v2-ctl install-enhanced-dnsdist (app/dnsdist_upgrade.py,
 # reused verbatim from V1 -- see docs/v2/doh3-transport-implemented.md)
 # calls `gpg` to verify the PowerDNS signing-key fingerprint and `dig`
@@ -199,7 +199,7 @@ cp "$SOURCE_DIR/app/software_updates.py" "$PKG/opt/alderpointdns-v2/app/software
 # networkd/netplan/NetworkManager/ifupdown) rather than reimplementing a
 # second, unproven copy of a safety-critical subsystem -- see that
 # module's own docstring. Real defect found live during this candidate's
-# own clean-install acceptance testing (same class of gap RC44's fix
+# own clean-install acceptance testing (same class of gap a prior fix
 # closed for the import/software-updates reuse below): this file was
 # never added here, so a genuinely fresh install crashed
 # alderpointdns-v2-ctl's own module-load with
@@ -230,6 +230,7 @@ cp "$SOURCE_DIR/scripts/v2/alderpointdns_v2_ctl.py" "$PKG/opt/alderpointdns-v2/s
 cp "$SOURCE_DIR/scripts/provision-v2-analytics-vendor-runtime.sh" "$PKG/opt/alderpointdns-v2/scripts/provision-v2-analytics-vendor-runtime.sh"
 chmod 0755 "$PKG/opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_ctl.py" "$PKG/opt/alderpointdns-v2/scripts/provision-v2-analytics-vendor-runtime.sh"
 
+cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-state-init.service" "$PKG/lib/systemd/system/alderpointdns-v2-state-init.service"
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-analytics.service" "$PKG/lib/systemd/system/alderpointdns-v2-analytics.service"
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-tierb.service" "$PKG/lib/systemd/system/alderpointdns-v2-tierb.service"
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-schedule.service" "$PKG/lib/systemd/system/alderpointdns-v2-schedule.service"

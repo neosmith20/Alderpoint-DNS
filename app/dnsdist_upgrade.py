@@ -359,7 +359,7 @@ def restart_dnsdist_and_verify_services(
 
 
 def baseline_dns_test(timeout: int = 10) -> None:
-    # Real race condition found live during V2's RC24 clean-install
+    # Real race condition found live during a real clean-install
     # acceptance testing: restart_dnsdist_and_verify_services() only
     # waits for systemd to report the unit "active", which for dnsdist's
     # unit type happens as soon as the process is exec'd -- not once it
@@ -396,7 +396,7 @@ def restore_config_from_backup(backup_path: Path) -> None:
 
 def install_enhanced_dnsdist(
     expected_fingerprint: str = EXPECTED_KEY_FINGERPRINT,
-    # Real defect found live during V2's RC24 clean-install acceptance
+    # Real defect found live during a real clean-install acceptance
     # testing: this function's post-upgrade check-config/restart/verify
     # steps were hardcoded to V1's own real runtime topology (the stock
     # `dnsdist` package unit and V1's own generated

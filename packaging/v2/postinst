@@ -10,7 +10,7 @@ set -e
 # and is intended for isolated/private V2 targets, not co-installation on a
 # live V1 appliance.
 
-V2_SERVICES="alderpointdns-v2-bind@ctx0.service alderpointdns-v2-bind-reload.path alderpointdns-v2-dnsdist alderpointdns-v2-dnsdist-reload.path alderpointdns-v2-analytics alderpointdns-v2-analytics-protobuf-receiver alderpointdns-v2-tierb alderpointdns-v2-schedule alderpointdns-v2-web alderpointdns-v2-discovery alderpointdns-v2-dns-observer alderpointdns-v2-replication alderpointdns-v2-update-apply.path alderpointdns-v2-network-apply.path alderpointdns-v2-network-confirm.path alderpointdns-v2-blocklist-refresh.timer"
+V2_SERVICES="alderpointdns-v2-state-init alderpointdns-v2-bind@ctx0.service alderpointdns-v2-bind-reload.path alderpointdns-v2-dnsdist alderpointdns-v2-dnsdist-reload.path alderpointdns-v2-analytics alderpointdns-v2-analytics-protobuf-receiver alderpointdns-v2-tierb alderpointdns-v2-schedule alderpointdns-v2-web alderpointdns-v2-discovery alderpointdns-v2-dns-observer alderpointdns-v2-replication alderpointdns-v2-update-apply.path alderpointdns-v2-network-apply.path alderpointdns-v2-network-confirm.path alderpointdns-v2-blocklist-refresh.timer"
 
 alderpointdns_v2_wait_active() {
   # Real defect found live during Gate #3 clean-install acceptance on a

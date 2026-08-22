@@ -34,7 +34,7 @@ from app.v2.secret_store import SecretStore
 # *additional* cert signed by this node's CA after initial install,
 # which meant there was no real workflow for a real administrator to
 # establish replication trust between two independently installed nodes
-# (found live during RC3 replication acceptance testing; see
+# (found live during real replication acceptance testing; see
 # docs/v2/replication-real-two-node-acceptance.md). Nodes provisioned
 # before this fix never had a CA key to persist -- there is no way to
 # retroactively recover a key that was never saved; those nodes must
@@ -165,13 +165,17 @@ def ensure_schema(path: str | Path) -> None:
     # ever applies to a brand-new table, so an in-place package upgrade
     # needs its own explicit ADD COLUMN step to avoid breaking on "no
     # such column" the first time this node's control.db is opened
-    # post-upgrade.
-    with control_db.connect(path) as conn:
-        if not _column_exists(conn, "replication_peers", "expected_incoming_cert_sha256"):
-            conn.execute(
-                "ALTER TABLE replication_peers ADD COLUMN expected_incoming_cert_sha256 TEXT NOT NULL DEFAULT ''"
-            )
-            conn.commit()
+    # post-upgrade. Real defect found live during a real KVM clean-
+    # install/reboot acceptance: this used its own unprotected
+    # check-then-ALTER (no transaction), which raced under real
+    # concurrency -- see app/v2/control_db.py's own
+    # add_columns_if_missing() docstring for the full root cause and
+    # fix.
+    control_db.add_columns_if_missing(
+        path,
+        "replication_peers",
+        {"expected_incoming_cert_sha256": "TEXT NOT NULL DEFAULT ''"},
+    )
 
 
 def cert_fingerprint_sha256(pem: str | bytes) -> str:
@@ -617,7 +621,7 @@ def apply_message(
                 # this through explicitly, recompile_and_promote() falls
                 # back to its own default ("127.0.0.1:53"), rebinding
                 # this node's dnsdist to loopback-only the next time it
-                # applies replicated state (found live during RC1
+                # applies replicated state (found live during real
                 # acceptance testing, same defect as webapp.py's).
                 runtime_compile.recompile_and_promote(conn, staging_dir, live_dnsdist_conf_path, listen_address=listen_address)
             except BaseException:
@@ -675,7 +679,7 @@ def client_ssl_context(peer: Peer, temp_root: Path) -> ssl.SSLContext:
     key = _write_temp_file(temp_root, f"{peer.peer_node_id}.client.key", peer.client_key_pem)
     ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=str(ca))
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-    # Real defect found live during RC4 replication acceptance testing:
+    # Real defect found live during real replication acceptance testing:
     # every real peer's server cert (issue_node_cert, called with
     # server_name="localhost" at install time -- the appliance cannot
     # know in advance what address a future peer will actually dial it

@@ -133,7 +133,7 @@ class ValidatedPackage:
 def validate_candidate_package(deb_path: Path, installed_pkg_version: Optional[str]) -> ValidatedPackage:
     """Real, non-cosmetic validation before anything is staged for a
     privileged apply: correct package name, amd64-only architecture
-    (matching the RC43 package-metadata fix -- V2 genuinely ships
+    (matching a prior package-metadata fix -- V2 genuinely ships
     x86_64/CPython binary payloads, "all" would be inaccurate), and,
     when the installed version is known, strictly newer per dpkg's own
     comparison (never a same-version no-op reinstall, never a

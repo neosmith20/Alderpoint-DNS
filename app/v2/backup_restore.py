@@ -1,6 +1,6 @@
 """V2 full appliance backup/restore (beta-rescue priority 3).
 
-Replaces RC43's "secrets-only" backup (real, but only ever one component
+Replaces the prior "secrets-only" backup (real, but only ever one component
 of what an appliance backup means) with a real whole-appliance backup:
 
 - control.db itself (a consistent snapshot via sqlite3's own Connection.

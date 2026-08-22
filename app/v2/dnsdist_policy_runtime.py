@@ -525,7 +525,7 @@ class DnscryptConfig:
     Shares DoQ/DoH3's defensive capability-call wrapper: not every distro
     build necessarily ships DNSCrypt support, even though the stock
     Debian archive build this appliance targets does (confirmed live,
-    this continuation: ``dnscrypt`` listed among RC24's real installed
+    this continuation: ``dnscrypt`` listed among a real installed
     ``dnsdist 1.9.16``'s ``Enabled features``) -- wrapped anyway, since
     being defensive here costs nothing and a future packaging change
     should never be able to crash-loop the live runtime."""

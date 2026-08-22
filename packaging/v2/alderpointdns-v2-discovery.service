@@ -1,6 +1,17 @@
 [Unit]
 Description=Alderpoint DNS V2 observed-client discovery worker
-After=network.target
+# Real defect found live during a real KVM clean-install/reboot
+# acceptance: this worker's own startup calls
+# observed_clients.ensure_schema() directly, which (like every other
+# V2 module's ensure_schema()) took a real write lock against
+# control.db -- with no boot-time ordering guarantee that schema was
+# already established first, this genuinely raced every other
+# schema-touching worker's own startup and once lost that race outright
+# (a real "database is locked" past the busy_timeout, not a
+# hypothetical one). See alderpointdns-v2-state-init.service's own
+# comment for the full root cause and fix.
+After=network.target alderpointdns-v2-state-init.service
+Requires=alderpointdns-v2-state-init.service
 
 [Service]
 Type=simple
