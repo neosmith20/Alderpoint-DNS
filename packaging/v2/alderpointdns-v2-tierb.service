@@ -26,7 +26,25 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ReadWritePaths=/var/lib/alderpointdns-v2/tierb /var/lib/alderpointdns-v2/worker-heartbeats /var/log/alderpointdns-v2
+# Real defect found live during RC46/RC47 KVM clean-install/reboot
+# acceptance: scoping ReadWritePaths to just this unit's own leaf
+# subdirectories (tierb/, worker-heartbeats/) means ProtectSystem=strict's
+# bind-mount setup needs each of those exact paths to already exist on
+# a real fresh boot -- and postinst creating them is not itself
+# ordered before systemd starts this unit, so a real fresh boot could
+# (and did) start this service before /var/lib/alderpointdns-v2/worker-heartbeats
+# existed yet: "Failed to set up mount namespacing: ... No such file or
+# directory", the unit failing its first start attempt every time
+# (masked only by Restart=on-failure's retry succeeding a few seconds
+# later, once the directory existed). This is the exact same
+# whole-state-directory lesson alderpointdns-v2-analytics.service's own
+# comment above already documents for a different reason (a real SQLite
+# WAL -shm file needing write access outside the narrowly-scoped
+# subdirs) -- matching that unit (and alderpointdns-v2-schedule.service,
+# alderpointdns-v2-discovery.service) removes this unit's own
+# unnecessarily narrow scoping and its startup-ordering fragility along
+# with it.
+ReadWritePaths=/var/lib/alderpointdns-v2 /var/log/alderpointdns-v2
 UMask=0027
 CapabilityBoundingSet=
 MemoryMax=256M

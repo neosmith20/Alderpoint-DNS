@@ -92,20 +92,79 @@ def _parse_domains(text: str) -> tuple[list[tuple[str, str]], list[str]]:
     return domains, warnings
 
 
+def _is_transient_fetch_error(exc: Exception) -> bool:
+    """True for the class of failure a real retry can plausibly help with
+    (the connection/response never completed) -- never for a real,
+    permanent rejection where retrying only wastes real refresh time for
+    no chance of a different outcome: urllib.error.HTTPError (404/403/
+    etc, which subclasses URLError and must be checked first), and a
+    genuine DNS resolution failure (socket.gaierror -- a real bad/typo'd
+    hostname or dead subscription URL, which no amount of retrying
+    fixes; found live via this pass's own regression suite retrying a
+    deliberately-invalid `.invalid` test hostname for several real
+    seconds it never needed to spend).
+    """
+    import socket
+    import urllib.error
+
+    if isinstance(exc, urllib.error.HTTPError):
+        return False
+    if isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, socket.gaierror):
+        return False
+    if isinstance(exc, (TimeoutError, socket.timeout, urllib.error.URLError, ConnectionError)):
+        return True
+    return False
+
+
+def _fetch_bytes(url: str) -> bytes:
+    import urllib.request
+
+    opener = urllib.request.build_opener(v1_importer._HttpOnlyRedirectHandler())
+    request = urllib.request.Request(url, headers={"User-Agent": "AlderpointDNS-V2-BlocklistRefresh/1"})
+    with opener.open(request, timeout=15) as response:
+        return response.read(v1_importer.MAX_API_RESPONSE_BYTES + 1)
+
+
 def fetch_and_parse(url: str) -> tuple[list[tuple[str, str]], list[str]]:
     """Real HTTP GET (reusing app.importer's own audited fetch safety:
     http(s)-only redirects, size cap) -- raises BlocklistSubscriptionError
-    on any fetch/parse failure, never returns a partial/ambiguous result."""
-    import urllib.request
+    on any fetch/parse failure, never returns a partial/ambiguous result.
+
+    Real defect found live during RC46/RC47 KVM clean-install/reboot
+    acceptance: a single flat 15s timeout with no retry meant an
+    ordinary transient network hiccup (confirmed live: a real remote
+    fetch of one of this package's own default subscriptions --
+    AdGuard DNS filter, StevenBlack Unified Hosts, or HaGeZi Multi
+    Normal, which one varied run to run -- occasionally exceeded 15s
+    under real concurrent host load) permanently failed that
+    subscription's refresh for the whole cycle, even though the same
+    remote endpoint reliably succeeded on the very next attempt a
+    moment later. A bounded retry (3 attempts total) with short
+    backoff+jitter gives a real transient failure a real second chance
+    without ever looping indefinitely or blocking appliance startup --
+    a genuinely broken/unreachable source still fails (recorded
+    honestly, previous compiled content untouched, see this module's
+    own docstring) after those 3 attempts, same as before.
+    """
+    import random
+    import time
 
     sanitized = v1_importer.sanitize_url(url)
-    try:
-        opener = urllib.request.build_opener(v1_importer._HttpOnlyRedirectHandler())
-        request = urllib.request.Request(sanitized, headers={"User-Agent": "AlderpointDNS-V2-BlocklistRefresh/1"})
-        with opener.open(request, timeout=15) as response:
-            body = response.read(v1_importer.MAX_API_RESPONSE_BYTES + 1)
-    except Exception as exc:
-        raise BlocklistSubscriptionError(f"fetch failed: {exc}") from exc
+    max_attempts = 3
+    last_exc: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            body = _fetch_bytes(sanitized)
+            last_exc = None
+            break
+        except Exception as exc:  # noqa: BLE001 -- classified below, always re-raised or retried
+            last_exc = exc
+            if attempt < max_attempts and _is_transient_fetch_error(exc):
+                time.sleep(min(1.0 * attempt, 3.0) + random.uniform(0, 0.5))
+                continue
+            raise BlocklistSubscriptionError(f"fetch failed: {exc}") from exc
+    if last_exc is not None:  # pragma: no cover -- defensive, unreachable (loop always breaks or raises)
+        raise BlocklistSubscriptionError(f"fetch failed: {last_exc}") from last_exc
     if len(body) > v1_importer.MAX_API_RESPONSE_BYTES:
         raise BlocklistSubscriptionError(f"response exceeds {v1_importer.MAX_API_RESPONSE_BYTES // (1024 * 1024)} MiB limit")
     try:

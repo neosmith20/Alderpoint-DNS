@@ -86,7 +86,22 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 ReadWritePaths=/var/lib/alderpointdns-v2 /var/log/alderpointdns-v2 /etc/alderpointdns-v2
 UMask=0027
 CapabilityBoundingSet=
-MemoryMax=768M
+# Real defect class found live during RC46/RC47 KVM acceptance (see
+# alderpointdns-v2-schedule.service's own comment for the full root
+# cause): every real policy mutation through the management API calls
+# _mutate_and_promote(), which runs the same real
+# stage_validate_promote_all() -> `dnsdist --check-config` /
+# `named-checkconf` / `named-checkzone` subprocesses in-process, and
+# those children inherit this unit's own cgroup the same way. 768M
+# left uncomfortably little headroom above this service's own real
+# steady-state footprint (~150-180M observed) plus a real validator
+# child's peak (~569M+ against the full default blocklist ruleset,
+# see alderpointdns-v2-dnsdist.service's own comment) -- close enough
+# to the edge that ordinary growth (more blocklist entries, more
+# concurrent requests) could tip it into the same cgroup-oom crash
+# this pass found for alderpointdns-v2-schedule.service. Raised to the
+# same 1024M floor for real, matching headroom.
+MemoryMax=1024M
 
 [Install]
 WantedBy=multi-user.target

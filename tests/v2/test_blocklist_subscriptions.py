@@ -84,6 +84,95 @@ class TestFetchAndParse:
         with pytest.raises(bl.BlocklistSubscriptionError):
             bl.fetch_and_parse("http://127.0.0.1:1/unreachable.txt")
 
+    def test_dns_resolution_failure_fails_fast_without_retrying(self):
+        """Regression guard for a real defect this pass's own retry fix
+        (below) introduced and this pass's own regression suite caught
+        live: a genuine DNS resolution failure (a bad/typo'd hostname,
+        or a `.invalid`-TLD test domain) is permanent -- no amount of
+        retrying resolves it -- so it must fail immediately, not spend
+        several real seconds retrying an outcome that cannot change.
+        """
+        start = time.monotonic()
+        with pytest.raises(bl.BlocklistSubscriptionError):
+            bl.fetch_and_parse("http://this-hostname-does-not-resolve.invalid/list.txt")
+        elapsed = time.monotonic() - start
+        assert elapsed < 2.0, (
+            f"a real DNS resolution failure took {elapsed:.1f}s -- it must "
+            "fail fast (no retry), not spend the retry backoff on a "
+            "hostname that structurally cannot ever resolve"
+        )
+
+    def test_transient_failure_then_success_recovers_via_retry(self):
+        """Regression guard for a real defect found live during RC46/RC47
+        KVM clean-install/reboot acceptance: a real remote fetch of one
+        of this package's own default blocklist subscriptions
+        occasionally exceeded the flat 15s timeout under real
+        concurrent host load, with no retry -- permanently failing that
+        subscription for the whole refresh cycle even though the same
+        endpoint reliably succeeded moments later. A real local server
+        that drops the connection (no response at all, the same failure
+        shape a real transient network hiccup produces) on its first two
+        requests and only serves real content on the third proves the
+        real fetch_and_parse() retry actually recovers, not just that
+        the retry code exists.
+        """
+        content = "recovered-after-retry.example\n"
+        attempts = {"count": 0}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                attempts["count"] += 1
+                if attempts["count"] < 3:
+                    # Simulate a transient network failure: close the
+                    # connection with no response at all (what a real
+                    # dropped/reset connection looks like to the client),
+                    # rather than a permanent HTTP error status.
+                    self.connection.close()
+                    return
+                body = content.encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            port = server.server_address[1]
+            domains, _warnings = bl.fetch_and_parse(f"http://127.0.0.1:{port}/list.txt")
+            assert {d for _kind, d in domains} == {"recovered-after-retry.example"}
+            assert attempts["count"] == 3, "expected exactly 2 real failed attempts before the successful 3rd"
+        finally:
+            server.shutdown()
+
+    def test_permanent_failure_does_not_retry(self):
+        """A real 404 (or any genuine HTTP-level rejection) must fail
+        immediately, not waste real refresh time retrying an outcome
+        that cannot change."""
+        attempts = {"count": 0}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                attempts["count"] += 1
+                self.send_response(404)
+                self.end_headers()
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            port = server.server_address[1]
+            with pytest.raises(bl.BlocklistSubscriptionError):
+                bl.fetch_and_parse(f"http://127.0.0.1:{port}/missing.txt")
+            assert attempts["count"] == 1, "a real permanent HTTP error must not be retried"
+        finally:
+            server.shutdown()
+
 
 class TestRefreshSubscription:
     def test_refresh_compiles_into_policy_and_is_idempotent(self, conn):

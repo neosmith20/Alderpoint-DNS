@@ -45,7 +45,34 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 ReadWritePaths=/var/lib/alderpointdns-v2 /var/log/alderpointdns-v2
 UMask=0027
 CapabilityBoundingSet=
-MemoryMax=256M
+# Real defect found live during RC46/RC47 KVM clean-install/reboot
+# acceptance: this worker's on_transition hook calls
+# app/v2/webapp.py's _mutate_and_promote() in-process (see this unit's
+# own comment above), which stages+validates the real compiled
+# runtime via app/v2/runtime_staging.py's stage_validate_promote_all()
+# -- real subprocess invocations of `dnsdist --check-config` /
+# `named-checkconf` / `named-checkzone` against the full real default
+# blocklist configuration (~450k+ domains). Those child processes
+# inherit THIS unit's own cgroup (a plain subprocess.run() does not
+# get its own cgroup -- cgroup v2 memory.max is enforced hierarchically,
+# so no descendant process can ever exceed an ancestor's cap regardless
+# of its own settings), so this cap has to cover this worker's own
+# baseline *plus* the validator subprocess's real peak, not just the
+# worker's own footprint. 256M was sized only for the latter. Measured
+# live: a real `dnsdist --check-config` against the full default
+# three-blocklist ruleset needs comparable memory to the running daemon
+# itself (~569M baseline, see alderpointdns-v2-dnsdist.service's own
+# MemoryMax comment) -- 256M reproducibly cgroup-oom-killed this
+# worker's own process (and the dnsdist check-config child alongside
+# it) every time a real schedule transition tried to recompile,
+# producing a real, sustained crash loop after every reboot. Matched to
+# alderpointdns-v2-dnsdist.service's own 1024M floor: real headroom
+# above the measured baseline, still a real bounded cap. See
+# tests/v2/test_packaging_unit_lifecycle_consistency.py's
+# test_every_runtime_validating_unit_has_adequate_memory_cap for the
+# regression guard covering this and every other unit whose code path
+# can reach the same validators.
+MemoryMax=1024M
 
 [Install]
 WantedBy=multi-user.target

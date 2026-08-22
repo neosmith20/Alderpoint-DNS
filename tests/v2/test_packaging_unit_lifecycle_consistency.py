@@ -127,3 +127,126 @@ def test_dnsdist_service_memory_cap_fits_default_blocklist_configuration():
         "reproducibly crash-loops dnsdist via a real cgroup oom-kill on every "
         "fresh install"
     )
+
+
+# Regression guard for a real defect found live during RC47 KVM
+# clean-install/reboot acceptance: alderpointdns-v2-schedule.service's
+# on_transition hook calls app/v2/webapp.py's _mutate_and_promote()
+# in-process, which runs app/v2/runtime_staging.py's
+# stage_validate_promote_all() -- real `dnsdist --check-config` /
+# `named-checkconf` / `named-checkzone` subprocess invocations against
+# the full real default blocklist configuration. A plain
+# subprocess.run() child does not get its own cgroup -- cgroup v2's
+# memory.max is enforced hierarchically, so no descendant process can
+# ever exceed an ancestor's cap regardless of its own settings -- so
+# ANY unit whose code path can reach these validators needs a
+# MemoryMax that covers its own baseline *plus* the validator's real
+# peak (~569M+, matching alderpointdns-v2-dnsdist.service's own
+# measured need), not just its own footprint. This table is the single
+# place that audit lives; a future caller must be added here (or this
+# test fails closed, forcing the audit rather than silently missing a
+# new caller).
+#
+# Reachability audit (this pass, by direct code inspection of every
+# packaged unit's real ExecStart entrypoint):
+#   - alderpointdns-v2-schedule.service: schedule-worker's
+#     on_transition -> webapp._mutate_and_promote() -> validators. REACHES.
+#   - alderpointdns-v2-web.service: every real policy-mutation API
+#     endpoint -> _mutate_and_promote() -> validators. REACHES.
+#   - alderpointdns-v2-tierb.service: the packaged tier-b-worker entry
+#     point (cmd_tier_b_worker) only issues real UDP resolves against
+#     the already-running dnsdist listener (app/v2/tier_b_worker.py's
+#     make_udp_resolve_fn) -- it never calls generate-runtime,
+#     stage_validate_promote(_all), or webapp._mutate_and_promote.
+#     tier_b_worker.py's separate isolated_dnsdist_instance() helper
+#     does spawn a real (non-`--check-config`) dnsdist child, but only
+#     with upstreams/ACL (no RPZ/blocklist domains) and is not called
+#     from the packaged tier-b-worker entry point at all. DOES NOT
+#     REACH the validators -- its existing 256M cap is unaffected by
+#     this defect class.
+#   - alderpointdns-v2-blocklist-refresh.service,
+#     alderpointdns-v2-network-apply.service,
+#     alderpointdns-v2-network-confirm.service,
+#     alderpointdns-v2-update-apply.service: all reach the same
+#     validators (blocklist-refresh via the real compile/promote it
+#     triggers; network-apply/confirm and update-apply via their own
+#     runtime recompiles) but none of them declare a MemoryMax at all
+#     -- uncapped, so not at risk of this specific inherited-low-cap
+#     defect (a separate, lower-priority "no resource isolation at
+#     all" concern, out of scope here).
+_RUNTIME_VALIDATING_CAPPED_UNITS = (
+    "alderpointdns-v2-schedule.service",
+    "alderpointdns-v2-web.service",
+)
+
+
+def test_no_unit_scopes_readwritepaths_to_a_narrow_subdirectory_that_races_at_boot():
+    """Regression guard for a real defect found live during RC46/RC47
+    KVM clean-install/reboot acceptance: alderpointdns-v2-tierb.service
+    used to scope ReadWritePaths to two narrow leaf subdirectories
+    (.../tierb, .../worker-heartbeats) instead of the whole
+    /var/lib/alderpointdns-v2 state directory every sibling worker unit
+    uses. Under ProtectSystem=strict, each ReadWritePaths entry needs
+    to already exist on disk for systemd's own bind-mount setup at
+    startup -- postinst creating those exact leaf directories is not
+    itself ordered before systemd starts this unit, so a real fresh
+    boot could (and did) start the unit before its leaf directory
+    existed: "Failed to set up mount namespacing: ... No such file or
+    directory", every time, self-masked only by Restart=on-failure's
+    retry succeeding a few seconds later. Scoping to the whole state
+    directory (which postinst creates once, before any unit ever
+    starts, per packaging/v2/postinst) removes the race entirely --
+    this is already the pattern every other non-templated unit in this
+    package uses; a future new unit or a regression back to
+    per-worker-subdirectory scoping should fail this test rather than
+    silently reintroduce the same class of boot race.
+    """
+    allowed_top_level = {
+        "/var/lib/alderpointdns-v2",
+        "/var/log/alderpointdns-v2",
+        "/etc/alderpointdns-v2",
+    }
+    for unit_path in sorted((ROOT / "packaging/v2").glob("alderpointdns-v2-*.service")):
+        text = unit_path.read_text()
+        if "ProtectSystem=strict" not in text:
+            continue
+        m = re.search(r"^ReadWritePaths=(.+)$", text, re.MULTILINE)
+        if not m:
+            continue
+        for entry in m.group(1).split():
+            if entry in allowed_top_level:
+                continue
+            # The one legitimate exception: alderpointdns-v2-bind@.service's
+            # own templated per-context directory
+            # (/var/lib|log/alderpointdns-v2/bind/%i) is created by the
+            # real runtime compiler for every context before that
+            # context's own systemd instance is ever started -- not a
+            # race, and structurally can't be widened to the whole state
+            # directory (BIND's own AppArmor profile confines it to
+            # exactly its own working directory).
+            if unit_path.name == "alderpointdns-v2-bind@.service" and entry.endswith("/%i"):
+                continue
+            raise AssertionError(
+                f"{unit_path.name} scopes ReadWritePaths to the narrow path "
+                f"{entry!r} instead of its containing top-level state "
+                "directory -- under ProtectSystem=strict this path must "
+                "already exist at systemd's own bind-mount setup time, "
+                "which is not guaranteed on a genuinely fresh boot and "
+                "reproducibly races (RC46/RC47's real tierb.service defect)"
+            )
+
+
+def test_every_runtime_validating_unit_has_adequate_memory_cap():
+    for unit in _RUNTIME_VALIDATING_CAPPED_UNITS:
+        text = (ROOT / f"packaging/v2/{unit}").read_text()
+        m = re.search(r"^MemoryMax=(\d+)M$", text, re.MULTILINE)
+        assert m, f"expected a 'MemoryMax=<N>M' line in {unit}"
+        assert int(m.group(1)) >= 1024, (
+            f"{unit} can reach app/v2/runtime_staging.py's real "
+            "stage_validate_promote_all() (dnsdist --check-config / "
+            "named-checkconf / named-checkzone subprocesses, which inherit "
+            "this unit's own cgroup) and must keep a MemoryMax of at least "
+            "1024M -- a lower cap reproducibly crash-loops this unit via a "
+            "real cgroup oom-kill whenever it triggers a real runtime "
+            "recompile against the full default blocklist configuration"
+        )
