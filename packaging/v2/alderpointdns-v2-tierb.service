@@ -26,7 +26,7 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-# Real defect found live during RC46/RC47 KVM clean-install/reboot
+# Real defect found live during a real KVM clean-install/reboot
 # acceptance: scoping ReadWritePaths to just this unit's own leaf
 # subdirectories (tierb/, worker-heartbeats/) means ProtectSystem=strict's
 # bind-mount setup needs each of those exact paths to already exist on

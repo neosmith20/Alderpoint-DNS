@@ -236,6 +236,62 @@ def test_no_unit_scopes_readwritepaths_to_a_narrow_subdirectory_that_races_at_bo
             )
 
 
+def test_no_shipped_file_references_an_internal_private_rc_identifier():
+    """Regression guard for a real privacy-scrub defect this pass's own
+    scrub caught before it ever shipped: this pass's own defect-history
+    comments (added directly to alderpointdns-v2-schedule.service,
+    alderpointdns-v2-tierb.service, alderpointdns-v2-web.service, and
+    app/v2/blocklist_subscriptions.py while explaining a real live-found
+    defect and its fix) used the literal private candidate identifiers
+    "RC46"/"RC47" -- internal, sequential, pre-release QA-pass markers,
+    not meant to ever reach a real customer's installed system. A real
+    operator seeing "RC46" in their own installed systemd unit file is
+    both confusing and an unintended disclosure of this project's
+    internal release-candidate churn. This never actually shipped (the
+    pre-build private scrub caught it, see this pass's own RC48/RC49
+    manifest), but must not silently regress: every future defect-
+    history comment must describe *what* was found and fixed without
+    embedding a private "RC<N>" token. The real, intentional Debian
+    package version string (e.g. "2.0.0~rc48-1", always lowercase
+    "~rcNN-1") is exempt -- only a bare uppercase "RC" + digits token,
+    the internal prose-reference form, is checked here.
+
+    Scope note: this check is intentionally limited to the specific
+    files this pass itself touched (below), not a repo-wide sweep --
+    a repo-wide grep for this same bare 'RC\\d+' pattern turns up
+    pre-existing references in several other shipped files going back
+    to earlier RCs (e.g. app/v2/auth_hash.py, app/dnsdist_upgrade.py),
+    which is a genuine, real, *pre-existing* instance of this same
+    defect class this pass did not introduce and did not attempt to
+    remediate repo-wide (out of scope for this pass's specific fixes;
+    flagged in this pass's own final report as a real remaining item
+    for a future privacy-scrub pass, not silently dropped). A repo-wide
+    version of this test would need to first reconcile all of those
+    pre-existing hits, which is real, separate work.
+    """
+    import re
+
+    prohibited = re.compile(r"\bRC\d+\b")
+    touched_files = (
+        "app/v2/blocklist_subscriptions.py",
+        "packaging/v2/alderpointdns-v2-schedule.service",
+        "packaging/v2/alderpointdns-v2-tierb.service",
+        "packaging/v2/alderpointdns-v2-web.service",
+        "packaging/v2/alderpointdns-v2-dnsdist.service",
+        "packaging/v2/alderpointdns-v2-dnsdist-reload.path",
+    )
+    hits = []
+    for rel_path in touched_files:
+        path = ROOT / rel_path
+        if prohibited.search(path.read_text(encoding="utf-8")):
+            hits.append(rel_path)
+    assert not hits, (
+        f"found internal private RC-identifier reference(s) (e.g. 'RC46') in "
+        f"shipped file(s): {hits} -- reword to describe the defect without "
+        "embedding a private release-candidate number"
+    )
+
+
 def test_every_runtime_validating_unit_has_adequate_memory_cap():
     for unit in _RUNTIME_VALIDATING_CAPPED_UNITS:
         text = (ROOT / f"packaging/v2/{unit}").read_text()

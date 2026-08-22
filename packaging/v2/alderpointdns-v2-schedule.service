@@ -45,7 +45,7 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 ReadWritePaths=/var/lib/alderpointdns-v2 /var/log/alderpointdns-v2
 UMask=0027
 CapabilityBoundingSet=
-# Real defect found live during RC46/RC47 KVM clean-install/reboot
+# Real defect found live during a real KVM clean-install/reboot
 # acceptance: this worker's on_transition hook calls
 # app/v2/webapp.py's _mutate_and_promote() in-process (see this unit's
 # own comment above), which stages+validates the real compiled

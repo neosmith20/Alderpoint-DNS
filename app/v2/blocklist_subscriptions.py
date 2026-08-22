@@ -130,7 +130,7 @@ def fetch_and_parse(url: str) -> tuple[list[tuple[str, str]], list[str]]:
     http(s)-only redirects, size cap) -- raises BlocklistSubscriptionError
     on any fetch/parse failure, never returns a partial/ambiguous result.
 
-    Real defect found live during RC46/RC47 KVM clean-install/reboot
+    Real defect found live during a real KVM clean-install/reboot
     acceptance: a single flat 15s timeout with no retry meant an
     ordinary transient network hiccup (confirmed live: a real remote
     fetch of one of this package's own default subscriptions --
