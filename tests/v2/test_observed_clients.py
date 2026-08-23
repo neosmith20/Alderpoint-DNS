@@ -24,6 +24,55 @@ def test_observations_coalesce_by_source_and_sanitize_hostnames(tmp_path):
         assert "<" not in row["hostname_candidate"]
 
 
+def test_implausible_addresses_are_never_ingested_as_observations(tmp_path):
+    # Real defect fixed here (owner-reported live): "192.168.32.0" (a
+    # network address, not a real host) and "10.89.0.0" (this preview's
+    # own Podman bridge network) both appeared as "clients". Neither a
+    # network-looking address nor loopback/link-local/multicast/
+    # unspecified/reserved traffic may ever become a manageable client,
+    # regardless of which producer submitted it.
+    db = tmp_path / "control.db"
+    _init(db)
+    with control_db.connect(db) as conn:
+        observed_clients.apply_observations(
+            conn,
+            [
+                observed_clients.Observation("192.168.32.0"),  # network address (owner's real repro)
+                observed_clients.Observation("10.89.0.0"),  # network address (owner's real repro)
+                observed_clients.Observation("127.0.0.1"),  # loopback
+                observed_clients.Observation("169.254.1.5"),  # link-local
+                observed_clients.Observation("224.0.0.251"),  # multicast
+                observed_clients.Observation("0.0.0.0"),  # unspecified
+                observed_clients.Observation("::1"),  # IPv6 loopback
+                observed_clients.Observation("192.168.32.157"),  # a real, plausible host
+            ],
+        )
+        rows = observed_clients.list_observed(conn)
+        source_ips = {r["source_ip"] for r in rows["observed_clients"]}
+        assert source_ips == {"192.168.32.157"}
+
+
+def test_purge_implausible_cleans_up_already_persisted_bogus_rows_but_spares_managed(tmp_path):
+    db = tmp_path / "control.db"
+    _init(db)
+    with control_db.connect(db) as conn:
+        # Insert directly, bypassing apply_observations's own filter, to
+        # simulate rows a past run of the now-fixed producer bug already
+        # wrote before this fix existed.
+        conn.execute(
+            "INSERT INTO observed_clients(source_ip, address_family, first_seen, last_seen, query_count) "
+            "VALUES ('192.168.32.0','ipv4','2026-01-01T00:00:00+00:00','2026-01-01T00:00:00+00:00',1)"
+        )
+        conn.execute(
+            "INSERT INTO observed_clients(source_ip, address_family, first_seen, last_seen, query_count) "
+            "VALUES ('192.168.32.157','ipv4','2026-01-01T00:00:00+00:00','2026-01-01T00:00:00+00:00',1)"
+        )
+        removed = observed_clients.purge_implausible(conn)
+        assert removed == 1
+        source_ips = {r[0] for r in conn.execute("SELECT source_ip FROM observed_clients")}
+        assert source_ips == {"192.168.32.157"}
+
+
 def test_retention_caps_observed_clients_without_deleting_managed(tmp_path):
     db = tmp_path / "control.db"
     _init(db)

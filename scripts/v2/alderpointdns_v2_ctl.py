@@ -1409,6 +1409,16 @@ def cmd_analytics_protobuf_receiver(args: argparse.Namespace) -> int:
     """
     inbox = STATE_DIR / "analytics" / "inbox"
     inbox.mkdir(parents=True, exist_ok=True)
+    # Real client discovery source (owner-reported live defect fix; see
+    # cmd_dns_observer's own docstring for the full root cause): every
+    # real query message this receiver decodes already carries the
+    # client's real, never-ECS-truncated address in decoded.client (the
+    # same protobuf "from" field Query Log's client column already uses
+    # correctly) -- feeding that into the SAME discovery inbox
+    # cmd_discovery_worker already drains needs no new plumbing on the
+    # read side, just a second, independent producer here.
+    discovery_inbox = STATE_DIR / "discovery" / "inbox"
+    discovery_inbox.mkdir(parents=True, exist_ok=True)
     stop = {"flag": False}
 
     def _handle_signal(signum, frame):
@@ -1427,6 +1437,7 @@ def cmd_analytics_protobuf_receiver(args: argparse.Namespace) -> int:
     def _handle_connection(conn: socket.socket) -> None:
         conn.settimeout(2.0)
         batch: list[dict] = []
+        discovery_batch: list[observed_clients.Observation] = []
         last_flush = time.monotonic()
         # (client, msg_id) -> (DecodedQuery, monotonic insert time)
         pending: dict[tuple[str, int], tuple["dnsdist_protobuf.DecodedQuery", float]] = {}
@@ -1483,6 +1494,9 @@ def cmd_analytics_protobuf_receiver(args: argparse.Namespace) -> int:
                         _remember_answer(decoded)
                         batch.append(_event_from_response(decoded))
                     elif isinstance(decoded, dnsdist_protobuf.DecodedQuery):
+                        discovery_batch.append(observed_clients.Observation(
+                            decoded.client, decoded.qname, "dns-query", decoded.ts,
+                        ))
                         if len(pending) >= _PENDING_QUERY_MAX:
                             # Defense in depth only: drop the oldest
                             # in-flight entry rather than grow unbounded
@@ -1497,10 +1511,14 @@ def cmd_analytics_protobuf_receiver(args: argparse.Namespace) -> int:
                     _write_analytics_events_batch(inbox, batch)
                     batch = []
                     last_flush = now
+                if len(discovery_batch) >= args.flush_batch_size or (discovery_batch and now - last_flush >= args.flush_interval_seconds):
+                    _write_observation_batch(discovery_inbox, discovery_batch)
+                    discovery_batch = []
         finally:
             for q, _t0 in pending.values():
                 _emit_unmatched(q)
             _write_analytics_events_batch(inbox, batch)
+            _write_observation_batch(discovery_inbox, discovery_batch)
             try:
                 conn.close()
             except OSError:
@@ -1572,19 +1590,32 @@ def cmd_dns_observer(args: argparse.Namespace) -> int:
                 if stop["flag"]:
                     break
                 raise
-            # This ingress is only ever fed via dnsdist's TeeAction, whose
+            # Real defect fixed here (owner-reported live: exact client
+            # identity was broken -- a device showed as a truncated
+            # network address like "192.168.32.0", and dnsdist's own
+            # tee traffic showed up as a bogus "client" too). Root cause:
+            # this ingress is only ever fed via dnsdist's TeeAction, whose
             # tee'd copy always arrives from dnsdist's OWN local socket
-            # (addr[0] is dnsdist, e.g. 127.0.0.1) -- prefer the real
-            # client address dnsdist embeds as an ECS option (see
-            # _parse_ecs_source_ip's own docstring) and only fall back to
-            # the raw UDP peer when it's absent/unparseable.
-            source_ip = _parse_ecs_source_ip(packet) or addr[0]
-            hostname = ""
-            try:
-                hostname, _qtype, _qclass, _question = _parse_dns_qname(packet)
-            except ValueError:
-                pass
-            queue.submit(source_ip, hostname_candidate=hostname, hostname_source="dns-query")
+            # (addr[0] is dnsdist, never the real client) -- the ECS
+            # option _parse_ecs_source_ip decodes was meant to work
+            # around that, but dnsdist's ECS source-prefix is a single
+            # global setting shared with real upstream-forwarded ECS
+            # (app/v2/ecs_policy.py, deliberately never full-length for
+            # privacy), so it can never carry a real client's exact
+            # address -- only ever a truncated prefix, or nothing (in
+            # which case the old fallback used dnsdist's own local
+            # address). Real client discovery now comes exclusively from
+            # analytics-protobuf-receiver's dnsdist protobuf stream (see
+            # cmd_analytics_protobuf_receiver below), whose "from" field
+            # is the real, never-truncated client address dnsdist itself
+            # records at accept time -- the same field Query Log's
+            # client column already used correctly. This ingress still
+            # answers the teed packet (preserving TeeAction's
+            # fire-and-forget contract) but no longer records an
+            # observation from it; _parse_ecs_source_ip is kept (and
+            # still covered by its own unit tests) as a documented,
+            # available decode for a well-formed teed ECS option, not as
+            # an identity source.
             response = _dns_response(packet)
             if response:
                 try:

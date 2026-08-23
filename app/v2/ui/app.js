@@ -469,12 +469,16 @@
   // hot path) so a fresh appliance with real traffic and zero managed
   // clients shows the truth ("a real device is querying this
   // appliance") instead of "No managed clients." Observed rows carry
-  // the same one-click Promote action as the full Clients page (wired
-  // globally in wire()'s [data-promote] handler).
+  // the same one-click Manage Client action as the full Clients page
+  // (wired globally in wire()'s [data-promote] handler; label renamed
+  // from "Promote" -- owner-reported: not understandable operator
+  // language). Only ever rendered for a row not already managed
+  // (filtered below), so this can never target an already-managed
+  // observed client.
   function clientMini(managed, observed) {
     if (!managed.length && !observed.length) return `<div class="empty">No managed clients, and no DNS activity observed yet.</div>`;
     const managedRows = managed.slice(0, 5).map((c) => `<tr><td><span class="badge ok">managed</span></td><td>${esc(c.name)}</td><td>${(c.identifiers || []).map((i) => `<span class="badge">${esc(i.value)}</span>`).join(" ") || '<span class="muted">none</span>'}</td><td></td></tr>`).join("");
-    const observedRows = observed.slice(0, 5).filter((o) => !o.managed_client_id).map((o) => `<tr><td><span class="badge inherit">observed</span></td><td class="mono">${esc(o.hostname_candidate || o.source_ip)}</td><td class="mono">${esc(o.source_ip)}<span class="muted"> -- ${esc(o.query_count || o.observation_count || 0)} queries</span></td><td><button data-promote="${esc(o.source_ip)}">Promote</button></td></tr>`).join("");
+    const observedRows = observed.slice(0, 5).filter((o) => !o.managed_client_id).map((o) => `<tr><td><span class="badge inherit">observed</span></td><td class="mono">${esc(o.hostname_candidate || o.source_ip)}</td><td class="mono">${esc(o.source_ip)}<span class="muted"> -- ${esc(o.query_count || o.observation_count || 0)} queries</span></td><td><button data-promote="${esc(o.source_ip)}">Manage Client</button></td></tr>`).join("");
     if (!managedRows && !observedRows) return `<div class="empty">No managed clients, and no DNS activity observed yet.</div>`;
     return `<div class="table-wrap"><table data-grid data-grid-id="dashboard-clients"><thead><tr><th>State</th><th>Name / hostname</th><th>Identifier</th><th data-no-sort></th></tr></thead><tbody>${managedRows}${observedRows}</tbody></table></div>`;
   }
@@ -544,7 +548,7 @@
       api("/api/discovery/status").catch(() => ({})),
       api("/api/groups").catch(() => ({ groups: [] })),
     ]);
-    return page("Clients", "Managed clients and DNS-observed addresses stay distinct until explicit promotion.", `<button data-refresh>Refresh</button>`, `
+    return page("Clients", "Managed clients and DNS-observed addresses stay distinct until you explicitly manage one.", `<button data-refresh>Refresh</button>`, `
       <div class="strip">
         <div class="metric"><strong>${managed.clients.length}</strong><span>Managed</span></div>
         <div class="metric"><strong>${dstat.observed_count ?? (observed.items || observed.observed_clients || []).length}</strong><span>Observed</span></div>
@@ -553,17 +557,28 @@
       </div>
       <div class="split">
         <div class="grid">
-          <section class="panel"><div class="panel__head"><h2>Observed Clients</h2></div><div class="panel__body">${observedTable(observed.items || observed.observed_clients || observed.clients || [])}</div></section>
+          <section class="panel"><div class="panel__head"><h2>Observed Clients</h2></div><div class="panel__body">
+            <p class="muted">Devices seen making real DNS queries, not yet configured. Click <strong>Manage Client</strong> to give one a name and assign it policies/settings -- this creates a managed client record; it does not change anything about the device itself.</p>
+            ${observedTable(observed.items || observed.observed_clients || observed.clients || [])}
+          </div></section>
           <section class="panel"><div class="panel__head"><h2>Managed Clients</h2></div><div class="panel__body">${managedTable(managed.clients)}</div></section>
         </div>
         <aside class="panel drawer"><div class="panel__head"><h2>Create Managed Client</h2></div><div class="panel__body">${clientForm(groups.groups || [])}</div></aside>
       </div>`);
   }
 
+  // Real defect fixed here (owner-reported: "Promote" is unclear
+  // operator language, and duplicate managed-client creation was
+  // reachable -- the Manage Client action rendered unconditionally,
+  // even for a row already carrying a managed_client_id). Renamed to
+  // "Manage Client" and only rendered when the row is not already
+  // managed; an already-managed row instead shows which managed client
+  // it maps to (already the case via the Association column) with no
+  // redundant action next to it.
   function observedTable(items) {
     if (!items.length) return `<div class="empty">No observed clients yet. Real DNS packets populate this asynchronously.</div>`;
     return `<div class="table-wrap"><table data-grid data-grid-id="observed-clients"><thead><tr><th>IP</th><th>Hostname</th><th>First / Last seen</th><th>Queries</th><th>Association</th><th data-no-sort>Actions</th></tr></thead><tbody>${items.map((o) => `
-      <tr><td class="mono">${esc(o.source_ip)}</td><td>${esc(o.hostname_candidate || "")}<br><span class="muted">${esc(o.hostname_source || "")}</span></td><td>${esc(o.first_seen || "")}<br>${esc(o.last_seen || "")}</td><td>${esc(o.query_count || o.observation_count || 0)}</td><td>${o.managed_client_id ? `<span class="badge ok">client ${esc(o.managed_client_id)}</span>` : `<span class="badge inherit">unmanaged</span>`}</td><td class="field-row"><button data-promote="${esc(o.source_ip)}">Promote</button><button class="danger" data-forget="${esc(o.source_ip)}">Forget</button></td></tr>`).join("")}</tbody></table></div>`;
+      <tr><td class="mono">${esc(o.source_ip)}</td><td>${esc(o.hostname_candidate || "")}<br><span class="muted">${esc(o.hostname_source || "")}</span></td><td>${esc(o.first_seen || "")}<br>${esc(o.last_seen || "")}</td><td>${esc(o.query_count || o.observation_count || 0)}</td><td>${o.managed_client_id ? `<span class="badge ok">client ${esc(o.managed_client_id)}</span>` : `<span class="badge inherit">unmanaged</span>`}</td><td class="field-row">${o.managed_client_id ? "" : `<button data-promote="${esc(o.source_ip)}">Manage Client</button>`}<button class="danger" data-forget="${esc(o.source_ip)}">Forget</button></td></tr>`).join("")}</tbody></table></div>`;
   }
 
   // Friendly-selector/internal-ID cleanup (workstream 1C): the immutable
@@ -1374,16 +1389,26 @@
         wrap.closest("label").querySelector("input[type=hidden]").value = tri.dataset.val;
         return;
       }
+      // Real defect fixed here (owner-reported: "Promote" is not
+      // understandable operator language). Renamed everywhere to
+      // "Manage Client" -- the internal data-promote attribute/API path
+      // are unchanged (they're not operator-visible), only the label,
+      // prompt, and toast wording. The observedTable()/clientMini()
+      // renderers already only ever show this button for a row with no
+      // managed_client_id yet, so a click here can never target an
+      // already-managed observed client -- no duplicate managed-client
+      // creation is reachable from the UI, and promote() itself is
+      // still idempotent server-side as a second line of defense.
       const promote = ev.target.closest("[data-promote]");
       if (promote) {
         const ip = promote.dataset.promote;
-        const name = prompt(`Managed client name for ${ip}`, `Client ${ip}`);
+        const name = prompt(`Name for the managed client at ${ip}`, `Client ${ip}`);
         if (name) {
           await api(`/api/discovery/observed-clients/${encodeURIComponent(ip)}/promote`, { method: "POST", body: JSON.stringify({ display_name: name }) });
-          toast("Observed client promoted", "ok");
+          toast("Client is now managed", "ok");
           // Reload wherever the operator actually is (Dashboard now has
-          // its own promote action, not just the Clients page) rather
-          // than always redirecting to Clients.
+          // its own Manage Client action, not just the Clients page)
+          // rather than always redirecting to Clients.
           await loadPage(state.route);
         }
         return;

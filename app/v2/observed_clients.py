@@ -130,6 +130,13 @@ def ensure_schema(path: str | Path) -> None:
             "INSERT OR IGNORE INTO observed_client_settings(key, value) VALUES ('expiry_days', ?)",
             (str(DEFAULT_EXPIRY_DAYS),),
         )
+        # Clean up any already-persisted rows from the now-fixed producer
+        # bug (see _is_plausible_client_address's docstring) on every
+        # schema-ensure call -- cheap (bounded by max_entries, a normal
+        # DELETE loop over at most a few thousand rows) and idempotent,
+        # so this runs on every worker start without needing a one-off
+        # migration script.
+        purge_implausible(conn)
 
 
 def _now_iso(ts: float | None = None) -> str:
@@ -148,6 +155,69 @@ def sanitize_hostname(value: str) -> str:
         if label:
             labels.append(label.lower())
     return ".".join(labels)[:MAX_HOSTNAME_LEN]
+
+
+# Real defect fixed here (owner-reported live: the owner's own PC showed
+# as "192.168.32.0" -- a network address, not a host address -- and an
+# unexplained "10.89.0.0" also appeared as a client). Root cause traced
+# end to end: the only producer of observed_clients rows was
+# dns-observer's TeeAction+ECS ingress (see
+# scripts/v2/alderpointdns_v2_ctl.py's _parse_ecs_source_ip), which is
+# architecturally incapable of exact precision -- it decodes whatever
+# EDNS Client Subnet dnsdist embedded, and dnsdist's ECS source-prefix is
+# a single global setting shared with real upstream-forwarded ECS
+# (app/v2/ecs_policy.py, deliberately never full-length for privacy), so
+# every observation from that path was truncated to whatever prefix
+# length happened to be configured (192.168.32.0 = a /24-truncated real
+# client address). When ECS was entirely absent, it fell back to the raw
+# UDP peer address of TeeAction's own re-originated packet -- which is
+# dnsdist's OWN local socket address, not the client's (10.89.0.0, this
+# preview's Podman bridge network). Both symptoms are the same
+# mechanism. The real fix (this pass) stops trusting that path for
+# identity at all and instead derives observations from
+# analytics-protobuf-receiver's already-real, already-verified,
+# never-ECS-truncated dnsdist protobuf "from" field (see
+# app/v2/dnsdist_protobuf.py's _client_ip -- the exact same field Query
+# Log's client column already uses correctly). This filter is the
+# second, independent layer: even a correctly-sourced observation must
+# still look like a plausible single host, never a network/broadcast
+# address, loopback, link-local, multicast, or unspecified address --
+# defense in depth against any future producer bug, not a rewrite of the
+# same broken assumption. IPv4 addresses whose last octet is 0 are
+# rejected as well: within any conventionally-sized subnet (the
+# overwhelming common case for an operator's own LAN) that is always the
+# network's own address, never a real assignable host, so trusting it
+# would materialize exactly the class of bug this fix exists to close.
+def _is_plausible_client_address(ip: "ipaddress.IPv4Address | ipaddress.IPv6Address") -> bool:
+    if ip.is_loopback or ip.is_unspecified or ip.is_multicast or ip.is_link_local or ip.is_reserved:
+        return False
+    if ip.version == 4 and int(ip) & 0xFF == 0:
+        return False
+    return True
+
+
+def purge_implausible(conn: sqlite3.Connection) -> int:
+    """Removes any already-persisted observed_clients row that fails
+    ``_is_plausible_client_address`` -- cleans up rows a past run of the
+    now-fixed producer bug above already wrote, so they stop resurfacing
+    on their own. Never touches a row already promoted to a managed
+    client (``managed_client_id`` set): a real operator-created client
+    record is never silently deleted out from under them, even if its
+    underlying address later fails this heuristic (e.g. a legitimately
+    reconfigured network).
+    """
+    removed = 0
+    for (source_ip,) in conn.execute(
+        "SELECT source_ip FROM observed_clients WHERE managed_client_id IS NULL"
+    ).fetchall():
+        try:
+            ip = ipaddress.ip_address(source_ip)
+        except ValueError:
+            continue
+        if not _is_plausible_client_address(ip):
+            conn.execute("DELETE FROM observed_clients WHERE source_ip=?", (source_ip,))
+            removed += 1
+    return removed
 
 
 def managed_client_for_ip(conn: sqlite3.Connection, source_ip: str) -> Optional[int]:
@@ -196,6 +266,8 @@ def apply_observations(conn: sqlite3.Connection, observations: list[Observation]
     applied = 0
     for obs in observations[:1024]:
         ip = ipaddress.ip_address(obs.source_ip)
+        if not _is_plausible_client_address(ip):
+            continue
         family = "ipv6" if ip.version == 6 else "ipv4"
         ts = _now_iso(obs.ts)
         hostname = sanitize_hostname(obs.hostname_candidate)

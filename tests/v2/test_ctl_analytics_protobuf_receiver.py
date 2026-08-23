@@ -57,6 +57,10 @@ class _RunningReceiver:
     def inbox(self) -> Path:
         return self.state_dir / "analytics" / "inbox"
 
+    @property
+    def discovery_inbox(self) -> Path:
+        return self.state_dir / "discovery" / "inbox"
+
     def stop(self):
         self.proc.terminate()
         try:
@@ -132,6 +136,35 @@ def test_real_captured_response_message_lands_in_the_inbox_as_jsonl(receiver):
     assert event["rcode"] == "NOERROR"
     assert event["client"] == "127.0.0.1"
     assert event["protocol"] == "udp"
+
+
+def test_real_query_also_lands_in_the_discovery_inbox_with_the_exact_client_address(receiver):
+    # Real defect fixed this pass (owner-reported live: the owner's own
+    # PC showed as a truncated network address like "192.168.32.0"
+    # under Clients, because the old sole discovery producer -- dns-
+    # observer's TeeAction+ECS ingress -- could only ever carry a
+    # dnsdist-global-ECS-prefix-truncated address, never the real one).
+    # This proves the real, replacement source path end to end: a real
+    # captured dnsdist query protobuf message decodes to client
+    # "127.0.0.1" (test_dnsdist_protobuf.py's own real-capture
+    # verification) and that EXACT, unmodified address -- not a
+    # network/subnet-looking value -- is what lands in the discovery
+    # inbox JSONL cmd_discovery_worker drains into observed_clients.
+    sock = _connect(receiver.port)
+    assert sock is not None, "receiver never started listening"
+    try:
+        body = bytes.fromhex(REAL_QUERY_HEX)
+        sock.sendall(struct.pack(">H", len(body)) + body)
+    finally:
+        sock.close()
+
+    files = _wait_for_inbox_file(receiver.discovery_inbox)
+    assert files, "no observation ever landed in the discovery inbox"
+    lines = files[0].read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    obs = json.loads(lines[0])
+    assert obs["source_ip"] == "127.0.0.1"
+    assert obs["hostname_candidate"] == "pbtest.example.com."
 
 
 def test_malformed_message_is_skipped_not_fatal_to_the_connection(receiver):
