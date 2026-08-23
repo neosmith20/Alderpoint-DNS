@@ -25,8 +25,12 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 CONTAINER=apdns-v2-preview
 STATE_ETC=/root/apdns-v2-preview-state/etc
 STATE_VARLIB=/root/apdns-v2-preview-state/var-lib
-MGMT_PORT=18443
-DNS_PORT=18053
+# Normal V2 appliance listener ports. V1.1.1 was removed from active
+# service on this build server specifically so V2's preview could own
+# these (see docs/v2/owner-preview.md) -- the old development-only
+# 18443/18053 mappings are no longer used as the primary interface.
+MGMT_PORT=8443
+DNS_PORT=53
 
 fail() { echo "DEPLOY FAILED: $*" >&2; exit 1; }
 

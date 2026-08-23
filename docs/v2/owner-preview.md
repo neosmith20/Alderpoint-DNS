@@ -17,7 +17,7 @@ re-audited.
 
 ## Existing build-server state (as found, before this preview existed)
 
-- `alderpointdns` (V1.1.1, package version `1.1.1-1`) is installed and
+- `alderpointdns` (V1.1.1, package version `1.1.1-1`) was installed and
   running as systemd services (`alderpointdns.service`,
   `alderpointdns-analytics.service`, plus timers), serving on the host's
   real network directly: `dnsdist` on `0.0.0.0:53/443/853`, the V1 web app
@@ -32,16 +32,30 @@ re-audited.
   work, unrelated to this preview).
 - Traffic observed against V1 in `journalctl` was exclusively from
   `127.0.0.1` (redirects consistent with automated/local testing, not
-  external device traffic) -- V1 was **not** treated as disposable
-  regardless; it was left completely untouched. Verified after setting up
-  the preview: V1's `dnsdist`/`named`/`alderpointdns.service` PIDs, ports,
-  and behavior are unchanged.
+  external device traffic).
+
+**2026-08-23 correction (owner-directed):** the isolated dev-only ports
+below (`18443`/`18053`/etc.) defeated the purpose of owner testing --
+Alex could not point a real client's DNS at `172.16.43.100` and land on
+V2, because V1 still owned the standard listener ports. Per explicit
+owner instruction, V1.1.1 was removed from **active service** on this
+build server (`alderpointdns.service`, `alderpointdns-analytics.service`,
+their timers, `dnsdist.service`, and `named.service` stopped and
+disabled) and V2's preview container was recreated publishing the
+**normal** V2 appliance ports directly, so `172.16.43.100` now reaches V2
+the same way a real appliance would. This did **not** touch the public V1
+repo/artifacts, uninstall the V1 package, or delete `/etc/alderpointdns`
+/ `/var/lib/alderpointdns` -- see
+`/root/alderpointdns-v1.1.1-active-service-removal-backup-*/ROLLBACK.md`
+on the build server for the exact rollback commands and a config/db
+snapshot.
 
 ## Isolation approach
 
 A dedicated, systemd-capable Podman container, on its own bridge network,
-so V1 and V2 never contend for port 53, the management HTTPS port,
-analytics ports, or any state/config directory:
+so V1 and V2 never contend for state/config directories even though (as
+of 2026-08-23) they *do* now share the same listener ports -- V1 is
+simply stopped, not merely isolated on different ports:
 
 - Container: `apdns-v2-preview` (image
   `localhost/alderpointdns-clean-install-base-2613118` -- a stock
@@ -51,19 +65,17 @@ analytics ports, or any state/config directory:
   preinstalled -- alderpointdns-v2's own real `Depends:` resolve the rest
   from Debian's stock repositories, same as a real install).
 - Network: `apdns-v2-preview-net` (Podman bridge, `--disable-dns` --
-  V1's `dnsdist` already occupies `0.0.0.0:53` host-wide, which would
-  otherwise collide with Podman's own aardvark-dns on the bridge gateway;
-  not needed for a single-container network anyway).
+  not needed for a single-container network).
 - Published ports (container -> host, host binds `0.0.0.0`, reachable at
-  the host's real address `172.16.43.100`):
+  the host's real address `172.16.43.100`) -- **normal V2 appliance
+  ports**, matching what a real install would bind directly:
   - `8443/tcp` (real V2 management HTTPS, native TLS via uvicorn, not a
-    reverse proxy) -> host `18443`
-  - `53/udp` + `53/tcp` (real V2 dnsdist) -> host `18053`
-  - `853/tcp` (DoT, once enabled under Encryption) -> host `18853`
-  - `9443/tcp` (dnsdist's own web console, if enabled) -> host `18943`
-  - **Not** the V1 ports (53/443/853 direct) -- this is deliberate; the
-    preview is reachable on the *same host address* as V1 but on
-    different, non-conflicting ports.
+    reverse proxy) -> host `8443`
+  - `53/udp` + `53/tcp` (real V2 dnsdist) -> host `53`
+  - `853/tcp` (DoT, once enabled under Encryption) -> host `853`
+  - `9443/tcp` (dnsdist's own web console, if enabled) -> host `9443`
+  - The old `18443`/`18053`/`18853`/`18943` dev-only mappings are
+    retired; nothing publishes them any more.
 - Persistent state, bind-mounted from the host (survives container
   recreation, package upgrade-in-place, and this box rebooting -- confirmed
   live: a full `podman rm`+recreate of the container preserved the admin
@@ -107,7 +119,8 @@ The script:
 - never touches `--reset` unless explicitly passed and typed-out
   confirmed.
 
-## First deployment (this pass)
+## First deployment (historical -- superseded by the 2026-08-23 port
+promotion above; kept for record)
 
 - Deployed Git SHA: `ddb0fb2` (`ddb0fb25a2...`) -- the workstream 1 commit
   from this same session.
@@ -121,16 +134,17 @@ The script:
   left for Alex's own click-through, matching the real owner-facing
   workflow rather than a pre-seeded account.
 
-## Reaching it
+## Reaching it (current, normal ports)
 
-- Management UI: `https://172.16.43.100:18443/` (self-signed certificate
+- Management UI: `https://172.16.43.100:8443/` (self-signed certificate
   until a trusted one is configured under Encryption -- expect a browser
   warning, click through it).
-- DNS for manual testing: `172.16.43.100`, port `18053` (both UDP and
-  TCP) -- **not** port 53. Point a specific test client/`dig`/resolver
-  config at `172.16.43.100:18053` explicitly; this preview cannot be a
-  device's default resolver at the standard port without conflicting with
-  the host's existing V1 install.
+- DNS: `172.16.43.100`, standard port `53` (both UDP and TCP) -- this can
+  now be set as a device's actual default resolver for realistic
+  DNS/client testing, which was the whole point of the 2026-08-23
+  correction. `dig @172.16.43.100 example.com`.
+- Encrypted DNS: `853/tcp` (DoT) and `9443/tcp` (dnsdist web console) are
+  published the same way, matching a normal V2 appliance.
 
 ## Redeploy loop going forward
 
