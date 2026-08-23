@@ -107,3 +107,16 @@ Each completed matrix row must cite evidence for:
 
 Headless authenticated Chromium evidence is required for owner-facing actions. Pytest/source
 inspection alone is insufficient for private-beta parity.
+
+## Workflow Parity Is Necessary But Not Sufficient
+
+Added by explicit owner instruction (2026-08-23). Completing every row of the Workflow Matrix above
+-- full V1.1.1 operator-workflow parity -- is a required precondition for the next private RC, but
+it is not by itself sufficient. `docs/v2/v2-roadmap.md`'s "Final Product Experience — Design
+System, UI/UX Polish, and Frontend Performance" workstream (workstream 14) is a separate, mandatory,
+late-stage gate: a consistent design system, measured frontend performance against explicit
+budgets, full responsive/light/dark/accessibility visual acceptance, and Alex's explicit acceptance
+of the deployed owner-preview UI. See that roadmap section's "Hard Release Rule" for the exact
+precondition list. Do not treat this parity contract's own completion, workstream 1 (UI
+Foundation)'s completion, or any individual workflow-matrix row's evidence as satisfying that
+separate gate.

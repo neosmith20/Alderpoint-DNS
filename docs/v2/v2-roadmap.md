@@ -265,6 +265,105 @@ Source inspection and pytest alone cannot certify owner-facing parity. Headless 
 Chromium is required for private-beta acceptance. Actual owner beta remains the final private-beta
 truth.
 
+## Final Product Experience — Design System, UI/UX Polish, and Frontend Performance
+
+Added by explicit owner instruction (2026-08-23): V2 must not proceed directly from
+backend/workflow parity into RC packaging with a merely functional or minimally styled interface.
+This is workstream 14 (see Current Workstreams below) -- a dedicated late-stage pass, run after
+workstreams 1-13's product workflows and runtime semantics are complete, and before final
+acceptance/RC packaging. Workstream 1 (UI Foundation) provides reusable mechanics (the shared data
+grid, navigation disclosure/accordion behavior, friendly selectors); this workstream evaluates and
+polishes the *completed product as a whole* against that mechanics foundation. Completing
+workstream 1 never satisfies this gate by itself, and must never be recorded as doing so.
+
+**Canonical sequence:**
+
+1. Complete all product workflows and runtime semantics (workstreams 1-13).
+2. Complete the Final Product Experience workstream (this one, workstream 14).
+3. Complete full owner/browser/runtime acceptance (workstream 15, Full Workflow Acceptance).
+4. Dex performs the final read-only parity/product audit.
+5. Only then may the next private RC be built.
+
+### Design-system and UI/UX requirements
+
+A consistent, reusable visual and interaction system covering: navigation; typography; spacing and
+layout; color and theme tokens; local SVG iconography; buttons and action hierarchy; forms and
+validation; tables and data grids; cards and dashboard widgets; dialogs, drawers, and popovers;
+tooltips; status indicators; charts and analytics; loading and skeleton states; empty states;
+degraded/error states; toasts and operation progress; responsive/mobile behavior; keyboard and
+screen-reader accessibility; and Browser Local / Appliance Time / UTC timestamp presentation.
+
+The finished product must have:
+
+- Clear parent/child navigation hierarchy.
+- Intentional icons rather than placeholder letters.
+- No raw internal database IDs in normal operator workflows.
+- No generic AI-generated SaaS appearance.
+- No giant pill/card soup.
+- No copied competitor trade dress.
+- No external CDN dependency.
+- No inconsistent page-by-page component styling.
+- No owner-visible raw ISO UTC timestamps by default.
+- No controls whose labels require implementation knowledge to understand.
+- No chart that withholds its values, labels, or meaning.
+- No page-level horizontal overflow at supported widths.
+
+The private internal quality target is an operator experience better than the current leading
+self-hosted DNS management products. This is an internal benchmark only -- never public competitor
+marketing, branding, or permission to copy another product's visual design or trade dress.
+
+### Frontend performance requirements
+
+A measured performance baseline and a final performance report, both from the real owner-preview
+environment and the recommended target hardware -- "feels faster" is not acceptance evidence; any
+adjusted threshold below must be justified with real measurements.
+
+At minimum: route/navigation shell responds essentially immediately; slow panels load
+independently and never block the whole page; stale requests are cancelled or ignored; independent
+API requests run in parallel where safe; unchanged global data is not redundantly fetched on every
+route; no full-page rebuild is used for a small panel update; no rapid navigation or theme toggling
+can leave a page stuck on Loading; no significant layout shift occurs while data loads; locally
+packaged frontend assets are compressed, cacheable, and reasonably bounded; charts and grids resize
+without freezing, overflow, or excessive rerendering; background polling does not multiply after
+navigation; long operations expose progress and do not freeze unrelated UI interaction.
+
+Suggested initial owner-preview performance budgets, subject to evidence-based adjustment:
+
+- Route/shell visual response: under 100 ms at p95.
+- Useful cached/lightweight page content: under 500 ms at p95.
+- Cold management UI first usable state over the appliance LAN: under 2 seconds.
+- No ordinary route transition should remain visually blank or blocked for multiple seconds.
+- No unbounded growth in requests, event listeners, timers, or browser memory after repeated
+  navigation.
+
+### Required visual acceptance
+
+Every operator-facing page inspected in a real browser at representative widths (approximately
+1440px desktop, 1024px compact desktop/tablet, 390px mobile), each in: light theme; dark theme;
+normal data; empty data; loading state; degraded/error state; long labels and unusually large
+values. A visual acceptance gallery or equivalent recorded evidence is required for all main pages
+-- source inspection and DOM existence alone are insufficient.
+
+### Owner acceptance is required
+
+This gate cannot be closed solely by automated tests, screenshots, Lighthouse-style scores, or an
+agent declaring the interface modern. Required closure evidence: exact clean SHA deployed to the
+persistent build-server owner preview; real browser/runtime testing; recorded performance
+measurements; full responsive/light/dark inspection; accessibility and keyboard checks; Alex owner
+click-testing and explicit acceptance; a fix/redeploy/retest loop until owner-visible defects are
+resolved.
+
+### Hard release rule
+
+Workflow parity is necessary but not sufficient for the next private RC. No private RC, package
+acceptance cycle, production pilot, or public-release preparation may begin until:
+
+- All workflow workstreams (1-13) are complete.
+- This Final Product Experience workstream (14) is complete.
+- The performance budgets above are met, or explicitly owner-approved with documented evidence.
+- Alex has accepted the deployed owner-preview UI.
+- Dex has completed the final read-only parity/product audit.
+
 ## Current Workstreams
 
 1. UI Foundation: navigation, shared data grid, friendly selectors, status truth.
@@ -282,7 +381,15 @@ truth.
 12. Backup / Restore: complete operator lifecycle.
 13. Setup / Network Semantic Clarity: actual appliance/network configuration versus Local DNS
     records.
-14. Full Workflow Acceptance: Chromium automation and owner-beta regression coverage.
+14. **Final Product Experience — Design System, UI/UX Polish, and Frontend Performance.** A
+    dedicated late-stage workstream, run after workstreams 1-13's workflows/runtime semantics are
+    functionally complete and before final acceptance -- see "Final Product Experience" below for
+    its full scope and the hard release rule it establishes. Workstream 1 (UI Foundation) is
+    necessary groundwork -- the shared data grid, navigation mechanics, friendly selectors -- but
+    it is reusable *mechanics*, not a finished, polished product; it does not by itself satisfy
+    this workstream, and completing workstream 1 must never be recorded or treated as satisfying
+    it.
+15. Full Workflow Acceptance: Chromium automation and owner-beta regression coverage.
 
 ## Canonical Document Map
 
