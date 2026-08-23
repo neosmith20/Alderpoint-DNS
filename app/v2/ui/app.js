@@ -1171,7 +1171,19 @@
     return page("Backup / Restore / Migration", "Safe entry points for backup and migration preview. Opening this page does not start destructive work.", "", `
       <section class="panel"><div class="panel__head"><h2>Appliance Backup / Restore</h2></div><div class="panel__body">
         <p class="muted">A full encrypted snapshot: control database (clients, groups, networks, policies, filtering, Local DNS, upstream profiles, domain routing, schedules, DNS-transport/encryption settings, notifications, replication identity/peers), protected secrets, and the active HTTPS/DNSCrypt certificates. Raw query history is never included -- control.db cannot hold it. Restore is staged and validated before anything live changes, and the prior appliance state is snapshotted first so a failed restore leaves it untouched.</p>
-        <button data-appliance-backup class="primary">Create appliance backup</button>
+        <button data-appliance-backup class="primary">Create local appliance backup</button>
+        <form data-form="appliance-backup" class="field-row">
+          <label>Portable passphrase <input name="passphrase" type="password" autocomplete="new-password" data-omit-empty="1" placeholder="required for cross-appliance restore"></label>
+          <button>Create portable appliance backup</button>
+        </form>
+        <form data-form="appliance-upload" class="backup-upload" data-drop-upload>
+          <label class="dropzone">Upload and preview native backup
+            <input type="file" name="file" accept=".apdnsbak">
+          </label>
+          <label>Restore passphrase <input name="passphrase" type="password" autocomplete="current-password" data-omit-empty="1" placeholder="if backup is portable"></label>
+          <button>Upload and preview</button>
+          <div class="muted" data-upload-hint>Choose a native backup file or drop it here.</div>
+        </form>
         ${applianceBackupTable(applianceBackups.backups || [])}
         ${restoreJobs(applianceBackups.restore_jobs || [])}
       </div></section>
@@ -1183,7 +1195,7 @@
 
   function applianceBackupTable(backups) {
     if (!backups.length) return `<div class="empty">No appliance backups.</div>`;
-    return `<div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>Name</th><th>Created</th><th>Size</th><th>Restore</th></tr></thead><tbody>${backups.map((b) => `<tr><td class="mono">${esc(b.name)}</td><td>${ts(b.created_at)}</td><td>${esc(b.size_bytes)}</td><td><button data-validate-appliance-backup="${esc(b.name)}">Validate</button><form data-form="appliance-restore" data-backup-name="${esc(b.name)}" class="field-row"><input name="confirmation" placeholder="type exact file name"><button class="danger">Restore</button></form></td></tr>`).join("")}</tbody></table></div>`;
+    return `<div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>Name</th><th>Created</th><th>Size</th><th>Restore</th></tr></thead><tbody>${backups.map((b) => `<tr><td class="mono">${esc(b.name)}</td><td>${ts(b.created_at)}</td><td>${esc(b.size_bytes)}</td><td><button data-validate-appliance-backup="${esc(b.name)}">Preview</button><form data-form="appliance-restore" data-backup-name="${esc(b.name)}" class="field-row"><input name="confirmation" placeholder="type exact file name"><input name="passphrase" type="password" data-omit-empty="1" placeholder="passphrase if required"><button class="danger">Restore</button></form></td></tr>`).join("")}</tbody></table></div>`;
   }
 
   function backupTable(backups) {
@@ -1843,6 +1855,37 @@
       const pt = ev.target.closest && ev.target.closest(".ts-point-hit");
       if (pt) hideChartTooltip();
     }, true);
+    document.body.addEventListener("dragover", (ev) => {
+      const drop = ev.target.closest && ev.target.closest("[data-drop-upload]");
+      if (!drop) return;
+      ev.preventDefault();
+      drop.classList.add("is-dragging");
+    });
+    document.body.addEventListener("dragleave", (ev) => {
+      const drop = ev.target.closest && ev.target.closest("[data-drop-upload]");
+      if (drop && !drop.contains(ev.relatedTarget)) drop.classList.remove("is-dragging");
+    });
+    document.body.addEventListener("drop", (ev) => {
+      const drop = ev.target.closest && ev.target.closest("[data-drop-upload]");
+      if (!drop) return;
+      ev.preventDefault();
+      drop.classList.remove("is-dragging");
+      const file = ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0];
+      const input = drop.querySelector('input[type=file]');
+      if (file && input) {
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        input.files = dt.files;
+        const hint = drop.querySelector("[data-upload-hint]");
+        if (hint) hint.textContent = `Selected ${file.name}`;
+      }
+    });
+    document.body.addEventListener("change", (ev) => {
+      const input = ev.target.closest && ev.target.closest("[data-drop-upload] input[type=file]");
+      if (!input) return;
+      const hint = input.closest("[data-drop-upload]").querySelector("[data-upload-hint]");
+      if (hint && input.files[0]) hint.textContent = `Selected ${input.files[0].name}`;
+    });
     document.body.addEventListener("click", async (ev) => {
       // Touch/click activation for the chart tooltip (mouseover/focusin
       // above already cover mouse and keyboard) -- toggles so a second
@@ -2003,7 +2046,7 @@
         return;
       }
       const applianceBackup = ev.target.closest("[data-appliance-backup]");
-      if (applianceBackup) {
+      if (applianceBackup && !applianceBackup.closest('form[data-form="appliance-backup"]')) {
         const res = await api("/api/backup/appliance", { method: "POST" });
         await loadPage("backup");
         toast(`Appliance backup created (${res.contents.join(", ")})`, "ok");
@@ -2014,7 +2057,8 @@
         const name = validateAppliance.dataset.validateApplianceBackup;
         const res = await api(`/api/backup/appliance/${encodeURIComponent(name)}/validate`, { method: "POST" });
         await loadPage("backup");
-        toast(`Backup ${res.backup_name} is valid (${res.contents.join(", ")})`, "ok");
+        const warnings = (res.warnings || []).length ? `; warnings: ${res.warnings.join("; ")}` : "";
+        toast(`Backup ${res.backup_name} is valid (${res.contents.join(", ")})${warnings}`, warnings ? "info" : "ok");
         return;
       }
       const applyUpdate = ev.target.closest("[data-apply-update]");
@@ -2286,6 +2330,22 @@
     } else if (type === "restore") {
       const name = form.dataset.backupName;
       await api(`/api/backup/secrets/${encodeURIComponent(name)}/restore`, { method: "POST", body: JSON.stringify(body) });
+    } else if (type === "appliance-backup") {
+      if (!body.passphrase) throw new Error("enter a portable passphrase for cross-appliance backup export");
+      const payload = {};
+      payload.passphrase = body.passphrase;
+      const res = await api("/api/backup/appliance", { method: "POST", body: JSON.stringify(payload) });
+      toast(`Appliance backup created (${res.contents.join(", ")})`, "ok");
+    } else if (type === "appliance-upload") {
+      const fileInput = form.querySelector('input[type=file]');
+      const file = fileInput && fileInput.files[0];
+      if (!file) throw new Error("choose a native .apdnsbak backup to upload");
+      const data_base64 = await fileToBase64(file);
+      const payload = { filename: file.name, data_base64 };
+      if (body.passphrase) payload.passphrase = body.passphrase;
+      const res = await api("/api/backup/appliance/upload", { method: "POST", body: JSON.stringify(payload) });
+      const warnings = (res.warnings || []).length ? `; warnings: ${res.warnings.join("; ")}` : "";
+      toast(`Uploaded ${res.backup_name}; contents: ${res.contents.join(", ")}${warnings}`, warnings ? "info" : "ok");
     } else if (type === "appliance-restore") {
       const name = form.dataset.backupName;
       await api(`/api/backup/appliance/${encodeURIComponent(name)}/restore`, { method: "POST", body: JSON.stringify(body) });

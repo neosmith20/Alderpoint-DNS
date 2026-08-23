@@ -195,7 +195,8 @@ MAX_REQUEST_BODY_BYTES = 1_000_000
 # route (JSON bodies, PEM certs/keys at most a few KB) keeps the
 # original 1 MB cap and its original rationale unchanged.
 MAX_UPDATE_UPLOAD_BODY_BYTES = 250_000_000
-_LARGE_UPLOAD_PATHS = {"/api/updates/upload"}
+MAX_APPLIANCE_BACKUP_UPLOAD_BODY_BYTES = int(backup_restore.MAX_UPLOAD_BYTES * 1.4)
+_LARGE_UPLOAD_PATHS = {"/api/updates/upload", "/api/backup/appliance/upload"}
 
 
 @app.middleware("http")
@@ -206,7 +207,12 @@ async def _reject_oversized_requests(request: Request, call_next):
             declared_size = int(content_length)
         except ValueError:
             declared_size = None
-        limit = MAX_UPDATE_UPLOAD_BODY_BYTES if request.url.path in _LARGE_UPLOAD_PATHS else MAX_REQUEST_BODY_BYTES
+        if request.url.path == "/api/backup/appliance/upload":
+            limit = MAX_APPLIANCE_BACKUP_UPLOAD_BODY_BYTES
+        elif request.url.path in _LARGE_UPLOAD_PATHS:
+            limit = MAX_UPDATE_UPLOAD_BODY_BYTES
+        else:
+            limit = MAX_REQUEST_BODY_BYTES
         if declared_size is not None and declared_size > limit:
             return JSONResponse(
                 status_code=413,
@@ -2479,6 +2485,47 @@ def _appliance_source_version() -> str:
     return version_file.read_text().strip() if version_file.exists() else "unknown"
 
 
+def _appliance_backup_warnings(manifest: backup_restore.ApplianceManifest) -> list[str]:
+    warnings: list[str] = []
+    live_schema = backup_restore._control_db_schema_version(CONTROL_DB)
+    if manifest.control_db_schema_version is not None and live_schema is not None:
+        if manifest.control_db_schema_version > live_schema:
+            warnings.append(
+                f"backup schema {manifest.control_db_schema_version} is newer than this appliance schema {live_schema}"
+            )
+        elif manifest.control_db_schema_version < live_schema:
+            warnings.append(
+                f"backup schema {manifest.control_db_schema_version} is older than this appliance schema {live_schema}; migrations may run after restore"
+            )
+    if manifest.key_mode == "local":
+        warnings.append("this backup uses this appliance's local backup key and is not portable unless the target has the same protected backup key")
+    return warnings
+
+
+def _appliance_manifest_response(name: str, path: Path, manifest: backup_restore.ApplianceManifest) -> dict[str, Any]:
+    return {
+        "status": "valid", "backup_name": name, "created_at": manifest.created_at,
+        "product": manifest.product, "source_version": manifest.source_version,
+        "source_node_id": manifest.source_node_id, "key_mode": manifest.key_mode,
+        "contents": manifest.contents, "secret_count": manifest.secret_count,
+        "cert_files": manifest.cert_files,
+        "control_db_schema_version": manifest.control_db_schema_version,
+        "raw_query_history_included": manifest.raw_query_history_included,
+        "size_bytes": path.stat().st_size,
+        "warnings": _appliance_backup_warnings(manifest),
+    }
+
+
+class ApplianceBackupCreateRequest(BaseModel):
+    passphrase: Optional[str] = None
+
+
+class ApplianceBackupUploadRequest(BaseModel):
+    filename: str
+    data_base64: str
+    passphrase: Optional[str] = None
+
+
 @app.get("/api/backup/appliance")
 def list_appliance_backups(admin=Depends(current_admin)):
     rows = []
@@ -2506,14 +2553,19 @@ def list_appliance_backups(admin=Depends(current_admin)):
 
 
 @app.post("/api/backup/appliance")
-def create_appliance_backup_route(admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+def create_appliance_backup_route(req: ApplianceBackupCreateRequest = Body(default_factory=ApplianceBackupCreateRequest), admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
     check_csrf(admin, x_csrf_token)
     secrets = _secrets()
     key = _backup_key(secrets)
     backup_path = _backup_dir() / f"appliance-{int(time.time())}.apdnsbak"
+    node_identity.ensure_schema(CONTROL_DB)
+    with _db() as conn:
+        identity = node_identity.get_or_create(conn)
+        conn.commit()
     result = backup_restore.create_appliance_backup(
         CONTROL_DB, secrets, key, backup_path,
         cert_files=_appliance_cert_files(), source_version=_appliance_source_version(),
+        passphrase=req.passphrase or None, source_node_id=identity.node_id,
     )
     with _db() as conn:
         now = datetime.now(timezone.utc).isoformat()
@@ -2525,30 +2577,81 @@ def create_appliance_backup_route(admin=Depends(current_admin), x_csrf_token: Op
         "status": "created", "name": backup_path.name, "created_at": result.created_at,
         "contents": result.contents, "secret_count": result.secret_count,
         "control_db_schema_version": result.control_db_schema_version, "size_bytes": result.size_bytes,
+        "key_mode": "passphrase" if req.passphrase else "local",
     }
 
 
+@app.post("/api/backup/appliance/upload")
+def upload_appliance_backup_route(req: ApplianceBackupUploadRequest, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    import base64 as _b64
+    import binascii
+
+    original = Path(req.filename).name
+    if not original or original.startswith(".") or "/" in req.filename or "\\" in req.filename:
+        raise ApiError(400, "validation_error", "invalid backup filename")
+    if not original.endswith(".apdnsbak"):
+        raise ApiError(400, "validation_error", "native appliance backups must end in .apdnsbak")
+    try:
+        data = _b64.b64decode(req.data_base64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ApiError(400, "validation_error", f"invalid data_base64: {exc}") from exc
+    if not data:
+        raise ApiError(400, "validation_error", "uploaded backup is empty")
+    if len(data) > backup_restore.MAX_UPLOAD_BYTES:
+        raise ApiError(413, "payload_too_large", "backup upload exceeds the configured size limit")
+
+    staging_root = STAGING_DIR / "backup-imports"
+    staging_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(staging_root, 0o700)
+    staged_path = staging_root / f"upload-{int(time.time() * 1000)}.apdnsbak"
+    try:
+        with open(staged_path, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(staged_path, 0o600)
+        manifest = backup_restore.validate_appliance_backup(staged_path, _backup_key(_secrets()), passphrase=req.passphrase or None)
+        safe_original = re.sub(r"[^A-Za-z0-9_.-]+", "-", original).strip(".-") or "uploaded.apdnsbak"
+        dest = _backup_dir() / f"uploaded-{int(time.time())}-{safe_original}"
+        counter = 1
+        while dest.exists():
+            dest = _backup_dir() / f"uploaded-{int(time.time())}-{counter}-{safe_original}"
+            counter += 1
+        os.replace(staged_path, dest)
+        os.chmod(dest, 0o600)
+        return _appliance_manifest_response(dest.name, dest, manifest)
+    except backup_restore.ApplianceBackupKeyError as exc:
+        raise ApiError(400, "backup_invalid", str(exc)) from exc
+    except (backup_restore.ApplianceBackupError, backup_restore.ApplianceRestoreError) as exc:
+        raise ApiError(400, "backup_invalid", str(exc)) from exc
+    finally:
+        try:
+            staged_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+class ApplianceBackupValidateRequest(BaseModel):
+    passphrase: Optional[str] = None
+
+
 @app.post("/api/backup/appliance/{name}/validate")
-def validate_appliance_backup_route(name: str, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+def validate_appliance_backup_route(name: str, req: ApplianceBackupValidateRequest = Body(default_factory=ApplianceBackupValidateRequest), admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
     check_csrf(admin, x_csrf_token)
     path = _appliance_backup_path_from_name(name)
     if not path.exists():
         raise ApiError(404, "not_found", "backup not found")
     try:
-        manifest = backup_restore.validate_appliance_backup(path, _backup_key(_secrets()))
+        manifest = backup_restore.validate_appliance_backup(path, _backup_key(_secrets()), passphrase=req.passphrase or None)
     except (backup_restore.ApplianceBackupError, backup_restore.ApplianceRestoreError) as exc:
         raise ApiError(400, "backup_invalid", str(exc)) from exc
-    return {
-        "status": "valid", "backup_name": name, "created_at": manifest.created_at,
-        "source_version": manifest.source_version, "contents": manifest.contents,
-        "secret_count": manifest.secret_count, "cert_files": manifest.cert_files,
-        "control_db_schema_version": manifest.control_db_schema_version,
-        "size_bytes": path.stat().st_size,
-    }
+    return _appliance_manifest_response(name, path, manifest)
 
 
 class ApplianceRestoreRequest(BaseModel):
     confirmation: str
+    passphrase: Optional[str] = None
 
 
 @app.post("/api/backup/appliance/{name}/restore")
@@ -2583,8 +2686,10 @@ def restore_appliance_backup_route(name: str, req: ApplianceRestoreRequest, admi
 
     key = _backup_key(_secrets())
     staging_dir = STATE_DIR / "restore-staging" / f"job-{int(time.time() * 1000)}"
+    rollback_root = STATE_DIR / "restore-rollback" / f"job-{int(time.time() * 1000)}"
+    pre_restore_backup_path: Optional[Path] = None
     try:
-        staged = backup_restore.stage_appliance_restore(path, key, staging_dir)
+        staged = backup_restore.stage_appliance_restore(path, key, staging_dir, passphrase=req.passphrase or None)
     except backup_restore.ApplianceBackupKeyError as exc:
         _record_failure(exc, "backup_invalid")
         return  # pragma: no cover -- _record_failure always raises
@@ -2592,8 +2697,12 @@ def restore_appliance_backup_route(name: str, req: ApplianceRestoreRequest, admi
         _record_failure(exc, "restore_failed")
         return  # pragma: no cover -- _record_failure always raises
 
-    rollback_root = STATE_DIR / "restore-rollback" / f"job-{int(time.time() * 1000)}"
     try:
+        pre_restore_backup_path = _backup_dir() / f"pre-restore-safety-{int(time.time())}.apdnsbak"
+        backup_restore.create_appliance_backup(
+            CONTROL_DB, _secrets(), key, pre_restore_backup_path,
+            cert_files=_appliance_cert_files(), source_version=_appliance_source_version(),
+        )
         promo = backup_restore.promote_appliance_restore(
             staged, CONTROL_DB, SECRETS_DIR, _appliance_cert_files(), rollback_root=rollback_root,
         )
@@ -2602,6 +2711,7 @@ def restore_appliance_backup_route(name: str, req: ApplianceRestoreRequest, admi
         # promote_appliance_restore itself before this exception reached
         # here -- report the failure, but the prior valid appliance is
         # still the one actually live.
+        shutil.rmtree(rollback_root, ignore_errors=True)
         _record_failure(exc, "restore_failed")
         return  # pragma: no cover -- _record_failure always raises
     finally:
@@ -2609,14 +2719,10 @@ def restore_appliance_backup_route(name: str, req: ApplianceRestoreRequest, admi
 
     # Recompile/promote the runtime against the just-restored control.db
     # so the restored state is actually live, not just present on disk.
-    # A recompile failure here is a real, reportable failure -- surfaced
-    # to the operator -- but does not itself roll back the already-
-    # promoted control.db/secrets/certs (those are already validated,
-    # real, consistent state; a compile failure means the *runtime*
-    # couldn't pick it up yet, most likely because the restored
-    # configuration references something -- an upstream, a certificate --
-    # not actually present on this host, which the operator needs to see
-    # and fix, not have silently reverted out from under them).
+    # A recompile failure here is a real, reportable failure and rolls
+    # back the durable state to the pre-restore snapshot captured above;
+    # a "successful" restore is only reported once the restored control
+    # state has also compiled/promoted into runtime.
     runtime_promoted = False
     runtime_error = None
     try:
@@ -2624,11 +2730,18 @@ def restore_appliance_backup_route(name: str, req: ApplianceRestoreRequest, admi
         runtime_promoted = result.promoted
     except Exception as exc:  # noqa: BLE001 -- reported, not swallowed
         runtime_error = str(exc)
+        backup_restore.restore_from_rollback(
+            CONTROL_DB, SECRETS_DIR, _appliance_cert_files(), rollback_root=rollback_root,
+        )
+        shutil.rmtree(rollback_root, ignore_errors=True)
+        _record_failure(exc, "restore_failed")
+        return  # pragma: no cover -- _record_failure always raises
 
     finished = datetime.now(timezone.utc).isoformat()
     detail = {
         "control_db_restored": promo.control_db_restored, "secret_count_restored": promo.secret_count_restored,
         "certs_restored": promo.certs_restored, "runtime_promoted": runtime_promoted, "runtime_error": runtime_error,
+        "pre_restore_backup": pre_restore_backup_path.name if pre_restore_backup_path else None,
     }
     # Inserted into the NOW-current control.db -- the one the restore
     # itself just promoted, if control_db was part of this backup.
@@ -2638,6 +2751,7 @@ def restore_appliance_backup_route(name: str, req: ApplianceRestoreRequest, admi
             (started, finished, "succeeded", str(path), json.dumps(detail)),
         )
         job_id = cur.lastrowid
+    shutil.rmtree(rollback_root, ignore_errors=True)
     return {"status": "succeeded", "job_id": job_id, "backup_name": name, **detail}
 
 

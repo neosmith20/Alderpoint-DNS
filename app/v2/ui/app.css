@@ -292,6 +292,10 @@ button, .btn { min-height: 36px; border: 1px solid var(--line-2); border-radius:
 button:hover, .btn:hover { background: var(--surface-3); text-decoration: none; }
 button.primary, .btn.primary { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); background: color-mix(in srgb, var(--accent) 18%, var(--surface)); }
 button.danger { border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); color: var(--bad); }
+.backup-upload { margin-top: var(--s-3); padding: var(--s-3); border: 1px dashed var(--line-2); border-radius: var(--r-2); background: var(--surface-2); display: grid; gap: var(--s-2); }
+.backup-upload.is-dragging { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--surface-2)); }
+.dropzone { display: grid; gap: var(--s-2); min-height: 76px; align-content: center; justify-items: start; }
+.dropzone input[type="file"] { max-width: 100%; }
 button:disabled { opacity: .55; cursor: not-allowed; }
 .icon-btn { width: 36px; padding: 0; font-family: var(--mono); }
 

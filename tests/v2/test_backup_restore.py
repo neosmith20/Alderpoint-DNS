@@ -15,6 +15,7 @@ webapp routes with real auth/CSRF.
 from __future__ import annotations
 
 import io
+import base64
 import json
 import shutil
 import socket
@@ -81,6 +82,27 @@ class TestCreateAndValidate:
         with pytest.raises(br.ApplianceBackupKeyError):
             br.validate_appliance_backup(backup_path, wrong_key)
 
+    def test_portable_backup_requires_correct_passphrase(self, live):
+        backup_path = live["tmp_path"] / "portable.apdnsbak"
+        br.create_appliance_backup(live["db_path"], live["secrets"], live["key"], backup_path, passphrase="correct passphrase")
+        with pytest.raises(br.ApplianceBackupKeyError):
+            br.validate_appliance_backup(backup_path, live["key"])
+        with pytest.raises(br.ApplianceBackupKeyError):
+            br.validate_appliance_backup(backup_path, live["key"], passphrase="wrong passphrase")
+        manifest = br.validate_appliance_backup(backup_path, live["key"], passphrase="correct passphrase")
+        assert manifest.key_mode == "passphrase"
+
+    def test_hostile_kdf_iterations_are_rejected_before_decrypt(self, live):
+        backup_path = live["tmp_path"] / "portable.apdnsbak"
+        br.create_appliance_backup(live["db_path"], live["secrets"], live["key"], backup_path, passphrase="correct passphrase")
+        payload = backup_path.read_bytes()
+        header_raw, ciphertext = payload[len(br.FILE_MAGIC):].split(b"\n", 1)
+        header = json.loads(header_raw.decode("utf-8"))
+        header["iterations"] = br.PBKDF2_MAX_ITERATIONS + 1
+        backup_path.write_bytes(br.FILE_MAGIC + json.dumps(header).encode("utf-8") + b"\n" + ciphertext)
+        with pytest.raises(br.ApplianceBackupError):
+            br.validate_appliance_backup(backup_path, live["key"], passphrase="correct passphrase")
+
     def test_tampered_archive_is_detected(self, live):
         backup_path = live["tmp_path"] / "b4.apdnsbak"
         br.create_appliance_backup(live["db_path"], live["secrets"], live["key"], backup_path)
@@ -114,9 +136,9 @@ class TestStageRestoreSafety:
         backup_path.write_bytes(fernet.encrypt(buf.getvalue()))
 
         staging = live["tmp_path"] / "staging"
-        staged = br.stage_appliance_restore(backup_path, live["key"], staging)
+        with pytest.raises(br.ApplianceRestoreError):
+            br.stage_appliance_restore(backup_path, live["key"], staging)
         assert not (live["tmp_path"] / "tmp" / "apdns-escape-test.txt").exists()
-        assert staged.manifest.contents == []
 
     def test_incomplete_control_db_fails_staging(self, live):
         backup_path = live["tmp_path"] / "incomplete.apdnsbak"
@@ -403,3 +425,117 @@ class TestApplianceBackupApiRoutes:
         client = TestClient(webapp.app)
         assert client.get("/api/backup/appliance").status_code == 401
         assert client.post("/api/backup/appliance").status_code == 401
+
+    def test_portable_backup_upload_preview_restore_over_http(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        passphrase = "portable restore passphrase 2026"
+
+        webapp_a = self._fresh_webapp(tmp_path / "a", monkeypatch)
+        client_a = TestClient(webapp_a.app)
+        client_a.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12", "create_local_dns": False})
+        login_a = client_a.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
+        csrf_a = login_a.json()["csrf"]
+        client_a.post("/api/local-dns", json={"name": "portable.lan", "record_type": "A", "value": "10.7.7.7", "ttl": 300}, headers={"X-CSRF-Token": csrf_a})
+        created = client_a.post("/api/backup/appliance", json={"passphrase": passphrase}, headers={"X-CSRF-Token": csrf_a})
+        assert created.status_code == 200, created.text
+        assert created.json()["key_mode"] == "passphrase"
+        backup_bytes = (tmp_path / "a" / "state" / "backups" / created.json()["name"]).read_bytes()
+
+        webapp_b = self._fresh_webapp(tmp_path / "b", monkeypatch)
+        client_b = TestClient(webapp_b.app)
+        client_b.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12", "create_local_dns": False})
+        login_b = client_b.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
+        csrf_b = login_b.json()["csrf"]
+        assert client_b.get("/api/local-dns").json()["records"] == []
+
+        upload = client_b.post(
+            "/api/backup/appliance/upload",
+            json={
+                "filename": "fixture-a.apdnsbak",
+                "data_base64": base64.b64encode(backup_bytes).decode("ascii"),
+                "passphrase": passphrase,
+            },
+            headers={"X-CSRF-Token": csrf_b},
+        )
+        assert upload.status_code == 200, upload.text
+        preview = upload.json()
+        assert preview["backup_name"].startswith("uploaded-")
+        assert preview["key_mode"] == "passphrase"
+        assert "control_db" in preview["contents"]
+
+        restored = client_b.post(
+            f"/api/backup/appliance/{preview['backup_name']}/restore",
+            json={"confirmation": preview["backup_name"], "passphrase": passphrase},
+            headers={"X-CSRF-Token": csrf_b},
+        )
+        assert restored.status_code == 200, restored.text
+        assert restored.json()["pre_restore_backup"].startswith("pre-restore-safety-")
+        login_after_restore = client_b.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
+        assert login_after_restore.status_code == 200, login_after_restore.text
+        records = client_b.get("/api/local-dns").json()["records"]
+        assert {r["name"] for r in records} == {"portable.lan"}
+
+    def test_upload_rejects_special_archive_entries_without_mutating_target(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        webapp = self._fresh_webapp(tmp_path, monkeypatch)
+        client = TestClient(webapp.app)
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12", "create_local_dns": False})
+        login = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
+        csrf = login.json()["csrf"]
+        client.post("/api/local-dns", json={"name": "unchanged.lan", "record_type": "A", "value": "10.8.8.8", "ttl": 300}, headers={"X-CSRF-Token": csrf})
+
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            manifest = {
+                "format_version": br.BACKUP_FORMAT_VERSION, "product": br.PRODUCT_ID, "created_at": "now", "source_version": "x",
+                "control_db_schema_version": 1, "contents": [], "secret_count": 0, "cert_files": [], "raw_query_history_included": False,
+            }
+            mbytes = json.dumps(manifest).encode()
+            info = tarfile.TarInfo(name=br.MANIFEST_NAME)
+            info.size = len(mbytes)
+            tar.addfile(info, io.BytesIO(mbytes))
+            link = tarfile.TarInfo(name="certs/bad-link")
+            link.type = tarfile.SYMTYPE
+            link.linkname = "/etc/passwd"
+            tar.addfile(link)
+        fernet = Fernet(webapp._backup_key(webapp._secrets()))
+        payload = fernet.encrypt(buf.getvalue())
+        failed = client.post(
+            "/api/backup/appliance/upload",
+            json={"filename": "bad.apdnsbak", "data_base64": base64.b64encode(payload).decode("ascii")},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert failed.status_code == 400
+        assert failed.json()["error"] == "backup_invalid"
+        records = client.get("/api/local-dns").json()["records"]
+        assert {r["name"] for r in records} == {"unchanged.lan"}
+        assert client.get("/api/backup/appliance").json()["backups"] == []
+
+    def test_runtime_promotion_failure_rolls_back_restored_control_state(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        webapp = self._fresh_webapp(tmp_path, monkeypatch)
+        client = TestClient(webapp.app)
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12", "create_local_dns": False})
+        login = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
+        csrf = login.json()["csrf"]
+        client.post("/api/local-dns", json={"name": "backup-state.lan", "record_type": "A", "value": "10.9.9.9", "ttl": 300}, headers={"X-CSRF-Token": csrf})
+        created = client.post("/api/backup/appliance", headers={"X-CSRF-Token": csrf})
+        name = created.json()["name"]
+        client.post("/api/local-dns", json={"name": "pre-restore-live.lan", "record_type": "A", "value": "10.9.9.10", "ttl": 300}, headers={"X-CSRF-Token": csrf})
+
+        def fail_promote(_mutator):
+            raise RuntimeError("forced runtime promotion failure")
+
+        monkeypatch.setattr(webapp, "_mutate_and_promote", fail_promote)
+        failed = client.post(
+            f"/api/backup/appliance/{name}/restore",
+            json={"confirmation": name},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert failed.status_code == 400
+        assert failed.json()["error"] == "restore_failed"
+        records = client.get("/api/local-dns").json()["records"]
+        assert {r["name"] for r in records} == {"backup-state.lan", "pre-restore-live.lan"}
