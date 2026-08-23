@@ -92,12 +92,30 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .nav button { width: 100%; min-height: 38px; display: flex; align-items: center; gap: var(--s-2); margin: 0 0 var(--s-1); padding: 8px 10px; border: 1px solid transparent; border-radius: var(--r-2); color: var(--muted); background: transparent; cursor: pointer; text-align: left; }
 .nav button:hover { background: var(--surface-2); color: var(--text); }
 .nav button.active { background: color-mix(in srgb, var(--accent) 12%, var(--surface)); color: var(--text); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); box-shadow: inset 3px 0 0 var(--accent); }
-.nav button.nav-top { font-weight: 700; margin-bottom: var(--s-3); }
+.nav button.nav-top { margin-bottom: var(--s-3); font-size: 14px; font-weight: 700; min-height: 40px; }
+.nav button.nav-top.active { color: var(--accent); }
 .nav .glyph { width: 2.6ch; font-family: var(--mono); color: var(--accent-2); flex: 0 0 auto; text-align: center; }
+/* Real defect fixed here (owner-reported: main-menu items showed an
+   arbitrary placeholder letter instead of an intentional icon, and
+   icon/label were not cleanly centered/aligned). A fixed-size, centered,
+   rounded-square icon container -- every icon lines up on the same grid
+   regardless of glyph shape, at both nav-row heights (top-level and
+   section-header buttons share this class). The SVG itself is sized off
+   the container so hand-authored viewBox coordinates never need
+   per-icon tuning. */
+.nav-icon { width: 26px; height: 26px; flex: 0 0 auto; display: grid; place-items: center; border-radius: var(--r-2); background: color-mix(in srgb, var(--text) 6%, transparent); color: var(--muted); }
+.nav-icon svg { width: 16px; height: 16px; display: block; }
+.nav button.active .nav-icon, .nav-section.is-active > .nav-section__toggle .nav-icon { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
+.nav button:hover .nav-icon { color: var(--text); }
 .nav-section { margin: var(--s-2) 0 0; }
-.nav .nav-section__toggle { min-height: 34px; padding: 6px 10px; color: var(--faint); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; margin-bottom: 0; }
-.nav .nav-section__toggle:hover { color: var(--text); }
-.nav-section.is-active > .nav-section__toggle { color: var(--text); }
+/* Main section label: deliberately the most prominent text in the
+   sidebar (owner-reported: it previously rendered SMALLER than its own
+   submenu items, an inverted/backwards hierarchy). Real weight/size
+   step above .nav-subitem below, plain sentence case rather than the
+   small uppercase "section label" treatment this used to borrow. */
+.nav .nav-section__toggle { min-height: 40px; padding: 8px 10px; color: var(--text); font-size: 14px; font-weight: 700; margin-bottom: 0; }
+.nav .nav-section__toggle:hover { background: var(--surface-2); }
+.nav-section.is-active > .nav-section__toggle { color: var(--accent); }
 .nav-section__label { flex: 1 1 auto; }
 .nav-section__chevron { flex: 0 0 auto; font-size: 10px; color: var(--faint); }
 .nav-section__panel { display: grid; gap: 0; margin: var(--s-1) 0 var(--s-2); }
@@ -114,7 +132,13 @@ button, input, select, textarea { font: inherit; color: inherit; }
    not trustworthy" finding. An explicit `[hidden]` override, with strictly
    higher specificity than the bare class rule, is required. */
 .nav-section__panel[hidden] { display: none; }
-.nav-subitem { padding-left: 1.8ch; }
+/* Submenu: clearly subordinate to its parent section (owner-reported
+   requirement) -- smaller than the 14px/700 section header, muted by
+   default, indented to visually nest under the icon column above it
+   (26px icon + var(--s-2) gap == the icon's left edge) rather than an
+   arbitrary character-based indent. */
+.nav-subitem { min-height: 32px; padding: 6px 10px 6px calc(26px + var(--s-2) + 10px); font-size: 13px; color: var(--muted); }
+.nav-subitem.active { font-weight: 600; }
 .side-footer { padding: var(--s-3); border-top: 1px solid var(--line); display: grid; gap: var(--s-2); }
 
 /* Collapsed nav: fixed icon-rail width, same DOM/labels (kept for a11y and
@@ -128,7 +152,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .app-shell.nav-collapsed .brand { justify-content: center; padding: var(--s-4) var(--s-2); }
 .app-shell.nav-collapsed .collapse-toggle { margin-left: 0; }
 /* Collapsed icon-rail: each section keeps its own toggle button, now shown
-   as a 2-letter glyph identifying the group (DN/SC/OP/SY) instead of the
+   as its real section icon (see GROUP_ICON in app.js) instead of the
    generic "-"/"*" every section previously shared. Its panel is a real
    flyout -- opened via `.is-flyout-open` (see wire()'s sectionToggle
    branch in app.js), positioned beside the rail with full text labels
@@ -151,9 +175,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
   box-shadow: 0 12px 32px rgba(0, 0, 0, .4);
   z-index: 40;
 }
-.app-shell.nav-collapsed .nav-section.is-flyout-open .nav-section__panel button { justify-content: flex-start; }
+.app-shell.nav-collapsed .nav-section.is-flyout-open .nav-section__panel button { justify-content: flex-start; padding-left: 10px; }
 .app-shell.nav-collapsed .nav-section.is-flyout-open .nav-section__panel button span:not(.glyph) { display: inline; }
-.app-shell.nav-collapsed .nav button span:not(.glyph) { display: none; }
+.app-shell.nav-collapsed .nav button span:not(.glyph):not(.nav-icon) { display: none; }
 .app-shell.nav-collapsed .nav button { justify-content: center; }
 .app-shell.nav-collapsed .side-footer button span:not(.glyph) { display: none; }
 .app-shell.nav-collapsed .side-footer button { justify-content: center; }
@@ -195,6 +219,8 @@ td { font-size: 13px; }
 tr:last-child td { border-bottom: 0; }
 .mono { font-family: var(--mono); }
 .muted { color: var(--muted); }
+.ts-value { white-space: nowrap; }
+.ts-value.muted { font-style: italic; }
 .faint { color: var(--faint); }
 .truncate { max-width: 34ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -237,6 +263,8 @@ form { display: grid; gap: var(--s-3); }
 .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s-3); }
 .query-filter { display: grid; grid-template-columns: repeat(4, minmax(130px, 1fr)); gap: var(--s-3); align-items: end; margin-bottom: var(--s-3); }
 label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; font-weight: 650; }
+label.row { display: flex; flex-direction: row; align-items: center; gap: var(--s-2); }
+label.row input[type="checkbox"] { width: 16px; min-height: 16px; height: 16px; flex: 0 0 auto; }
 input, select, textarea { width: 100%; min-height: 38px; border: 1px solid var(--line-2); background: var(--bg); color: var(--text); border-radius: var(--r-2); padding: 8px 9px; }
 textarea { min-height: 94px; resize: vertical; font-family: var(--mono); font-size: 12px; }
 .field-row { display: flex; gap: var(--s-2); align-items: end; flex-wrap: wrap; }

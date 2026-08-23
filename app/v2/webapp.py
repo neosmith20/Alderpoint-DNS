@@ -3293,6 +3293,48 @@ def migration_detect(source_path: str, admin=Depends(current_admin)):
 # --- system status (§33) -----------------------------------------------
 
 
+def _detect_appliance_timezone() -> str:
+    """Best-effort real IANA timezone name for this Debian appliance
+    (owner-reported requirement: display modes must never hardcode a
+    geographic timezone -- "Appliance Time" has to reflect whatever
+    this specific box is actually configured with). Two real, standard
+    Debian sources, in order: `/etc/timezone` (a single-line IANA name,
+    maintained by `dpkg-reconfigure tzdata`/`timedatectl set-timezone`)
+    and, if that's missing or unreadable, the `/etc/localtime` symlink
+    target's path under .../zoneinfo/<name> (the same mechanism `date`
+    itself relies on). Falls back to the canonical "Etc/UTC" -- never an
+    empty string or an exception -- if neither source is usable, so a
+    caller always gets a real, displayable IANA-shaped name.
+    """
+    # Real, documented test-only override, same pattern as
+    # ALDERPOINTDNS_V2_FORCE_ANALYTICS_DEGRADED above -- lets the real
+    # browser harness prove Appliance Time genuinely reflects "whatever
+    # this box is configured with" for more than one zone, without
+    # depending on a shared build-server's real /etc/timezone (never
+    # read anywhere except this function; production deployments never
+    # set this).
+    forced = os.environ.get("ALDERPOINTDNS_V2_FORCE_APPLIANCE_TIMEZONE", "").strip()
+    if forced:
+        return forced
+    try:
+        name = Path("/etc/timezone").read_text(encoding="utf-8").strip()
+        if name:
+            return name
+    except OSError:
+        pass
+    try:
+        target = os.readlink("/etc/localtime")
+        marker = "zoneinfo/"
+        idx = target.find(marker)
+        if idx != -1:
+            name = target[idx + len(marker):]
+            if name:
+                return name
+    except OSError:
+        pass
+    return "Etc/UTC"
+
+
 @app.get("/api/system/status")
 def system_status(admin=Depends(current_admin)):
     import shutil as _shutil
@@ -3303,6 +3345,7 @@ def system_status(admin=Depends(current_admin)):
         "version": version_file.read_text().strip() if version_file.exists() else "unknown",
         "storage": {"total": disk.total, "used": disk.used, "free": disk.free} if disk else None,
         "compiled_runtime_present": COMPILED_DNSDIST_CONF.exists(),
+        "timezone": _detect_appliance_timezone(),
     }
 
 

@@ -82,6 +82,25 @@
     });
   }
 
+  // Real defect fixed here (owner-reported: sorting must use the
+  // underlying timestamp/epoch value, never the formatted display
+  // string). A cell's visible text is not always its true sort key --
+  // a locale-formatted timestamp like "Aug 9, 2026, ..." sorts before
+  // "Aug 22, 2026, ..." as plain text (lexicographic "2" < "9") even
+  // though Aug 9 is chronologically earlier. Any cell (or a descendant
+  // of it -- app.js's timestampHtml() renders the formatted text
+  // inside a child <span data-sort-value="...">) can opt out of
+  // text-based sorting by carrying a real, comparable sort key in
+  // data-sort-value; parseCellValue() already numeric-parses it the
+  // same as any other numeric text, so an epoch-millisecond string
+  // sorts correctly with no special-casing here.
+  function cellSortText(cell) {
+    if (!cell) return "";
+    const withKey = cell.hasAttribute("data-sort-value") ? cell : cell.querySelector("[data-sort-value]");
+    if (withKey) return withKey.getAttribute("data-sort-value");
+    return cell.textContent;
+  }
+
   function sortRows(table, columnIndex, direction) {
     const tbody = table.tBodies[0];
     if (!tbody) return;
@@ -90,7 +109,7 @@
     rows.sort((rowA, rowB) => {
       const cellA = rowA.children[columnIndex];
       const cellB = rowB.children[columnIndex];
-      return compareCells(cellA ? cellA.textContent : "", cellB ? cellB.textContent : "") * factor;
+      return compareCells(cellSortText(cellA), cellSortText(cellB)) * factor;
     });
     rows.forEach((row) => tbody.appendChild(row));
   }

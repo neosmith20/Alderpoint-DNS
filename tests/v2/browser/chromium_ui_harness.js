@@ -294,6 +294,13 @@ async function main() {
     // whatever the binary happens to ship, not something this harness
     // should depend on implicitly.
     await cdp("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+    // Real browser-timezone emulation for the Local/Appliance/UTC
+    // timestamp-display proof below -- never a hardcoded zone in
+    // production code, but this harness needs a deterministic, real
+    // browser-reported IANA zone to check Intl output against.
+    if (process.env.APDNS_CHROME_TIMEZONE) {
+      await cdp("Emulation.setTimezoneOverride", { timezoneId: process.env.APDNS_CHROME_TIMEZONE });
+    }
     await cdp("Runtime.enable");
     await cdp("Page.navigate", { url: base + "/" });
     // Selector-based, not inner-text-based (real defect fixed here: this
@@ -592,6 +599,60 @@ async function main() {
       if (openRestored !== openBefore) throw new Error(`${group} parent did not return to its starting open/closed state after a second click`);
     }
     proof.push("expanded-parent-click-never-navigates");
+
+    // Real defect fixed this pass (owner-reported: main menu items
+    // showed an arbitrary placeholder letter, main labels rendered
+    // SMALLER than their own submenu items -- backwards hierarchy).
+    // Every main section (and Dashboard) must render a real <svg> icon,
+    // not text, inside a centered icon container, and the main label's
+    // own font must be strictly larger than a submenu label's.
+    for (const sel of ['[data-route="dashboard"]', '.nav-section[data-nav-section="DNS"] [data-nav-section-toggle]']) {
+      const hasSvgIcon = await evalJs(`(() => { const el = document.querySelector(${JSON.stringify(sel)}); const icon = el && el.querySelector('.nav-icon svg'); return !!icon && icon.querySelectorAll('path,rect,circle').length > 0; })()`);
+      if (!hasSvgIcon) throw new Error(`${sel} has no real SVG icon (still a placeholder letter?)`);
+    }
+    const mainLabelSize = await evalJs(`parseFloat(getComputedStyle(document.querySelector('.nav-section[data-nav-section="DNS"] [data-nav-section-toggle]')).fontSize)`);
+    const subLabelSize = await evalJs(`parseFloat(getComputedStyle(document.querySelector('[data-route="localdns"]')).fontSize)`);
+    if (!(mainLabelSize > subLabelSize)) throw new Error(`main section label (${mainLabelSize}px) is not larger than a submenu label (${subLabelSize}px)`);
+    proof.push("nav-icons-and-typography-hierarchy-correct");
+
+    // Default accordion behavior (owner-reported requirement): opening
+    // one main section closes whichever other one was open. The
+    // "keep multiple navigation sections open" preference defaults OFF.
+    const secToggle = (g) => `.nav-section[data-nav-section="${g}"] [data-nav-section-toggle]`;
+    const secOpen = async (g) => evalJs(`document.querySelector(${JSON.stringify(secToggle(g))}).getAttribute('aria-expanded') === 'true'`);
+    // Ensure DNS is open and Security is closed to start from a known state.
+    if (!(await secOpen("DNS"))) { await evalJs(`document.querySelector(${JSON.stringify(secToggle("DNS"))}).click(); true`); await waitFor(`document.querySelector(${JSON.stringify(secToggle("DNS"))}).getAttribute('aria-expanded') === 'true'`, "DNS opened for accordion proof"); }
+    if (await secOpen("Security")) { await evalJs(`document.querySelector(${JSON.stringify(secToggle("Security"))}).click(); true`); await waitFor(`document.querySelector(${JSON.stringify(secToggle("Security"))}).getAttribute('aria-expanded') === 'false'`, "Security closed for accordion proof"); }
+    await evalJs(`document.querySelector(${JSON.stringify(secToggle("Security"))}).click(); true`);
+    await waitFor(`document.querySelector(${JSON.stringify(secToggle("Security"))}).getAttribute('aria-expanded') === 'true'`, "Security opened");
+    if (await secOpen("DNS")) throw new Error("accordion default failed: opening Security did not close DNS");
+    proof.push("nav-accordion-default-closes-other-section");
+
+    // "Keep multiple sections open" preference, turned on via the real
+    // Administration control, actually allows both to stay open.
+    await route("administration");
+    await waitFor(`document.querySelector('[data-action="nav-keep-multiple-open"]')`, "nav preference control rendered");
+    await evalJs(`(() => { const cb = document.querySelector('[data-action="nav-keep-multiple-open"]'); if (!cb.checked) cb.click(); return true; })()`);
+    await waitFor(`document.querySelector('[data-action="nav-keep-multiple-open"]').checked`, "keep-multiple-open enabled");
+    if (!(await secOpen("Security"))) { await evalJs(`document.querySelector(${JSON.stringify(secToggle("Security"))}).click(); true`); }
+    if (!(await secOpen("DNS"))) { await evalJs(`document.querySelector(${JSON.stringify(secToggle("DNS"))}).click(); true`); await sleep(150); }
+    await evalJs(`document.querySelector(${JSON.stringify(secToggle("Operations"))}).click(); true`);
+    await waitFor(`document.querySelector(${JSON.stringify(secToggle("Operations"))}).getAttribute('aria-expanded') === 'true'`, "Operations opened with keep-multiple-open on");
+    if (!(await secOpen("DNS")) || !(await secOpen("Security"))) throw new Error("keep-multiple-open preference did not actually keep other sections open");
+    proof.push("nav-keep-multiple-open-preference-works");
+    // Restore the default (accordion) for the rest of the run.
+    await route("administration");
+    await evalJs(`(() => { const cb = document.querySelector('[data-action="nav-keep-multiple-open"]'); if (cb.checked) cb.click(); return true; })()`);
+
+    // Rapid repeated clicking on the same section toggle must never
+    // desync aria-expanded from actual panel visibility.
+    await route("health");
+    for (let i = 0; i < 8; i++) await evalJs(`document.querySelector(${JSON.stringify(secToggle("DNS"))}).click(); true`);
+    await sleep(200);
+    const rapidExpanded = await evalJs(`document.querySelector(${JSON.stringify(secToggle("DNS"))}).getAttribute('aria-expanded') === 'true'`);
+    const rapidPanelVisible = await isVisible(`.nav-section[data-nav-section="DNS"] .nav-section__panel`);
+    if (rapidExpanded !== rapidPanelVisible) throw new Error(`8 rapid clicks desynced aria-expanded (${rapidExpanded}) from panel visibility (${rapidPanelVisible})`);
+    proof.push("nav-rapid-clicking-stays-consistent");
 
     // Repeated open/close, and a genuine (real-visible, not hidden-DOM)
     // child click while open, landing on the correct route with correct
@@ -1253,6 +1314,126 @@ async function main() {
     await evalJs(`(() => { window.confirm = () => true; document.querySelector('[data-revoke-sessions]').click(); return true; })()`);
     await waitForOkOrError(`document.body.innerText.includes("other session")`, "revoke other sessions");
     proof.push("administration-sessions-revoked");
+
+    // ================================================================
+    // Owner-reported fix: raw UTC ISO timestamps ("2026-08-23T05:00:00
+    // +00:00") were the default operator-facing presentation everywhere.
+    // Three real display modes -- Browser Local (the browser's own
+    // detected IANA zone), Appliance Time (the server's real configured
+    // zone), UTC -- must never hardcode a geographic timezone, must
+    // switch every visible timestamp instantly with no reload, and must
+    // never let sorting be fooled by the formatted display text. Only
+    // runs when the caller has set both a real CDP browser-timezone
+    // override and ALDERPOINTDNS_V2_FORCE_APPLIANCE_TIMEZONE for the
+    // server (see test_timezone_display_modes in
+    // test_ui_browser_harness.py) -- both real, verifiable inputs, not
+    // fabricated expectations.
+    if (process.env.APDNS_ASSERT_TIMEZONE_DISPLAY === "1") {
+      const browserTz = process.env.APDNS_EXPECTED_BROWSER_TZ;
+      const applianceTz = process.env.APDNS_EXPECTED_APPLIANCE_TZ;
+      // Real data through the real pipeline: an actual DNS-observation
+      // API call (the same one real DNS workers use), not a fabricated
+      // DOM node.
+      const seedIp = "203.0.113.77";
+      await pageApi("/api/discovery/observe", { method: "POST", body: JSON.stringify({ source_ip: seedIp, hostname_candidate: "tz-proof-host" }) });
+      await route("clients");
+      await waitFor(`document.querySelector('[data-grid-id="observed-clients"] [data-ts-utc]')`, "observed client timestamp rendered");
+
+      async function currentDisplayFor(rawUtc) {
+        return evalJs(`(() => {
+          const cell = Array.from(document.querySelectorAll('[data-ts-utc]')).find((el) => el.getAttribute('data-ts-utc') === ${JSON.stringify(rawUtc)});
+          return cell ? cell.textContent : null;
+        })()`);
+      }
+      const rawUtc = await evalJs(`document.querySelector('[data-grid-id="observed-clients"] [data-ts-utc]').getAttribute('data-ts-utc')`);
+      if (!rawUtc) throw new Error("seeded observed client has no data-ts-utc timestamp");
+
+      // Mode 1: Browser Local (default). Independently compute the
+      // expected string in Node with the SAME Intl options app.js uses,
+      // against the SAME real raw UTC value -- proves the real pipeline
+      // (not a hand-picked example), for whichever real browser
+      // timezone the caller configured.
+      const expectedBrowser = new Date(rawUtc).toLocaleString(undefined, { timeZone: browserTz, year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", timeZoneName: "short" });
+      const shownBrowser = await currentDisplayFor(rawUtc);
+      if (shownBrowser !== expectedBrowser) throw new Error(`Browser Local display mismatch: expected ${JSON.stringify(expectedBrowser)} (zone ${browserTz}), got ${JSON.stringify(shownBrowser)}`);
+      // innerText reflects only rendered VISIBLE text, not attributes --
+      // the raw ISO string legitimately still lives in title/data-ts-utc
+      // for exact inspection, but must not be the visible presentation.
+      const bodyText = await evalJs(`document.body.innerText`);
+      if (bodyText.includes(rawUtc)) throw new Error("raw UTC ISO string is visible in normal operator-facing text");
+      proof.push("timestamp-browser-local-mode-correct");
+
+      // Mode 2: Appliance Time -- switch via the real Administration
+      // preference control, confirm every visible timestamp updates
+      // WITHOUT a page reload (no Page.navigate between here and the
+      // check).
+      await route("administration");
+      await waitFor(`document.querySelector('[data-action="timestamp-display-mode"]')`, "timezone preference selector rendered");
+      const applianceLabelText = await evalJs(`document.querySelector('[data-action="timestamp-display-mode"] option[value="appliance"]').textContent`);
+      if (!applianceLabelText.includes(applianceTz)) throw new Error(`Appliance Time option should show the real detected zone ${applianceTz}, got ${JSON.stringify(applianceLabelText)}`);
+      const browserLabelText = await evalJs(`document.querySelector('[data-action="timestamp-display-mode"] option[value="browser"]').textContent`);
+      if (!browserLabelText.includes(browserTz)) throw new Error(`Browser Local option should show the real detected zone ${browserTz}, got ${JSON.stringify(browserLabelText)}`);
+      await evalJs(`(() => { const s = document.querySelector('[data-action="timestamp-display-mode"]'); s.value = 'appliance'; s.dispatchEvent(new Event('change', {bubbles:true})); return true; })()`);
+      await route("clients");
+      const expectedAppliance = new Date(rawUtc).toLocaleString(undefined, { timeZone: applianceTz, year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", timeZoneName: "short" });
+      await waitFor(`Array.from(document.querySelectorAll('[data-ts-utc]')).some((el) => el.getAttribute('data-ts-utc') === ${JSON.stringify(rawUtc)} && el.textContent === ${JSON.stringify(expectedAppliance)})`, "Appliance Time mode reformatted the timestamp");
+      proof.push("timestamp-appliance-mode-correct");
+
+      // Mode 3: UTC.
+      await route("administration");
+      await evalJs(`(() => { const s = document.querySelector('[data-action="timestamp-display-mode"]'); s.value = 'utc'; s.dispatchEvent(new Event('change', {bubbles:true})); return true; })()`);
+      await route("clients");
+      const expectedUtc = new Date(rawUtc).toLocaleString(undefined, { timeZone: "UTC", year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", timeZoneName: "short" });
+      await waitFor(`Array.from(document.querySelectorAll('[data-ts-utc]')).some((el) => el.getAttribute('data-ts-utc') === ${JSON.stringify(rawUtc)} && el.textContent === ${JSON.stringify(expectedUtc)})`, "UTC mode reformatted the timestamp");
+      proof.push("timestamp-utc-mode-correct");
+
+      // Preference survives navigation and a real reload (localStorage,
+      // not page/session state).
+      await cdp("Page.navigate", { url: base + "/ui/administration" });
+      await waitFor(`document.querySelector('[data-action="timestamp-display-mode"]')`, "administration reloaded");
+      const modeAfterReload = await evalJs(`document.querySelector('[data-action="timestamp-display-mode"]').value`);
+      if (modeAfterReload !== "utc") throw new Error(`timestamp display preference did not survive a real reload: expected utc, got ${modeAfterReload}`);
+      proof.push("timestamp-preference-persists-across-reload");
+
+      // Chronological sort must use the real epoch value, never the
+      // formatted text -- synthetic rows with known, deliberately
+      // text-sort-hostile display strings (Aug 9 vs Aug 22) prove the
+      // real DOM sort click uses data-sort-value, not textContent.
+      await route("clients");
+      await evalJs(`(() => {
+        const table = document.querySelector('[data-grid-id="observed-clients"]');
+        const tbody = table.tBodies[0];
+        const mk = (iso, ip) => {
+          const tr = document.createElement('tr');
+          const td = document.createElement('td');
+          const span = document.createElement('span');
+          span.className = 'ts-value';
+          span.setAttribute('data-ts-utc', iso);
+          span.setAttribute('data-sort-value', String(Date.parse(iso)));
+          span.textContent = iso.startsWith('2026-08-10') ? 'Aug 9, 2026, 11:00 PM MDT' : 'Aug 22, 2026, 11:00 PM MDT';
+          td.appendChild(span);
+          tr.appendChild(td);
+          for (let i = 1; i < table.tHead.rows[0].cells.length; i++) tr.appendChild(document.createElement('td'));
+          tr.dataset.sortProofIp = ip;
+          return tr;
+        };
+        tbody.appendChild(mk('2026-08-23T05:00:00Z', 'sort-proof-late'));
+        tbody.appendChild(mk('2026-08-10T05:00:00Z', 'sort-proof-early'));
+        return true;
+      })()`);
+      await evalJs(`document.querySelector('[data-grid-id="observed-clients"] thead th').click(); true`);
+      const direction = await evalJs(`document.querySelector('[data-grid-id="observed-clients"] thead th').getAttribute('aria-sort')`);
+      const sortOrder = await evalJs(`Array.from(document.querySelectorAll('[data-grid-id="observed-clients"] tbody tr')).map((r) => r.dataset.sortProofIp).filter(Boolean)`);
+      const expectedOrder = direction === "ascending" ? ["sort-proof-early", "sort-proof-late"] : ["sort-proof-late", "sort-proof-early"];
+      if (JSON.stringify(sortOrder) !== JSON.stringify(expectedOrder)) {
+        throw new Error(`chronological sort (${direction}) used formatted text instead of the real epoch value -- order was ${JSON.stringify(sortOrder)}, expected ${JSON.stringify(expectedOrder)}`);
+      }
+      proof.push("timestamp-chronological-sort-uses-epoch-not-display-text");
+
+      // Reset the preference back to the default for the rest of the run.
+      await route("administration");
+      await evalJs(`(() => { const s = document.querySelector('[data-action="timestamp-display-mode"]'); s.value = 'browser'; s.dispatchEvent(new Event('change', {bubbles:true})); return true; })()`);
+    }
 
     // ================================================================
     // Workstream 1B: real-browser proof for the shared data-grid

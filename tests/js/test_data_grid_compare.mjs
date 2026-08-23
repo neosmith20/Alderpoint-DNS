@@ -30,4 +30,20 @@ assert.equal(compareCells('', 'apple') > 0, true, 'empty should sort after any v
 assert.equal(compareCells('apple', '') < 0, true, 'value should sort before empty');
 assert.equal(compareCells('', '') === 0, true, 'two empties compare equal');
 
+// Real defect fixed here (owner-reported: chronological sort/filter must
+// use the underlying timestamp/epoch value, never the formatted display
+// string). A locale-formatted timestamp for Aug 9 sorts AFTER Aug 22 as
+// plain text (lexicographic "2" < "9"), even though Aug 9 is
+// chronologically earlier -- exactly the class of bug this guards
+// against. Epoch-millisecond strings (what app.js's timestampHtml()
+// puts in data-sort-value, read by data-grid.js's cellSortText()) are
+// plain numeric text to this comparator, so they sort correctly with no
+// special-casing.
+const aug9 = 'Aug 9, 2026, 11:00 PM MDT';
+const aug22 = 'Aug 22, 2026, 11:00 PM MDT';
+assert.equal(compareCells(aug9, aug22) > 0, true, 'sanity check: formatted display text alone sorts Aug 9 AFTER Aug 22 (the bug)');
+const aug9Epoch = String(Date.parse('2026-08-10T05:00:00Z'));
+const aug22Epoch = String(Date.parse('2026-08-23T05:00:00Z'));
+assert.equal(compareCells(aug9Epoch, aug22Epoch) < 0, true, 'epoch-millisecond sort keys correctly sort Aug 9 before Aug 22');
+
 console.log('data-grid comparator: all assertions passed');

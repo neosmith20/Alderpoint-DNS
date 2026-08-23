@@ -15,6 +15,7 @@
     // operator can change per visit, not a durable preference.
     dashboardRangeMinutes: 1440,
     dashboardTopMode: "top",
+    applianceTimezone: null,
   };
 
   // Grouping/order intentionally mirrors V1.1.1's information architecture
@@ -36,33 +37,45 @@
   // encryption.html, notifications.html, system_logs_results.html are
   // five separate V1 templates, not one).
   const pages = [
-    ["DNS", "analytics", "Query Log", "Q"],
-    ["DNS", "clients", "Clients", "C"],
-    ["DNS", "policies", "Clients & Access", "P"],
-    ["DNS", "localdns", "Local DNS", "L"],
-    ["DNS", "upstreams", "DNS Settings", "U"],
-    ["DNS", "cache", "Cache", "K"],
-    ["Security", "filtering", "Filters", "F"],
-    ["Security", "blocklists", "Blocklists", "X"],
-    ["Security", "encryption", "Encryption", "E"],
-    ["Operations", "importexport", "Import", "I"],
-    ["Operations", "backup", "Backup & Restore", "B"],
-    ["Operations", "replication", "Replication", "R"],
-    ["System", "statistics", "Statistics", "T"],
-    ["System", "health", "System Status", "Y"],
-    ["System", "administration", "Administration", "A"],
-    ["System", "network", "Network Configuration", "W"],
-    ["System", "notifications", "Notifications", "N"],
-    ["System", "updates", "Software Updates", "V"],
-    ["System", "logs", "Logs", "G"],
+    ["DNS", "analytics", "Query Log"],
+    ["DNS", "clients", "Clients"],
+    ["DNS", "policies", "Clients & Access"],
+    ["DNS", "localdns", "Local DNS"],
+    ["DNS", "upstreams", "DNS Settings"],
+    ["DNS", "cache", "Cache"],
+    ["Security", "filtering", "Filters"],
+    ["Security", "blocklists", "Blocklists"],
+    ["Security", "encryption", "Encryption"],
+    ["Operations", "importexport", "Import"],
+    ["Operations", "backup", "Backup & Restore"],
+    ["Operations", "replication", "Replication"],
+    ["System", "statistics", "Statistics"],
+    ["System", "health", "System Status"],
+    ["System", "administration", "Administration"],
+    ["System", "network", "Network Configuration"],
+    ["System", "notifications", "Notifications"],
+    ["System", "updates", "Software Updates"],
+    ["System", "logs", "Logs"],
   ];
   const GROUP_ORDER = ["DNS", "Security", "Operations", "System"];
-  // Distinct 2-letter glyphs so the collapsed icon-rail can identify which
-  // section is which -- the prior "*"/"-" glyph was identical across every
-  // inactive section, giving the collapsed rail no way to tell DNS from
-  // Security from Operations from System (real owner-reported finding:
-  // collapsed navigation not properly usable).
-  const GROUP_GLYPH = { DNS: "DN", Security: "SC", Operations: "OP", System: "SY" };
+  // Real defect fixed here (owner-reported: main-menu items showed an
+  // arbitrary placeholder letter, which reads as unfinished/prototype
+  // UI). Intentional, hand-authored inline SVG per section -- generic
+  // geometric glyphs (a network globe, a shield, a sliders/controls
+  // icon, a stacked-server icon), not copied from any icon library or
+  // loaded from a CDN (no external dependency at all: every <path>
+  // below is inline markup). `currentColor` so each icon automatically
+  // follows the surrounding button's text color (muted/active/hover),
+  // matching every other themed element rather than a fixed hardcoded
+  // color.
+  const ICON_VIEWBOX = "0 0 24 24";
+  const DASHBOARD_ICON = `<svg viewBox="${ICON_VIEWBOX}" fill="currentColor" aria-hidden="true"><rect x="3" y="3" width="7.5" height="7.5" rx="1.6"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.6"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.6"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.6"/></svg>`;
+  const GROUP_ICON = {
+    DNS: `<svg viewBox="${ICON_VIEWBOX}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.8 2.3 2.8 15 0 17M12 3.5c-2.8 2.3-2.8 15 0 17"/></svg>`,
+    Security: `<svg viewBox="${ICON_VIEWBOX}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true"><path d="M12 3.2l7 2.8v5.6c0 4.6-3 8.3-7 9.4-4-1.1-7-4.8-7-9.4V6l7-2.8z"/><path d="M8.7 12l2.3 2.3 4.3-4.3"/></svg>`,
+    Operations: `<svg viewBox="${ICON_VIEWBOX}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M4 7h11M18 7h2M4 12h6M9 17h11M6 17h2"/><circle cx="15" cy="7" r="2.1" fill="currentColor" stroke="none"/><circle cx="8" cy="12" r="2.1" fill="currentColor" stroke="none"/><circle cx="15" cy="17" r="2.1" fill="currentColor" stroke="none"/></svg>`,
+    System: `<svg viewBox="${ICON_VIEWBOX}" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3.5" y="4" width="17" height="6.2" rx="1.4"/><rect x="3.5" y="13.8" width="17" height="6.2" rx="1.4"/><circle cx="7" cy="7.1" r=".9" fill="currentColor" stroke="none"/><circle cx="7" cy="16.9" r=".9" fill="currentColor" stroke="none"/></svg>`,
+  };
 
   // Real per-section expand/collapse state (a real owner-reported finding, priority
   // 1 of the beta-rescue brief: the sidebar previously rendered
@@ -82,6 +95,19 @@
   }
   function setNavSectionOpen(group, open) {
     try { localStorage.setItem(NAV_SECTION_KEY_PREFIX + group, open ? "1" : "0"); } catch (_) {}
+  }
+
+  // Owner preference (default OFF, i.e. accordion behavior by default:
+  // opening one main section closes whichever other one was open).
+  // Persisted like every other nav preference; a real settings control
+  // lives on the Administration page (administration()/wire()'s
+  // [data-action="nav-keep-multiple-open"] handler).
+  const NAV_KEEP_MULTIPLE_OPEN_KEY = "apdnsNavKeepMultipleOpen";
+  function navKeepMultipleOpen() {
+    try { return localStorage.getItem(NAV_KEEP_MULTIPLE_OPEN_KEY) === "1"; } catch (_) { return false; }
+  }
+  function setNavKeepMultipleOpen(value) {
+    try { localStorage.setItem(NAV_KEEP_MULTIPLE_OPEN_KEY, value ? "1" : "0"); } catch (_) {}
   }
 
   // One canonical model, matching app/v2/policy_model.py's own
@@ -113,7 +139,122 @@
     return String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   }
 
+  // Real defect fixed here (owner-reported: raw UTC ISO strings like
+  // "2026-08-23T05:00:00+00:00" were the default operator-facing
+  // presentation everywhere -- Dashboard, Query Log, Clients, backup/
+  // update history, replication, everywhere an API field carried a
+  // timestamp). UTC stays the canonical storage/API/transport format
+  // (never reinterpreted here -- this only ever affects presentation,
+  // and only for values that already look like a real ISO-8601
+  // UTC-offset timestamp; a plain date, a bare number, or free text is
+  // left completely alone). One shared formatter + one shared DOM
+  // marker (`data-ts-utc`) so the display-mode preference below can
+  // reformat every already-rendered timestamp on the page in place,
+  // instantly, with no re-fetch and no page reload.
+  //
+  // Three modes, never a hardcoded geographic timezone anywhere in this
+  // file (owner-reported requirement): "browser" (the operator's own
+  // browser-detected IANA zone, via the standard
+  // Intl.DateTimeFormat().resolvedOptions().timeZone -- the same
+  // mechanism every other real-world local-time UI uses, not a guess),
+  // "appliance" (this specific box's own configured zone, detected
+  // server-side by webapp.py's _detect_appliance_timezone() and cached
+  // here once fetched), and "utc". Default is "browser"; precedence
+  // falls back browser -> appliance -> utc only when a zone is
+  // genuinely undetectable/invalid, per the owner's explicit fallback
+  // chain -- not a preference choice.
+  const TIMESTAMP_DISPLAY_KEY = "apdnsTimestampDisplay"; // "browser" | "appliance" | "utc"
+  function timestampDisplayMode() {
+    try {
+      const v = localStorage.getItem(TIMESTAMP_DISPLAY_KEY);
+      if (v === "utc" || v === "browser" || v === "appliance") return v;
+      if (v === "local") return "browser"; // migrates the earlier binary local/utc preference
+    } catch (_) {}
+    return "browser";
+  }
+  function setTimestampDisplayMode(mode) {
+    try { localStorage.setItem(TIMESTAMP_DISPLAY_KEY, (mode === "utc" || mode === "appliance") ? mode : "browser"); } catch (_) {}
+  }
+  function browserTimezone() {
+    try {
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (tz) return tz;
+    } catch (_) {}
+    return null;
+  }
+  // Populated once /api/system/status has been fetched by any page
+  // (common(), administration(), etc.) -- see timezonePreferenceSelector().
+  // Never a hardcoded zone: this is exactly what the appliance itself
+  // reported, or null until known/if genuinely undetectable server-side.
+  function applianceTimezone() { return state.applianceTimezone || null; }
+  // Requires an explicit Z or +HH:MM/-HHMM offset -- a timezone-naive
+  // value is never guessed to be UTC (a real defect class this
+  // deliberately avoids); every V2 API timestamp field is offset-aware
+  // (Python's datetime.isoformat() on an aware UTC datetime, verified
+  // against app/v2/webapp.py's own timestamp fields).
+  const ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})$/;
+  const TS_FORMAT_OPTS = { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", timeZoneName: "short" };
+  // Fallback chain (owner-specified, not a silent substitution the
+  // operator can't tell happened): an unavailable/invalid zone for the
+  // selected mode falls through to the next one. Shared by
+  // formatTimestamp() (full cell display) and the dashboard activity
+  // chart's own compact axis/tooltip labels, so both always agree on
+  // which real zone is actually in effect.
+  function resolveDisplayTimeZone() {
+    const mode = timestampDisplayMode();
+    const zone = mode === "utc" ? "UTC" : mode === "appliance" ? (applianceTimezone() || browserTimezone()) : (browserTimezone() || applianceTimezone());
+    return zone || "UTC";
+  }
+  function formatTimestamp(raw) {
+    const str = String(raw ?? "");
+    if (!ISO_TIMESTAMP_RE.test(str)) return null; // not recognized as a timestamp at all
+    const d = new Date(str);
+    if (isNaN(d.getTime())) return { display: "Unknown time", exact: str, invalid: true };
+    const zone = resolveDisplayTimeZone();
+    try {
+      return { display: d.toLocaleString(undefined, Object.assign({ timeZone: zone }, TS_FORMAT_OPTS)), exact: str, invalid: false };
+    } catch (_) {
+      // An invalid/unrecognized IANA name from either detector -- fall
+      // back to UTC rather than throwing and leaving the cell blank.
+      return { display: d.toLocaleString(undefined, Object.assign({ timeZone: "UTC" }, TS_FORMAT_OPTS)), exact: str, invalid: false };
+    }
+  }
+  // Returns null (not html) when ``raw`` doesn't look like a timestamp at
+  // all, so every call site can fall through to its own plain-text
+  // rendering for non-timestamp values.
+  function timestampHtml(raw) {
+    const f = formatTimestamp(raw);
+    if (f === null) return null;
+    // data-sort-value: the real epoch millisecond value -- see
+    // data-grid.js's cellSortText(), which prefers this over the
+    // formatted display text for exactly this cell so chronological
+    // sort/filter is never fooled by locale-formatted text.
+    const epoch = Date.parse(f.exact);
+    const sortAttr = Number.isNaN(epoch) ? "" : ` data-sort-value="${epoch}"`;
+    return `<span class="ts-value${f.invalid ? " muted" : ""}" data-ts-utc="${esc(f.exact)}"${sortAttr} title="${esc(f.exact)}">${esc(f.display)}</span>`;
+  }
+  // Reformats every already-rendered timestamp in the current page in
+  // place -- no re-fetch, no navigation -- when the Local/UTC
+  // preference changes (wired in wire()'s change-delegation listener).
+  // Convenience wrapper for call sites rendering a single named
+  // timestamp field directly (rather than through the generic
+  // tableFromRows()/pretty() path): real timestamp -> formatted local/
+  // UTC html; anything else (e.g. the literal fallback text "never") ->
+  // plain escaped text, unchanged.
+  function ts(value, fallbackText) {
+    return timestampHtml(value) || esc(fallbackText !== undefined ? fallbackText : value);
+  }
+
+  function reformatVisibleTimestamps() {
+    document.querySelectorAll("[data-ts-utc]").forEach((el) => {
+      const f = formatTimestamp(el.getAttribute("data-ts-utc"));
+      if (f && !f.invalid) el.textContent = f.display;
+    });
+  }
+
   function pretty(value) {
+    const ts = typeof value === "string" ? timestampHtml(value) : null;
+    if (ts !== null) return ts;
     if (value === null || value === undefined || value === "") return '<span class="badge inherit">inherit</span>';
     if (typeof value === "boolean") return value ? '<span class="badge ok">enabled</span>' : '<span class="badge warn">disabled</span>';
     // Real defect fixed here (owner-beta visual pass): a plain
@@ -303,7 +444,7 @@
     // Dashboard is a standalone top-level entry above every group, matching
     // V1.1.1 -- it is never itself inside a collapsible section, so it is
     // always exactly one click away regardless of nav-collapse state.
-    const dashboardBtn = `<button data-route="dashboard" class="nav-top ${state.route === "dashboard" ? "active" : ""}"><span class="glyph">#</span><span>Dashboard</span></button>`;
+    const dashboardBtn = `<button data-route="dashboard" class="nav-top ${state.route === "dashboard" ? "active" : ""}"><span class="nav-icon">${DASHBOARD_ICON}</span><span class="nav-top__label">Dashboard</span></button>`;
     return `
       <div class="layout">
         <aside class="sidebar">
@@ -322,12 +463,12 @@
               return `
               <section class="nav-section${activeInGroup ? " is-active" : ""}" data-nav-section="${group}">
                 <button type="button" class="nav-section__toggle" data-nav-section-toggle aria-expanded="${open}" aria-controls="${panelId}" aria-label="${esc(group)}" title="${esc(group)}" ${activeInGroup ? 'aria-current="true"' : ""}>
-                  <span class="glyph">${GROUP_GLYPH[group] || group.slice(0, 2).toUpperCase()}</span>
+                  <span class="nav-icon">${GROUP_ICON[group] || ""}</span>
                   <span class="nav-section__label">${esc(group)}</span>
                   <span class="nav-section__chevron" aria-hidden="true">${open ? "▾" : "▸"}</span>
                 </button>
                 <div class="nav-section__panel" id="${panelId}" ${open ? "" : "hidden"}>
-                  ${items.map(([, id, label, glyph]) => `<button data-route="${id}" class="nav-subitem${state.route === id ? " active" : ""}" title="${esc(label)}" ${state.route === id ? 'aria-current="page"' : ""}><span class="glyph">${esc(glyph)}</span><span>${esc(label)}</span></button>`).join("")}
+                  ${items.map(([, id, label]) => `<button data-route="${id}" class="nav-subitem${state.route === id ? " active" : ""}" title="${esc(label)}" ${state.route === id ? 'aria-current="page"' : ""}><span>${esc(label)}</span></button>`).join("")}
                 </div>
               </section>`;
             }).join("")}
@@ -374,7 +515,25 @@
       api("/api/discovery/status").catch(() => ({})),
     ];
     const [health, system, replication, discovery] = await Promise.all(requests);
+    if (system.timezone) state.applianceTimezone = system.timezone;
     return { health, system, replication, discovery };
+  }
+
+  // Fetches and caches the appliance's real detected timezone (see
+  // webapp.py's _detect_appliance_timezone()) exactly once per session
+  // -- every page that needs it (the timestamp display-mode selector,
+  // any page not already calling common()) shares the same cached
+  // value instead of re-fetching. Never a hardcoded zone: null until
+  // genuinely known.
+  let applianceTimezoneFetch = null;
+  async function ensureApplianceTimezone() {
+    if (state.applianceTimezone) return state.applianceTimezone;
+    if (!applianceTimezoneFetch) {
+      applianceTimezoneFetch = api("/api/system/status")
+        .then((s) => { state.applianceTimezone = s.timezone || null; return state.applianceTimezone; })
+        .catch(() => null);
+    }
+    return applianceTimezoneFetch;
   }
 
   // granularity is derived from the selected range, not independently
@@ -475,7 +634,12 @@
     const path = (key) => buckets.map((b, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(b[key] || 0).toFixed(1)}`).join(" ");
     // Every Nth label so labels never overlap regardless of range/granularity.
     const labelEvery = Math.max(1, Math.ceil(n / 8));
-    const fmt = (iso) => new Date(iso).toLocaleString(undefined, n <= 24 && result.granularity === "hour" ? { hour: "numeric", minute: "2-digit" } : result.granularity === "minute" ? { hour: "numeric", minute: "2-digit" } : { month: "short", day: "numeric" });
+    // Respects the same Browser/Appliance/UTC display-mode preference
+    // as every other timestamp in the app (owner-reported requirement:
+    // one shared utility, migrated everywhere -- the chart's own axis/
+    // tooltip labels are not a separate, un-migrated special case).
+    const chartZone = resolveDisplayTimeZone();
+    const fmt = (iso) => new Date(iso).toLocaleString(undefined, Object.assign({ timeZone: chartZone }, n <= 24 && result.granularity === "hour" ? { hour: "numeric", minute: "2-digit" } : result.granularity === "minute" ? { hour: "numeric", minute: "2-digit" } : { month: "short", day: "numeric" }));
     const gridlines = [0, 0.25, 0.5, 0.75, 1].map((f) => `<line x1="${padL}" x2="${w - padR}" y1="${(padT + plotH * f).toFixed(1)}" y2="${(padT + plotH * f).toFixed(1)}" class="ts-grid"/>`).join("");
     const yLabels = [0, 0.5, 1].map((f) => `<text x="${padL - 6}" y="${(padT + plotH * (1 - f) + 4).toFixed(1)}" class="ts-axis" text-anchor="end">${Math.round(maxTotal * f)}</text>`).join("");
     const xLabels = buckets.map((b, i) => (i % labelEvery !== 0 && i !== n - 1) ? "" : `<text x="${x(i).toFixed(1)}" y="${h - 8}" class="ts-axis" text-anchor="middle">${esc(fmt(b.bucket_start_iso))}</text>`).join("");
@@ -672,7 +836,7 @@
   function observedTable(items) {
     if (!items.length) return `<div class="empty">No observed clients yet. Real DNS packets populate this asynchronously.</div>`;
     return `<div class="table-wrap"><table data-grid data-grid-id="observed-clients"><thead><tr><th>IP</th><th>Hostname</th><th>First / Last seen</th><th>Queries</th><th>Association</th><th data-no-sort>Actions</th></tr></thead><tbody>${items.map((o) => `
-      <tr><td class="mono">${esc(o.source_ip)}</td><td>${esc(o.hostname_candidate || "")}<br><span class="muted">${esc(o.hostname_source || "")}</span></td><td>${esc(o.first_seen || "")}<br>${esc(o.last_seen || "")}</td><td>${esc(o.query_count || o.observation_count || 0)}</td><td>${o.managed_client_id ? `<span class="badge ok">client ${esc(o.managed_client_id)}</span>` : `<span class="badge inherit">unmanaged</span>`}</td><td class="field-row">${o.managed_client_id ? "" : `<button data-promote="${esc(o.source_ip)}">Manage Client</button>`}<button class="danger" data-forget="${esc(o.source_ip)}">Forget</button></td></tr>`).join("")}</tbody></table></div>`;
+      <tr><td class="mono">${esc(o.source_ip)}</td><td>${esc(o.hostname_candidate || "")}<br><span class="muted">${esc(o.hostname_source || "")}</span></td><td>${ts(o.first_seen, "")}<br>${ts(o.last_seen, "")}</td><td>${esc(o.query_count || o.observation_count || 0)}</td><td>${o.managed_client_id ? `<span class="badge ok">client ${esc(o.managed_client_id)}</span>` : `<span class="badge inherit">unmanaged</span>`}</td><td class="field-row">${o.managed_client_id ? "" : `<button data-promote="${esc(o.source_ip)}">Manage Client</button>`}<button class="danger" data-forget="${esc(o.source_ip)}">Forget</button></td></tr>`).join("")}</tbody></table></div>`;
   }
 
   // Friendly-selector/internal-ID cleanup (workstream 1C): the immutable
@@ -832,7 +996,7 @@
 
   function peerTable(peers) {
     if (!peers.length) return `<div class="empty">No peers configured.</div>`;
-    return `<div class="table-wrap"><table><thead><tr><th>Peer</th><th>URL</th><th>Auth</th><th>Sync</th><th>Error</th><th>Actions</th></tr></thead><tbody>${peers.map((p) => `<tr><td class="mono">${esc(p.peer_node_id)}</td><td>${esc(p.url)}</td><td><span class="badge ${p.authorized ? "ok" : "bad"}">${p.authorized ? "authorized" : "disabled"}</span></td><td>last success ${esc(p.last_success_at || "never")}<br>lag ${esc(p.lag ?? "")}</td><td>${esc(p.last_error || "")}</td><td><button data-sync="${esc(p.peer_node_id)}">Sync</button></td></tr>`).join("")}</tbody></table></div>`;
+    return `<div class="table-wrap"><table><thead><tr><th>Peer</th><th>URL</th><th>Auth</th><th>Sync</th><th>Error</th><th>Actions</th></tr></thead><tbody>${peers.map((p) => `<tr><td class="mono">${esc(p.peer_node_id)}</td><td>${esc(p.url)}</td><td><span class="badge ${p.authorized ? "ok" : "bad"}">${p.authorized ? "authorized" : "disabled"}</span></td><td>last success ${ts(p.last_success_at, "never")}<br>lag ${esc(p.lag ?? "")}</td><td>${esc(p.last_error || "")}</td><td><button data-sync="${esc(p.peer_node_id)}">Sync</button></td></tr>`).join("")}</tbody></table></div>`;
   }
 
   function peerForm() {
@@ -860,12 +1024,12 @@
 
   function applianceBackupTable(backups) {
     if (!backups.length) return `<div class="empty">No appliance backups.</div>`;
-    return `<div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>Name</th><th>Created</th><th>Size</th><th>Restore</th></tr></thead><tbody>${backups.map((b) => `<tr><td class="mono">${esc(b.name)}</td><td>${esc(b.created_at)}</td><td>${esc(b.size_bytes)}</td><td><button data-validate-appliance-backup="${esc(b.name)}">Validate</button><form data-form="appliance-restore" data-backup-name="${esc(b.name)}" class="field-row"><input name="confirmation" placeholder="type exact file name"><button class="danger">Restore</button></form></td></tr>`).join("")}</tbody></table></div>`;
+    return `<div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>Name</th><th>Created</th><th>Size</th><th>Restore</th></tr></thead><tbody>${backups.map((b) => `<tr><td class="mono">${esc(b.name)}</td><td>${ts(b.created_at)}</td><td>${esc(b.size_bytes)}</td><td><button data-validate-appliance-backup="${esc(b.name)}">Validate</button><form data-form="appliance-restore" data-backup-name="${esc(b.name)}" class="field-row"><input name="confirmation" placeholder="type exact file name"><button class="danger">Restore</button></form></td></tr>`).join("")}</tbody></table></div>`;
   }
 
   function backupTable(backups) {
     if (!backups.length) return `<div class="empty">No encrypted secret backups.</div>`;
-    return `<div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>Name</th><th>Created</th><th>Size</th><th>Restore</th></tr></thead><tbody>${backups.map((b) => `<tr><td class="mono">${esc(b.name)}</td><td>${esc(b.created_at)}</td><td>${esc(b.size_bytes)}</td><td><button data-validate-backup="${esc(b.name)}">Validate</button><form data-form="restore" data-backup-name="${esc(b.name)}" class="field-row"><input name="confirmation" placeholder="type exact file name"><select name="overwrite" data-bool="1"><option value="false">no overwrite</option><option value="true">overwrite</option></select><button class="danger">Restore</button></form></td></tr>`).join("")}</tbody></table></div>`;
+    return `<div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>Name</th><th>Created</th><th>Size</th><th>Restore</th></tr></thead><tbody>${backups.map((b) => `<tr><td class="mono">${esc(b.name)}</td><td>${ts(b.created_at)}</td><td>${esc(b.size_bytes)}</td><td><button data-validate-backup="${esc(b.name)}">Validate</button><form data-form="restore" data-backup-name="${esc(b.name)}" class="field-row"><input name="confirmation" placeholder="type exact file name"><select name="overwrite" data-bool="1"><option value="false">no overwrite</option><option value="true">overwrite</option></select><button class="danger">Restore</button></form></td></tr>`).join("")}</tbody></table></div>`;
   }
 
   function restoreJobs(jobs) {
@@ -937,11 +1101,37 @@
   }
 
   async function administration() {
-    return page("Administration", "Your own account and session controls.", "", `
+    await ensureApplianceTimezone();
+    return page("Administration", "Your own account, session, and interface preferences.", "", `
       <section class="panel"><div class="panel__head"><h2>Account</h2></div><div class="panel__body"><div class="grid two">
         <form data-form="change-password"><label>Current password<input name="current_password" type="password" autocomplete="current-password" required></label><label>New password (min. 12 characters)<input name="new_password" type="password" autocomplete="new-password" minlength="12" required></label><button class="primary">Change password</button></form>
         <div><p class="muted">Signs out every other active session for your account (not this one). Use after a shared/compromised session.</p><button data-revoke-sessions class="danger">Revoke other sessions</button></div>
-      </div></div></section>`);
+      </div></div></section>
+      <section class="panel"><div class="panel__head"><h2>Preferences</h2></div><div class="panel__body">
+        <label class="row"><input type="checkbox" data-action="nav-keep-multiple-open" ${navKeepMultipleOpen() ? "checked" : ""}> Keep multiple navigation sections open</label>
+        <p class="muted">Off by default: opening a main navigation section closes whichever other one was open. Turn this on to expand and collapse each section independently instead. Saved on this device/browser.</p>
+        <label style="margin-top:16px">Timestamp display${timezonePreferenceSelector()}</label>
+        <p class="muted">Every timestamp shown anywhere in the app updates immediately when you change this -- no reload. Storage, the API, sorting, and filtering always use the exact UTC value regardless of this display choice.</p>
+      </div></section>`);
+  }
+
+  // Real defect fixed here (owner-reported: raw UTC ISO strings were
+  // the default presentation everywhere, and later, that the display
+  // mode must never hardcode a geographic timezone). Three modes, each
+  // labeled with the REAL zone it will use -- never a static label --
+  // so the operator can see exactly what "Browser Local" and
+  // "Appliance Time" actually mean on this box, right now.
+  function timezonePreferenceSelector() {
+    const mode = timestampDisplayMode();
+    const browserTz = browserTimezone();
+    const applianceTz = applianceTimezone();
+    const browserLabel = browserTz ? `Browser Local — ${browserTz}` : "Browser Local (undetected)";
+    const applianceLabel = applianceTz ? `Appliance Time — ${applianceTz}` : "Appliance Time (unavailable)";
+    return `<select data-action="timestamp-display-mode" aria-label="Timestamp display timezone">
+      <option value="browser" ${mode === "browser" ? "selected" : ""}>${esc(browserLabel)}</option>
+      <option value="appliance" ${mode === "appliance" ? "selected" : ""}>${esc(applianceLabel)}</option>
+      <option value="utc" ${mode === "utc" ? "selected" : ""}>UTC</option>
+    </select>`;
   }
 
   async function logs() {
@@ -977,7 +1167,7 @@
         <td><span class="badge ${s.enabled ? "ok" : "inherit"}">${s.enabled ? "enabled" : "disabled"}</span></td>
         <td><span class="badge ${tone(s.last_status)}">${esc(s.last_status)}</span>${s.last_error ? `<br><span class="muted">${esc(s.last_error)}</span>` : ""}</td>
         <td>${esc(s.rule_count)}</td>
-        <td>${esc(s.last_refresh_at || "never")}</td>
+        <td>${ts(s.last_refresh_at, "never")}</td>
         <td class="field-row">
           <button data-blocklist-refresh="${esc(s.subscription_id)}">Refresh</button>
           <button data-blocklist-toggle="${esc(s.subscription_id)}">${s.enabled ? "Disable" : "Enable"}</button>
@@ -1119,7 +1309,7 @@
   function importJobsTable(jobs) {
     if (!jobs.length) return `<div class="empty">No import jobs yet.</div>`;
     return `<div class="table-wrap"><table><thead><tr><th>ID</th><th>Source</th><th>Name</th><th>Status</th><th>Items</th><th>Created</th></tr></thead><tbody>${jobs.map((j) => `
-      <tr><td>${j.id}</td><td>${esc(j.source_type)}</td><td>${esc(j.source_name)}</td><td><span class="badge ${tone(j.status)}">${esc(j.status)}</span></td><td>${esc((j.plan || {}).item_count ?? "")}</td><td>${esc(j.created_at || "")}</td></tr>`).join("")}</tbody></table></div>`;
+      <tr><td>${j.id}</td><td>${esc(j.source_type)}</td><td>${esc(j.source_name)}</td><td><span class="badge ${tone(j.status)}">${esc(j.status)}</span></td><td>${esc((j.plan || {}).item_count ?? "")}</td><td>${ts(j.created_at, "")}</td></tr>`).join("")}</tbody></table></div>`;
   }
 
   function importPlanPreview(jobId, plan) {
@@ -1168,7 +1358,7 @@
   function updateJobsTable(jobs) {
     if (!jobs.length) return `<div class="empty">No update jobs yet.</div>`;
     return `<div class="table-wrap"><table><thead><tr><th>ID</th><th>Status</th><th>Version</th><th>Started</th><th>Finished</th><th>Actions</th></tr></thead><tbody>${jobs.map((j) => `
-      <tr><td>${j.id}</td><td><span class="badge ${tone(j.status)}">${esc(j.status)}</span></td><td>${esc(j.detail.candidate_version || "")}</td><td>${esc(j.started_at || "")}</td><td>${esc(j.finished_at || "")}</td><td>${j.status === "staged" ? `<button data-apply-update="${j.id}" class="danger">Apply</button>` : ""}${j.detail.apply_result && j.detail.apply_result.error ? `<span class="muted">${esc(j.detail.apply_result.error)}</span>` : ""}</td></tr>`).join("")}</tbody></table></div>`;
+      <tr><td>${j.id}</td><td><span class="badge ${tone(j.status)}">${esc(j.status)}</span></td><td>${esc(j.detail.candidate_version || "")}</td><td>${ts(j.started_at, "")}</td><td>${ts(j.finished_at, "")}</td><td>${j.status === "staged" ? `<button data-apply-update="${j.id}" class="danger">Apply</button>` : ""}${j.detail.apply_result && j.detail.apply_result.error ? `<span class="muted">${esc(j.detail.apply_result.error)}</span>` : ""}</td></tr>`).join("")}</tbody></table></div>`;
   }
 
   const renderers = { dashboard, analytics, clients, policies, filtering, blocklists, encryption, upstreams, localdns, cache, network, replication, backup, statistics, notifications, administration, health, importexport, updates, logs };
@@ -1218,11 +1408,28 @@
     // collapsed state. Only the containing section is touched; every
     // other section's open/closed state (and its persisted preference)
     // is left exactly as the operator left it.
+    const keepMultipleOpen = navKeepMultipleOpen();
     document.querySelectorAll("[data-nav-section]").forEach((section) => {
       const inSection = section.querySelector(`[data-route="${CSS.escape(requested)}"]`);
       section.classList.toggle("is-active", !!inSection);
-      if (!inSection) return;
       const toggle = section.querySelector("[data-nav-section-toggle]");
+      if (!inSection) {
+        // Accordion default: navigating into a different section closes
+        // every other one, same as an explicit click (owner-reported
+        // requirement: "route navigation" must behave consistently with
+        // clicking the section header). Skipped entirely when the
+        // operator has opted into keeping multiple sections open.
+        if (!keepMultipleOpen && toggle && toggle.getAttribute("aria-expanded") === "true") {
+          toggle.setAttribute("aria-expanded", "false");
+          toggle.removeAttribute("aria-current");
+          const panel = document.getElementById(toggle.getAttribute("aria-controls"));
+          if (panel) panel.hidden = true;
+          const chevron = toggle.querySelector(".nav-section__chevron");
+          if (chevron) chevron.textContent = "▸";
+          setNavSectionOpen(section.getAttribute("data-nav-section"), false);
+        }
+        return;
+      }
       const panel = document.getElementById(toggle.getAttribute("aria-controls"));
       toggle.setAttribute("aria-expanded", "true");
       toggle.setAttribute("aria-current", "true");
@@ -1465,6 +1672,28 @@
         // DOM nodes involved -- the same direct-update approach loadPage()
         // itself already uses to reveal the active route's section.
         const open = sectionToggle.getAttribute("aria-expanded") !== "true";
+        // Default accordion behavior (owner-reported requirement):
+        // opening one main section closes whichever other one was open,
+        // unless the operator has turned on "keep multiple navigation
+        // sections open" (Administration -> Preferences). Closing a
+        // section never touches this one, and this only runs when
+        // actually opening (not when collapsing the clicked section),
+        // so a click that just closes its own section behaves exactly
+        // as before.
+        if (open && !navKeepMultipleOpen()) {
+          document.querySelectorAll("[data-nav-section]").forEach((otherSection) => {
+            if (otherSection === section) return;
+            const otherToggle = otherSection.querySelector("[data-nav-section-toggle]");
+            if (!otherToggle || otherToggle.getAttribute("aria-expanded") !== "true") return;
+            otherToggle.setAttribute("aria-expanded", "false");
+            const otherGroup = otherSection.getAttribute("data-nav-section");
+            if (otherGroup) setNavSectionOpen(otherGroup, false);
+            const otherPanel = document.getElementById(otherToggle.getAttribute("aria-controls"));
+            if (otherPanel) otherPanel.hidden = true;
+            const otherChevron = otherToggle.querySelector(".nav-section__chevron");
+            if (otherChevron) otherChevron.textContent = "▸";
+          });
+        }
         if (group) setNavSectionOpen(group, open);
         const panel = document.getElementById(sectionToggle.getAttribute("aria-controls"));
         sectionToggle.setAttribute("aria-expanded", String(open));
@@ -1599,6 +1828,21 @@
       if (range) { state.dashboardRangeMinutes = Number(range.value); await loadPage("dashboard"); return; }
       const topMode = ev.target.closest("[data-action='dashboard-top-mode']");
       if (topMode) { state.dashboardTopMode = topMode.value; await loadPage("dashboard"); return; }
+      const keepOpen = ev.target.closest("[data-action='nav-keep-multiple-open']");
+      if (keepOpen) { setNavKeepMultipleOpen(keepOpen.checked); toast(keepOpen.checked ? "Multiple navigation sections can now stay open" : "Navigation sections now close each other (accordion)", "ok"); return; }
+      const tsMode = ev.target.closest("[data-action='timestamp-display-mode']");
+      if (tsMode) {
+        setTimestampDisplayMode(tsMode.value);
+        reformatVisibleTimestamps();
+        // The dashboard activity chart's axis/tooltip labels are real
+        // SVG text, not a simple [data-ts-utc] cell -- re-rendering the
+        // current route (no browser navigation/reload, just this SPA's
+        // normal in-place DOM replacement) picks up the new zone there
+        // too, so no timestamp anywhere is left stale after a mode
+        // switch.
+        if (state.route === "dashboard") await loadPage("dashboard");
+        return;
+      }
       const sel = ev.target.closest("[data-import-type]");
       if (!sel) return;
       const type = sel.value;
