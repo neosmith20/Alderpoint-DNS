@@ -1,5 +1,17 @@
 # V2 Architecture Map — Workstream 1 Summary
 
+**Supporting/historical status:** this document remains architecture evidence and workstream
+history. It is not the current private V2 roadmap, release-stage statement, hardware acceptance
+contract, or V1.1.1 workflow-parity contract.
+
+Current canonical private V2 documents:
+
+- Roadmap: `docs/v2/v2-roadmap.md`
+- Workflow parity contract: `docs/v2/v1-workflow-parity-contract.md`
+
+Where this architecture history conflicts with those documents, the canonical roadmap and
+workflow-parity contract win.
+
 **Status:** V2 Workstream 1 output, consolidating `docs/v2/storage-audit.md`,
 `docs/v2/failure-domains.md`, and `docs/v2/benchmark-results.md` into the confirmed architecture.
 Amended after the Dex architecture gate review (see "Architecture gate remediation" below) — that

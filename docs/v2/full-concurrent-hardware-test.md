@@ -1,5 +1,11 @@
 # V2 Full Concurrent Resource Test (Workstream 3 final continuation, §34-37)
 
+**Historical evidence notice:** this file preserves one hardware-test result set. It is not the
+current private V2 hardware acceptance contract. See `docs/v2/v2-roadmap.md` for the current
+hardware reality: 2 GB is the minimum proven boot/functional tier, 3 GB is a comfortable
+intermediate tier, and 4 GB is the recommended owner/normal deployment target. Do not infer
+independent 4 GB stress certification from this file.
+
 **Status:** Real, isolated, cgroup-capped evidence at 1 GiB and 2 GiB. 4 GiB was not attempted — see
 the concrete measured reason below. This replaces Workstream 2's stated blocker ("could not safely
 build a second complete constrained environment") with an actual isolated measurement, made safe by

@@ -1,5 +1,18 @@
 # Alderpoint DNS V2 -- private RC ready for Dex Gate #3 review
 
+**Historical/superseded status:** this document is retained as RC/Gate evidence only. It is not a
+current readiness, owner-beta, roadmap, or V1.1.1 workflow-parity statement.
+
+RC51 remains failed owner-beta history for product-parity purposes. Earlier KVM closure, RC
+readiness, and Gate #3 evidence did not prove complete V1.1.1 operator-workflow parity. Current
+canonical documents:
+
+- Roadmap: `docs/v2/v2-roadmap.md`
+- Workflow parity contract: `docs/v2/v1-workflow-parity-contract.md`
+
+Any completion language below is historical to the RC/Gate context in which it was written and is
+superseded by the canonical roadmap and workflow-parity contract.
+
 Artifact: `alderpointdns-v2_2.0.0~rc29-1_all.deb`
 (sha256 `0b0a06427ffec93e9949905467c23cc90d8eaca82c4552f9ceae30bc0038472c`),
 branch `v2/architecture-storage-foundation`, still fully private
@@ -362,7 +375,7 @@ scope and recommendation.
   with dummy keys, verified by inspection), 25 commits ahead of local
   `main` / 325 ahead of `origin/main`, nothing pushed.
 
-## Conclusion (final, through RC29 -- all roadmap items complete)
+## Historical Conclusion (superseded; RC29-era "all roadmap items complete" claim)
 
 Every item from this continuation's roadmap is now done, each with
 real, live evidence against an installed package where applicable, not
@@ -436,8 +449,8 @@ twice in a row, not a code defect).
 **Readiness assessment:** the private candidate (RC29,
 `alderpointdns-v2_2.0.0~rc29-1_all.deb`, sha256
 `0b0a06427ffec93e9949905467c23cc90d8eaca82c4552f9ceae30bc0038472c`) is
-ready for Dex Gate #3 review. All roadmap items from this
-continuation's handoff are complete; nothing was left unattempted or
+ready for Dex Gate #3 review. Historical RC29-era claim: all roadmap items from this
+continuation's handoff were complete; nothing was left unattempted or
 assumed done without real evidence. Highest-value areas for Dex to
 attack: the DNSCrypt provisioning surface (the newest, most recently
 security-reviewed code, see `docs/v2/dnscrypt-adversarial-security-pass.md`

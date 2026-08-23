@@ -1,5 +1,17 @@
 # Project Status
 
+**Historical/public status notice:** this document is not the canonical private V2 roadmap,
+readiness statement, or V1.1.1 workflow-parity contract. It summarizes the older/public project
+state and must not be used to claim private V2 parity.
+
+Current private V2 canonical documents:
+
+- `docs/v2/v2-roadmap.md`
+- `docs/v2/v1-workflow-parity-contract.md`
+
+Where this historical/public status page conflicts with those documents, the private V2 roadmap and
+workflow-parity contract win.
+
 Alderpoint DNS is a self-hosted DNS filtering appliance built on BIND (a
 recursive, DNSSEC-validating backend that also serves RPZ-based filtering
 policy and authoritative Local DNS records) and dnsdist (the client-facing
