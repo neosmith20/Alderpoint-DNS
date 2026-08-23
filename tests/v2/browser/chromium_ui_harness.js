@@ -270,7 +270,7 @@ async function main() {
         network: "Network Configuration",
       };
       await evalJs(`document.querySelector('[data-route="${name}"]').click(); true`);
-      await waitFor(`document.querySelector('.page-head h1') && document.querySelector('.page-head h1').textContent === ${JSON.stringify(titles[name])} && !document.body.innerText.includes("Page unavailable")`, name);
+      await waitFor(`document.querySelector('.page-head h1') && document.querySelector('.page-head h1').textContent === ${JSON.stringify(titles[name])} && document.getElementById('page') && document.getElementById('page').getAttribute('data-route-ready') === '1' && !document.body.innerText.includes("Page unavailable")`, name);
       proof.push(`route:${name}`);
     }
     async function pageApi(path, options = {}) {

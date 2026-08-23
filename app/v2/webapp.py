@@ -32,7 +32,9 @@ import re
 import shutil
 import sqlite3
 import time
+import uuid
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -161,6 +163,15 @@ app = FastAPI(title="Alderpoint DNS V2 Management API", docs_url=None, redoc_url
 if UI_DIR.exists():
     app.mount("/ui-static", StaticFiles(directory=str(UI_DIR)), name="ui-static")
 
+_request_timings: ContextVar[dict[str, float] | None] = ContextVar("request_timings", default=None)
+_SLOW_REQUEST_MS = 750.0
+
+
+def _add_timing(name: str, duration_ms: float) -> None:
+    timings = _request_timings.get()
+    if timings is not None:
+        timings[name] = timings.get(name, 0.0) + duration_ms
+
 
 # Found during adversarial security testing: no request body size limit
 # existed anywhere in this app -- a single authenticated request (valid
@@ -222,6 +233,42 @@ async def _reject_oversized_requests(request: Request, call_next):
 
 
 @app.middleware("http")
+async def _performance_headers(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:12]
+    request.state.request_id = request_id
+    timings: dict[str, float] = {}
+    token = _request_timings.set(timings)
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        _request_timings.reset(token)
+        raise
+    else:
+        total_ms = (time.perf_counter() - started) * 1000.0
+        _request_timings.reset(token)
+        timings["app"] = total_ms
+        response.headers["X-Request-ID"] = request_id
+        response.headers["Server-Timing"] = ", ".join(
+            f"{name};dur={duration:.1f}" for name, duration in sorted(timings.items()) if duration >= 0
+        )
+        if request.url.path.startswith("/api/") and total_ms >= _SLOW_REQUEST_MS:
+            print(
+                json.dumps({
+                    "event": "slow_request",
+                    "request_id": request_id,
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status": response.status_code,
+                    "duration_ms": round(total_ms, 1),
+                    "timings": {k: round(v, 1) for k, v in timings.items()},
+                }),
+                flush=True,
+            )
+        return response
+
+
+@app.middleware("http")
 async def _security_headers(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
@@ -234,7 +281,10 @@ async def _security_headers(request: Request, call_next):
         )
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Cache-Control"] = "no-store"
+    if request.url.path.startswith("/ui-static/"):
+        response.headers["Cache-Control"] = "public, max-age=31536000"
+    else:
+        response.headers["Cache-Control"] = "no-store"
     # §9: HSTS is deliberately NOT set. This service has no separate
     # plaintext HTTP listener to redirect from (HTTPS-only, see module
     # docstring / docs/v2/management-plane.md "HTTP strategy") and the
@@ -258,8 +308,12 @@ def _db():
     # never be silently, invisibly replaced by an empty one indistinguishable
     # from a genuine fresh install.
     CONTROL_DB.parent.mkdir(parents=True, exist_ok=True)
+    started = time.perf_counter()
     with control_db.connect(CONTROL_DB, create_if_missing=False) as conn:
-        yield conn
+        try:
+            yield conn
+        finally:
+            _add_timing("sqlite", (time.perf_counter() - started) * 1000.0)
 
 
 def _secrets() -> SecretStore:
@@ -465,15 +519,19 @@ def current_session(request: Request, conn: sqlite3.Connection) -> Optional[sqli
 def current_admin(request: Request):
     """FastAPI dependency: 401 if not authenticated. Also bumps
     last_seen_at (bounded per-request write, matching V1's precedent)."""
-    with _db() as conn:
-        session = current_session(request, conn)
-        if session is None or session["admin_id"] is None:
-            raise ApiError(401, "unauthenticated", "login required")
-        conn.execute("UPDATE sessions SET last_seen_at=? WHERE id=?", (datetime.now(timezone.utc).isoformat(), session["id"]))
-        admin = conn.execute("SELECT * FROM admins WHERE id=?", (session["admin_id"],)).fetchone()
-        if admin is None:
-            raise ApiError(401, "unauthenticated", "account no longer exists")
-        return {"admin_id": session["admin_id"], "session_id": session["id"], "csrf": session["csrf"]}
+    started = time.perf_counter()
+    try:
+        with _db() as conn:
+            session = current_session(request, conn)
+            if session is None or session["admin_id"] is None:
+                raise ApiError(401, "unauthenticated", "login required")
+            conn.execute("UPDATE sessions SET last_seen_at=? WHERE id=?", (datetime.now(timezone.utc).isoformat(), session["id"]))
+            admin = conn.execute("SELECT * FROM admins WHERE id=?", (session["admin_id"],)).fetchone()
+            if admin is None:
+                raise ApiError(401, "unauthenticated", "account no longer exists")
+            return {"admin_id": session["admin_id"], "session_id": session["id"], "csrf": session["csrf"]}
+    finally:
+        _add_timing("auth", (time.perf_counter() - started) * 1000.0)
 
 
 def check_csrf(admin: dict, x_csrf_token: Optional[str]) -> None:
@@ -500,7 +558,14 @@ def _ui_index() -> str:
     index = UI_DIR / "index.html"
     if not index.exists():
         raise ApiError(404, "ui_not_available", "the V2 UI assets are not installed")
-    return index.read_text(encoding="utf-8")
+    version_file = APP_ROOT / "VERSION"
+    version = re.sub(r"[^A-Za-z0-9_.~-]+", "-", version_file.read_text().strip()) if version_file.exists() else "dev"
+    return (
+        index.read_text(encoding="utf-8")
+        .replace('/ui-static/app.css"', f'/ui-static/app.css?v={version}"')
+        .replace('/ui-static/data-grid.js"', f'/ui-static/data-grid.js?v={version}"')
+        .replace('/ui-static/app.js"', f'/ui-static/app.js?v={version}"')
+    )
 
 
 @app.get("/", response_class=HTMLResponse)

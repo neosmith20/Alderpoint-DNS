@@ -1,6 +1,16 @@
 (function () {
   "use strict";
 
+  function loadPerfHistory() {
+    try {
+      const parsed = JSON.parse(sessionStorage.getItem("apdnsPerfHistory") || "[]");
+      return Array.isArray(parsed) ? parsed.slice(0, 80) : [];
+    } catch (_) {
+      sessionStorage.removeItem("apdnsPerfHistory");
+      return [];
+    }
+  }
+
   const state = {
     csrf: "",
     user: "",
@@ -16,7 +26,73 @@
     dashboardRangeMinutes: 1440,
     dashboardTopMode: "top",
     applianceTimezone: null,
+    routeCache: new Map(),
+    inFlightGets: new Map(),
+    perfHistory: loadPerfHistory(),
+    lastNavClickAt: 0,
   };
+  const PERF_LIMIT = 80;
+  const ROUTE_CACHE_TTL_MS = 30000;
+  let routeLabels = {};
+
+  function nowMs() { return performance.now(); }
+  function absNow() { return new Date().toISOString(); }
+  function perfSave(entry) {
+    state.perfHistory.unshift(entry);
+    state.perfHistory = state.perfHistory.slice(0, PERF_LIMIT);
+    try { sessionStorage.setItem("apdnsPerfHistory", JSON.stringify(state.perfHistory)); } catch (_) {}
+  }
+  function parseServerTiming(header) {
+    const out = {};
+    String(header || "").split(",").forEach((part) => {
+      const bits = part.trim().split(";");
+      const name = bits[0] && bits[0].trim();
+      const dur = bits.find((b) => b.trim().startsWith("dur="));
+      if (name && dur) out[name] = Number(dur.split("=", 2)[1]) || 0;
+    });
+    return out;
+  }
+  function pageTitleFor(route) { return routeLabels[route] || route; }
+  function routeSkeleton(route, note) {
+    return page(pageTitleFor(route), note || "Preparing page.", "", `
+      <div class="grid two" data-route-loading="1">
+        <section class="panel"><div class="panel__head"><h2>Summary</h2></div><div class="panel__body"><div class="empty">Loading summary...</div></div></section>
+        <section class="panel"><div class="panel__head"><h2>Details</h2></div><div class="panel__body"><div class="empty">Loading details...</div></div></section>
+      </div>`);
+  }
+  function nextPaint() {
+    return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  }
+  function deployedVersionFromPage() {
+    const text = document.body.innerText || "";
+    const match = text.match(/2\.0\.0~preview[0-9a-f]+-1/);
+    return match ? match[0] : "";
+  }
+  function performanceReportText() {
+    const payload = {
+      generated_at: absNow(),
+      browser_timezone: browserTimezone(),
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      deployed_version_seen: deployedVersionFromPage(),
+      measurements: state.perfHistory,
+    };
+    return JSON.stringify(payload, null, 2);
+  }
+  function clearPerformanceMeasurements() {
+    state.perfHistory = [];
+    sessionStorage.removeItem("apdnsPerfHistory");
+  }
+
+  if ("PerformanceObserver" in window) {
+    try {
+      const longTasks = new PerformanceObserver((list) => {
+        for (const item of list.getEntries()) {
+          perfSave({ type: "longtask", route: state.route, timestamp: absNow(), duration_ms: Math.round(item.duration) });
+        }
+      });
+      longTasks.observe({ entryTypes: ["longtask"] });
+    } catch (_) {}
+  }
 
   // Grouping/order intentionally mirrors V1.1.1's information architecture
   // (docs/v2/... parity work, priority 1 of the beta-rescue brief) rather
@@ -57,6 +133,7 @@
     ["System", "updates", "Software Updates"],
     ["System", "logs", "Logs"],
   ];
+  routeLabels = Object.fromEntries([["Dashboard", "dashboard", "Dashboard"], ...pages].map((p) => [p[1], p[2]]));
   const GROUP_ORDER = ["DNS", "Security", "Operations", "System"];
   // Real defect fixed here (owner-reported: main-menu items showed an
   // arbitrary placeholder letter, which reads as unfinished/prototype
@@ -366,20 +443,43 @@
     opts.headers = Object.assign({ "Accept": "application/json" }, opts.headers || {});
     if (opts.body && !(opts.body instanceof FormData)) opts.headers["Content-Type"] = "application/json";
     const method = (opts.method || "GET").toUpperCase();
+    const requestId = Math.random().toString(16).slice(2, 14);
+    opts.headers["X-Request-ID"] = requestId;
     if (!/^(GET|HEAD)$/.test(method)) opts.headers["X-CSRF-Token"] = state.csrf;
     else if (!opts.signal && pageLoadController) opts.signal = pageLoadController.signal;
-    const res = await fetch(path, opts);
-    let body = null;
-    const text = await res.text();
-    try { body = text ? JSON.parse(text) : null; } catch (_) { body = { error: "invalid_json", detail: text.slice(0, 240) }; }
-    if (!res.ok) {
-      const detail = body && (body.detail || body.error) ? `${body.error || "error"}: ${body.detail || ""}` : `HTTP ${res.status}`;
-      const err = new Error(detail);
-      err.status = res.status;
-      err.body = body;
-      throw err;
-    }
-    return body || {};
+    const cacheKey = method === "GET" ? `${method} ${path}` : "";
+    if (cacheKey && state.inFlightGets.has(cacheKey)) return state.inFlightGets.get(cacheKey);
+    const started = nowMs();
+    const requestEntry = { type: "api", route: state.route, path: path.split("?", 1)[0], method, request_id: requestId, timestamp: absNow() };
+    const promise = (async () => {
+      const res = await fetch(path, opts);
+      const ttfb = nowMs();
+      let body = null;
+      const text = await res.text();
+      const complete = nowMs();
+      try { body = text ? JSON.parse(text) : null; } catch (_) { body = { error: "invalid_json", detail: text.slice(0, 240) }; }
+      const parsed = nowMs();
+      perfSave(Object.assign(requestEntry, {
+        status: res.status,
+        ttfb_ms: Math.round(ttfb - started),
+        download_ms: Math.round(complete - ttfb),
+        parse_ms: Math.round(parsed - complete),
+        total_ms: Math.round(parsed - started),
+        server_timing: parseServerTiming(res.headers.get("Server-Timing")),
+        response_request_id: res.headers.get("X-Request-ID") || "",
+      }));
+      if (!res.ok) {
+        const detail = body && (body.detail || body.error) ? `${body.error || "error"}: ${body.detail || ""}` : `HTTP ${res.status}`;
+        const err = new Error(detail);
+        err.status = res.status;
+        err.body = body;
+        throw err;
+      }
+      return body || {};
+    })();
+    if (cacheKey) state.inFlightGets.set(cacheKey, promise.finally(() => state.inFlightGets.delete(cacheKey)));
+    if (!/^(GET|HEAD)$/.test(method)) state.routeCache.clear();
+    return promise;
   }
 
   function jsonForm(form) {
@@ -1266,9 +1366,16 @@
   // system_logs_results.html templates.
   async function health() {
     const [h, s, n, d] = await Promise.all([api("/api/health"), api("/api/system/status"), api("/api/node-identity"), api("/api/discovery/status")]);
-    return page("System Status", "Operational status separates DNS/runtime health from optional subsystem degradation.", `<button data-refresh>Refresh</button>`, `
+    return page("System Status", "Operational status separates DNS/runtime health from optional subsystem degradation.", `<button data-copy-perf>Copy UI Performance Report</button><button data-clear-perf>Clear Measurements</button><button data-refresh>Refresh</button>`, `
       <div class="strip"><div class="metric"><strong>${esc(h.status)}</strong><span>Overall</span></div><div class="metric"><strong>${esc(s.version)}</strong><span>Version</span></div><div class="metric"><strong>${s.compiled_runtime_present ? "yes" : "no"}</strong><span>Compiled runtime</span></div><div class="metric"><strong>${esc(d.observed_count ?? 0)}</strong><span>Observed clients</span></div></div>
+      <section class="panel"><div class="panel__head"><h2>UI Performance</h2></div><div class="panel__body"><p class="muted">Recent in-browser route and API timings are kept only in this browser session. Copy the report after reproducing slow navigation.</p>${performanceSummaryTable()}</div></section>
       <div class="grid two"><section class="panel"><div class="panel__head"><h2>Components</h2></div><div class="panel__body">${componentList(h.components || {})}</div></section><section class="panel"><div class="panel__head"><h2>Node Identity</h2></div><div class="panel__body">${tableFromRows([n], 1)}</div></section></div>`);
+  }
+
+  function performanceSummaryTable() {
+    const routes = state.perfHistory.filter((e) => e.type === "route").slice(0, 12);
+    if (!routes.length) return `<div class="empty">No route measurements yet.</div>`;
+    return `<div class="table-wrap"><table><thead><tr><th>Route</th><th>When</th><th>Shell</th><th>Useful</th><th>Total</th><th>Cache</th><th>Slowest API</th></tr></thead><tbody>${routes.map((r) => `<tr><td>${esc(r.route)}</td><td>${esc(r.timestamp)}</td><td>${esc(r.shell_paint_ms)} ms</td><td>${esc(r.first_useful_ms)} ms</td><td>${esc(r.total_ms)} ms</td><td>${esc(r.cache_status)}</td><td>${esc(r.slowest_api || "")}</td></tr>`).join("")}</tbody></table></div>`;
   }
 
   async function administration() {
@@ -1549,9 +1656,13 @@
   async function loadPage(id, opts = {}) {
     const requested = id || "dashboard";
     const token = ++loadToken;
+    const navAcceptedAt = nowMs();
+    const routeStartAt = state.lastNavClickAt || navAcceptedAt;
+    performance.mark(`route-${token}-accepted`);
     // Cancel the previous page-load's own in-flight GETs (see api()'s
     // pageLoadController note) before starting this one's.
     if (pageLoadController) pageLoadController.abort();
+    state.inFlightGets.clear();
     pageLoadController = new AbortController();
     // Real defect fixed here (owner-beta closure item 3, found live via
     // the Chromium harness's own browser back/forward proof): every
@@ -1566,6 +1677,9 @@
     // sidebar doesn't spam back with no-op entries.
     const routeChanged = state.route !== requested;
     state.route = requested;
+    const url = `/ui/${requested}`;
+    if (!opts.replace && routeChanged) history.pushState(null, "", url);
+    else history.replaceState(null, "", url);
     document.querySelectorAll("[data-route]").forEach((b) => {
       const isActive = b.dataset.route === state.route;
       b.classList.toggle("active", isActive);
@@ -1610,19 +1724,45 @@
       setNavSectionOpen(section.getAttribute("data-nav-section"), true);
     });
     const target = document.getElementById("page");
-    target.innerHTML = page("Loading", "Fetching live appliance state.", "", `<div class="empty">Loading...</div>`);
+    const cached = state.routeCache.get(requested);
+    const cacheFresh = cached && (Date.now() - cached.at) < ROUTE_CACHE_TTL_MS;
+    target.setAttribute("data-route-name", requested);
+    target.setAttribute("data-route-ready", "0");
+    target.innerHTML = cacheFresh ? cached.html : routeSkeleton(requested, "Loading live appliance data.");
+    if (cacheFresh) target.insertAdjacentHTML("afterbegin", `<div class="alert info" data-cache-note>Refreshing ${esc(pageTitleFor(requested))}...</div>`);
+    await nextPaint();
+    const shellPaintAt = nowMs();
+    performance.measure(`route-${token}-shell`, { start: `route-${token}-accepted`, duration: shellPaintAt - navAcceptedAt });
     try {
       const html = await renderers[requested]();
       if (token !== loadToken) return;
       target.innerHTML = html;
-      const url = `/ui/${requested}`;
-      if (!opts.replace && routeChanged) history.pushState(null, "", url);
-      else history.replaceState(null, "", url);
+      target.setAttribute("data-route-ready", "1");
+      state.routeCache.set(requested, { at: Date.now(), html });
+      await nextPaint();
+      const doneAt = nowMs();
+      performance.measure(`route-${token}-complete`, { start: `route-${token}-accepted`, duration: doneAt - navAcceptedAt });
+      const recentApis = state.perfHistory.filter((e) => e.type === "api" && e.route === requested && (Date.parse(e.timestamp) > Date.now() - 120000));
+      const slowestApi = recentApis.sort((a, b) => (b.total_ms || 0) - (a.total_ms || 0))[0];
+      perfSave({
+        type: "route",
+        route: requested,
+        timestamp: absNow(),
+        viewport: `${window.innerWidth}x${window.innerHeight}`,
+        browser_timezone: browserTimezone(),
+        click_to_accept_ms: Math.round(navAcceptedAt - routeStartAt),
+        shell_paint_ms: Math.round(shellPaintAt - routeStartAt),
+        first_useful_ms: Math.round((cacheFresh ? shellPaintAt : doneAt) - routeStartAt),
+        total_ms: Math.round(doneAt - routeStartAt),
+        cache_status: cacheFresh ? "warm-route-cache" : "miss",
+        slowest_api: slowestApi ? `${slowestApi.path} ${slowestApi.total_ms}ms` : "",
+      });
     } catch (err) {
       if (token !== loadToken) return;
       if (err.status === 401) return boot();
       target.innerHTML = page("Page unavailable", "The backend rejected or failed this request.", `<button data-refresh>Retry</button>`, `<div class="alert bad">${esc(err.message)}</div>`);
     }
+    state.lastNavClickAt = 0;
   }
 
   function authScreen(setupRequired) {
@@ -1902,6 +2042,7 @@
       }
       const route = ev.target.closest("[data-route]");
       if (route) {
+        state.lastNavClickAt = nowMs();
         document.body.classList.remove("nav-open");
         document.querySelectorAll(".nav-section.is-flyout-open").forEach((s) => {
           s.classList.remove("is-flyout-open");
@@ -1912,6 +2053,19 @@
         return;
       }
       if (ev.target.closest("[data-action='menu']")) { document.body.classList.toggle("nav-open"); return; }
+      if (ev.target.closest("[data-copy-perf]")) {
+        const report = performanceReportText();
+        if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(report);
+        else window.prompt("Copy UI Performance Report", report);
+        toast("UI performance report copied", "ok");
+        return;
+      }
+      if (ev.target.closest("[data-clear-perf]")) {
+        clearPerformanceMeasurements();
+        toast("UI performance measurements cleared", "ok");
+        await loadPage("health");
+        return;
+      }
       if (ev.target.closest("[data-action='theme']")) { setTheme(state.theme === "dark" ? "light" : "dark"); renderShell(); await loadPage(state.route); return; }
       if (ev.target.closest("[data-action='collapse']")) { state.navCollapsed = !state.navCollapsed; localStorage.setItem("apdnsNavCollapsed", state.navCollapsed ? "1" : "0"); renderShell(); await loadPage(state.route); return; }
       const sectionToggle = ev.target.closest("[data-nav-section-toggle]");
