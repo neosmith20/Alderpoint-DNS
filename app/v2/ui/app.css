@@ -301,8 +301,37 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .drawer { position: sticky; top: var(--s-4); }
 /* DNS activity time-series chart (owner-reported fix: replaces an
    anonymous bar row whose only values lived in `title` attributes). */
-.ts-wrap { border: 1px solid var(--line); background: var(--surface-2); border-radius: var(--r-2); padding: var(--s-3); overflow-x: auto; }
-.ts-chart { display: block; width: 100%; height: 220px; min-width: 480px; }
+/* Real defect fixed here (owner-reported: the chart rendered at a fixed
+   760px viewBox with no responsive sizing, leaving unexplained empty
+   space beside it instead of filling the card). .ts-svg-host is the
+   real measured element (app.js's mountActivityChart reads its
+   clientWidth and regenerates the SVG at exactly that pixel width, so
+   the SVG's own width/height attributes always already match the host
+   -- no CSS stretching that would distort stroke widths or text). The
+   width:100%/min-width:0 pair is what makes clientWidth itself track
+   the card's real available inner width in the first place; overflow-x
+   stays only as a safety net (never triggers in normal use once the
+   width tracks correctly). */
+/* overflow-y is set explicitly (not left to default) because CSS forces
+   an axis left at its 'visible' default to compute as 'auto' the
+   moment the OTHER axis is anything but 'visible' -- an unset
+   overflow-y here would silently reserve a vertical scrollbar's width
+   (real defect found live: measured exactly a scrollbar-width gap
+   between the card's available width and the chart's rendered width),
+   shrinking the real width mountActivityChart() measures for no
+   visible reason. overflow-x:auto remains only as a safety net (the
+   chart is sized to never need it in normal use). */
+.ts-wrap { border: 1px solid var(--line); background: var(--surface-2); border-radius: var(--r-2); padding: var(--s-3); overflow-x: auto; overflow-y: hidden; width: 100%; min-width: 0; box-sizing: border-box; }
+.ts-svg-host { width: 100%; min-width: 0; }
+.ts-chart-overlay { position: relative; max-width: 100%; }
+.ts-chart { display: block; max-width: 100%; }
+/* Real interactive hit-targets, exactly overlaid on their (purely
+   visual) SVG marker -- see renderActivitySvgMarkup()'s own comment
+   for why a real <button> replaces a focusable SVG <circle> here. */
+.ts-point-hit { position: absolute; width: 18px; height: 18px; transform: translate(-50%, -50%); margin: 0; padding: 0; border: none; border-radius: 50%; background: transparent; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.ts-point-hit:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ts-tooltip { position: fixed; transform: translate(-50%, -100%); pointer-events: none; background: var(--surface-3); border: 1px solid var(--line-2); border-radius: var(--r-2); padding: 8px 10px; font-size: 12px; line-height: 1.5; color: var(--text); box-shadow: var(--shadow); z-index: 60; opacity: 0; visibility: hidden; transition: opacity .08s ease; max-width: min(260px, calc(100vw - 24px)); }
+.ts-tooltip.is-visible { opacity: 1; visibility: visible; }
 .ts-grid { stroke: var(--line); stroke-width: 1; }
 .ts-axis { fill: var(--faint); font-size: 10px; font-family: var(--font); }
 .ts-line { fill: none; stroke-width: 2; }

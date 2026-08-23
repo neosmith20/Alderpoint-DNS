@@ -402,15 +402,118 @@ async function main() {
       await waitFor(`document.documentElement.dataset.theme === ${JSON.stringify(themeBeforeChartCheck)}`, "theme restored after chart color check");
       proof.push("dashboard-chart-legend-distinguishable-both-themes");
 
-      // Mobile width: the chart's own horizontal-scroll container must
-      // absorb overflow -- the page body itself must never gain
-      // horizontal scroll from this chart.
-      await cdp("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
-      await waitFor(`document.querySelector('.ts-chart')`, "chart still rendered at mobile width");
-      const overflowsBody = await evalJs(`document.documentElement.scrollWidth > window.innerWidth + 1`);
-      if (overflowsBody) throw new Error("dashboard chart caused page-level horizontal overflow at mobile width (390px)");
+      // Real defect fixed this pass (owner-reported: the chart rendered
+      // at a fixed 760px viewBox with no responsive sizing -- it never
+      // filled its card and left unexplained empty space beside it).
+      // At each of desktop, tablet, and mobile widths: measure the
+      // card's real inner content width and the chart's real rendered
+      // width, and require them to match within normal
+      // padding/rounding tolerance -- not merely "no horizontal
+      // overflow", the specific owner complaint (empty space beside a
+      // fixed-size graphic) requires the chart to actually fill the
+      // available width, not just fit inside it.
+      async function measureChart() {
+        const measurement = await evalJs(`(() => {
+          const body = document.querySelector('.ts-wrap').getBoundingClientRect();
+          const chart = document.querySelector('.ts-chart').getBoundingClientRect();
+          const style = getComputedStyle(document.querySelector('.ts-wrap'));
+          const innerWidth = body.width - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) - parseFloat(style.borderLeftWidth) - parseFloat(style.borderRightWidth);
+          return JSON.stringify({ innerWidth, chartWidth: chart.width, overflows: document.documentElement.scrollWidth > window.innerWidth + 1 });
+        })()`);
+        return JSON.parse(measurement);
+      }
+      async function chartFillsCardWidth(viewport) {
+        await cdp("Emulation.setDeviceMetricsOverride", Object.assign({ deviceScaleFactor: viewport.mobile ? 2 : 1, mobile: !!viewport.mobile }, viewport));
+        await waitFor(`document.querySelector('.ts-chart')`, `chart rendered at ${viewport.width}px`);
+        // The ResizeObserver's redraw is async (fires on its own
+        // microtask/animation-frame schedule after the initial mount) --
+        // poll until the measurement converges rather than assuming one
+        // fixed sleep is always enough.
+        let last = await measureChart();
+        for (let i = 0; i < 15 && Math.abs(last.innerWidth - last.chartWidth) > 4; i++) {
+          await sleep(100);
+          last = await measureChart();
+        }
+        const { innerWidth, chartWidth, overflows } = last;
+        if (overflows) throw new Error(`page-level horizontal overflow at ${viewport.width}px`);
+        const diff = Math.abs(innerWidth - chartWidth);
+        if (diff > 4) throw new Error(`chart (${chartWidth}px) does not fill the card's available inner width (${innerWidth}px) at ${viewport.width}px viewport -- off by ${diff}px`);
+        // No overlapping x-axis labels: every label's bounding box must
+        // be disjoint from its neighbor's.
+        const overlap = await evalJs(`(() => {
+          const labels = Array.from(document.querySelectorAll('.ts-chart .ts-axis')).filter((t) => t.getAttribute('text-anchor') === 'middle' && t.textContent.trim() !== '');
+          const boxes = labels.map((t) => t.getBoundingClientRect()).sort((a, b) => a.left - b.left);
+          for (let i = 1; i < boxes.length; i++) if (boxes[i].left < boxes[i - 1].right - 1) return true;
+          return false;
+        })()`);
+        if (overlap) throw new Error(`x-axis labels overlap at ${viewport.width}px viewport`);
+        return chartWidth;
+      }
+      const desktopWidth = await chartFillsCardWidth({ width: 1440, height: 1000 });
+      const tabletWidth = await chartFillsCardWidth({ width: 820, height: 1180 });
+      const mobileWidth = await chartFillsCardWidth({ width: 390, height: 844, mobile: true });
+      if (!(desktopWidth > tabletWidth && tabletWidth > mobileWidth)) throw new Error(`chart did not actually resize across viewports: desktop=${desktopWidth} tablet=${tabletWidth} mobile=${mobileWidth}`);
+      proof.push("dashboard-chart-fills-card-width-desktop-tablet-mobile-no-overflow");
+
+      // Sidebar collapse also changes the card's available width --
+      // proves the ResizeObserver reacts to layout changes generally,
+      // not only viewport resizes.
       await cdp("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
-      proof.push("dashboard-chart-no-horizontal-overflow-at-mobile-width");
+      await waitFor(`document.querySelector('.ts-chart')`, "chart rendered before collapse-resize check");
+      const widthBeforeCollapse = await evalJs(`document.querySelector('.ts-chart').getBoundingClientRect().width`);
+      await evalJs(`document.querySelector('[data-action="collapse"]').click(); true`);
+      await sleep(250);
+      const widthAfterCollapse = await evalJs(`document.querySelector('.ts-chart') ? document.querySelector('.ts-chart').getBoundingClientRect().width : 0`);
+      await evalJs(`document.querySelector('[data-action="collapse"]').click(); true`);
+      await sleep(250);
+      if (!(widthAfterCollapse > widthBeforeCollapse)) throw new Error(`chart did not widen when the sidebar collapsed: before=${widthBeforeCollapse} after=${widthAfterCollapse}`);
+      proof.push("dashboard-chart-resizes-with-sidebar-collapse");
+
+      // Real tooltip interaction: mouse hover, keyboard focus, and
+      // touch/click each independently reveal the same real details
+      // (owner-reported: a native <title> alone is not adequate).
+      await waitFor(`document.querySelector('.ts-point-hit.ts-point-total')`, "chart point rendered for tooltip proof");
+      await evalJs(`(() => { const p = document.querySelector('.ts-point-hit.ts-point-total'); const r = p.getBoundingClientRect(); const opts = {bubbles:true, clientX: r.left + r.width/2, clientY: r.top + r.height/2}; p.dispatchEvent(new MouseEvent('mouseover', opts)); return true; })()`);
+      await waitFor(`document.getElementById('apdns-chart-tooltip') && document.getElementById('apdns-chart-tooltip').classList.contains('is-visible')`, "tooltip visible on mouse hover");
+      const tooltipTextHover = await evalJs(`document.getElementById('apdns-chart-tooltip').textContent`);
+      if (!/quer(y|ies)/i.test(tooltipTextHover) || !/blocked/i.test(tooltipTextHover)) throw new Error(`hover tooltip missing expected content: ${JSON.stringify(tooltipTextHover)}`);
+      await evalJs(`(() => { document.querySelector('.ts-point-hit.ts-point-total').dispatchEvent(new MouseEvent('mouseout', {bubbles:true})); return true; })()`);
+      await waitFor(`!document.getElementById('apdns-chart-tooltip').classList.contains('is-visible')`, "tooltip hides on mouseout");
+
+      // Real keyboard Tab navigation, via genuine CDP key events (not
+      // scripted .focus()/.blur() -- real-world-verified defect found
+      // live: this specific headless Chromium build updates
+      // document.activeElement for a scripted .focus() call but never
+      // dispatches an observable focus/blur event for it (confirmed
+      // even for a plain HTML <button> on a blank page, and even via
+      // the DOM.focus CDP command) -- only genuine input-driven focus
+      // (a real Tab keypress, or a real mouse click) goes through the
+      // browser's actual focus pipeline and fires real events. A real
+      // Tab keypress is also simply the more faithful test of "can a
+      // keyboard user actually reach this," which is what the owner's
+      // requirement is really asking for.
+      await evalJs(`document.querySelector('.ts-point-hit.ts-point-total').focus(); true`);
+      const startTag = await evalJs(`document.activeElement.getAttribute('data-tp-time')`);
+      await pressKey("Tab", "Tab", 9, "");
+      await sleep(150);
+      const afterTabIsPoint = await evalJs(`document.activeElement.classList && document.activeElement.classList.contains('ts-point-hit')`);
+      if (!afterTabIsPoint) throw new Error(`Tab from one chart point did not land on another focusable chart point (landed on ${await evalJs("document.activeElement.tagName + '.' + document.activeElement.className")})`);
+      await waitFor(`document.getElementById('apdns-chart-tooltip').classList.contains('is-visible')`, "tooltip visible after real Tab-key focus");
+      const afterTabTime = await evalJs(`document.activeElement.getAttribute('data-tp-time')`);
+      proof.push(`chart-keyboard-tab-moved-from-${startTag ? "a-point" : "start"}-to-${afterTabTime ? "a-point" : "nowhere"}`);
+      await pressKey("Tab", "Tab", 9, ""); // move focus off the chart entirely
+      await sleep(150);
+      const stillOnChart = await evalJs(`document.activeElement.classList && document.activeElement.classList.contains('ts-point-hit')`);
+      if (!stillOnChart) await waitFor(`!document.getElementById('apdns-chart-tooltip').classList.contains('is-visible')`, "tooltip hides once focus leaves the chart");
+
+      // Touch/click.
+      await evalJs(`document.querySelector('.ts-point-hit.ts-point-total').click(); true`);
+      await waitFor(`document.getElementById('apdns-chart-tooltip').classList.contains('is-visible')`, "tooltip visible on click/touch activation");
+      const tooltipTextClick = await evalJs(`document.getElementById('apdns-chart-tooltip').textContent`);
+      if (!/quer(y|ies)/i.test(tooltipTextClick) || !/blocked/i.test(tooltipTextClick)) throw new Error(`click/touch tooltip missing expected content: ${JSON.stringify(tooltipTextClick)}`);
+      await evalJs(`document.body.click(); true`);
+      await waitFor(`!document.getElementById('apdns-chart-tooltip').classList.contains('is-visible')`, "tooltip dismisses on outside click");
+      proof.push("dashboard-chart-tooltip-mouse-keyboard-touch");
     }
 
     for (const r of ["analytics", "statistics", "clients", "policies", "filtering", "blocklists", "encryption", "upstreams", "localdns", "replication", "backup", "notifications", "administration", "health", "importexport", "updates", "logs"]) await route(r);

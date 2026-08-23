@@ -545,15 +545,28 @@
     return "hour";
   }
 
+  // Real performance fix (owner-reported: route navigation must not
+  // block on the slowest panel). Dashboard's two analytics panels (the
+  // activity time-series and the domain ranking) are backed by the
+  // heaviest real queries on the page -- a DuckDB/Parquet scan and a
+  // SQLite aggregate rollup -- while every other panel here is a small,
+  // fast lookup (system/health status, replication, discovery counts,
+  // managed clients, upstream profiles). Fetching everything through one
+  // Promise.all and rendering only once ALL of it resolves means the
+  // slowest of those seven real network calls gates the entire page,
+  // even though six of them are typically fast. This renders the fast
+  // group immediately with real placeholder panels for the two slow
+  // ones, then fetches and injects each slow panel independently as
+  // soon as it resolves -- one genuinely slow panel (e.g. a large real
+  // query-log history under load) no longer blocks the metrics strip,
+  // clients, or upstreams from appearing.
   async function dashboard() {
     const rangeMinutes = state.dashboardRangeMinutes;
     const granularity = dashboardGranularity(rangeMinutes);
     const topMode = state.dashboardTopMode;
-    const [c, recent, timeseries, topResult, clients, observed, upstreams] = await Promise.all([
+    const [c, recent, clients, observed, upstreams] = await Promise.all([
       common(),
       api("/api/analytics/recent?minutes=60").catch((e) => ({ rows: [], degraded: true, degraded_reason: e.message })),
-      api(`/api/analytics/timeseries?minutes=${rangeMinutes}&granularity=${granularity}`).catch((e) => ({ buckets: [], degraded: true, degraded_reason: e.message })),
-      api(`/api/analytics/${topMode === "blocked" ? "top-blocked-domains" : "top-domains"}?minutes=${rangeMinutes}&limit=15`).catch((e) => ({ rows: [], degraded: true, degraded_reason: e.message })),
       api("/api/clients").catch(() => ({ clients: [] })),
       // Owner-reported finding, priority 3 of the second beta-rescue pass: a
       // real client was actively querying Alderpoint, but Dashboard
@@ -577,6 +590,7 @@
     // must use typed fields, not string heuristics.
     const blockedIdx = (recent.columns || []).indexOf("blocked");
     const blocked = blockedIdx === -1 ? 0 : rows.filter((r) => r[blockedIdx] === true).length;
+    loadSlowDashboardPanels(rangeMinutes, granularity, topMode);
     return page("Dashboard", "Operational state from the real V2 HTTPS APIs.", `<button data-refresh>Refresh</button>`, `
       <div class="strip">
         <div class="metric"><strong>${esc(c.health.status || "unknown")}</strong><span>Management / runtime status</span></div>
@@ -586,13 +600,36 @@
         <div class="metric"><strong>${esc((c.replication.peers || []).length)}</strong><span>Replication peers</span></div>
       </div>
       ${recent.degraded ? `<div class="alert warn">Analytics degraded: ${esc(recent.degraded_reason || "query data unavailable")}. DNS status is reported separately.</div>` : ""}
-      <section class="panel"><div class="panel__head"><h2>DNS Activity</h2>${rangeSelector()}</div><div class="panel__body">${activityChart(timeseries)}</div></section>
+      <section class="panel"><div class="panel__head"><h2>DNS Activity</h2>${rangeSelector()}</div><div class="panel__body" id="dashboard-activity-panel"><div class="empty">Loading activity...</div></div></section>
       <div class="grid two">
-        <section class="panel"><div class="panel__head"><h2>${topMode === "blocked" ? "Top Blocked Domains" : "Top Domains"}</h2>${topModeSelector()}</div><div class="panel__body">${topDomainsTable(topResult)}</div></section>
+        <section class="panel"><div class="panel__head"><h2>${topMode === "blocked" ? "Top Blocked Domains" : "Top Domains"}</h2>${topModeSelector()}</div><div class="panel__body" id="dashboard-topdomains-panel"><div class="empty">Loading...</div></div></section>
         <section class="panel"><div class="panel__head"><h2>Runtime Components</h2></div><div class="panel__body">${componentList(c.health.components || {})}</div></section>
         <section class="panel"><div class="panel__head"><h2>Clients</h2><button class="link" data-route="clients">Manage</button></div><div class="panel__body">${clientMini(clients.clients || [], observed.items || observed.observed_clients || observed.clients || [])}</div></section>
         <section class="panel"><div class="panel__head"><h2>Upstreams</h2></div><div class="panel__body">${upstreams.upstreams?.length ? tableFromRows(upstreams.upstreams, 5, undefined, "dashboard-upstreams") : `<div class="empty">No upstream profiles configured.</div>`}</div></section>
       </div>`);
+  }
+
+  // Fetches and injects the two slow Dashboard panels independently of
+  // the fast-render path above. Guarded by the current loadToken (the
+  // same staleness guard loadPage() itself uses) so a slow response
+  // that finally resolves after the operator has already navigated
+  // elsewhere never overwrites a different, now-current page.
+  function loadSlowDashboardPanels(rangeMinutes, granularity, topMode) {
+    const token = loadToken;
+    api(`/api/analytics/timeseries?minutes=${rangeMinutes}&granularity=${granularity}`)
+      .catch((e) => ({ buckets: [], degraded: true, degraded_reason: e.message }))
+      .then((timeseries) => {
+        if (token !== loadToken) return;
+        const el = document.getElementById("dashboard-activity-panel");
+        if (el) el.innerHTML = activityChart(timeseries);
+      });
+    api(`/api/analytics/${topMode === "blocked" ? "top-blocked-domains" : "top-domains"}?minutes=${rangeMinutes}&limit=15`)
+      .catch((e) => ({ rows: [], degraded: true, degraded_reason: e.message }))
+      .then((topResult) => {
+        if (token !== loadToken) return;
+        const el = document.getElementById("dashboard-topdomains-panel");
+        if (el) el.innerHTML = topDomainsTable(topResult);
+      });
   }
 
   function rangeSelector() {
@@ -621,47 +658,134 @@
   // with an already-resolved result (loading is the page shell's own
   // "Loading..." state), so it only needs to distinguish degraded from
   // genuinely-empty from populated.
+  // Real defect fixed here (owner-reported: the chart rendered at a
+  // fixed 760px viewBox width with no CSS width rule, so it never
+  // filled its card and felt like a static image rather than a
+  // responsive dashboard chart). The SVG's viewBox width is now
+  // regenerated to match the container's REAL measured pixel width
+  // (via ResizeObserver, see mountActivityChart below) -- one viewBox
+  // unit equals one real CSS pixel, so stroke widths/font sizes never
+  // stretch or shrink independent of the actual rendered size the way
+  // they would if a fixed-760 viewBox were merely scaled by CSS
+  // width:100%. Tick label density is recomputed for the real width
+  // each time, never overlapping regardless of how narrow the card is.
+  let activityChartHostSeq = 0;
   function activityChart(result) {
     if (result.degraded) return `<div class="alert warn">Analytics degraded: ${esc(result.degraded_reason || "time-series data unavailable")}. DNS status is reported separately.</div>`;
     const buckets = result.buckets || [];
-    if (!buckets.length) return `<div class="empty">No query activity in this window.</div>`;
-    const w = 760, h = 200, padL = 44, padB = 28, padT = 10, padR = 10;
+    const legend = `<div class="ts-legend">
+      <span class="ts-legend-item"><span class="ts-swatch ts-swatch-total"></span>DNS Queries</span>
+      <span class="ts-legend-item"><span class="ts-swatch ts-swatch-blocked"></span>Blocked by Filters</span>
+    </div>`;
+    if (!buckets.length) return `${legend}<div class="empty">No query activity in this window.</div>`;
+    const hostId = `ts-svg-host-${++activityChartHostSeq}`;
+    const totalSum = buckets.reduce((s, b) => s + (b.total_queries || 0), 0);
+    const blockedSum = buckets.reduce((s, b) => s + (b.blocked_queries || 0), 0);
+    const chartZone = resolveDisplayTimeZone();
+    const n = buckets.length;
+    const fmt = (iso) => new Date(iso).toLocaleString(undefined, Object.assign({ timeZone: chartZone }, n <= 24 && result.granularity === "hour" ? { hour: "numeric", minute: "2-digit" } : result.granularity === "minute" ? { hour: "numeric", minute: "2-digit" } : { month: "short", day: "numeric" }));
+    const tableRows = buckets.map((b) => ({ time: fmt(b.bucket_start_iso), exact_time_utc: b.bucket_start_iso, dns_queries: b.total_queries || 0, blocked_by_filters: b.blocked_queries || 0 }));
+    // Scheduled for right after this html string is actually inserted
+    // into the DOM by the caller (mountActivityChart measures the real
+    // element, which doesn't exist yet at string-build time here).
+    setTimeout(() => mountActivityChart(hostId, result), 0);
+    return `${legend}
+      <div class="ts-wrap"><div class="ts-svg-host" id="${hostId}"><div class="empty">Rendering chart...</div></div></div>
+      <div class="strip" style="margin-top:10px"><div class="metric"><strong>${totalSum}</strong><span>Total queries</span></div><div class="metric"><strong>${blockedSum}</strong><span>Blocked by filters</span></div></div>
+      <details class="ts-table-fallback"><summary>View exact values as a table</summary>${tableFromRows(tableRows, 500, undefined, "dashboard-activity")}</details>`;
+  }
+
+  // Measures the real host element and (re)renders the SVG at that
+  // exact pixel width, then keeps it correct as the container resizes
+  // (viewport resize, sidebar collapse/expand, orientation change).
+  function mountActivityChart(hostId, result) {
+    const host = document.getElementById(hostId);
+    if (!host) return; // navigated away before this ever mounted
+    function redraw() {
+      if (!document.body.contains(host)) { if (host.__apdnsRO) host.__apdnsRO.disconnect(); return; }
+      const width = Math.max(280, Math.round(host.clientWidth) || 600);
+      host.innerHTML = renderActivitySvgMarkup(result, width);
+    }
+    redraw();
+    if (typeof ResizeObserver !== "undefined") {
+      const ro = new ResizeObserver(() => redraw());
+      ro.observe(host);
+      host.__apdnsRO = ro;
+    } else {
+      window.addEventListener("resize", redraw);
+    }
+  }
+
+  // Pure(ish) markup builder: given real bucket data and a real target
+  // pixel width, returns the SVG at exactly that width -- viewBox width
+  // === widthPx, so every stroke-width/font-size CSS rule applies at
+  // its real, undistorted size no matter how the card is sized.
+  function renderActivitySvgMarkup(result, widthPx) {
+    const buckets = result.buckets || [];
+    const w = widthPx, h = 220;
+    const padL = 46, padB = 30, padT = 12, padR = 12;
     const plotW = w - padL - padR, plotH = h - padT - padB;
     const maxTotal = Math.max(1, ...buckets.map((b) => b.total_queries || 0));
     const n = buckets.length;
     const x = (i) => padL + (n === 1 ? plotW / 2 : (i / (n - 1)) * plotW);
     const y = (v) => padT + plotH - (v / maxTotal) * plotH;
     const path = (key) => buckets.map((b, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(b[key] || 0).toFixed(1)}`).join(" ");
-    // Every Nth label so labels never overlap regardless of range/granularity.
-    const labelEvery = Math.max(1, Math.ceil(n / 8));
-    // Respects the same Browser/Appliance/UTC display-mode preference
-    // as every other timestamp in the app (owner-reported requirement:
-    // one shared utility, migrated everywhere -- the chart's own axis/
-    // tooltip labels are not a separate, un-migrated special case).
+    // Reduce tick density on narrow screens: target roughly one label
+    // per 70px of real plot width rather than a fixed count, so labels
+    // never overlap at any viewport width.
+    const maxLabels = Math.max(2, Math.floor(plotW / 70));
+    const labelEvery = Math.max(1, Math.ceil(n / maxLabels));
     const chartZone = resolveDisplayTimeZone();
     const fmt = (iso) => new Date(iso).toLocaleString(undefined, Object.assign({ timeZone: chartZone }, n <= 24 && result.granularity === "hour" ? { hour: "numeric", minute: "2-digit" } : result.granularity === "minute" ? { hour: "numeric", minute: "2-digit" } : { month: "short", day: "numeric" }));
     const gridlines = [0, 0.25, 0.5, 0.75, 1].map((f) => `<line x1="${padL}" x2="${w - padR}" y1="${(padT + plotH * f).toFixed(1)}" y2="${(padT + plotH * f).toFixed(1)}" class="ts-grid"/>`).join("");
     const yLabels = [0, 0.5, 1].map((f) => `<text x="${padL - 6}" y="${(padT + plotH * (1 - f) + 4).toFixed(1)}" class="ts-axis" text-anchor="end">${Math.round(maxTotal * f)}</text>`).join("");
     const xLabels = buckets.map((b, i) => (i % labelEvery !== 0 && i !== n - 1) ? "" : `<text x="${x(i).toFixed(1)}" y="${h - 8}" class="ts-axis" text-anchor="middle">${esc(fmt(b.bucket_start_iso))}</text>`).join("");
-    const points = (key, cls) => buckets.map((b, i) => `<circle cx="${x(i).toFixed(1)}" cy="${y(b[key] || 0).toFixed(1)}" r="2.5" class="${cls}"><title>${esc(fmt(b.bucket_start_iso))}: ${esc(b[key] || 0)} ${key === "blocked_queries" ? "blocked" : "queries"} (exact: ${esc(b.bucket_start_iso)})</title></circle>`).join("");
-    const svg = `<svg viewBox="0 0 ${w} ${h}" class="ts-chart" role="img" aria-label="DNS queries and blocked queries over time">
-      ${gridlines}${yLabels}${xLabels}
-      <path d="${path("total_queries")}" class="ts-line ts-line-total"/>
-      <path d="${path("blocked_queries")}" class="ts-line ts-line-blocked"/>
-      ${points("total_queries", "ts-point-total")}
-      ${points("blocked_queries", "ts-point-blocked")}
-    </svg>`;
-    const legend = `<div class="ts-legend">
-      <span class="ts-legend-item"><span class="ts-swatch ts-swatch-total"></span>DNS Queries</span>
-      <span class="ts-legend-item"><span class="ts-swatch ts-swatch-blocked"></span>Blocked by Filters</span>
+    // Purely visual SVG markers -- <title> stays as a harmless native
+    // fallback, but real interaction lives on the real HTML <button>
+    // hit-targets below, not here. Real defect found live via the
+    // Chromium harness (not source inspection): a focusable SVG
+    // <circle> (tabindex + real .focus()) correctly became
+    // document.activeElement but never dispatched an observable
+    // focus/focusin event in this browser -- keyboard-driven tooltip
+    // reveal was silently unreachable despite activeElement looking
+    // correct. A real <button> element's focus behavior has no such
+    // ambiguity in any browser, so the actual interactive target is a
+    // real button, positioned exactly over its SVG marker.
+    const dot = (b, i, key, cls) => `<circle cx="${x(i).toFixed(1)}" cy="${y(b[key] || 0).toFixed(1)}" r="4" class="${cls}"><title>${esc(fmt(b.bucket_start_iso))}: ${esc(b[key] || 0)}</title></circle>`;
+    const dots = (key, cls) => buckets.map((b, i) => dot(b, i, key, cls)).join("");
+    // Real interactive tooltip target (owner-reported: a native <title>
+    // alone is not an adequate tooltip system). One real, focusable
+    // <button> per point per series, absolutely positioned over its
+    // SVG marker (the wrapping .ts-chart-overlay is position:relative;
+    // 1 SVG user unit === 1 real CSS px by construction here, so the
+    // same x()/y() coordinates used for the SVG marker place the button
+    // exactly on top of it) -- carries the full data as data-* so
+    // wire()'s delegated mouseover/focus/click handlers (see
+    // [data-tp-time]) can build and position a shared floating
+    // tooltip, working identically for mouse hover, real keyboard
+    // focus, and touch/click.
+    const hit = (b, i, key, cls, label) => {
+      const value = b[key] || 0;
+      const total = b.total_queries || 0;
+      const blocked = b.blocked_queries || 0;
+      const pct = total > 0 ? Math.round((blocked / total) * 100) : 0;
+      const timeLabel = fmt(b.bucket_start_iso);
+      const a11y = `${timeLabel}: ${value} ${label}${key === "total_queries" ? `, ${blocked} blocked (${pct}%)` : ""}`;
+      const cx = x(i), cy = y(value);
+      return `<button type="button" class="ts-point-hit ${cls}" style="left:${cx.toFixed(1)}px;top:${cy.toFixed(1)}px" aria-label="${esc(a11y)}" data-tp-time="${esc(timeLabel)}" data-tp-total="${esc(total)}" data-tp-blocked="${esc(blocked)}" data-tp-pct="${esc(pct)}"></button>`;
+    };
+    const hits = (key, cls, label) => buckets.map((b, i) => hit(b, i, key, cls, label)).join("");
+    return `<div class="ts-chart-overlay" style="width:${w}px;height:${h}px">
+      <svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" class="ts-chart" role="img" aria-label="DNS queries and blocked queries over time">
+        ${gridlines}${yLabels}${xLabels}
+        <path d="${path("total_queries")}" class="ts-line ts-line-total"/>
+        <path d="${path("blocked_queries")}" class="ts-line ts-line-blocked"/>
+        ${dots("total_queries", "ts-point-total")}
+        ${dots("blocked_queries", "ts-point-blocked")}
+      </svg>
+      ${hits("total_queries", "ts-point-total", "queries")}
+      ${hits("blocked_queries", "ts-point-blocked", "blocked")}
     </div>`;
-    const totalSum = buckets.reduce((s, b) => s + (b.total_queries || 0), 0);
-    const blockedSum = buckets.reduce((s, b) => s + (b.blocked_queries || 0), 0);
-    const tableRows = buckets.map((b) => ({ time: fmt(b.bucket_start_iso), exact_time_utc: b.bucket_start_iso, dns_queries: b.total_queries || 0, blocked_by_filters: b.blocked_queries || 0 }));
-    return `${legend}
-      <div class="ts-wrap">${svg}</div>
-      <div class="strip" style="margin-top:10px"><div class="metric"><strong>${totalSum}</strong><span>Total queries</span></div><div class="metric"><strong>${blockedSum}</strong><span>Blocked by filters</span></div></div>
-      <details class="ts-table-fallback"><summary>View exact values as a table</summary>${tableFromRows(tableRows, 500, undefined, "dashboard-activity")}</details>`;
   }
 
   // Real domain names, real counts, real percentage of total -- a real
@@ -1618,8 +1742,86 @@
     });
   }
 
+  // Real defect fixed here (owner-reported: a native SVG <title> alone
+  // is not an adequate operator tooltip system -- invisible until
+  // hover, unreachable by keyboard, unusable on touch). One shared
+  // floating tooltip element, positioned above whichever chart point is
+  // currently hovered/focused/tapped, driven by that point's own
+  // data-tp-* attributes (already respecting the active Browser/
+  // Appliance/UTC display mode -- see renderActivitySvgMarkup).
+  function chartTooltipEl() {
+    let tip = document.getElementById("apdns-chart-tooltip");
+    if (!tip) {
+      tip = document.createElement("div");
+      tip.id = "apdns-chart-tooltip";
+      tip.className = "ts-tooltip";
+      tip.setAttribute("role", "status");
+      tip.setAttribute("aria-live", "polite");
+      document.body.appendChild(tip);
+    }
+    return tip;
+  }
+  function showChartTooltip(el) {
+    const tip = chartTooltipEl();
+    const time = el.getAttribute("data-tp-time") || "";
+    const total = el.getAttribute("data-tp-total") || "0";
+    const blocked = el.getAttribute("data-tp-blocked") || "0";
+    const pct = el.getAttribute("data-tp-pct") || "0";
+    tip.innerHTML = `<strong>${esc(time)}</strong><br>${esc(total)} queries<br>${esc(blocked)} blocked (${esc(pct)}%)`;
+    const rect = el.getBoundingClientRect();
+    let left = rect.left + rect.width / 2;
+    left = Math.max(70, Math.min(left, window.innerWidth - 70));
+    tip.style.left = `${left}px`;
+    tip.style.top = `${Math.max(8, rect.top - 8)}px`;
+    tip.classList.add("is-visible");
+  }
+  function hideChartTooltip() {
+    const tip = document.getElementById("apdns-chart-tooltip");
+    if (tip) tip.classList.remove("is-visible");
+  }
+
   function wire() {
+    document.body.addEventListener("mouseover", (ev) => {
+      const pt = ev.target.closest(".ts-point-hit");
+      if (pt) showChartTooltip(pt);
+    });
+    document.body.addEventListener("mouseout", (ev) => {
+      const pt = ev.target.closest(".ts-point-hit");
+      if (pt) hideChartTooltip();
+    });
+    // Real defect fixed here (found live via the Chromium harness, not
+    // source inspection): "focusin"/"focusout" are the usual delegation
+    // choice (they bubble, unlike plain "focus"/"blur"), but a focused
+    // SVG <circle> did not reliably dispatch a bubbling focusin this
+    // browser could observe at document.body even though
+    // document.activeElement correctly became the circle. "focus"/
+    // "blur" don't bubble at all, but registering them with the
+    // capture-phase flag lets one delegated listener at document.body
+    // still observe every focus/blur anywhere beneath it, SVG included
+    // -- the traditional, reliable way to delegate non-bubbling focus
+    // events.
+    document.body.addEventListener("focus", (ev) => {
+      const pt = ev.target.closest && ev.target.closest(".ts-point-hit");
+      if (pt) showChartTooltip(pt);
+    }, true);
+    document.body.addEventListener("blur", (ev) => {
+      const pt = ev.target.closest && ev.target.closest(".ts-point-hit");
+      if (pt) hideChartTooltip();
+    }, true);
     document.body.addEventListener("click", async (ev) => {
+      // Touch/click activation for the chart tooltip (mouseover/focusin
+      // above already cover mouse and keyboard) -- toggles so a second
+      // tap on the same point dismisses it, and any other click in the
+      // app dismisses a currently-shown tooltip rather than leaving it
+      // stuck open.
+      const chartPoint = ev.target.closest(".ts-point-hit");
+      if (chartPoint) {
+        const tip = chartTooltipEl();
+        if (tip.classList.contains("is-visible") && tip.dataset.forPoint === chartPoint.getAttribute("data-tp-time") + chartPoint.className) hideChartTooltip();
+        else { showChartTooltip(chartPoint); chartTooltipEl().dataset.forPoint = chartPoint.getAttribute("data-tp-time") + chartPoint.className; }
+      } else {
+        hideChartTooltip();
+      }
       const route = ev.target.closest("[data-route]");
       if (route) {
         document.body.classList.remove("nav-open");
