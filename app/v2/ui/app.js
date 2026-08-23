@@ -1263,10 +1263,9 @@
   }
 
   async function backup() {
-    const [applianceBackups, backups, migration] = await Promise.all([
+    const [applianceBackups, backups] = await Promise.all([
       api("/api/backup/appliance").catch((e) => ({ backups: [], restore_jobs: [], error: e.message })),
       api("/api/backup/secrets").catch((e) => ({ backups: [], restore_jobs: [], error: e.message })),
-      api("/api/migration/detect?source_path=/var/lib/alderpointdns/alderpointdns.db").catch((e) => ({ error: e.message })),
     ]);
     return page("Backup / Restore / Migration", "Safe entry points for backup and migration preview. Opening this page does not start destructive work.", "", `
       <section class="panel"><div class="panel__head"><h2>Appliance Backup / Restore</h2></div><div class="panel__body">
@@ -1289,7 +1288,7 @@
       </div></section>
       <div class="grid two">
         <section class="panel"><div class="panel__head"><h2>Secret Backup / Restore</h2></div><div class="panel__body"><p class="muted">One component of the appliance backup above, also available standalone: encrypted protected secrets only. Secret values are never displayed.</p><button data-backup class="primary">Create secret-only backup</button>${backupTable(backups.backups || [])}${restoreJobs(backups.restore_jobs || [])}</div></section>
-        <section class="panel"><div class="panel__head"><h2>Migration Detection</h2></div><div class="panel__body">${migration.error ? `<div class="alert warn">${esc(migration.error)}</div>` : tableFromRows([migration], 1)}<form data-form="migration"><label>Source path<input name="source_path" value="/var/lib/alderpointdns/alderpointdns.db"></label><button>Detect source</button></form><div id="migration-result"></div></div></section>
+        <section class="panel"><div class="panel__head"><h2>Migration Detection</h2></div><div class="panel__body"><p class="muted">Run detection only when you have a source path to inspect.</p><form data-form="migration"><label>Source path<input name="source_path" value="/var/lib/alderpointdns/alderpointdns.db"></label><button>Detect source</button></form><div id="migration-result"></div></div></section>
       </div>`);
   }
 

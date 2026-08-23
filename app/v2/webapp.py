@@ -31,6 +31,7 @@ import os
 import re
 import shutil
 import sqlite3
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -165,12 +166,24 @@ if UI_DIR.exists():
 
 _request_timings: ContextVar[dict[str, float] | None] = ContextVar("request_timings", default=None)
 _SLOW_REQUEST_MS = 750.0
+_SESSION_TOUCH_INTERVAL_SECONDS = 60.0
+_extended_schemas_ready = False
+_extended_schemas_lock = threading.Lock()
 
 
 def _add_timing(name: str, duration_ms: float) -> None:
     timings = _request_timings.get()
     if timings is not None:
         timings[name] = timings.get(name, 0.0) + duration_ms
+
+
+@contextmanager
+def _timed_stage(name: str):
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        _add_timing(name, (time.perf_counter() - started) * 1000.0)
 
 
 # Found during adversarial security testing: no request body size limit
@@ -325,6 +338,7 @@ def _secrets() -> SecretStore:
 
 
 def _ensure_extended_schemas() -> None:
+    global _extended_schemas_ready
     # Real defect found and fixed live during this workstream's
     # failure-domain/chaos pass (docs/v2/control-db-silent-recreation-
     # fix.md): every ensure_schema() below starts with
@@ -341,9 +355,18 @@ def _ensure_extended_schemas() -> None:
             f"control.db not found at {CONTROL_DB} -- refusing to silently create a new, empty "
             "database in its place"
         )
-    node_identity.ensure_schema(CONTROL_DB)
-    observed_clients.ensure_schema(CONTROL_DB)
-    replication_v2.ensure_schema(CONTROL_DB)
+    if _extended_schemas_ready:
+        return
+    with _extended_schemas_lock:
+        if _extended_schemas_ready:
+            return
+        with _timed_stage("schema.node_identity"):
+            node_identity.ensure_schema(CONTROL_DB)
+        with _timed_stage("schema.observed_clients"):
+            observed_clients.ensure_schema(CONTROL_DB)
+        with _timed_stage("schema.replication"):
+            replication_v2.ensure_schema(CONTROL_DB)
+        _extended_schemas_ready = True
 
 
 def _client_ip(request: Request) -> str:
@@ -518,15 +541,26 @@ def current_session(request: Request, conn: sqlite3.Connection) -> Optional[sqli
 
 def current_admin(request: Request):
     """FastAPI dependency: 401 if not authenticated. Also bumps
-    last_seen_at (bounded per-request write, matching V1's precedent)."""
+    last_seen_at on a bounded cadence."""
     started = time.perf_counter()
     try:
         with _db() as conn:
-            session = current_session(request, conn)
+            with _timed_stage("auth.session_read"):
+                session = current_session(request, conn)
             if session is None or session["admin_id"] is None:
                 raise ApiError(401, "unauthenticated", "login required")
-            conn.execute("UPDATE sessions SET last_seen_at=? WHERE id=?", (datetime.now(timezone.utc).isoformat(), session["id"]))
-            admin = conn.execute("SELECT * FROM admins WHERE id=?", (session["admin_id"],)).fetchone()
+            now = datetime.now(timezone.utc)
+            should_touch = True
+            try:
+                last_seen = datetime.fromisoformat(str(session["last_seen_at"]))
+                should_touch = (now - last_seen).total_seconds() >= _SESSION_TOUCH_INTERVAL_SECONDS
+            except (TypeError, ValueError):
+                should_touch = True
+            if should_touch:
+                with _timed_stage("auth.session_touch"):
+                    conn.execute("UPDATE sessions SET last_seen_at=? WHERE id=?", (now.isoformat(), session["id"]))
+            with _timed_stage("auth.admin_read"):
+                admin = conn.execute("SELECT * FROM admins WHERE id=?", (session["admin_id"],)).fetchone()
             if admin is None:
                 raise ApiError(401, "unauthenticated", "account no longer exists")
             return {"admin_id": session["admin_id"], "session_id": session["id"], "csrf": session["csrf"]}
@@ -816,13 +850,15 @@ def revoke_other_sessions(request: Request, admin=Depends(current_admin), x_csrf
 def health():
     result: dict[str, Any] = {"status": "ok", "components": {}}
     try:
-        version = control_db.schema_version(CONTROL_DB)
+        with _timed_stage("health.control_db"):
+            version = control_db.schema_version(CONTROL_DB)
         result["components"]["control_db"] = {"status": "ok", "schema_version": version}
     except Exception as exc:
         result["components"]["control_db"] = {"status": "unavailable", "detail": str(exc)}
         result["status"] = "degraded"
 
-    dep_health = analytics_deps.check_health()
+    with _timed_stage("health.analytics_deps"):
+        dep_health = analytics_deps.check_health()
     result["components"]["analytics"] = {
         "status": "degraded" if dep_health.degraded else "ok",
         "pyarrow_available": dep_health.pyarrow_available,
@@ -834,13 +870,14 @@ def health():
         # and are what actually matters for appliance health (§16).
         result["status"] = "degraded" if result["status"] == "ok" else result["status"]
 
-    result["components"]["compiled_runtime"] = {
-        "present": COMPILED_DNSDIST_CONF.exists(),
-        "last_modified": (
-            datetime.fromtimestamp(COMPILED_DNSDIST_CONF.stat().st_mtime, tz=timezone.utc).isoformat()
-            if COMPILED_DNSDIST_CONF.exists() else None
-        ),
-    }
+    with _timed_stage("health.compiled_runtime"):
+        result["components"]["compiled_runtime"] = {
+            "present": COMPILED_DNSDIST_CONF.exists(),
+            "last_modified": (
+                datetime.fromtimestamp(COMPILED_DNSDIST_CONF.stat().st_mtime, tz=timezone.utc).isoformat()
+                if COMPILED_DNSDIST_CONF.exists() else None
+            ),
+        }
 
     # BIND recursive-backend health (Gate #3 acceptance closure §9): the
     # locked hot path's second RAM-cache tier gets its own independently
@@ -853,22 +890,23 @@ def health():
     # statistics-channel port -- see app/v2/bind_gen.py's per-context
     # port allocation), not inferred from config files alone.
     bind_contexts_status: dict[str, dict] = {}
-    if COMPILED_BIND_DIR.exists():
-        for ctx_dir in sorted(p for p in COMPILED_BIND_DIR.iterdir() if p.is_dir()):
-            conf_path = ctx_dir / "named.conf"
-            if not conf_path.exists():
-                continue
-            idx = int(ctx_dir.name.removeprefix("ctx")) if ctx_dir.name.startswith("ctx") and ctx_dir.name[3:].isdigit() else 0
-            stats_port = 8153 + idx
-            reachable = False
-            try:
-                import socket as _socket
-
-                with _socket.create_connection(("127.0.0.1", stats_port), timeout=0.5):
-                    reachable = True
-            except OSError:
+    with _timed_stage("health.bind_probe"):
+        if COMPILED_BIND_DIR.exists():
+            for ctx_dir in sorted(p for p in COMPILED_BIND_DIR.iterdir() if p.is_dir()):
+                conf_path = ctx_dir / "named.conf"
+                if not conf_path.exists():
+                    continue
+                idx = int(ctx_dir.name.removeprefix("ctx")) if ctx_dir.name.startswith("ctx") and ctx_dir.name[3:].isdigit() else 0
+                stats_port = 8153 + idx
                 reachable = False
-            bind_contexts_status[ctx_dir.name] = {"reachable": reachable, "statistics_port": stats_port}
+                try:
+                    import socket as _socket
+
+                    with _socket.create_connection(("127.0.0.1", stats_port), timeout=0.5):
+                        reachable = True
+                except OSError:
+                    reachable = False
+                bind_contexts_status[ctx_dir.name] = {"reachable": reachable, "statistics_port": stats_port}
     result["components"]["bind"] = {
         "contexts": bind_contexts_status,
         "status": "ok" if bind_contexts_status and all(c["reachable"] for c in bind_contexts_status.values())
@@ -892,18 +930,19 @@ def health():
     # is reported here as degraded, not silently folded into "ok".
     workers: dict[str, Any] = {}
     any_stale = False
-    for name, interval in worker_heartbeat.WORKER_INTERVALS_SECONDS.items():
-        hb = worker_heartbeat.read_heartbeat(STATE_DIR, name) or worker_heartbeat.unknown(name)
-        stale = hb.is_stale(interval_seconds=interval)
-        any_stale = any_stale or stale
-        workers[name] = {
-            "status": hb.status,
-            "stale": stale,
-            "tick_count": hb.tick_count,
-            "last_success_at": hb.last_success_at,
-            "last_result": hb.last_result,
-            "last_error": hb.last_error,
-        }
+    with _timed_stage("health.worker_heartbeats"):
+        for name, interval in worker_heartbeat.WORKER_INTERVALS_SECONDS.items():
+            hb = worker_heartbeat.read_heartbeat(STATE_DIR, name) or worker_heartbeat.unknown(name)
+            stale = hb.is_stale(interval_seconds=interval)
+            any_stale = any_stale or stale
+            workers[name] = {
+                "status": hb.status,
+                "stale": stale,
+                "tick_count": hb.tick_count,
+                "last_success_at": hb.last_success_at,
+                "last_result": hb.last_result,
+                "last_error": hb.last_error,
+            }
     result["components"]["background_workers"] = workers
     if any_stale:
         # A stalled worker never demotes overall status below "degraded"
@@ -912,11 +951,15 @@ def health():
         # governs "healthy" for the appliance.
         result["status"] = "degraded" if result["status"] == "ok" else result["status"]
     try:
-        _ensure_extended_schemas()
+        with _timed_stage("health.extended_schemas"):
+            _ensure_extended_schemas()
         with _db() as conn:
-            result["components"]["node_identity"] = {"node_id": node_identity.get_or_create(conn).node_id}
-            result["components"]["client_discovery"] = observed_clients.stats(conn)
-            result["components"]["replication"] = {"peers": len(replication_v2.list_peers(conn))}
+            with _timed_stage("health.node_identity"):
+                result["components"]["node_identity"] = {"node_id": node_identity.get_or_create(conn).node_id}
+            with _timed_stage("health.client_discovery"):
+                result["components"]["client_discovery"] = observed_clients.stats(conn)
+            with _timed_stage("health.replication"):
+                result["components"]["replication"] = {"peers": len(replication_v2.list_peers(conn))}
     except Exception as exc:
         result["components"]["replication_discovery"] = {"status": "unavailable", "detail": str(exc)}
         result["status"] = "degraded"
@@ -3212,9 +3255,11 @@ class NodeIdentityUpdate(BaseModel):
 
 @app.get("/api/node-identity")
 def node_identity_status(admin=Depends(current_admin)):
-    _ensure_extended_schemas()
+    with _timed_stage("node_identity.extended_schemas"):
+        _ensure_extended_schemas()
     with _db() as conn:
-        ident = node_identity.get_or_create(conn)
+        with _timed_stage("node_identity.get_or_create"):
+            ident = node_identity.get_or_create(conn)
     return {
         "node_id": ident.node_id,
         "display_name": ident.display_name,
@@ -3428,9 +3473,11 @@ class DiscoverySettingsUpdate(BaseModel):
 
 @app.get("/api/discovery/status")
 def discovery_status(admin=Depends(current_admin)):
-    _ensure_extended_schemas()
+    with _timed_stage("discovery.extended_schemas"):
+        _ensure_extended_schemas()
     with _db() as conn:
-        return observed_clients.stats(conn)
+        with _timed_stage("discovery.stats"):
+            return observed_clients.stats(conn)
 
 
 @app.put("/api/discovery/settings")

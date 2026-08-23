@@ -50,6 +50,16 @@ def test_ui_shell_and_static_assets_are_served(tmp_path, monkeypatch):
     assert "purple" not in css.text.lower()
 
 
+def test_backup_page_does_not_auto_probe_default_migration_path(tmp_path, monkeypatch):
+    webapp = _fresh_webapp(tmp_path, monkeypatch)
+    client = _client(webapp)
+
+    js = client.get("/ui-static/app.js")
+    assert js.status_code == 200
+    assert "/api/migration/detect?source_path=/var/lib/alderpointdns/alderpointdns.db" not in js.text
+    assert "/api/migration/detect?source_path=${encodeURIComponent(body.source_path)}" in js.text
+
+
 def test_session_endpoint_returns_csrf_for_refresh_recovery(tmp_path, monkeypatch):
     webapp = _fresh_webapp(tmp_path, monkeypatch)
     client = _client(webapp)
