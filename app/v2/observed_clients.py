@@ -10,7 +10,9 @@ from __future__ import annotations
 import ipaddress
 import queue
 import re
+import socket
 import sqlite3
+import struct
 import threading
 import time
 from dataclasses import dataclass
@@ -188,10 +190,46 @@ def sanitize_hostname(value: str) -> str:
 # overwhelming common case for an operator's own LAN) that is always the
 # network's own address, never a real assignable host, so trusting it
 # would materialize exactly the class of bug this fix exists to close.
+_LOCAL_GATEWAY_ADDRESS_CACHE: "list[str | None]" = []  # single-element memo; None means "checked, none found"
+
+
+def _local_gateway_address() -> Optional[str]:
+    """Best-effort: this host/container's own default-route gateway
+    address, e.g. a Podman bridge network's gateway (confirmed live:
+    172.16.43.100's own owner-preview container sees exactly this
+    address, 10.89.0.1, for host-originated traffic reaching it through
+    Podman's port-forwarding NAT -- indistinguishable from a real client
+    by address shape alone, unlike the network-address heuristic above).
+    Reads Linux's /proc/net/route (present in every real deployment
+    target -- Debian under BIND/dnsdist) directly rather than depending
+    on an external tool; any failure (non-Linux, no default route,
+    permission) is swallowed and simply disables this specific check,
+    never raises into a caller that's just trying to record a DNS
+    observation.
+    """
+    if _LOCAL_GATEWAY_ADDRESS_CACHE:
+        return _LOCAL_GATEWAY_ADDRESS_CACHE[0]
+    address = None
+    try:
+        with open("/proc/net/route", encoding="ascii") as fh:
+            next(fh)  # header line
+            for line in fh:
+                fields = line.split()
+                if len(fields) >= 3 and fields[1] == "00000000":  # destination 0.0.0.0 == default route
+                    address = socket.inet_ntoa(struct.pack("<I", int(fields[2], 16)))
+                    break
+    except (OSError, StopIteration, ValueError):
+        address = None
+    _LOCAL_GATEWAY_ADDRESS_CACHE.append(address)
+    return address
+
+
 def _is_plausible_client_address(ip: "ipaddress.IPv4Address | ipaddress.IPv6Address") -> bool:
     if ip.is_loopback or ip.is_unspecified or ip.is_multicast or ip.is_link_local or ip.is_reserved:
         return False
     if ip.version == 4 and int(ip) & 0xFF == 0:
+        return False
+    if str(ip) == _local_gateway_address():
         return False
     return True
 

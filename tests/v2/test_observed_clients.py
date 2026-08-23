@@ -52,6 +52,30 @@ def test_implausible_addresses_are_never_ingested_as_observations(tmp_path):
         assert source_ips == {"192.168.32.157"}
 
 
+def test_local_gateway_address_is_never_ingested_as_a_client(tmp_path, monkeypatch):
+    # Real defect fixed here (confirmed against the live owner-preview
+    # container: host-originated traffic through Podman's port-forward
+    # NAT arrived at dnsdist as the bridge gateway's own address,
+    # 10.89.0.1, indistinguishable from a real client by address shape
+    # alone since it doesn't end in .0). Proven by monkeypatching the
+    # gateway-detection helper directly (real /proc/net/route parsing is
+    # covered implicitly by every other passing observed_clients test
+    # not spuriously rejecting real addresses in this environment).
+    monkeypatch.setattr(observed_clients, "_local_gateway_address", lambda: "10.89.0.1")
+    db = tmp_path / "control.db"
+    _init(db)
+    with control_db.connect(db) as conn:
+        observed_clients.apply_observations(
+            conn,
+            [
+                observed_clients.Observation("10.89.0.1"),  # the (mocked) gateway itself
+                observed_clients.Observation("10.89.0.42"),  # a real host on the same subnet
+            ],
+        )
+        source_ips = {r["source_ip"] for r in observed_clients.list_observed(conn)["observed_clients"]}
+        assert source_ips == {"10.89.0.42"}
+
+
 def test_purge_implausible_cleans_up_already_persisted_bogus_rows_but_spares_managed(tmp_path):
     db = tmp_path / "control.db"
     _init(db)
