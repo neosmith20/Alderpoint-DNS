@@ -68,7 +68,19 @@ if [ "$SMOKE_ONLY" = 0 ]; then
 
   echo "+ deploying $VERSION to $CONTAINER"
   podman cp "$DEB" "$CONTAINER:/tmp/alderpointdns-v2.deb" || fail "podman cp failed"
-  podman exec "$CONTAINER" sh -c 'export DEBIAN_FRONTEND=noninteractive; apt-get install -y -qq /tmp/alderpointdns-v2.deb' \
+  # Real defect fixed here (hit live, this pass): the preview version
+  # string is 2.0.0~preview<shortsha>-1 -- a real git short SHA, which
+  # is NOT monotonically ordered hex (unlike an RC/build number). Two
+  # consecutive real commits can legitimately produce a "lower" dpkg
+  # version by Debian's comparison rules than the one currently
+  # installed (observed live: preview9cd5cdb228 sorted below
+  # previewe8f5f04475), which apt correctly refuses as a "downgrade"
+  # without --allow-downgrades. This is expected and safe for a dev-only
+  # preview loop (always installing the current, coherent HEAD -- never
+  # an intentionally-older one, and never a real RC/release line, which
+  # never uses this version scheme) -- an RC install must NEVER pass
+  # this flag, only this development preview path.
+  podman exec "$CONTAINER" sh -c 'export DEBIAN_FRONTEND=noninteractive; apt-get install -y -qq --allow-downgrades /tmp/alderpointdns-v2.deb' \
     || { podman exec "$CONTAINER" journalctl -u alderpointdns-v2-web -n 60 --no-pager 2>&1 || true; fail "apt-get install failed inside the preview container -- see journalctl output above"; }
   rm -rf "$WORK"
 fi
