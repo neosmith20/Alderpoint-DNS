@@ -232,6 +232,17 @@ Canonical current stages:
 
 V2 remains private until explicitly authorized. RC numbers do not imply progress by themselves.
 
+**Development-workflow change:** implementation now deploys to a persistent
+build-server owner-preview environment (`docs/v2/owner-preview.md`) for Alex
+to click-test the real V2 backend/runtime after each coherent slice, before
+any private RC is built. A new private RC is forbidden until canonical
+workflow-parity implementation is complete, Dex has performed a read-only
+re-audit, and owner-preview product/workflow acceptance shows no meaningful
+issue reasonably catchable before packaging. The owner-preview loop proves
+UI/workflow/backend/runtime/DNS/analytics behavior; it does not and cannot
+substitute for the separate exact-package clean-install/upgrade/reboot KVM
+acceptance gate, which remains mandatory before any release.
+
 ## Owner-Browser Acceptance Gate
 
 "If Alex can click it, Alderpoint needs to survive Alex clicking it."
@@ -282,3 +293,4 @@ truth.
 - Historical/public project progress: `docs/progress.md`.
 - Historical/public V2 reference inputs: `docs/v2/roadmap-reference/*`.
 - Supporting architecture evidence: `docs/v2/architecture-map.md`.
+- Build-server owner-preview environment (development staging, not release evidence): `docs/v2/owner-preview.md`.
