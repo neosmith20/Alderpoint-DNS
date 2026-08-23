@@ -183,6 +183,39 @@ class TestPolicyCompilerBindRouting:
         assert bind_gen.BIND_BACKEND_ADDRESS not in text
         assert '"1.1.1.1:53"' in text
 
+    def test_zero_managed_upstreams_routes_via_bind_native_recursion_not_cloudflare(self):
+        # Real defect fixed (owner-reported live, "Zero Managed
+        # Upstreams" locked decision, docs/v2/v2-roadmap.md): a binding
+        # with NO managed upstream endpoints (every managed upstream
+        # disabled/deleted) must route through a real BIND context
+        # allocated with EMPTY forwarders -- BIND's own genuine
+        # recursive-from-the-root behavior -- never a hardcoded
+        # Cloudflare/Google/other public resolver. app/v2/
+        # runtime_compile.py's own _upstream_for_policy is what produces
+        # this empty-endpoints binding in the real appliance; this
+        # proves the compiler's own handling of it end to end.
+        addrs = _context_addresses(bind_gen.UpstreamSelection(forwarders=(), tls_hostname=None))
+        b = _binding("10.0.0.0/24", "p-empty", ())
+        text = compile_multi_policy_dnsdist_config("0.0.0.0:53", [b], bind_context_addresses=addrs)
+        ctx_addr = list(addrs.values())[0]
+        assert f'address="{ctx_addr}"' in text
+        for hardcoded in ("1.1.1.1", "1.0.0.1", "8.8.8.8", "9.9.9.9"):
+            assert hardcoded not in text
+
+    def test_zero_managed_upstreams_named_conf_has_no_forwarders(self):
+        # Companion proof at the named.conf-generation layer: the actual
+        # BIND context allocated for an empty-forwarders selection
+        # produces config with recursion enabled and NO forwarders
+        # clause -- real native root-hierarchy resolution, not merely
+        # "an empty list that happens not to crash."
+        ctx = bind_gen.allocate_bind_contexts([bind_gen.UpstreamSelection(forwarders=(), tls_hostname=None)])[0]
+        conf = bind_gen.render_named_conf_for_context(ctx, "/var/lib/alderpointdns-v2/compiled/bind/alderpointdns-v2.rpz")
+        assert "recursion yes;" in conf
+        assert "forward only;" not in conf
+        assert "forwarders {" not in conf
+        for hardcoded in ("1.1.1.1", "1.0.0.1", "8.8.8.8", "9.9.9.9"):
+            assert hardcoded not in conf
+
 
 class TestContextAllocation:
     def test_deterministic_regardless_of_call_count(self):

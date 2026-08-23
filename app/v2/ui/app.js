@@ -1082,14 +1082,49 @@
   async function upstreams() {
     const [ups, routes] = await Promise.all([api("/api/upstreams"), api("/api/domain-routing")]);
     return page("Upstreams / Routing", "Plain, DoT, and DoH profiles with explicit routing rules. DoH requires TLS hostname validation.", "", `
+      ${ups.native_recursion_active ? `<div class="alert info">No managed upstream is enabled. BIND is performing normal native recursive resolution using the root/authoritative hierarchy -- not a substituted third-party resolver.</div>` : ""}
       <div class="grid two">
-        <section class="panel"><div class="panel__head"><h2>Upstream Profiles</h2></div><div class="panel__body">${upstreamForm()}${tableFromRows(ups.upstreams, 50, undefined, "upstream-profiles", ["upstream_profile_id"])}</div></section>
+        <section class="panel"><div class="panel__head"><h2>Upstream Profiles</h2></div><div class="panel__body">${upstreamForm()}${upstreamsTable(ups.upstreams)}</div></section>
         <section class="panel"><div class="panel__head"><h2>Domain Routes</h2></div><div class="panel__body">${routeForm(ups.upstreams)}${tableFromRows(routes.routes, 50, undefined, "upstream-domain-routes")}</div></section>
       </div>`);
   }
 
   function upstreamForm() {
-    return `<form data-form="upstream"><div class="form-grid"><label>Name<input name="name" required placeholder="Cloudflare"></label><label>Transport<select name="transport"><option>plain</option><option>dot</option><option>doh</option></select></label><label>Strategy<select name="strategy"><option>ordered</option><option>failover</option><option>load_balanced</option></select></label><label>Address<input name="address" required placeholder="1.1.1.1:53"></label><label>TLS hostname<input name="tls_hostname" placeholder="cloudflare-dns.com"></label><label>DoH path<input name="doh_path" placeholder="/dns-query"></label></div><button>Create upstream</button></form>`;
+    return `<form data-form="upstream"><div class="form-grid"><label>Name<input name="name" required placeholder="Cloudflare"></label><label>Transport<select name="transport"><option>plain</option><option>dot</option><option>doh</option></select></label><label>Strategy<select name="strategy"><option>ordered</option><option>failover</option><option>load_balanced</option></select></label><label>Address<input name="address" required placeholder="1.1.1.1:53"></label><label>TLS hostname<input name="tls_hostname" placeholder="cloudflare-dns.com"></label><label>DoH path<input name="doh_path" placeholder="/dns-query"></label></div><button data-upstream-submit class="primary">Create upstream</button><button type="button" data-upstream-cancel-edit hidden>Cancel edit</button></form>`;
+  }
+
+  // Real owner-reported live defect fixed here: managed upstreams --
+  // both default-seeded and operator-added -- could not be edited,
+  // disabled, or removed at all; only Create + List ever existed. Real
+  // lifecycle control per row, in one compact accessible overflow menu
+  // (owner-reported: rows must not be "a pile of buttons") that opens
+  // on click/keyboard/touch alike -- never hover-only -- see
+  // wire()'s [data-row-menu-toggle] handler.
+  function upstreamsTable(items) {
+    if (!items.length) return `<div class="empty">No upstream profiles configured. BIND performs normal native recursive resolution until one is added and enabled.</div>`;
+    const rows = items.map((u, i) => {
+      const addr = (u.endpoints || []).map((e) => e.address).join(", ") || "-";
+      return `<tr data-upstream-row="${esc(u.upstream_profile_id)}">
+        <td>${esc(u.name)}<br><span class="muted mono">${esc(u.upstream_profile_id)}</span></td>
+        <td class="mono">${esc(u.transport)}</td>
+        <td class="mono truncate" title="${esc(addr)}">${esc(addr)}</td>
+        <td>${esc(u.strategy)}</td>
+        <td>${u.enabled ? '<span class="badge ok">enabled</span>' : '<span class="badge warn">disabled</span>'}</td>
+        <td class="field-row" data-no-sort>
+          <button class="icon-btn" data-reorder-upstream="up" data-upstream-id="${esc(u.upstream_profile_id)}" title="Move up" ${i === 0 ? "disabled" : ""} aria-label="Move ${esc(u.name)} up in order">&uarr;</button>
+          <button class="icon-btn" data-reorder-upstream="down" data-upstream-id="${esc(u.upstream_profile_id)}" title="Move down" ${i === items.length - 1 ? "disabled" : ""} aria-label="Move ${esc(u.name)} down in order">&darr;</button>
+          <div class="row-actions">
+            <button type="button" class="row-actions__trigger" data-row-menu-toggle aria-haspopup="true" aria-expanded="false" aria-label="Actions for ${esc(u.name)}">&ctdot;</button>
+            <div class="row-actions__menu" hidden role="menu">
+              <button type="button" role="menuitem" data-edit-upstream="${esc(u.upstream_profile_id)}">Edit</button>
+              <button type="button" role="menuitem" data-toggle-upstream="${esc(u.upstream_profile_id)}" data-currently-enabled="${u.enabled ? "1" : "0"}">${u.enabled ? "Disable" : "Enable"}</button>
+              <button type="button" role="menuitem" class="danger" data-delete-upstream="${esc(u.upstream_profile_id)}">Delete</button>
+            </div>
+          </div>
+        </td>
+      </tr>`;
+    }).join("");
+    return `<div class="table-wrap"><table data-grid data-grid-id="upstream-profiles"><thead><tr><th>Name</th><th>Transport</th><th>Address</th><th>Strategy</th><th>Status</th><th data-no-sort>Actions</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
 
   function routeForm(upstreams) {
@@ -2023,6 +2058,108 @@
         toast("Subscription deleted", "ok");
         return;
       }
+
+      // Real owner-reported live defect fixed here: managed upstreams
+      // could not be edited, disabled, or removed at all. Compact
+      // per-row overflow menu (opens on plain click -- works for mouse,
+      // keyboard Enter/Space on the real <button>, and touch alike;
+      // never hover-only) plus real up/down reordering.
+      const rowMenuToggle = ev.target.closest("[data-row-menu-toggle]");
+      if (rowMenuToggle) {
+        const wrap = rowMenuToggle.closest(".row-actions");
+        const menu = wrap.querySelector(".row-actions__menu");
+        const wasOpen = !menu.hidden;
+        closeRowActionMenus();
+        if (!wasOpen) { menu.hidden = false; rowMenuToggle.setAttribute("aria-expanded", "true"); }
+        return;
+      }
+      const editUpstream = ev.target.closest("[data-edit-upstream]");
+      if (editUpstream) {
+        closeRowActionMenus();
+        const id = editUpstream.dataset.editUpstream;
+        const current = (await api("/api/upstreams")).upstreams.find((u) => u.upstream_profile_id === id);
+        if (!current) return;
+        const form = document.querySelector('form[data-form="upstream"]');
+        form.dataset.editingId = id;
+        form.elements.name.value = current.name;
+        form.elements.transport.value = current.transport;
+        form.elements.strategy.value = current.strategy;
+        const ep = (current.endpoints || [])[0] || {};
+        form.elements.address.value = ep.address || "";
+        form.elements.tls_hostname.value = ep.tls_hostname || "";
+        form.elements.doh_path.value = ep.doh_path || "";
+        form.querySelector("[data-upstream-submit]").textContent = `Save changes to ${current.name}`;
+        form.querySelector("[data-upstream-cancel-edit]").hidden = false;
+        form.scrollIntoView({ behavior: "smooth", block: "center" });
+        return;
+      }
+      const cancelEdit = ev.target.closest("[data-upstream-cancel-edit]");
+      if (cancelEdit) {
+        const form = cancelEdit.closest("form");
+        delete form.dataset.editingId;
+        form.reset();
+        form.querySelector("[data-upstream-submit]").textContent = "Create upstream";
+        cancelEdit.hidden = true;
+        return;
+      }
+      const toggleUpstream = ev.target.closest("[data-toggle-upstream]");
+      if (toggleUpstream) {
+        closeRowActionMenus();
+        const id = toggleUpstream.dataset.toggleUpstream;
+        const currentlyEnabled = toggleUpstream.dataset.currentlyEnabled === "1";
+        const action = currentlyEnabled ? "disable" : "enable";
+        try {
+          await api(`/api/upstreams/${encodeURIComponent(id)}/${action}`, { method: "POST" });
+        } catch (err) {
+          // Real owner-required workflow: disabling the FINAL enabled
+          // managed upstream is refused once (409 last_enabled_upstream)
+          // with a real warning; a real confirmation resubmits with
+          // confirm_last -- never silently substituted for a different
+          // resolver, and never a second, separate confirm() dialog
+          // stacked on top of the server's own real rejection.
+          if (err.status === 409 && err.body && err.body.error === "last_enabled_upstream") {
+            if (!confirm(err.message)) return;
+            await api(`/api/upstreams/${encodeURIComponent(id)}/disable`, { method: "POST", body: JSON.stringify({ confirm_last: true }) });
+          } else {
+            throw err;
+          }
+        }
+        await loadPage("upstreams");
+        toast(currentlyEnabled ? "Upstream disabled" : "Upstream enabled", "ok");
+        return;
+      }
+      const deleteUpstream = ev.target.closest("[data-delete-upstream]");
+      if (deleteUpstream) {
+        closeRowActionMenus();
+        const id = deleteUpstream.dataset.deleteUpstream;
+        if (!confirm(`Delete upstream ${id}? This cannot be undone.`)) return;
+        try {
+          await api(`/api/upstreams/${encodeURIComponent(id)}`, { method: "DELETE" });
+        } catch (err) {
+          if (err.status === 409 && err.body && err.body.error === "last_enabled_upstream") {
+            if (!confirm(err.message)) return;
+            await api(`/api/upstreams/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({ confirm_last: true }) });
+          } else {
+            throw err;
+          }
+        }
+        await loadPage("upstreams");
+        toast("Upstream deleted", "ok");
+        return;
+      }
+      const reorderUpstream = ev.target.closest("[data-reorder-upstream]");
+      if (reorderUpstream) {
+        const id = reorderUpstream.dataset.upstreamId;
+        const direction = reorderUpstream.dataset.reorderUpstream;
+        const current = (await api("/api/upstreams")).upstreams.map((u) => u.upstream_profile_id);
+        const idx = current.indexOf(id);
+        const swapWith = direction === "up" ? idx - 1 : idx + 1;
+        if (swapWith < 0 || swapWith >= current.length) return;
+        [current[idx], current[swapWith]] = [current[swapWith], current[idx]];
+        await api("/api/upstreams/reorder", { method: "POST", body: JSON.stringify({ ordered_upstream_profile_ids: current }) });
+        await loadPage("upstreams");
+        return;
+      }
     });
 
     document.body.addEventListener("change", async (ev) => {
@@ -2127,7 +2264,14 @@
     } else if (type === "schedule") {
       await api("/api/schedules", { method: "POST", body: JSON.stringify({ name: body.name, timezone: body.timezone || "UTC", windows: [{ start: body.start, end: body.end, weekdays: String(body.weekdays || "").split(",").map((x) => Number(x.trim())).filter((x) => Number.isInteger(x)) }] }) });
     } else if (type === "upstream") {
-      await api("/api/upstreams", { method: "POST", body: JSON.stringify({ name: body.name, transport: body.transport, strategy: body.strategy, endpoints: [{ address: body.address, tls_hostname: body.tls_hostname || null, doh_path: body.doh_path || null }] }) });
+      const editingId = form.dataset.editingId;
+      const payload = { name: body.name, transport: body.transport, strategy: body.strategy, endpoints: [{ address: body.address, tls_hostname: body.tls_hostname || null, doh_path: body.doh_path || null }] };
+      if (editingId) {
+        await api(`/api/upstreams/${encodeURIComponent(editingId)}`, { method: "PUT", body: JSON.stringify(payload) });
+        delete form.dataset.editingId;
+      } else {
+        await api("/api/upstreams", { method: "POST", body: JSON.stringify(payload) });
+      }
     } else if (type === "route") {
       await api("/api/domain-routing", { method: "POST", body: JSON.stringify(body) });
     } else if (type === "localdns") {
@@ -2268,17 +2412,32 @@
       const toggle = section.querySelector("[data-nav-section-toggle]");
       if (toggle) toggle.setAttribute("aria-expanded", "false");
     });
+    // Compact row-action ("...") menus (owner-reported requirement:
+    // one intentional overflow control per row instead of a pile of
+    // buttons) -- same outside-click-closes contract as the nav
+    // flyouts above.
+    closeRowActionMenus(ev.target);
   });
   document.addEventListener("keydown", (ev) => {
     if (ev.key !== "Escape") return;
     const open = document.querySelectorAll(".nav-section.is-flyout-open");
-    if (!open.length) return;
     open.forEach((section) => {
       section.classList.remove("is-flyout-open");
       const toggle = section.querySelector("[data-nav-section-toggle]");
       if (toggle) toggle.setAttribute("aria-expanded", "false");
     });
+    closeRowActionMenus();
   });
+
+  function closeRowActionMenus(exceptWithin) {
+    document.querySelectorAll(".row-actions__menu:not([hidden])").forEach((menu) => {
+      const wrap = menu.closest(".row-actions");
+      if (exceptWithin && wrap && wrap.contains(exceptWithin)) return;
+      menu.hidden = true;
+      const trigger = wrap && wrap.querySelector("[data-row-menu-toggle]");
+      if (trigger) trigger.setAttribute("aria-expanded", "false");
+    });
+  }
 
   boot();
 }());

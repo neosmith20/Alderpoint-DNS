@@ -153,7 +153,7 @@ def _domain_routes_for_policy(conn: sqlite3.Connection, policy) -> tuple:
         return ()
     routes = []
     for match_kind, domain, upstream_profile_id in store.list_domain_routing_rules(conn, ruleset_id):
-        profile = store.load_upstream_profile(conn, upstream_profile_id)
+        profile = store.load_upstream_profile(conn, upstream_profile_id, enabled_only=True)
         if profile is None:
             continue  # dangling reference: never silently route into nothing
         routes.append((domain, profile.endpoints, profile.transport, profile.strategy, match_kind))
@@ -174,27 +174,26 @@ def _safesearch_level_for_policy(policy) -> str:
     return policy.safesearch_mode if policy.safesearch_mode in ("moderate", "strict") else "strict"
 
 
-def _default_upstream_endpoints() -> tuple:
-    """Emergency bootstrap/recovery fallback ONLY (owner product decision,
-    second beta-rescue pass) -- used below purely as defense in depth for
-    a policy row with no upstream_profile_id set at all (should not
-    happen on any appliance past fresh-install: scripts/v2/
-    alderpointdns_v2_ctl.py's _seed_fresh_install_defaults() always seeds
-    a real "cloudflare" upstream_profiles row and assigns it to the
-    global policy during the genuinely-fresh-install window). This must
-    never be what an operator's Dashboard/DNS Settings/compiled runtime
-    silently disagree about -- if this path is ever actually hit, that is
-    itself a bug (missing/corrupted global policy), not steady-state
-    configuration. Matches the same Cloudflare pair seeded as real state,
-    not a different, surprising pair."""
-    from app.v2.policy_store import UpstreamEndpointRecord
-
-    return (UpstreamEndpointRecord("1.1.1.1:53", None, 0, 1, None), UpstreamEndpointRecord("1.0.0.1:53", None, 1, 1, None))
-
-
 def _upstream_for_policy(conn: sqlite3.Connection, policy) -> tuple[tuple, str, str]:
+    """Real defect fixed here (owner-reported live, "Zero Managed
+    Upstreams" locked decision in docs/v2/v2-roadmap.md): this used to
+    fall back to a HARDCODED Cloudflare pair (1.1.1.1/1.0.0.1) whenever
+    a policy had no upstream_profile_id, or referenced one that no
+    longer resolves to an enabled profile (deleted, or -- newly
+    reachable now that upstreams are actually disableable -- disabled).
+    That is exactly the "hidden Cloudflare fallback" the locked decision
+    explicitly forbids: "There must be no hidden Cloudflare fallback,
+    hidden Google fallback, silently substituted resolver, or UI/runtime
+    disagreement." An empty endpoints tuple here means "no usable
+    managed upstream for this binding" -- the compiler (see
+    dnsdist_policy_runtime.py's pool-building loop) routes a pool with
+    zero configured endpoints through the packaged BIND recursive-cache
+    tier with no `forwarders` configured, which is genuine, real
+    recursive/root-hierarchy resolution (app/v2/bind_gen.py), never a
+    third-party resolver this appliance never asked the operator about.
+    """
     if policy.upstream_profile_id:
-        profile = store.load_upstream_profile(conn, policy.upstream_profile_id)
+        profile = store.load_upstream_profile(conn, policy.upstream_profile_id, enabled_only=True)
         if profile is not None:
             if profile.strategy not in ("ordered", "failover", "load_balanced"):
                 # Defensive: create_upstream_profile() already rejects
@@ -207,7 +206,7 @@ def _upstream_for_policy(conn: sqlite3.Connection, policy) -> tuple[tuple, str, 
                     f"strategy {profile.strategy!r}"
                 )
             return profile.endpoints, profile.transport, profile.strategy
-    return _default_upstream_endpoints(), "plain", "ordered"
+    return (), "plain", "ordered"
 
 
 def _ecs_for_policy(policy) -> EcsPolicy:
@@ -252,7 +251,7 @@ def _apply_fallback(
     """
     if policy.fallback_strategy == "none" or not policy.fallback_upstream_profile_id or policy.fallback_upstream_profile_id == "none":
         return endpoints, strategy
-    fb_profile = store.load_upstream_profile(conn, policy.fallback_upstream_profile_id)
+    fb_profile = store.load_upstream_profile(conn, policy.fallback_upstream_profile_id, enabled_only=True)
     if fb_profile is None:
         return endpoints, strategy  # dangling reference: never silently route into nothing
 
@@ -549,14 +548,29 @@ def recompile_and_promote(
         ordered_selections: list[bind_gen.UpstreamSelection] = []
         seen: set = set()
         if live_bind_conf_path is not None:
+            # Real defect fixed here (owner-reported live, "Zero Managed
+            # Upstreams" locked decision): this used to skip any
+            # selection with empty forwarders outright (`sel.forwarders
+            # and ...`), so a binding with no usable managed upstream
+            # never got a BIND context allocated for it at all -- it
+            # fell through to dnsdist_policy_runtime.py's own
+            # direct-to-upstream `else` branch with zero endpoints to
+            # iterate, producing a genuinely empty (and invalid) dnsdist
+            # pool instead of real native recursion. An empty-forwarders
+            # selection is now a real, valid, intentional allocation
+            # target -- BIND's own default (no `forwarders` configured)
+            # recursive-from-the-root behavior -- and every binding that
+            # resolves to one shares the SAME single context (the `seen`
+            # dedup below treats `UpstreamSelection(forwarders=(),
+            # tls_hostname=None)` as one key, same as any other).
             if default_binding is not None:
                 for sel in _bind_eligible_selections(default_binding):
-                    if sel.forwarders and sel not in seen:
+                    if sel not in seen:
                         ordered_selections.append(sel)
                         seen.add(sel)
             for b in sorted(bindings, key=lambda b: b.network.network_id):
                 for sel in sorted(_bind_eligible_selections(b), key=lambda s: (s.forwarders, s.tls_hostname or "")):
-                    if sel.forwarders and sel not in seen:
+                    if sel not in seen:
                         ordered_selections.append(sel)
                         seen.add(sel)
 

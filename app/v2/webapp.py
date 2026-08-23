@@ -1649,31 +1649,34 @@ class UpstreamProfileCreate(BaseModel):
     upstream_profile_id: str = Field(default="", max_length=64)
 
 
+def _upstream_profile_to_dict(profile: "store.UpstreamProfileRecord") -> dict:
+    return {
+        "upstream_profile_id": profile.upstream_profile_id,
+        "name": profile.name,
+        "transport": profile.transport,
+        "strategy": profile.strategy,
+        "enabled": profile.enabled,
+        "sort_order": profile.sort_order,
+        "endpoints": [
+            {"address": e.address, "tls_hostname": e.tls_hostname, "priority": e.priority, "weight": e.weight, "doh_path": e.doh_path}
+            for e in profile.endpoints
+        ],
+    }
+
+
 @app.get("/api/upstreams")
 def list_upstreams(admin=Depends(current_admin)):
     with _db() as conn:
-        rows = conn.execute("SELECT upstream_profile_id, name, transport, strategy FROM upstream_profiles ORDER BY upstream_profile_id").fetchall()
-        upstreams = []
-        for upstream_profile_id, name, transport, strategy in rows:
-            ep_rows = conn.execute(
-                "SELECT address, tls_hostname, priority, weight, doh_path FROM upstream_endpoints "
-                "WHERE upstream_profile_row_id=(SELECT id FROM upstream_profiles WHERE upstream_profile_id=?) "
-                "ORDER BY priority, address",
-                (upstream_profile_id,),
-            ).fetchall()
-            upstreams.append(
-                {
-                    "upstream_profile_id": upstream_profile_id,
-                    "name": name,
-                    "transport": transport,
-                    "strategy": strategy,
-                    "endpoints": [
-                        {"address": e[0], "tls_hostname": e[1], "priority": e[2], "weight": e[3], "doh_path": e[4]}
-                        for e in ep_rows
-                    ],
-                }
-            )
-    return {"upstreams": upstreams}
+        profiles = store.list_upstream_profiles(conn)
+        # Runtime truth (§ Upstream Lifecycle / Runtime Truth): whether
+        # every managed upstream is currently disabled/deleted, i.e. the
+        # compiled runtime is genuinely in native BIND recursion mode --
+        # the UI must be able to state this as a fact, not infer it.
+        native_recursion_active = not any(p.enabled for p in profiles)
+    return {
+        "upstreams": [_upstream_profile_to_dict(p) for p in profiles],
+        "native_recursion_active": native_recursion_active,
+    }
 
 
 @app.post("/api/upstreams")
@@ -1687,6 +1690,109 @@ def create_upstream(req: UpstreamProfileCreate, admin=Depends(current_admin), x_
         upstream_profile_id = req.upstream_profile_id.strip() or _unique_id(conn, "upstream_profiles", "upstream_profile_id", req.name)
         store.create_upstream_profile(conn, upstream_profile_id, req.name, req.transport, endpoints, strategy=req.strategy)
     return {"status": "created", "upstream_profile_id": upstream_profile_id}
+
+
+class UpstreamProfileUpdate(BaseModel):
+    name: str
+    transport: str
+    strategy: str = "ordered"
+    endpoints: list[UpstreamEndpointIn]
+
+
+class LastUpstreamConfirm(BaseModel):
+    # Real owner-required workflow ("Zero Managed Upstreams" locked
+    # decision): disabling/deleting the FINAL enabled managed upstream
+    # must show a warning and require confirmation, but must be
+    # allowed. Server-side enforced (not just a client-side confirm()
+    # dialog): the first attempt without confirm_last=True against the
+    # last enabled upstream is rejected with a real, distinguishable
+    # 409 the UI turns into that warning; the identical request with
+    # confirm_last=True is what actually proceeds.
+    confirm_last: bool = False
+
+
+def _is_last_enabled_upstream(conn: sqlite3.Connection, upstream_profile_id: str) -> bool:
+    enabled_ids = [p.upstream_profile_id for p in store.list_upstream_profiles(conn) if p.enabled]
+    return enabled_ids == [upstream_profile_id]
+
+
+@app.put("/api/upstreams/{upstream_profile_id}")
+def update_upstream_route(upstream_profile_id: str, req: UpstreamProfileUpdate, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    endpoints = [
+        store.UpstreamEndpointRecord(e.address, e.tls_hostname, e.priority, e.weight, None, e.doh_path)
+        for e in req.endpoints
+    ]
+    try:
+        result = _mutate_and_promote(
+            lambda conn: store.update_upstream_profile(conn, upstream_profile_id, req.name, req.transport, endpoints, strategy=req.strategy)
+        )
+    except PolicyStoreError as exc:
+        raise ApiError(400, "invalid_upstream", str(exc)) from exc
+    return {"status": "updated", "runtime": {"promoted": result.promoted, "binding_count": result.binding_count}}
+
+
+@app.post("/api/upstreams/{upstream_profile_id}/enable")
+def enable_upstream_route(upstream_profile_id: str, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    try:
+        result = _mutate_and_promote(lambda conn: store.set_upstream_profile_enabled(conn, upstream_profile_id, True))
+    except PolicyStoreError as exc:
+        raise ApiError(404, "not_found", str(exc)) from exc
+    return {"status": "enabled", "runtime": {"promoted": result.promoted, "binding_count": result.binding_count}}
+
+
+@app.post("/api/upstreams/{upstream_profile_id}/disable")
+def disable_upstream_route(upstream_profile_id: str, req: LastUpstreamConfirm = LastUpstreamConfirm(), admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    with _db() as conn:
+        is_last = _is_last_enabled_upstream(conn, upstream_profile_id)
+    if is_last and not req.confirm_last:
+        raise ApiError(
+            409, "last_enabled_upstream",
+            "This is the final enabled managed upstream. Disabling it leaves zero managed "
+            "forwarders -- BIND will perform normal native recursion using the root/authoritative "
+            "hierarchy. Confirm to proceed.",
+        )
+    try:
+        result = _mutate_and_promote(lambda conn: store.set_upstream_profile_enabled(conn, upstream_profile_id, False))
+    except PolicyStoreError as exc:
+        raise ApiError(404, "not_found", str(exc)) from exc
+    return {"status": "disabled", "was_last_enabled": is_last, "runtime": {"promoted": result.promoted, "binding_count": result.binding_count}}
+
+
+@app.delete("/api/upstreams/{upstream_profile_id}")
+def delete_upstream_route(upstream_profile_id: str, req: LastUpstreamConfirm = LastUpstreamConfirm(), admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    with _db() as conn:
+        is_last = _is_last_enabled_upstream(conn, upstream_profile_id)
+    if is_last and not req.confirm_last:
+        raise ApiError(
+            409, "last_enabled_upstream",
+            "This is the final enabled managed upstream. Deleting it leaves zero managed "
+            "forwarders -- BIND will perform normal native recursion using the root/authoritative "
+            "hierarchy. Confirm to proceed.",
+        )
+    try:
+        result = _mutate_and_promote(lambda conn: store.delete_upstream_profile(conn, upstream_profile_id))
+    except PolicyStoreError as exc:
+        raise ApiError(404, "not_found", str(exc)) from exc
+    return {"status": "deleted", "was_last_enabled": is_last, "runtime": {"promoted": result.promoted, "binding_count": result.binding_count}}
+
+
+class UpstreamReorderRequest(BaseModel):
+    ordered_upstream_profile_ids: list[str]
+
+
+@app.post("/api/upstreams/reorder")
+def reorder_upstreams_route(req: UpstreamReorderRequest, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    try:
+        with _db() as conn:
+            store.reorder_upstream_profiles(conn, req.ordered_upstream_profile_ids)
+    except PolicyStoreError as exc:
+        raise ApiError(400, "invalid_reorder", str(exc)) from exc
+    return {"status": "reordered"}
 
 
 class DomainRoutingCreate(BaseModel):

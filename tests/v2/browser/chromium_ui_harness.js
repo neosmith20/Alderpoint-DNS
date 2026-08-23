@@ -996,6 +996,111 @@ async function main() {
     await waitFor(`document.body.innerText.includes("route-${suffix}.test") || document.body.innerText.includes("Operation completed")`, "domain route saved");
     proof.push("upstream-routing-mutation");
 
+    // ================================================================
+    // Upstream lifecycle (owner-reported live defect: managed upstreams
+    // could not be edited, disabled, or removed at all). "Browser
+    // Upstream ${suffix}" (created just above) is currently the only
+    // real upstream on this fresh fixture, so it doubles as the
+    // "final enabled managed upstream" case the owner's locked
+    // decision requires a real warning/confirmation for.
+    // ================================================================
+    await route("upstreams");
+    await waitFor(`document.querySelector('[data-upstream-row]')`, "upstream row rendered");
+    const rowSel = `tr[data-upstream-row] .row-actions`;
+    async function openRowMenu() {
+      await evalJs(`document.querySelector(${JSON.stringify(rowSel + " [data-row-menu-toggle]")}).click(); true`);
+      await waitFor(`!document.querySelector(${JSON.stringify(rowSel + " .row-actions__menu")}).hidden`, "row action menu open");
+    }
+    // Compact menu opens on click, is keyboard/touch reachable (a real
+    // <button>), and closes on outside click.
+    await openRowMenu();
+    await evalJs(`document.body.click(); true`);
+    await waitFor(`document.querySelector(${JSON.stringify(rowSel + " .row-actions__menu")}).hidden`, "row action menu closes on outside click");
+    proof.push("upstream-row-menu-opens-and-closes");
+
+    // Edit: change the strategy, save, and confirm the change is real
+    // (reflected in the table after a real PUT + recompile/promote).
+    await openRowMenu();
+    await evalJs(`document.querySelector(${JSON.stringify(rowSel)}).querySelector('[data-edit-upstream]').click(); true`);
+    await waitFor(`document.querySelector('form[data-form="upstream"]').dataset.editingId`, "upstream edit form populated");
+    await evalJs(`(() => { document.querySelector('form[data-form="upstream"] [name=strategy]').value = 'failover'; document.querySelector('form[data-form="upstream"]').requestSubmit(); return true; })()`);
+    await waitForOkOrError(`document.body.innerText.includes("Operation completed")`, "upstream edit saved");
+    await waitFor(`document.querySelector('[data-upstream-row]') && document.querySelector('[data-upstream-row]').textContent.includes("failover")`, "edited strategy visible in the table");
+    proof.push("upstream-edit-real-mutation");
+
+    // Disable the FINAL enabled upstream: must be refused once with a
+    // real warning (window.confirm), then allowed on confirmation --
+    // never silently applied, never silently blocked outright.
+    let confirmCalls = 0;
+    let confirmMessage = "";
+    await evalJs(`window.confirm = (msg) => { window.__confirmCalls = (window.__confirmCalls||0)+1; window.__confirmMessage = msg; return true; }; true`);
+    await openRowMenu();
+    await evalJs(`document.querySelector(${JSON.stringify(rowSel)}).querySelector('[data-toggle-upstream]').click(); true`);
+    await waitForOkOrError(`document.body.innerText.includes("Upstream disabled")`, "upstream disabled after confirmation");
+    confirmCalls = await evalJs(`window.__confirmCalls || 0`);
+    confirmMessage = await evalJs(`window.__confirmMessage || ""`);
+    if (confirmCalls < 1) throw new Error("disabling the final enabled upstream never showed a real confirmation");
+    if (!/final enabled managed upstream/i.test(confirmMessage)) throw new Error(`confirmation message missing the required warning content: ${JSON.stringify(confirmMessage)}`);
+    proof.push("upstream-last-enabled-disable-warned-and-confirmed");
+
+    // Runtime truth: zero enabled managed upstreams is shown as real
+    // native-recursion status, not silently hidden.
+    await waitFor(`document.body.innerText.toLowerCase().includes("native recursive")`, "native recursion banner visible with zero enabled upstreams");
+    proof.push("upstream-native-recursion-banner-visible");
+
+    // Re-enable -- runtime truth flips back, banner disappears.
+    await openRowMenu();
+    await evalJs(`document.querySelector(${JSON.stringify(rowSel)}).querySelector('[data-toggle-upstream]').click(); true`);
+    await waitForOkOrError(`document.body.innerText.includes("Upstream enabled")`, "upstream re-enabled");
+    if (await evalJs(`document.body.innerText.toLowerCase().includes("native recursive")`)) throw new Error("native recursion banner still visible after re-enabling the only upstream");
+    proof.push("upstream-re-enable-clears-native-recursion-banner");
+
+    // A SECOND upstream makes the first one no longer "the last one" --
+    // disabling it must NOT prompt for confirmation this time.
+    await evalJs(`(() => {
+      const f = document.querySelector('form[data-form="upstream"]');
+      f.querySelector('[name=name]').value = 'Second Upstream ${suffix}';
+      f.querySelector('[name=address]').value = '9.9.9.9:53';
+      f.requestSubmit();
+      return true;
+    })()`);
+    await waitFor(`document.body.innerText.includes("Second Upstream ${suffix}")`, "second upstream created");
+    await evalJs(`window.__confirmCalls = 0; true`);
+    await openRowMenu();
+    await evalJs(`document.querySelector(${JSON.stringify(rowSel)}).querySelector('[data-toggle-upstream]').click(); true`);
+    await waitForOkOrError(`document.body.innerText.includes("Upstream disabled")`, "first upstream disabled with a second one present");
+    if ((await evalJs(`window.__confirmCalls || 0`)) !== 0) throw new Error("disabling a non-last upstream incorrectly asked for confirmation");
+    proof.push("upstream-non-last-disable-no-confirmation-needed");
+
+    // Delete: the final confirm() dialog and the delete's own
+    // window.confirm() are the SAME mocked function above -- delete
+    // must still work with a real DELETE + recompile/promote.
+    await openRowMenu();
+    const rowCountBefore = await evalJs(`document.querySelectorAll('[data-upstream-row]').length`);
+    await evalJs(`document.querySelector(${JSON.stringify(rowSel)}).querySelector('[data-delete-upstream]').click(); true`);
+    await waitForOkOrError(`document.body.innerText.includes("Upstream deleted")`, "upstream deleted");
+    await waitFor(`document.querySelectorAll('[data-upstream-row]').length === ${rowCountBefore} - 1`, "deleted upstream actually removed from the table");
+    proof.push("upstream-delete-real-mutation");
+
+    // Reorder: with the remaining real upstream(s), the up/down
+    // controls actually change server-side order (persists across a
+    // reload, since sort_order is real control.db state).
+    await evalJs(`(() => {
+      const f = document.querySelector('form[data-form="upstream"]');
+      f.querySelector('[name=name]').value = 'Third Upstream ${suffix}';
+      f.querySelector('[name=address]').value = '8.8.8.8:53';
+      f.requestSubmit();
+      return true;
+    })()`);
+    await waitFor(`document.body.innerText.includes("Third Upstream ${suffix}")`, "third upstream created");
+    const namesBefore = await evalJs(`Array.from(document.querySelectorAll('[data-upstream-row] td:first-child')).map((td) => td.textContent.trim())`);
+    await evalJs(`document.querySelectorAll('[data-reorder-upstream="down"]')[0].click(); true`);
+    await sleep(400);
+    const namesAfter = await evalJs(`Array.from(document.querySelectorAll('[data-upstream-row] td:first-child')).map((td) => td.textContent.trim())`);
+    if (JSON.stringify(namesBefore) === JSON.stringify(namesAfter)) throw new Error("reordering (move down) did not change the real upstream order");
+    if (namesBefore[0] !== namesAfter[1] || namesBefore[1] !== namesAfter[0]) throw new Error(`reorder did not swap the expected two rows: before=${JSON.stringify(namesBefore)} after=${JSON.stringify(namesAfter)}`);
+    proof.push("upstream-reorder-real-mutation");
+
     await route("localdns");
     await waitFor(`document.querySelector('form[data-form="localdns"]')`, "local dns form");
     await evalJs(`(() => {
@@ -1647,7 +1752,13 @@ async function main() {
     await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x: hx + 120, y: hy, button: "left", pointerType: "mouse" });
     await sleep(200);
     const widthAfterDrag = await evalJs(`document.querySelector(${JSON.stringify(firstHeader)}).getBoundingClientRect().width`);
-    if (!(widthAfterDrag > startWidth + 60)) throw new Error(`dragging the column resizer +120px did not grow the column (before=${startWidth} after=${widthAfterDrag})`);
+    // Real growth, not necessarily the full +120px of mouse travel --
+    // the upstreams table now has more real columns (Name/Transport/
+    // Address/Strategy/Status/Actions) than before, so table-layout:auto
+    // gives the dragged column less slack to claim from its siblings.
+    // The threshold here proves resize genuinely works, not a specific
+    // pixel-for-pixel mouse-to-width mapping.
+    if (!(widthAfterDrag > startWidth + 30)) throw new Error(`dragging the column resizer +120px did not grow the column (before=${startWidth} after=${widthAfterDrag})`);
     proof.push("grid-column-drag-resize");
 
     // Minimum width: drag far to the left (shrink hard) and confirm it

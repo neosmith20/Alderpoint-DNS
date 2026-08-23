@@ -377,6 +377,33 @@ def _local_dns_rule_lines(local_dns_records: list[tuple]) -> list[str]:
     return lines
 
 
+# Real defect fixed here (found live via the full test suite, not just
+# the new unit-level compile proof): a pool with genuinely zero
+# upstream endpoints and no BIND context wired for it (an empty
+# `bind_context_addresses` -- the documented back-compat case for a
+# caller that hasn't wired BIND, see _route_via_bind's own docstring)
+# previously emitted ZERO newServer lines. dnsdist's PoolAction still
+# routes real queries into that genuinely empty pool (nothing upstream
+# of this function skips the PoolAction just because a pool ended up
+# serverless), and a real dnsdist process forwarding into an empty pool
+# does not fail fast -- it hangs, confirmed live via a real client
+# query timing out rather than getting even a SERVFAIL. The real
+# production path (app/v2/runtime_compile.py's recompile_and_promote)
+# always wires real bind_context_addresses once COMPILED_RPZ_ZONE
+# exists (true for any appliance past its first generate-runtime), so
+# this exact gap is a narrow dev/test-fixture edge case in practice --
+# but it must still fail SAFELY, not hang, for a caller that genuinely
+# hasn't wired BIND yet (e.g. very early boot). The same well-known
+# default BIND backend address the ORIGINAL bootstrap generator
+# (app/v2/dnsdist_gen.py) already always uses is reused here as the
+# last-resort target -- if nothing is actually listening there yet
+# (BIND not started), dnsdist gets a fast connection-refused/
+# unreachable and returns SERVFAIL immediately, never a silent hang. A
+# literal, independent constant (not a cross-import), matching this
+# module's own existing pattern for ANALYTICS_PROTOBUF_LOG_ADDRESS/
+# DISCOVERY_INGRESS_ADDRESS below.
+_DEFAULT_BIND_BACKEND_ADDRESS = "127.0.0.1:5553"
+
 # Local-only IPC address for the real analytics event producer (roadmap
 # Priority 6 continuation -- see
 # docs/v2/analytics-ingestion-not-wired-to-live-dns.md for the gap this
@@ -744,6 +771,17 @@ def compile_multi_policy_dnsdist_config(
                 "tier via a local DoH-egress transport (app/v2/doh_egress_gen.py)"
             )
             lines.append(_bind_server_line(pool_name, doh_bind_addr))
+        elif not binding.upstream_endpoints:
+            # Zero endpoints and no BIND context available for this
+            # (forwarders=(), tls_hostname=None) selection -- see
+            # _DEFAULT_BIND_BACKEND_ADDRESS's own docstring above for
+            # why this specific fallback (never an empty pool).
+            lines.append(
+                "-- no managed upstream and no BIND context wired for this pool -- "
+                "routing to the default BIND backend address as a safe fallback "
+                "(never a serverless pool)"
+            )
+            lines.append(_bind_server_line(pool_name, _DEFAULT_BIND_BACKEND_ADDRESS))
         else:
             for ep in binding.upstream_endpoints:
                 lines.append(

@@ -179,14 +179,73 @@ def _dig(port: int, qname: str, rdtype: str = "A", timeout: float = 2.0):
     return dns.query.udp(q, "127.0.0.1", port=port, timeout=timeout)
 
 
+def _fake_nxdomain_upstream(port: int, stop_event) -> "threading.Thread":
+    """A real, minimal UDP DNS server answering every query NXDOMAIN --
+    same real-socket pattern test_final_policy_runtime_revalidation.py
+    already established. Used so this test's "mutated.lan does not
+    resolve" assertion is proven against a real, fast, controlled
+    upstream, not by accidentally depending on the zero-managed-
+    upstream native-recursion fallback (a real, separate architecture
+    path with its own dedicated coverage in
+    test_bind_architecture_routing.py -- this backup/restore test
+    should not incidentally exercise it just because it never
+    configured an upstream profile at all).
+    """
+    import threading
+
+    import dns.message
+
+    def _serve():
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("127.0.0.1", port))
+        sock.settimeout(0.2)
+        while not stop_event.is_set():
+            try:
+                data, addr = sock.recvfrom(512)
+            except socket.timeout:
+                continue
+            try:
+                import dns.rcode
+
+                query = dns.message.from_wire(data)
+                response = dns.message.make_response(query)
+                response.set_rcode(dns.rcode.NXDOMAIN)
+                sock.sendto(response.to_wire(), addr)
+            except Exception:
+                continue
+        sock.close()
+
+    thread = threading.Thread(target=_serve, daemon=True)
+    thread.start()
+    return thread
+
+
 @pytest.mark.skipif(not DNSDIST_INSTALLED, reason="requires installed dnsdist")
 class TestRealRuntimeProof:
     def test_backup_mutate_restore_reaches_real_dns_answers(self, live):
+        import threading
+
         from app.v2 import runtime_compile
         from app.v2.dnsdist_policy_runtime import compile_multi_policy_dnsdist_config
+        from app.v2.policy_model import PolicyLayer
+
+        # A real, controlled upstream (not the zero-managed-upstream
+        # native-recursion path -- that has its own dedicated coverage
+        # in test_bind_architecture_routing.py) so "mutated.lan does not
+        # resolve" is proven fast, against a real backend, regardless of
+        # how the appliance's own default upstream/native-recursion
+        # fallback behaves.
+        fake_port = _free_port()
+        stop_event = threading.Event()
+        _fake_nxdomain_upstream(fake_port, stop_event)
 
         with control_db.connect(live["db_path"]) as conn:
             store.upsert_local_dns_record(conn, "original.lan", "A", "10.9.9.1", 300)
+            store.create_upstream_profile(
+                conn, "proof-upstream", "Proof", "plain",
+                [store.UpstreamEndpointRecord(f"127.0.0.1:{fake_port}", None, 0, 1, None)],
+            )
+            store.save_policy_layer(conn, "global", "singleton", PolicyLayer(upstream_profile_id="proof-upstream"))
             conn.commit()
 
         backup_path = live["tmp_path"] / "proof.apdnsbak"
@@ -238,6 +297,7 @@ class TestRealRuntimeProof:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+            stop_event.set()
 
 
 class TestApplianceBackupApiRoutes:

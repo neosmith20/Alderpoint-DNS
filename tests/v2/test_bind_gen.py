@@ -43,9 +43,25 @@ class TestRenderNamedConf:
         b = bind_gen.render_named_conf(["1.1.1.1:53"], str(rpz), directory=str(tmp_path))
         assert a == b
 
-    def test_no_forwarders_rejected(self, tmp_path):
-        with pytest.raises(bind_gen.BindGenError):
-            bind_gen.render_named_conf([], str(_rpz_path(tmp_path)))
+    def test_no_forwarders_means_native_recursion(self, tmp_path):
+        # Real defect fixed (owner-reported live, "Zero Managed
+        # Upstreams" locked decision, docs/v2/v2-roadmap.md): this used
+        # to reject an empty forwarders list outright, so the locked
+        # decision -- "zero configured forwarders means BIND operates
+        # as a normal recursive resolver using the DNS root and
+        # authoritative hierarchy" -- had no real generation path. An
+        # empty list must produce valid config with recursion enabled,
+        # `forward only` and `forwarders {}` both absent (so BIND falls
+        # through to its own real root-hint iterative resolution), and
+        # -- the actual point of the locked decision -- no hardcoded
+        # third-party resolver address anywhere in the output.
+        conf = bind_gen.render_named_conf([], str(_rpz_path(tmp_path)))
+        assert "recursion yes;" in conf
+        assert "forward only;" not in conf
+        assert "forwarders {" not in conf
+        assert "1.1.1.1" not in conf
+        assert "8.8.8.8" not in conf
+        assert "9.9.9.9" not in conf
 
     def test_invalid_forwarder_rejected(self, tmp_path):
         with pytest.raises(bind_gen.BindGenError):

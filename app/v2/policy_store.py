@@ -207,6 +207,31 @@ def ensure_schema(path: str | Path) -> None:
     _ensure_policy_layers_beta_rescue_columns(path)
     _ensure_dns_transport_settings_table(path)
     _ensure_dnscrypt_settings_table(path)
+    _ensure_upstream_profile_lifecycle_columns(path)
+
+
+def _ensure_upstream_profile_lifecycle_columns(path: str | Path) -> None:
+    """Incremental migration (owner-reported live defect: managed
+    upstreams -- both the default seeded ones and operator-added ones --
+    could not be disabled or removed). ``upstream_profiles`` had no
+    ``enabled``/``sort_order`` columns at all; the only lifecycle it
+    supported was list + create. ``enabled`` defaults to 1 (existing
+    upstreams stay exactly as they behave today on upgrade -- adding
+    this column never silently disables anything already relied on).
+    ``sort_order`` defaults to 0 for the same reason (stable, ties break
+    on upstream_profile_id, matching the prior de facto ordering) and is
+    only meaningful once an operator actually reorders something. Runs
+    unconditionally on every ensure_schema() call, same incremental-
+    migration pattern as _ensure_dns_transport_settings_table above.
+    """
+    control_db.add_columns_if_missing(
+        path,
+        "upstream_profiles",
+        {
+            "enabled": "INTEGER NOT NULL DEFAULT 1",
+            "sort_order": "INTEGER NOT NULL DEFAULT 0",
+        },
+    )
 
 
 def _ensure_policy_layers_beta_rescue_columns(path: str | Path) -> None:
@@ -661,16 +686,11 @@ class UpstreamProfileRecord:
     transport: str
     strategy: str
     endpoints: tuple[UpstreamEndpointRecord, ...]
+    enabled: bool = True
+    sort_order: int = 0
 
 
-def create_upstream_profile(
-    conn: sqlite3.Connection,
-    upstream_profile_id: str,
-    name: str,
-    transport: str,
-    endpoints: list[UpstreamEndpointRecord],
-    strategy: str = "ordered",
-) -> None:
+def _validate_upstream_profile_fields(transport: str, strategy: str, endpoints: list[UpstreamEndpointRecord]) -> None:
     if transport not in ("plain", "dot", "doh"):
         raise PolicyStoreError(f"invalid transport: {transport!r}")
     # Real defect closed (beta-rescue pass): "ordered" and "load_balanced"
@@ -709,10 +729,21 @@ def create_upstream_profile(
             path = ep.doh_path or "/dns-query"
             if not path.startswith("/") or "\n" in path or "\r" in path or " " in path:
                 raise PolicyStoreError(f"invalid doh_path: {path!r}")
+
+
+def create_upstream_profile(
+    conn: sqlite3.Connection,
+    upstream_profile_id: str,
+    name: str,
+    transport: str,
+    endpoints: list[UpstreamEndpointRecord],
+    strategy: str = "ordered",
+) -> None:
+    _validate_upstream_profile_fields(transport, strategy, endpoints)
     try:
         cur = conn.execute(
-            "INSERT INTO upstream_profiles (upstream_profile_id, name, transport, strategy, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO upstream_profiles (upstream_profile_id, name, transport, strategy, created_at, enabled, sort_order) "
+            "VALUES (?, ?, ?, ?, ?, 1, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM upstream_profiles))",
             (upstream_profile_id, name, transport, strategy, _now()),
         )
     except sqlite3.IntegrityError as exc:
@@ -730,23 +761,130 @@ def create_upstream_profile(
         )
 
 
+# Real owner-reported live defect fixed here: managed upstreams -- both
+# default-seeded and operator-added -- could not be edited, disabled, or
+# removed at all; only Create + List ever existed. Full lifecycle below,
+# matching the same shape create_upstream_profile/load_upstream_profile
+# already established.
+
+
+def update_upstream_profile(
+    conn: sqlite3.Connection,
+    upstream_profile_id: str,
+    name: str,
+    transport: str,
+    endpoints: list[UpstreamEndpointRecord],
+    strategy: str = "ordered",
+) -> None:
+    row = conn.execute("SELECT id FROM upstream_profiles WHERE upstream_profile_id = ?", (upstream_profile_id,)).fetchone()
+    if row is None:
+        raise PolicyStoreError(f"unknown upstream_profile_id: {upstream_profile_id!r}")
+    _validate_upstream_profile_fields(transport, strategy, endpoints)
+    row_id = row[0]
+    conn.execute(
+        "UPDATE upstream_profiles SET name=?, transport=?, strategy=? WHERE id=?",
+        (name, transport, strategy, row_id),
+    )
+    conn.execute("DELETE FROM upstream_endpoints WHERE upstream_profile_row_id=?", (row_id,))
+    for ep in endpoints:
+        doh_path = ep.doh_path if transport == "doh" else None
+        if doh_path is None and transport == "doh":
+            doh_path = "/dns-query"
+        conn.execute(
+            "INSERT INTO upstream_endpoints "
+            "(upstream_profile_row_id, address, tls_hostname, priority, weight, secret_ref, doh_path) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (row_id, ep.address, ep.tls_hostname, ep.priority, ep.weight, ep.secret_ref, doh_path),
+        )
+
+
+def set_upstream_profile_enabled(conn: sqlite3.Connection, upstream_profile_id: str, enabled: bool) -> None:
+    cur = conn.execute(
+        "UPDATE upstream_profiles SET enabled=? WHERE upstream_profile_id=?",
+        (1 if enabled else 0, upstream_profile_id),
+    )
+    if cur.rowcount == 0:
+        raise PolicyStoreError(f"unknown upstream_profile_id: {upstream_profile_id!r}")
+
+
+def delete_upstream_profile(conn: sqlite3.Connection, upstream_profile_id: str) -> None:
+    cur = conn.execute("DELETE FROM upstream_profiles WHERE upstream_profile_id=?", (upstream_profile_id,))
+    if cur.rowcount == 0:
+        raise PolicyStoreError(f"unknown upstream_profile_id: {upstream_profile_id!r}")
+    # Every policy layer/domain-route/fallback reference to a now-deleted
+    # profile becomes a dangling reference -- the exact same, already-
+    # handled state as "operator never configured one" (runtime_compile.py's
+    # own load_upstream_profile()-returns-None branches already treat a
+    # dangling upstream_profile_id as "no usable upstream for this
+    # binding," never an error), so nothing further needs cleaning up
+    # here to keep the compiled runtime coherent.
+
+
+def reorder_upstream_profiles(conn: sqlite3.Connection, ordered_ids: list[str]) -> None:
+    """Sets ``sort_order`` to each id's position in ``ordered_ids``.
+    Only ids that already exist are touched; an id present in the
+    control.db but omitted from ``ordered_ids`` keeps its current
+    position -- reordering never silently drops a profile from the
+    list because a caller's ordered_ids happened to be stale/partial.
+    """
+    existing = {r[0] for r in conn.execute("SELECT upstream_profile_id FROM upstream_profiles").fetchall()}
+    unknown = [i for i in ordered_ids if i not in existing]
+    if unknown:
+        raise PolicyStoreError(f"unknown upstream_profile_id(s) in reorder request: {unknown}")
+    for position, upstream_profile_id in enumerate(ordered_ids):
+        conn.execute(
+            "UPDATE upstream_profiles SET sort_order=? WHERE upstream_profile_id=?",
+            (position, upstream_profile_id),
+        )
+
+
+def list_upstream_profiles(conn: sqlite3.Connection) -> list[UpstreamProfileRecord]:
+    rows = conn.execute(
+        "SELECT upstream_profile_id, id, name, transport, strategy, enabled, sort_order "
+        "FROM upstream_profiles ORDER BY sort_order ASC, upstream_profile_id ASC"
+    ).fetchall()
+    profiles = []
+    for upstream_profile_id, row_id, name, transport, strategy, enabled, sort_order in rows:
+        ep_rows = conn.execute(
+            "SELECT address, tls_hostname, priority, weight, secret_ref, doh_path FROM upstream_endpoints "
+            "WHERE upstream_profile_row_id = ? ORDER BY priority ASC, address ASC",
+            (row_id,),
+        ).fetchall()
+        endpoints = tuple(UpstreamEndpointRecord(*r) for r in ep_rows)
+        profiles.append(UpstreamProfileRecord(upstream_profile_id, name, transport, strategy, endpoints, bool(enabled), sort_order))
+    return profiles
+
+
 def load_upstream_profile(
-    conn: sqlite3.Connection, upstream_profile_id: str
+    conn: sqlite3.Connection, upstream_profile_id: str, *, enabled_only: bool = False
 ) -> Optional[UpstreamProfileRecord]:
+    """``enabled_only=True`` is the real compile-time contract (used by
+    app/v2/runtime_compile.py): a disabled profile is treated exactly
+    like a dangling/nonexistent reference -- returns None, never a
+    disabled profile's real endpoints -- so a policy layer still
+    pointing at a since-disabled upstream_profile_id falls through to
+    the same "no usable upstream for this binding" handling a deleted
+    profile already gets, which in turn resolves to native BIND
+    recursion (see runtime_compile.py's _upstream_for_policy), never a
+    hardcoded fallback. The UI's own edit/detail views want the record
+    regardless of enabled state, so this defaults to False.
+    """
     row = conn.execute(
-        "SELECT id, name, transport, strategy FROM upstream_profiles WHERE upstream_profile_id = ?",
+        "SELECT id, name, transport, strategy, enabled, sort_order FROM upstream_profiles WHERE upstream_profile_id = ?",
         (upstream_profile_id,),
     ).fetchone()
     if row is None:
         return None
-    row_id, name, transport, strategy = row
+    row_id, name, transport, strategy, enabled, sort_order = row
+    if enabled_only and not enabled:
+        return None
     ep_rows = conn.execute(
         "SELECT address, tls_hostname, priority, weight, secret_ref, doh_path FROM upstream_endpoints "
         "WHERE upstream_profile_row_id = ? ORDER BY priority ASC, address ASC",
         (row_id,),
     ).fetchall()
     endpoints = tuple(UpstreamEndpointRecord(*r) for r in ep_rows)
-    return UpstreamProfileRecord(upstream_profile_id, name, transport, strategy, endpoints)
+    return UpstreamProfileRecord(upstream_profile_id, name, transport, strategy, endpoints, bool(enabled), sort_order)
 
 
 # --------------------------------------------------------------------------

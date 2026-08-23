@@ -148,6 +148,98 @@ class TestUpstreamProfiles:
         with pytest.raises(store.PolicyStoreError):
             store.create_upstream_profile(conn, "bad", "Bad", "plain", eps)
 
+    # Real owner-reported live defect fixed here: managed upstreams --
+    # both default-seeded and operator-added -- could not be edited,
+    # disabled, or removed at all.
+
+    def test_new_profile_defaults_enabled(self, conn):
+        eps = [store.UpstreamEndpointRecord("1.1.1.1:53", None, 0, 1, None)]
+        store.create_upstream_profile(conn, "p1", "P1", "plain", eps)
+        loaded = store.load_upstream_profile(conn, "p1")
+        assert loaded.enabled is True
+
+    def test_disable_then_enable_round_trips(self, conn):
+        eps = [store.UpstreamEndpointRecord("1.1.1.1:53", None, 0, 1, None)]
+        store.create_upstream_profile(conn, "p1", "P1", "plain", eps)
+        store.set_upstream_profile_enabled(conn, "p1", False)
+        assert store.load_upstream_profile(conn, "p1").enabled is False
+        # enabled_only=True must treat a disabled profile as a dangling
+        # reference -- exactly what runtime_compile.py's compile-time
+        # resolution relies on to fall through to native BIND recursion.
+        assert store.load_upstream_profile(conn, "p1", enabled_only=True) is None
+        store.set_upstream_profile_enabled(conn, "p1", True)
+        assert store.load_upstream_profile(conn, "p1").enabled is True
+        assert store.load_upstream_profile(conn, "p1", enabled_only=True) is not None
+
+    def test_disable_unknown_profile_raises(self, conn):
+        with pytest.raises(store.PolicyStoreError):
+            store.set_upstream_profile_enabled(conn, "ghost", False)
+
+    def test_delete_removes_profile_and_its_endpoints(self, conn):
+        eps = [store.UpstreamEndpointRecord("1.1.1.1:53", None, 0, 1, None)]
+        store.create_upstream_profile(conn, "p1", "P1", "plain", eps)
+        store.delete_upstream_profile(conn, "p1")
+        assert store.load_upstream_profile(conn, "p1") is None
+        assert conn.execute("SELECT count(*) FROM upstream_endpoints").fetchone()[0] == 0
+
+    def test_delete_unknown_profile_raises(self, conn):
+        with pytest.raises(store.PolicyStoreError):
+            store.delete_upstream_profile(conn, "ghost")
+
+    def test_update_replaces_endpoints_and_fields(self, conn):
+        eps = [store.UpstreamEndpointRecord("1.1.1.1:53", None, 0, 1, None)]
+        store.create_upstream_profile(conn, "p1", "P1", "plain", eps)
+        new_eps = [store.UpstreamEndpointRecord("9.9.9.9:53", None, 0, 1, None)]
+        store.update_upstream_profile(conn, "p1", "P1 renamed", "plain", new_eps, strategy="failover")
+        loaded = store.load_upstream_profile(conn, "p1")
+        assert loaded.name == "P1 renamed"
+        assert loaded.strategy == "failover"
+        assert [e.address for e in loaded.endpoints] == ["9.9.9.9:53"]
+
+    def test_update_unknown_profile_raises(self, conn):
+        eps = [store.UpstreamEndpointRecord("1.1.1.1:53", None, 0, 1, None)]
+        with pytest.raises(store.PolicyStoreError):
+            store.update_upstream_profile(conn, "ghost", "X", "plain", eps)
+
+    def test_update_still_validates_fields(self, conn):
+        eps = [store.UpstreamEndpointRecord("1.1.1.1:53", None, 0, 1, None)]
+        store.create_upstream_profile(conn, "p1", "P1", "plain", eps)
+        with pytest.raises(store.PolicyStoreError):
+            store.update_upstream_profile(conn, "p1", "P1", "plain", [])
+
+    def test_list_orders_by_sort_order_then_id(self, conn):
+        eps = [store.UpstreamEndpointRecord("1.1.1.1:53", None, 0, 1, None)]
+        store.create_upstream_profile(conn, "b", "B", "plain", eps)
+        store.create_upstream_profile(conn, "a", "A", "plain", eps)
+        listed = store.list_upstream_profiles(conn)
+        assert [p.upstream_profile_id for p in listed] == ["b", "a"]  # creation order via sort_order
+
+    def test_reorder_sets_explicit_order(self, conn):
+        eps = [store.UpstreamEndpointRecord("1.1.1.1:53", None, 0, 1, None)]
+        store.create_upstream_profile(conn, "b", "B", "plain", eps)
+        store.create_upstream_profile(conn, "a", "A", "plain", eps)
+        store.reorder_upstream_profiles(conn, ["a", "b"])
+        listed = store.list_upstream_profiles(conn)
+        assert [p.upstream_profile_id for p in listed] == ["a", "b"]
+
+    def test_reorder_rejects_unknown_id(self, conn):
+        eps = [store.UpstreamEndpointRecord("1.1.1.1:53", None, 0, 1, None)]
+        store.create_upstream_profile(conn, "a", "A", "plain", eps)
+        with pytest.raises(store.PolicyStoreError):
+            store.reorder_upstream_profiles(conn, ["a", "ghost"])
+
+    def test_disabled_profile_still_loads_without_enabled_only_for_ui_editing(self, conn):
+        eps = [store.UpstreamEndpointRecord("1.1.1.1:53", None, 0, 1, None)]
+        store.create_upstream_profile(conn, "p1", "P1", "plain", eps)
+        store.set_upstream_profile_enabled(conn, "p1", False)
+        # The UI's own edit/detail view must still be able to fetch a
+        # disabled profile's real data (name/endpoints/strategy) --
+        # only compile-time resolution treats it as absent.
+        loaded = store.load_upstream_profile(conn, "p1")
+        assert loaded is not None
+        assert loaded.enabled is False
+        assert loaded.name == "P1"
+
 
 class TestDomainRouting:
     def test_exact_beats_suffix(self, conn):
