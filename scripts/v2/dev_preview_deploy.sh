@@ -94,5 +94,9 @@ echo
 echo "DEPLOY OK"
 echo "  Deployed version : $installed_version"
 echo "  Management UI    : https://172.16.43.100:${MGMT_PORT}/  (self-signed cert; also reachable at https://127.0.0.1:${MGMT_PORT}/ from this host)"
-echo "  DNS for testing  : 172.16.43.100 port ${DNS_PORT} (both UDP and TCP) -- NOT port 53; e.g. dig @172.16.43.100 -p ${DNS_PORT} example.com"
+if [ "$DNS_PORT" = "53" ]; then
+  echo "  DNS for testing  : 172.16.43.100, standard port 53 (both UDP and TCP) -- e.g. dig @172.16.43.100 example.com"
+else
+  echo "  DNS for testing  : 172.16.43.100 port ${DNS_PORT} (both UDP and TCP) -- NOT port 53; e.g. dig @172.16.43.100 -p ${DNS_PORT} example.com"
+fi
 echo "  State            : preserved (bind-mounted at $STATE_ETC and $STATE_VARLIB) unless --reset was passed"
