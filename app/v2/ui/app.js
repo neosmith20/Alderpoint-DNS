@@ -2055,7 +2055,10 @@
       const validateAppliance = ev.target.closest("[data-validate-appliance-backup]");
       if (validateAppliance) {
         const name = validateAppliance.dataset.validateApplianceBackup;
-        const res = await api(`/api/backup/appliance/${encodeURIComponent(name)}/validate`, { method: "POST" });
+        const row = validateAppliance.closest("tr");
+        const passphrase = row && row.querySelector('input[name="passphrase"]') ? row.querySelector('input[name="passphrase"]').value : "";
+        const payload = passphrase ? { passphrase } : {};
+        const res = await api(`/api/backup/appliance/${encodeURIComponent(name)}/validate`, { method: "POST", body: JSON.stringify(payload) });
         await loadPage("backup");
         const warnings = (res.warnings || []).length ? `; warnings: ${res.warnings.join("; ")}` : "";
         toast(`Backup ${res.backup_name} is valid (${res.contents.join(", ")})${warnings}`, warnings ? "info" : "ok");
