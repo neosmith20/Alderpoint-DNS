@@ -165,6 +165,28 @@ tr:last-child td { border-bottom: 0; }
 .faint { color: var(--faint); }
 .truncate { max-width: 34ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* Shared data-grid (data-grid.js): sortable/resizable table headers, used
+   across the major operator tables instead of a one-off per page. */
+table[data-grid] th { position: sticky; top: 0; z-index: 1; user-select: none; }
+table[data-grid] th.is-sortable { cursor: pointer; padding-right: 1.5em; }
+table[data-grid] th.is-sortable:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+table[data-grid] th.is-sortable::after {
+  content: "";
+  position: absolute;
+  margin-left: 0.4em;
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-bottom: 5px solid var(--muted);
+  opacity: 0.4;
+  transform: translateY(-2px);
+}
+table[data-grid] th.is-sorted::after { opacity: 1; border-bottom-color: var(--accent); }
+table[data-grid] th.is-sorted-desc::after { border-bottom: none; border-top: 5px solid var(--accent); transform: translateY(4px); }
+.grid-col-resizer { position: absolute; top: 0; right: -3px; width: 7px; height: 100%; cursor: col-resize; touch-action: none; z-index: 2; }
+.grid-col-resizer:hover, .grid-col-resizer:active { background: color-mix(in srgb, var(--accent) 45%, transparent); }
+
 .badge { display: inline-flex; align-items: center; gap: 6px; min-height: 22px; padding: 2px 7px; border: 1px solid var(--line-2); border-radius: var(--r-1); color: var(--text); background: var(--surface-2); font-size: 12px; white-space: nowrap; }
 .badge.ok { border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); color: var(--ok); }
 .badge.warn { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); color: var(--warn); }

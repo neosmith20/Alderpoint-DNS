@@ -386,10 +386,10 @@
       </div>
       ${recent.degraded ? `<div class="alert warn">Analytics degraded: ${esc(recent.degraded_reason || "query data unavailable")}. DNS status is reported separately.</div>` : ""}
       <div class="grid two">
-        <section class="panel"><div class="panel__head"><h2>Top Domains</h2><span class="badge ${top.degraded ? "warn" : "ok"}">${top.degraded ? "degraded" : "live"}</span></div><div class="panel__body">${chart(bars, max)}${tableFromRows(top.rows || [], 6, top.columns)}</div></section>
+        <section class="panel"><div class="panel__head"><h2>Top Domains</h2><span class="badge ${top.degraded ? "warn" : "ok"}">${top.degraded ? "degraded" : "live"}</span></div><div class="panel__body">${chart(bars, max)}${tableFromRows(top.rows || [], 6, top.columns, "dashboard-top-domains")}</div></section>
         <section class="panel"><div class="panel__head"><h2>Runtime Components</h2></div><div class="panel__body">${componentList(c.health.components || {})}</div></section>
         <section class="panel"><div class="panel__head"><h2>Clients</h2><button class="link" data-route="clients">Manage</button></div><div class="panel__body">${clientMini(clients.clients || [], observed.items || observed.observed_clients || observed.clients || [])}</div></section>
-        <section class="panel"><div class="panel__head"><h2>Upstreams</h2></div><div class="panel__body">${upstreams.upstreams?.length ? tableFromRows(upstreams.upstreams, 5) : `<div class="empty">No upstream profiles configured.</div>`}</div></section>
+        <section class="panel"><div class="panel__head"><h2>Upstreams</h2></div><div class="panel__body">${upstreams.upstreams?.length ? tableFromRows(upstreams.upstreams, 5, undefined, "dashboard-upstreams") : `<div class="empty">No upstream profiles configured.</div>`}</div></section>
       </div>`);
   }
 
@@ -410,14 +410,20 @@
   // a list of plain arrays, exactly what a positional analytics row is.
   // Named analytics rows are zipped into real objects here, once, rather
   // than asking every caller to guess the row shape.
-  function tableFromRows(rows, limit, columns) {
+  // ``gridId`` opts this table into the shared sortable/resizable grid
+  // (data-grid.js) with a stable per-page identity so column widths and
+  // sort choice persist across navigation/reload -- see docs/v2/v2-roadmap.md
+  // "Data-grid requirements". Callers that render genuinely non-tabular
+  // 1-row status blobs (a single TLS/node-identity object, etc.) omit it.
+  function tableFromRows(rows, limit, columns, gridId) {
     let list = rows.slice(0, limit || 50);
     if (columns && columns.length) {
       list = list.map((r) => Object.fromEntries(columns.map((c, i) => [c, r[i]])));
     }
     if (!list.length) return `<div class="empty">No records.</div>`;
     const cols = Object.keys(list[0]).slice(0, 8);
-    return `<div class="table-wrap"><table><thead><tr>${cols.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>${list.map((r) => `<tr>${cols.map((c) => `<td class="truncate" title="${esc(r[c])}">${pretty(r[c])}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
+    const gridAttrs = gridId ? ` data-grid data-grid-id="${esc(gridId)}"` : "";
+    return `<div class="table-wrap"><table${gridAttrs}><thead><tr>${cols.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>${list.map((r) => `<tr>${cols.map((c) => `<td class="truncate" title="${esc(r[c])}">${pretty(r[c])}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
   }
 
   // Owner-reported finding, priority 3 of the second beta-rescue pass: shows
@@ -434,7 +440,7 @@
     const managedRows = managed.slice(0, 5).map((c) => `<tr><td><span class="badge ok">managed</span></td><td>${esc(c.name)}</td><td>${(c.identifiers || []).map((i) => `<span class="badge">${esc(i.value)}</span>`).join(" ") || '<span class="muted">none</span>'}</td><td></td></tr>`).join("");
     const observedRows = observed.slice(0, 5).filter((o) => !o.managed_client_id).map((o) => `<tr><td><span class="badge inherit">observed</span></td><td class="mono">${esc(o.hostname_candidate || o.source_ip)}</td><td class="mono">${esc(o.source_ip)}<span class="muted"> -- ${esc(o.query_count || o.observation_count || 0)} queries</span></td><td><button data-promote="${esc(o.source_ip)}">Promote</button></td></tr>`).join("");
     if (!managedRows && !observedRows) return `<div class="empty">No managed clients, and no DNS activity observed yet.</div>`;
-    return `<div class="table-wrap"><table><thead><tr><th>State</th><th>Name / hostname</th><th>Identifier</th><th></th></tr></thead><tbody>${managedRows}${observedRows}</tbody></table></div>`;
+    return `<div class="table-wrap"><table data-grid data-grid-id="dashboard-clients"><thead><tr><th>State</th><th>Name / hostname</th><th>Identifier</th><th data-no-sort></th></tr></thead><tbody>${managedRows}${observedRows}</tbody></table></div>`;
   }
 
   async function analytics() {
@@ -446,8 +452,8 @@
       <button data-refresh>Refresh</button>`, `
       ${recent.degraded ? `<div class="alert warn">Recent query log degraded: ${esc(recent.degraded_reason || "unavailable")}</div>` : ""}
       <div class="grid two">
-        <section class="panel"><div class="panel__head"><h2>Recent Queries</h2><span class="badge">${recent.rows.length} rows</span></div><div class="panel__body">${queryFilters()}<div id="query-active">${activeFilters(recent.filters || {})}</div><div id="query-results">${tableFromRows(recent.rows || [], 100, recent.columns)}</div></div></section>
-        <section class="panel"><div class="panel__head"><h2>Top Domains</h2></div><div class="panel__body">${tableFromRows(top.rows || [], 30, top.columns)}</div></section>
+        <section class="panel"><div class="panel__head"><h2>Recent Queries</h2><span class="badge">${recent.rows.length} rows</span></div><div class="panel__body">${queryFilters()}<div id="query-active">${activeFilters(recent.filters || {})}</div><div id="query-results">${tableFromRows(recent.rows || [], 100, recent.columns, "query-log-results")}</div></div></section>
+        <section class="panel"><div class="panel__head"><h2>Top Domains</h2></div><div class="panel__body">${tableFromRows(top.rows || [], 30, top.columns, "query-log-top-domains")}</div></section>
       </div>`);
   }
 
@@ -520,13 +526,13 @@
 
   function observedTable(items) {
     if (!items.length) return `<div class="empty">No observed clients yet. Real DNS packets populate this asynchronously.</div>`;
-    return `<div class="table-wrap"><table><thead><tr><th>IP</th><th>Hostname</th><th>First / Last seen</th><th>Queries</th><th>Association</th><th>Actions</th></tr></thead><tbody>${items.map((o) => `
+    return `<div class="table-wrap"><table data-grid data-grid-id="observed-clients"><thead><tr><th>IP</th><th>Hostname</th><th>First / Last seen</th><th>Queries</th><th>Association</th><th data-no-sort>Actions</th></tr></thead><tbody>${items.map((o) => `
       <tr><td class="mono">${esc(o.source_ip)}</td><td>${esc(o.hostname_candidate || "")}<br><span class="muted">${esc(o.hostname_source || "")}</span></td><td>${esc(o.first_seen || "")}<br>${esc(o.last_seen || "")}</td><td>${esc(o.query_count || o.observation_count || 0)}</td><td>${o.managed_client_id ? `<span class="badge ok">client ${esc(o.managed_client_id)}</span>` : `<span class="badge inherit">unmanaged</span>`}</td><td class="field-row"><button data-promote="${esc(o.source_ip)}">Promote</button><button class="danger" data-forget="${esc(o.source_ip)}">Forget</button></td></tr>`).join("")}</tbody></table></div>`;
   }
 
   function managedTable(items) {
     if (!items.length) return `<div class="empty">No managed clients.</div>`;
-    return `<div class="table-wrap"><table><thead><tr><th>ID</th><th>Name</th><th>Identifiers</th><th>Groups</th><th>Policy</th><th>Actions</th></tr></thead><tbody>${items.map((c) => `
+    return `<div class="table-wrap"><table data-grid data-grid-id="managed-clients"><thead><tr><th>ID</th><th>Name</th><th>Identifiers</th><th>Groups</th><th>Policy</th><th data-no-sort>Actions</th></tr></thead><tbody>${items.map((c) => `
       <tr><td>${c.id}</td><td>${esc(c.name)}<br><span class="muted">${esc(c.description)}</span></td><td>${(c.identifiers || []).map((i) => `<span class="badge">${esc(i.kind)} ${esc(i.value)}</span>`).join(" ")}</td><td>${(c.groups || []).map((g) => `<span class="badge info">${esc(g.name)}</span>`).join(" ")}</td><td>${policySummary(c.policy)}</td><td><button data-explain-client="${c.id}">Explain</button></td></tr>`).join("")}</tbody></table></div>`;
   }
 
@@ -610,8 +616,8 @@
       <div class="grid two">
         <section class="panel"><div class="panel__head"><h2>Global Answer Policy</h2></div><div class="panel__body">${policyEditor("global", "singleton", global.policy)}</div></section>
         <section class="panel"><div class="panel__head"><h2>Service Catalog</h2></div><div class="panel__body">${serviceForm()}${serviceTable(services.services)}</div></section>
-        <section class="panel"><div class="panel__head"><h2>Service Rulesets</h2></div><div class="panel__body">${rulesetForm(services.services)}${tableFromRows(rulesets.rulesets, 20)}</div></section>
-        <section class="panel"><div class="panel__head"><h2>Schedules</h2></div><div class="panel__body">${scheduleForm()}${tableFromRows(schedules.schedules, 20)}</div></section>
+        <section class="panel"><div class="panel__head"><h2>Service Rulesets</h2></div><div class="panel__body">${rulesetForm(services.services)}${tableFromRows(rulesets.rulesets, 20, undefined, "filtering-rulesets")}</div></section>
+        <section class="panel"><div class="panel__head"><h2>Schedules</h2></div><div class="panel__body">${scheduleForm()}${tableFromRows(schedules.schedules, 20, undefined, "filtering-schedules")}</div></section>
       </div>`);
   }
 
@@ -621,7 +627,7 @@
 
   function serviceTable(services) {
     if (!services.length) return `<div class="empty">No service definitions.</div>`;
-    return `<div style="margin-top:12px">${tableFromRows(services, 50)}</div>`;
+    return `<div style="margin-top:12px">${tableFromRows(services, 50, undefined, "filtering-services")}</div>`;
   }
 
   function rulesetForm(services) {
@@ -636,8 +642,8 @@
     const [ups, routes] = await Promise.all([api("/api/upstreams"), api("/api/domain-routing")]);
     return page("Upstreams / Routing", "Plain, DoT, and DoH profiles with explicit routing rules. DoH requires TLS hostname validation.", "", `
       <div class="grid two">
-        <section class="panel"><div class="panel__head"><h2>Upstream Profiles</h2></div><div class="panel__body">${upstreamForm()}${tableFromRows(ups.upstreams, 50)}</div></section>
-        <section class="panel"><div class="panel__head"><h2>Domain Routes</h2></div><div class="panel__body">${routeForm(ups.upstreams)}${tableFromRows(routes.routes, 50)}</div></section>
+        <section class="panel"><div class="panel__head"><h2>Upstream Profiles</h2></div><div class="panel__body">${upstreamForm()}${tableFromRows(ups.upstreams, 50, undefined, "upstream-profiles")}</div></section>
+        <section class="panel"><div class="panel__head"><h2>Domain Routes</h2></div><div class="panel__body">${routeForm(ups.upstreams)}${tableFromRows(routes.routes, 50, undefined, "upstream-domain-routes")}</div></section>
       </div>`);
   }
 
@@ -657,7 +663,7 @@
   async function localdns() {
     const records = await api("/api/local-dns");
     return page("Local DNS", "Bounded Local DNS records with backend validation and runtime promotion.", "", `
-      <div class="split"><section class="panel"><div class="panel__head"><h2>Records</h2></div><div class="panel__body">${tableFromRows(records.records, 200)}</div></section><aside class="panel drawer"><div class="panel__head"><h2>Add Record</h2></div><div class="panel__body">${localDnsForm()}</div></aside></div>`);
+      <div class="split"><section class="panel"><div class="panel__head"><h2>Records</h2></div><div class="panel__body">${tableFromRows(records.records, 200, undefined, "local-dns-records")}</div></section><aside class="panel drawer"><div class="panel__head"><h2>Add Record</h2></div><div class="panel__body">${localDnsForm()}</div></aside></div>`);
   }
 
   function localDnsForm() {
@@ -737,7 +743,7 @@
   async function notifications() {
     const data = await api("/api/notifications");
     return page("Notifications", "Provider secrets are write-only and redacted once saved.", "", `
-      <section class="panel"><div class="panel__head"><h2>Providers</h2></div><div class="panel__body">${tableFromRows(data.providers || [], 50)}${notificationForm()}</div></section>`);
+      <section class="panel"><div class="panel__head"><h2>Providers</h2></div><div class="panel__body">${tableFromRows(data.providers || [], 50, undefined, "notification-providers")}${notificationForm()}</div></section>`);
   }
 
   function dnsTransportForm(t) {
@@ -827,7 +833,7 @@
       </tr>`).join("");
     return page("Blocklists", "Subscribed, refreshable domain-block feeds. A failed refresh keeps the previous valid list enforced -- it never clears filtering on error. Refreshed automatically every 24h, or on demand below.", `<button data-refresh>Refresh page</button>`, `
       <section class="panel"><div class="panel__head"><h2>Subscriptions</h2></div><div class="panel__body">
-        ${(data.subscriptions || []).length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>URL</th><th>Enabled</th><th>Last status</th><th>Rules</th><th>Last refresh</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty">No blocklist subscriptions yet.</div>`}
+        ${(data.subscriptions || []).length ? `<div class="table-wrap"><table data-grid data-grid-id="blocklist-subscriptions"><thead><tr><th>Name</th><th>URL</th><th>Enabled</th><th>Last status</th><th>Rules</th><th>Last refresh</th><th data-no-sort>Actions</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty">No blocklist subscriptions yet.</div>`}
       </div></section>
       <section class="panel"><div class="panel__head"><h2>Add Subscription</h2></div><div class="panel__body">
         <form data-form="blocklist-create"><div class="form-grid">
@@ -1446,7 +1452,7 @@
       const activeTarget = document.getElementById("query-active");
       const resultsTarget = document.getElementById("query-results");
       if (activeTarget) activeTarget.innerHTML = activeFilters(res.filters || {});
-      if (resultsTarget) resultsTarget.innerHTML = tableFromRows(res.rows || [], Number(body.limit || 100), res.columns);
+      if (resultsTarget) resultsTarget.innerHTML = tableFromRows(res.rows || [], Number(body.limit || 100), res.columns, "query-log-results");
       return "skip-reload";
     } else if (type === "service") {
       // No service_id from the form -- the backend generates a stable id
