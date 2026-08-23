@@ -83,7 +83,7 @@ def test_app_js_source_has_no_syntax_errors_and_defines_shared_grid_ids():
 def test_every_expected_table_call_site_opts_into_shared_grid():
     source = (UI_DIR / "app.js").read_text()
     for grid_id in EXPECTED_GRID_IDS:
-        pattern = re.compile(r'data-grid[^>]*data-grid-id="%s"|tableFromRows\([^)]*"%s"\)' % (re.escape(grid_id), re.escape(grid_id)))
+        pattern = re.compile(r'data-grid[^>]*data-grid-id="%s"|tableFromRows\([^)]*"%s"' % (re.escape(grid_id), re.escape(grid_id)))
         assert pattern.search(source), f"no data-grid wiring found for {grid_id!r}"
 
 

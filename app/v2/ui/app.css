@@ -93,7 +93,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .nav button:hover { background: var(--surface-2); color: var(--text); }
 .nav button.active { background: color-mix(in srgb, var(--accent) 12%, var(--surface)); color: var(--text); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); box-shadow: inset 3px 0 0 var(--accent); }
 .nav button.nav-top { font-weight: 700; margin-bottom: var(--s-3); }
-.nav .glyph { width: 1.8ch; font-family: var(--mono); color: var(--accent-2); flex: 0 0 auto; }
+.nav .glyph { width: 2.6ch; font-family: var(--mono); color: var(--accent-2); flex: 0 0 auto; text-align: center; }
 .nav-section { margin: var(--s-2) 0 0; }
 .nav .nav-section__toggle { min-height: 34px; padding: 6px 10px; color: var(--faint); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; margin-bottom: 0; }
 .nav .nav-section__toggle:hover { color: var(--text); }
@@ -101,6 +101,19 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .nav-section__label { flex: 1 1 auto; }
 .nav-section__chevron { flex: 0 0 auto; font-size: 10px; color: var(--faint); }
 .nav-section__panel { display: grid; gap: 0; margin: var(--s-1) 0 var(--s-2); }
+/* Real defect found live via the Chromium harness (getBoundingClientRect/
+   offsetParent checks, not source reading): the `display: grid` rule above
+   is an author-stylesheet class selector, which the cascade always ranks
+   above the browser's own default `[hidden] { display: none }` UA-
+   stylesheet rule regardless of specificity or source order (author origin
+   beats user-agent origin). A closed section's `hidden` attribute (set by
+   app.js's own sectionToggle handler) therefore never actually hid
+   anything in expanded mode -- every section's children were always
+   visible on screen no matter what aria-expanded/the chevron claimed. This
+   plausibly explains part of the real owner-reported "submenu behavior is
+   not trustworthy" finding. An explicit `[hidden]` override, with strictly
+   higher specificity than the bare class rule, is required. */
+.nav-section__panel[hidden] { display: none; }
 .nav-subitem { padding-left: 1.8ch; }
 .side-footer { padding: var(--s-3); border-top: 1px solid var(--line); display: grid; gap: var(--s-2); }
 
@@ -114,12 +127,32 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .app-shell.nav-collapsed .brand span:not(.collapse-toggle), .app-shell.nav-collapsed .brand small { display: none; }
 .app-shell.nav-collapsed .brand { justify-content: center; padding: var(--s-4) var(--s-2); }
 .app-shell.nav-collapsed .collapse-toggle { margin-left: 0; }
-/* Collapsed icon-rail: section headers/chevrons hide and every child
-   item's panel is forced open and shown flat (icons only) -- there is no
-   room for a text disclosure header at 60px, and a flyout-on-hover
-   affordance is intentionally deferred rather than shipped half-built. */
-.app-shell.nav-collapsed .nav .nav-section__toggle { display: none; }
-.app-shell.nav-collapsed .nav .nav-section__panel { display: grid !important; }
+/* Collapsed icon-rail: each section keeps its own toggle button, now shown
+   as a 2-letter glyph identifying the group (DN/SC/OP/SY) instead of the
+   generic "-"/"*" every section previously shared. Its panel is a real
+   flyout -- opened via `.is-flyout-open` (see wire()'s sectionToggle
+   branch in app.js), positioned beside the rail with full text labels
+   restored, closed on outside click/Escape/route selection. This replaces
+   the prior "every child forced open and shown flat, icon-only, no
+   grouping" collapsed behavior. */
+.app-shell.nav-collapsed .nav-section { position: relative; }
+.app-shell.nav-collapsed .nav .nav-section__panel { display: none; }
+.app-shell.nav-collapsed .nav-section.is-flyout-open .nav-section__panel {
+  display: grid;
+  position: absolute;
+  top: 0;
+  left: 100%;
+  margin-left: 8px;
+  min-width: 200px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  padding: 6px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .4);
+  z-index: 40;
+}
+.app-shell.nav-collapsed .nav-section.is-flyout-open .nav-section__panel button { justify-content: flex-start; }
+.app-shell.nav-collapsed .nav-section.is-flyout-open .nav-section__panel button span:not(.glyph) { display: inline; }
 .app-shell.nav-collapsed .nav button span:not(.glyph) { display: none; }
 .app-shell.nav-collapsed .nav button { justify-content: center; }
 .app-shell.nav-collapsed .side-footer button span:not(.glyph) { display: none; }
@@ -184,7 +217,13 @@ table[data-grid] th.is-sortable::after {
 }
 table[data-grid] th.is-sorted::after { opacity: 1; border-bottom-color: var(--accent); }
 table[data-grid] th.is-sorted-desc::after { border-bottom: none; border-top: 5px solid var(--accent); transform: translateY(4px); }
-.grid-col-resizer { position: absolute; top: 0; right: -3px; width: 7px; height: 100%; cursor: col-resize; touch-action: none; z-index: 2; }
+/* Kept fully inside the header's own box (not straddling the column
+   border) -- real defect found live via CDP mouse-coordinate hit-testing:
+   straddling the border let the next column's <th> (a later DOM sibling,
+   painted on top at an overlapping pixel) win hit-testing right at the
+   boundary, making the handle unreachable by a real pointer at its own
+   reported geometry. */
+.grid-col-resizer { position: absolute; top: 0; right: 0; width: 6px; height: 100%; cursor: col-resize; touch-action: none; z-index: 2; }
 .grid-col-resizer:hover, .grid-col-resizer:active { background: color-mix(in srgb, var(--accent) 45%, transparent); }
 
 .badge { display: inline-flex; align-items: center; gap: 6px; min-height: 22px; padding: 2px 7px; border: 1px solid var(--line-2); border-radius: var(--r-1); color: var(--text); background: var(--surface-2); font-size: 12px; white-space: nowrap; }

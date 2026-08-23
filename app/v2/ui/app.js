@@ -51,6 +51,12 @@
     ["System", "logs", "Logs", "G"],
   ];
   const GROUP_ORDER = ["DNS", "Security", "Operations", "System"];
+  // Distinct 2-letter glyphs so the collapsed icon-rail can identify which
+  // section is which -- the prior "*"/"-" glyph was identical across every
+  // inactive section, giving the collapsed rail no way to tell DNS from
+  // Security from Operations from System (real owner-reported finding:
+  // collapsed navigation not properly usable).
+  const GROUP_GLYPH = { DNS: "DN", Security: "SC", Operations: "OP", System: "SY" };
 
   // Real per-section expand/collapse state (a real owner-reported finding, priority
   // 1 of the beta-rescue brief: the sidebar previously rendered
@@ -289,8 +295,8 @@
               const panelId = `nav-panel-${group.toLowerCase()}`;
               return `
               <section class="nav-section${activeInGroup ? " is-active" : ""}" data-nav-section="${group}">
-                <button type="button" class="nav-section__toggle" data-nav-section-toggle aria-expanded="${open}" aria-controls="${panelId}" ${activeInGroup ? 'aria-current="true"' : ""}>
-                  <span class="glyph">${activeInGroup ? "*" : "-"}</span>
+                <button type="button" class="nav-section__toggle" data-nav-section-toggle aria-expanded="${open}" aria-controls="${panelId}" aria-label="${esc(group)}" title="${esc(group)}" ${activeInGroup ? 'aria-current="true"' : ""}>
+                  <span class="glyph">${GROUP_GLYPH[group] || group.slice(0, 2).toUpperCase()}</span>
                   <span class="nav-section__label">${esc(group)}</span>
                   <span class="nav-section__chevron" aria-hidden="true">${open ? "▾" : "▸"}</span>
                 </button>
@@ -415,13 +421,23 @@
   // sort choice persist across navigation/reload -- see docs/v2/v2-roadmap.md
   // "Data-grid requirements". Callers that render genuinely non-tabular
   // 1-row status blobs (a single TLS/node-identity object, etc.) omit it.
-  function tableFromRows(rows, limit, columns, gridId) {
+  // ``hideColumns`` drops raw internal-id fields from prominent table
+  // presentation when a friendlier column (e.g. "name") already appears
+  // in the same row -- see docs/v2/v2-roadmap.md Object Identity
+  // requirements. Only pass a key here when the row still carries a
+  // genuinely friendly identity elsewhere; a key with no friendlier
+  // sibling (e.g. domain-routing rows, which carry an upstream_profile_id
+  // with no companion upstream name in the same payload) must stay
+  // visible rather than becoming unidentifiable.
+  function tableFromRows(rows, limit, columns, gridId, hideColumns) {
     let list = rows.slice(0, limit || 50);
     if (columns && columns.length) {
       list = list.map((r) => Object.fromEntries(columns.map((c, i) => [c, r[i]])));
     }
     if (!list.length) return `<div class="empty">No records.</div>`;
-    const cols = Object.keys(list[0]).slice(0, 8);
+    let cols = Object.keys(list[0]).slice(0, 8 + (hideColumns || []).length);
+    if (hideColumns && hideColumns.length) cols = cols.filter((c) => !hideColumns.includes(c));
+    cols = cols.slice(0, 8);
     const gridAttrs = gridId ? ` data-grid data-grid-id="${esc(gridId)}"` : "";
     return `<div class="table-wrap"><table${gridAttrs}><thead><tr>${cols.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>${list.map((r) => `<tr>${cols.map((c) => `<td class="truncate" title="${esc(r[c])}">${pretty(r[c])}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
   }
@@ -530,10 +546,18 @@
       <tr><td class="mono">${esc(o.source_ip)}</td><td>${esc(o.hostname_candidate || "")}<br><span class="muted">${esc(o.hostname_source || "")}</span></td><td>${esc(o.first_seen || "")}<br>${esc(o.last_seen || "")}</td><td>${esc(o.query_count || o.observation_count || 0)}</td><td>${o.managed_client_id ? `<span class="badge ok">client ${esc(o.managed_client_id)}</span>` : `<span class="badge inherit">unmanaged</span>`}</td><td class="field-row"><button data-promote="${esc(o.source_ip)}">Promote</button><button class="danger" data-forget="${esc(o.source_ip)}">Forget</button></td></tr>`).join("")}</tbody></table></div>`;
   }
 
+  // Friendly-selector/internal-ID cleanup (workstream 1C): the immutable
+  // database primary key `c.id` used to be this table's first, most
+  // prominent column. Name is the client's real friendly identity here --
+  // the id is still used internally (e.g. the Explain button's own
+  // data-explain-client) but no longer needs to be shown in a normal
+  // operator table; see Object Identity requirements in
+  // docs/v2/v2-roadmap.md ("Internal IDs remain internal... Advanced/
+  // details views may expose immutable IDs when genuinely useful").
   function managedTable(items) {
     if (!items.length) return `<div class="empty">No managed clients.</div>`;
-    return `<div class="table-wrap"><table data-grid data-grid-id="managed-clients"><thead><tr><th>ID</th><th>Name</th><th>Identifiers</th><th>Groups</th><th>Policy</th><th data-no-sort>Actions</th></tr></thead><tbody>${items.map((c) => `
-      <tr><td>${c.id}</td><td>${esc(c.name)}<br><span class="muted">${esc(c.description)}</span></td><td>${(c.identifiers || []).map((i) => `<span class="badge">${esc(i.kind)} ${esc(i.value)}</span>`).join(" ")}</td><td>${(c.groups || []).map((g) => `<span class="badge info">${esc(g.name)}</span>`).join(" ")}</td><td>${policySummary(c.policy)}</td><td><button data-explain-client="${c.id}">Explain</button></td></tr>`).join("")}</tbody></table></div>`;
+    return `<div class="table-wrap"><table data-grid data-grid-id="managed-clients"><thead><tr><th>Name</th><th>Identifiers</th><th>Groups</th><th>Policy</th><th data-no-sort>Actions</th></tr></thead><tbody>${items.map((c) => `
+      <tr><td>${esc(c.name)}<br><span class="muted">${esc(c.description)}</span></td><td>${(c.identifiers || []).map((i) => `<span class="badge">${esc(i.kind)} ${esc(i.value)}</span>`).join(" ")}</td><td>${(c.groups || []).map((g) => `<span class="badge info">${esc(g.name)}</span>`).join(" ")}</td><td>${policySummary(c.policy)}</td><td><button data-explain-client="${c.id}">Explain</button></td></tr>`).join("")}</tbody></table></div>`;
   }
 
   function clientForm(groups) {
@@ -603,7 +627,7 @@
 
   function explainForm(clients) {
     return `<form data-form="explain">
-      <label>Client<select name="client_id">${clients.map((c) => `<option value="${c.id}">${esc(c.name)} (#${c.id})</option>`).join("")}</select></label>
+      <label>Client<select name="client_id">${clients.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join("")}</select></label>
       <label>Client IP<input name="client_ip" placeholder="optional"></label>
       <button class="primary">Explain effective policy</button>
       <div id="explain-result" class="alert">Select a client to inspect global, network, group, client, schedule, filtering, upstream, ECS, and cache contributions.</div>
@@ -642,7 +666,7 @@
     const [ups, routes] = await Promise.all([api("/api/upstreams"), api("/api/domain-routing")]);
     return page("Upstreams / Routing", "Plain, DoT, and DoH profiles with explicit routing rules. DoH requires TLS hostname validation.", "", `
       <div class="grid two">
-        <section class="panel"><div class="panel__head"><h2>Upstream Profiles</h2></div><div class="panel__body">${upstreamForm()}${tableFromRows(ups.upstreams, 50, undefined, "upstream-profiles")}</div></section>
+        <section class="panel"><div class="panel__head"><h2>Upstream Profiles</h2></div><div class="panel__body">${upstreamForm()}${tableFromRows(ups.upstreams, 50, undefined, "upstream-profiles", ["upstream_profile_id"])}</div></section>
         <section class="panel"><div class="panel__head"><h2>Domain Routes</h2></div><div class="panel__body">${routeForm(ups.upstreams)}${tableFromRows(routes.routes, 50, undefined, "upstream-domain-routes")}</div></section>
       </div>`);
   }
@@ -663,7 +687,7 @@
   async function localdns() {
     const records = await api("/api/local-dns");
     return page("Local DNS", "Bounded Local DNS records with backend validation and runtime promotion.", "", `
-      <div class="split"><section class="panel"><div class="panel__head"><h2>Records</h2></div><div class="panel__body">${tableFromRows(records.records, 200, undefined, "local-dns-records")}</div></section><aside class="panel drawer"><div class="panel__head"><h2>Add Record</h2></div><div class="panel__body">${localDnsForm()}</div></aside></div>`);
+      <div class="split"><section class="panel"><div class="panel__head"><h2>Records</h2></div><div class="panel__body">${tableFromRows(records.records, 200, undefined, "local-dns-records", ["id"])}</div></section><aside class="panel drawer"><div class="panel__head"><h2>Add Record</h2></div><div class="panel__body">${localDnsForm()}</div></aside></div>`);
   }
 
   function localDnsForm() {
@@ -1257,7 +1281,16 @@
   function wire() {
     document.body.addEventListener("click", async (ev) => {
       const route = ev.target.closest("[data-route]");
-      if (route) { document.body.classList.remove("nav-open"); await loadPage(route.dataset.route); return; }
+      if (route) {
+        document.body.classList.remove("nav-open");
+        document.querySelectorAll(".nav-section.is-flyout-open").forEach((s) => {
+          s.classList.remove("is-flyout-open");
+          const t = s.querySelector("[data-nav-section-toggle]");
+          if (t) t.setAttribute("aria-expanded", "false");
+        });
+        await loadPage(route.dataset.route);
+        return;
+      }
       if (ev.target.closest("[data-action='menu']")) { document.body.classList.toggle("nav-open"); return; }
       if (ev.target.closest("[data-action='theme']")) { setTheme(state.theme === "dark" ? "light" : "dark"); renderShell(); await loadPage(state.route); return; }
       if (ev.target.closest("[data-action='collapse']")) { state.navCollapsed = !state.navCollapsed; localStorage.setItem("apdnsNavCollapsed", state.navCollapsed ? "1" : "0"); renderShell(); await loadPage(state.route); return; }
@@ -1265,9 +1298,46 @@
       if (sectionToggle) {
         const section = sectionToggle.closest("[data-nav-section]");
         const group = section && section.getAttribute("data-nav-section");
+        // In the collapsed icon-rail, a section's toggle opens/closes a
+        // transient flyout beside the rail rather than the persisted
+        // expanded-mode disclosure state -- switching collapse modes must
+        // not fight over the same stored preference, and only one flyout
+        // is open at a time (real owner-reported finding: collapsed
+        // navigation was not properly usable).
+        if (state.navCollapsed) {
+          const wasOpen = section.classList.contains("is-flyout-open");
+          document.querySelectorAll(".nav-section.is-flyout-open").forEach((s) => {
+            s.classList.remove("is-flyout-open");
+            const t = s.querySelector("[data-nav-section-toggle]");
+            if (t) t.setAttribute("aria-expanded", "false");
+          });
+          if (!wasOpen) {
+            section.classList.add("is-flyout-open");
+            sectionToggle.setAttribute("aria-expanded", "true");
+          }
+          return;
+        }
+        // Real defect found live via the Chromium harness (not source
+        // inspection, per the corrected contract): this used to call
+        // renderShell(), which replaces #app's ENTIRE innerHTML --
+        // including the empty `<section id="page"></section>` shell
+        // markup -- and never re-ran loadPage() afterward the way the
+        // theme/collapse toggles above do. A parent click in expanded
+        // mode therefore blanked whatever page was currently showing.
+        // (Depending on state.route's async fetch timing this could also
+        // show a genuinely wrong page's stale content mid-flight -- the
+        // owner-reported "parent click lands on Query Log" class of bug.)
+        // A section toggle only needs to open/close its own panel; it
+        // must never touch #page at all, so this now mutates exactly the
+        // DOM nodes involved -- the same direct-update approach loadPage()
+        // itself already uses to reveal the active route's section.
         const open = sectionToggle.getAttribute("aria-expanded") !== "true";
         if (group) setNavSectionOpen(group, open);
-        renderShell();
+        const panel = document.getElementById(sectionToggle.getAttribute("aria-controls"));
+        sectionToggle.setAttribute("aria-expanded", String(open));
+        if (panel) panel.hidden = !open;
+        const chevron = sectionToggle.querySelector(".nav-section__chevron");
+        if (chevron) chevron.textContent = open ? "▾" : "▸";
         return;
       }
       if (ev.target.closest("[data-action='logout']")) { await api("/api/logout", { method: "POST" }).catch(() => {}); state.csrf = ""; await boot(); return; }
@@ -1591,6 +1661,31 @@
       reader.readAsDataURL(file);
     });
   }
+
+  // Collapsed-rail flyout dismissal: a click outside the open flyout, or
+  // Escape, closes it. Kept separate from wire()'s single delegated click
+  // handler (rather than folded into an early-return branch there) so it
+  // runs regardless of which branch above handled the click, including
+  // clicks on ordinary page content that none of wire()'s specific
+  // `data-*` branches match.
+  document.addEventListener("click", (ev) => {
+    document.querySelectorAll(".nav-section.is-flyout-open").forEach((section) => {
+      if (section.contains(ev.target)) return;
+      section.classList.remove("is-flyout-open");
+      const toggle = section.querySelector("[data-nav-section-toggle]");
+      if (toggle) toggle.setAttribute("aria-expanded", "false");
+    });
+  });
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Escape") return;
+    const open = document.querySelectorAll(".nav-section.is-flyout-open");
+    if (!open.length) return;
+    open.forEach((section) => {
+      section.classList.remove("is-flyout-open");
+      const toggle = section.querySelector("[data-nav-section-toggle]");
+      if (toggle) toggle.setAttribute("aria-expanded", "false");
+    });
+  });
 
   boot();
 }());

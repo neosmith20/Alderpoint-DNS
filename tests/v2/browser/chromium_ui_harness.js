@@ -179,12 +179,22 @@ async function main() {
     const ws = await wsConnect(target.webSocketDebuggerUrl);
     let id = 0;
     const pending = new Map();
+    // Real browser console.error/console.warn calls, captured at the CDP
+    // level (Runtime.consoleAPICalled) rather than only via window.onerror
+    // -- an app that calls console.error() without throwing would
+    // otherwise go unnoticed by the existing uncaught-exception capture.
+    const consoleErrors = [];
     ws.onmessage = (data) => {
       const msg = JSON.parse(data);
       if (msg.id && pending.has(msg.id)) {
         const { resolve, reject } = pending.get(msg.id);
         pending.delete(msg.id);
         msg.error ? reject(new Error(JSON.stringify(msg.error))) : resolve(msg.result || {});
+        return;
+      }
+      if (msg.method === "Runtime.consoleAPICalled" && (msg.params.type === "error" || msg.params.type === "warning")) {
+        const text = (msg.params.args || []).map((a) => a.value ?? a.description ?? "").join(" ");
+        consoleErrors.push(`${msg.params.type}: ${text}`);
       }
     };
     function cdp(method, params = {}) {
@@ -277,6 +287,13 @@ async function main() {
     }
 
     await cdp("Page.enable");
+    // Explicit, generous viewport -- headless Chromium's own default
+    // (observed too narrow for this app's tables, causing real mouse
+    // coordinates for a column-resize drag to land outside the actual
+    // rendered viewport and hit-test as nothing at all) is otherwise
+    // whatever the binary happens to ship, not something this harness
+    // should depend on implicitly.
+    await cdp("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
     await cdp("Runtime.enable");
     await cdp("Page.navigate", { url: base + "/" });
     // Selector-based, not inner-text-based (real defect fixed here: this
@@ -431,6 +448,198 @@ async function main() {
     // actual client-side error instead of only a blind text-mismatch
     // timeout.
     await evalJs(`window.onerror = (msg) => { window.__harnessErrors = window.__harnessErrors || []; window.__harnessErrors.push(String(msg)); }; window.addEventListener('unhandledrejection', (e) => { window.__harnessErrors = window.__harnessErrors || []; window.__harnessErrors.push('unhandledrejection: ' + (e.reason && e.reason.stack || e.reason)); }); true`);
+
+    // ================================================================
+    // Workstream 1A: real-browser navigation proof against the actual V2
+    // SPA. Owner beta (RC51) observed: collapsed nav not properly usable,
+    // parent clicks sometimes landing on an unrelated page (e.g. Query
+    // Log), submenu behavior untrustworthy. Source inspection is not
+    // accepted evidence for this claim -- this reproduces (or disproves)
+    // each one against the real rendered app.
+    // ================================================================
+    async function isVisible(selector) {
+      return await evalJs(`(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && el.offsetParent !== null; })()`);
+    }
+    async function pageTitle() {
+      return await evalJs(`document.querySelector('.page-head h1') ? document.querySelector('.page-head h1').textContent : ""`);
+    }
+    async function pressKey(key, code, windowsVirtualKeyCode, text) {
+      // A real native default action (e.g. Enter/Space activating a
+      // focused <button>) only fires for a genuine "char" event carrying
+      // `text`, not from rawKeyDown/keyUp alone -- matching how Puppeteer
+      // itself synthesizes key presses. Verified against a live instance:
+      // rawKeyDown+keyUp alone silently did nothing to a focused button.
+      await cdp("Input.dispatchKeyEvent", { type: "rawKeyDown", key, code, windowsVirtualKeyCode, text });
+      if (text) await cdp("Input.dispatchKeyEvent", { type: "char", key, code, windowsVirtualKeyCode, text });
+      await cdp("Input.dispatchKeyEvent", { type: "keyUp", key, code, windowsVirtualKeyCode, text });
+    }
+    const consoleErrorsBeforeNav = consoleErrors.length;
+
+    if (await evalJs(`document.getElementById('app').classList.contains('nav-collapsed')`)) {
+      await evalJs(`document.querySelector('[data-action="collapse"]').click(); true`);
+      await waitFor(`!document.getElementById('app').classList.contains('nav-collapsed')`, "sidebar starts expanded");
+    }
+
+    // --- EXPANDED MODE: parent click contract ------------------------
+    // A parent (section toggle) must ONLY ever toggle its own submenu; it
+    // must never itself navigate anywhere -- the exact owner complaint was
+    // a parent click landing on Query Log.
+    await route("health"); // arbitrary starting page, deliberately outside the DNS group
+    for (const group of ["DNS", "Security", "Operations", "System"]) {
+      const sel = `.nav-section[data-nav-section="${group}"] [data-nav-section-toggle]`;
+      const panelSel = `.nav-section[data-nav-section="${group}"] .nav-section__panel`;
+      const before = await pageTitle();
+      const openBefore = await evalJs(`document.querySelector(${JSON.stringify(sel)}).getAttribute('aria-expanded') === 'true'`);
+      await evalJs(`document.querySelector(${JSON.stringify(sel)}).click(); true`);
+      await sleep(150);
+      const after = await pageTitle();
+      if (after !== before) throw new Error(`clicking the ${group} parent navigated from "${before}" to "${after}" -- parent click must only toggle its submenu`);
+      const openAfter = await evalJs(`document.querySelector(${JSON.stringify(sel)}).getAttribute('aria-expanded') === 'true'`);
+      if (openAfter === openBefore) throw new Error(`${group} parent toggle did not change aria-expanded`);
+      const panelVisible = await isVisible(panelSel);
+      if (panelVisible !== openAfter) throw new Error(`${group} panel visibility (${panelVisible}) does not match aria-expanded (${openAfter})`);
+      await evalJs(`document.querySelector(${JSON.stringify(sel)}).click(); true`);
+      await sleep(150);
+      const openRestored = await evalJs(`document.querySelector(${JSON.stringify(sel)}).getAttribute('aria-expanded') === 'true'`);
+      if (openRestored !== openBefore) throw new Error(`${group} parent did not return to its starting open/closed state after a second click`);
+    }
+    proof.push("expanded-parent-click-never-navigates");
+
+    // Repeated open/close, and a genuine (real-visible, not hidden-DOM)
+    // child click while open, landing on the correct route with correct
+    // active-parent/active-child state.
+    const dnsToggle = `.nav-section[data-nav-section="DNS"] [data-nav-section-toggle]`;
+    // Earlier navigation in this run (the pre-existing dashboard-navigation
+    // sweep above) leaves several sections already open -- the containing
+    // section auto-opens on every route visit, and nothing auto-closes a
+    // section just because navigation moved elsewhere. So don't assume a
+    // starting state: read it, and require 3 (odd) clicks to have flipped
+    // it, whichever direction that is.
+    const dnsOpenBeforeRepeat = await evalJs(`document.querySelector(${JSON.stringify(dnsToggle)}).getAttribute('aria-expanded') === 'true'`);
+    for (let i = 0; i < 3; i++) await evalJs(`document.querySelector(${JSON.stringify(dnsToggle)}).click(); true`);
+    await waitFor(`document.querySelector(${JSON.stringify(dnsToggle)}).getAttribute('aria-expanded') === ${JSON.stringify(String(!dnsOpenBeforeRepeat))}`, "DNS section flips open/closed after 3 (odd) repeated toggles");
+    if (!(await evalJs(`document.querySelector(${JSON.stringify(dnsToggle)}).getAttribute('aria-expanded') === 'true'`))) {
+      // Whichever state 3 clicks landed on, the rest of this test needs
+      // the section open to click a visible child -- one more click gets
+      // there deterministically.
+      await evalJs(`document.querySelector(${JSON.stringify(dnsToggle)}).click(); true`);
+      await waitFor(`document.querySelector(${JSON.stringify(dnsToggle)}).getAttribute('aria-expanded') === 'true'`, "DNS section open after the extra toggle");
+    }
+    if (!(await isVisible(`[data-route="localdns"]`))) throw new Error("Local DNS child not visible after opening the DNS section");
+    await evalJs(`document.querySelector('[data-route="localdns"]').click(); true`);
+    await waitFor(`document.querySelector('.page-head h1') && document.querySelector('.page-head h1').textContent === "Local DNS"`, "child navigation from open submenu");
+    const dnsSectionActive = await evalJs(`document.querySelector('.nav-section[data-nav-section="DNS"]').classList.contains('is-active')`);
+    const localDnsActive = await evalJs(`document.querySelector('[data-route="localdns"]').classList.contains('active')`);
+    if (!dnsSectionActive || !localDnsActive) throw new Error(`active state wrong after child navigation: section active=${dnsSectionActive} child active=${localDnsActive}`);
+    proof.push("expanded-submenu-repeated-toggle-and-child-navigation");
+
+    // Direct route load / refresh-on-a-child-route: the section
+    // containing the active route must present as open/active even though
+    // no click ever happened in this page load.
+    await cdp("Page.navigate", { url: base + "/ui/blocklists" });
+    await waitFor(`document.querySelector('.page-head h1') && document.querySelector('.page-head h1').textContent === "Blocklists"`, "direct route load");
+    await waitFor(`document.querySelector('.nav-section[data-nav-section="Security"]') && document.querySelector('.nav-section[data-nav-section="Security"]').classList.contains('is-active')`, "direct-loaded route's section marked active");
+    if (!(await isVisible(`[data-route="blocklists"]`))) throw new Error("direct-loaded child route not visible in its (auto-opened) section");
+    proof.push("direct-route-load-opens-containing-section");
+
+    // --- KEYBOARD ------------------------------------------------------
+    await evalJs(`document.querySelector(${JSON.stringify(dnsToggle)}).focus(); true`);
+    if (!(await evalJs(`document.activeElement === document.querySelector(${JSON.stringify(dnsToggle)})`))) throw new Error("DNS section toggle is not a focusable element");
+    const openBeforeEnter = await evalJs(`document.querySelector(${JSON.stringify(dnsToggle)}).getAttribute('aria-expanded') === 'true'`);
+    await pressKey("Enter", "Enter", 13, "\r");
+    await sleep(200);
+    const openAfterEnter = await evalJs(`document.querySelector(${JSON.stringify(dnsToggle)}).getAttribute('aria-expanded') === 'true'`);
+    if (openAfterEnter === openBeforeEnter) throw new Error("Enter on a focused section toggle did not activate it");
+    proof.push("keyboard-enter-activates-section-toggle");
+
+    // --- COLLAPSED MODE --------------------------------------------------
+    await route("dashboard");
+    await evalJs(`document.querySelector('[data-action="collapse"]').click(); true`);
+    await waitFor(`document.getElementById('app').classList.contains('nav-collapsed')`, "sidebar collapsed");
+    // The collapse toggle's own click handler re-runs loadPage(state.route)
+    // after renderShell() (so the page content survives the shell
+    // rebuild); that fetch is still async after the CSS class above has
+    // already flipped, so wait for the page to actually settle back on
+    // "Dashboard" (not the transient "Loading" placeholder) before using
+    // its title as a before/after baseline below.
+    await waitFor(`document.querySelector('.page-head h1') && document.querySelector('.page-head h1').textContent === "Dashboard"`, "dashboard settled after collapse toggle");
+
+    for (const group of ["DNS", "Security", "Operations", "System"]) {
+      const sel = `.nav-section[data-nav-section="${group}"] [data-nav-section-toggle]`;
+      if (!(await isVisible(sel))) throw new Error(`${group} parent toggle not visible/discoverable in collapsed mode`);
+    }
+    proof.push("collapsed-parents-discoverable");
+
+    const beforeCollapsedClickTitle = await pageTitle();
+    await evalJs(`document.querySelector(${JSON.stringify(dnsToggle)}).click(); true`);
+    await sleep(200);
+    if ((await pageTitle()) !== beforeCollapsedClickTitle) throw new Error("clicking a parent in collapsed mode navigated away instead of opening a flyout");
+    if (!(await evalJs(`document.querySelector('.nav-section[data-nav-section="DNS"]').classList.contains('is-flyout-open')`))) throw new Error("collapsed parent click did not open its flyout");
+    if (!(await isVisible(`[data-route="localdns"]`))) throw new Error("collapsed flyout child not visible");
+    const childLabelVisible = await evalJs(`(() => { const btn = document.querySelector('[data-route="localdns"]'); const label = btn.querySelector('span:not(.glyph)'); return !!label && getComputedStyle(label).display !== 'none'; })()`);
+    if (!childLabelVisible) throw new Error("collapsed flyout child text label is not actually shown");
+    proof.push("collapsed-parent-click-opens-flyout-not-navigation");
+
+    const securityToggle = `.nav-section[data-nav-section="Security"] [data-nav-section-toggle]`;
+    await evalJs(`document.querySelector(${JSON.stringify(securityToggle)}).click(); true`);
+    await sleep(200);
+    const dnsStillOpen = await evalJs(`document.querySelector('.nav-section[data-nav-section="DNS"]').classList.contains('is-flyout-open')`);
+    const securityOpen = await evalJs(`document.querySelector('.nav-section[data-nav-section="Security"]').classList.contains('is-flyout-open')`);
+    if (dnsStillOpen || !securityOpen) throw new Error(`opening Security's flyout should close DNS's: dnsStillOpen=${dnsStillOpen} securityOpen=${securityOpen}`);
+    proof.push("collapsed-flyout-single-open-at-a-time");
+
+    if (!(await isVisible(`[data-route="blocklists"]`))) throw new Error("Security flyout child not visible before click");
+    await evalJs(`document.querySelector('[data-route="blocklists"]').click(); true`);
+    await waitFor(`document.querySelector('.page-head h1') && document.querySelector('.page-head h1').textContent === "Blocklists"`, "collapsed flyout child navigation");
+    await waitFor(`!document.querySelector('.nav-section[data-nav-section="Security"]').classList.contains('is-flyout-open')`, "flyout closes after selecting a child");
+    proof.push("collapsed-flyout-child-navigation-and-autoclose");
+
+    await evalJs(`document.querySelector(${JSON.stringify(dnsToggle)}).click(); true`);
+    await waitFor(`document.querySelector('.nav-section[data-nav-section="DNS"]').classList.contains('is-flyout-open')`, "DNS flyout open before outside-click test");
+    const titleBeforeOutsideClick = await pageTitle();
+    await evalJs(`document.querySelector('.page-head h1').click(); true`);
+    await sleep(200);
+    if ((await pageTitle()) !== titleBeforeOutsideClick) throw new Error("clicking outside the sidebar unexpectedly navigated");
+    if (!(await evalJs(`!document.querySelector('.nav-section[data-nav-section="DNS"]').classList.contains('is-flyout-open')`))) throw new Error("clicking outside the sidebar did not close the open flyout");
+    proof.push("collapsed-flyout-closes-on-outside-click");
+
+    await evalJs(`document.querySelector(${JSON.stringify(dnsToggle)}).click(); true`);
+    await waitFor(`document.querySelector('.nav-section[data-nav-section="DNS"]').classList.contains('is-flyout-open')`, "DNS flyout open before Escape test");
+    await pressKey("Escape", "Escape", 27);
+    await waitFor(`!document.querySelector('.nav-section[data-nav-section="DNS"]').classList.contains('is-flyout-open')`, "Escape closes the open flyout");
+    proof.push("collapsed-flyout-closes-on-escape");
+
+    await evalJs(`document.querySelector('[data-action="collapse"]').click(); true`);
+    await waitFor(`!document.getElementById('app').classList.contains('nav-collapsed')`, "sidebar restored to expanded");
+    const leftoverFlyout = await evalJs(`document.querySelectorAll('.nav-section.is-flyout-open').length`);
+    if (leftoverFlyout !== 0) throw new Error(`leftover is-flyout-open class(es) after restoring expanded mode: ${leftoverFlyout}`);
+    proof.push("collapsed-to-expanded-restore-sane");
+
+    // --- THEME: nav behavior unchanged in the other theme ---------------
+    const themeBeforeNavCheck = await evalJs(`document.documentElement.dataset.theme || ""`);
+    await evalJs(`document.querySelector('[data-action="theme"]').click(); true`);
+    await waitFor(`document.documentElement.dataset.theme !== ${JSON.stringify(themeBeforeNavCheck)}`, "theme toggled for nav-in-other-theme check");
+    // Same async-settle requirement as the collapse toggle above: the
+    // theme toggle's own handler also re-runs loadPage() after
+    // renderShell(), so wait past the transient "Loading" placeholder
+    // before using the title as a before/after baseline.
+    await waitFor(`document.querySelector('.page-head h1') && document.querySelector('.page-head h1').textContent !== "Loading"`, "page settled after theme toggle");
+    const titleBeforeOtherThemeCheck = await pageTitle();
+    await evalJs(`document.querySelector(${JSON.stringify(dnsToggle)}).click(); true`);
+    await sleep(150);
+    if ((await pageTitle()) !== titleBeforeOtherThemeCheck) throw new Error("parent click navigated away after a theme switch");
+    const dnsOpenInOtherTheme = await evalJs(`document.querySelector(${JSON.stringify(dnsToggle)}).getAttribute('aria-expanded') === 'true'`);
+    await evalJs(`document.querySelector(${JSON.stringify(dnsToggle)}).click(); true`); // restore closed
+    if (!dnsOpenInOtherTheme) throw new Error("section toggle did not open after switching theme");
+    await evalJs(`document.querySelector('[data-action="theme"]').click(); true`);
+    await waitFor(`document.documentElement.dataset.theme === ${JSON.stringify(themeBeforeNavCheck)}`, "theme restored after nav-in-other-theme check");
+    proof.push("navigation-consistent-across-themes");
+
+    const harnessErrorsAfterNav = await evalJs(`JSON.stringify(window.__harnessErrors || [])`);
+    if (harnessErrorsAfterNav !== "[]") throw new Error(`uncaught JS errors during navigation proof: ${harnessErrorsAfterNav}`);
+    if (consoleErrors.length > consoleErrorsBeforeNav) throw new Error(`browser console error/warning during navigation proof: ${JSON.stringify(consoleErrors.slice(consoleErrorsBeforeNav))}`);
+    proof.push("navigation-proof-no-console-errors");
+
 
     await route("clients");
     await waitFor(`document.querySelector('form[data-form="client"]')`, "client form");
@@ -956,6 +1165,170 @@ async function main() {
     await evalJs(`(() => { window.confirm = () => true; document.querySelector('[data-revoke-sessions]').click(); return true; })()`);
     await waitForOkOrError(`document.body.innerText.includes("other session")`, "revoke other sessions");
     proof.push("administration-sessions-revoked");
+
+    // ================================================================
+    // Workstream 1B: real-browser proof for the shared data-grid
+    // (app/v2/ui/data-grid.js, introduced in the prior pass). Seeds a
+    // few extra rows via the real API (beyond what earlier steps already
+    // created) so sort has something real to reorder, then drives actual
+    // click/drag interaction through CDP -- not a DOM-level function call.
+    // ================================================================
+    async function seedOk(path, body) {
+      const res = await pageApi(path, { method: "POST", body: JSON.stringify(body) });
+      if (!res.ok) throw new Error(`seed ${path} failed: ${JSON.stringify(res)}`);
+      return res.body;
+    }
+    await seedOk("/api/upstreams", { name: `Aardvark Upstream ${suffix}`, transport: "plain", strategy: "ordered", endpoints: [{ address: "9.9.9.9:53" }] });
+    await seedOk("/api/upstreams", { name: `Zebra Upstream ${suffix}`, transport: "plain", strategy: "ordered", endpoints: [{ address: "8.8.4.4:53" }] });
+    await seedOk("/api/local-dns", { name: `aaa-host-${suffix}.lan`, record_type: "A", value: "10.0.0.1", ttl: 300 });
+    await seedOk("/api/local-dns", { name: `zzz-host-${suffix}.lan`, record_type: "A", value: "10.0.0.250", ttl: 300 });
+    for (const label of ["Aardvark", "Zebra"]) {
+      const created = await seedOk("/api/clients", { name: `${label} Client ${suffix}`, description: "" });
+      await seedOk(`/api/clients/${created.client_id}/identifiers`, { kind: "ipv4", value: label === "Aardvark" ? "10.9.9.1" : "10.9.9.2" });
+    }
+
+    async function sortTable(gridId, columnIndex) {
+      const tableSel = `table[data-grid-id="${gridId}"]`;
+      await waitFor(`document.querySelector(${JSON.stringify(tableSel)})`, `${gridId} table present`);
+      const th = `${tableSel} thead th:nth-child(${columnIndex + 1})`;
+      const cellsText = async () => evalJs(`Array.from(document.querySelectorAll(${JSON.stringify(tableSel + " tbody tr")})).map((r) => r.children[${columnIndex}].textContent.trim())`);
+      const before = await cellsText();
+      await evalJs(`document.querySelector(${JSON.stringify(th)}).click(); true`);
+      await sleep(150);
+      const ascending = await cellsText();
+      const ariaAsc = await evalJs(`document.querySelector(${JSON.stringify(th)}).getAttribute('aria-sort')`);
+      if (ariaAsc !== "ascending") throw new Error(`${gridId} column ${columnIndex}: expected aria-sort="ascending" after first click, got ${ariaAsc}`);
+      const sortedAscCheck = [...ascending].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+      if (JSON.stringify(ascending) === JSON.stringify(before) && before.length > 1 && new Set(before).size > 1) {
+        // A no-op is only suspicious if the data wasn't already sorted
+        // ascending to begin with -- otherwise this just proves nothing
+        // moved when nothing needed to.
+        if (JSON.stringify(before) !== JSON.stringify(sortedAscCheck)) throw new Error(`${gridId} column ${columnIndex}: clicking the header did not actually reorder anything (before=${JSON.stringify(before)})`);
+      }
+      await evalJs(`document.querySelector(${JSON.stringify(th)}).click(); true`);
+      await sleep(150);
+      const descending = await cellsText();
+      const ariaDesc = await evalJs(`document.querySelector(${JSON.stringify(th)}).getAttribute('aria-sort')`);
+      if (ariaDesc !== "descending") throw new Error(`${gridId} column ${columnIndex}: expected aria-sort="descending" after second click, got ${ariaDesc}`);
+      if (JSON.stringify(descending) !== JSON.stringify([...ascending].reverse()) && new Set(ascending).size > 1) {
+        throw new Error(`${gridId} column ${columnIndex}: descending order is not the reverse of ascending -- asc=${JSON.stringify(ascending)} desc=${JSON.stringify(descending)}`);
+      }
+      return { before, ascending, descending };
+    }
+
+    await route("upstreams");
+    const upstreamSort = await sortTable("upstream-profiles", 0);
+    if (!upstreamSort.ascending.some((v) => v.includes("Aardvark")) || !upstreamSort.ascending.some((v) => v.includes("Zebra"))) throw new Error("seeded upstream rows not found in the sorted table");
+    if (upstreamSort.ascending.findIndex((v) => v.includes("Aardvark")) > upstreamSort.ascending.findIndex((v) => v.includes("Zebra"))) throw new Error("text column did not sort sensibly (Aardvark should sort before Zebra ascending)");
+    proof.push("grid-upstreams-sort-text-ascending-descending");
+
+    await route("localdns");
+    const localDnsSort = await sortTable("local-dns-records", 0);
+    if (localDnsSort.ascending.findIndex((v) => v.includes("aaa-host")) > localDnsSort.ascending.findIndex((v) => v.includes("zzz-host"))) throw new Error("Local DNS name column did not sort sensibly");
+    proof.push("grid-local-dns-sort");
+
+    await route("clients");
+    await waitFor(`document.querySelector('table[data-grid-id="managed-clients"]')`, "managed clients table present");
+    const managedSort = await sortTable("managed-clients", 0);
+    if (managedSort.ascending.findIndex((v) => v.includes("Aardvark")) > managedSort.ascending.findIndex((v) => v.includes("Zebra"))) throw new Error("Managed Clients name column did not sort sensibly");
+    proof.push("grid-managed-clients-sort");
+
+    // Numeric / percentage / comma-formatted-count sorting: Query Log and
+    // Dashboard Top Domains/Clients are analytics-derived and this
+    // harness's environment forces analytics degraded (see
+    // ALDERPOINTDNS_V2_FORCE_ANALYTICS_DEGRADED in
+    // tests/v2/test_ui_browser_harness.py) to prove degraded-state UI
+    // truthfully, so there is no real query volume to sort here -- that
+    // numeric-sort proof against real traffic belongs with workstream 2's
+    // analytics work, not faked with mocked rows. The numeric/percent/
+    // comma-count comparator itself (used by every grid, including these)
+    // is proven directly, dependency-free, by
+    // tests/js/test_data_grid_compare.mjs.
+    await route("dashboard");
+    await waitFor(`document.body.innerText.includes("degraded") || document.body.innerText.includes("Analytics")`, "dashboard reflects forced-degraded analytics");
+    proof.push("grid-numeric-sort-covered-by-comparator-unit-test-analytics-degraded-in-this-env");
+
+    // No [object Object] and no new console errors from any of the above.
+    if (await evalJs(`document.body.innerText.includes("[object Object]")`)) throw new Error("a data-grid cell rendered the literal '[object Object]'");
+    const gridHarnessErrors = await evalJs(`JSON.stringify(window.__harnessErrors || [])`);
+    if (gridHarnessErrors !== "[]") throw new Error(`uncaught JS errors during data-grid sort proof: ${gridHarnessErrors}`);
+    proof.push("grid-sort-no-object-object-no-console-errors");
+
+    // --- Column resize: drag, minimum width enforced, persists across a
+    // route change and a real reload.
+    await route("upstreams");
+    await waitFor(`document.querySelector('table[data-grid-id="upstream-profiles"]')`, "upstream table present for resize test");
+    const firstHeader = `table[data-grid-id="upstream-profiles"] thead th:first-child`;
+    const startWidth = await evalJs(`document.querySelector(${JSON.stringify(firstHeader)}).getBoundingClientRect().width`);
+    const handleBox = await evalJs(`(() => { const h = document.querySelector(${JSON.stringify(firstHeader)}).querySelector('.grid-col-resizer'); if (!h) return null; const r = h.getBoundingClientRect(); return JSON.stringify({ x: r.x + r.width / 2, y: r.y + r.height / 2 }); })()`);
+    if (!handleBox) throw new Error("no .grid-col-resizer handle found on the first upstream-profiles column");
+    const { x: hx, y: hy } = JSON.parse(handleBox);
+    const hitTarget = await evalJs(`(() => { const el = document.elementFromPoint(${hx}, ${hy}); return el ? el.className || el.tagName : null; })()`);
+    if (!/grid-col-resizer/.test(String(hitTarget))) throw new Error(`resize handle hit-test failed at (${hx},${hy}): elementFromPoint found ${hitTarget}`);
+    // pointerType: "mouse" ensures Chromium synthesizes real PointerEvents
+    // (not just MouseEvents) from these CDP-driven coordinates -- the
+    // resize handlers in data-grid.js are pointerdown/pointermove/pointerup.
+    await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x: hx, y: hy, button: "left", clickCount: 1, pointerType: "mouse" });
+    for (let step = 1; step <= 4; step++) {
+      await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: hx + step * 30, y: hy, button: "left", pointerType: "mouse" });
+    }
+    await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x: hx + 120, y: hy, button: "left", pointerType: "mouse" });
+    await sleep(200);
+    const widthAfterDrag = await evalJs(`document.querySelector(${JSON.stringify(firstHeader)}).getBoundingClientRect().width`);
+    if (!(widthAfterDrag > startWidth + 60)) throw new Error(`dragging the column resizer +120px did not grow the column (before=${startWidth} after=${widthAfterDrag})`);
+    proof.push("grid-column-drag-resize");
+
+    // Minimum width: drag far to the left (shrink hard) and confirm it
+    // clamps rather than collapsing to near-zero or negative.
+    const handleBox2 = await evalJs(`(() => { const h = document.querySelector(${JSON.stringify(firstHeader)}).querySelector('.grid-col-resizer'); const r = h.getBoundingClientRect(); return JSON.stringify({ x: r.x + r.width / 2, y: r.y + r.height / 2 }); })()`);
+    const { x: hx2, y: hy2 } = JSON.parse(handleBox2);
+    await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x: hx2, y: hy2, button: "left", clickCount: 1 });
+    await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: hx2 - 500, y: hy2, button: "left" });
+    await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x: hx2 - 500, y: hy2, button: "left" });
+    await sleep(200);
+    const widthAfterShrink = await evalJs(`document.querySelector(${JSON.stringify(firstHeader)}).getBoundingClientRect().width`);
+    if (widthAfterShrink < 60) throw new Error(`column shrank below the enforced minimum width: ${widthAfterShrink}px`);
+    proof.push("grid-column-minimum-width-enforced");
+
+    // Width persists across a route change and back.
+    const widthBeforeNav = widthAfterShrink;
+    await route("localdns");
+    await route("upstreams");
+    await waitFor(`document.querySelector('table[data-grid-id="upstream-profiles"]')`, "upstream table present after route round-trip");
+    const widthAfterRouteChange = await evalJs(`document.querySelector(${JSON.stringify(firstHeader)}).getBoundingClientRect().width`);
+    if (Math.abs(widthAfterRouteChange - widthBeforeNav) > 8) throw new Error(`column width did not persist across a route change: before=${widthBeforeNav} after=${widthAfterRouteChange}`);
+    proof.push("grid-column-width-persists-across-route-change");
+
+    // Width (and sort direction) persists across a real page reload.
+    const sortDirBeforeReload = await evalJs(`document.querySelector(${JSON.stringify(firstHeader)}).getAttribute('aria-sort')`);
+    await cdp("Page.navigate", { url: base + "/ui/upstreams" });
+    await waitFor(`document.querySelector('table[data-grid-id="upstream-profiles"]')`, "upstream table present after reload");
+    const widthAfterReload = await evalJs(`document.querySelector(${JSON.stringify(firstHeader)}).getBoundingClientRect().width`);
+    const sortDirAfterReload = await evalJs(`document.querySelector(${JSON.stringify(firstHeader)}).getAttribute('aria-sort')`);
+    if (Math.abs(widthAfterReload - widthBeforeNav) > 8) throw new Error(`column width did not persist across a reload: before=${widthBeforeNav} after=${widthAfterReload}`);
+    if (sortDirAfterReload !== sortDirBeforeReload) throw new Error(`sort direction did not persist across a reload: before=${sortDirBeforeReload} after=${sortDirAfterReload}`);
+    proof.push("grid-width-and-sort-persist-across-reload");
+
+    // Async table replacement (a sub-panel refresh, not a full route
+    // change) must not lose sort/resize behavior or double-attach
+    // handlers: Query Log's own "Apply filters" re-renders #query-results
+    // in place via innerHTML (see handleForm's "querylog" branch).
+    await route("analytics");
+    await waitFor(`document.querySelector('form[data-form="querylog"]')`, "query log filter form");
+    const queryTableInitialGridId = await evalJs(`(() => { const t = document.querySelector('#query-results table'); return t ? t.dataset.gridId : null; })()`);
+    await evalJs(`document.querySelector('form[data-form="querylog"]').requestSubmit(); true`);
+    await sleep(500);
+    const queryTableAfterRefreshGridId = await evalJs(`(() => { const t = document.querySelector('#query-results table'); return t ? t.dataset.gridId : null; })()`);
+    // The table itself is a fresh DOM node after each filter submit (new
+    // innerHTML), so a *new* grid id being assigned is expected and fine;
+    // what actually matters is that it's still wired (data-grid-wired) and
+    // sortable, i.e. the MutationObserver in data-grid.js picked up the
+    // replacement without any page-specific glue code re-registering it.
+    const queryTableWiredAfterRefresh = await evalJs(`(() => { const t = document.querySelector('#query-results table'); return t ? t.dataset.gridWired === '1' : false; })()`);
+    if (queryTableInitialGridId !== null && queryTableAfterRefreshGridId === null) throw new Error("query log results table disappeared after a filter refresh");
+    if (queryTableAfterRefreshGridId && !queryTableWiredAfterRefresh) throw new Error("query log results table was replaced by an async refresh but the shared grid never re-wired it");
+    proof.push("grid-survives-async-subpanel-replacement");
+
 
     await evalJs(`document.querySelector('[data-action="logout"]').click(); true`);
     await waitFor(`document.body.innerText.includes("Sign in") || document.body.innerText.includes("Create first administrator")`, "logout invalidates session");
