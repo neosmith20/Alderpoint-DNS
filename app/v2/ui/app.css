@@ -271,8 +271,24 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .tabs button.active { background: var(--surface); color: var(--accent); border-color: var(--line); border-bottom-color: var(--surface); }
 .split { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: var(--s-4); align-items: start; }
 .drawer { position: sticky; top: var(--s-4); }
-.chart { min-height: 180px; display: flex; align-items: end; gap: 6px; border: 1px solid var(--line); background: var(--surface-2); border-radius: var(--r-2); padding: var(--s-3); }
-.bar { flex: 1; min-width: 8px; background: var(--accent); border-radius: var(--r-1) var(--r-1) 0 0; opacity: .82; }
+/* DNS activity time-series chart (owner-reported fix: replaces an
+   anonymous bar row whose only values lived in `title` attributes). */
+.ts-wrap { border: 1px solid var(--line); background: var(--surface-2); border-radius: var(--r-2); padding: var(--s-3); overflow-x: auto; }
+.ts-chart { display: block; width: 100%; height: 220px; min-width: 480px; }
+.ts-grid { stroke: var(--line); stroke-width: 1; }
+.ts-axis { fill: var(--faint); font-size: 10px; font-family: var(--font); }
+.ts-line { fill: none; stroke-width: 2; }
+.ts-line-total { stroke: var(--accent); }
+.ts-line-blocked { stroke: var(--blocked); }
+.ts-point-total { fill: var(--accent); }
+.ts-point-blocked { fill: var(--blocked); }
+.ts-legend { display: flex; gap: var(--s-4); margin-bottom: var(--s-2); font-size: 13px; color: var(--muted); }
+.ts-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+.ts-swatch { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.ts-swatch-total { background: var(--accent); }
+.ts-swatch-blocked { background: var(--blocked); }
+.ts-table-fallback { margin-top: var(--s-3); }
+.ts-table-fallback summary { cursor: pointer; color: var(--accent); font-size: 13px; }
 .toast-host { position: fixed; right: var(--s-4); bottom: var(--s-4); z-index: 50; display: grid; gap: var(--s-2); width: min(420px, calc(100vw - 32px)); }
 .toast { border: 1px solid var(--line-2); background: var(--surface); border-radius: var(--r-2); box-shadow: var(--shadow); padding: var(--s-3); }
 .toast.ok { border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); }

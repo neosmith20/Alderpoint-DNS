@@ -348,6 +348,64 @@ async function main() {
     await evalJs(`{ const b = document.querySelector('[data-refresh]'); if (b) { b.click(); b.click(); } true }`);
     await sleep(1200);
     await waitFor(`document.querySelector('.page-head h1') && document.querySelector('.page-head h1').textContent === "Dashboard"`, "dashboard rapid refresh settled");
+
+    // Real defect fixed this pass (owner-reported: the Dashboard "Top
+    // Domains" chart rendered anonymous bars with counts hidden in a
+    // `title` attribute -- no visible domain names, values, scale,
+    // legend, or allowed/blocked distinction, and no time-series view
+    // existed at all). When the caller seeds real aggregates/query-log
+    // data ahead of a non-degraded run (see
+    // test_dashboard_charts_render_real_data in
+    // test_ui_browser_harness.py), prove every specific thing the
+    // owner asked to see is genuinely visible in the rendered DOM --
+    // not merely present in the API response.
+    if (process.env.APDNS_ASSERT_POPULATED_DASHBOARD === "1") {
+      await waitFor(`document.querySelector('.ts-chart')`, "activity chart rendered");
+      const text = await evalJs(`document.body.innerText`);
+      if (!text.includes("DNS Queries")) throw new Error("activity chart legend missing 'DNS Queries'");
+      if (!text.includes("Blocked by Filters")) throw new Error("activity chart legend missing 'Blocked by Filters'");
+      const seededDomain = process.env.APDNS_SEEDED_DOMAIN || "chart-proof.example";
+      if (!text.includes(seededDomain)) throw new Error(`Top Domains table missing the real seeded domain name ${seededDomain}`);
+      if (!/%/.test(text)) throw new Error("Top Domains table missing a percentage-of-total value");
+      const svgPaths = await evalJs(`document.querySelectorAll('.ts-line').length`);
+      if (svgPaths !== 2) throw new Error(`expected 2 chart series (queries, blocked), found ${svgPaths}`);
+      const circleTitles = await evalJs(`document.querySelectorAll('.ts-chart circle title').length`);
+      if (circleTitles < 2) throw new Error("chart data points missing exact-value tooltips");
+      // Keyboard-reachable, always-visible table fallback -- never
+      // hover-only, per the owner's explicit requirement.
+      await evalJs(`document.querySelector('.ts-table-fallback summary').click(); true`);
+      await waitFor(`document.querySelector('.ts-table-fallback table')`, "activity table fallback expanded");
+      // Top Blocked Domains selector actually switches the ranking.
+      await evalJs(`(() => { const s = document.querySelector('[data-action="dashboard-top-mode"]'); s.value = 'blocked'; s.dispatchEvent(new Event('change', {bubbles:true})); return true; })()`);
+      await waitFor(`document.querySelector('.page-head h1') && document.querySelector('.page-head h1').textContent === "Dashboard" && document.body.innerText.includes("Top Blocked Domains")`, "top-blocked-domains mode switch");
+      proof.push("dashboard-charts-populated-and-accessible");
+
+      // Light theme: legend/chart stay genuinely visible, not just
+      // present in markup with zero-contrast colors.
+      const themeBeforeChartCheck = await evalJs(`document.documentElement.dataset.theme || ""`);
+      await evalJs(`document.querySelector('[data-action="theme"]').click(); true`);
+      await waitFor(`document.documentElement.dataset.theme !== ${JSON.stringify(themeBeforeChartCheck)}`, "theme toggled for chart color check");
+      await waitFor(`document.querySelector('.ts-chart')`, "chart still rendered after theme toggle");
+      const swatchColors = await evalJs(`(() => { const t = getComputedStyle(document.querySelector('.ts-swatch-total')).backgroundColor; const b = getComputedStyle(document.querySelector('.ts-swatch-blocked')).backgroundColor; return JSON.stringify([t, b]); })()`);
+      const [totalColor, blockedColor] = JSON.parse(swatchColors);
+      if (!totalColor || totalColor === "rgba(0, 0, 0, 0)") throw new Error("DNS Queries legend swatch has no real color in this theme");
+      if (!blockedColor || blockedColor === "rgba(0, 0, 0, 0)") throw new Error("Blocked by Filters legend swatch has no real color in this theme");
+      if (totalColor === blockedColor) throw new Error("the two chart series are not visually distinguishable (identical swatch color)");
+      await evalJs(`document.querySelector('[data-action="theme"]').click(); true`);
+      await waitFor(`document.documentElement.dataset.theme === ${JSON.stringify(themeBeforeChartCheck)}`, "theme restored after chart color check");
+      proof.push("dashboard-chart-legend-distinguishable-both-themes");
+
+      // Mobile width: the chart's own horizontal-scroll container must
+      // absorb overflow -- the page body itself must never gain
+      // horizontal scroll from this chart.
+      await cdp("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+      await waitFor(`document.querySelector('.ts-chart')`, "chart still rendered at mobile width");
+      const overflowsBody = await evalJs(`document.documentElement.scrollWidth > window.innerWidth + 1`);
+      if (overflowsBody) throw new Error("dashboard chart caused page-level horizontal overflow at mobile width (390px)");
+      await cdp("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+      proof.push("dashboard-chart-no-horizontal-overflow-at-mobile-width");
+    }
+
     for (const r of ["analytics", "statistics", "clients", "policies", "filtering", "blocklists", "encryption", "upstreams", "localdns", "replication", "backup", "notifications", "administration", "health", "importexport", "updates", "logs"]) await route(r);
     proof.push("dashboard-navigation");
 

@@ -9,6 +9,12 @@
     navCollapsed: localStorage.getItem("apdnsNavCollapsed") === "1",
     cache: {},
     busy: new Set(),
+    // Dashboard chart controls (owner-reported fix: Top Domains was an
+    // anonymous, non-operator-usable bar chart with no time-series view
+    // at all). Session-only (not persisted) -- a reasonable default the
+    // operator can change per visit, not a durable preference.
+    dashboardRangeMinutes: 1440,
+    dashboardTopMode: "top",
   };
 
   // Grouping/order intentionally mirrors V1.1.1's information architecture
@@ -371,11 +377,24 @@
     return { health, system, replication, discovery };
   }
 
+  // granularity is derived from the selected range, not independently
+  // chosen -- 1h buckets by minute, 24h/7d by hour, keeping the point
+  // count sane for both the SVG chart and its table fallback (7d @
+  // hourly = 168 points; @ minute would be >10,000).
+  function dashboardGranularity(minutes) {
+    if (minutes <= 120) return "minute";
+    return "hour";
+  }
+
   async function dashboard() {
-    const [c, recent, top, clients, observed, upstreams] = await Promise.all([
+    const rangeMinutes = state.dashboardRangeMinutes;
+    const granularity = dashboardGranularity(rangeMinutes);
+    const topMode = state.dashboardTopMode;
+    const [c, recent, timeseries, topResult, clients, observed, upstreams] = await Promise.all([
       common(),
       api("/api/analytics/recent?minutes=60").catch((e) => ({ rows: [], degraded: true, degraded_reason: e.message })),
-      api("/api/analytics/top-domains?minutes=60&limit=10").catch((e) => ({ rows: [], degraded: true, degraded_reason: e.message })),
+      api(`/api/analytics/timeseries?minutes=${rangeMinutes}&granularity=${granularity}`).catch((e) => ({ buckets: [], degraded: true, degraded_reason: e.message })),
+      api(`/api/analytics/${topMode === "blocked" ? "top-blocked-domains" : "top-domains"}?minutes=${rangeMinutes}&limit=15`).catch((e) => ({ rows: [], degraded: true, degraded_reason: e.message })),
       api("/api/clients").catch(() => ({ clients: [] })),
       // Owner-reported finding, priority 3 of the second beta-rescue pass: a
       // real client was actively querying Alderpoint, but Dashboard
@@ -399,9 +418,6 @@
     // must use typed fields, not string heuristics.
     const blockedIdx = (recent.columns || []).indexOf("blocked");
     const blocked = blockedIdx === -1 ? 0 : rows.filter((r) => r[blockedIdx] === true).length;
-    const countIdx = (top.columns || []).indexOf("count");
-    const bars = (top.rows || []).slice(0, 10).map((r) => Number(countIdx === -1 ? 1 : r[countIdx]) || 1);
-    const max = Math.max(1, ...bars);
     return page("Dashboard", "Operational state from the real V2 HTTPS APIs.", `<button data-refresh>Refresh</button>`, `
       <div class="strip">
         <div class="metric"><strong>${esc(c.health.status || "unknown")}</strong><span>Management / runtime status</span></div>
@@ -411,17 +427,95 @@
         <div class="metric"><strong>${esc((c.replication.peers || []).length)}</strong><span>Replication peers</span></div>
       </div>
       ${recent.degraded ? `<div class="alert warn">Analytics degraded: ${esc(recent.degraded_reason || "query data unavailable")}. DNS status is reported separately.</div>` : ""}
+      <section class="panel"><div class="panel__head"><h2>DNS Activity</h2>${rangeSelector()}</div><div class="panel__body">${activityChart(timeseries)}</div></section>
       <div class="grid two">
-        <section class="panel"><div class="panel__head"><h2>Top Domains</h2><span class="badge ${top.degraded ? "warn" : "ok"}">${top.degraded ? "degraded" : "live"}</span></div><div class="panel__body">${chart(bars, max)}${tableFromRows(top.rows || [], 6, top.columns, "dashboard-top-domains")}</div></section>
+        <section class="panel"><div class="panel__head"><h2>${topMode === "blocked" ? "Top Blocked Domains" : "Top Domains"}</h2>${topModeSelector()}</div><div class="panel__body">${topDomainsTable(topResult)}</div></section>
         <section class="panel"><div class="panel__head"><h2>Runtime Components</h2></div><div class="panel__body">${componentList(c.health.components || {})}</div></section>
         <section class="panel"><div class="panel__head"><h2>Clients</h2><button class="link" data-route="clients">Manage</button></div><div class="panel__body">${clientMini(clients.clients || [], observed.items || observed.observed_clients || observed.clients || [])}</div></section>
         <section class="panel"><div class="panel__head"><h2>Upstreams</h2></div><div class="panel__body">${upstreams.upstreams?.length ? tableFromRows(upstreams.upstreams, 5, undefined, "dashboard-upstreams") : `<div class="empty">No upstream profiles configured.</div>`}</div></section>
       </div>`);
   }
 
-  function chart(values, max) {
-    if (!values.length) return `<div class="empty">No chartable data in this window.</div>`;
-    return `<div class="chart" aria-label="Top-domain activity bars">${values.map((v) => `<div class="bar" style="height:${Math.max(6, Math.round(v / max * 155))}px" title="${esc(v)}"></div>`).join("")}</div>`;
+  function rangeSelector() {
+    const options = [[60, "Last hour"], [1440, "Last 24 hours"], [10080, "Last 7 days"]];
+    return `<select data-action="dashboard-range" aria-label="DNS activity time range">${options.map(([v, l]) => `<option value="${v}" ${state.dashboardRangeMinutes === v ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
+  }
+
+  function topModeSelector() {
+    return `<select data-action="dashboard-top-mode" aria-label="Domain ranking">
+      <option value="top" ${state.dashboardTopMode === "top" ? "selected" : ""}>All domains</option>
+      <option value="blocked" ${state.dashboardTopMode === "blocked" ? "selected" : ""}>Blocked domains only</option>
+    </select>`;
+  }
+
+  // Real defect fixed here (owner-reported: the prior "chart" was a row
+  // of anonymous <div class="bar"> elements with the only value anyone
+  // could see stuffed into a `title` attribute -- invisible until
+  // hover, unreachable by keyboard, and not a real time-series at all,
+  // just the ranked top-domains dataset reused as bar heights). This is
+  // a real SVG time-series over app/v2/aggregates_db.py's own bucketed
+  // totals (via /api/analytics/timeseries) -- two series (DNS Queries,
+  // Blocked by Filters), a real legend, local-time axis labels, exact
+  // values in both a native <title> tooltip AND a keyboard-reachable,
+  // always-visible table fallback (never hover-only). Truthful
+  // loading/empty/degraded states: this function is only ever called
+  // with an already-resolved result (loading is the page shell's own
+  // "Loading..." state), so it only needs to distinguish degraded from
+  // genuinely-empty from populated.
+  function activityChart(result) {
+    if (result.degraded) return `<div class="alert warn">Analytics degraded: ${esc(result.degraded_reason || "time-series data unavailable")}. DNS status is reported separately.</div>`;
+    const buckets = result.buckets || [];
+    if (!buckets.length) return `<div class="empty">No query activity in this window.</div>`;
+    const w = 760, h = 200, padL = 44, padB = 28, padT = 10, padR = 10;
+    const plotW = w - padL - padR, plotH = h - padT - padB;
+    const maxTotal = Math.max(1, ...buckets.map((b) => b.total_queries || 0));
+    const n = buckets.length;
+    const x = (i) => padL + (n === 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+    const y = (v) => padT + plotH - (v / maxTotal) * plotH;
+    const path = (key) => buckets.map((b, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(b[key] || 0).toFixed(1)}`).join(" ");
+    // Every Nth label so labels never overlap regardless of range/granularity.
+    const labelEvery = Math.max(1, Math.ceil(n / 8));
+    const fmt = (iso) => new Date(iso).toLocaleString(undefined, n <= 24 && result.granularity === "hour" ? { hour: "numeric", minute: "2-digit" } : result.granularity === "minute" ? { hour: "numeric", minute: "2-digit" } : { month: "short", day: "numeric" });
+    const gridlines = [0, 0.25, 0.5, 0.75, 1].map((f) => `<line x1="${padL}" x2="${w - padR}" y1="${(padT + plotH * f).toFixed(1)}" y2="${(padT + plotH * f).toFixed(1)}" class="ts-grid"/>`).join("");
+    const yLabels = [0, 0.5, 1].map((f) => `<text x="${padL - 6}" y="${(padT + plotH * (1 - f) + 4).toFixed(1)}" class="ts-axis" text-anchor="end">${Math.round(maxTotal * f)}</text>`).join("");
+    const xLabels = buckets.map((b, i) => (i % labelEvery !== 0 && i !== n - 1) ? "" : `<text x="${x(i).toFixed(1)}" y="${h - 8}" class="ts-axis" text-anchor="middle">${esc(fmt(b.bucket_start_iso))}</text>`).join("");
+    const points = (key, cls) => buckets.map((b, i) => `<circle cx="${x(i).toFixed(1)}" cy="${y(b[key] || 0).toFixed(1)}" r="2.5" class="${cls}"><title>${esc(fmt(b.bucket_start_iso))}: ${esc(b[key] || 0)} ${key === "blocked_queries" ? "blocked" : "queries"} (exact: ${esc(b.bucket_start_iso)})</title></circle>`).join("");
+    const svg = `<svg viewBox="0 0 ${w} ${h}" class="ts-chart" role="img" aria-label="DNS queries and blocked queries over time">
+      ${gridlines}${yLabels}${xLabels}
+      <path d="${path("total_queries")}" class="ts-line ts-line-total"/>
+      <path d="${path("blocked_queries")}" class="ts-line ts-line-blocked"/>
+      ${points("total_queries", "ts-point-total")}
+      ${points("blocked_queries", "ts-point-blocked")}
+    </svg>`;
+    const legend = `<div class="ts-legend">
+      <span class="ts-legend-item"><span class="ts-swatch ts-swatch-total"></span>DNS Queries</span>
+      <span class="ts-legend-item"><span class="ts-swatch ts-swatch-blocked"></span>Blocked by Filters</span>
+    </div>`;
+    const totalSum = buckets.reduce((s, b) => s + (b.total_queries || 0), 0);
+    const blockedSum = buckets.reduce((s, b) => s + (b.blocked_queries || 0), 0);
+    const tableRows = buckets.map((b) => ({ time: fmt(b.bucket_start_iso), exact_time_utc: b.bucket_start_iso, dns_queries: b.total_queries || 0, blocked_by_filters: b.blocked_queries || 0 }));
+    return `${legend}
+      <div class="ts-wrap">${svg}</div>
+      <div class="strip" style="margin-top:10px"><div class="metric"><strong>${totalSum}</strong><span>Total queries</span></div><div class="metric"><strong>${blockedSum}</strong><span>Blocked by filters</span></div></div>
+      <details class="ts-table-fallback"><summary>View exact values as a table</summary>${tableFromRows(tableRows, 500, undefined, "dashboard-activity")}</details>`;
+  }
+
+  // Real domain names, real counts, real percentage of total -- a real
+  // sortable table (the shared data-grid, per "sortable means sortable
+  // product-wide"), not bars with hidden values.
+  function topDomainsTable(result) {
+    if (result.degraded) return `<div class="alert warn">Analytics degraded: ${esc(result.degraded_reason || "domain ranking unavailable")}. DNS status is reported separately.</div>`;
+    const rows = result.rows || [];
+    if (!rows.length) return `<div class="empty">No domain activity in this window.</div>`;
+    const cols = result.columns || [];
+    const domainIdx = cols.indexOf("domain");
+    const countIdx = cols.indexOf("count");
+    const total = rows.reduce((s, r) => s + (Number(countIdx === -1 ? r[1] : r[countIdx]) || 0), 0) || 1;
+    const shaped = rows.map((r) => {
+      const count = Number(countIdx === -1 ? r[1] : r[countIdx]) || 0;
+      return { domain: domainIdx === -1 ? r[0] : r[domainIdx], queries: count, percent_of_total: `${((count / total) * 100).toFixed(1)}%` };
+    });
+    return tableFromRows(shaped, 50, undefined, state.dashboardTopMode === "blocked" ? "dashboard-blocked-domains" : "dashboard-top-domains");
   }
 
   function componentList(components) {
@@ -1500,7 +1594,11 @@
       }
     });
 
-    document.body.addEventListener("change", (ev) => {
+    document.body.addEventListener("change", async (ev) => {
+      const range = ev.target.closest("[data-action='dashboard-range']");
+      if (range) { state.dashboardRangeMinutes = Number(range.value); await loadPage("dashboard"); return; }
+      const topMode = ev.target.closest("[data-action='dashboard-top-mode']");
+      if (topMode) { state.dashboardTopMode = topMode.value; await loadPage("dashboard"); return; }
       const sel = ev.target.closest("[data-import-type]");
       if (!sel) return;
       const type = sel.value;

@@ -36,6 +36,8 @@ UI_DIR = ROOT / "app" / "v2" / "ui"
 # the roadmap workstreams explicitly name.
 EXPECTED_GRID_IDS = {
     "dashboard-top-domains",
+    "dashboard-blocked-domains",
+    "dashboard-activity",
     "dashboard-upstreams",
     "dashboard-clients",
     "query-log-results",

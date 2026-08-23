@@ -2060,6 +2060,60 @@ def analytics_top_domains(minutes: float = 60.0, limit: int = 20, admin=Depends(
         svc.close()
 
 
+# Real defect fixed here (owner-reported: Dashboard's "Top Domains" bar
+# chart had no visible domain names, values, or blocked/allowed
+# distinction -- just anonymous bars with the count hidden in a `title`
+# attribute, and there was no time-series/activity view at all). Two new
+# endpoints, both already fully backed by existing service-layer methods
+# that simply had no API route wired to them yet -- no new aggregation
+# logic invented here, just exposing what app/v2/analytics_service.py
+# and app/v2/aggregates_db.py already compute.
+@app.get("/api/analytics/top-blocked-domains")
+def analytics_top_blocked_domains(minutes: float = 60.0, limit: int = 20, admin=Depends(current_admin)):
+    if reason := _forced_analytics_degraded():
+        return {"rows": [], "columns": [], "degraded": True, "degraded_reason": reason}
+    now = time.time()
+    svc = _analytics_service()
+    try:
+        return _query_result_to_dict(svc.top_blocked_domains(now - minutes * 60, now, limit=limit))
+    finally:
+        svc.close()
+
+
+_TIMESERIES_GRANULARITIES = ("minute", "hour", "day")
+
+
+@app.get("/api/analytics/timeseries")
+def analytics_timeseries(minutes: float = 1440.0, granularity: str = "hour", admin=Depends(current_admin)):
+    if granularity not in _TIMESERIES_GRANULARITIES:
+        raise HTTPException(status_code=400, detail=f"granularity must be one of {_TIMESERIES_GRANULARITIES}")
+    if reason := _forced_analytics_degraded():
+        return {"buckets": [], "granularity": granularity, "degraded": True, "degraded_reason": reason}
+    now = time.time()
+    svc = _analytics_service()
+    try:
+        rows = svc.time_series_totals(now - minutes * 60, now, granularity=granularity)
+    except Exception as exc:  # noqa: BLE001 -- aggregates_db is pure sqlite3, but never let a dashboard chart 500 the page
+        return {"buckets": [], "granularity": granularity, "degraded": True, "degraded_reason": str(exc)}
+    finally:
+        svc.close()
+    return {
+        "granularity": granularity,
+        "degraded": False,
+        "buckets": [
+            {
+                "bucket_start": bucket_start,
+                "bucket_start_iso": datetime.fromtimestamp(bucket_start, tz=timezone.utc).isoformat(),
+                "total_queries": total,
+                "blocked_queries": blocked,
+                "cache_hits": hits,
+                "cache_misses": misses,
+            }
+            for bucket_start, total, blocked, hits, misses in rows
+        ],
+    }
+
+
 # --- statistics export/clear (beta-rescue priority 3C) -----------------------
 
 
