@@ -196,11 +196,31 @@
     setTimeout(() => node.remove(), 5200);
   }
 
+  // Real defect fixed here (owner-reported: 10+ rapid Light/Dark clicks
+  // leave the page stuck on "Loading"). Every loadPage() call (a route
+  // change, a theme toggle, a collapse toggle -- all of them re-render
+  // and re-fetch the current route) previously left its own GET requests
+  // running to completion even after a newer loadPage() superseded it;
+  // `token` already stopped a stale response from being *rendered*, but
+  // did nothing to stop it from still executing. A rapid-click storm
+  // therefore piled up N abandoned page-load fetches all still competing
+  // for the browser's connection pool and the backend's own request
+  // capacity, which could starve the one response that actually mattered
+  // indefinitely -- exactly "stuck on Loading" with no error, no
+  // eventual recovery. `pageLoadController` is aborted and replaced at
+  // the top of every loadPage() call so only the most recent page-load's
+  // GETs are ever still in flight; mutations (POST/PUT/DELETE, e.g. form
+  // submits, promote/sync/backup actions) are never auto-aborted this
+  // way since aborting a write client-side does not undo it server-side.
+  let pageLoadController = null;
+
   async function api(path, options) {
     const opts = Object.assign({ credentials: "same-origin", headers: {} }, options || {});
     opts.headers = Object.assign({ "Accept": "application/json" }, opts.headers || {});
     if (opts.body && !(opts.body instanceof FormData)) opts.headers["Content-Type"] = "application/json";
-    if (!/^(GET|HEAD)$/i.test(opts.method || "GET")) opts.headers["X-CSRF-Token"] = state.csrf;
+    const method = (opts.method || "GET").toUpperCase();
+    if (!/^(GET|HEAD)$/.test(method)) opts.headers["X-CSRF-Token"] = state.csrf;
+    else if (!opts.signal && pageLoadController) opts.signal = pageLoadController.signal;
     const res = await fetch(path, opts);
     let body = null;
     const text = await res.text();
@@ -1059,6 +1079,10 @@
   async function loadPage(id, opts = {}) {
     const requested = id || "dashboard";
     const token = ++loadToken;
+    // Cancel the previous page-load's own in-flight GETs (see api()'s
+    // pageLoadController note) before starting this one's.
+    if (pageLoadController) pageLoadController.abort();
+    pageLoadController = new AbortController();
     // Real defect fixed here (owner-beta closure item 3, found live via
     // the Chromium harness's own browser back/forward proof): every
     // navigation -- a real route change from a sidebar click AND a

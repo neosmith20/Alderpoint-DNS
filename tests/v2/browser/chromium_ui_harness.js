@@ -442,6 +442,36 @@ async function main() {
     await cdp("Page.navigate", { url: base + "/ui/dashboard" });
     await waitFor(`document.documentElement.dataset.theme === ${JSON.stringify(beforeTheme)} && document.querySelector('[data-route="clients"]')`, "theme persisted after reload");
     proof.push("theme-persistence");
+
+    // Real defect fixed this pass (owner-reported: 10+ rapid Light/Dark
+    // clicks left the page stuck on "Loading" indefinitely). Each theme
+    // toggle re-renders the shell and re-fetches the current route's
+    // data; a rapid-click storm previously left every earlier click's
+    // now-abandoned fetches still running, competing for the browser's
+    // connection pool and the backend's own request capacity and able to
+    // starve the one response that actually mattered. Fire the toggle 12
+    // times with zero delay between clicks (a real impatient-operator/
+    // stuck-key pattern, not one clean toggle-and-wait) and require the
+    // page to actually settle on real content -- never left showing
+    // "Loading" -- within the normal wait budget.
+    const themeBeforeStorm = await evalJs(`document.documentElement.dataset.theme || ""`);
+    await evalJs(`(() => { for (let i = 0; i < 12; i++) document.querySelector('[data-action="theme"]').click(); return true; })()`);
+    await waitFor(`document.querySelector('.page-head h1') && document.querySelector('.page-head h1').textContent !== "Loading" && !document.body.innerText.includes("Page unavailable")`, "page settles after a rapid 12x theme-toggle storm");
+    const themeAfterStorm = await evalJs(`document.documentElement.dataset.theme || ""`);
+    // 12 is even, so the storm should land back on the starting theme --
+    // a genuine correctness check, not just "it didn't hang."
+    if (themeAfterStorm !== themeBeforeStorm) throw new Error(`theme after an even (12x) rapid-toggle storm should match the starting theme: before=${themeBeforeStorm} after=${themeAfterStorm}`);
+    // Also fire the storm mid-navigation (toggle while a route change's
+    // own fetch is still in flight) and immediately after a fresh route
+    // load, per the owner's specific repro notes.
+    await evalJs(`document.querySelector('[data-route="backup"]').click(); true`);
+    await evalJs(`(() => { for (let i = 0; i < 10; i++) document.querySelector('[data-action="theme"]').click(); return true; })()`);
+    await waitFor(`document.querySelector('.page-head h1') && document.querySelector('.page-head h1').textContent !== "Loading" && !document.body.innerText.includes("Page unavailable")`, "page settles after theme storm fired during a route change");
+    await route("dashboard");
+    await evalJs(`(() => { for (let i = 0; i < 10; i++) document.querySelector('[data-action="theme"]').click(); return true; })()`);
+    await waitFor(`document.querySelector('.page-head h1') && document.querySelector('.page-head h1').textContent !== "Loading" && !document.body.innerText.includes("Page unavailable")`, "page settles after theme storm fired immediately post-navigation");
+    proof.push("rapid-theme-toggle-storm-no-hang");
+
     // Real, permanent diagnostic value (not one-off debug scaffolding):
     // captures uncaught exceptions/unhandled promise rejections for
     // waitFor's own timeout report, so a future failure here shows the
