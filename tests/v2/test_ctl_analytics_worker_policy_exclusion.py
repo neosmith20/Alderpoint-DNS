@@ -165,6 +165,24 @@ def test_client_with_no_exclusions_is_logged_normally(ctl_module):
     assert any(b"normal-domain" in f.read_bytes() for f in parquet_files)
 
 
+def test_malformed_inbox_file_is_quarantined_not_retried(ctl_module):
+    _seed_control_db(ctl_module)
+    inbox = ctl_module.STATE_DIR / "analytics" / "inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    bad_file = inbox / "bad.jsonl"
+    bad_file.write_text("{not-json\n", encoding="utf-8")
+
+    args = argparse.Namespace(once=True, interval_seconds=1.0, inject_test_event=False)
+    rc = ctl_module.cmd_analytics_worker(args)
+    assert rc == 0
+
+    assert not bad_file.exists()
+    quarantine = ctl_module.STATE_DIR / "analytics" / "quarantine"
+    quarantined = [p for p in quarantine.glob("bad.jsonl.bad-*") if p.suffix != ".json"]
+    assert len(quarantined) == 1
+    assert list(quarantine.glob("bad.jsonl.bad-*.json"))
+
+
 def test_real_client_name_is_populated_not_left_blank(ctl_module):
     # Real defect found in the same pass as cache_profile_id/action/
     # upstream_profile_id: client_name (a real projectable/sortable

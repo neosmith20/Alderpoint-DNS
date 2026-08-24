@@ -841,6 +841,53 @@ def cmd_generate_runtime(args: argparse.Namespace) -> int:
 
 # --- analytics-worker ----------------------------------------------------
 
+ANALYTICS_MAX_INBOX_FILES_PER_TICK = 500
+ANALYTICS_PROGRESS_INTERVAL_SECONDS = 5.0
+
+
+def _quarantine_analytics_inbox_file(path: Path, reason: str) -> Path | None:
+    """Move a malformed analytics inbox file aside so it is not retried forever.
+
+    The quarantined payload may contain client identifiers and query names, so
+    keep it under the private analytics state tree with owner-only mode.
+    """
+    quarantine_dir = STATE_DIR / "analytics" / "quarantine"
+    try:
+        quarantine_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(quarantine_dir, 0o700)
+        except OSError:
+            pass
+        suffix = f".bad-{int(time.time() * 1000)}-{os.getpid()}"
+        dest = quarantine_dir / f"{path.name}{suffix}"
+        path.replace(dest)
+        try:
+            os.chmod(dest, 0o600)
+        except OSError:
+            pass
+        meta = {
+            "original_name": path.name,
+            "quarantined_at": datetime.now(timezone.utc).isoformat(),
+            "reason": reason[:500],
+        }
+        meta_path = quarantine_dir / f"{dest.name}.json"
+        meta_path.write_text(json.dumps(meta), encoding="utf-8")
+        try:
+            os.chmod(meta_path, 0o600)
+        except OSError:
+            pass
+        return dest
+    except OSError:
+        log.exception("failed quarantining analytics inbox file %s", path)
+        return None
+
+
+def _analytics_tick_count() -> int:
+    from app.v2 import worker_heartbeat
+
+    hb = worker_heartbeat.read_heartbeat(STATE_DIR, "analytics-worker")
+    return hb.tick_count if hb is not None else 0
+
 
 def _build_pipeline():
     from app.v2.analytics_pipeline import AnalyticsPipeline
@@ -1005,7 +1052,15 @@ def cmd_analytics_worker(args: argparse.Namespace) -> int:
         )
 
     def _drain_once() -> int:
+        from app.v2 import worker_heartbeat
+
+        tick_count = _analytics_tick_count()
+        tick_started = time.monotonic()
+        next_progress_at = tick_started
         processed = 0
+        files_seen = 0
+        files_processed = 0
+        quarantined = 0
         flag_cache: dict[str, tuple[bool, bool]] = {}
         # Real regression found live during real clean-install acceptance
         # testing: this service's systemd unit (like every other V2
@@ -1039,7 +1094,24 @@ def cmd_analytics_worker(args: argparse.Namespace) -> int:
                 log.exception("could not open control.db read-only for policy lookups; logging everything")
         try:
             now = datetime.now(timezone.utc)
-            for f in sorted(inbox.glob("*.jsonl")):
+            worker_heartbeat.record_tick_progress(
+                STATE_DIR,
+                "analytics-worker",
+                tick_count=tick_count,
+                stage="scan_inbox",
+                counters={"processed": processed, "files_seen": files_seen, "quarantined": quarantined},
+            )
+            for f in sorted(inbox.glob("*.jsonl"))[:ANALYTICS_MAX_INBOX_FILES_PER_TICK]:
+                files_seen += 1
+                if time.monotonic() >= next_progress_at:
+                    worker_heartbeat.record_tick_progress(
+                        STATE_DIR,
+                        "analytics-worker",
+                        tick_count=tick_count,
+                        stage="process_inbox",
+                        counters={"processed": processed, "files_seen": files_seen, "quarantined": quarantined},
+                    )
+                    next_progress_at = time.monotonic() + ANALYTICS_PROGRESS_INTERVAL_SECONDS
                 try:
                     for line in f.read_text(encoding="utf-8").splitlines():
                         if not line.strip():
@@ -1073,13 +1145,53 @@ def cmd_analytics_worker(args: argparse.Namespace) -> int:
                         pipeline.submit(NormalizedQueryEvent(**record))
                         processed += 1
                     f.unlink()
-                except (OSError, ValueError, TypeError) as exc:
+                    files_processed += 1
+                except (ValueError, TypeError) as exc:
+                    quarantined += 1
+                    dest = _quarantine_analytics_inbox_file(f, str(exc))
+                    log.error("quarantined malformed analytics inbox file %s -> %s: %s", f, dest, exc)
+                except OSError as exc:
                     log.error("failed processing inbox file %s: %s", f, exc)
         finally:
             if conn is not None:
                 conn.close()
+        worker_heartbeat.record_tick_progress(
+            STATE_DIR,
+            "analytics-worker",
+            tick_count=tick_count,
+            stage="flush_pipeline",
+            counters={
+                "processed": processed,
+                "files_seen": files_seen,
+                "files_processed": files_processed,
+                "quarantined": quarantined,
+            },
+        )
         n = pipeline.flush()
+        worker_heartbeat.record_tick_progress(
+            STATE_DIR,
+            "analytics-worker",
+            tick_count=tick_count,
+            stage="flush_tier_b",
+            counters={
+                "processed": processed,
+                "files_seen": files_seen,
+                "files_processed": files_processed,
+                "quarantined": quarantined,
+                "flushed": n,
+            },
+        )
         tier_b_flush(tier_b_index, TIER_B_STATE_FILE)
+        elapsed_ms = (time.monotonic() - tick_started) * 1000.0
+        if elapsed_ms > 1000.0 or quarantined:
+            log.info(
+                "analytics tick completed processed=%s files=%s quarantined=%s flushed=%s elapsed_ms=%.1f",
+                processed,
+                files_processed,
+                quarantined,
+                n,
+                elapsed_ms,
+            )
         return n
 
     if args.once:

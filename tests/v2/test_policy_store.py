@@ -264,6 +264,29 @@ class TestServiceBlocking:
         assert store.is_domain_service_blocked(conn, "teen-rules", "www.social.example") == "svc-social"
         assert store.is_domain_service_blocked(conn, "teen-rules", "unrelated.test") is None
 
+    def test_large_service_ruleset_lookup_is_indexed(self, conn):
+        domains = [("suffix", f"bulk-{i}.example") for i in range(10_000)]
+        domains.append(("suffix", "blocked.example"))
+        store.create_service(conn, "svc-bulk", "Bulk", domains)
+        store.create_service_ruleset(conn, "bulk-rules", ["svc-bulk"])
+
+        progress_calls = 0
+
+        def progress_handler():
+            nonlocal progress_calls
+            progress_calls += 1
+            if progress_calls > 200:
+                return 1
+            return 0
+
+        conn.set_progress_handler(progress_handler, 1000)
+        try:
+            assert store.is_domain_service_blocked(conn, "bulk-rules", "www.blocked.example") == "svc-bulk"
+            assert store.is_domain_service_blocked(conn, "bulk-rules", "unrelated.test") is None
+        finally:
+            conn.set_progress_handler(None, 0)
+        assert progress_calls < 200
+
     def test_ruleset_references_unknown_service_rejected(self, conn):
         with pytest.raises(store.PolicyStoreError):
             store.create_service_ruleset(conn, "r1", ["ghost-service"])

@@ -128,6 +128,37 @@ def record_tick_start(state_dir: Path, worker: str, *, tick_count: int) -> None:
     )
 
 
+def record_tick_progress(
+    state_dir: Path,
+    worker: str,
+    *,
+    tick_count: int,
+    stage: str,
+    counters: dict[str, int] | None = None,
+) -> None:
+    """Refresh a running tick heartbeat with low-cardinality progress data.
+
+    This is intentionally small and secret-free: it records worker stage
+    names and counts, not payload contents such as queried domains.
+    """
+    prior = read_heartbeat(state_dir, worker)
+    _atomic_write(
+        _heartbeat_path(state_dir, worker),
+        {
+            "worker": worker,
+            "status": "running",
+            "tick_count": tick_count,
+            "tick_started_at": prior.tick_started_at if prior else time.time(),
+            "last_success_at": prior.last_success_at if prior else None,
+            "last_result": prior.last_result if prior else None,
+            "last_error": prior.last_error if prior else None,
+            "stage": stage,
+            "counters": counters or {},
+            "progress_at": time.time(),
+        },
+    )
+
+
 def record_tick_success(state_dir: Path, worker: str, *, tick_count: int, result: int) -> None:
     now = time.time()
     _atomic_write(

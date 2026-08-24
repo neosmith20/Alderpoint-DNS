@@ -208,6 +208,29 @@ def ensure_schema(path: str | Path) -> None:
     _ensure_dns_transport_settings_table(path)
     _ensure_dnscrypt_settings_table(path)
     _ensure_upstream_profile_lifecycle_columns(path)
+    _ensure_service_domain_lookup_indexes(path)
+
+
+def _ensure_service_domain_lookup_indexes(path: str | Path) -> None:
+    """Indexes for query-time service/blocklist membership checks.
+
+    Large imported blocklists can contain more than a million domains. The
+    runtime decision path must probe the requested qname and its suffix
+    candidates directly, not scan the whole ruleset into Python.
+    """
+    with control_db.connect(path) as conn:
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_service_domains_lookup
+            ON service_domains(match_kind, domain, service_row_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_service_domains_service_lookup
+            ON service_domains(service_row_id, match_kind, domain)
+            """
+        )
 
 
 def _ensure_upstream_profile_lifecycle_columns(path: str | Path) -> None:
@@ -1067,23 +1090,46 @@ def is_domain_service_blocked(conn: sqlite3.Connection, ruleset_id: str, qname: 
     "block reason").
     """
     qname = qname.strip(".").lower()
-    rows = conn.execute(
+    if not qname:
+        return None
+
+    exact = conn.execute(
         """
-        SELECT sd.service_id, sdom.match_kind, sdom.domain
-        FROM service_blocking_ruleset_members m
+        SELECT sd.service_id
+        FROM service_blocking_rulesets r
+        JOIN service_blocking_ruleset_members m ON m.ruleset_row_id = r.id
+        JOIN service_domains sdom ON sdom.service_row_id = m.service_row_id
         JOIN service_definitions sd ON sd.id = m.service_row_id
-        JOIN service_domains sdom ON sdom.service_row_id = sd.id
-        JOIN service_blocking_rulesets r ON r.id = m.ruleset_row_id
         WHERE r.ruleset_id = ?
+          AND sdom.match_kind = 'exact'
+          AND sdom.domain = ?
+        ORDER BY sd.id
+        LIMIT 1
         """,
-        (ruleset_id,),
-    ).fetchall()
-    for service_id, match_kind, domain in rows:
-        if match_kind == "exact" and qname == domain:
-            return service_id
-        if match_kind == "suffix" and (qname == domain or qname.endswith("." + domain)):
-            return service_id
-    return None
+        (ruleset_id, qname),
+    ).fetchone()
+    if exact is not None:
+        return exact[0]
+
+    parts = qname.split(".")
+    suffix_candidates = [".".join(parts[i:]) for i in range(min(len(parts), 128))]
+    placeholders = ",".join("?" for _ in suffix_candidates)
+    suffix = conn.execute(
+        f"""
+        SELECT sd.service_id
+        FROM service_blocking_rulesets r
+        JOIN service_blocking_ruleset_members m ON m.ruleset_row_id = r.id
+        JOIN service_domains sdom ON sdom.service_row_id = m.service_row_id
+        JOIN service_definitions sd ON sd.id = m.service_row_id
+        WHERE r.ruleset_id = ?
+          AND sdom.match_kind = 'suffix'
+          AND sdom.domain IN ({placeholders})
+        ORDER BY length(sdom.domain) DESC, sd.id
+        LIMIT 1
+        """,
+        (ruleset_id, *suffix_candidates),
+    ).fetchone()
+    return suffix[0] if suffix is not None else None
 
 
 # --------------------------------------------------------------------------
