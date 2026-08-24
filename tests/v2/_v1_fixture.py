@@ -77,6 +77,24 @@ CREATE TABLE access_settings (
 CREATE TABLE dns_cache_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE encryption_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE analytics_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE sources (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    url TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    category TEXT NOT NULL DEFAULT 'ads_trackers',
+    last_attempt TEXT,
+    last_success TEXT,
+    http_status INTEGER,
+    downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+    parsed_rules INTEGER NOT NULL DEFAULT 0,
+    accepted_domains INTEGER NOT NULL DEFAULT 0,
+    duplicate_domains INTEGER NOT NULL DEFAULT 0,
+    invalid_rules INTEGER NOT NULL DEFAULT 0,
+    unsupported_rules INTEGER NOT NULL DEFAULT 0,
+    final_active_domains INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT
+);
 CREATE TABLE query_events (
     id INTEGER PRIMARY KEY, ts REAL NOT NULL, domain TEXT NOT NULL
 );
@@ -170,6 +188,10 @@ def build_v1_fixture(
             conn.execute("INSERT INTO dns_cache_settings VALUES ('max_cache_size_mb', '500')")
             conn.execute("INSERT INTO encryption_settings VALUES ('dot_enabled', 'true')")
             conn.execute("INSERT INTO analytics_settings VALUES ('retention_days', '30')")
+            conn.execute(
+                "INSERT INTO sources(name, url, enabled, category) VALUES "
+                "('StevenBlack', 'https://example.test/hosts.txt', 1, 'ads_trackers')"
+            )
             if upstream_protocol and upstream_protocol != "dot":
                 port = {"plain": 53, "doh": 443}[upstream_protocol]
                 doh_path = "/dns-query" if upstream_protocol == "doh" else ""

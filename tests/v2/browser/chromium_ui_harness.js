@@ -1238,7 +1238,19 @@ async function main() {
     await route("backup");
     await waitFor(`document.querySelector('[data-validate-appliance-backup]')`, "appliance backup list (pre-restore)");
     await evalJs(`(() => {
+      const target = ${JSON.stringify(applianceBackupName)};
+      const button = Array.from(document.querySelectorAll('[data-validate-appliance-backup]')).find((b) => b.dataset.validateApplianceBackup === target);
+      if (!button) throw new Error('backup preview button not found for ' + target);
+      button.click();
+      return true;
+    })()`);
+    await waitFor(`document.querySelector('form[data-form="appliance-restore"] input[name="archive_digest"]')`, "structured appliance restore preview");
+    await evalJs(`(() => {
       const f = document.querySelector('form[data-form="appliance-restore"]');
+      f.querySelectorAll('input[name="selected_categories"]').forEach((box) => { box.checked = false; });
+      const localDns = f.querySelector('input[name="selected_categories"][value="local_dns"]');
+      if (!localDns || localDns.disabled) throw new Error("local_dns restore category is not available");
+      localDns.checked = true;
       f.querySelector('[name=confirmation]').value = ${JSON.stringify(applianceBackupName)};
       f.requestSubmit();
       return true;

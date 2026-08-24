@@ -681,6 +681,126 @@ class TestApplianceBackupApiRoutes:
         assert {"nas.lan", "printer.lan"} <= local_names
         assert "Kids Laptop" in clients
 
+    def test_selective_v1_restore_only_blocklist_subscriptions(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        webapp = self._fresh_webapp(tmp_path, monkeypatch)
+        client = TestClient(webapp.app)
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12", "create_local_dns": False})
+        login = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
+        csrf = login.json()["csrf"]
+        client.post("/api/local-dns", json={"name": "keep.lan", "record_type": "A", "value": "10.10.10.10", "ttl": 300}, headers={"X-CSRF-Token": csrf})
+
+        source_db = build_v1_fixture(tmp_path / "v1" / "alderpointdns.db")
+        archive = _v111_tar_gz_fixture(tmp_path, source_db)
+        upload = client.post(
+            "/api/backup/appliance/upload",
+            json={"filename": "alderpointdns-backup-20260823T000000Z.tar.gz", "data_base64": base64.b64encode(archive.read_bytes()).decode("ascii")},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert upload.status_code == 200, upload.text
+        payload = upload.json()
+        cats = {c["id"]: c for c in payload["inventory"]["categories"]}
+        assert cats["blocklist_subscriptions"]["found_count"] == 1
+        assert "app_config" not in json.dumps(payload["inventory"])
+
+        restored = client.post(
+            f"/api/backup/appliance/{payload['backup_name']}/restore",
+            json={
+                "confirmation": payload["backup_name"],
+                "archive_digest": payload["inventory"]["archive_digest"],
+                "selected_categories": ["blocklist_subscriptions"],
+                "conflict_policy": "merge",
+            },
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert restored.status_code == 200, restored.text
+
+        local_records = client.get("/api/local-dns").json()["records"]
+        assert {r["name"] for r in local_records} == {"keep.lan"}
+        blocklists = client.get("/api/blocklists").json()["subscriptions"]
+        assert {b["name"] for b in blocklists} == {"StevenBlack"}
+
+    def test_selective_v1_restore_only_local_dns_keeps_clients_unchanged(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        webapp = self._fresh_webapp(tmp_path, monkeypatch)
+        client = TestClient(webapp.app)
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12", "create_local_dns": False})
+        login = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
+        csrf = login.json()["csrf"]
+        client.post("/api/clients", json={"name": "Existing Client", "identifiers": [{"kind": "ipv4", "value": "10.20.30.40"}]}, headers={"X-CSRF-Token": csrf})
+
+        source_db = build_v1_fixture(tmp_path / "v1" / "alderpointdns.db")
+        archive = _v111_tar_gz_fixture(tmp_path, source_db)
+        upload = client.post(
+            "/api/backup/appliance/upload",
+            json={"filename": "alderpointdns-backup-20260823T000000Z.tar.gz", "data_base64": base64.b64encode(archive.read_bytes()).decode("ascii")},
+            headers={"X-CSRF-Token": csrf},
+        )
+        payload = upload.json()
+        restored = client.post(
+            f"/api/backup/appliance/{payload['backup_name']}/restore",
+            json={
+                "confirmation": payload["backup_name"],
+                "archive_digest": payload["inventory"]["archive_digest"],
+                "selected_categories": ["local_dns"],
+                "conflict_policy": "merge",
+            },
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert restored.status_code == 200, restored.text
+        records = client.get("/api/local-dns").json()["records"]
+        assert {"nas.lan", "printer.lan"} <= {r["name"] for r in records}
+        clients = client.get("/api/clients").json()["clients"]
+        assert {c["name"] for c in clients} == {"Existing Client"}
+
+    def test_selective_v2_restore_only_local_dns_keeps_clients_unchanged(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        webapp = self._fresh_webapp(tmp_path, monkeypatch)
+        client = TestClient(webapp.app)
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12", "create_local_dns": False})
+        login = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
+        csrf = login.json()["csrf"]
+        client.post("/api/local-dns", json={"name": "backup-only.lan", "record_type": "A", "value": "10.30.30.1", "ttl": 300}, headers={"X-CSRF-Token": csrf})
+        with control_db.connect(webapp.CONTROL_DB) as conn:
+            cur = conn.execute(
+                "INSERT INTO clients (name, description, enabled, created_at, updated_at) VALUES ('Client At Backup', '', 1, 'now', 'now')"
+            )
+            conn.execute(
+                "INSERT INTO client_identifiers (client_id, kind, value, created_at) VALUES (?, 'ipv4', '10.30.30.30', 'now')",
+                (cur.lastrowid,),
+            )
+
+        created = client.post("/api/backup/appliance", headers={"X-CSRF-Token": csrf})
+        assert created.status_code == 200, created.text
+        name = created.json()["name"]
+
+        client.post("/api/local-dns", json={"name": "after-backup.lan", "record_type": "A", "value": "10.30.30.2", "ttl": 300}, headers={"X-CSRF-Token": csrf})
+        with control_db.connect(webapp.CONTROL_DB) as conn:
+            conn.execute("UPDATE clients SET name='Client After Backup'")
+
+        preview = client.post(f"/api/backup/appliance/{name}/validate", headers={"X-CSRF-Token": csrf})
+        assert preview.status_code == 200, preview.text
+        inv = preview.json()["inventory"]
+        restored = client.post(
+            f"/api/backup/appliance/{name}/restore",
+            json={
+                "confirmation": name,
+                "archive_digest": inv["archive_digest"],
+                "selected_categories": ["local_dns"],
+                "conflict_policy": "merge",
+            },
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert restored.status_code == 200, restored.text
+        records = client.get("/api/local-dns").json()["records"]
+        assert {r["name"] for r in records} == {"backup-only.lan"}
+        with control_db.connect(webapp.CONTROL_DB) as conn:
+            clients_after = {r[0] for r in conn.execute("SELECT name FROM clients").fetchall()}
+        assert clients_after == {"Client After Backup"}
+
     def test_runtime_promotion_failure_rolls_back_restored_control_state(self, tmp_path, monkeypatch):
         from fastapi.testclient import TestClient
 

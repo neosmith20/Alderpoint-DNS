@@ -1299,7 +1299,54 @@
 
   function applianceBackupTable(backups) {
     if (!backups.length) return `<div class="empty">No appliance backups.</div>`;
-    return `<div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>Name</th><th>Created</th><th>Size</th><th>Restore</th></tr></thead><tbody>${backups.map((b) => `<tr><td class="mono">${esc(b.name)}</td><td>${ts(b.created_at)}</td><td>${esc(b.size_bytes)}</td><td><button data-validate-appliance-backup="${esc(b.name)}">Preview</button><form data-form="appliance-restore" data-backup-name="${esc(b.name)}" class="field-row"><input name="confirmation" placeholder="type exact file name"><input name="passphrase" type="password" data-omit-empty="1" placeholder="passphrase if required"><button class="danger">Restore</button></form></td></tr>`).join("")}</tbody></table></div>`;
+    return `<div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>Name</th><th>Created</th><th>Size</th><th>Restore</th></tr></thead><tbody>${backups.map((b) => `<tr><td class="mono">${esc(b.name)}</td><td>${ts(b.created_at)}</td><td>${esc(b.size_bytes)}</td><td><button data-validate-appliance-backup="${esc(b.name)}">Preview</button><input name="passphrase" type="password" data-omit-empty="1" placeholder="passphrase if required"></td></tr><tr id="preview-${esc(b.name).replace(/[^A-Za-z0-9_-]/g, "-")}" class="restore-preview-row" hidden><td colspan="4"></td></tr>`).join("")}</tbody></table></div>`;
+  }
+
+  function backupPreviewId(name) {
+    return `preview-${String(name).replace(/[^A-Za-z0-9_-]/g, "-")}`;
+  }
+
+  function restorePreview(res) {
+    const inv = res.inventory;
+    if (!inv) return `<div class="alert error">The backup is valid, but no structured inventory was returned. Restore is blocked until preview can be generated.</div>`;
+    const meta = inv.metadata || {};
+    const cats = inv.categories || [];
+    const categoryRows = cats.map((c) => {
+      const disabled = !c.supported ? "disabled" : "";
+      const checked = c.selected_by_default ? "checked" : "";
+      const samples = (c.samples || []).slice(0, 5).map((s) => `<li>${esc(s)}</li>`).join("");
+      const detail = c.unsupported_reason || c.warning || c.transform || "";
+      return `<tr>
+        <td><label class="row"><input type="checkbox" name="selected_categories" value="${esc(c.id)}" ${checked} ${disabled}> ${esc(c.label)}${c.sensitive ? ' <span class="badge warn">sensitive</span>' : ""}</label></td>
+        <td>${esc(c.found_count)}</td><td>${esc(c.restorable_count)}</td><td>${esc(c.skipped_count)}</td><td>${esc(c.conflict_count)}</td>
+        <td>${c.supported ? '<span class="badge ok">supported</span>' : '<span class="badge bad">unsupported</span>'}<br><span class="muted">${esc(detail)}</span>${samples ? `<details><summary>Items</summary><ul>${samples}</ul></details>` : ""}</td>
+      </tr>`;
+    }).join("");
+    return `<section class="panel stack restore-preview">
+      <div class="panel__head"><h2>Restore Preview</h2><span class="badge ok">valid</span></div>
+      <div class="grid compact">
+        <div><strong>Original filename</strong><br><span class="mono">${esc(meta.original_filename)}</span></div>
+        <div><strong>Detected format</strong><br>${esc(meta.detected_format)}</div>
+        <div><strong>Source version</strong><br>${esc(meta.source_alderpoint_version)}</div>
+        <div><strong>Created</strong><br>${ts(meta.created_at)}</div>
+        <div><strong>Archive size</strong><br>${esc(meta.archive_size_bytes)} bytes</div>
+        <div><strong>Encryption</strong><br>${meta.encrypted ? esc(meta.key_mode) : "not encrypted"}</div>
+      </div>
+      <form data-form="appliance-restore" data-backup-name="${esc(res.backup_name)}" class="stack">
+        <input type="hidden" name="archive_digest" value="${esc(inv.archive_digest)}">
+        <input type="hidden" name="confirmation" value="${esc(res.backup_name)}">
+        <div class="field-row">
+          <button type="button" data-select-restore="recommended">Recommended Selection</button>
+          <button type="button" data-select-restore="all">Select All Supported</button>
+          <button type="button" data-select-restore="none">Select None</button>
+          <label>Conflict policy <select name="conflict_policy"><option value="merge">Merge / skip duplicates</option><option value="replace">Replace selected category</option></select></label>
+          <label><input type="checkbox" name="acknowledge_sensitive" value="true" data-bool="1"> I understand selected sensitive categories can affect access or identity</label>
+        </div>
+        <div class="table-wrap"><table><thead><tr><th>Category</th><th>Found</th><th>Restorable</th><th>Skipped</th><th>Conflicts</th><th>Details</th></tr></thead><tbody>${categoryRows}</tbody></table></div>
+        <label>Final confirmation <input name="confirmation" value="${esc(res.backup_name)}" required></label>
+        <button class="danger">Restore selected categories</button>
+      </form>
+    </section>`;
   }
 
   function backupTable(backups) {
@@ -2150,6 +2197,18 @@
         wrap.closest("label").querySelector("input[type=hidden]").value = tri.dataset.val;
         return;
       }
+      const restoreSelect = ev.target.closest("[data-select-restore]");
+      if (restoreSelect) {
+        const form = restoreSelect.closest('form[data-form="appliance-restore"]');
+        if (!form) return;
+        const mode = restoreSelect.dataset.selectRestore;
+        form.querySelectorAll('input[name="selected_categories"]').forEach((box) => {
+          if (box.disabled) return;
+          box.checked = mode === "all" || (mode === "recommended" && box.defaultChecked);
+          if (mode === "none") box.checked = false;
+        });
+        return;
+      }
       // Real defect fixed here (owner-reported: "Promote" is not
       // understandable operator language). Renamed everywhere to
       // "Manage Client" -- the internal data-promote attribute/API path
@@ -2217,9 +2276,12 @@
         const passphrase = row && row.querySelector('input[name="passphrase"]') ? row.querySelector('input[name="passphrase"]').value : "";
         const payload = passphrase ? { passphrase } : {};
         const res = await api(`/api/backup/appliance/${encodeURIComponent(name)}/validate`, { method: "POST", body: JSON.stringify(payload) });
-        await loadPage("backup");
-        const warnings = (res.warnings || []).length ? `; warnings: ${res.warnings.join("; ")}` : "";
-        toast(`Backup ${res.backup_name} is valid (${res.contents.join(", ")})${warnings}`, warnings ? "info" : "ok");
+        const previewRow = document.getElementById(backupPreviewId(name));
+        if (previewRow) {
+          previewRow.hidden = false;
+          previewRow.querySelector("td").innerHTML = restorePreview(res);
+        }
+        toast(`Backup ${res.backup_name} preview is ready`, "ok");
         return;
       }
       const applyUpdate = ev.target.closest("[data-apply-update]");
@@ -2505,10 +2567,21 @@
       const payload = { filename: file.name, data_base64 };
       if (body.passphrase) payload.passphrase = body.passphrase;
       const res = await api("/api/backup/appliance/upload", { method: "POST", body: JSON.stringify(payload) });
-      const warnings = (res.warnings || []).length ? `; warnings: ${res.warnings.join("; ")}` : "";
-      toast(`Uploaded ${res.backup_name}; contents: ${res.contents.join(", ")}${warnings}`, warnings ? "info" : "ok");
+      await loadPage("backup");
+      const previewRow = document.getElementById(backupPreviewId(res.backup_name));
+      if (previewRow) {
+        previewRow.hidden = false;
+        previewRow.querySelector("td").innerHTML = restorePreview(res);
+      }
+      toast(`Uploaded ${res.backup_name}; preview is ready`, "ok");
+      return "skip-reload";
     } else if (type === "appliance-restore") {
       const name = form.dataset.backupName;
+      body.selected_categories = Array.from(form.querySelectorAll('input[name="selected_categories"]:checked')).map((box) => box.value);
+      body.acknowledge_sensitive = !!form.querySelector('input[name="acknowledge_sensitive"]:checked');
+      if (!body.selected_categories.length) throw new Error("select at least one supported category to restore");
+      const labels = body.selected_categories.join(", ");
+      if (!confirm(`Restore selected categories from ${name}: ${labels}?`)) return "skip-reload";
       await api(`/api/backup/appliance/${encodeURIComponent(name)}/restore`, { method: "POST", body: JSON.stringify(body) });
     } else if (type === "dns-transports") {
       await api("/api/dns-transports", { method: "PUT", body: JSON.stringify(body) });

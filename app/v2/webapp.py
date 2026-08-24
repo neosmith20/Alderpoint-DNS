@@ -49,6 +49,7 @@ from pydantic import BaseModel, Field
 from app import dnsdist_upgrade
 from app.db_retry import DatabaseBusyError, is_lock_error, retry_on_locked
 from app.v2 import analytics_deps
+from app.v2 import backup_selective
 from app.v2 import backup_restore
 from app.v2 import blocklist_subscriptions
 from app.v2 import statistics_control
@@ -2690,7 +2691,11 @@ def _appliance_backup_warnings(manifest: backup_restore.ApplianceManifest) -> li
     return warnings
 
 
-def _appliance_manifest_response(name: str, path: Path, manifest: backup_restore.ApplianceManifest) -> dict[str, Any]:
+def _appliance_manifest_response(name: str, path: Path, manifest: backup_restore.ApplianceManifest, *, passphrase: Optional[str] = None) -> dict[str, Any]:
+    inventory = backup_selective.build_inventory(
+        path, key=_backup_key(_secrets()), live_control_db=CONTROL_DB,
+        passphrase=passphrase,
+    )
     return {
         "status": "valid", "backup_name": name, "created_at": manifest.created_at,
         "backup_format": manifest.backup_format,
@@ -2703,6 +2708,7 @@ def _appliance_manifest_response(name: str, path: Path, manifest: backup_restore
         "size_bytes": path.stat().st_size,
         "migration_preview": manifest.migration_preview,
         "unsupported_categories": manifest.unsupported_categories,
+        "inventory": inventory,
         "warnings": _appliance_backup_warnings(manifest),
     }
 
@@ -2821,10 +2827,10 @@ def upload_appliance_backup_route(req: ApplianceBackupUploadRequest, admin=Depen
             counter += 1
         os.replace(staged_path, dest)
         os.chmod(dest, 0o600)
-        return _appliance_manifest_response(dest.name, dest, manifest)
+        return _appliance_manifest_response(dest.name, dest, manifest, passphrase=req.passphrase or None)
     except backup_restore.ApplianceBackupKeyError as exc:
         raise ApiError(400, "backup_invalid", str(exc)) from exc
-    except (backup_restore.ApplianceBackupError, backup_restore.ApplianceRestoreError) as exc:
+    except (backup_selective.SelectiveRestoreError, backup_restore.ApplianceBackupError, backup_restore.ApplianceRestoreError) as exc:
         raise ApiError(400, "backup_invalid", str(exc)) from exc
     finally:
         try:
@@ -2845,14 +2851,18 @@ def validate_appliance_backup_route(name: str, req: ApplianceBackupValidateReque
         raise ApiError(404, "not_found", "backup not found")
     try:
         manifest = _validate_appliance_backup_any(path, passphrase=req.passphrase or None)
-    except (backup_restore.ApplianceBackupError, backup_restore.ApplianceRestoreError) as exc:
+    except (backup_selective.SelectiveRestoreError, backup_restore.ApplianceBackupError, backup_restore.ApplianceRestoreError) as exc:
         raise ApiError(400, "backup_invalid", str(exc)) from exc
-    return _appliance_manifest_response(name, path, manifest)
+    return _appliance_manifest_response(name, path, manifest, passphrase=req.passphrase or None)
 
 
 class ApplianceRestoreRequest(BaseModel):
     confirmation: str
     passphrase: Optional[str] = None
+    selected_categories: list[str] = Field(default_factory=list)
+    archive_digest: Optional[str] = None
+    conflict_policy: str = "merge"
+    acknowledge_sensitive: bool = False
 
 
 @app.post("/api/backup/appliance/{name}/restore")
@@ -2889,6 +2899,85 @@ def restore_appliance_backup_route(name: str, req: ApplianceRestoreRequest, admi
     staging_dir = STATE_DIR / "restore-staging" / f"job-{int(time.time() * 1000)}"
     rollback_root = STATE_DIR / "restore-rollback" / f"job-{int(time.time() * 1000)}"
     pre_restore_backup_path: Optional[Path] = None
+
+    if req.selected_categories:
+        sensitive = {"administrator_accounts", "tls_private_keys"} & set(req.selected_categories)
+        if sensitive and not req.acknowledge_sensitive:
+            raise ApiError(400, "confirmation_required", f"explicit acknowledgement required for sensitive category/categories: {', '.join(sorted(sensitive))}")
+        if not req.archive_digest:
+            raise ApiError(400, "validation_error", "archive_digest from the restore preview is required")
+        try:
+            selected = backup_selective.stage_selected_restore(
+                path,
+                key=key,
+                live_control_db=CONTROL_DB,
+                live_secrets_dir=SECRETS_DIR,
+                staging_dir=staging_dir,
+                selected_categories=req.selected_categories,
+                archive_digest=req.archive_digest,
+                conflict_policy=req.conflict_policy,
+                passphrase=req.passphrase or None,
+            )
+        except (backup_selective.SelectiveRestoreError, backup_restore.ApplianceBackupError, backup_restore.ApplianceRestoreError) as exc:
+            _record_failure(exc, "restore_failed")
+            return  # pragma: no cover -- _record_failure always raises
+
+        try:
+            pre_restore_backup_path = _backup_dir() / f"pre-restore-safety-{int(time.time())}.apdnsbak"
+            backup_restore.create_appliance_backup(
+                CONTROL_DB, _secrets(), key, pre_restore_backup_path,
+                cert_files=_appliance_cert_files(), source_version=_appliance_source_version(),
+            )
+            promo = backup_restore.promote_appliance_restore(
+                selected.staged, CONTROL_DB, SECRETS_DIR, [], rollback_root=rollback_root,
+            )
+            result = _mutate_and_promote(lambda conn: None)
+            analytics_result = backup_selective.promote_selected_analytics(
+                selected.analytics_stage_dir, ANALYTICS_PARQUET_DIR,
+            )
+            runtime_promoted = result.promoted
+        except Exception as exc:
+            if pre_restore_backup_path is not None and pre_restore_backup_path.exists():
+                try:
+                    safety_stage = STATE_DIR / "restore-staging" / f"safety-{int(time.time() * 1000)}"
+                    safety_rollback = STATE_DIR / "restore-rollback" / f"safety-{int(time.time() * 1000)}"
+                    safety = backup_restore.stage_appliance_restore(pre_restore_backup_path, key, safety_stage)
+                    backup_restore.promote_appliance_restore(
+                        safety, CONTROL_DB, SECRETS_DIR, _appliance_cert_files(), rollback_root=safety_rollback,
+                    )
+                    _mutate_and_promote(lambda conn: None)
+                    shutil.rmtree(safety_stage, ignore_errors=True)
+                    shutil.rmtree(safety_rollback, ignore_errors=True)
+                except Exception:
+                    pass
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            shutil.rmtree(rollback_root, ignore_errors=True)
+            _record_failure(exc, "restore_failed")
+            return  # pragma: no cover -- _record_failure always raises
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+
+        finished = datetime.now(timezone.utc).isoformat()
+        detail = {
+            "backup_format": selected.inventory["metadata"]["detected_format"],
+            "selected_categories": req.selected_categories,
+            "conflict_policy": req.conflict_policy,
+            "control_db_restored": promo.control_db_restored,
+            "secret_count_restored": promo.secret_count_restored,
+            "certs_restored": promo.certs_restored,
+            "runtime_promoted": runtime_promoted,
+            "runtime_error": None,
+            "pre_restore_backup": pre_restore_backup_path.name if pre_restore_backup_path else None,
+            **analytics_result,
+        }
+        with _db() as conn:
+            cur = conn.execute(
+                "INSERT INTO restore_jobs(started_at, finished_at, status, backup_path, detail_json) VALUES (?, ?, ?, ?, ?)",
+                (started, finished, "succeeded", str(path), json.dumps(detail)),
+            )
+            job_id = cur.lastrowid
+        shutil.rmtree(rollback_root, ignore_errors=True)
+        return {"status": "succeeded", "job_id": job_id, "backup_name": name, **detail}
 
     if path.name.endswith(".tar.gz"):
         try:
