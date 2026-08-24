@@ -168,6 +168,7 @@ _request_timings: ContextVar[dict[str, float] | None] = ContextVar("request_timi
 _SLOW_REQUEST_MS = 750.0
 _SESSION_TOUCH_INTERVAL_SECONDS = 60.0
 _extended_schemas_ready = False
+_extended_schemas_error = ""
 _extended_schemas_lock = threading.Lock()
 
 
@@ -338,7 +339,7 @@ def _secrets() -> SecretStore:
 
 
 def _ensure_extended_schemas() -> None:
-    global _extended_schemas_ready
+    global _extended_schemas_error, _extended_schemas_ready
     # Real defect found and fixed live during this workstream's
     # failure-domain/chaos pass (docs/v2/control-db-silent-recreation-
     # fix.md): every ensure_schema() below starts with
@@ -366,7 +367,21 @@ def _ensure_extended_schemas() -> None:
             observed_clients.ensure_schema(CONTROL_DB)
         with _timed_stage("schema.replication"):
             replication_v2.ensure_schema(CONTROL_DB)
+        _extended_schemas_error = ""
         _extended_schemas_ready = True
+
+
+def _warm_extended_schemas() -> None:
+    global _extended_schemas_error
+    try:
+        _ensure_extended_schemas()
+    except Exception as exc:
+        _extended_schemas_error = str(exc)
+
+
+@app.on_event("startup")
+def _start_schema_warmup() -> None:
+    threading.Thread(target=_warm_extended_schemas, name="apdns-schema-warmup", daemon=True).start()
 
 
 def _client_ip(request: Request) -> str:
@@ -950,19 +965,24 @@ def health():
         # answering itself is reported separately and is what actually
         # governs "healthy" for the appliance.
         result["status"] = "degraded" if result["status"] == "ok" else result["status"]
-    try:
-        with _timed_stage("health.extended_schemas"):
-            _ensure_extended_schemas()
-        with _db() as conn:
-            with _timed_stage("health.node_identity"):
-                result["components"]["node_identity"] = {"node_id": node_identity.get_or_create(conn).node_id}
-            with _timed_stage("health.client_discovery"):
-                result["components"]["client_discovery"] = observed_clients.stats(conn)
-            with _timed_stage("health.replication"):
-                result["components"]["replication"] = {"peers": len(replication_v2.list_peers(conn))}
-    except Exception as exc:
-        result["components"]["replication_discovery"] = {"status": "unavailable", "detail": str(exc)}
+    if not _extended_schemas_ready:
+        result["components"]["replication_discovery"] = {
+            "status": "unavailable" if _extended_schemas_error else "initializing",
+            "detail": _extended_schemas_error or "extended control schemas are warming up",
+        }
         result["status"] = "degraded"
+    else:
+        try:
+            with _db() as conn:
+                with _timed_stage("health.node_identity"):
+                    result["components"]["node_identity"] = {"node_id": node_identity.get_or_create(conn).node_id}
+                with _timed_stage("health.client_discovery"):
+                    result["components"]["client_discovery"] = observed_clients.stats(conn)
+                with _timed_stage("health.replication"):
+                    result["components"]["replication"] = {"peers": len(replication_v2.list_peers(conn))}
+        except Exception as exc:
+            result["components"]["replication_discovery"] = {"status": "unavailable", "detail": str(exc)}
+            result["status"] = "degraded"
     return result
 
 
@@ -3255,8 +3275,16 @@ class NodeIdentityUpdate(BaseModel):
 
 @app.get("/api/node-identity")
 def node_identity_status(admin=Depends(current_admin)):
-    with _timed_stage("node_identity.extended_schemas"):
-        _ensure_extended_schemas()
+    if not _extended_schemas_ready:
+        return {
+            "status": "unavailable" if _extended_schemas_error else "initializing",
+            "detail": _extended_schemas_error or "extended control schemas are warming up",
+            "node_id": "",
+            "display_name": "",
+            "created_at": None,
+            "regenerated_at": None,
+            "restore_clone_semantics": "backup restore retains node_id; active clones must explicitly regenerate identity before adding replication trust",
+        }
     with _db() as conn:
         with _timed_stage("node_identity.get_or_create"):
             ident = node_identity.get_or_create(conn)
@@ -3473,8 +3501,18 @@ class DiscoverySettingsUpdate(BaseModel):
 
 @app.get("/api/discovery/status")
 def discovery_status(admin=Depends(current_admin)):
-    with _timed_stage("discovery.extended_schemas"):
-        _ensure_extended_schemas()
+    if not _extended_schemas_ready:
+        return {
+            "status": "unavailable" if _extended_schemas_error else "initializing",
+            "detail": _extended_schemas_error or "extended control schemas are warming up",
+            "observed_count": 0,
+            "dropped": 0,
+            "evicted": 0,
+            "coalesced": 0,
+            "last_error": _extended_schemas_error,
+            "settings": {},
+            "queue_depth": 0,
+        }
     with _db() as conn:
         with _timed_stage("discovery.stats"):
             return observed_clients.stats(conn)
