@@ -165,6 +165,34 @@ class TestValidateProposedThroughWrapper(unittest.TestCase):
         nc.validate_proposed("eth0", "static", "10.0.0.5", 24, "10.0.0.1", "unchanged", None, None, None)
 
 
+class TestHostNetworkMetadata(unittest.TestCase):
+    def test_preview_metadata_reports_host_interface_and_filters_podman(self):
+        payload = {
+            "generated_at": "2026-08-24T04:56:00+00:00",
+            "management_interface": "eno1",
+            "default_ipv4": {"interface": "eno1", "gateway": "172.16.43.1"},
+            "default_ipv6": {},
+            "interfaces": [
+                {"name": "podman0", "ipv4": [{"address": "10.89.0.1", "prefixlen": 24}], "ipv6": []},
+                {"name": "eth0", "ipv4": [{"address": "10.89.0.4", "prefixlen": 24}], "ipv6": []},
+                {"name": "eno1", "ipv4": [{"address": "172.16.43.100", "prefixlen": 24}], "ipv6": [{"address": "2001:db8::10", "prefixlen": 64}]},
+            ],
+            "ipv4_mode": "externally managed",
+            "ipv6_mode": "externally managed",
+        }
+        current = nc._validate_host_metadata(payload)
+        self.assertEqual(current["interface"], "eno1")
+        self.assertEqual(current["ipv4"]["address"], "172.16.43.100")
+        self.assertEqual(current["ipv4"]["gateway"], "172.16.43.1")
+        self.assertEqual(current["ipv4"]["mode"], "externally managed")
+        self.assertEqual(current["source"]["label"], "Detected from appliance host")
+        self.assertNotIn("podman0", current["interfaces"])
+
+    def test_malformed_preview_metadata_is_truthful_failure(self):
+        with self.assertRaises(nc.NetworkConfigError):
+            nc._validate_host_metadata({"generated_at": "not-a-date", "interfaces": []})
+
+
 class TestCtlNetworkSubcommands(unittest.TestCase):
     """Exercises the real, packaged scripts/v2/alderpointdns_v2_ctl.py
     entry point's network-apply/network-confirm/network-rollback-check

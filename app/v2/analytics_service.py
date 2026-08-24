@@ -28,9 +28,10 @@ DEFAULT_TOP_N = 20
 class AnalyticsService:
     parquet_root: Path
     aggregates_path: Path
+    timing_callback: Callable[[str, float], None] | None = None
 
     def __post_init__(self) -> None:
-        self._reader = PartitionPruningReader(self.parquet_root)
+        self._reader = PartitionPruningReader(self.parquet_root, timing_callback=self.timing_callback)
 
     def close(self) -> None:
         self._reader.close()
@@ -128,6 +129,9 @@ class AnalyticsService:
         return aggregates_db.query_totals(
             self.aggregates_path, start_ts, end_ts, granularity=granularity
         )
+
+    def live_totals(self, start_ts: float, end_ts: float) -> list[tuple]:
+        return aggregates_db.query_live_buckets(self.aggregates_path, start_ts, end_ts)
 
     def top_dimension_from_aggregates(
         self, dimension: str, start_ts: float, end_ts: float, *,

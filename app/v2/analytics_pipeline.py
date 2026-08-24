@@ -38,9 +38,11 @@ class PipelineStats:
     excluded_from_stats: int = 0
     parquet_failures: int = 0
     aggregate_failures: int = 0
+    live_bucket_failures: int = 0
     tier_b_failures: int = 0
     last_parquet_error: Optional[str] = None
     last_aggregate_error: Optional[str] = None
+    last_live_bucket_error: Optional[str] = None
     last_tier_b_error: Optional[str] = None
     parquet_dependency_unavailable: bool = False
 
@@ -76,7 +78,7 @@ class AnalyticsPipeline:
             self.stats.dropped_by_queue += 1
         self.stats.ingested += 1
 
-    def flush(self, max_items: Optional[int] = None) -> int:
+    def flush(self, max_items: Optional[int] = None, *, flush_parquet: bool = False) -> int:
         """Drains up to ``max_items`` queued events (all of them by
         default) and fans them out to the three sinks. Returns the number
         of events processed. Each sink's failure is isolated: an exception
@@ -97,7 +99,8 @@ class AnalyticsPipeline:
         if raw_records:
             try:
                 self.parquet_writer.ingest(raw_records)
-                self.parquet_writer.flush()
+                if flush_parquet:
+                    self.parquet_writer.flush()
             except Exception as exc:  # noqa: BLE001 - isolation boundary, never propagate
                 self.stats.parquet_failures += 1
                 self.stats.last_parquet_error = str(exc)
@@ -116,6 +119,11 @@ class AnalyticsPipeline:
                 continue
             agg_records.append(e.to_raw_record())
         if agg_records:
+            try:
+                aggregates_db.record_live_batch(self.aggregates_path, agg_records)
+            except Exception as exc:  # noqa: BLE001
+                self.stats.live_bucket_failures += 1
+                self.stats.last_live_bucket_error = str(exc)
             try:
                 for granularity in ("minute", "hour", "day"):
                     aggregates_db.record_batch(self.aggregates_path, agg_records, granularity=granularity)

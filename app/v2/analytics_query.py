@@ -30,6 +30,8 @@ into SQL — this is the SQL-injection-safety requirement from Workstream 2
 
 from __future__ import annotations
 
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -169,9 +171,19 @@ class PartitionPruningReader:
     during retention" requirement).
     """
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, timing_callback=None):
         self.root = Path(root)
         self._con = None
+        self._timing_callback = timing_callback
+
+    @contextmanager
+    def _timed(self, name: str):
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            if self._timing_callback is not None:
+                self._timing_callback(name, (time.perf_counter() - started) * 1000.0)
 
     def _connect(self):
         from app.v2.analytics_deps import ensure_on_path
@@ -189,7 +201,8 @@ class PartitionPruningReader:
             self._con = None
 
     def _files_for_range(self, start_ts: float, end_ts: float) -> list[Path]:
-        candidates = enumerate_partition_files(self.root, start_ts, end_ts)
+        with self._timed("analytics.recent.source_discovery"):
+            candidates = enumerate_partition_files(self.root, start_ts, end_ts)
         # Re-check existence right before use: retention may have deleted a
         # segment between enumeration and query. Also validate each
         # candidate (cheap metadata-only open) so a corrupted closed segment
@@ -199,14 +212,15 @@ class PartitionPruningReader:
         from app.v2.parquet_writer import validate_segment, SegmentValidationError
 
         good = []
-        for f in candidates:
-            if not f.exists():
-                continue
-            try:
-                validate_segment(f)
-                good.append(f)
-            except SegmentValidationError:
-                continue
+        with self._timed("analytics.recent.segment_validation"):
+            for f in candidates:
+                if not f.exists():
+                    continue
+                try:
+                    validate_segment(f)
+                    good.append(f)
+                except SegmentValidationError:
+                    continue
         return good
 
     def _scan_source(self, files: list[Path]) -> str | None:
@@ -260,20 +274,26 @@ class PartitionPruningReader:
         if not files:
             return QueryResult(rows=[], files_considered=0, columns=result_columns)
 
-        con = self._connect()
-        src = self._scan_source(files)
+        with self._timed("analytics.recent.parquet_open"):
+            con = self._connect()
+            src = self._scan_source(files)
         params: list[Any] = [start_ts, end_ts]
-        where = ["ts >= ?", "ts < ?"]
-        for key, value in (filters or {}).items():
-            if key not in _FILTERABLE_COLUMNS:
-                raise ValueError(f"unsupported filter column: {key!r}")
-            where.append(f"{key} = ?")
-            params.append(value)
-        sql = f"SELECT {projection} FROM {src} WHERE " + " AND ".join(where)
-        if sort_column is not None:
-            sql += f" ORDER BY {sort_column} {sort_direction}"
-        sql += f" LIMIT {limit} OFFSET {offset}"
-        rows = con.execute(sql, params).fetchall()
+        with self._timed("analytics.recent.filtering"):
+            where = ["ts >= ?", "ts < ?"]
+            for key, value in (filters or {}).items():
+                if key not in _FILTERABLE_COLUMNS:
+                    raise ValueError(f"unsupported filter column: {key!r}")
+                where.append(f"{key} = ?")
+                params.append(value)
+            sql = f"SELECT {projection} FROM {src} WHERE " + " AND ".join(where)
+        with self._timed("analytics.recent.sorting"):
+            if sort_column is not None:
+                sql += f" ORDER BY {sort_column} {sort_direction}"
+            sql += f" LIMIT {limit} OFFSET {offset}"
+        with self._timed("analytics.recent.parquet_read"):
+            rows = con.execute(sql, params).fetchall()
+        with self._timed("analytics.recent.deserialization"):
+            rows = list(rows)
         return QueryResult(rows=rows, files_considered=len(files), columns=result_columns)
 
     def query_recent(

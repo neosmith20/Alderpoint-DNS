@@ -27,11 +27,15 @@
     dashboardTopMode: "top",
     dashboardLivePaused: false,
     dashboardLiveTimer: null,
+    dashboardLiveAbort: null,
+    dashboardLivePollSeq: 0,
+    dashboardLiveDiagnostics: { renders: [], replacement_count: 0, stale_discards: 0, overlap_skips: 0, failures: [] },
     applianceTimezone: null,
     routeCache: new Map(),
     inFlightGets: new Map(),
     perfHistory: loadPerfHistory(),
     lastNavClickAt: 0,
+    currentNavigationId: "",
   };
   const PERF_LIMIT = 80;
   const ROUTE_CACHE_TTL_MS = 30000;
@@ -77,6 +81,7 @@
       viewport: { width: window.innerWidth, height: window.innerHeight },
       deployed_version_seen: deployedVersionFromPage(),
       measurements: state.perfHistory,
+      live_render_health: state.dashboardLiveDiagnostics,
     };
     return JSON.stringify(payload, null, 2);
   }
@@ -459,6 +464,9 @@
 
   async function api(path, options) {
     const opts = Object.assign({ credentials: "same-origin", headers: {} }, options || {});
+    const perfOptions = { background: !!opts.background, navigationId: opts.navigationId || state.currentNavigationId || "" };
+    delete opts.background;
+    delete opts.navigationId;
     opts.headers = Object.assign({ "Accept": "application/json" }, opts.headers || {});
     if (opts.body && !(opts.body instanceof FormData)) opts.headers["Content-Type"] = "application/json";
     const method = (opts.method || "GET").toUpperCase();
@@ -469,7 +477,7 @@
     const cacheKey = method === "GET" ? `${method} ${path}` : "";
     if (cacheKey && state.inFlightGets.has(cacheKey)) return state.inFlightGets.get(cacheKey);
     const started = nowMs();
-    const requestEntry = { type: "api", route: state.route, path: path.split("?", 1)[0], method, request_id: requestId, timestamp: absNow() };
+    const requestEntry = { type: "api", route: state.route, path: path.split("?", 1)[0], method, request_id: requestId, timestamp: absNow(), navigation_id: perfOptions.navigationId, background: perfOptions.background };
     const promise = (async () => {
       const res = await fetch(path, opts);
       const ttfb = nowMs();
@@ -786,18 +794,28 @@
   function liveActivityShell() {
     return `<div class="live-toolbar">
       <span class="badge info" data-live-status>Connecting</span>
-      <span class="metric-inline">Current bucket: <strong data-live-current>0</strong></span>
-      <span class="metric-inline">QPS: <strong data-live-qps>0</strong></span>
-      <span class="metric-inline">Blocked: <strong data-live-blocked>0%</strong></span>
+      <span class="metric-inline">Current second: <strong data-live-current>0</strong></span>
+      <span class="metric-inline">Current QPS: <strong data-live-qps>0</strong></span>
+      <span class="metric-inline">Blocked this second: <strong data-live-blocked>0%</strong></span>
       <button type="button" data-action="dashboard-live-pause">${state.dashboardLivePaused ? "Resume" : "Pause"}</button>
     </div>
-    <div id="dashboard-live-chart"><div class="empty">Loading activity...</div></div>`;
+    <div id="dashboard-live-chart">
+      <div class="ts-legend">
+        <span class="ts-legend-item"><span class="ts-swatch ts-swatch-total"></span>DNS Queries</span>
+        <span class="ts-legend-item"><span class="ts-swatch ts-swatch-blocked"></span>Blocked by Filters</span>
+      </div>
+      <div class="ts-wrap"><div class="ts-svg-host" id="dashboard-live-svg-host" data-live-chart-host><div class="empty">Loading activity...</div></div></div>
+    </div>`;
   }
 
   function cleanupDashboardLive() {
     if (state.dashboardLiveTimer) {
       clearInterval(state.dashboardLiveTimer);
       state.dashboardLiveTimer = null;
+    }
+    if (state.dashboardLiveAbort) {
+      state.dashboardLiveAbort.abort();
+      state.dashboardLiveAbort = null;
     }
     document.querySelectorAll(".ts-svg-host").forEach((host) => {
       if (host.__apdnsRO) host.__apdnsRO.disconnect();
@@ -806,8 +824,10 @@
 
   function startLiveActivity(token, topMode) {
     cleanupDashboardLive();
-    const pollMs = 5000;
+    const pollMs = 1000;
     let topRefresh = 0;
+    let inFlight = false;
+    let lastAppliedSeq = 0;
     async function poll() {
       if (token !== loadToken || state.route !== "dashboard") return cleanupDashboardLive();
       const status = document.querySelector("[data-live-status]");
@@ -815,10 +835,23 @@
         if (status) status.textContent = "Paused";
         return;
       }
+      if (inFlight) {
+        state.dashboardLiveDiagnostics.overlap_skips += 1;
+        return;
+      }
+      inFlight = true;
+      const seq = ++state.dashboardLivePollSeq;
+      const controller = new AbortController();
+      state.dashboardLiveAbort = controller;
       try {
-        if (status) status.textContent = "Connecting";
-        const data = await api("/api/analytics/live-activity?seconds=180&bucket_seconds=5", { signal: undefined });
+        if (status && lastAppliedSeq === 0) status.textContent = "Connecting";
+        const data = await api("/api/analytics/live-activity?seconds=300&bucket_seconds=1", { signal: controller.signal, background: true, navigationId: `live-${token}` });
         if (token !== loadToken || state.route !== "dashboard") return;
+        if (seq < lastAppliedSeq) {
+          state.dashboardLiveDiagnostics.stale_discards += 1;
+          return;
+        }
+        lastAppliedSeq = seq;
         if (data.degraded) {
           if (status) status.textContent = "Degraded";
           const chart = document.getElementById("dashboard-live-chart");
@@ -828,14 +861,16 @@
         document.querySelector("[data-live-current]").textContent = String(data.current_bucket_count || 0);
         document.querySelector("[data-live-qps]").textContent = String(data.current_qps || 0);
         document.querySelector("[data-live-blocked]").textContent = `${esc(data.current_blocked_percent || 0)}%`;
-        const chart = document.getElementById("dashboard-live-chart");
-        if (chart) {
-          chart.querySelectorAll(".ts-svg-host").forEach((host) => { if (host.__apdnsRO) host.__apdnsRO.disconnect(); });
-          const buckets = data.buckets || [];
-          const total = buckets.reduce((s, b) => s + (Number(b.total_queries) || 0), 0);
-          if (status) status.textContent = total > 0 ? "Connected" : "Connected - no recent activity";
-          chart.innerHTML = activityChart({ buckets, granularity: "minute" });
-        }
+        const buckets = data.buckets || [];
+        const total = buckets.reduce((s, b) => s + (Number(b.total_queries) || 0), 0);
+        if (status) status.textContent = total > 0 ? "Connected" : "Connected - no recent activity";
+        const renderStart = nowMs();
+        requestAnimationFrame(() => {
+          const host = document.getElementById("dashboard-live-svg-host");
+          if (host && token === loadToken && state.route === "dashboard") updateActivityChartHost(host, { buckets, granularity: "second" });
+          state.dashboardLiveDiagnostics.renders.unshift({ at: absNow(), duration_ms: Math.round(nowMs() - renderStart), navigation_id: `live-${token}`, buckets: buckets.length });
+          state.dashboardLiveDiagnostics.renders = state.dashboardLiveDiagnostics.renders.slice(0, 30);
+        });
         const now = Date.now();
         if (now - topRefresh > 30000) {
           topRefresh = now;
@@ -844,6 +879,11 @@
       } catch (err) {
         if (token !== loadToken || state.route !== "dashboard") return;
         if (status) status.textContent = "Reconnecting";
+        state.dashboardLiveDiagnostics.failures.unshift({ at: absNow(), message: String(err.message || err).slice(0, 160) });
+        state.dashboardLiveDiagnostics.failures = state.dashboardLiveDiagnostics.failures.slice(0, 10);
+      } finally {
+        if (state.dashboardLiveAbort === controller) state.dashboardLiveAbort = null;
+        inFlight = false;
       }
     }
     poll();
@@ -914,19 +954,27 @@
   function mountActivityChart(hostId, result) {
     const host = document.getElementById(hostId);
     if (!host) return; // navigated away before this ever mounted
+    updateActivityChartHost(host, result);
+  }
+
+  function updateActivityChartHost(host, result) {
+    host.__apdnsResult = result;
     function redraw() {
       if (!document.body.contains(host)) { if (host.__apdnsRO) host.__apdnsRO.disconnect(); return; }
       const width = Math.max(280, Math.round(host.clientWidth) || 600);
-      host.innerHTML = renderActivitySvgMarkup(result, width);
+      const before = host.querySelector("svg.ts-chart");
+      host.innerHTML = renderActivitySvgMarkup(host.__apdnsResult || result, width);
+      if (before) state.dashboardLiveDiagnostics.replacement_count += 1;
     }
-    redraw();
-    if (typeof ResizeObserver !== "undefined") {
+    host.__apdnsRedraw = redraw;
+    if (!host.__apdnsRO && typeof ResizeObserver !== "undefined") {
       const ro = new ResizeObserver(() => redraw());
       ro.observe(host);
       host.__apdnsRO = ro;
-    } else {
+    } else if (!host.__apdnsRO) {
       window.addEventListener("resize", redraw);
     }
+    redraw();
   }
 
   // Pure(ish) markup builder: given real bucket data and a real target
@@ -949,7 +997,7 @@
     const maxLabels = Math.max(2, Math.floor(plotW / 70));
     const labelEvery = Math.max(1, Math.ceil(n / maxLabels));
     const chartZone = resolveDisplayTimeZone();
-    const fmt = (iso) => new Date(iso).toLocaleString(undefined, Object.assign({ timeZone: chartZone }, n <= 24 && result.granularity === "hour" ? { hour: "numeric", minute: "2-digit" } : result.granularity === "minute" ? { hour: "numeric", minute: "2-digit" } : { month: "short", day: "numeric" }));
+    const fmt = (iso) => new Date(iso).toLocaleString(undefined, Object.assign({ timeZone: chartZone }, result.granularity === "second" ? { hour: "numeric", minute: "2-digit", second: "2-digit" } : n <= 24 && result.granularity === "hour" ? { hour: "numeric", minute: "2-digit" } : result.granularity === "minute" ? { hour: "numeric", minute: "2-digit" } : { month: "short", day: "numeric" }));
     const gridlines = [0, 0.25, 0.5, 0.75, 1].map((f) => `<line x1="${padL}" x2="${w - padR}" y1="${(padT + plotH * f).toFixed(1)}" y2="${(padT + plotH * f).toFixed(1)}" class="ts-grid"/>`).join("");
     const yLabels = [0, 0.5, 1].map((f) => `<text x="${padL - 6}" y="${(padT + plotH * (1 - f) + 4).toFixed(1)}" class="ts-axis" text-anchor="end">${Math.round(maxTotal * f)}</text>`).join("");
     const xLabels = buckets.map((b, i) => (i % labelEvery !== 0 && i !== n - 1) ? "" : `<text x="${x(i).toFixed(1)}" y="${h - 8}" class="ts-axis" text-anchor="middle">${esc(fmt(b.bucket_start_iso))}</text>`).join("");
@@ -1583,7 +1631,7 @@
   function performanceSummaryTable() {
     const routes = state.perfHistory.filter((e) => e.type === "route").slice(0, 12);
     if (!routes.length) return `<div class="empty">No route measurements yet.</div>`;
-    return `<div class="table-wrap"><table><thead><tr><th>Route</th><th>When</th><th>Shell</th><th>Useful</th><th>Total</th><th>Cache</th><th>Slowest API</th></tr></thead><tbody>${routes.map((r) => `<tr><td>${esc(r.route)}</td><td>${esc(r.timestamp)}</td><td>${esc(r.shell_paint_ms)} ms</td><td>${esc(r.first_useful_ms)} ms</td><td>${esc(r.total_ms)} ms</td><td>${esc(r.cache_status)}</td><td>${esc(r.slowest_api || "")}</td></tr>`).join("")}</tbody></table></div>`;
+    return `<div class="table-wrap"><table><thead><tr><th>Route</th><th>Navigation ID</th><th>When</th><th>Shell</th><th>Useful</th><th>Total</th><th>Cache</th><th>Slowest API</th></tr></thead><tbody>${routes.map((r) => `<tr><td>${esc(r.route)}</td><td class="mono">${esc(r.navigation_id || "")}</td><td>${esc(r.timestamp)}</td><td>${esc(r.shell_paint_ms)} ms</td><td>${esc(r.first_useful_ms)} ms</td><td>${esc(r.total_ms)} ms</td><td>${esc(r.cache_status)}</td><td>${esc(r.slowest_api || "")}</td></tr>`).join("")}</tbody></table></div>`;
   }
 
   async function administration() {
@@ -1725,8 +1773,10 @@
     const current = status.current || {};
     const pending = status.pending;
     const ifaceOptions = (current.interfaces || []).map((i) => `<option value="${esc(i)}" ${i === current.interface ? "selected" : ""}>${esc(i)}</option>`).join("");
+    const source = current.source || {};
+    const sourceText = source.label || (source.kind === "host_metadata" ? "Detected from appliance host" : "Detected from appliance OS");
     const row = (label, value) => `<tr><td>${esc(label)}</td><td class="mono">${esc(value ?? "unknown")}</td></tr>`;
-    const changeForm = current.backend && current.backend !== "unsupported" && !pending ? `
+    const changeForm = current.backend && current.backend !== "unsupported" && current.backend !== "external" && !pending ? `
       <section class="panel"><div class="panel__head"><h2>Change Network Configuration</h2></div><div class="panel__body">
         <p class="muted">Changing this appliance's IP address may disconnect your browser. The previous configuration is automatically restored if the new settings are not confirmed within about 120 seconds -- no reboot required.</p>
         <form data-form="network-apply">
@@ -1758,9 +1808,10 @@
         <section class="panel"><div class="panel__head"><h2>Detected Backend</h2></div><div class="panel__body">
           <span class="badge ${current.backend && current.backend !== "unsupported" ? "ok" : "bad"}">${esc(current.backend || "unknown")}</span>
           <p class="muted">${esc(current.backend_detail || "")}</p>
+          <p class="muted">${esc(sourceText)}${source.generated_at ? ` at ${ts(source.generated_at, "")}` : ""}${source.stale ? " (stale)" : ""}</p>
           ${current.ambiguous ? `<p class="alert error">Multiple networking backends appear active on this host. Settings are shown read-only until this is resolved.</p>` : ""}
         </section>
-        <section class="panel"><div class="panel__head"><h2>Active Interface</h2></div><div class="panel__body"><p class="mono">${esc(current.interface || "none detected")}</p></section>
+        <section class="panel"><div class="panel__head"><h2>Management Interface</h2></div><div class="panel__body"><p class="mono">${esc(current.interface || "none detected")}</p></section>
       </div>
       <section class="panel"><div class="panel__head"><h2>Current Network Settings</h2></div><div class="panel__body">
         <div class="table-wrap"><table><tbody>
@@ -1889,6 +1940,8 @@
   async function loadPage(id, opts = {}) {
     const requested = id || "dashboard";
     const token = ++loadToken;
+    const navigationId = `nav-${token}-${Date.now().toString(36)}`;
+    state.currentNavigationId = navigationId;
     const navAcceptedAt = nowMs();
     const routeStartAt = state.lastNavClickAt || navAcceptedAt;
     performance.mark(`route-${token}-accepted`);
@@ -1977,11 +2030,12 @@
       await nextPaint();
       const doneAt = nowMs();
       performance.measure(`route-${token}-complete`, { start: `route-${token}-accepted`, duration: doneAt - navAcceptedAt });
-      const recentApis = state.perfHistory.filter((e) => e.type === "api" && e.route === requested && (Date.parse(e.timestamp) > Date.now() - 120000));
+      const recentApis = state.perfHistory.filter((e) => e.type === "api" && e.navigation_id === navigationId && !e.background);
       const slowestApi = recentApis.sort((a, b) => (b.total_ms || 0) - (a.total_ms || 0))[0];
       perfSave({
         type: "route",
         route: requested,
+        navigation_id: navigationId,
         timestamp: absNow(),
         viewport: `${window.innerWidth}x${window.innerHeight}`,
         browser_timezone: browserTimezone(),
@@ -2555,7 +2609,7 @@
         state.dashboardLivePaused = !state.dashboardLivePaused;
         livePause.textContent = state.dashboardLivePaused ? "Resume" : "Pause";
         const status = document.querySelector("[data-live-status]");
-        if (status) status.textContent = state.dashboardLivePaused ? "Paused" : "Live";
+        if (status) status.textContent = state.dashboardLivePaused ? "Paused" : "Reconnecting";
         return;
       }
 

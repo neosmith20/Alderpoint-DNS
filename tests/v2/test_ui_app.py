@@ -68,6 +68,20 @@ def test_dashboard_live_initializes_after_panel_exists_and_has_terminal_states(t
     assert "liveActivityShell()" in js
     assert "Connected - no recent activity" in js
     assert "Reconnecting" in js
+    assert "Current second:" in js
+    assert "/api/analytics/live-activity?seconds=300&bucket_seconds=1" in js
+    assert "dashboard-live-svg-host" in js
+    assert "overlap_skips" in js
+
+
+def test_performance_report_uses_navigation_ids_and_excludes_background_live(tmp_path, monkeypatch):
+    webapp = _fresh_webapp(tmp_path, monkeypatch)
+    client = _client(webapp)
+    js = client.get("/ui-static/app.js").text
+    assert "navigation_id" in js
+    assert "!e.background" in js
+    assert "navigationId: `live-${token}`" in js
+    assert "live_render_health" in js
 
 
 def test_upstream_table_defaults_to_display_order_and_does_not_truncate_addresses(tmp_path, monkeypatch):

@@ -2297,7 +2297,7 @@ def create_local_dns(req: LocalDnsRecordCreate, admin=Depends(current_admin), x_
 
 
 def _analytics_service() -> AnalyticsService:
-    return AnalyticsService(parquet_root=ANALYTICS_PARQUET_DIR, aggregates_path=ANALYTICS_AGGREGATES_DB)
+    return AnalyticsService(parquet_root=ANALYTICS_PARQUET_DIR, aggregates_path=ANALYTICS_AGGREGATES_DB, timing_callback=_add_timing)
 
 
 def _query_result_to_dict(qr) -> dict:
@@ -2312,9 +2312,13 @@ def _forced_analytics_degraded() -> str:
 def analytics_recent(minutes: float = 60.0, admin=Depends(current_admin)):
     if reason := _forced_analytics_degraded():
         return {"rows": [], "columns": [], "degraded": True, "degraded_reason": reason}
-    svc = _analytics_service()
+    with _timed_stage("analytics.recent.cache_lookup"):
+        svc = _analytics_service()
     try:
-        return _query_result_to_dict(svc.recent_query_log(minutes=minutes))
+        with _timed_stage("analytics.recent.query"):
+            result = svc.recent_query_log(minutes=minutes)
+        with _timed_stage("analytics.recent.serialization"):
+            return _query_result_to_dict(result)
     finally:
         svc.close()
 
@@ -2488,32 +2492,52 @@ def analytics_timeseries(minutes: float = 1440.0, granularity: str = "hour", adm
 
 
 @app.get("/api/analytics/live-activity")
-def analytics_live_activity(seconds: float = 180.0, bucket_seconds: int = 5, admin=Depends(current_admin)):
+def analytics_live_activity(seconds: float = 180.0, bucket_seconds: int = 1, admin=Depends(current_admin)):
     if reason := _forced_analytics_degraded():
         return {"buckets": [], "degraded": True, "degraded_reason": reason}
     seconds = max(30.0, min(float(seconds), 900.0))
-    bucket_seconds = max(1, min(int(bucket_seconds), 30))
+    bucket_seconds = 1
     now = time.time()
     start = now - seconds
     svc = _analytics_service()
     try:
-        with _timed_stage("analytics.live_aggregate"):
-            rows = svc.time_series_totals(start, now, granularity="minute")
+        with _timed_stage("analytics.live_query"):
+            rows = svc.live_totals(start, now)
     finally:
         svc.close()
-    buckets = _fill_timeseries_buckets(rows, start, now, "minute")
+    by_bucket = {int(bucket_start): (total, blocked, hits, misses) for bucket_start, total, blocked, hits, misses in rows}
+    buckets: list[dict[str, Any]] = []
+    bucket = int(start)
+    end_bucket = int(now)
+    while bucket <= end_bucket:
+        total, blocked, hits, misses = by_bucket.get(bucket, (0, 0, 0, 0))
+        buckets.append(
+            {
+                "bucket_start": bucket,
+                "bucket_start_iso": datetime.fromtimestamp(bucket, tz=timezone.utc).isoformat(),
+                "total_queries": total,
+                "blocked_queries": blocked,
+                "cache_hits": hits,
+                "cache_misses": misses,
+            }
+        )
+        bucket += 1
     recent = buckets[-1] if buckets else {"total_queries": 0, "blocked_queries": 0}
     total = int(recent.get("total_queries") or 0)
     blocked = int(recent.get("blocked_queries") or 0)
+    rolling_total = sum(int(b.get("total_queries") or 0) for b in buckets[-10:])
+    rolling_blocked = sum(int(b.get("blocked_queries") or 0) for b in buckets[-10:])
     return {
         "degraded": False,
         "transport": "bounded_polling",
-        "poll_seconds": bucket_seconds,
-        "bucket_seconds": 60,
+        "poll_seconds": 1,
+        "bucket_seconds": 1,
         "window": {"start": start, "end": now, "seconds": seconds},
         "current_bucket_count": total,
-        "current_qps": round(total / 60.0, 3),
+        "current_qps": float(total),
         "current_blocked_percent": round((blocked / total) * 100.0, 1) if total else 0.0,
+        "rolling_10s_qps": round(rolling_total / min(10, max(1, len(buckets))), 3),
+        "rolling_10s_blocked_percent": round((rolling_blocked / rolling_total) * 100.0, 1) if rolling_total else 0.0,
         "buckets": buckets,
     }
 

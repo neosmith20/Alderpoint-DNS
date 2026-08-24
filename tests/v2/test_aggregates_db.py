@@ -55,6 +55,24 @@ def test_record_batch_accumulates_across_calls(tmp_path):
     assert rows[0][1] == 3  # total_queries accumulated, not overwritten
 
 
+def test_live_buckets_are_real_second_buckets_with_zero_fill_by_caller(tmp_path):
+    db = tmp_path / "aggregates.db"
+    agg.initialize(db)
+    base = int(time.time())
+    records = (
+        [_rec(base, blocked=False) for _ in range(5)]
+        + [_rec(base + 2, blocked=False) for _ in range(10)]
+        + [_rec(base + 3, blocked=True) for _ in range(3)]
+    )
+    agg.record_live_batch(db, records, now=base + 4)
+    rows = agg.query_live_buckets(db, base, base + 3)
+    by_bucket = {row[0]: row for row in rows}
+    assert by_bucket[base][1] == 5
+    assert (base + 1) not in by_bucket
+    assert by_bucket[base + 2][1] == 10
+    assert by_bucket[base + 3][2] == 3
+
+
 def test_dimension_counts_top_n(tmp_path):
     db = tmp_path / "aggregates.db"
     agg.initialize(db)

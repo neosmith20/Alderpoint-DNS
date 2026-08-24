@@ -157,15 +157,38 @@ class TestTimeseries:
         import time
 
         now = time.time()
-        aggregates_db.record_batch(
+        aggregates_db.record_live_batch(
             webapp.ANALYTICS_AGGREGATES_DB,
             [{"ts": now, "domain": "live.example", "blocked": True, "cache_status": "miss",
               "protocol": "udp", "qtype": "A", "client": "10.0.0.5", "rcode": "NXDOMAIN", "upstream": "u1"}],
-            granularity="minute",
         )
-        r = client.get("/api/analytics/live-activity?seconds=180&bucket_seconds=5")
+        r = client.get("/api/analytics/live-activity?seconds=180&bucket_seconds=1")
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["transport"] == "bounded_polling"
-        assert body["bucket_seconds"] == 60
+        assert body["bucket_seconds"] == 1
         assert sum(b["blocked_queries"] for b in body["buckets"]) == 1
+
+    def test_live_activity_reports_real_per_second_pattern_before_minute_closes(self, tmp_path, monkeypatch):
+        webapp = _fresh_webapp(tmp_path, monkeypatch)
+        client = _client(webapp)
+        _setup_login(client)
+        import time
+
+        base = int(time.time()) - 20
+        records = (
+            [{"ts": base, "domain": "a.example", "blocked": False, "cache_status": "miss",
+              "protocol": "udp", "qtype": "A", "client": "10.0.0.5", "rcode": "NOERROR", "upstream": "u1"} for _ in range(5)]
+            + [{"ts": base + 2, "domain": "c.example", "blocked": False, "cache_status": "miss",
+                "protocol": "udp", "qtype": "A", "client": "10.0.0.5", "rcode": "NOERROR", "upstream": "u1"} for _ in range(10)]
+            + [{"ts": base + 3, "domain": "d.example", "blocked": True, "cache_status": "miss",
+                "protocol": "udp", "qtype": "A", "client": "10.0.0.5", "rcode": "NXDOMAIN", "upstream": "u1"} for _ in range(4)]
+        )
+        aggregates_db.record_live_batch(webapp.ANALYTICS_AGGREGATES_DB, records, now=base + 4)
+        r = client.get("/api/analytics/live-activity?seconds=60&bucket_seconds=1")
+        assert r.status_code == 200, r.text
+        buckets = {b["bucket_start"]: b for b in r.json()["buckets"]}
+        assert buckets[base]["total_queries"] == 5
+        assert buckets[base + 1]["total_queries"] == 0
+        assert buckets[base + 2]["total_queries"] == 10
+        assert buckets[base + 3]["blocked_queries"] == 4

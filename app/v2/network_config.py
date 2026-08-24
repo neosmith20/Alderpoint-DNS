@@ -29,9 +29,13 @@ perform_rollback -- is the exact same, already-tested logic.
 
 from __future__ import annotations
 
+import ipaddress
+import json
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from app import network_config as _v1
 
@@ -107,3 +111,128 @@ _v1.cancel_rollback_timer = cancel_rollback_timer
 
 confirm_change = _v1.confirm_change
 rollback_check = _v1.rollback_check
+
+
+HOST_NETWORK_METADATA_FILE = STATE_DIR / "host-network.json"
+_INTERNAL_INTERFACE_PREFIXES = ("lo", "podman", "docker", "cni", "veth", "virbr", "br-")
+
+
+def _is_internal_interface(name: str) -> bool:
+    lowered = name.lower()
+    return any(lowered == p or lowered.startswith(p) for p in _INTERNAL_INTERFACE_PREFIXES)
+
+
+def _safe_ip(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    try:
+        return str(ipaddress.ip_address(str(value)))
+    except ValueError:
+        return None
+
+
+def _safe_prefix(value: Any, max_prefix: int) -> int | None:
+    try:
+        prefix = int(value)
+    except (TypeError, ValueError):
+        return None
+    return prefix if 0 <= prefix <= max_prefix else None
+
+
+def _validate_host_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+    generated_at = str(payload.get("generated_at") or "")
+    try:
+        generated_dt = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+        age_seconds = (datetime.now(timezone.utc) - generated_dt).total_seconds()
+    except ValueError as exc:
+        raise NetworkConfigError("host network metadata has an invalid generated_at timestamp") from exc
+    interfaces: list[dict[str, Any]] = []
+    for raw in payload.get("interfaces") or []:
+        name = str(raw.get("name") or "")[:64]
+        if not name or _is_internal_interface(name):
+            continue
+        ipv4 = []
+        for item in raw.get("ipv4") or []:
+            addr = _safe_ip(item.get("address"))
+            prefix = _safe_prefix(item.get("prefixlen"), 32)
+            if addr and prefix is not None:
+                ipv4.append({"address": addr, "prefixlen": prefix})
+        ipv6 = []
+        for item in raw.get("ipv6") or []:
+            addr = _safe_ip(item.get("address"))
+            prefix = _safe_prefix(item.get("prefixlen"), 128)
+            if addr and prefix is not None:
+                ipv6.append({"address": addr, "prefixlen": prefix})
+        if ipv4 or ipv6:
+            interfaces.append({"name": name, "ipv4": ipv4, "ipv6": ipv6})
+    if not interfaces:
+        raise NetworkConfigError("host network metadata contains no appliance-facing interfaces")
+    default_v4 = payload.get("default_ipv4") or {}
+    default_v6 = payload.get("default_ipv6") or {}
+    management = str(payload.get("management_interface") or default_v4.get("interface") or default_v6.get("interface") or interfaces[0]["name"])
+    if _is_internal_interface(management) or management not in {i["name"] for i in interfaces}:
+        management = interfaces[0]["name"]
+    selected = next(i for i in interfaces if i["name"] == management)
+    v4 = selected["ipv4"][0] if selected["ipv4"] else None
+    v6 = selected["ipv6"][0] if selected["ipv6"] else None
+    stale = age_seconds > 7 * 24 * 3600
+    return {
+        "backend": "external",
+        "ambiguous": False,
+        "backend_detail": "Network state is detected from appliance host metadata and is not managed by Alderpoint DNS in this preview container.",
+        "interface": selected["name"],
+        "interfaces": [i["name"] for i in interfaces],
+        "interface_details": interfaces,
+        "ipv4": {
+            "address": v4["address"] if v4 else None,
+            "prefixlen": v4["prefixlen"] if v4 else None,
+            "gateway": _safe_ip(default_v4.get("gateway")),
+            "mode": str(payload.get("ipv4_mode") or "externally managed"),
+        },
+        "ipv6": {
+            "address": v6["address"] if v6 else None,
+            "prefixlen": v6["prefixlen"] if v6 else None,
+            "gateway": _safe_ip(default_v6.get("gateway")),
+            "mode": str(payload.get("ipv6_mode") or "externally managed"),
+        },
+        "source": {
+            "kind": "host_metadata",
+            "label": "Detected from appliance host",
+            "generated_at": generated_at,
+            "stale": stale,
+        },
+    }
+
+
+def _read_host_metadata_config() -> dict[str, Any] | None:
+    if not HOST_NETWORK_METADATA_FILE.exists():
+        return None
+    try:
+        payload = json.loads(HOST_NETWORK_METADATA_FILE.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise NetworkConfigError("host network metadata is malformed")
+        return _validate_host_metadata(payload)
+    except json.JSONDecodeError as exc:
+        raise NetworkConfigError("host network metadata is not valid JSON") from exc
+
+
+def read_current_config() -> dict[str, Any]:
+    metadata = _read_host_metadata_config()
+    if metadata is not None:
+        return metadata
+    current = _v1.read_current_config()
+    interfaces = [i for i in current.get("interfaces", []) if not _is_internal_interface(str(i))]
+    if interfaces and current.get("interface") not in interfaces:
+        current["interface"] = interfaces[0]
+        addrs = _v1.interface_addresses(current["interface"])
+        v4 = addrs["ipv4"][0] if addrs["ipv4"] else None
+        v6 = addrs["ipv6"][0] if addrs["ipv6"] else None
+        current["ipv4"] = {"address": v4["address"] if v4 else None, "prefixlen": v4["prefixlen"] if v4 else None, "gateway": _v1.default_gateway("-4"), "mode": _v1.detect_ipv4_mode(current["backend"], current["interface"])}
+        current["ipv6"] = {"address": v6["address"] if v6 else None, "prefixlen": v6["prefixlen"] if v6 else None, "gateway": _v1.default_gateway("-6"), "mode": _v1.detect_ipv6_mode(current["backend"], current["interface"])}
+    current["interfaces"] = interfaces
+    current.setdefault("source", {"kind": "direct", "label": "Detected from appliance OS"})
+    if (current.get("ipv4") or {}).get("mode") == "unknown":
+        current["ipv4"]["mode"] = "not managed by Alderpoint DNS"
+    if (current.get("ipv6") or {}).get("mode") == "unknown":
+        current["ipv6"]["mode"] = "not managed by Alderpoint DNS"
+    return current

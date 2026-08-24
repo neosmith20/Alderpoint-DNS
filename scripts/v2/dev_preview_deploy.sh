@@ -59,6 +59,76 @@ fi
 if [ "$SMOKE_ONLY" = 0 ]; then
   cd "$REPO_ROOT"
   [ -z "$(git status --porcelain)" ] || fail "worktree is not clean -- deploy only from a clean coherent source state (git status --porcelain is non-empty)"
+  mkdir -p "$STATE_VARLIB/network"
+  python3 - "$STATE_VARLIB/network/host-network.json" <<'PY'
+import json, subprocess, sys
+from datetime import datetime, timezone
+
+out = sys.argv[1]
+
+def run_json(*args):
+    p = subprocess.run(["ip", "-json", *args], check=False, text=True, capture_output=True)
+    if p.returncode != 0 or not p.stdout.strip():
+        return []
+    try:
+        return json.loads(p.stdout)
+    except json.JSONDecodeError:
+        return []
+
+def run_text(*args):
+    p = subprocess.run(["ip", *args], check=False, text=True, capture_output=True)
+    return p.stdout if p.returncode == 0 else ""
+
+def default_route(family):
+    text = run_text(family, "route", "show", "default")
+    parts = text.split()
+    if "dev" not in parts:
+        return {}
+    data = {"interface": parts[parts.index("dev") + 1]}
+    if "via" in parts:
+        data["gateway"] = parts[parts.index("via") + 1]
+    return data
+
+internal_prefixes = ("lo", "podman", "docker", "cni", "veth", "virbr", "br-")
+def internal(name):
+    lower = name.lower()
+    return any(lower == p or lower.startswith(p) for p in internal_prefixes)
+
+interfaces = []
+for entry in run_json("addr", "show"):
+    name = entry.get("ifname") or ""
+    if not name or internal(name):
+        continue
+    ipv4, ipv6 = [], []
+    for addr in entry.get("addr_info", []):
+        item = {"address": addr.get("local"), "prefixlen": addr.get("prefixlen")}
+        if addr.get("family") == "inet" and item["address"] is not None:
+            ipv4.append(item)
+        elif addr.get("family") == "inet6" and addr.get("scope") != "link" and item["address"] is not None:
+            ipv6.append(item)
+    if ipv4 or ipv6:
+        interfaces.append({"name": name, "ipv4": ipv4, "ipv6": ipv6})
+
+default_v4 = default_route("-4")
+default_v6 = default_route("-6")
+payload = {
+    "schema": 1,
+    "source": "dev_preview_deploy.sh host iproute2",
+    "generated_at": datetime.now(timezone.utc).isoformat(),
+    "management_interface": default_v4.get("interface") or default_v6.get("interface") or (interfaces[0]["name"] if interfaces else ""),
+    "default_ipv4": default_v4,
+    "default_ipv6": default_v6,
+    "ipv4_mode": "externally managed",
+    "ipv6_mode": "externally managed",
+    "interfaces": interfaces,
+}
+tmp = out + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, separators=(",", ":"))
+import os
+os.chmod(tmp, 0o640)
+os.replace(tmp, out)
+PY
   SHA="$(git rev-parse --short=10 HEAD)"
   VERSION="2.0.0~preview${SHA}-1"
   echo "+ building $VERSION from HEAD $SHA"

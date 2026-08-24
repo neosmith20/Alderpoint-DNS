@@ -68,6 +68,16 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_dim_lookup ON dimension_counts(granularity, dimension, bucket_start)",
+    """
+    CREATE TABLE IF NOT EXISTS live_buckets (
+        bucket_start INTEGER PRIMARY KEY,
+        total_queries INTEGER NOT NULL DEFAULT 0,
+        blocked_queries INTEGER NOT NULL DEFAULT 0,
+        cache_hits INTEGER NOT NULL DEFAULT 0,
+        cache_misses INTEGER NOT NULL DEFAULT 0,
+        updated_at REAL NOT NULL
+    )
+    """,
 )
 
 AGGREGATE_SCHEMA_VERSION = 1
@@ -243,6 +253,73 @@ def delete_old_buckets(
                 cur.execute("ROLLBACK")
                 raise
     return n
+
+
+def record_live_batch(path: str | Path, records: Iterable[dict], *, now: float | None = None, retention_seconds: int = 600) -> None:
+    """Record recent live activity as real one-second buckets.
+
+    This is intentionally separate from minute/hour/day dashboard
+    aggregates. It is bounded, updated in batches by the analytics worker,
+    and never receives a SQLite write from the DNS hot path.
+    """
+    import time as _time
+
+    records = list(records)
+    if not records:
+        return
+    now = now if now is not None else _time.time()
+    cutoff = int(now) - max(60, int(retention_seconds))
+    bucket_totals: dict[int, list[int]] = {}
+    for rec in records:
+        bucket = int(float(rec["ts"]))
+        totals = bucket_totals.setdefault(bucket, [0, 0, 0, 0])
+        totals[0] += 1
+        if rec.get("blocked"):
+            totals[1] += 1
+        cache_status = rec.get("cache_status")
+        if cache_status == "hit":
+            totals[2] += 1
+        elif cache_status == "miss":
+            totals[3] += 1
+    with connect(path) as conn:
+        with closing(conn.cursor()) as cur:
+            cur.execute("BEGIN")
+            try:
+                for bucket, (total, blocked, hits, misses) in bucket_totals.items():
+                    cur.execute(
+                        """
+                        INSERT INTO live_buckets
+                            (bucket_start, total_queries, blocked_queries, cache_hits, cache_misses, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(bucket_start) DO UPDATE SET
+                            total_queries = total_queries + excluded.total_queries,
+                            blocked_queries = blocked_queries + excluded.blocked_queries,
+                            cache_hits = cache_hits + excluded.cache_hits,
+                            cache_misses = cache_misses + excluded.cache_misses,
+                            updated_at = excluded.updated_at
+                        """,
+                        (bucket, total, blocked, hits, misses, now),
+                    )
+                cur.execute("DELETE FROM live_buckets WHERE bucket_start < ?", (cutoff,))
+                cur.execute("COMMIT")
+            except BaseException:
+                cur.execute("ROLLBACK")
+                raise
+
+
+def query_live_buckets(path: str | Path, start_ts: float, end_ts: float) -> list[tuple]:
+    start_bucket = int(start_ts)
+    end_bucket = int(end_ts)
+    with connect(path) as conn:
+        return conn.execute(
+            """
+            SELECT bucket_start, total_queries, blocked_queries, cache_hits, cache_misses
+            FROM live_buckets
+            WHERE bucket_start >= ? AND bucket_start <= ?
+            ORDER BY bucket_start
+            """,
+            (start_bucket, end_bucket),
+        ).fetchall()
 
 
 def rebuild_range_from_reader(

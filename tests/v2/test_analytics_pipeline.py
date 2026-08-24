@@ -46,6 +46,19 @@ class TestBasicFlow:
         )
         total_queries = sum(row[1] for row in totals)
         assert total_queries == 1
+        live = aggregates_db.query_live_buckets(
+            tmp_path / "aggregates.db", int(time.time()) - 3600, int(time.time()) + 3600
+        )
+        assert sum(row[1] for row in live) == 1
+        pipeline.close()
+
+    def test_ordinary_flush_does_not_force_tiny_parquet_segment(self, tmp_path):
+        pipeline = _pipeline(tmp_path)
+        pipeline.submit(_event())
+        assert pipeline.flush() == 1
+        assert pipeline.parquet_writer.stats.segments_written == 0
+        pipeline.parquet_writer.flush()
+        assert pipeline.parquet_writer.stats.segments_written == 1
         pipeline.close()
 
     def test_normalization_happens_once(self, tmp_path):
