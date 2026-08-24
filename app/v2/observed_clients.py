@@ -462,6 +462,31 @@ def record_drain_success(conn: sqlite3.Connection, *, ts: float | None = None) -
 
 
 def stats(conn: sqlite3.Connection, *, queue_obj: ObservationQueue | None = None) -> dict:
+    """``dropped``/``coalesced`` in the returned dict are ``None`` --
+    "not tracked", not "confirmed zero" -- unless a real ``queue_obj`` is
+    passed (see below). Real defect found live during the pre-DoH
+    discovery-producer trace (owner-clarified, part of the same pass
+    that resolved which of the two discovery services is actually
+    live): the observed_client_stats.dropped/coalesced DB columns are
+    never written by ANY current code path -- they only ever moved
+    through ObservationQueue (cmd_dns_observer's own in-memory
+    dropped/coalesced counters), and that producer stopped recording
+    discovery observations entirely as of the "exact client identity"
+    fix (see cmd_dns_observer's own docstring) without anyone revisiting
+    what these two health fields still meant afterward. Every real caller
+    of stats() in this codebase (webapp.py's health()/discovery routes)
+    calls it with no queue_obj, so both fields silently read back the
+    DB's permanently-unwritten default (0) forever -- indistinguishable,
+    to a reader, from "checked, found none". analytics-protobuf-receiver
+    (the actual live producer since that fix) has no drop-on-full queue
+    at all (an unbounded list, periodically flushed -- see
+    scripts/v2/alderpointdns_v2_ctl.py's cmd_analytics_protobuf_receiver),
+    so "dropped" has no live analog to measure; it DOES coalesce (see
+    _should_emit_discovery_observation there), just never reports it here
+    -- instrumenting that without a real per-query SQLite write (which
+    the DNS-adjacent hot path must never take on) is future work, not
+    something this fix invents a stats file for on its own initiative.
+    """
     row = conn.execute(
         "SELECT dropped, evicted, coalesced, last_error, last_error_at, last_success_at "
         "FROM observed_client_stats WHERE id=1"
@@ -489,9 +514,13 @@ def stats(conn: sqlite3.Connection, *, queue_obj: ObservationQueue | None = None
     return {
         "status": "error" if current_error else "ok",
         "observed_count": count,
-        "dropped": row[0] + (queue_obj.dropped if queue_obj else 0),
+        # None ("not tracked") unless a real queue_obj is supplied -- see
+        # this function's own docstring; every real caller today has no
+        # queue_obj, so both are always None, never a misleadingly
+        # confident 0.
+        "dropped": (row[0] + queue_obj.dropped) if queue_obj else None,
         "evicted": row[1],
-        "coalesced": row[2] + (queue_obj.coalesced if queue_obj else 0),
+        "coalesced": (row[2] + queue_obj.coalesced) if queue_obj else None,
         # Back-compat shape: empty string, never null, and only ever
         # populated while the error is actually still current -- old
         # dashboards/tests reading this field as "the live error" now get

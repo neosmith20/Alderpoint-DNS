@@ -805,6 +805,23 @@ class TestExtendedSchemaWarmupRecovery:
         assert "replication" in body["components"]
 
 
+class TestDiscoveryProducerHealthHonesty:
+    """Pre-DoH discovery-producer trace (owner-clarified): dns-observer
+    is not a live discovery producer (see cmd_dns_observer's own
+    docstring) -- client_discovery.dropped/coalesced must therefore
+    never render as a confident 0 through the real /api/health path.
+    """
+
+    def test_client_discovery_dropped_and_coalesced_are_null_over_http(self, app_client):
+        webapp, client = app_client
+        webapp._ensure_extended_schemas()  # warm it synchronously, same as a real request eventually would
+        r = client.get("/api/health")
+        cd = r.json()["components"]["client_discovery"]
+        assert cd["dropped"] is None
+        assert cd["coalesced"] is None
+        assert isinstance(cd["evicted"], int)
+
+
 class TestBlocklistRefreshHealth:
     """Owner-clarified health semantics (pre-DoH reliability pass, part
     3): a per-subscription failure is a real "warning" signal, never

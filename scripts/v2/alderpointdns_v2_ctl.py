@@ -1709,36 +1709,45 @@ def cmd_analytics_protobuf_receiver(args: argparse.Namespace) -> int:
 
 
 def cmd_dns_observer(args: argparse.Namespace) -> int:
-    """Observation-only UDP DNS ingress for package-first discovery tests.
+    """UDP DNS ingress for dnsdist's TeeAction (fire-and-forget: it answers
+    every packet it's teed, exactly as TeeAction's own contract expects,
+    but is NOT a real or authoritative DNS resolution path -- see
+    _dns_response's own docstring).
 
-    This is deliberately not the future authoritative dnsdist/BIND runtime.
-    It proves the mandatory packet-origin path by accepting real DNS packets,
-    returning bounded DNS responses, and asynchronously handing source-address
-    observations to the existing discovery worker through the JSONL inbox.
+    Pre-DoH reliability pass (owner-clarified discovery-producer trace):
+    this used to ALSO be a client-discovery producer -- it queued an
+    Observation per packet (source address recovered from a teed ECS
+    option, since TeeAction re-originates from dnsdist's own local
+    socket, never the real client's) and a background thread flushed
+    that queue to the discovery inbox. The "exact client identity" fix
+    (see this function's own docstring history / _parse_ecs_source_ip's
+    docstring) already removed the one line that queued an Observation,
+    because that recovered address could only ever be a privacy-
+    truncated ECS prefix (e.g. "192.168.32.0") or, when no ECS was
+    present, dnsdist's own local/bridge address -- real discovery has
+    used analytics-protobuf-receiver's exact, never-truncated protobuf
+    "from" field exclusively since that fix. What that pass left behind
+    was this now-dead queue/flush-thread machinery: a real background
+    thread that woke up every flush_interval_seconds forever to flush an
+    ObservationQueue nothing ever wrote to -- confirmed live (pre-DoH
+    trace): zero inbox files ever carry this service's PID as producer,
+    even under sustained real multi-client traffic, and CPU time stays
+    at 0 across a real 24+-minute window. Harmless (an always-empty
+    queue costs almost nothing), but genuinely misleading to read --
+    exactly the class of confusion that produced an incorrect "two live
+    discovery producers" claim during that same trace, since this code
+    still LOOKED like an active one. Removed rather than left as a live-
+    looking trap for the next reader; --queue-capacity/--flush-batch-
+    size/--flush-interval-seconds stay accepted CLI arguments (unused
+    now) purely for invocation compatibility.
     """
-    queue = observed_clients.ObservationQueue(capacity=args.queue_capacity)
-    inbox = STATE_DIR / "discovery" / "inbox"
     stop = {"flag": False}
 
     def _handle_signal(signum, frame):
         stop["flag"] = True
 
-    def _flush_loop() -> None:
-        while not stop["flag"]:
-            try:
-                _write_observation_batch(inbox, queue.drain(args.flush_batch_size))
-            except Exception:
-                log.exception("dns-observer flush failed")
-            time.sleep(args.flush_interval_seconds)
-        try:
-            _write_observation_batch(inbox, queue.drain(args.queue_capacity))
-        except Exception:
-            log.exception("dns-observer final flush failed")
-
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
-    flusher = threading.Thread(target=_flush_loop, daemon=True)
-    flusher.start()
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(0.5)
@@ -1754,32 +1763,10 @@ def cmd_dns_observer(args: argparse.Namespace) -> int:
                 if stop["flag"]:
                     break
                 raise
-            # Real defect fixed here (owner-reported live: exact client
-            # identity was broken -- a device showed as a truncated
-            # network address like "192.168.32.0", and dnsdist's own
-            # tee traffic showed up as a bogus "client" too). Root cause:
-            # this ingress is only ever fed via dnsdist's TeeAction, whose
-            # tee'd copy always arrives from dnsdist's OWN local socket
-            # (addr[0] is dnsdist, never the real client) -- the ECS
-            # option _parse_ecs_source_ip decodes was meant to work
-            # around that, but dnsdist's ECS source-prefix is a single
-            # global setting shared with real upstream-forwarded ECS
-            # (app/v2/ecs_policy.py, deliberately never full-length for
-            # privacy), so it can never carry a real client's exact
-            # address -- only ever a truncated prefix, or nothing (in
-            # which case the old fallback used dnsdist's own local
-            # address). Real client discovery now comes exclusively from
-            # analytics-protobuf-receiver's dnsdist protobuf stream (see
-            # cmd_analytics_protobuf_receiver below), whose "from" field
-            # is the real, never-truncated client address dnsdist itself
-            # records at accept time -- the same field Query Log's
-            # client column already used correctly. This ingress still
-            # answers the teed packet (preserving TeeAction's
-            # fire-and-forget contract) but no longer records an
-            # observation from it; _parse_ecs_source_ip is kept (and
-            # still covered by its own unit tests) as a documented,
-            # available decode for a well-formed teed ECS option, not as
-            # an identity source.
+            # No observation is recorded from this packet -- see this
+            # function's own docstring for why (identity comes exclusively
+            # from analytics-protobuf-receiver). Fire-and-forget answer
+            # only, matching TeeAction's own contract.
             response = _dns_response(packet)
             if response:
                 try:
@@ -1789,7 +1776,6 @@ def cmd_dns_observer(args: argparse.Namespace) -> int:
     finally:
         stop["flag"] = True
         sock.close()
-        flusher.join(timeout=2.0)
     return 0
 
 

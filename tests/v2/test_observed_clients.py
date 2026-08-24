@@ -238,3 +238,40 @@ def test_stats_with_no_error_ever_recorded_is_clean(tmp_path):
         assert stats["last_error"] == ""
         assert stats["last_error_at"] is None
         assert stats["last_historical_error"] is None
+
+
+def test_dropped_and_coalesced_are_not_tracked_not_a_false_zero(tmp_path):
+    # Real defect found live during the pre-DoH discovery-producer trace
+    # (owner-clarified): observed_client_stats.dropped/coalesced are
+    # never written by any current code path (analytics-protobuf-
+    # receiver, the sole live discovery producer, has no drop-on-full
+    # queue and never reports its own coalescing suppression count here)
+    # -- every real caller (webapp.py) reads stats() with no queue_obj,
+    # so both used to silently read back the DB's permanently-unwritten
+    # default (0), indistinguishable from "checked, found none". None
+    # ("not tracked") is the honest value; evicted (a real, currently-
+    # written counter -- see apply_observations' retention logic) stays
+    # a real int, never None.
+    db = tmp_path / "control.db"
+    _init(db)
+    with control_db.connect(db) as conn:
+        stats = observed_clients.stats(conn)
+        assert stats["dropped"] is None
+        assert stats["coalesced"] is None
+        assert stats["evicted"] == 0
+        assert isinstance(stats["evicted"], int)
+
+
+def test_dropped_and_coalesced_reflect_a_real_queue_when_one_is_supplied(tmp_path):
+    # The ObservationQueue-based path (queue_obj) still works correctly
+    # when a real queue is passed -- this codepath is just never reached
+    # in production today (see stats()'s own docstring), not removed.
+    db = tmp_path / "control.db"
+    _init(db)
+    queue = observed_clients.ObservationQueue(capacity=1)
+    queue.submit("203.0.113.5")
+    queue.submit("203.0.113.5")  # coalesced (same key within 0.25s)
+    with control_db.connect(db) as conn:
+        stats = observed_clients.stats(conn, queue_obj=queue)
+        assert stats["coalesced"] == 1
+        assert stats["dropped"] == 0
