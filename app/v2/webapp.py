@@ -185,6 +185,7 @@ _blocklist_running_lock = threading.Lock()
 _dns_benchmark_lock = threading.Lock()
 _dns_benchmark_running = False
 _dns_benchmark_last_error = ""
+_analytics_thread_local = threading.local()
 
 UPLOAD_RETENTION_DEFAULT_SECONDS = 24 * 3600
 BLOCKLIST_INTERVAL_PRESETS: tuple[tuple[int, str], ...] = (
@@ -2333,7 +2334,23 @@ def create_local_dns(req: LocalDnsRecordCreate, admin=Depends(current_admin), x_
 
 
 def _analytics_service() -> AnalyticsService:
-    return AnalyticsService(parquet_root=ANALYTICS_PARQUET_DIR, aggregates_path=ANALYTICS_AGGREGATES_DB, timing_callback=_add_timing)
+    cached = getattr(_analytics_thread_local, "service", None)
+    if (
+        cached is None
+        or getattr(cached, "parquet_root", None) != ANALYTICS_PARQUET_DIR
+        or getattr(cached, "aggregates_path", None) != ANALYTICS_AGGREGATES_DB
+    ):
+        cached = AnalyticsService(parquet_root=ANALYTICS_PARQUET_DIR, aggregates_path=ANALYTICS_AGGREGATES_DB, timing_callback=_add_timing)
+        _analytics_thread_local.service = cached
+    return cached
+
+
+def _release_analytics_service(_svc: AnalyticsService) -> None:
+    # Sync FastAPI handlers run in a bounded worker pool. Keeping one
+    # DuckDB-backed analytics reader per worker thread avoids reopening the
+    # in-memory connection for every warm UI query while never sharing a
+    # DuckDB connection across threads.
+    return None
 
 
 def _query_result_to_dict(qr) -> dict:
@@ -2356,7 +2373,7 @@ def analytics_recent(minutes: float = 60.0, admin=Depends(current_admin)):
         with _timed_stage("analytics.recent.serialization"):
             return _query_result_to_dict(result)
     finally:
-        svc.close()
+        _release_analytics_service(svc)
 
 
 @app.get("/api/analytics/query-log")
@@ -2406,7 +2423,7 @@ def analytics_query_log(
     try:
         result = svc.recent_query_log(minutes=minutes, filters=filters, limit=limit, offset=offset)
     finally:
-        svc.close()
+        _release_analytics_service(svc)
 
     rows = result.rows
     # Full-text contains filtering is intentionally post-query and bounded:
@@ -2443,7 +2460,7 @@ def analytics_top_domains(minutes: float = 60.0, limit: int = 20, admin=Depends(
         with _timed_stage("analytics.parquet_top"):
             return _query_result_to_dict(svc.top_domains(start, now, limit=limit))
     finally:
-        svc.close()
+        _release_analytics_service(svc)
 
 
 # Real defect fixed here (owner-reported: Dashboard's "Top Domains" bar
@@ -2467,7 +2484,7 @@ def analytics_top_blocked_domains(minutes: float = 60.0, limit: int = 20, admin=
         with _timed_stage("analytics.parquet_top_blocked"):
             return _query_result_to_dict(svc.top_blocked_domains(start, now, limit=limit))
     finally:
-        svc.close()
+        _release_analytics_service(svc)
 
 
 _TIMESERIES_GRANULARITIES = ("minute", "hour", "day")
@@ -2518,7 +2535,7 @@ def analytics_timeseries(minutes: float = 1440.0, granularity: str = "hour", adm
     except Exception as exc:  # noqa: BLE001 -- aggregates_db is pure sqlite3, but never let a dashboard chart 500 the page
         return {"buckets": [], "granularity": granularity, "degraded": True, "degraded_reason": str(exc)}
     finally:
-        svc.close()
+        _release_analytics_service(svc)
     return {
         "granularity": granularity,
         "degraded": False,
@@ -2540,7 +2557,7 @@ def analytics_live_activity(seconds: float = 180.0, bucket_seconds: int = 1, adm
         with _timed_stage("analytics.live_query"):
             rows = svc.live_totals(start, now)
     finally:
-        svc.close()
+        _release_analytics_service(svc)
     by_bucket = {int(bucket_start): (total, blocked, hits, misses) for bucket_start, total, blocked, hits, misses in rows}
     buckets: list[dict[str, Any]] = []
     bucket = int(start)
