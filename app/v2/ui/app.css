@@ -354,6 +354,8 @@ button:disabled { opacity: .55; cursor: not-allowed; }
    visible reason. overflow-x:auto remains only as a safety net (the
    chart is sized to never need it in normal use). */
 .ts-wrap { border: 1px solid var(--line); background: var(--surface-2); border-radius: var(--r-2); padding: var(--s-3); overflow-x: auto; overflow-y: hidden; width: 100%; min-width: 0; box-sizing: border-box; }
+.live-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: var(--s-3); }
+.metric-inline { white-space: normal; }
 .ts-svg-host { width: 100%; min-width: 0; }
 .ts-chart-overlay { position: relative; max-width: 100%; }
 .ts-chart { display: block; max-width: 100%; }

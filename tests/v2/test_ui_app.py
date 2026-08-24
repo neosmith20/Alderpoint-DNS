@@ -68,10 +68,27 @@ def test_dashboard_live_initializes_after_panel_exists_and_has_terminal_states(t
     assert "liveActivityShell()" in js
     assert "Connected - no recent activity" in js
     assert "Reconnecting" in js
-    assert "Current second:" in js
+    assert "Queries this second:" in js
+    assert "QPS (10s avg):" in js
+    assert "Blocked (10s):" in js
+    assert "rolling_10s_qps" in js
+    assert "rolling_10s_blocked_percent" in js
     assert "/api/analytics/live-activity?seconds=300&bucket_seconds=1" in js
     assert "dashboard-live-svg-host" in js
     assert "overlap_skips" in js
+
+
+def test_dashboard_live_axis_labels_are_measured_not_fixed_stride(tmp_path, monkeypatch):
+    webapp = _fresh_webapp(tmp_path, monkeypatch)
+    client = _client(webapp)
+    js = client.get("/ui-static/app.js").text
+    css = client.get("/ui-static/app.css").text
+    assert "chooseXAxisTicks" in js
+    assert "measureSvgAxisLabel" in js
+    assert "measureText" in js
+    assert "labelEvery" not in js
+    assert ".live-toolbar" in css
+    assert "flex-wrap: wrap" in css
 
 
 def test_performance_report_uses_navigation_ids_and_excludes_background_live(tmp_path, monkeypatch):

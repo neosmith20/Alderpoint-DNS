@@ -794,9 +794,9 @@
   function liveActivityShell() {
     return `<div class="live-toolbar">
       <span class="badge info" data-live-status>Connecting</span>
-      <span class="metric-inline">Current second: <strong data-live-current>0</strong></span>
-      <span class="metric-inline">Current QPS: <strong data-live-qps>0</strong></span>
-      <span class="metric-inline">Blocked this second: <strong data-live-blocked>0%</strong></span>
+      <span class="metric-inline">Queries this second: <strong data-live-current>0</strong></span>
+      <span class="metric-inline">QPS (10s avg): <strong data-live-qps>0</strong></span>
+      <span class="metric-inline">Blocked (10s): <strong data-live-blocked>0%</strong></span>
       <button type="button" data-action="dashboard-live-pause">${state.dashboardLivePaused ? "Resume" : "Pause"}</button>
     </div>
     <div id="dashboard-live-chart">
@@ -858,9 +858,9 @@
           if (chart) chart.innerHTML = `<div class="alert warn">${esc(data.degraded_reason || "Live analytics unavailable")}</div>`;
           return;
         }
-        document.querySelector("[data-live-current]").textContent = String(data.current_bucket_count || 0);
-        document.querySelector("[data-live-qps]").textContent = String(data.current_qps || 0);
-        document.querySelector("[data-live-blocked]").textContent = `${esc(data.current_blocked_percent || 0)}%`;
+        document.querySelector("[data-live-current]").textContent = formatCompactNumber(data.current_bucket_count || 0);
+        document.querySelector("[data-live-qps]").textContent = formatCompactNumber(data.rolling_10s_qps || 0);
+        document.querySelector("[data-live-blocked]").textContent = `${formatCompactNumber(data.rolling_10s_blocked_percent || 0)}%`;
         const buckets = data.buckets || [];
         const total = buckets.reduce((s, b) => s + (Number(b.total_queries) || 0), 0);
         if (status) status.textContent = total > 0 ? "Connected" : "Connected - no recent activity";
@@ -895,6 +895,11 @@
       <option value="top" ${state.dashboardTopMode === "top" ? "selected" : ""}>All domains</option>
       <option value="blocked" ${state.dashboardTopMode === "blocked" ? "selected" : ""}>Blocked domains only</option>
     </select>`;
+  }
+
+  function formatCompactNumber(value) {
+    const n = Number(value) || 0;
+    return n.toFixed(2).replace(/\.?0+$/, "");
   }
 
   // Real defect fixed here (owner-reported: the prior "chart" was a row
@@ -991,16 +996,16 @@
     const x = (i) => padL + (n === 1 ? plotW / 2 : (i / (n - 1)) * plotW);
     const y = (v) => padT + plotH - (v / maxTotal) * plotH;
     const path = (key) => buckets.map((b, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(b[key] || 0).toFixed(1)}`).join(" ");
-    // Reduce tick density on narrow screens: target roughly one label
-    // per 70px of real plot width rather than a fixed count, so labels
-    // never overlap at any viewport width.
-    const maxLabels = Math.max(2, Math.floor(plotW / 70));
-    const labelEvery = Math.max(1, Math.ceil(n / maxLabels));
+    // Tick labels are selected using real measured label widths below;
+    // never force first/last labels if the browser's actual locale/time
+    // formatting would make them collide.
     const chartZone = resolveDisplayTimeZone();
     const fmt = (iso) => new Date(iso).toLocaleString(undefined, Object.assign({ timeZone: chartZone }, result.granularity === "second" ? { hour: "numeric", minute: "2-digit", second: "2-digit" } : n <= 24 && result.granularity === "hour" ? { hour: "numeric", minute: "2-digit" } : result.granularity === "minute" ? { hour: "numeric", minute: "2-digit" } : { month: "short", day: "numeric" }));
+    const labelWidth = (text) => measureSvgAxisLabel(text);
+    const tickIndexes = chooseXAxisTicks(buckets, fmt, x, plotW, labelWidth);
     const gridlines = [0, 0.25, 0.5, 0.75, 1].map((f) => `<line x1="${padL}" x2="${w - padR}" y1="${(padT + plotH * f).toFixed(1)}" y2="${(padT + plotH * f).toFixed(1)}" class="ts-grid"/>`).join("");
     const yLabels = [0, 0.5, 1].map((f) => `<text x="${padL - 6}" y="${(padT + plotH * (1 - f) + 4).toFixed(1)}" class="ts-axis" text-anchor="end">${Math.round(maxTotal * f)}</text>`).join("");
-    const xLabels = buckets.map((b, i) => (i % labelEvery !== 0 && i !== n - 1) ? "" : `<text x="${x(i).toFixed(1)}" y="${h - 8}" class="ts-axis" text-anchor="middle">${esc(fmt(b.bucket_start_iso))}</text>`).join("");
+    const xLabels = tickIndexes.map((i) => `<text x="${x(i).toFixed(1)}" y="${h - 8}" class="ts-axis" text-anchor="middle">${esc(fmt(buckets[i].bucket_start_iso))}</text>`).join("");
     // Purely visual SVG markers -- <title> stays as a harmless native
     // fallback, but real interaction lives on the real HTML <button>
     // hit-targets below, not here. Real defect found live via the
@@ -1047,6 +1052,44 @@
       ${hits("total_queries", "ts-point-total", "queries")}
       ${hits("blocked_queries", "ts-point-blocked", "blocked")}
     </div>`;
+  }
+
+  let axisMeasureCanvas = null;
+  function measureSvgAxisLabel(text) {
+    try {
+      axisMeasureCanvas = axisMeasureCanvas || document.createElement("canvas");
+      const ctx = axisMeasureCanvas.getContext("2d");
+      const family = getComputedStyle(document.documentElement).getPropertyValue("--font") || "system-ui, sans-serif";
+      ctx.font = `10px ${family}`;
+      return ctx.measureText(String(text)).width;
+    } catch (_) {
+      return String(text).length * 6;
+    }
+  }
+
+  function chooseXAxisTicks(buckets, fmt, x, plotW, labelWidth) {
+    const n = buckets.length;
+    if (!n) return [];
+    const minGap = 14;
+    const target = plotW >= 900 ? 7 : plotW >= 650 ? 6 : plotW >= 420 ? 4 : 3;
+    const candidates = [];
+    if (target <= 1 || n === 1) candidates.push(0);
+    else {
+      for (let j = 0; j < target; j += 1) {
+        const idx = Math.round((j * (n - 1)) / (target - 1));
+        if (!candidates.includes(idx)) candidates.push(idx);
+      }
+    }
+    const accepted = [];
+    for (const idx of candidates) {
+      const text = fmt(buckets[idx].bucket_start_iso);
+      const half = labelWidth(text) / 2;
+      const left = x(idx) - half;
+      const right = x(idx) + half;
+      const collides = accepted.some((item) => left < item.right + minGap && right > item.left - minGap);
+      if (!collides) accepted.push({ idx, left, right });
+    }
+    return accepted.map((item) => item.idx);
   }
 
   // Real domain names, real counts, real percentage of total -- a real
