@@ -179,6 +179,28 @@ class TestServiceCatalogApi:
         assert "domains" not in item
         assert item["sample_domains"][0]["domain"] == "cdn.video.example"
 
+    def test_compact_service_listing_can_exclude_subscription_services(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        for service_id, name in [("subscription-big-list", "Subscribed: Big List"), ("custom-video", "Video Apps")]:
+            created = client.post(
+                "/api/services",
+                json={
+                    "service_id": service_id,
+                    "display_name": name,
+                    "category": "media",
+                    "domains": [{"match_kind": "suffix", "domain": f"{service_id}.example"}],
+                },
+                headers={"X-CSRF-Token": csrf},
+            )
+            assert created.status_code == 200, created.text
+
+        compact = client.get("/api/services?include_domains=false&include_subscriptions=false")
+
+        assert compact.status_code == 200
+        service_ids = [s["service_id"] for s in compact.json()["services"]]
+        assert service_ids == ["custom-video"]
+
 
 class TestLoginLogoutSessions:
     def test_login_wrong_password_rejected(self, app_client):

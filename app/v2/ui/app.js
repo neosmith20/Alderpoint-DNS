@@ -1356,7 +1356,7 @@
   }
 
   async function filtering() {
-    const [services, rulesets, schedules, global] = await Promise.all([api("/api/services?include_domains=false"), api("/api/service-rulesets"), api("/api/schedules"), api("/api/policy/global")]);
+    const [services, rulesets, schedules, global] = await Promise.all([api("/api/services?include_domains=false&include_subscriptions=false"), api("/api/service-rulesets"), api("/api/schedules"), api("/api/policy/global")]);
     return page("Filtering / Security", "SafeSearch, parental filtering, security filtering, service blocking, schedules, and response modes remain separate controls.", "", `
       <div class="grid two">
         <section class="panel"><div class="panel__head"><h2>Global Answer Policy</h2></div><div class="panel__body">${policyEditor("global", "singleton", global.policy)}</div></section>

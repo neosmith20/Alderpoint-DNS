@@ -2064,10 +2064,15 @@ def create_service(req: ServiceCreate, admin=Depends(current_admin), x_csrf_toke
 
 
 @app.get("/api/services")
-def list_services(include_domains: bool = True, admin=Depends(current_admin)):
+def list_services(include_domains: bool = True, include_subscriptions: bool = True, admin=Depends(current_admin)):
     with _db() as conn:
         with _timed_stage("services.definitions"):
-            rows = conn.execute("SELECT id, service_id, display_name, category FROM service_definitions ORDER BY category, display_name").fetchall()
+            if include_subscriptions:
+                rows = conn.execute("SELECT id, service_id, display_name, category FROM service_definitions ORDER BY category, display_name").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT id, service_id, display_name, category FROM service_definitions WHERE service_id NOT LIKE 'subscription-%' ORDER BY category, display_name"
+                ).fetchall()
         row_ids = [r[0] for r in rows]
         domain_counts: dict[int, int] = {}
         domain_samples: dict[int, list[dict[str, str]]] = {}
