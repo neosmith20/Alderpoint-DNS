@@ -1863,6 +1863,7 @@ def _upstream_profile_to_dict(profile: "store.UpstreamProfileRecord") -> dict:
         "strategy": profile.strategy,
         "enabled": profile.enabled,
         "sort_order": profile.sort_order,
+        "order": profile.sort_order + 1,
         "endpoints": [
             {"address": e.address, "tls_hostname": e.tls_hostname, "priority": e.priority, "weight": e.weight, "doh_path": e.doh_path}
             for e in profile.endpoints
@@ -1996,9 +1997,10 @@ def reorder_upstreams_route(req: UpstreamReorderRequest, admin=Depends(current_a
     try:
         with _db() as conn:
             store.reorder_upstream_profiles(conn, req.ordered_upstream_profile_ids)
+            profiles = store.list_upstream_profiles(conn)
     except PolicyStoreError as exc:
         raise ApiError(400, "invalid_reorder", str(exc)) from exc
-    return {"status": "reordered"}
+    return {"status": "reordered", "upstreams": [_upstream_profile_to_dict(p) for p in profiles]}
 
 
 class DomainRoutingCreate(BaseModel):
@@ -2389,9 +2391,17 @@ def analytics_top_domains(minutes: float = 60.0, limit: int = 20, admin=Depends(
     if reason := _forced_analytics_degraded():
         return {"rows": [], "columns": [], "degraded": True, "degraded_reason": reason}
     now = time.time()
+    minutes = max(1.0, min(float(minutes), 31 * 24 * 60.0))
+    limit = max(1, min(int(limit), 500))
+    start = now - minutes * 60
     svc = _analytics_service()
     try:
-        return _query_result_to_dict(svc.top_domains(now - minutes * 60, now, limit=limit))
+        if minutes <= 120:
+            with _timed_stage("analytics.aggregate_top"):
+                rows = svc.top_dimension_from_aggregates("domain", start, now, granularity="minute", limit=limit)
+            return {"rows": rows, "columns": ["domain", "count"], "degraded": False, "window": {"start": start, "end": now, "minutes": minutes}}
+        with _timed_stage("analytics.parquet_top"):
+            return _query_result_to_dict(svc.top_domains(start, now, limit=limit))
     finally:
         svc.close()
 
@@ -2409,14 +2419,47 @@ def analytics_top_blocked_domains(minutes: float = 60.0, limit: int = 20, admin=
     if reason := _forced_analytics_degraded():
         return {"rows": [], "columns": [], "degraded": True, "degraded_reason": reason}
     now = time.time()
+    minutes = max(1.0, min(float(minutes), 31 * 24 * 60.0))
+    limit = max(1, min(int(limit), 500))
+    start = now - minutes * 60
     svc = _analytics_service()
     try:
-        return _query_result_to_dict(svc.top_blocked_domains(now - minutes * 60, now, limit=limit))
+        with _timed_stage("analytics.parquet_top_blocked"):
+            return _query_result_to_dict(svc.top_blocked_domains(start, now, limit=limit))
     finally:
         svc.close()
 
 
 _TIMESERIES_GRANULARITIES = ("minute", "hour", "day")
+_TIMESERIES_STEP_SECONDS = {"minute": 60, "hour": 3600, "day": 86400}
+
+
+def _aligned_bucket_start(ts: float, granularity: str) -> int:
+    step = _TIMESERIES_STEP_SECONDS[granularity]
+    return int(ts // step) * step
+
+
+def _fill_timeseries_buckets(rows: list[tuple], start_ts: float, end_ts: float, granularity: str) -> list[dict[str, Any]]:
+    step = _TIMESERIES_STEP_SECONDS[granularity]
+    by_bucket = {int(bucket_start): (total, blocked, hits, misses) for bucket_start, total, blocked, hits, misses in rows}
+    start_bucket = _aligned_bucket_start(start_ts, granularity)
+    end_bucket = _aligned_bucket_start(end_ts, granularity)
+    buckets = []
+    bucket = start_bucket
+    while bucket <= end_bucket:
+        total, blocked, hits, misses = by_bucket.get(bucket, (0, 0, 0, 0))
+        buckets.append(
+            {
+                "bucket_start": bucket,
+                "bucket_start_iso": datetime.fromtimestamp(bucket, tz=timezone.utc).isoformat(),
+                "total_queries": total,
+                "blocked_queries": blocked,
+                "cache_hits": hits,
+                "cache_misses": misses,
+            }
+        )
+        bucket += step
+    return buckets
 
 
 @app.get("/api/analytics/timeseries")
@@ -2426,9 +2469,12 @@ def analytics_timeseries(minutes: float = 1440.0, granularity: str = "hour", adm
     if reason := _forced_analytics_degraded():
         return {"buckets": [], "granularity": granularity, "degraded": True, "degraded_reason": reason}
     now = time.time()
+    minutes = max(1.0, min(float(minutes), 31 * 24 * 60.0))
+    start = now - minutes * 60
     svc = _analytics_service()
     try:
-        rows = svc.time_series_totals(now - minutes * 60, now, granularity=granularity)
+        with _timed_stage("analytics.aggregate_timeseries"):
+            rows = svc.time_series_totals(start, now, granularity=granularity)
     except Exception as exc:  # noqa: BLE001 -- aggregates_db is pure sqlite3, but never let a dashboard chart 500 the page
         return {"buckets": [], "granularity": granularity, "degraded": True, "degraded_reason": str(exc)}
     finally:
@@ -2436,17 +2482,39 @@ def analytics_timeseries(minutes: float = 1440.0, granularity: str = "hour", adm
     return {
         "granularity": granularity,
         "degraded": False,
-        "buckets": [
-            {
-                "bucket_start": bucket_start,
-                "bucket_start_iso": datetime.fromtimestamp(bucket_start, tz=timezone.utc).isoformat(),
-                "total_queries": total,
-                "blocked_queries": blocked,
-                "cache_hits": hits,
-                "cache_misses": misses,
-            }
-            for bucket_start, total, blocked, hits, misses in rows
-        ],
+        "window": {"start": start, "end": now, "minutes": minutes},
+        "buckets": _fill_timeseries_buckets(rows, start, now, granularity),
+    }
+
+
+@app.get("/api/analytics/live-activity")
+def analytics_live_activity(seconds: float = 180.0, bucket_seconds: int = 5, admin=Depends(current_admin)):
+    if reason := _forced_analytics_degraded():
+        return {"buckets": [], "degraded": True, "degraded_reason": reason}
+    seconds = max(30.0, min(float(seconds), 900.0))
+    bucket_seconds = max(1, min(int(bucket_seconds), 30))
+    now = time.time()
+    start = now - seconds
+    svc = _analytics_service()
+    try:
+        with _timed_stage("analytics.live_aggregate"):
+            rows = svc.time_series_totals(start, now, granularity="minute")
+    finally:
+        svc.close()
+    buckets = _fill_timeseries_buckets(rows, start, now, "minute")
+    recent = buckets[-1] if buckets else {"total_queries": 0, "blocked_queries": 0}
+    total = int(recent.get("total_queries") or 0)
+    blocked = int(recent.get("blocked_queries") or 0)
+    return {
+        "degraded": False,
+        "transport": "bounded_polling",
+        "poll_seconds": bucket_seconds,
+        "bucket_seconds": 60,
+        "window": {"start": start, "end": now, "seconds": seconds},
+        "current_bucket_count": total,
+        "current_qps": round(total / 60.0, 3),
+        "current_blocked_percent": round((blocked / total) * 100.0, 1) if total else 0.0,
+        "buckets": buckets,
     }
 
 

@@ -113,6 +113,43 @@ class TestAuthRequired:
         assert r.status_code == 401
 
 
+class TestUpstreamReorderApi:
+    def test_reorder_returns_authoritative_order_and_persists(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        headers = {"X-CSRF-Token": csrf}
+        for upstream_id, name, address in (
+            ("first", "First", "1.1.1.1:53"),
+            ("second", "Second", "8.8.8.8:53"),
+            ("third", "Third", "9.9.9.9:53"),
+        ):
+            r = client.post(
+                "/api/upstreams",
+                headers=headers,
+                json={
+                    "upstream_profile_id": upstream_id,
+                    "name": name,
+                    "transport": "plain",
+                    "strategy": "ordered",
+                    "endpoints": [{"address": address}],
+                },
+            )
+            assert r.status_code == 200, r.text
+
+        r = client.post(
+            "/api/upstreams/reorder",
+            headers=headers,
+            json={"ordered_upstream_profile_ids": ["third", "first", "second"]},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert [u["upstream_profile_id"] for u in body["upstreams"]] == ["third", "first", "second"]
+        assert [u["order"] for u in body["upstreams"]] == [1, 2, 3]
+
+        persisted = client.get("/api/upstreams").json()["upstreams"]
+        assert [u["upstream_profile_id"] for u in persisted] == ["third", "first", "second"]
+
+
 class TestServiceCatalogApi:
     def test_compact_service_listing_omits_full_domain_arrays(self, app_client):
         webapp, client = app_client

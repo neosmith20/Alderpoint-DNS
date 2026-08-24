@@ -83,7 +83,8 @@ class TestTimeseries:
         body = r.json()
         assert body["granularity"] == "hour"
         assert body["degraded"] is False
-        assert body["buckets"] == []  # no real query traffic in this fixture
+        assert body["buckets"]  # fixed rolling frame, even with no traffic
+        assert all(b["total_queries"] == 0 for b in body["buckets"])
 
     def test_invalid_granularity_is_a_real_400_not_a_500(self, tmp_path, monkeypatch):
         webapp = _fresh_webapp(tmp_path, monkeypatch)
@@ -115,7 +116,56 @@ class TestTimeseries:
         r = client.get("/api/analytics/timeseries?minutes=1440&granularity=hour")
         assert r.status_code == 200, r.text
         buckets = r.json()["buckets"]
-        assert len(buckets) == 1
-        assert buckets[0]["total_queries"] == 2
-        assert buckets[0]["blocked_queries"] == 1
+        populated = [b for b in buckets if b["total_queries"]]
+        assert len(populated) == 1
+        assert populated[0]["total_queries"] == 2
+        assert populated[0]["blocked_queries"] == 1
         assert "bucket_start_iso" in buckets[0]
+
+    def test_last_hour_minute_buckets_include_current_open_bucket_and_top_domains(self, tmp_path, monkeypatch):
+        webapp = _fresh_webapp(tmp_path, monkeypatch)
+        client = _client(webapp)
+        _setup_login(client)
+        import time
+
+        now = time.time()
+        aggregates_db.record_batch(
+            webapp.ANALYTICS_AGGREGATES_DB,
+            [
+                {"ts": now - 10, "domain": "current.example", "blocked": False, "cache_status": "hit",
+                 "protocol": "udp", "qtype": "A", "client": "10.0.0.5", "rcode": "NOERROR", "upstream": "u1"},
+                {"ts": now - 30, "domain": "current.example", "blocked": False, "cache_status": "miss",
+                 "protocol": "udp", "qtype": "A", "client": "10.0.0.5", "rcode": "NOERROR", "upstream": "u1"},
+            ],
+            granularity="minute",
+        )
+        r = client.get("/api/analytics/timeseries?minutes=60&granularity=minute")
+        assert r.status_code == 200, r.text
+        buckets = r.json()["buckets"]
+        assert len(buckets) >= 60
+        assert buckets[-1]["bucket_start"] <= int(now)
+        assert sum(b["total_queries"] for b in buckets) == 2
+
+        top = client.get("/api/analytics/top-domains?minutes=60&limit=5")
+        assert top.status_code == 200, top.text
+        assert top.json()["rows"][0] == ["current.example", 2]
+
+    def test_live_activity_uses_bounded_recent_window(self, tmp_path, monkeypatch):
+        webapp = _fresh_webapp(tmp_path, monkeypatch)
+        client = _client(webapp)
+        _setup_login(client)
+        import time
+
+        now = time.time()
+        aggregates_db.record_batch(
+            webapp.ANALYTICS_AGGREGATES_DB,
+            [{"ts": now, "domain": "live.example", "blocked": True, "cache_status": "miss",
+              "protocol": "udp", "qtype": "A", "client": "10.0.0.5", "rcode": "NXDOMAIN", "upstream": "u1"}],
+            granularity="minute",
+        )
+        r = client.get("/api/analytics/live-activity?seconds=180&bucket_seconds=5")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["transport"] == "bounded_polling"
+        assert body["bucket_seconds"] == 60
+        assert sum(b["blocked_queries"] for b in body["buckets"]) == 1

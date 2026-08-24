@@ -97,6 +97,7 @@ class AnalyticsPipeline:
         if raw_records:
             try:
                 self.parquet_writer.ingest(raw_records)
+                self.parquet_writer.flush()
             except Exception as exc:  # noqa: BLE001 - isolation boundary, never propagate
                 self.stats.parquet_failures += 1
                 self.stats.last_parquet_error = str(exc)
@@ -116,7 +117,8 @@ class AnalyticsPipeline:
             agg_records.append(e.to_raw_record())
         if agg_records:
             try:
-                aggregates_db.record_batch(self.aggregates_path, agg_records)
+                for granularity in ("minute", "hour", "day"):
+                    aggregates_db.record_batch(self.aggregates_path, agg_records, granularity=granularity)
             except Exception as exc:  # noqa: BLE001
                 self.stats.aggregate_failures += 1
                 self.stats.last_aggregate_error = str(exc)

@@ -25,6 +25,8 @@
     // operator can change per visit, not a durable preference.
     dashboardRangeMinutes: 1440,
     dashboardTopMode: "top",
+    dashboardLivePaused: false,
+    dashboardLiveTimer: null,
     applianceTimezone: null,
     routeCache: new Map(),
     inFlightGets: new Map(),
@@ -668,6 +670,7 @@
   // count sane for both the SVG chart and its table fallback (7d @
   // hourly = 168 points; @ minute would be >10,000).
   function dashboardGranularity(minutes) {
+    if (minutes === "live") return "minute";
     if (minutes <= 120) return "minute";
     return "hour";
   }
@@ -688,7 +691,8 @@
   // query-log history under load) no longer blocks the metrics strip,
   // clients, or upstreams from appearing.
   async function dashboard() {
-    const rangeMinutes = state.dashboardRangeMinutes;
+    const isLive = state.dashboardRangeMinutes === "live";
+    const rangeMinutes = isLive ? 60 : Number(state.dashboardRangeMinutes);
     const granularity = dashboardGranularity(rangeMinutes);
     const topMode = state.dashboardTopMode;
     const [c, recent, clients, observed, upstreams] = await Promise.all([
@@ -717,7 +721,7 @@
     // must use typed fields, not string heuristics.
     const blockedIdx = (recent.columns || []).indexOf("blocked");
     const blocked = blockedIdx === -1 ? 0 : rows.filter((r) => r[blockedIdx] === true).length;
-    loadSlowDashboardPanels(rangeMinutes, granularity, topMode);
+    loadSlowDashboardPanels(isLive ? "live" : rangeMinutes, granularity, topMode);
     return page("Dashboard", "Operational state from the real V2 HTTPS APIs.", `<button data-refresh>Refresh</button>`, `
       <div class="strip">
         <div class="metric"><strong>${esc(c.health.status || "unknown")}</strong><span>Management / runtime status</span></div>
@@ -743,6 +747,15 @@
   // elsewhere never overwrites a different, now-current page.
   function loadSlowDashboardPanels(rangeMinutes, granularity, topMode) {
     const token = loadToken;
+    if (rangeMinutes === "live") {
+      const el = document.getElementById("dashboard-activity-panel");
+      if (el) {
+        el.innerHTML = liveActivityShell();
+        startLiveActivity(token, topMode);
+      }
+      refreshDashboardTopDomains(token, 60, topMode);
+      return;
+    }
     api(`/api/analytics/timeseries?minutes=${rangeMinutes}&granularity=${granularity}`)
       .catch((e) => ({ buckets: [], degraded: true, degraded_reason: e.message }))
       .then((timeseries) => {
@@ -750,6 +763,10 @@
         const el = document.getElementById("dashboard-activity-panel");
         if (el) el.innerHTML = activityChart(timeseries);
       });
+    refreshDashboardTopDomains(token, rangeMinutes, topMode);
+  }
+
+  function refreshDashboardTopDomains(token, rangeMinutes, topMode) {
     api(`/api/analytics/${topMode === "blocked" ? "top-blocked-domains" : "top-domains"}?minutes=${rangeMinutes}&limit=15`)
       .catch((e) => ({ rows: [], degraded: true, degraded_reason: e.message }))
       .then((topResult) => {
@@ -760,8 +777,72 @@
   }
 
   function rangeSelector() {
-    const options = [[60, "Last hour"], [1440, "Last 24 hours"], [10080, "Last 7 days"]];
+    const options = [["live", "Live"], [60, "Last hour"], [1440, "Last 24 hours"], [10080, "Last 7 days"]];
     return `<select data-action="dashboard-range" aria-label="DNS activity time range">${options.map(([v, l]) => `<option value="${v}" ${state.dashboardRangeMinutes === v ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
+  }
+
+  function liveActivityShell() {
+    return `<div class="live-toolbar">
+      <span class="badge info" data-live-status>Connecting</span>
+      <span class="metric-inline">Current bucket: <strong data-live-current>0</strong></span>
+      <span class="metric-inline">QPS: <strong data-live-qps>0</strong></span>
+      <span class="metric-inline">Blocked: <strong data-live-blocked>0%</strong></span>
+      <button type="button" data-action="dashboard-live-pause">${state.dashboardLivePaused ? "Resume" : "Pause"}</button>
+    </div>
+    <div id="dashboard-live-chart">${activityChart({ buckets: [], granularity: "minute" })}</div>`;
+  }
+
+  function cleanupDashboardLive() {
+    if (state.dashboardLiveTimer) {
+      clearInterval(state.dashboardLiveTimer);
+      state.dashboardLiveTimer = null;
+    }
+    document.querySelectorAll(".ts-svg-host").forEach((host) => {
+      if (host.__apdnsRO) host.__apdnsRO.disconnect();
+    });
+  }
+
+  function startLiveActivity(token, topMode) {
+    cleanupDashboardLive();
+    const pollMs = 5000;
+    let topRefresh = 0;
+    async function poll() {
+      if (token !== loadToken || state.route !== "dashboard") return cleanupDashboardLive();
+      const status = document.querySelector("[data-live-status]");
+      if (state.dashboardLivePaused) {
+        if (status) status.textContent = "Paused";
+        return;
+      }
+      try {
+        if (status) status.textContent = "Live";
+        const data = await api("/api/analytics/live-activity?seconds=180&bucket_seconds=5", { signal: undefined });
+        if (token !== loadToken || state.route !== "dashboard") return;
+        if (data.degraded) {
+          if (status) status.textContent = "Degraded";
+          const chart = document.getElementById("dashboard-live-chart");
+          if (chart) chart.innerHTML = `<div class="alert warn">${esc(data.degraded_reason || "Live analytics unavailable")}</div>`;
+          return;
+        }
+        document.querySelector("[data-live-current]").textContent = String(data.current_bucket_count || 0);
+        document.querySelector("[data-live-qps]").textContent = String(data.current_qps || 0);
+        document.querySelector("[data-live-blocked]").textContent = `${esc(data.current_blocked_percent || 0)}%`;
+        const chart = document.getElementById("dashboard-live-chart");
+        if (chart) {
+          chart.querySelectorAll(".ts-svg-host").forEach((host) => { if (host.__apdnsRO) host.__apdnsRO.disconnect(); });
+          chart.innerHTML = activityChart({ buckets: data.buckets || [], granularity: "minute" });
+        }
+        const now = Date.now();
+        if (now - topRefresh > 30000) {
+          topRefresh = now;
+          refreshDashboardTopDomains(token, 60, topMode);
+        }
+      } catch (err) {
+        if (token !== loadToken || state.route !== "dashboard") return;
+        if (status) status.textContent = "Reconnecting";
+      }
+    }
+    poll();
+    state.dashboardLiveTimer = setInterval(poll, pollMs);
   }
 
   function topModeSelector() {
@@ -1216,7 +1297,9 @@
     return page("Upstreams / Routing", "Plain, DoT, and DoH profiles with explicit routing rules. DoH requires TLS hostname validation.", "", `
       ${ups.native_recursion_active ? `<div class="alert info">No managed upstream is enabled. BIND is performing normal native recursive resolution using the root/authoritative hierarchy -- not a substituted third-party resolver.</div>` : ""}
       <div class="grid two">
-        <section class="panel"><div class="panel__head"><h2>Upstream Profiles</h2></div><div class="panel__body">${upstreamForm()}${upstreamsTable(ups.upstreams)}</div></section>
+        <section class="panel"><div class="panel__head"><h2>Upstream Profiles</h2></div><div class="panel__body">
+          <p class="muted">Order is the operator-visible priority list for profile management. Runtime DNS uses the upstream profile selected by global/client policy or a matching domain route; endpoint order inside that selected profile controls ordered/failover behavior.</p>
+          ${upstreamForm()}<div id="upstreams-table-host">${upstreamsTable(ups.upstreams)}</div></div></section>
         <section class="panel"><div class="panel__head"><h2>Domain Routes</h2></div><div class="panel__body">${routeForm(ups.upstreams)}${tableFromRows(routes.routes, 50, undefined, "upstream-domain-routes")}</div></section>
       </div>`);
   }
@@ -1238,6 +1321,7 @@
       const addr = (u.endpoints || []).map((e) => e.address).join(", ") || "-";
       return `<tr data-upstream-row="${esc(u.upstream_profile_id)}">
         <td>${esc(u.name)}<br><span class="muted mono">${esc(u.upstream_profile_id)}</span></td>
+        <td class="mono"><span class="badge info">#${esc(u.order || i + 1)}</span></td>
         <td class="mono">${esc(u.transport)}</td>
         <td class="mono truncate" title="${esc(addr)}">${esc(addr)}</td>
         <td>${esc(u.strategy)}</td>
@@ -1256,7 +1340,7 @@
         </td>
       </tr>`;
     }).join("");
-    return `<div class="table-wrap"><table data-grid data-grid-id="upstream-profiles"><thead><tr><th>Name</th><th>Transport</th><th>Address</th><th>Strategy</th><th>Status</th><th data-no-sort>Actions</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    return `<div class="table-wrap"><table data-grid data-grid-id="upstream-profiles"><thead><tr><th>Name</th><th>Order</th><th>Transport</th><th>Address</th><th>Strategy</th><th>Status</th><th data-no-sort>Actions</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
 
   function routeForm(upstreams) {
@@ -1802,6 +1886,7 @@
     // Cancel the previous page-load's own in-flight GETs (see api()'s
     // pageLoadController note) before starting this one's.
     if (pageLoadController) pageLoadController.abort();
+    cleanupDashboardLive();
     closeRowActionMenus();
     state.inFlightGets.clear();
     pageLoadController = new AbortController();
@@ -2456,6 +2541,14 @@
         toast("Uploaded archive deleted", "ok");
         return;
       }
+      const livePause = ev.target.closest("[data-action='dashboard-live-pause']");
+      if (livePause) {
+        state.dashboardLivePaused = !state.dashboardLivePaused;
+        livePause.textContent = state.dashboardLivePaused ? "Resume" : "Pause";
+        const status = document.querySelector("[data-live-status]");
+        if (status) status.textContent = state.dashboardLivePaused ? "Paused" : "Live";
+        return;
+      }
 
       // Real owner-reported live defect fixed here: managed upstreams
       // could not be edited, disabled, or removed at all. Compact
@@ -2549,20 +2642,24 @@
       if (reorderUpstream) {
         const id = reorderUpstream.dataset.upstreamId;
         const direction = reorderUpstream.dataset.reorderUpstream;
+        reorderUpstream.disabled = true;
         const current = (await api("/api/upstreams")).upstreams.map((u) => u.upstream_profile_id);
         const idx = current.indexOf(id);
         const swapWith = direction === "up" ? idx - 1 : idx + 1;
         if (swapWith < 0 || swapWith >= current.length) return;
         [current[idx], current[swapWith]] = [current[swapWith], current[idx]];
-        await api("/api/upstreams/reorder", { method: "POST", body: JSON.stringify({ ordered_upstream_profile_ids: current }) });
-        await loadPage("upstreams");
+        const result = await api("/api/upstreams/reorder", { method: "POST", body: JSON.stringify({ ordered_upstream_profile_ids: current }) });
+        const host = document.getElementById("upstreams-table-host");
+        if (host && result.upstreams) host.innerHTML = upstreamsTable(result.upstreams);
+        else await loadPage("upstreams");
+        toast("Upstream order saved", "ok");
         return;
       }
     });
 
     document.body.addEventListener("change", async (ev) => {
       const range = ev.target.closest("[data-action='dashboard-range']");
-      if (range) { state.dashboardRangeMinutes = Number(range.value); await loadPage("dashboard"); return; }
+      if (range) { state.dashboardRangeMinutes = range.value === "live" ? "live" : Number(range.value); await loadPage("dashboard"); return; }
       const topMode = ev.target.closest("[data-action='dashboard-top-mode']");
       if (topMode) { state.dashboardTopMode = topMode.value; await loadPage("dashboard"); return; }
       const keepOpen = ev.target.closest("[data-action='nav-keep-multiple-open']");
