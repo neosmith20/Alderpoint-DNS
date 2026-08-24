@@ -267,6 +267,8 @@ cp "$SOURCE_DIR/scripts/v2/alderpointdns_v2_blocklist_refresh.py" "$PKG/opt/alde
 chmod 0755 "$PKG/opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_blocklist_refresh.py"
 cp "$SOURCE_DIR/scripts/v2/alderpointdns_v2_dns_benchmark.py" "$PKG/opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_dns_benchmark.py"
 chmod 0755 "$PKG/opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_dns_benchmark.py"
+cp "$SOURCE_DIR/scripts/v2/apdns_lan_benchmark.ps1" "$PKG/opt/alderpointdns-v2/scripts/v2/apdns_lan_benchmark.ps1"
+chmod 0644 "$PKG/opt/alderpointdns-v2/scripts/v2/apdns_lan_benchmark.ps1"
 # BIND architecture correction (Gate #3): the real packaged V2 BIND
 # recursive-cache backend unit + its AppArmor local override (see
 # packaging/v2/postinst's own apparmor block for why this must be

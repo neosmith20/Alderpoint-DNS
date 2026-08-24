@@ -167,6 +167,26 @@ def test_real_query_also_lands_in_the_discovery_inbox_with_the_exact_client_addr
     assert obs["hostname_candidate"] == "pbtest.example.com."
 
 
+def test_repeated_same_client_query_is_coalesced_in_discovery_inbox(receiver):
+    sock = _connect(receiver.port)
+    assert sock is not None, "receiver never started listening"
+    try:
+        body = bytes.fromhex(REAL_QUERY_HEX)
+        framed = struct.pack(">H", len(body)) + body
+        for _ in range(100):
+            sock.sendall(framed)
+    finally:
+        sock.close()
+
+    files = _wait_for_inbox_file(receiver.discovery_inbox)
+    assert files, "no observation ever landed in the discovery inbox"
+    observations = []
+    for path in files:
+        observations.extend(json.loads(line) for line in path.read_text(encoding="utf-8").splitlines())
+    matching = [o for o in observations if o["source_ip"] == "127.0.0.1" and o["hostname_candidate"] == "pbtest.example.com."]
+    assert len(matching) == 1
+
+
 def test_malformed_message_is_skipped_not_fatal_to_the_connection(receiver):
     # A garbled/truncated message must never crash the receiver or take
     # down its ability to keep serving other connections -- this is a

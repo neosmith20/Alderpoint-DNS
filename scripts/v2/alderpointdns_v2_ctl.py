@@ -1492,6 +1492,31 @@ _PENDING_QUERY_MAX = 8192
 # strictly more accurate than always assuming NOERROR.
 _QNAME_RCODE_CACHE_MAX = 4096
 _QNAME_RCODE_CACHE_TTL_SECONDS = 3600.0
+_DISCOVERY_OBSERVATION_COALESCE_SECONDS = 10.0
+_DISCOVERY_OBSERVATION_RECENT_MAX = 8192
+
+
+def _should_emit_discovery_observation(
+    recent: dict[tuple[str, str, str], float],
+    obs: observed_clients.Observation,
+    *,
+    now: float,
+    window_seconds: float = _DISCOVERY_OBSERVATION_COALESCE_SECONDS,
+) -> bool:
+    key = (obs.source_ip, obs.hostname_candidate, obs.hostname_source)
+    last = recent.get(key)
+    if last is not None and now - last < window_seconds:
+        return False
+    recent[key] = now
+    if len(recent) > _DISCOVERY_OBSERVATION_RECENT_MAX:
+        cutoff = now - max(window_seconds * 2, 60.0)
+        for stale_key, stale_at in list(recent.items()):
+            if stale_at < cutoff:
+                recent.pop(stale_key, None)
+        while len(recent) > _DISCOVERY_OBSERVATION_RECENT_MAX:
+            oldest_key = min(recent, key=recent.get)
+            recent.pop(oldest_key, None)
+    return True
 
 
 def cmd_analytics_protobuf_receiver(args: argparse.Namespace) -> int:
@@ -1561,6 +1586,7 @@ def cmd_analytics_protobuf_receiver(args: argparse.Namespace) -> int:
         # (qname, qtype) -> (rcode, monotonic insert time) -- see
         # _event_from_unmatched_query's docstring for why this exists.
         qname_rcode_cache: dict[tuple[str, str], tuple[str, float]] = {}
+        discovery_recent: dict[tuple[str, str, str], float] = {}
 
         def _remember_answer(decoded: "dnsdist_protobuf.DecodedResponse") -> None:
             if len(qname_rcode_cache) >= _QNAME_RCODE_CACHE_MAX:
@@ -1611,9 +1637,11 @@ def cmd_analytics_protobuf_receiver(args: argparse.Namespace) -> int:
                         _remember_answer(decoded)
                         batch.append(_event_from_response(decoded))
                     elif isinstance(decoded, dnsdist_protobuf.DecodedQuery):
-                        discovery_batch.append(observed_clients.Observation(
+                        obs = observed_clients.Observation(
                             decoded.client, decoded.qname, "dns-query", decoded.ts,
-                        ))
+                        )
+                        if _should_emit_discovery_observation(discovery_recent, obs, now=time.monotonic()):
+                            discovery_batch.append(obs)
                         if len(pending) >= _PENDING_QUERY_MAX:
                             # Defense in depth only: drop the oldest
                             # in-flight entry rather than grow unbounded
