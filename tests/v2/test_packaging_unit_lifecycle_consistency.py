@@ -236,6 +236,74 @@ def test_no_unit_scopes_readwritepaths_to_a_narrow_subdirectory_that_races_at_bo
             )
 
 
+def test_units_reaching_mutate_and_promote_can_write_rndc_conf_dir():
+    """Regression guard for a real defect found live on the owner preview
+    (Aug 23-24, pre-DoH reliability pass): alderpointdns-v2-web.service's
+    ReadWritePaths already covers /etc/alderpointdns-v2 (a prior, separate
+    real defect -- see that unit's own comment) because every request
+    handler in app/v2/webapp.py reaches app.v2.webapp._mutate_and_promote(),
+    which unconditionally writes a promoted rndc.conf under CONFIG_DIR
+    once a real BIND context exists. alderpointdns-v2-schedule.service's
+    own on_transition hook was refactored to reuse that exact same
+    function (see that unit's own docstring), but its ReadWritePaths was
+    never updated to match -- every single scheduled recompile tick then
+    raised a real "[Errno 30] Read-only file system:
+    '/etc/alderpointdns-v2/.rndc.conf.tmp'" under ProtectSystem=strict,
+    silently (caught by on_transition's own try/except), on essentially
+    every tick for over a day before being caught. Statically checking
+    "every unit whose ExecStart command reuses _mutate_and_promote also
+    has /etc/alderpointdns-v2 in ReadWritePaths" catches this without
+    needing a live boot -- and catches the next worker that starts
+    reusing the same recompile path without its own unit being updated to
+    match.
+    """
+    units_dir = ROOT / "packaging/v2"
+    scripts_text = (ROOT / "scripts/v2/alderpointdns_v2_ctl.py").read_text()
+    webapp_text = (ROOT / "app/v2/webapp.py").read_text()
+
+    # web.service's ExecStart runs uvicorn against app.v2.webapp:app
+    # directly -- every one of its request handlers can reach
+    # _mutate_and_promote, so it always needs this regardless of the
+    # scripts/v2/alderpointdns_v2_ctl.py scan below.
+    reaching_units = {"alderpointdns-v2-web.service"}
+    # Any alderpointdns_v2_ctl.py `cmd_*` worker entry point whose own
+    # source calls _mutate_and_promote reaches the exact same rndc.conf
+    # write -- map each such function back to the systemd unit that runs
+    # it via its own `ExecStart=... alderpointdns_v2_ctl.py <subcommand>`
+    # line, the same way postinst/the argparse subcommands wire them.
+    unit_subcommands = {
+        p.name: re.search(r"alderpointdns_v2_ctl\.py\s+([\w-]+)", p.read_text())
+        for p in units_dir.glob("alderpointdns-v2-*.service")
+    }
+    for func_match in re.finditer(r"def (cmd_\w+)\(.*?\n(?=def cmd_|\Z)", scripts_text, re.DOTALL):
+        func_name, func_body = func_match.group(1), func_match.group(0)
+        if "_mutate_and_promote" not in func_body:
+            continue
+        subcommand = func_name.removeprefix("cmd_").replace("_", "-")
+        for unit_name, m in unit_subcommands.items():
+            if m and m.group(1) == subcommand:
+                reaching_units.add(unit_name)
+
+    assert "alderpointdns-v2-schedule.service" in reaching_units, (
+        "expected schedule-worker's cmd_schedule_worker to still reach "
+        "_mutate_and_promote -- if this assertion fails because that's no "
+        "longer true, the ReadWritePaths requirement below may no longer "
+        "apply to it either"
+    )
+
+    for unit_name in sorted(reaching_units):
+        text = (units_dir / unit_name).read_text()
+        m = re.search(r"^ReadWritePaths=(.+)$", text, re.MULTILINE)
+        assert m and "/etc/alderpointdns-v2" in m.group(1).split(), (
+            f"{unit_name} reaches _mutate_and_promote() (which writes a "
+            "promoted rndc.conf under CONFIG_DIR whenever a real BIND "
+            "context exists) but its ReadWritePaths doesn't include "
+            "/etc/alderpointdns-v2 -- under ProtectSystem=strict this "
+            "will fail every such write with a real EROFS, exactly the "
+            "schedule.service defect this test guards against"
+        )
+
+
 def test_every_packaging_unit_file_is_copied_by_the_build_script():
     """Regression guard: scripts/build-v2-deb.sh copies each
     packaging/v2/*.service and *.path file into the built package via

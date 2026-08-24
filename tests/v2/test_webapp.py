@@ -533,6 +533,58 @@ class TestBackgroundWorkerHealth:
         assert r.json()["status"] == "degraded"
 
 
+class TestScheduleWorkerPromotionHealth:
+    """Real defect found live on the owner preview (Aug 23-24, pre-DoH
+    reliability pass): alderpointdns-v2-schedule.service's ReadWritePaths
+    didn't include /etc/alderpointdns-v2, so every scheduled recompile
+    tick's rndc.conf promotion raised a real EROFS -- caught safely (the
+    previously-promoted runtime stayed live), but /api/health's own
+    schedule_worker component only ever reported state_present=True, with
+    no way to tell a worker whose every promotion is failing from one
+    that's actually keeping up."""
+
+    def test_no_state_file_yet_reports_absent_not_a_crash(self, app_client):
+        webapp, client = app_client
+        r = client.get("/api/health")
+        worker = r.json()["components"]["schedule_worker"]
+        assert worker == {"state_present": False}
+
+    def test_failed_promotion_is_reported_and_degrades_overall_status(self, app_client):
+        webapp, client = app_client
+        webapp.SCHEDULE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        webapp.SCHEDULE_STATE_FILE.write_text(
+            json.dumps(
+                {
+                    "active_schedule_ids": [],
+                    "promotion_succeeded": False,
+                    "reason": "transition failed, retaining previous active set",
+                }
+            )
+        )
+        r = client.get("/api/health")
+        body = r.json()
+        worker = body["components"]["schedule_worker"]
+        assert worker["state_present"] is True
+        assert worker["status"] == "promotion_failed"
+        assert worker["promotion_succeeded"] is False
+        assert body["status"] == "degraded"
+
+    def test_successful_promotion_reports_ok(self, app_client):
+        webapp, client = app_client
+        webapp.SCHEDULE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        webapp.SCHEDULE_STATE_FILE.write_text(
+            json.dumps({"active_schedule_ids": [], "promotion_succeeded": True, "reason": "transition applied"})
+        )
+        r = client.get("/api/health")
+        worker = r.json()["components"]["schedule_worker"]
+        # Bare fixture has no warmed heartbeats, so overall status is
+        # already "degraded" for unrelated reasons (see
+        # TestBackgroundWorkerHealth) -- the thing under test is that a
+        # successful promotion doesn't add its own degradation on top.
+        assert worker["status"] == "ok"
+        assert worker["promotion_succeeded"] is True
+
+
 class TestSecurityHeaders:
     def test_security_headers_present(self, app_client):
         webapp, client = app_client

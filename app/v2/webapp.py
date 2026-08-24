@@ -990,7 +990,37 @@ def health():
         # degradation, never silently reported as fully healthy.
         result["status"] = "degraded"
     result["components"]["tier_b"] = {"state_present": TIER_B_STATE_FILE.exists()}
-    result["components"]["schedule_worker"] = {"state_present": SCHEDULE_STATE_FILE.exists()}
+    # Real gap found live alongside the /etc/alderpointdns-v2 ReadWritePaths
+    # defect fixed in alderpointdns-v2-schedule.service (pre-DoH
+    # reliability pass): this used to report only whether the worker's own
+    # state file existed, never its content -- a schedule-worker that had
+    # been failing every single recompile tick (a real EROFS promotion
+    # failure, in that incident) still showed as a plain present/ok-looking
+    # component here, with no visibility into schedule_runtime.py's own
+    # persisted promotion_succeeded/reason. This is the last tick's result
+    # only (schedule_runtime.py persists one record, not a history), so
+    # "currently failing" here really does mean the most recent tick, not
+    # a possibly-stale one -- background_workers.schedule-worker's own
+    # heartbeat above already covers "is the loop itself still running".
+    schedule_worker: dict[str, Any] = {"state_present": SCHEDULE_STATE_FILE.exists()}
+    if schedule_worker["state_present"]:
+        try:
+            raw = json.loads(SCHEDULE_STATE_FILE.read_text(encoding="utf-8"))
+            promotion_succeeded = raw.get("promotion_succeeded")
+            schedule_worker.update(
+                {
+                    "status": "promotion_failed" if promotion_succeeded is False else "ok",
+                    "promotion_succeeded": promotion_succeeded,
+                    "active_schedule_ids": raw.get("active_schedule_ids"),
+                    "reason": raw.get("reason"),
+                }
+            )
+            if promotion_succeeded is False:
+                result["status"] = "degraded" if result["status"] == "ok" else result["status"]
+        except (OSError, ValueError) as exc:
+            schedule_worker["status"] = "unknown"
+            schedule_worker["detail"] = str(exc)
+    result["components"]["schedule_worker"] = schedule_worker
 
     # Real background-worker progress, not just "the unit hasn't exited"
     # (app/v2/worker_heartbeat.py) -- owner-beta aging hardening item 1.

@@ -61,10 +61,14 @@ TimeoutStopSec=15
 #    as "promotion failed, roll back the control.db write too" -- so the
 #    control.db side effect was never left half-applied, but literally no
 #    operator-driven policy change could ever be saved through the web
-#    UI/API on a real install. The scheduled recompile path (see
-#    alderpointdns-v2-schedule.service) never hit this because it never
-#    passes live_rndc_conf_path; only this unit's *interactive* mutations
-#    do. This grants write access to the appliance's own DNS runtime
+#    UI/API on a real install. (Correction, pre-DoH reliability pass:
+#    this comment used to claim the scheduled recompile path -- see
+#    alderpointdns-v2-schedule.service -- never hit this because it
+#    never passes live_rndc_conf_path. That stopped being true once that
+#    unit's own on_transition was refactored to reuse this same
+#    _mutate_and_promote(), which does always pass it; that unit now
+#    carries the identical ReadWritePaths fix and its own comment has
+#    the real story.) This grants write access to the appliance's own DNS runtime
 #    config directory, not secret material -- real secrets stay under
 #    /var/lib/alderpointdns-v2/secrets, already writable above with its
 #    own separate 0600/dedicated-directory protection.

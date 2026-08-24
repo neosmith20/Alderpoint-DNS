@@ -51,7 +51,29 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 # wiping every configured block domain/upstream/encrypted-transport
 # setting back to nothing on every restart with no error surfaced
 # anywhere.
-ReadWritePaths=/var/lib/alderpointdns-v2 /var/log/alderpointdns-v2
+# /etc/alderpointdns-v2 added to this list (real defect found live on
+# the owner preview, Aug 23-24, pre-DoH reliability pass): on_transition
+# below reuses app.v2.webapp._mutate_and_promote() (see this unit's own
+# docstring on that refactor), and that function unconditionally passes
+# live_rndc_conf_path=RNDC_CONF_PATH (/etc/alderpointdns-v2/rndc.conf)
+# once COMPILED_RPZ_ZONE exists -- true on any real install, not just an
+# interactive one. alderpointdns-v2-web.service's own comment on its
+# identical ReadWritePaths entry claims "the scheduled recompile path
+# never hit this because it never passes live_rndc_conf_path" -- that
+# was true only of the old, separate recompile implementation this unit
+# used to run; reusing _mutate_and_promote made it false without either
+# unit's ReadWritePaths being revisited. Confirmed live: this worker's
+# own scheduled tick (every interval-seconds, i.e. every 60s) raised
+# "[Errno 30] Read-only file system: '/etc/alderpointdns-v2/.rndc.conf.tmp'"
+# on essentially every single tick since the refactor landed -- caught by
+# on_transition's own try/except (see below) and _mutate_and_promote's
+# all-or-nothing rollback, so no DNS/config regression ever resulted
+# (the previously-promoted runtime stayed live throughout), but every
+# scheduled policy transition silently failed to ever actually promote.
+# See tests/v2/test_packaging_unit_lifecycle_consistency.py's
+# test_units_reaching_mutate_and_promote_can_write_rndc_conf_dir for the
+# regression guard.
+ReadWritePaths=/var/lib/alderpointdns-v2 /var/log/alderpointdns-v2 /etc/alderpointdns-v2
 UMask=0027
 CapabilityBoundingSet=
 # Real defect found live during a real KVM clean-install/reboot
