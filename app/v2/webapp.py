@@ -2074,23 +2074,51 @@ def list_services(include_domains: bool = True, admin=Depends(current_admin)):
         domains_by_service: dict[int, list[dict[str, str]]] = {}
         if row_ids:
             placeholders = ",".join("?" for _ in row_ids)
-            with _timed_stage("services.domains"):
-                domain_rows = conn.execute(
-                    f"""
-                    SELECT service_row_id, match_kind, domain
-                    FROM service_domains
-                    WHERE service_row_id IN ({placeholders})
-                    ORDER BY service_row_id, match_kind, domain
-                    """,
-                    row_ids,
-                ).fetchall()
-            for row_id, match_kind, domain in domain_rows:
-                domain_counts[row_id] = domain_counts.get(row_id, 0) + 1
-                item = {"match_kind": match_kind, "domain": domain}
-                if include_domains:
-                    domains_by_service.setdefault(row_id, []).append(item)
-                elif len(domain_samples.setdefault(row_id, [])) < 3:
-                    domain_samples[row_id].append(item)
+            if include_domains:
+                with _timed_stage("services.domains"):
+                    domain_rows = conn.execute(
+                        f"""
+                        SELECT service_row_id, match_kind, domain
+                        FROM service_domains
+                        WHERE service_row_id IN ({placeholders})
+                        ORDER BY service_row_id, match_kind, domain
+                        """,
+                        row_ids,
+                    ).fetchall()
+                for row_id, match_kind, domain in domain_rows:
+                    domain_counts[row_id] = domain_counts.get(row_id, 0) + 1
+                    domains_by_service.setdefault(row_id, []).append({"match_kind": match_kind, "domain": domain})
+            else:
+                with _timed_stage("services.domain_counts"):
+                    domain_counts = {
+                        int(row_id): int(count)
+                        for row_id, count in conn.execute(
+                            f"""
+                            SELECT service_row_id, COUNT(*)
+                            FROM service_domains
+                            WHERE service_row_id IN ({placeholders})
+                            GROUP BY service_row_id
+                            """,
+                            row_ids,
+                        ).fetchall()
+                    }
+                with _timed_stage("services.domain_samples"):
+                    sample_rows = conn.execute(
+                        f"""
+                        SELECT service_row_id, match_kind, domain
+                        FROM (
+                            SELECT service_row_id, match_kind, domain,
+                                   ROW_NUMBER() OVER (PARTITION BY service_row_id ORDER BY match_kind, domain) AS rn
+                            FROM service_domains
+                            WHERE service_row_id IN ({placeholders})
+                        )
+                        WHERE rn <= 3
+                        ORDER BY service_row_id, match_kind, domain
+                        """,
+                        row_ids,
+                    ).fetchall()
+                for row_id, match_kind, domain in sample_rows:
+                    domain_samples.setdefault(row_id, []).append({"match_kind": match_kind, "domain": domain})
         services = []
         with _timed_stage("services.shape"):
             for row_id, service_id, display_name, category in rows:
