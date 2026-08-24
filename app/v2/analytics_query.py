@@ -49,6 +49,8 @@ from app.v2.parquet_writer import _COLUMN_NAMES as _QUERY_LOG_COLUMNS
 
 DEFAULT_LIMIT = 200
 MAX_LIMIT = 2000
+_SEGMENT_VALIDATION_CACHE_MAX = 2048
+_segment_validation_cache: dict[str, tuple[int, int, bool]] = {}
 
 # Columns a caller may filter on. Deliberately a fixed allowlist — filter
 # keys are used to build column references in SQL, so only ever accepting a
@@ -217,9 +219,22 @@ class PartitionPruningReader:
                 if not f.exists():
                     continue
                 try:
+                    stat = f.stat()
+                except OSError:
+                    continue
+                cache_key = str(f)
+                cached = _segment_validation_cache.get(cache_key)
+                if cached == (stat.st_mtime_ns, stat.st_size, True):
+                    good.append(f)
+                    continue
+                try:
                     validate_segment(f)
+                    if len(_segment_validation_cache) >= _SEGMENT_VALIDATION_CACHE_MAX:
+                        _segment_validation_cache.pop(next(iter(_segment_validation_cache)))
+                    _segment_validation_cache[cache_key] = (stat.st_mtime_ns, stat.st_size, True)
                     good.append(f)
                 except SegmentValidationError:
+                    _segment_validation_cache.pop(cache_key, None)
                     continue
         return good
 
