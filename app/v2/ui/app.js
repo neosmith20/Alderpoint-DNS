@@ -322,6 +322,23 @@
     return timestampHtml(value) || esc(fallbackText !== undefined ? fallbackText : value);
   }
 
+  function bytes(value) {
+    const n = Number(value || 0);
+    if (!Number.isFinite(n) || n <= 0) return "0 bytes";
+    const units = ["bytes", "KiB", "MiB", "GiB", "TiB"];
+    let size = n;
+    let unit = 0;
+    while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit += 1; }
+    return unit === 0 ? `${n} bytes` : `${size.toFixed(size >= 100 ? 0 : size >= 10 ? 1 : 2)} ${units[unit]}`;
+  }
+
+  function backupFormatLabel(format, sourceVersion) {
+    if (format === "v1.1.1-tar.gz") return "V1.1.1 (.tar.gz)";
+    if (format === "apdns-v2-full") return "V2 native (.apdnsbak)";
+    if (format && sourceVersion && sourceVersion !== "unknown") return `${format} (${sourceVersion})`;
+    return format || "Unknown";
+  }
+
   function reformatVisibleTimestamps() {
     document.querySelectorAll("[data-ts-utc]").forEach((el) => {
       const f = formatTimestamp(el.getAttribute("data-ts-utc"));
@@ -1319,22 +1336,26 @@
     const settings = data.uploaded_archive_settings || {};
     const cleanup = data.cleanup || {};
     const rows = archives.map((a) => `<tr>
-      <td>${esc(a.original_filename)}<br><span class="muted mono">${esc(a.name)}</span></td>
-      <td>${esc(a.detected_format)}<br><span class="muted">${esc(a.source_version)}</span></td>
+      <td class="truncate" title="${esc(a.original_filename)}">${esc(a.original_filename)}<br><span class="muted mono" title="${esc(a.name)}">${esc(a.name)}</span></td>
+      <td>${esc(backupFormatLabel(a.detected_format, a.source_version))}</td>
       <td>${ts(a.uploaded_at)}</td>
-      <td>${esc(a.size_bytes)}</td>
+      <td title="${esc(a.size_bytes)} bytes">${esc(bytes(a.size_bytes))}</td>
       <td><span class="badge ${a.validation_status === "valid" ? "ok" : "bad"}">${esc(a.validation_status)}</span></td>
       <td>${esc(a.restore_status)}</td>
-      <td class="field-row"><button data-validate-appliance-backup="${esc(a.name)}">Preview</button><input name="passphrase" type="password" data-omit-empty="1" placeholder="passphrase if required"><button class="danger" data-delete-uploaded-archive="${esc(a.archive_id)}" data-filename="${esc(a.original_filename)}" data-size="${esc(a.size_bytes)}">Delete</button></td>
+      <td class="compact-actions">${a.requires_passphrase ? `<input name="passphrase" type="password" data-omit-empty="1" placeholder="passphrase" aria-label="Restore passphrase for ${esc(a.original_filename)}">` : ""}<button class="compact" data-validate-appliance-backup="${esc(a.name)}">Preview</button><button class="compact danger" data-delete-uploaded-archive="${esc(a.archive_id)}" data-filename="${esc(a.original_filename)}" data-size="${esc(a.size_bytes)}">Delete</button></td>
     </tr><tr id="preview-${esc(a.name).replace(/[^A-Za-z0-9_-]/g, "-")}" class="restore-preview-row" hidden><td colspan="7"></td></tr>`).join("");
     const failures = (cleanup.failures || []).length ? `<div class="alert error">${esc(cleanup.failures.join("; "))}</div>` : "";
     return `<section class="subpanel"><h3>Uploaded Restore Archives</h3>
-      <div class="strip"><div><span>Total storage</span><strong>${esc(data.uploaded_storage_bytes || 0)} bytes</strong></div><div><span>Retention</span><strong>${esc(settings.retention_label || "")}</strong></div><div><span>Cleanup</span><strong>${esc(cleanup.removed || 0)} removed</strong></div></div>
+      <div class="summary-metrics">
+        <div class="summary-metric"><span class="summary-metric__label">Total uploaded storage</span><strong class="summary-metric__value" title="${esc(data.uploaded_storage_bytes || 0)} bytes">${esc(bytes(data.uploaded_storage_bytes || 0))}</strong></div>
+        <div class="summary-metric"><span class="summary-metric__label">Retention</span><strong class="summary-metric__value">${esc((settings.retention_label || "").replace("hour(s)", "hours"))}</strong></div>
+        <div class="summary-metric"><span class="summary-metric__label">Last cleanup</span><strong class="summary-metric__value">${esc(cleanup.removed || 0)} removed</strong></div>
+      </div>
       ${failures}
       <form data-form="uploaded-archive-settings" class="field-row">
         <label>Retention <select name="retention_seconds"><option value="86400" ${settings.retention_seconds === 86400 ? "selected" : ""}>24 hours</option><option value="3600" ${settings.retention_seconds === 3600 ? "selected" : ""}>1 hour</option><option value="21600" ${settings.retention_seconds === 21600 ? "selected" : ""}>6 hours</option><option value="604800" ${settings.retention_seconds === 604800 ? "selected" : ""}>7 days</option><option value="0" ${settings.retention_seconds === 0 ? "selected" : ""}>Manual Only</option></select></label>
-        <label><input type="checkbox" name="remove_after_successful_restore" value="true" data-bool="1" ${settings.remove_after_successful_restore ? "checked" : ""}> Remove uploaded archive after successful restore</label>
-        <button>Save</button>
+        <label class="row"><input type="checkbox" name="remove_after_successful_restore" value="true" data-bool="1" ${settings.remove_after_successful_restore ? "checked" : ""}> Remove uploaded archive after successful restore</label>
+        <button class="compact">Save</button>
       </form>
       ${archives.length ? `<div class="table-wrap" style="margin-top:12px"><table data-grid data-grid-id="uploaded-restore-archives"><thead><tr><th>Original filename</th><th>Format / Version</th><th>Uploaded</th><th>Size</th><th>Validation</th><th>Restore status</th><th data-no-sort>Actions</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty">No uploaded restore archives.</div>`}
     </section>`;
@@ -1543,15 +1564,15 @@
         <td>${s.effective_interval_seconds ? ts(s.next_retry_at || s.next_update_at, "not scheduled") : "Manual Only"}</td>
         <td>${esc(s.effective_interval_label || "")}</td>
         <td><span class="badge ${s.update_in_progress ? "warn" : tone(s.last_status)}">${s.update_in_progress ? "updating" : esc(s.last_status)}</span>${s.last_error ? `<br><span class="muted">${esc(s.last_error)}</span>` : ""}${s.update_duration_ms ? `<br><span class="muted">${esc(s.update_duration_ms)} ms</span>` : ""}</td>
-        <td data-no-sort>
+        <td class="actions-cell" data-no-sort>
           <div class="row-actions">
-            <button type="button" class="row-actions__trigger" data-row-menu-toggle aria-haspopup="true" aria-expanded="false" aria-label="Actions for ${esc(s.name)}">&ctdot;</button>
-            <div class="row-actions__menu" hidden role="menu">
-              <button type="button" role="menuitem" data-blocklist-edit="${esc(s.subscription_id)}">Edit interval</button>
-              <button type="button" role="menuitem" data-blocklist-refresh="${esc(s.subscription_id)}">Update Now</button>
-              <button type="button" role="menuitem" data-blocklist-toggle="${esc(s.subscription_id)}">${s.enabled ? "Disable" : "Enable"}</button>
+            <button type="button" class="row-actions__trigger" data-row-menu-toggle aria-haspopup="true" aria-expanded="false" aria-label="More actions for ${esc(s.name)}">&ctdot;</button>
+            <div class="row-actions__menu" hidden role="menu" aria-label="Actions for ${esc(s.name)}">
+              <button type="button" role="menuitem" data-blocklist-edit="${esc(s.subscription_id)}" ${s.update_in_progress ? "disabled" : ""}>Edit Update Interval</button>
+              <button type="button" role="menuitem" data-blocklist-refresh="${esc(s.subscription_id)}" ${s.update_in_progress ? "disabled" : ""}>Update Now</button>
+              <button type="button" role="menuitem" data-blocklist-toggle="${esc(s.subscription_id)}" ${s.update_in_progress ? "disabled" : ""}>${s.enabled ? "Disable" : "Enable"}</button>
               <div class="overflow-menu__divider" role="separator"></div>
-              <button type="button" role="menuitem" data-blocklist-delete="${esc(s.subscription_id)}" class="danger">Delete</button>
+              <button type="button" role="menuitem" data-blocklist-delete="${esc(s.subscription_id)}" class="danger" ${s.update_in_progress ? "disabled" : ""}>Delete</button>
             </div>
           </div>
         </td>
@@ -1572,7 +1593,7 @@
         </form>
       </div></section>
       <section class="panel"><div class="panel__head"><h2>Subscriptions</h2></div><div class="panel__body">
-        ${(data.subscriptions || []).length ? `<div class="table-wrap"><table data-grid data-grid-id="blocklist-subscriptions"><thead><tr><th>Name</th><th>URL</th><th>Enabled</th><th>Rules</th><th>Last successful update</th><th>Next update</th><th>Effective interval</th><th>Status</th><th data-no-sort>Actions</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty">No blocklist subscriptions yet.</div>`}
+        ${(data.subscriptions || []).length ? `<div class="table-wrap"><table data-grid data-grid-id="blocklist-subscriptions"><thead><tr><th>Name</th><th>URL</th><th>Enabled</th><th>Rules</th><th>Last successful update</th><th>Next update</th><th>Effective interval</th><th>Status</th><th class="actions-cell" data-no-sort aria-label="Actions"></th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty">No blocklist subscriptions yet.</div>`}
       </div></section>
       ${jobRows ? `<section class="panel"><div class="panel__head"><h2>Recent Updates</h2></div><div class="panel__body"><div class="table-wrap"><table><thead><tr><th>Started</th><th>Status</th><th>Scope</th><th>Sources</th><th>Result</th></tr></thead><tbody>${jobRows}</tbody></table></div></div></section>` : ""}
       <section class="panel"><div class="panel__head"><h2>Add Subscription</h2></div><div class="panel__body">
@@ -1781,6 +1802,7 @@
     // Cancel the previous page-load's own in-flight GETs (see api()'s
     // pageLoadController note) before starting this one's.
     if (pageLoadController) pageLoadController.abort();
+    closeRowActionMenus();
     state.inFlightGets.clear();
     pageLoadController = new AbortController();
     // Real defect fixed here (owner-beta closure item 3, found live via
@@ -2446,7 +2468,7 @@
         const menu = wrap.querySelector(".row-actions__menu");
         const wasOpen = !menu.hidden;
         closeRowActionMenus();
-        if (!wasOpen) { menu.hidden = false; rowMenuToggle.setAttribute("aria-expanded", "true"); }
+        if (!wasOpen) openRowActionMenu(rowMenuToggle, menu);
         return;
       }
       const editUpstream = ev.target.closest("[data-edit-upstream]");
@@ -2829,6 +2851,20 @@
     closeRowActionMenus(ev.target);
   });
   document.addEventListener("keydown", (ev) => {
+    const openMenu = document.querySelector(".row-actions__menu:not([hidden])");
+    if (openMenu && ["ArrowDown", "ArrowUp", "Home", "End"].includes(ev.key)) {
+      const items = rowMenuItems(openMenu);
+      if (!items.length) return;
+      ev.preventDefault();
+      const current = items.indexOf(document.activeElement);
+      let next = current;
+      if (ev.key === "ArrowDown") next = current < 0 ? 0 : (current + 1) % items.length;
+      if (ev.key === "ArrowUp") next = current < 0 ? items.length - 1 : (current - 1 + items.length) % items.length;
+      if (ev.key === "Home") next = 0;
+      if (ev.key === "End") next = items.length - 1;
+      items[next].focus();
+      return;
+    }
     if (ev.key !== "Escape") return;
     const open = document.querySelectorAll(".nav-section.is-flyout-open");
     open.forEach((section) => {
@@ -2844,10 +2880,37 @@
       const wrap = menu.closest(".row-actions");
       if (exceptWithin && wrap && wrap.contains(exceptWithin)) return;
       menu.hidden = true;
+      menu.style.left = "";
+      menu.style.top = "";
       const trigger = wrap && wrap.querySelector("[data-row-menu-toggle]");
       if (trigger) trigger.setAttribute("aria-expanded", "false");
     });
   }
+
+  function rowMenuItems(menu) {
+    return [...menu.querySelectorAll('button[role="menuitem"]:not(:disabled)')];
+  }
+
+  function openRowActionMenu(trigger, menu) {
+    menu.hidden = false;
+    trigger.setAttribute("aria-expanded", "true");
+    positionRowActionMenu(trigger, menu);
+  }
+
+  function positionRowActionMenu(trigger, menu) {
+    const gap = 6;
+    const rect = trigger.getBoundingClientRect();
+    const width = menu.offsetWidth || 190;
+    const height = menu.offsetHeight || 160;
+    let left = Math.min(window.innerWidth - width - 8, Math.max(8, rect.right - width));
+    let top = rect.bottom + gap;
+    if (top + height > window.innerHeight - 8) top = Math.max(8, rect.top - height - gap);
+    menu.style.left = `${Math.round(left)}px`;
+    menu.style.top = `${Math.round(top)}px`;
+  }
+
+  document.addEventListener("scroll", () => closeRowActionMenus(), true);
+  window.addEventListener("resize", () => closeRowActionMenus());
 
   boot();
 }());

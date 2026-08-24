@@ -210,6 +210,10 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .metric span { color: var(--muted); font-size: 12px; }
 .strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1px; border: 1px solid var(--line); background: var(--line); border-radius: var(--r-3); overflow: hidden; }
 .strip .metric { background: var(--surface); padding: var(--s-3); }
+.summary-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--s-3); margin: var(--s-3) 0; }
+.summary-metric { display: grid; gap: 4px; padding: var(--s-3); border: 1px solid var(--line); border-radius: var(--r-2); background: var(--surface-2); min-width: 0; }
+.summary-metric__label { color: var(--muted); font-size: 12px; font-weight: 650; }
+.summary-metric__value { color: var(--text); font-size: 18px; line-height: 1.2; font-weight: 750; overflow-wrap: anywhere; }
 
 .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: var(--r-2); background: var(--surface); }
 table { width: 100%; border-collapse: collapse; min-width: 680px; }
@@ -265,6 +269,7 @@ form { display: grid; gap: var(--s-3); }
 label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; font-weight: 650; }
 label.row { display: flex; flex-direction: row; align-items: center; gap: var(--s-2); }
 label.row input[type="checkbox"] { width: 16px; min-height: 16px; height: 16px; flex: 0 0 auto; }
+input[type="checkbox"] { width: 16px; min-width: 16px; height: 16px; min-height: 16px; padding: 0; }
 input, select, textarea { width: 100%; min-height: 38px; border: 1px solid var(--line-2); background: var(--bg); color: var(--text); border-radius: var(--r-2); padding: 8px 9px; }
 textarea { min-height: 94px; resize: vertical; font-family: var(--mono); font-size: 12px; }
 .field-row { display: flex; gap: var(--s-2); align-items: end; flex-wrap: wrap; }
@@ -274,13 +279,18 @@ textarea { min-height: 94px; resize: vertical; font-family: var(--mono); font-si
    pile of buttons). One small icon-button opens a real popover menu on
    plain click -- works identically for mouse, keyboard (Enter/Space on
    a real <button>, Tab-focusable), and touch, never hover-only. */
-.row-actions { position: relative; display: inline-block; }
-.row-actions__trigger { width: 28px; height: 28px; min-height: 28px; padding: 0; display: grid; place-items: center; border-radius: var(--r-2); border: 1px solid var(--line); background: var(--surface-2); color: var(--muted); font-weight: 700; line-height: 1; }
+.actions-cell { width: 52px; min-width: 52px; max-width: 56px; text-align: center; vertical-align: middle; }
+.row-actions { position: relative; display: inline-grid; place-items: center; width: 36px; height: 36px; }
+.row-actions__trigger { width: 34px; height: 34px; min-height: 34px; padding: 0; display: grid; place-items: center; border-radius: var(--r-2); border: 1px solid var(--line); background: var(--surface-2); color: var(--muted); font-weight: 700; line-height: 1; font-size: 18px; }
 .row-actions__trigger:hover, .row-actions__trigger[aria-expanded="true"] { color: var(--text); border-color: var(--line-2); }
-.row-actions__menu { position: absolute; right: 0; top: calc(100% + 4px); min-width: 140px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-2); box-shadow: var(--shadow); padding: 4px; z-index: 30; display: grid; gap: 2px; }
-.row-actions__menu button { width: 100%; text-align: left; padding: 6px 8px; border-radius: var(--r-1); background: transparent; border: none; color: var(--text); font-size: 13px; }
-.row-actions__menu button:hover { background: var(--surface-2); }
-.row-actions__menu button.danger { color: var(--bad); }
+.row-actions__menu { position: fixed; min-width: 190px; max-width: min(280px, calc(100vw - 16px)); background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-2); box-shadow: var(--shadow); padding: 4px; z-index: 1000; display: grid; gap: 2px; }
+.row-actions__menu[hidden] { display: none !important; }
+.row-actions__menu button { width: 100%; text-align: left; justify-content: flex-start; padding: 7px 9px; border-radius: var(--r-1); background: transparent; border: none; color: var(--text); font-size: 13px; min-height: 32px; }
+.row-actions__menu button:hover, .row-actions__menu button:focus { background: var(--surface-2); }
+.row-actions__menu button.danger { color: var(--bad); border-top: 1px solid var(--line); border-radius: 0 0 var(--r-1) var(--r-1); margin-top: 3px; }
+.row-actions__menu button:disabled { opacity: .5; cursor: not-allowed; }
+.compact-actions { display: inline-flex; gap: 4px; align-items: center; justify-content: flex-end; }
+.compact-actions button, button.compact { min-height: 30px; padding: 4px 8px; font-size: 12px; }
 .icon-btn { width: 26px; height: 26px; min-height: 26px; padding: 0; display: inline-grid; place-items: center; border-radius: var(--r-1); border: 1px solid var(--line); background: var(--surface-2); color: var(--muted); }
 .icon-btn:disabled { opacity: .35; cursor: default; }
 .icon-btn:not(:disabled):hover { color: var(--text); }
