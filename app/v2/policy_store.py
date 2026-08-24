@@ -1335,10 +1335,29 @@ def ensure_blocklist_subscription_schema(conn: sqlite3.Connection) -> None:
         "failure_count": "INTEGER NOT NULL DEFAULT 0",
         "next_retry_at": "TEXT",
         "update_in_progress": "INTEGER NOT NULL DEFAULT 0",
+        # First-failure-in-current-streak timestamp (pre-DoH reliability
+        # pass, blocklist failure-isolation work): failure_count above
+        # already IS the consecutive-failure count (reset to 0 on every
+        # success -- see record_blocklist_refresh_result), this just adds
+        # *when the current streak started*, since the count alone can't
+        # answer "how long has this been broken".
+        "first_failure_at": "TEXT",
     }
     for column, ddl in additions.items():
         if column not in existing:
             conn.execute(f"ALTER TABLE blocklist_subscriptions ADD COLUMN {column} {ddl}")
+
+
+# A subscription that has failed this many consecutive real update
+# attempts in a row surfaces the page-level "needs attention" card (see
+# _decorate_blocklist_subscription's own attention_required field below,
+# and app.js's blocklistAttentionCard() on the UI side) -- one or two
+# failures show only on that subscription's own row (see
+# blocklist_subscriptions.py's module docstring on why a transient
+# failure never touches previously compiled content), matching the
+# owner-specified UX: don't cry wolf on the first blip, but don't stay
+# quiet forever either.
+BLOCKLIST_ATTENTION_THRESHOLD = 3
 
 
 def create_blocklist_subscription(conn: sqlite3.Connection, subscription_id: str, name: str, url: str, category: str = "") -> None:
@@ -1352,44 +1371,106 @@ def create_blocklist_subscription(conn: sqlite3.Connection, subscription_id: str
         raise PolicyStoreError(f"duplicate subscription_id: {exc}") from exc
 
 
+_BLOCKLIST_SUBSCRIPTION_COLUMNS = [
+    "id", "subscription_id", "name", "url", "category", "enabled", "created_at",
+    "last_refresh_at", "last_status", "last_error", "rule_count",
+    "last_checked_at", "last_success_at", "next_update_at", "update_duration_ms",
+    "update_interval_seconds", "etag", "last_modified", "failure_count",
+    "next_retry_at", "update_in_progress", "first_failure_at",
+]
+
+
+def _decorate_blocklist_subscription(row: dict) -> dict:
+    row["enabled"] = bool(row["enabled"])
+    row["update_in_progress"] = bool(row["update_in_progress"])
+    # "consecutive_failure_count" is exactly failure_count, kept under its
+    # own explicit name here too since that's the property this decision
+    # (row-level status only vs. the page-level attention card) actually
+    # keys off of -- failure_count alone reads ambiguously next to
+    # rule_count/duration_ms in a raw column dump.
+    row["consecutive_failure_count"] = int(row["failure_count"] or 0)
+    row["attention_required"] = row["enabled"] and row["consecutive_failure_count"] >= BLOCKLIST_ATTENTION_THRESHOLD
+    return row
+
+
 def list_blocklist_subscriptions(conn: sqlite3.Connection) -> list[dict]:
     ensure_blocklist_subscription_schema(conn)
-    cols = [
-        "id", "subscription_id", "name", "url", "category", "enabled", "created_at",
-        "last_refresh_at", "last_status", "last_error", "rule_count",
-        "last_checked_at", "last_success_at", "next_update_at", "update_duration_ms",
-        "update_interval_seconds", "etag", "last_modified", "failure_count",
-        "next_retry_at", "update_in_progress",
-    ]
+    cols = _BLOCKLIST_SUBSCRIPTION_COLUMNS
     rows = conn.execute(f"SELECT {', '.join(cols)} FROM blocklist_subscriptions ORDER BY subscription_id").fetchall()
-    out = [dict(zip(cols, row)) for row in rows]
-    for row in out:
-        row["enabled"] = bool(row["enabled"])
-        row["update_in_progress"] = bool(row["update_in_progress"])
-    return out
+    return [_decorate_blocklist_subscription(dict(zip(cols, row))) for row in rows]
 
 
 def get_blocklist_subscription(conn: sqlite3.Connection, subscription_id: str) -> dict | None:
     ensure_blocklist_subscription_schema(conn)
-    cols = [
-        "id", "subscription_id", "name", "url", "category", "enabled", "created_at",
-        "last_refresh_at", "last_status", "last_error", "rule_count",
-        "last_checked_at", "last_success_at", "next_update_at", "update_duration_ms",
-        "update_interval_seconds", "etag", "last_modified", "failure_count",
-        "next_retry_at", "update_in_progress",
-    ]
+    cols = _BLOCKLIST_SUBSCRIPTION_COLUMNS
     row = conn.execute(f"SELECT {', '.join(cols)} FROM blocklist_subscriptions WHERE subscription_id = ?", (subscription_id,)).fetchone()
     if row is None:
         return None
-    result = dict(zip(cols, row))
-    result["enabled"] = bool(result["enabled"])
-    result["update_in_progress"] = bool(result["update_in_progress"])
+    result = _decorate_blocklist_subscription(dict(zip(cols, row)))
     return result
 
 
 def set_blocklist_subscription_enabled(conn: sqlite3.Connection, subscription_id: str, enabled: bool) -> None:
     ensure_blocklist_subscription_schema(conn)
     conn.execute("UPDATE blocklist_subscriptions SET enabled = ? WHERE subscription_id = ?", (int(enabled), subscription_id))
+
+
+def update_blocklist_subscription_fields(
+    conn: sqlite3.Connection, subscription_id: str, *, name: str | None = None,
+    url: str | None = None, category: str | None = None,
+) -> bool:
+    """Edits name/url/category in place (Full Edit Blocklist workflow,
+    pre-DoH reliability pass). Returns True iff the URL materially
+    changed -- the caller (webapp.py's edit route) uses that to decide
+    whether to reset the consecutive-failure streak and mark the
+    subscription pending re-validation; changing only the name or
+    category must never look like a recovery (owner-specified: "Changing
+    only the display name or interval must not falsely count as
+    recovery" -- interval itself already goes through the separate,
+    untouched set_blocklist_update_interval, this covers the other
+    editable identity fields).
+
+    A None argument leaves that field unchanged (PATCH semantics, not a
+    full-record replace) -- an empty string IS a real value (e.g.
+    clearing category), so "don't touch this field" is spelled as
+    omitting it entirely, never as "".
+    """
+    ensure_blocklist_subscription_schema(conn)
+    existing = get_blocklist_subscription(conn, subscription_id)
+    if existing is None:
+        raise PolicyStoreError(f"unknown subscription: {subscription_id!r}")
+    fields: dict[str, str] = {}
+    if name is not None:
+        fields["name"] = name
+    if category is not None:
+        fields["category"] = category
+    url_changed = url is not None and url != existing["url"]
+    if url is not None:
+        fields["url"] = url
+    if url_changed:
+        # Fresh start for the failure streak on the NEW source -- the old
+        # URL's failures say nothing about whether this one is any good.
+        # Previously-compiled content (from the old URL) is deliberately
+        # left completely untouched here: it stays the active, previous-
+        # good filtering content until a real refresh against the new URL
+        # succeeds (blocklist_subscriptions.apply_prepared_refresh's own
+        # "only touches the compiled service on ok+domains" contract).
+        # Setting next_update_at to now marks it due/pending on the very
+        # next refresh pass without forcing a synchronous fetch here.
+        fields.update({
+            "failure_count": 0,
+            "first_failure_at": None,
+            "next_retry_at": None,
+            "next_update_at": _now(),
+        })
+    if not fields:
+        return False
+    assignments = ", ".join(f"{col} = :{col}" for col in fields)
+    conn.execute(
+        f"UPDATE blocklist_subscriptions SET {assignments} WHERE subscription_id = :subscription_id",
+        {**fields, "subscription_id": subscription_id},
+    )
+    return url_changed
 
 
 def delete_blocklist_subscription(conn: sqlite3.Connection, subscription_id: str) -> None:
@@ -1406,8 +1487,14 @@ def record_blocklist_refresh_result(
     ensure_blocklist_subscription_schema(conn)
     checked = checked_at or _now()
     existing = get_blocklist_subscription(conn, subscription_id) or {}
-    failure_count = 0 if status == "succeeded" else int(existing.get("failure_count") or 0) + 1
+    prior_failure_count = int(existing.get("failure_count") or 0)
+    failure_count = 0 if status == "succeeded" else prior_failure_count + 1
     success_at = checked if status == "succeeded" else existing.get("last_success_at")
+    # The streak's own start time: cleared on success, stamped only on
+    # the FIRST failure of a new streak (prior_failure_count == 0) so a
+    # second/third consecutive failure doesn't keep pushing it forward --
+    # see this module's own docstring on the attention-card threshold.
+    first_failure_at = None if status == "succeeded" else (checked if prior_failure_count == 0 else existing.get("first_failure_at"))
     count = int(rule_count) if rule_count is not None else int(existing.get("rule_count") or 0)
     values = {
         "last_refresh_at": checked,
@@ -1422,6 +1509,7 @@ def record_blocklist_refresh_result(
         "etag": etag if etag is not None else existing.get("etag", ""),
         "last_modified": last_modified if last_modified is not None else existing.get("last_modified", ""),
         "failure_count": failure_count,
+        "first_failure_at": first_failure_at,
         "update_in_progress": 0,
     }
     conn.execute(
@@ -1432,7 +1520,8 @@ def record_blocklist_refresh_result(
             last_error=:last_error, rule_count=:rule_count,
             update_duration_ms=:update_duration_ms, next_update_at=:next_update_at,
             next_retry_at=:next_retry_at, etag=:etag, last_modified=:last_modified,
-            failure_count=:failure_count, update_in_progress=:update_in_progress
+            failure_count=:failure_count, first_failure_at=:first_failure_at,
+            update_in_progress=:update_in_progress
         WHERE subscription_id=:subscription_id
         """,
         {**values, "subscription_id": subscription_id},

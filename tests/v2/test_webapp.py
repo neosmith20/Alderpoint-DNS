@@ -5,9 +5,13 @@ logic, auth, CSRF, and session mechanics thoroughly and fast)."""
 
 import importlib
 import json
+import multiprocessing
 import os
 import shutil
+import sqlite3
 import sys
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -583,6 +587,280 @@ class TestScheduleWorkerPromotionHealth:
         # successful promotion doesn't add its own degradation on top.
         assert worker["status"] == "ok"
         assert worker["promotion_succeeded"] is True
+
+
+class TestExtendedSchemaWarmupRecovery:
+    """Real defect found live on the owner preview (pre-DoH reliability
+    pass, part 2): a transient SQLite lock during a redeploy's restart
+    storm hit the old one-shot _warm_extended_schemas() and permanently
+    disabled replication_discovery/client_discovery for that process's
+    whole lifetime -- only a manual `systemctl restart` recovered it.
+    _ensure_extended_schemas() itself is now retried by a single bounded-
+    backoff background worker instead of tried once."""
+
+    def test_transient_lock_is_retrying_not_degraded(self, app_client):
+        webapp, client = app_client
+
+        def _boom():
+            raise sqlite3.OperationalError("database is locked")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(webapp.observed_clients, "ensure_schema", lambda *_a, **_k: _boom())
+            with pytest.raises(sqlite3.OperationalError):
+                webapp._ensure_extended_schemas()
+        assert webapp._extended_schemas_status == "retrying"
+        assert webapp._extended_schemas_ready is False
+        assert "locked" in webapp._extended_schemas_error
+
+    def test_non_retryable_error_is_degraded_not_retrying(self, app_client):
+        webapp, client = app_client
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(webapp.observed_clients, "ensure_schema", lambda *_a, **_k: (_ for _ in ()).throw(ValueError("schema corrupt")))
+            with pytest.raises(ValueError):
+                webapp._ensure_extended_schemas()
+        assert webapp._extended_schemas_status == "degraded"
+        assert webapp._extended_schemas_ready is False
+
+    def test_success_after_failure_clears_current_error_and_records_historical(self, app_client):
+        webapp, client = app_client
+        calls = {"n": 0}
+        real_ensure = webapp.observed_clients.ensure_schema
+
+        def _flaky(*a, **k):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return real_ensure(*a, **k)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(webapp.observed_clients, "ensure_schema", _flaky)
+            with pytest.raises(sqlite3.OperationalError):
+                webapp._ensure_extended_schemas()
+            assert webapp._extended_schemas_status == "retrying"
+            webapp._ensure_extended_schemas()  # second attempt succeeds
+        assert webapp._extended_schemas_ready is True
+        assert webapp._extended_schemas_status == "ok"
+        assert webapp._extended_schemas_error == ""
+        assert webapp._extended_schemas_last_success_at is not None
+        assert "locked" in webapp._extended_schemas_historical_error
+        assert webapp._extended_schemas_historical_error_at is not None
+
+    def test_warmup_worker_retries_with_bounded_backoff_and_recovers(self, app_client):
+        webapp, client = app_client
+        calls = {"n": 0}
+        real_ensure = webapp.observed_clients.ensure_schema
+
+        def _flaky(*a, **k):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise sqlite3.OperationalError("database is locked")
+            return real_ensure(*a, **k)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(webapp.observed_clients, "ensure_schema", _flaky)
+            mp.setattr(webapp, "_SCHEMA_WARMUP_BACKOFF_BASE_SECONDS", 0.01)
+            mp.setattr(webapp, "_SCHEMA_WARMUP_BACKOFF_MAX_SECONDS", 0.05)
+            t = threading.Thread(target=webapp._schema_warmup_worker, daemon=True)
+            t.start()
+            t.join(timeout=5.0)
+        assert not t.is_alive(), "warmup worker did not converge within the test timeout"
+        assert webapp._extended_schemas_ready is True
+        assert webapp._extended_schemas_status == "ok"
+        assert calls["n"] == 3
+
+    def test_start_schema_warmup_is_idempotent_one_worker_per_process(self, app_client):
+        webapp, client = app_client
+        starts = {"n": 0}
+        real_thread = threading.Thread
+
+        def _counting_thread(*a, **k):
+            starts["n"] += 1
+            k["target"] = lambda: None  # don't actually run the real loop
+            return real_thread(*a, **k)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(webapp.threading, "Thread", _counting_thread)
+            webapp._start_schema_warmup()
+            webapp._start_schema_warmup()
+            webapp._start_schema_warmup()
+        assert starts["n"] == 1
+
+    def test_shutdown_stops_warmup_worker_promptly(self, app_client):
+        webapp, client = app_client
+
+        def _always_locked(*a, **k):
+            raise sqlite3.OperationalError("database is locked")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(webapp.observed_clients, "ensure_schema", _always_locked)
+            mp.setattr(webapp, "_SCHEMA_WARMUP_BACKOFF_BASE_SECONDS", 0.05)
+            mp.setattr(webapp, "_SCHEMA_WARMUP_BACKOFF_MAX_SECONDS", 0.05)
+            t = threading.Thread(target=webapp._schema_warmup_worker, daemon=True)
+            t.start()
+            time.sleep(0.15)  # let it enter its backoff wait at least once
+            webapp._extended_schemas_stop.set()
+            t.join(timeout=2.0)
+        assert not t.is_alive(), "warmup worker did not stop promptly after shutdown was requested"
+
+    def test_health_reports_retrying_without_calling_ensure_schemas(self, app_client):
+        webapp, client = app_client
+        with pytest.MonkeyPatch.context() as mp:
+            def _fail_if_called(*a, **k):
+                raise AssertionError("health must not call _ensure_extended_schemas() itself")
+
+            mp.setattr(webapp, "_ensure_extended_schemas", _fail_if_called)
+            webapp._extended_schemas_status = "retrying"
+            webapp._extended_schemas_error = "database is locked"
+            webapp._extended_schemas_attempt = 2
+            webapp._extended_schemas_next_retry_at = time.time() + 5
+            r = client.get("/api/health")
+        assert r.status_code == 200
+        rd = r.json()["components"]["replication_discovery"]
+        assert rd["status"] == "retrying"
+        assert rd["attempt"] == 2
+        assert rd["next_retry_at"] is not None
+        assert r.json()["status"] == "degraded"
+
+    @staticmethod
+    def _hold_write_lock(path: str, hold_seconds: float, ready) -> None:
+        # Same real, deliberate-real-OS-process lock-holding pattern as
+        # tests/v2/test_control_db_concurrency.py's own TestRealLockPressure
+        # -- a genuine SQLite write lock held past control_db.py's own
+        # 10s busy_timeout, not a mock, so the background warmup worker's
+        # FIRST attempt really does fail with a real sqlite3.OperationalError.
+        conn = sqlite3.connect(path, timeout=30.0, isolation_level=None)
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA busy_timeout = 30000")
+        conn.execute("BEGIN IMMEDIATE")
+        ready.set()
+        time.sleep(hold_seconds)
+        conn.execute("COMMIT")
+        conn.close()
+
+    def test_real_held_lock_at_startup_self_recovers_without_manual_restart(self, app_client):
+        """Literal schema-recovery acceptance proof (pre-DoH reliability
+        pass, part 2, items 1-7): hold a REAL SQLite lock across the
+        first warmup attempt (long enough to exceed the real
+        busy_timeout, so that attempt genuinely fails), confirm the
+        worker reports "retrying" while the lock is held, release the
+        lock, and confirm it recovers on its own -- replication_discovery/
+        client_discovery become available and /api/health returns ok --
+        with no restart of anything, matching exactly what happened live
+        on the owner preview during the redeploy restart storm this
+        whole feature exists to fix."""
+        webapp, client = app_client
+        ready = multiprocessing.Event()
+        # 15s: comfortably longer than control_db.py's real 10s
+        # busy_timeout, so the warmup worker's first real attempt
+        # genuinely blocks the full busy_timeout and then fails with a
+        # real "database is locked" -- not just favorable timing -- with
+        # room afterward to observe "retrying" before the lock releases.
+        hold_seconds = 15.0
+        holder = multiprocessing.Process(target=self._hold_write_lock, args=(str(webapp.CONTROL_DB), hold_seconds, ready))
+        holder.start()
+        try:
+            assert ready.wait(timeout=10), "lock-holder process never signalled ready"
+            lock_acquired_at = time.time()
+            webapp._SCHEMA_WARMUP_BACKOFF_BASE_SECONDS = 0.2
+            webapp._SCHEMA_WARMUP_BACKOFF_MAX_SECONDS = 1.0
+            t = threading.Thread(target=webapp._schema_warmup_worker, daemon=True)
+            t.start()
+            # While the real lock is still held, health must show a
+            # truthful "retrying" state -- not hang, not silently ok. The
+            # first attempt only fails once busy_timeout (10s) is
+            # exhausted, so this window has to reach past that.
+            deadline = lock_acquired_at + hold_seconds - 1.0
+            saw_retrying = False
+            while time.time() < deadline:
+                r = client.get("/api/health")
+                if r.json()["components"]["replication_discovery"].get("status") == "retrying":
+                    saw_retrying = True
+                    break
+                time.sleep(0.2)
+            assert saw_retrying, "warmup never reported retrying while the real lock was held"
+            assert webapp._extended_schemas_ready is False
+
+            t.join(timeout=15)
+            assert not t.is_alive(), "warmup worker did not converge after the real lock was released"
+        finally:
+            holder.join(timeout=25)
+
+        assert webapp._extended_schemas_ready is True
+        r = client.get("/api/health")
+        body = r.json()
+        # The extended-schema components are real and populated again --
+        # replication_discovery (the "not ready yet" placeholder) is gone
+        # entirely, replaced by the real client_discovery/replication
+        # components health() only ever populates once ready. Overall
+        # body["status"] is deliberately NOT asserted "ok" here: this
+        # bare fixture's background-worker heartbeats are never warmed
+        # (see TestScheduleWorkerPromotionHealth's own comment), so it
+        # can independently stay "degraded" for reasons this recovery
+        # has nothing to do with -- what this proves is that the schema-
+        # warmup condition itself is fully resolved, not that every
+        # other component is also healthy.
+        assert "replication_discovery" not in body["components"]
+        assert "client_discovery" in body["components"]
+        assert "replication" in body["components"]
+
+
+class TestBlocklistRefreshHealth:
+    """Owner-clarified health semantics (pre-DoH reliability pass, part
+    3): a per-subscription failure is a real "warning" signal, never
+    treated as core appliance degradation the way a real infrastructure
+    failure (BIND down, a failed schedule promotion) is."""
+
+    def test_no_subscriptions_reports_ok_and_does_not_degrade(self, app_client):
+        webapp, client = app_client
+        r = client.get("/api/health")
+        bl = r.json()["components"]["blocklist_refresh"]
+        assert bl["status"] == "ok"
+        assert bl["attention_required_count"] == 0
+
+    def test_subscription_needing_attention_reports_warning_not_degraded(self, app_client):
+        webapp, client = app_client
+        baseline_status = client.get("/api/health").json()["status"]
+        with webapp._db() as conn:
+            webapp.store.create_blocklist_subscription(conn, "hc-flaky", "Flaky", "http://example.invalid/list.txt")
+            for _ in range(3):
+                webapp.store.record_blocklist_refresh_result(conn, "hc-flaky", "failed", "no valid domains found")
+        r = client.get("/api/health")
+        body = r.json()
+        bl = body["components"]["blocklist_refresh"]
+        assert bl["status"] == "warning"
+        assert bl["attention_required_count"] == 1
+        # A per-source warning must never by itself flip overall health --
+        # whatever the bare fixture's baseline status was (this fixture
+        # has unwarmed background-worker heartbeats regardless, so it may
+        # already be "degraded" for reasons unrelated to blocklists; see
+        # TestScheduleWorkerPromotionHealth's own comment), adding one
+        # attention-required subscription must not change it.
+        assert body["status"] == baseline_status
+
+    def test_failed_orchestration_run_degrades_overall_status(self, app_client):
+        webapp, client = app_client
+        webapp.BLOCKLIST_REFRESH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        webapp.BLOCKLIST_REFRESH_STATE_FILE.write_text(json.dumps({
+            "finished_at": "2026-01-01T00:00:00+00:00", "orchestration_ok": False,
+            "total": 0, "succeeded": 0, "failed": 0, "failed_subscriptions": [], "error": "compile failed",
+        }))
+        r = client.get("/api/health")
+        body = r.json()
+        assert body["components"]["blocklist_refresh"]["status"] == "degraded"
+        assert body["status"] == "degraded"
+
+    def test_successful_orchestration_run_with_no_attention_stays_ok(self, app_client):
+        webapp, client = app_client
+        webapp.BLOCKLIST_REFRESH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        webapp.BLOCKLIST_REFRESH_STATE_FILE.write_text(json.dumps({
+            "finished_at": "2026-01-01T00:00:00+00:00", "orchestration_ok": True,
+            "total": 2, "succeeded": 2, "failed": 0, "failed_subscriptions": [], "error": None,
+        }))
+        r = client.get("/api/health")
+        bl = r.json()["components"]["blocklist_refresh"]
+        assert bl["status"] == "ok"
+        assert bl["last_run"]["succeeded"] == 2
 
 
 class TestSecurityHeaders:

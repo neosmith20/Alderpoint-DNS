@@ -22,6 +22,35 @@ from app.v2 import control_db, policy_store as store
 DNSDIST_INSTALLED = shutil.which("dnsdist") is not None
 
 
+def _pop_webapp_module() -> None:
+    """Forces the NEXT ``from app.v2 import webapp`` (as opposed to
+    ``importlib.import_module("app.v2.webapp")``, which this codebase's
+    other webapp test fixtures already use) to genuinely reimport rather
+    than silently reusing a stale, previous-tmp_path-bound module.
+
+    Real defect found live in this test file itself: popping only
+    ``sys.modules["app.v2.webapp"]`` is not enough -- CPython's ``from
+    package import submodule`` resolves via ``getattr(package,
+    "submodule")`` first, and importing ``app.v2.webapp`` anywhere also
+    sets that attribute on the already-imported ``app.v2`` package
+    object. A prior test's already-executed ``from app.v2 import
+    webapp`` (scripts/v2/alderpointdns_v2_blocklist_refresh.py's own
+    import style) left that attribute pointing at ITS webapp module
+    instance -- bound to ITS tmp_path's CONTROL_DB -- and popping
+    sys.modules alone did not clear it, so the next test's freshly
+    ``monkeypatch.setenv()``-ed env vars were silently never read: the
+    script ran against the previous test's now-torn-down database and
+    (correctly, but confusingly) found nothing due, reporting 0
+    subscriptions instead of failing loudly.
+    """
+    import sys
+
+    sys.modules.pop("app.v2.webapp", None)
+    app_v2 = sys.modules.get("app.v2")
+    if app_v2 is not None and hasattr(app_v2, "webapp"):
+        delattr(app_v2, "webapp")
+
+
 @pytest.fixture()
 def conn(tmp_path):
     path = tmp_path / "control.db"
@@ -384,6 +413,327 @@ class TestBlocklistApiRoutes:
         client = TestClient(webapp.app)
         assert client.get("/api/blocklists").status_code == 401
         assert client.post("/api/blocklists", json={"subscription_id": "x", "name": "x", "url": "http://x"}).status_code == 401
+
+
+class TestConsecutiveFailureTracking:
+    """Pre-DoH reliability pass, part 3 (owner-clarified semantics): the
+    row-level status shows every failure from the first one, but the
+    page-level "needs attention" signal only trips after 3 consecutive
+    genuine failures, and a single success fully clears it."""
+
+    def _fail_server(self):
+        server = _serve("", status=404)
+        return server
+
+    def test_three_consecutive_failures_trip_attention_then_success_clears_it(self, conn):
+        server = self._fail_server()
+        try:
+            port = server.server_address[1]
+            store.create_blocklist_subscription(conn, "flaky", "Flaky", f"http://127.0.0.1:{port}/missing.txt")
+            for n in (1, 2, 3):
+                result = bl.refresh_subscription(conn, "flaky")
+                assert not result.ok
+                sub = store.get_blocklist_subscription(conn, "flaky")
+                assert sub["consecutive_failure_count"] == n
+                assert sub["first_failure_at"], "first_failure_at must be stamped from the very first failure"
+                assert sub["attention_required"] is (n >= 3)
+            first_failure_at = store.get_blocklist_subscription(conn, "flaky")["first_failure_at"]
+            # A 4th failure must not re-stamp first_failure_at -- it marks
+            # when the CURRENT streak started, not the most recent failure.
+            bl.refresh_subscription(conn, "flaky")
+            assert store.get_blocklist_subscription(conn, "flaky")["first_failure_at"] == first_failure_at
+            assert store.get_blocklist_subscription(conn, "flaky")["consecutive_failure_count"] == 4
+        finally:
+            server.shutdown()
+
+        good = _serve("recovered.example\n")
+        try:
+            store.update_blocklist_subscription_fields(conn, "flaky", url=f"http://127.0.0.1:{good.server_address[1]}/list.txt")
+            result = bl.refresh_subscription(conn, "flaky")
+            assert result.ok
+            sub = store.get_blocklist_subscription(conn, "flaky")
+            assert sub["consecutive_failure_count"] == 0
+            assert sub["first_failure_at"] is None
+            assert sub["attention_required"] is False
+            assert sub["last_error"] == ""
+        finally:
+            good.shutdown()
+
+    def test_one_or_two_failures_do_not_trip_attention(self, conn):
+        server = self._fail_server()
+        try:
+            port = server.server_address[1]
+            store.create_blocklist_subscription(conn, "flaky2", "Flaky2", f"http://127.0.0.1:{port}/missing.txt")
+            bl.refresh_subscription(conn, "flaky2")
+            bl.refresh_subscription(conn, "flaky2")
+            sub = store.get_blocklist_subscription(conn, "flaky2")
+            assert sub["consecutive_failure_count"] == 2
+            assert sub["attention_required"] is False
+        finally:
+            server.shutdown()
+
+    def test_disabled_subscription_never_requires_attention_even_after_failures(self, conn):
+        server = self._fail_server()
+        try:
+            port = server.server_address[1]
+            store.create_blocklist_subscription(conn, "flaky3", "Flaky3", f"http://127.0.0.1:{port}/missing.txt")
+            for _ in range(3):
+                bl.refresh_subscription(conn, "flaky3")
+            assert store.get_blocklist_subscription(conn, "flaky3")["attention_required"] is True
+            store.set_blocklist_subscription_enabled(conn, "flaky3", False)
+            assert store.get_blocklist_subscription(conn, "flaky3")["attention_required"] is False
+        finally:
+            server.shutdown()
+
+    def test_a_check_that_never_attempted_never_increments(self, conn):
+        # never_refreshed is the schema default -- record_blocklist_refresh_result
+        # is simply never called for a not-due/manual/disabled subscription
+        # (the orchestrator's own due-check skips it entirely), so nothing
+        # here should ever move failure_count off its default of 0.
+        store.create_blocklist_subscription(conn, "never-touched", "Never Touched", "http://example.invalid/list.txt")
+        sub = store.get_blocklist_subscription(conn, "never-touched")
+        assert sub["consecutive_failure_count"] == 0
+        assert sub["last_status"] == "never_refreshed"
+
+
+class TestRetryTimingUsesEffectiveInterval:
+    """Owner-clarified product behavior: a failed subscription retries at
+    its own next effective interval, not a separate faster exponential
+    schedule -- see blocklist_subscriptions._next_retry_time's own
+    docstring."""
+
+    def test_failed_refresh_schedules_retry_no_sooner_than_the_configured_interval(self, conn):
+        server = self._fail = _serve("", status=404)
+        try:
+            port = server.server_address[1]
+            store.create_blocklist_subscription(conn, "slow-retry", "Slow Retry", f"http://127.0.0.1:{port}/missing.txt")
+            store.set_blocklist_update_interval(conn, "slow-retry", 604800)  # 1 week
+            sub = store.get_blocklist_subscription(conn, "slow-retry")
+            prepared = bl.prepare_refresh(sub, default_interval_seconds=86400)
+            assert not prepared.ok
+            from datetime import datetime, timezone
+
+            checked = datetime.fromisoformat(prepared.checked_at)
+            retry_at = datetime.fromisoformat(prepared.next_retry_at)
+            delta = (retry_at - checked).total_seconds()
+            # Must be roughly a week out (interval + up to 10% jitter),
+            # never the old 60s-start exponential-backoff schedule.
+            assert delta >= 604800, f"retry scheduled only {delta:.0f}s out, expected >= 604800s (the configured interval)"
+        finally:
+            server.shutdown()
+
+    def test_retry_after_header_pushes_retry_further_out_never_sooner(self, conn):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(503)
+                self.send_header("Retry-After", "7200")
+                self.end_headers()
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            port = server.server_address[1]
+            store.create_blocklist_subscription(conn, "retry-after", "Retry After", f"http://127.0.0.1:{port}/list.txt")
+            store.set_blocklist_update_interval(conn, "retry-after", 3600)  # 1 hour -- shorter than the 2h Retry-After
+            sub = store.get_blocklist_subscription(conn, "retry-after")
+            prepared = bl.prepare_refresh(sub, default_interval_seconds=86400)
+            assert not prepared.ok
+            from datetime import datetime
+
+            checked = datetime.fromisoformat(prepared.checked_at)
+            retry_at = datetime.fromisoformat(prepared.next_retry_at)
+            delta = (retry_at - checked).total_seconds()
+            assert delta >= 7200, f"Retry-After: 7200 must be honored as a floor, got only {delta:.0f}s"
+        finally:
+            server.shutdown()
+
+
+class TestEditBlocklistSubscription:
+    def test_editing_only_name_does_not_reset_failure_streak(self, conn):
+        server = _serve("", status=404)
+        try:
+            port = server.server_address[1]
+            store.create_blocklist_subscription(conn, "edit-name", "Old Name", f"http://127.0.0.1:{port}/missing.txt")
+            for _ in range(3):
+                bl.refresh_subscription(conn, "edit-name")
+            before = store.get_blocklist_subscription(conn, "edit-name")
+            assert before["attention_required"] is True
+
+            url_changed = store.update_blocklist_subscription_fields(conn, "edit-name", name="New Name")
+            assert url_changed is False
+            after = store.get_blocklist_subscription(conn, "edit-name")
+            assert after["name"] == "New Name"
+            assert after["consecutive_failure_count"] == before["consecutive_failure_count"]
+            assert after["attention_required"] is True
+        finally:
+            server.shutdown()
+
+    def test_editing_url_resets_failure_streak_and_preserves_compiled_content(self, conn):
+        good = _serve("still-active.example\n")
+        try:
+            port = good.server_address[1]
+            store.create_blocklist_subscription(conn, "edit-url", "Edit URL", f"http://127.0.0.1:{port}/list.txt")
+            r = bl.refresh_subscription(conn, "edit-url")
+            assert r.ok
+            assert store.is_domain_service_blocked(conn, bl.SUBSCRIPTION_RULESET_ID, "still-active.example") is not None
+        finally:
+            good.shutdown()
+
+        bad = _serve("", status=404)
+        try:
+            port = bad.server_address[1]
+            for _ in range(3):
+                bl.refresh_subscription(conn, "edit-url")
+            assert store.get_blocklist_subscription(conn, "edit-url")["attention_required"] is True
+
+            url_changed = store.update_blocklist_subscription_fields(conn, "edit-url", url=f"http://127.0.0.1:{port}/still-broken.txt")
+            assert url_changed is True
+            after = store.get_blocklist_subscription(conn, "edit-url")
+            assert after["consecutive_failure_count"] == 0
+            assert after["first_failure_at"] is None
+            assert after["next_update_at"], "edited subscription must be marked pending/due"
+            # The OLD content (from the original, working URL) must still
+            # be the active compiled filtering -- editing configuration
+            # alone must never clear currently active filtering.
+            assert store.is_domain_service_blocked(conn, bl.SUBSCRIPTION_RULESET_ID, "still-active.example") is not None
+        finally:
+            bad.shutdown()
+
+    def test_edit_endpoint_over_http_full_lifecycle(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        webapp = TestBlocklistApiRoutes()._fresh_webapp(tmp_path, monkeypatch)
+        client = TestClient(webapp.app)
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12"})
+        csrf = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"}).json()["csrf"]
+        headers = {"X-CSRF-Token": csrf}
+
+        bad = _serve("", status=404)
+        try:
+            port = bad.server_address[1]
+            created = client.post("/api/blocklists", json={
+                "subscription_id": "edit-http", "name": "Edit HTTP", "url": f"http://127.0.0.1:{port}/missing.txt",
+            }, headers=headers)
+            assert created.status_code == 200, created.text
+
+            # Name-only edit: no job queued, no failure-streak effect (none yet).
+            r = client.patch("/api/blocklists/edit-http", json={"name": "Renamed"}, headers=headers)
+            assert r.status_code == 200, r.text
+            assert r.json()["job_id"] is None
+            assert r.json()["subscription"]["name"] == "Renamed"
+
+            # Bad interval value -> structured, field-level error.
+            r = client.patch("/api/blocklists/edit-http", json={"update_interval_seconds": 12345}, headers=headers)
+            assert r.status_code == 400
+            assert r.json()["field"] == "update_interval_seconds"
+
+            # Unknown subscription -> 404, no field-level noise.
+            r = client.patch("/api/blocklists/does-not-exist", json={"name": "x"}, headers=headers)
+            assert r.status_code == 404
+        finally:
+            bad.shutdown()
+
+        good = _serve("recovered-http.example\n")
+        try:
+            port = good.server_address[1]
+            r = client.patch("/api/blocklists/edit-http", json={
+                "url": f"http://127.0.0.1:{port}/list.txt", "trigger_update": True,
+            }, headers=headers)
+            assert r.status_code == 200, r.text
+            assert r.json()["url_reset_failure_streak"] is True
+            job_id = r.json()["job_id"]
+            assert job_id
+            job = None
+            for _ in range(50):
+                job = client.get(f"/api/blocklists/jobs/{job_id}").json()
+                if job["status"] != "running":
+                    break
+                time.sleep(0.1)
+            assert job["status"] == "succeeded", job
+        finally:
+            good.shutdown()
+
+        listed = client.get("/api/blocklists").json()["subscriptions"][0]
+        assert listed["consecutive_failure_count"] == 0
+        assert listed["last_status"] == "succeeded"
+
+
+class TestOrchestratorExitCode:
+    """Real defect fixed here (owner preview, pre-DoH reliability pass):
+    scripts/v2/alderpointdns_v2_blocklist_refresh.py used to exit 1 (a
+    real systemd unit failure) whenever ANY one subscription failed, even
+    with every other due subscription succeeding and the orchestration
+    itself working correctly."""
+
+    def _import_script(self):
+        import importlib.util
+        import sys
+
+        sys.modules.pop("alderpointdns_v2_blocklist_refresh", None)
+        spec = importlib.util.spec_from_file_location(
+            "alderpointdns_v2_blocklist_refresh",
+            __import__("pathlib").Path(__file__).resolve().parents[2] / "scripts/v2/alderpointdns_v2_blocklist_refresh.py",
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_partial_failure_exits_zero_and_persists_run_summary(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ALDERPOINTDNS_V2_APP_ROOT", str(tmp_path / "opt"))
+        monkeypatch.setenv("ALDERPOINTDNS_V2_CONFIG_ROOT", str(tmp_path / "etc"))
+        monkeypatch.setenv("ALDERPOINTDNS_V2_STATE_ROOT", str(tmp_path / "state"))
+        (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+        dbpath = tmp_path / "state" / "control.db"
+        control_db.initialize(dbpath)
+        store.ensure_schema(dbpath)
+
+        good = _serve("good-orchestrator.example\n")
+        bad = _serve("", status=404)
+        try:
+            from datetime import datetime, timedelta, timezone
+
+            past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+            with control_db.connect(dbpath) as conn:
+                store.create_blocklist_subscription(conn, "orch-good", "Good", f"http://127.0.0.1:{good.server_address[1]}/list.txt")
+                store.create_blocklist_subscription(conn, "orch-bad", "Bad", f"http://127.0.0.1:{bad.server_address[1]}/missing.txt")
+                # Explicit, unambiguous "due now" rather than relying on
+                # next_update_at defaulting to unset -- deterministic
+                # regardless of how a freshly-created subscription's due
+                # state is interpreted.
+                store.set_blocklist_next_update(conn, "orch-good", past)
+                store.set_blocklist_next_update(conn, "orch-bad", past)
+
+            import sys
+
+            _pop_webapp_module()
+            mod = self._import_script()
+            exit_code = mod.main()
+            assert exit_code == 0, "an orchestration that ran to completion must exit 0 even with one subscription failing"
+
+            run_state = __import__("json").loads(mod.webapp.BLOCKLIST_REFRESH_STATE_FILE.read_text())
+            assert run_state["orchestration_ok"] is True
+            assert run_state["total"] == 2
+            assert run_state["succeeded"] == 1
+            assert run_state["failed"] == 1
+            assert run_state["failed_subscriptions"] == ["orch-bad"]
+
+            with control_db.connect(dbpath) as conn:
+                assert store.get_blocklist_subscription(conn, "orch-good")["last_status"] == "succeeded"
+                assert store.get_blocklist_subscription(conn, "orch-bad")["last_status"] == "failed"
+        finally:
+            good.shutdown()
+            bad.shutdown()
+
+    def test_no_control_db_is_a_clean_noop_not_a_failure(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ALDERPOINTDNS_V2_APP_ROOT", str(tmp_path / "opt"))
+        monkeypatch.setenv("ALDERPOINTDNS_V2_CONFIG_ROOT", str(tmp_path / "etc"))
+        monkeypatch.setenv("ALDERPOINTDNS_V2_STATE_ROOT", str(tmp_path / "state"))
+        _pop_webapp_module()
+        mod = self._import_script()
+        assert mod.main() == 0
 
 
 def test_blocklist_refresh_timer_is_wired_into_packaging():

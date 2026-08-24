@@ -14,10 +14,29 @@ configuration a full recompile is supposed to carry forward.
 Refreshes every enabled subscription in turn; one subscription's fetch
 failure does not stop the others (each is independently recorded via
 app/v2/blocklist_subscriptions.py's own safe-failure contract).
+
+Real defect fixed here (owner preview, pre-DoH reliability pass, part 3):
+this used to return exit code 1 whenever ANY single subscription failed,
+even when every other due subscription succeeded and the orchestration
+itself (fetch loop, compile, promote) worked correctly -- systemd then
+reported the whole hourly service as FAILED for one bad external feed,
+indistinguishable from a real infrastructure problem. Exit code now
+reflects the orchestration's own outcome, not any one subscription's:
+0 for "ran to completion" (whether every subscription succeeded or some
+failed on their own, each recorded independently and safely -- see
+blocklist_subscriptions.py's own module docstring on why a failure never
+touches previously compiled content), 1 only when the run itself could
+not complete (no control.db, or the shared compile/promote step failed).
+A per-run summary is also persisted to STATE_DIR/blocklist/last-refresh-
+run.json (same atomic-write pattern as app/v2/schedule_runtime.py's own
+state file) so /api/health can report a truthful partial/warning state
+without any of this ever flipping core appliance health to degraded.
 """
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 from datetime import datetime, timezone
 
@@ -30,9 +49,29 @@ from app.v2 import policy_store as store  # noqa: E402
 from app.v2 import webapp  # noqa: E402
 
 
+def _persist_run_state(payload: dict) -> None:
+    """Atomic write (tmp + os.replace), same pattern as
+    app/v2/schedule_runtime.py's own _persist -- this file is read-only,
+    best-effort diagnostic state for /api/health; a write failure here
+    must never turn into the orchestration's own exit code."""
+    try:
+        path = webapp.BLOCKLIST_REFRESH_STATE_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.parent / f".{path.name}.tmp"
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        print(f"warning: failed to persist run state: {exc}", file=sys.stderr)
+
+
 def main() -> int:
+    finished_at = datetime.now(timezone.utc).isoformat()
     if not webapp.CONTROL_DB.exists():
         print("control.db not found; nothing to refresh")
+        _persist_run_state({
+            "finished_at": finished_at, "orchestration_ok": True, "total": 0,
+            "succeeded": 0, "failed": 0, "failed_subscriptions": [], "error": None,
+        })
         return 0
     now = datetime.now(timezone.utc)
     with webapp._db() as conn:
@@ -57,7 +96,11 @@ def main() -> int:
         if due <= now:
             subs.append(sub)
     if not subs:
-        print("no enabled subscriptions")
+        print("no enabled subscriptions due")
+        _persist_run_state({
+            "finished_at": finished_at, "orchestration_ok": True, "total": 0,
+            "succeeded": 0, "failed": 0, "failed_subscriptions": [], "error": None,
+        })
         return 0
 
     prepared = {}
@@ -73,15 +116,33 @@ def main() -> int:
 
     try:
         webapp._mutate_and_promote(_mutate)
-    except Exception as exc:  # noqa: BLE001 -- reported, not swallowed
+    except Exception as exc:  # noqa: BLE001 -- a real orchestration/infrastructure failure
         print(f"refresh/compile/promote failed: {exc}", file=sys.stderr)
+        _persist_run_state({
+            "finished_at": finished_at, "orchestration_ok": False, "total": len(subs),
+            "succeeded": 0, "failed": 0, "failed_subscriptions": [], "error": str(exc),
+        })
         return 1
 
-    failed = False
+    failed_ids = []
     for subscription_id, result in results.items():
         print(f"{subscription_id}: {'ok' if result.ok else 'FAILED'} -- {result.message}")
-        failed = failed or not result.ok
-    return 1 if failed else 0
+        if not result.ok:
+            failed_ids.append(subscription_id)
+    succeeded = len(results) - len(failed_ids)
+    if failed_ids:
+        print(f"partial: {succeeded}/{len(results)} subscription(s) succeeded; failed: {', '.join(failed_ids)}")
+    _persist_run_state({
+        "finished_at": finished_at, "orchestration_ok": True, "total": len(results),
+        "succeeded": succeeded, "failed": len(failed_ids), "failed_subscriptions": failed_ids, "error": None,
+    })
+    # Orchestration itself ran to completion either way -- a per-source
+    # failure is real, valuable information (visible above, in the
+    # subscription's own row, and in the persisted run state health
+    # reads), but it is not an infrastructure failure and must not mark
+    # this systemd unit "failed" for what is, product-wise, a partial
+    # success.
+    return 0
 
 
 if __name__ == "__main__":

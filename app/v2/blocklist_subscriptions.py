@@ -43,7 +43,10 @@ MAX_DOMAINS_PER_SUBSCRIPTION = 200_000
 
 
 class BlocklistSubscriptionError(ValueError):
-    pass
+    #: Set when the failure carried a real HTTP Retry-After header (see
+    #: _retry_after_seconds below) -- _next_retry_time honors this as a
+    #: floor on the retry delay it would otherwise compute.
+    retry_after_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -140,6 +143,35 @@ def _is_transient_fetch_error(exc: Exception) -> bool:
     return False
 
 
+def _retry_after_seconds(exc: Exception) -> Optional[int]:
+    """Parses a real HTTP Retry-After header (either delta-seconds or an
+    HTTP-date form, both valid per RFC 9110 10.2.3) off an HTTPError, so a
+    server's own explicit backoff request is honored by _next_retry_time
+    instead of always falling back to this subscription's own configured
+    interval. Returns None for anything else -- an absent, malformed, or
+    already-past value is silently ignored, never treated as "retry now".
+    """
+    import email.utils
+    import urllib.error
+
+    if not isinstance(exc, urllib.error.HTTPError) or not exc.headers:
+        return None
+    value = (exc.headers.get("Retry-After") or "").strip()
+    if not value:
+        return None
+    if value.isdigit():
+        return max(0, int(value))
+    try:
+        dt = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return max(0, int((dt - datetime.now(timezone.utc)).total_seconds()))
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(microsecond=0)
 
@@ -165,10 +197,40 @@ def _next_success_time(sub: dict, checked: datetime, default_interval_seconds: i
     return _iso(checked + timedelta(seconds=seconds + jitter))
 
 
-def _next_retry_time(sub: dict, checked: datetime) -> str:
-    failures = int(sub.get("failure_count") or 0) + 1
-    delay = min(3600, 60 * (2 ** min(failures - 1, 6)))
-    return _iso(checked + timedelta(seconds=delay)) or checked.isoformat()
+def _next_retry_time(
+    sub: dict, checked: datetime, default_interval_seconds: int = 86400, *, retry_after_seconds: int | None = None,
+) -> str:
+    """Owner-clarified product behavior (pre-DoH reliability pass): a
+    failed subscription retries at its own next EFFECTIVE interval --
+    the same per-list override or global default a successful check
+    would have used (_next_success_time above) -- not a separate, more
+    aggressive exponential-backoff schedule. The schedule-worker/refresh-
+    timer wakes far more often (every 60s / hourly) than most real
+    subscription intervals, so a faster-than-configured retry schedule
+    would look like a retry storm against a source that is genuinely
+    down; this keeps a failing source checked exactly as often as it
+    would have been on success, never more.
+
+    ``retry_after_seconds``, when the failed fetch carried a real HTTP
+    Retry-After header, is honored as a floor only -- it can push the
+    retry further out (respecting what the remote server asked for),
+    never pull it sooner than the subscription's own configured cadence.
+    """
+    import random
+
+    seconds = _effective_interval_seconds(sub, default_interval_seconds)
+    if seconds <= 0:
+        # Manual Only (or a stray non-positive override): the automatic
+        # refresh path already skips this subscription entirely
+        # regardless of next_retry_at (see
+        # scripts/v2/alderpointdns_v2_blocklist_refresh.py's own due-
+        # check), so this value is display-only -- fall back to the
+        # global default rather than a nonsensical "retry in 0s".
+        seconds = max(1, int(default_interval_seconds))
+    if retry_after_seconds:
+        seconds = max(seconds, int(retry_after_seconds))
+    jitter = random.randint(0, min(900, max(0, seconds // 10)))
+    return _iso(checked + timedelta(seconds=seconds + jitter)) or checked.isoformat()
 
 
 def _fetch_bytes(url: str, *, etag: str = "", last_modified: str = "") -> tuple[bytes | None, str, str]:
@@ -234,7 +296,9 @@ def fetch_and_parse_with_metadata(url: str, *, etag: str = "", last_modified: st
             if attempt < max_attempts and _is_transient_fetch_error(exc):
                 time.sleep(min(1.0 * attempt, 3.0) + random.uniform(0, 0.5))
                 continue
-            raise BlocklistSubscriptionError(f"fetch failed: {exc}") from exc
+            wrapped = BlocklistSubscriptionError(f"fetch failed: {exc}")
+            wrapped.retry_after_seconds = _retry_after_seconds(exc)
+            raise wrapped from exc
     if last_exc is not None:  # pragma: no cover -- defensive, unreachable (loop always breaks or raises)
         raise BlocklistSubscriptionError(f"fetch failed: {last_exc}") from last_exc
     if body is None:
@@ -286,7 +350,10 @@ def prepare_refresh(sub: dict, *, default_interval_seconds: int = 86400) -> Prep
             subscription_id=sub["subscription_id"], ok=False, domains=[], warnings=[],
             message=str(exc), rule_count=int(sub.get("rule_count") or 0), duration_ms=duration,
             checked_at=checked, next_update_at=sub.get("next_update_at"),
-            next_retry_at=_next_retry_time(sub, checked_dt),
+            next_retry_at=_next_retry_time(
+                sub, checked_dt, default_interval_seconds,
+                retry_after_seconds=getattr(exc, "retry_after_seconds", None),
+            ),
             etag=sub.get("etag") or "", last_modified=sub.get("last_modified") or "",
         )
     duration = int((time.perf_counter() - started) * 1000)

@@ -29,6 +29,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import random
 import re
 import shutil
 import sqlite3
@@ -116,6 +117,7 @@ REPLICATION_DIR = STATE_DIR / "replication"
 REPLICATION_SERVER_CERT_PATH = REPLICATION_DIR / "server.crt"
 REPLICATION_CA_PATH = REPLICATION_DIR / "trust-ca.pem"
 SCHEDULE_STATE_FILE = STATE_DIR / "schedule" / "schedule-transition-state.json"
+BLOCKLIST_REFRESH_STATE_FILE = STATE_DIR / "blocklist" / "last-refresh-run.json"
 
 SESSION_SECRET_ID = "web-session-signing-key"
 BACKUP_KEY_SECRET_ID = "secret-backup-encryption-key"
@@ -176,6 +178,24 @@ _session_touch_next_due: dict[str, float] = {}
 _extended_schemas_ready = False
 _extended_schemas_error = ""
 _extended_schemas_lock = threading.Lock()
+# Bounded, self-recovering schema warmup (pre-DoH reliability pass -- see
+# _ensure_extended_schemas()'s own docstring for the real defect this
+# replaces: a transient startup-time SQLite lock used to disable
+# replication_discovery/client_discovery for this process's entire
+# lifetime, recoverable only by a manual service restart).
+_extended_schemas_status = "initializing"  # initializing | retrying | ok | degraded
+_extended_schemas_stage = ""
+_extended_schemas_attempt = 0
+_extended_schemas_last_attempt_at: float | None = None
+_extended_schemas_last_success_at: float | None = None
+_extended_schemas_historical_error: str | None = None
+_extended_schemas_historical_error_at: float | None = None
+_extended_schemas_next_retry_at: float | None = None
+_extended_schemas_start_lock = threading.Lock()
+_extended_schemas_warmup_started = False
+_extended_schemas_stop = threading.Event()
+_SCHEMA_WARMUP_BACKOFF_BASE_SECONDS = 0.5
+_SCHEMA_WARMUP_BACKOFF_MAX_SECONDS = 30.0
 _active_uploaded_archives: set[str] = set()
 _active_uploaded_archives_lock = threading.Lock()
 _blocklist_jobs: dict[str, dict[str, Any]] = {}
@@ -367,18 +387,38 @@ def _secrets() -> SecretStore:
 
 
 def _ensure_extended_schemas() -> None:
-    global _extended_schemas_error, _extended_schemas_ready
-    # Real defect found and fixed live during this workstream's
-    # failure-domain/chaos pass (docs/v2/control-db-silent-recreation-
-    # fix.md): every ensure_schema() below starts with
-    # control_db.initialize(path), which -- like control_db.connect()
-    # itself -- silently creates an empty control.db if the path
-    # doesn't exist. This function is called from nearly every request
-    # handler in this module, so guarding only _db() (webapp.py's other
-    # connect() call site) was NOT sufficient on its own -- this path
-    # would have silently recreated a missing control.db regardless.
-    # Same fail-closed contract as _db(): a real, previously-
-    # initialized appliance's control.db must never simply not exist.
+    """Real defect found and fixed live during this workstream's
+    failure-domain/chaos pass (docs/v2/control-db-silent-recreation-
+    fix.md): every ensure_schema() below starts with
+    control_db.initialize(path), which -- like control_db.connect()
+    itself -- silently creates an empty control.db if the path doesn't
+    exist. This function is called from nearly every request handler in
+    this module, so guarding only _db() (webapp.py's other connect()
+    call site) was NOT sufficient on its own -- this path would have
+    silently recreated a missing control.db regardless. Same fail-closed
+    contract as _db(): a real, previously-initialized appliance's
+    control.db must never simply not exist.
+
+    Second real defect found and fixed live (owner preview, pre-DoH
+    reliability pass): this used to be tried exactly once, in a
+    background thread, at process startup (the old
+    _warm_extended_schemas()) -- a transient SQLite lock during a real
+    redeploy's restart storm (every background worker plus this process
+    all starting at once, all touching control.db) permanently disabled
+    replication_discovery/client_discovery in /api/health for this
+    process's whole lifetime, recoverable only by a manual
+    `systemctl restart alderpointdns-v2-web`. This function itself is
+    unchanged in the "single on-demand attempt, real requests call it
+    directly" respect -- what changed is that _start_schema_warmup below
+    now calls it in a loop with bounded backoff instead of once, and
+    real requests racing that background retry share the same state
+    below, so whichever succeeds first marks the process ready for both.
+    """
+    global _extended_schemas_error, _extended_schemas_ready, _extended_schemas_status
+    global _extended_schemas_stage, _extended_schemas_attempt, _extended_schemas_last_attempt_at
+    global _extended_schemas_last_success_at, _extended_schemas_historical_error
+    global _extended_schemas_historical_error_at
+
     if not CONTROL_DB.exists():
         raise control_db.ControlDbMissingError(
             f"control.db not found at {CONTROL_DB} -- refusing to silently create a new, empty "
@@ -389,27 +429,92 @@ def _ensure_extended_schemas() -> None:
     with _extended_schemas_lock:
         if _extended_schemas_ready:
             return
-        with _timed_stage("schema.node_identity"):
-            node_identity.ensure_schema(CONTROL_DB)
-        with _timed_stage("schema.observed_clients"):
-            observed_clients.ensure_schema(CONTROL_DB)
-        with _timed_stage("schema.replication"):
-            replication_v2.ensure_schema(CONTROL_DB)
+        _extended_schemas_attempt += 1
+        _extended_schemas_last_attempt_at = time.time()
+        try:
+            with _timed_stage("schema.node_identity"):
+                _extended_schemas_stage = "node_identity"
+                node_identity.ensure_schema(CONTROL_DB)
+            with _timed_stage("schema.observed_clients"):
+                _extended_schemas_stage = "observed_clients"
+                observed_clients.ensure_schema(CONTROL_DB)
+            with _timed_stage("schema.replication"):
+                _extended_schemas_stage = "replication"
+                replication_v2.ensure_schema(CONTROL_DB)
+        except Exception as exc:
+            # Retryable (a transient lock -- see db_retry.is_lock_error)
+            # gets "retrying": this is expected to clear on its own once
+            # whatever else briefly held control.db finishes. Anything
+            # else -- a real schema/programming error, a permissions
+            # problem -- will not fix itself by waiting, so it's
+            # "degraded" instead: still visible with a growing attempt
+            # count and advancing last_attempt_at (never silently given
+            # up on), just not retried at a hammering cadence.
+            _extended_schemas_error = str(exc)
+            _extended_schemas_status = "retrying" if is_lock_error(exc) else "degraded"
+            raise
+        _extended_schemas_stage = ""
+        if _extended_schemas_error:
+            _extended_schemas_historical_error = _extended_schemas_error
+            _extended_schemas_historical_error_at = _extended_schemas_last_attempt_at
         _extended_schemas_error = ""
+        _extended_schemas_status = "ok"
+        _extended_schemas_last_success_at = time.time()
         _extended_schemas_ready = True
 
 
-def _warm_extended_schemas() -> None:
-    global _extended_schemas_error
-    try:
-        _ensure_extended_schemas()
-    except Exception as exc:
-        _extended_schemas_error = str(exc)
+def _extended_schemas_snapshot() -> dict[str, Any]:
+    return {
+        "status": _extended_schemas_status,
+        "stage": _extended_schemas_stage,
+        "attempt": _extended_schemas_attempt,
+        "last_attempt_at": _extended_schemas_last_attempt_at,
+        "last_success_at": _extended_schemas_last_success_at,
+        "current_error": _extended_schemas_error or None,
+        "last_historical_error": _extended_schemas_historical_error,
+        "last_historical_error_at": _extended_schemas_historical_error_at,
+        "next_retry_at": _extended_schemas_next_retry_at,
+    }
+
+
+def _schema_warmup_worker() -> None:
+    """The single retry loop for _ensure_extended_schemas(): bounded
+    exponential backoff with jitter (same formula as app.db_retry's
+    request-scoped retry_on_locked, just unbounded in attempt count since
+    this runs for the process's whole lifetime rather than one request),
+    capped at _SCHEMA_WARMUP_BACKOFF_MAX_SECONDS so a stuck condition
+    polls at a slow, bounded cadence forever rather than either giving up
+    (the old defect) or hammering control.db. Exits for good the moment
+    _ensure_extended_schemas() succeeds -- from then on _extended_schemas_ready
+    short-circuits every caller, this thread and real requests alike."""
+    global _extended_schemas_next_retry_at
+    backoff = _SCHEMA_WARMUP_BACKOFF_BASE_SECONDS
+    while not _extended_schemas_stop.is_set():
+        try:
+            _ensure_extended_schemas()
+            return
+        except Exception:
+            pass  # state already recorded by _ensure_extended_schemas
+        delay = min(backoff + random.uniform(0, backoff * 0.25), _SCHEMA_WARMUP_BACKOFF_MAX_SECONDS)
+        _extended_schemas_next_retry_at = time.time() + delay
+        if _extended_schemas_stop.wait(timeout=delay):
+            return  # shutdown requested mid-wait
+        backoff = min(backoff * 2, _SCHEMA_WARMUP_BACKOFF_MAX_SECONDS)
 
 
 @app.on_event("startup")
 def _start_schema_warmup() -> None:
-    threading.Thread(target=_warm_extended_schemas, name="apdns-schema-warmup", daemon=True).start()
+    global _extended_schemas_warmup_started
+    with _extended_schemas_start_lock:
+        if _extended_schemas_warmup_started:
+            return  # exactly one warmup/retry worker per process
+        _extended_schemas_warmup_started = True
+        threading.Thread(target=_schema_warmup_worker, name="apdns-schema-warmup", daemon=True).start()
+
+
+@app.on_event("shutdown")
+def _stop_schema_warmup() -> None:
+    _extended_schemas_stop.set()
 
 
 def _client_ip(request: Request) -> str:
@@ -423,8 +528,16 @@ def _client_ip(request: Request) -> str:
 
 
 class ApiError(HTTPException):
-    def __init__(self, status_code: int, error: str, detail: str = ""):
-        super().__init__(status_code=status_code, detail={"error": error, "detail": detail})
+    def __init__(self, status_code: int, error: str, detail: str = "", *, field: str | None = None):
+        # ``field`` (optional, additive) names the single request-body
+        # field this error is about -- e.g. "url" for an interval/URL
+        # validation failure -- so a form can highlight that one input
+        # instead of only toasting the message text. Omitted (None) for
+        # errors that aren't about one specific field (404s, conflicts).
+        body: dict[str, Any] = {"error": error, "detail": detail}
+        if field:
+            body["field"] = field
+        super().__init__(status_code=status_code, detail=body)
 
 
 # Every real validation error type this module's routes can raise is a
@@ -1022,6 +1135,46 @@ def health():
             schedule_worker["detail"] = str(exc)
     result["components"]["schedule_worker"] = schedule_worker
 
+    # Blocklist subscription refresh (pre-DoH reliability pass, part 3):
+    # a per-source failure (a bad/broken external feed) is real,
+    # important information -- but per owner-clarified product
+    # semantics, it must never read as core appliance failure the way a
+    # BIND-context outage or a failed schedule promotion does. This
+    # component's own "status" carries that signal (ok/warning/
+    # degraded); only a genuine orchestration-level failure (below)
+    # demotes overall result["status"] -- a per-source "warning" never
+    # does -- see scripts/v2/alderpointdns_v2_blocklist_refresh.py's own
+    # module docstring for the exit-code half of this fix, and
+    # policy_store.py's BLOCKLIST_ATTENTION_THRESHOLD for the "3
+    # consecutive failures" rule this reads.
+    blocklist_refresh: dict[str, Any] = {"status": "ok", "attention_required_count": 0, "last_run": None}
+    try:
+        with _db() as conn:
+            store.ensure_blocklist_subscription_schema(conn)
+            attention_count = conn.execute(
+                "SELECT count(*) FROM blocklist_subscriptions WHERE enabled=1 AND failure_count >= ?",
+                (store.BLOCKLIST_ATTENTION_THRESHOLD,),
+            ).fetchone()[0]
+        blocklist_refresh["attention_required_count"] = int(attention_count)
+        if BLOCKLIST_REFRESH_STATE_FILE.exists():
+            run = json.loads(BLOCKLIST_REFRESH_STATE_FILE.read_text(encoding="utf-8"))
+            blocklist_refresh["last_run"] = run
+            if not run.get("orchestration_ok", True):
+                # A genuine infrastructure failure (no subscriptions could
+                # even be attempted, or the shared compile/promote step
+                # itself failed) -- this is the one blocklist condition
+                # the owner's own health semantics list as real
+                # degradation, not a per-source warning.
+                blocklist_refresh["status"] = "degraded"
+                result["status"] = "degraded" if result["status"] == "ok" else result["status"]
+            elif attention_count > 0:
+                blocklist_refresh["status"] = "warning"
+        elif attention_count > 0:
+            blocklist_refresh["status"] = "warning"
+    except Exception as exc:  # noqa: BLE001 -- health must stay a safe read even if this query fails
+        blocklist_refresh = {"status": "unknown", "detail": str(exc)}
+    result["components"]["blocklist_refresh"] = blocklist_refresh
+
     # Real background-worker progress, not just "the unit hasn't exited"
     # (app/v2/worker_heartbeat.py) -- owner-beta aging hardening item 1.
     # Each of these runs as its own systemd unit built around
@@ -1052,10 +1205,14 @@ def health():
         # governs "healthy" for the appliance.
         result["status"] = "degraded" if result["status"] == "ok" else result["status"]
     if not _extended_schemas_ready:
-        result["components"]["replication_discovery"] = {
-            "status": "unavailable" if _extended_schemas_error else "initializing",
-            "detail": _extended_schemas_error or "extended control schemas are warming up",
-        }
+        # Non-blocking: this branch only ever reads the warmup worker's
+        # own state (_schema_warmup_worker above), never calls
+        # _ensure_extended_schemas() itself -- a health check can never
+        # be made to wait on schema work.
+        result["components"]["replication_discovery"] = _extended_schemas_snapshot()
+        result["components"]["replication_discovery"]["detail"] = (
+            _extended_schemas_error or "extended control schemas are warming up"
+        )
         result["status"] = "degraded"
     else:
         try:
@@ -3904,12 +4061,37 @@ class BlocklistIntervalRequest(BaseModel):
     update_interval_seconds: Optional[int] = None
 
 
-def _validate_blocklist_interval(value: Optional[int]) -> Optional[int]:
+class BlocklistSubscriptionUpdate(BaseModel):
+    """Full Edit Blocklist workflow (pre-DoH reliability pass, part 3).
+    Every field is optional/PATCH-style -- only fields actually present
+    in the request body (see model_fields_set at the route below) are
+    changed; a field simply absent from the body is left untouched. No
+    internal id/storage-path/generated-filename field is ever accepted
+    here -- subscription_id (the one stable identity) comes from the URL
+    path, never the body, so it can never be silently reassigned."""
+
+    name: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    url: Optional[str] = Field(default=None, min_length=1, max_length=2048)
+    category: Optional[str] = Field(default=None, max_length=128)
+    enabled: Optional[bool] = None
+    update_interval_seconds: Optional[int] = None
+    # "Save & Update Now": persist the edit, then immediately queue the
+    # exact same async refresh job Update Now already uses -- reusing
+    # _run_blocklist_refresh_job means this gets the same progress/final-
+    # status reporting via /api/blocklists/jobs/{job_id} for free.
+    trigger_update: bool = False
+
+
+def _validate_blocklist_interval(value: Optional[int], *, field: str = "update_interval_seconds") -> Optional[int]:
     if value is None:
         return None
     allowed = {seconds for seconds, _ in BLOCKLIST_INTERVAL_PRESETS}
     if int(value) not in allowed:
-        raise ApiError(400, "validation_error", "update interval must be Manual Only, 1 hour, 6 hours, 12 hours, 1 day, 3 days, or 1 week")
+        raise ApiError(
+            400, "validation_error",
+            "update interval must be Manual Only, 1 hour, 6 hours, 12 hours, 1 day, 3 days, or 1 week",
+            field=field,
+        )
     return int(value)
 
 
@@ -4074,7 +4256,7 @@ def list_blocklist_subscriptions_route(admin=Depends(current_admin)):
 @app.post("/api/blocklists/settings")
 def update_blocklist_settings_route(req: BlocklistSettingsRequest, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
     check_csrf(admin, x_csrf_token)
-    value = _validate_blocklist_interval(req.default_interval_seconds)
+    value = _validate_blocklist_interval(req.default_interval_seconds, field="default_interval_seconds")
     with _db() as conn:
         store.set_blocklist_setting(conn, "default_interval_seconds", str(value))
     return {"status": "updated", "default_interval_seconds": value}
@@ -4107,6 +4289,54 @@ def update_blocklist_interval_route(subscription_id: str, req: BlocklistInterval
             raise ApiError(404, "not_found", "unknown subscription")
         store.set_blocklist_update_interval(conn, subscription_id, value)
     return {"status": "updated", "update_interval_seconds": value}
+
+
+@app.patch("/api/blocklists/{subscription_id}")
+def update_blocklist_subscription_route(
+    subscription_id: str, req: BlocklistSubscriptionUpdate, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader,
+):
+    """Full Edit Blocklist: reuses the exact same field-level setters as
+    every other blocklist mutation (set_blocklist_update_interval,
+    set_blocklist_subscription_enabled) for the fields that must NOT
+    disturb the consecutive-failure streak, and
+    update_blocklist_subscription_fields for name/url/category, which
+    resets that streak only when the URL actually changed -- see that
+    function's own docstring. Duplicate URLs across different
+    subscriptions are allowed (unchanged from creation's own behavior:
+    subscription_id, not url, is the unique identity here -- two
+    subscriptions may legitimately point at the same list)."""
+    check_csrf(admin, x_csrf_token)
+    fields_set = req.model_fields_set
+    url_reset_failure_streak = False
+    with _db() as conn:
+        if store.get_blocklist_subscription(conn, subscription_id) is None:
+            raise ApiError(404, "not_found", "unknown subscription")
+        if "update_interval_seconds" in fields_set:
+            value = _validate_blocklist_interval(req.update_interval_seconds)
+            store.set_blocklist_update_interval(conn, subscription_id, value)
+        if "enabled" in fields_set and req.enabled is not None:
+            store.set_blocklist_subscription_enabled(conn, subscription_id, req.enabled)
+        identity_fields = {
+            k: v for k, v in (("name", req.name), ("url", req.url), ("category", req.category)) if k in fields_set
+        }
+        if identity_fields:
+            try:
+                url_reset_failure_streak = store.update_blocklist_subscription_fields(conn, subscription_id, **identity_fields)
+            except PolicyStoreError as exc:
+                raise ApiError(409, "conflict", str(exc), field="url" if "url" in identity_fields else None) from exc
+        updated = store.get_blocklist_subscription(conn, subscription_id)
+
+    job_id = None
+    if req.trigger_update:
+        with _blocklist_running_lock:
+            if subscription_id in _blocklist_running:
+                raise ApiError(409, "conflict", "update already running for this subscription")
+        job_id = _new_blocklist_job("single", [subscription_id])
+        threading.Thread(target=_run_blocklist_refresh_job, args=(job_id, [subscription_id]), daemon=True).start()
+    return {
+        "status": "updated", "subscription": updated,
+        "url_reset_failure_streak": url_reset_failure_streak, "job_id": job_id,
+    }
 
 
 @app.post("/api/blocklists/{subscription_id}/toggle")
@@ -4333,7 +4563,7 @@ class NodeIdentityUpdate(BaseModel):
 def node_identity_status(admin=Depends(current_admin)):
     if not _extended_schemas_ready:
         return {
-            "status": "unavailable" if _extended_schemas_error else "initializing",
+            **_extended_schemas_snapshot(),
             "detail": _extended_schemas_error or "extended control schemas are warming up",
             "node_id": "",
             "display_name": "",
@@ -4559,7 +4789,7 @@ class DiscoverySettingsUpdate(BaseModel):
 def discovery_status(admin=Depends(current_admin)):
     if not _extended_schemas_ready:
         return {
-            "status": "unavailable" if _extended_schemas_error else "initializing",
+            **_extended_schemas_snapshot(),
             "detail": _extended_schemas_error or "extended control schemas are warming up",
             "observed_count": 0,
             "dropped": 0,
