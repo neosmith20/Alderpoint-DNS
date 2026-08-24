@@ -141,3 +141,100 @@ def test_queue_drops_or_coalesces_without_blocking():
     q.submit("192.0.2.3")
     q.submit("192.0.2.4")
     assert q.dropped >= 1 or len(q) <= 2
+
+
+def test_recovered_drain_error_is_reported_as_historical_not_current(tmp_path):
+    # Real defect this reproduces (owner preview, Aug 23-24): a transient
+    # "database is locked" recorded by the discovery worker stayed as
+    # client_discovery.last_error in /api/health indefinitely, even after
+    # the worker went on to commit thousands of observations cleanly --
+    # health could not tell a currently-failing worker from one that
+    # failed once, years ago, and fully recovered.
+    db = tmp_path / "control.db"
+    _init(db)
+    with control_db.connect(db) as conn:
+        observed_clients.record_drain_error(conn, "database is locked", ts=100.0)
+        stats = observed_clients.stats(conn)
+        assert stats["status"] == "error"
+        assert stats["last_error"] == "database is locked"
+        assert stats["last_error_at"] == 100.0
+        assert stats["last_historical_error"] is None
+
+        # A later successful commit recovers it.
+        observed_clients.record_drain_success(conn, ts=200.0)
+        stats = observed_clients.stats(conn)
+        assert stats["status"] == "ok"
+        assert stats["last_error"] == ""
+        assert stats["last_success_at"] == 200.0
+        assert stats["last_historical_error"] == "database is locked"
+        assert stats["last_historical_error_at"] == 100.0
+        assert stats["recovered_at"] == 200.0
+
+
+def test_drain_error_after_last_success_stays_current(tmp_path):
+    db = tmp_path / "control.db"
+    _init(db)
+    with control_db.connect(db) as conn:
+        observed_clients.record_drain_success(conn, ts=100.0)
+        observed_clients.record_drain_error(conn, "disk full", ts=200.0)
+        stats = observed_clients.stats(conn)
+        assert stats["status"] == "error"
+        assert stats["last_error"] == "disk full"
+        assert stats["last_historical_error"] is None
+        assert stats["recovered_at"] is None
+
+
+def test_ensure_schema_adds_error_timestamp_columns_to_a_preexisting_stats_table(tmp_path):
+    # Simulates the real owner-preview control.db: created before
+    # last_error_at/last_success_at existed, so observed_client_stats
+    # only has the original columns. ensure_schema() must add them
+    # in place rather than assuming a fresh install.
+    db = tmp_path / "control.db"
+    control_db.initialize(db)
+    with control_db.connect(db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE observed_clients (
+                source_ip TEXT PRIMARY KEY, address_family TEXT NOT NULL,
+                first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
+                query_count INTEGER NOT NULL DEFAULT 0,
+                hostname_candidate TEXT NOT NULL DEFAULT '',
+                hostname_source TEXT NOT NULL DEFAULT '',
+                managed_client_id INTEGER, dismissed INTEGER NOT NULL DEFAULT 0,
+                confidence TEXT NOT NULL DEFAULT 'dns-observed'
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE observed_client_stats (
+                id INTEGER PRIMARY KEY CHECK(id = 1),
+                dropped INTEGER NOT NULL DEFAULT 0, evicted INTEGER NOT NULL DEFAULT 0,
+                coalesced INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        conn.execute("CREATE TABLE observed_client_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        conn.execute("INSERT INTO observed_client_stats(id, last_error) VALUES (1, 'database is locked')")
+
+    observed_clients.ensure_schema(db)
+    with control_db.connect(db) as conn:
+        stats = observed_clients.stats(conn)
+        # Old, timestamp-less error carried forward -- reported current
+        # (no success has ever been recorded) rather than lost.
+        assert stats["last_error"] == "database is locked"
+        observed_clients.record_drain_success(conn)
+        stats = observed_clients.stats(conn)
+        assert stats["status"] == "ok"
+        assert stats["last_historical_error"] == "database is locked"
+
+
+def test_stats_with_no_error_ever_recorded_is_clean(tmp_path):
+    db = tmp_path / "control.db"
+    _init(db)
+    with control_db.connect(db) as conn:
+        stats = observed_clients.stats(conn)
+        assert stats["status"] == "ok"
+        assert stats["last_error"] == ""
+        assert stats["last_error_at"] is None
+        assert stats["last_historical_error"] is None

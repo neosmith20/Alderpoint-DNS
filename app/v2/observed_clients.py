@@ -48,7 +48,9 @@ _MIGRATION: list[str] = [
         dropped INTEGER NOT NULL DEFAULT 0,
         evicted INTEGER NOT NULL DEFAULT 0,
         coalesced INTEGER NOT NULL DEFAULT 0,
-        last_error TEXT NOT NULL DEFAULT ''
+        last_error TEXT NOT NULL DEFAULT '',
+        last_error_at REAL,
+        last_success_at REAL
     )
     """,
     """
@@ -122,8 +124,33 @@ def ensure_schema(path: str | Path) -> None:
         present = _table_exists(conn, "observed_clients")
     if not present:
         control_db.apply_migration_in_transaction(path, _MIGRATION, OBSERVED_SCHEMA_VERSION)
+    # Additive columns for an already-migrated install (e.g. the preview
+    # database created before last_error grew a timestamp) -- see
+    # control_db.add_columns_if_missing()'s own docstring for why this is
+    # its own atomic check-then-alter step rather than folded into
+    # _MIGRATION, which only ever runs for a brand-new table.
+    control_db.add_columns_if_missing(
+        path,
+        "observed_client_stats",
+        {
+            "last_error_at": "REAL",
+            "last_success_at": "REAL",
+        },
+    )
     with control_db.connect(path) as conn:
         conn.execute("INSERT OR IGNORE INTO observed_client_stats(id) VALUES (1)")
+        # Backfill: a pre-existing install may carry a last_error written
+        # before last_error_at existed. stats() treats an untimestamped
+        # error as unable to prove it's historical, so it would otherwise
+        # report forever-current with no way to ever recover -- stamping
+        # it "as of now" the first time this runs after upgrade means it
+        # behaves like any other current error from here on (in
+        # particular: a subsequent successful drain recovers it normally).
+        conn.execute(
+            "UPDATE observed_client_stats SET last_error_at=? "
+            "WHERE id=1 AND last_error != '' AND last_error_at IS NULL",
+            (time.time(),),
+        )
         conn.execute(
             "INSERT OR IGNORE INTO observed_client_settings(key, value) VALUES ('max_entries', ?)",
             (str(DEFAULT_MAX_ENTRIES),),
@@ -409,15 +436,72 @@ def forget(conn: sqlite3.Connection, source_ip: str) -> None:
     conn.execute("DELETE FROM observed_clients WHERE source_ip=?", (source_ip,))
 
 
+def record_drain_error(conn: sqlite3.Connection, message: str, *, ts: float | None = None) -> None:
+    """Records a discovery-inbox drain failure (e.g. a per-file SQLite
+    write that raised). Distinct from ``record_drain_success`` below --
+    ``stats()`` compares the two timestamps to tell a currently-failing
+    worker from one that failed once and has since recovered, instead of
+    the failure text sitting in health forever (real defect: a transient
+    "database is locked" from Aug 23 was still reported as the live
+    ``client_discovery`` error on Aug 24 after the worker had gone on to
+    process thousands of observations cleanly)."""
+    conn.execute(
+        "UPDATE observed_client_stats SET last_error=?, last_error_at=? WHERE id=1",
+        (message[:512], ts if ts is not None else time.time()),
+    )
+
+
+def record_drain_success(conn: sqlite3.Connection, *, ts: float | None = None) -> None:
+    """Marks that the discovery-inbox drain made real progress (a file
+    committed cleanly), so ``stats()`` can tell an error timestamped
+    before this one is recovered rather than still active."""
+    conn.execute(
+        "UPDATE observed_client_stats SET last_success_at=? WHERE id=1",
+        (ts if ts is not None else time.time(),),
+    )
+
+
 def stats(conn: sqlite3.Connection, *, queue_obj: ObservationQueue | None = None) -> dict:
-    row = conn.execute("SELECT dropped, evicted, coalesced, last_error FROM observed_client_stats WHERE id=1").fetchone()
+    row = conn.execute(
+        "SELECT dropped, evicted, coalesced, last_error, last_error_at, last_success_at "
+        "FROM observed_client_stats WHERE id=1"
+    ).fetchone()
     count = conn.execute("SELECT count(*) FROM observed_clients").fetchone()[0]
+    last_error_text, last_error_at, last_success_at = row[3], row[4], row[5]
+    # An error is "current" only while no success has been recorded since
+    # it happened -- a success at or after the error's own timestamp means
+    # the worker recovered on its own (e.g. the file that hit "database is
+    # locked" was retried, or a later file committed fine), so the error
+    # is historical, not live. See record_drain_error()'s docstring for
+    # the real staleness bug this replaces.
+    is_current = bool(last_error_text) and last_error_at is not None and (
+        last_success_at is None or last_success_at < last_error_at
+    )
+    current_error = last_error_text if is_current else None
+    if last_error_text and not is_current:
+        last_historical_error = last_error_text
+        last_historical_error_at = last_error_at
+        recovered_at = last_success_at
+    else:
+        last_historical_error = None
+        last_historical_error_at = None
+        recovered_at = None
     return {
+        "status": "error" if current_error else "ok",
         "observed_count": count,
         "dropped": row[0] + (queue_obj.dropped if queue_obj else 0),
         "evicted": row[1],
         "coalesced": row[2] + (queue_obj.coalesced if queue_obj else 0),
-        "last_error": row[3],
+        # Back-compat shape: empty string, never null, and only ever
+        # populated while the error is actually still current -- old
+        # dashboards/tests reading this field as "the live error" now get
+        # a truthful answer instead of a permanently-stuck one.
+        "last_error": current_error or "",
+        "last_error_at": last_error_at,
+        "last_success_at": last_success_at,
+        "last_historical_error": last_historical_error,
+        "last_historical_error_at": last_historical_error_at,
+        "recovered_at": recovered_at,
         "settings": settings(conn),
         "queue_depth": len(queue_obj) if queue_obj else 0,
     }

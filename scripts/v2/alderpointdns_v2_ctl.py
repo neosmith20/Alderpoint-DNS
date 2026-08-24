@@ -1231,7 +1231,19 @@ def cmd_discovery_worker(args: argparse.Namespace) -> int:
 
     def _drain_once() -> int:
         processed = 0
-        for f in sorted(inbox.glob("*.jsonl"))[:256]:
+        files = sorted(inbox.glob("*.jsonl"))[:256]
+        if not files:
+            # Nothing to drain this tick is itself a clean tick -- record
+            # it as progress so a historical error left over from a
+            # previous tick doesn't stay reported as "current" forever
+            # just because the inbox has since gone quiet (e.g. no new
+            # DNS traffic). A tick that actually sees files always
+            # records success/error per file below instead, so a file
+            # that is still genuinely failing is never masked by this.
+            with control_db.connect(CONTROL_DB) as conn:
+                observed_clients.record_drain_success(conn)
+            return processed
+        for f in files:
             try:
                 observations = []
                 for line in f.read_text(encoding="utf-8").splitlines():
@@ -1252,11 +1264,18 @@ def cmd_discovery_worker(args: argparse.Namespace) -> int:
                 # reads for an entire discovery backlog.
                 with control_db.connect(CONTROL_DB) as conn:
                     processed += observed_clients.apply_observations(conn, observations)
+                    # A clean commit is "real progress" for stats()'s
+                    # current-vs-historical comparison -- see
+                    # observed_clients.record_drain_success()'s docstring.
+                    # Recorded in the same transaction as the commit it's
+                    # reporting on, so it can never be newer than a
+                    # not-yet-durable write.
+                    observed_clients.record_drain_success(conn)
                 f.unlink()
             except Exception as exc:  # noqa: BLE001
                 log.error("failed processing discovery inbox file %s: %s", f, exc)
                 with control_db.connect(CONTROL_DB) as conn:
-                    conn.execute("UPDATE observed_client_stats SET last_error=? WHERE id=1", (str(exc)[:512],))
+                    observed_clients.record_drain_error(conn, str(exc))
         return processed
 
     if args.once:
