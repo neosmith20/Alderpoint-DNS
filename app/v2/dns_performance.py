@@ -232,7 +232,7 @@ def save_report(report: dict[str, Any], path: Path = REPORT_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.chmod(0o640)
+    tmp.chmod(0o644)
     tmp.replace(path)
 
 
@@ -241,5 +241,7 @@ def read_report(path: Path = REPORT_PATH) -> dict[str, Any] | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None
+    except PermissionError:
+        return {"schema": 1, "error": "stored DNS performance report is not readable by the management service"}
     except json.JSONDecodeError:
         return {"schema": 1, "error": "stored DNS performance report is malformed"}

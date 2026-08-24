@@ -38,7 +38,7 @@ def test_report_storage_is_bounded_json_file(tmp_path):
     dns_performance.save_report(report, path)
 
     assert dns_performance.read_report(path) == report
-    assert path.stat().st_mode & 0o777 == 0o640
+    assert path.stat().st_mode & 0o777 == 0o644
 
 
 def test_dns_performance_api_is_authenticated_and_reports_shape(tmp_path, monkeypatch):
