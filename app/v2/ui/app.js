@@ -1152,7 +1152,7 @@
   }
 
   async function filtering() {
-    const [services, rulesets, schedules, global] = await Promise.all([api("/api/services"), api("/api/service-rulesets"), api("/api/schedules"), api("/api/policy/global")]);
+    const [services, rulesets, schedules, global] = await Promise.all([api("/api/services?include_domains=false"), api("/api/service-rulesets"), api("/api/schedules"), api("/api/policy/global")]);
     return page("Filtering / Security", "SafeSearch, parental filtering, security filtering, service blocking, schedules, and response modes remain separate controls.", "", `
       <div class="grid two">
         <section class="panel"><div class="panel__head"><h2>Global Answer Policy</h2></div><div class="panel__body">${policyEditor("global", "singleton", global.policy)}</div></section>
@@ -1168,7 +1168,12 @@
 
   function serviceTable(services) {
     if (!services.length) return `<div class="empty">No service definitions.</div>`;
-    return `<div style="margin-top:12px">${tableFromRows(services, 50, undefined, "filtering-services")}</div>`;
+    const rows = services.slice(0, 100).map((s) => {
+      const sample = (s.sample_domains || s.domains || []).slice(0, 3).map((d) => `${d.match_kind}:${d.domain}`).join(", ");
+      return `<tr><td>${esc(s.display_name)}</td><td>${esc(s.category || "")}</td><td class="mono">${esc(s.service_id)}</td><td>${esc(s.domain_count ?? (s.domains || []).length)}</td><td class="truncate" title="${esc(sample)}">${esc(sample || "-")}</td></tr>`;
+    }).join("");
+    const overflow = services.length > 100 ? `<p class="muted">${esc(services.length - 100)} additional services hidden from this compact view.</p>` : "";
+    return `<div style="margin-top:12px"><div class="table-wrap"><table data-grid data-grid-id="filtering-services"><thead><tr><th>Name</th><th>Category</th><th>ID</th><th>Domains</th><th>Examples</th></tr></thead><tbody>${rows}</tbody></table></div>${overflow}</div>`;
   }
 
   function rulesetForm(services) {

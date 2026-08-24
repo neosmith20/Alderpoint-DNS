@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import sys
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -112,6 +113,36 @@ class TestAuthRequired:
         assert r.status_code == 401
 
 
+class TestServiceCatalogApi:
+    def test_compact_service_listing_omits_full_domain_arrays(self, app_client):
+        webapp, client = app_client
+        csrf = _setup_and_login(webapp, client)
+        created = client.post(
+            "/api/services",
+            json={
+                "display_name": "Video Apps",
+                "category": "media",
+                "domains": [
+                    {"match_kind": "suffix", "domain": "video.example"},
+                    {"match_kind": "exact", "domain": "cdn.video.example"},
+                ],
+            },
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert created.status_code == 200, created.text
+
+        detailed = client.get("/api/services")
+        assert detailed.status_code == 200
+        assert len(detailed.json()["services"][0]["domains"]) == 2
+
+        compact = client.get("/api/services?include_domains=false")
+        assert compact.status_code == 200
+        item = compact.json()["services"][0]
+        assert item["domain_count"] == 2
+        assert "domains" not in item
+        assert item["sample_domains"][0]["domain"] == "cdn.video.example"
+
+
 class TestLoginLogoutSessions:
     def test_login_wrong_password_rejected(self, app_client):
         webapp, client = app_client
@@ -134,6 +165,34 @@ class TestLoginLogoutSessions:
         assert r.status_code == 200
         r2 = client.get("/api/networks")
         assert r2.status_code == 401
+
+    def test_due_session_touch_is_coalesced_out_of_request_path(self, app_client, monkeypatch):
+        webapp, client = app_client
+        _setup_and_login(webapp, client)
+        started = []
+
+        class FakeThread:
+            def __init__(self, *, target, args, name, daemon):
+                self.target = target
+                self.args = args
+                self.name = name
+                self.daemon = daemon
+
+            def start(self):
+                started.append((self.name, self.args))
+
+        monkeypatch.setattr(webapp.threading, "Thread", FakeThread)
+        webapp._session_touch_next_due.clear()
+        with webapp._db() as conn:
+            session_id = conn.execute("SELECT id FROM sessions LIMIT 1").fetchone()[0]
+            stale = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+            conn.execute("UPDATE sessions SET last_seen_at=? WHERE id=?", (stale, session_id))
+
+        for _ in range(3):
+            r = client.get("/api/system/status")
+            assert r.status_code == 200
+
+        assert [name for name, _args in started].count("apdns-session-touch") == 1
 
     def test_session_rotates_on_each_login(self, app_client):
         webapp, client = app_client

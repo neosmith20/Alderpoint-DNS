@@ -167,6 +167,8 @@ if UI_DIR.exists():
 _request_timings: ContextVar[dict[str, float] | None] = ContextVar("request_timings", default=None)
 _SLOW_REQUEST_MS = 750.0
 _SESSION_TOUCH_INTERVAL_SECONDS = 60.0
+_session_touch_lock = threading.Lock()
+_session_touch_next_due: dict[str, float] = {}
 _extended_schemas_ready = False
 _extended_schemas_error = ""
 _extended_schemas_lock = threading.Lock()
@@ -554,6 +556,41 @@ def current_session(request: Request, conn: sqlite3.Connection) -> Optional[sqli
     return row
 
 
+def _touch_session_best_effort(session_id: str, timestamp: str) -> None:
+    try:
+        with control_db.connect(CONTROL_DB, create_if_missing=False) as conn:
+            conn.execute("UPDATE sessions SET last_seen_at=? WHERE id=?", (timestamp, session_id))
+    except Exception:
+        pass
+
+
+def _maybe_schedule_session_touch(session_id: str, last_seen_at: str, now: datetime) -> bool:
+    try:
+        last_seen = datetime.fromisoformat(str(last_seen_at))
+        if (now - last_seen).total_seconds() < _SESSION_TOUCH_INTERVAL_SECONDS:
+            return False
+    except (TypeError, ValueError):
+        pass
+    now_monotonic = time.monotonic()
+    with _session_touch_lock:
+        next_due = _session_touch_next_due.get(session_id, 0.0)
+        if next_due > now_monotonic:
+            return False
+        _session_touch_next_due[session_id] = now_monotonic + _SESSION_TOUCH_INTERVAL_SECONDS
+        if len(_session_touch_next_due) > 4096:
+            stale_cutoff = now_monotonic - _SESSION_TOUCH_INTERVAL_SECONDS
+            for stale_id, due_at in list(_session_touch_next_due.items()):
+                if due_at < stale_cutoff:
+                    _session_touch_next_due.pop(stale_id, None)
+    threading.Thread(
+        target=_touch_session_best_effort,
+        args=(session_id, now.isoformat()),
+        name="apdns-session-touch",
+        daemon=True,
+    ).start()
+    return True
+
+
 def current_admin(request: Request):
     """FastAPI dependency: 401 if not authenticated. Also bumps
     last_seen_at on a bounded cadence."""
@@ -565,15 +602,8 @@ def current_admin(request: Request):
             if session is None or session["admin_id"] is None:
                 raise ApiError(401, "unauthenticated", "login required")
             now = datetime.now(timezone.utc)
-            should_touch = True
-            try:
-                last_seen = datetime.fromisoformat(str(session["last_seen_at"]))
-                should_touch = (now - last_seen).total_seconds() >= _SESSION_TOUCH_INTERVAL_SECONDS
-            except (TypeError, ValueError):
-                should_touch = True
-            if should_touch:
-                with _timed_stage("auth.session_touch"):
-                    conn.execute("UPDATE sessions SET last_seen_at=? WHERE id=?", (now.isoformat(), session["id"]))
+            with _timed_stage("auth.session_touch_schedule"):
+                _maybe_schedule_session_touch(session["id"], session["last_seen_at"], now)
             with _timed_stage("auth.admin_read"):
                 admin = conn.execute("SELECT * FROM admins WHERE id=?", (session["admin_id"],)).fetchone()
             if admin is None:
@@ -1987,23 +2017,47 @@ def create_service(req: ServiceCreate, admin=Depends(current_admin), x_csrf_toke
 
 
 @app.get("/api/services")
-def list_services(admin=Depends(current_admin)):
+def list_services(include_domains: bool = True, admin=Depends(current_admin)):
     with _db() as conn:
-        rows = conn.execute("SELECT id, service_id, display_name, category FROM service_definitions ORDER BY category, display_name").fetchall()
+        with _timed_stage("services.definitions"):
+            rows = conn.execute("SELECT id, service_id, display_name, category FROM service_definitions ORDER BY category, display_name").fetchall()
+        row_ids = [r[0] for r in rows]
+        domain_counts: dict[int, int] = {}
+        domain_samples: dict[int, list[dict[str, str]]] = {}
+        domains_by_service: dict[int, list[dict[str, str]]] = {}
+        if row_ids:
+            placeholders = ",".join("?" for _ in row_ids)
+            with _timed_stage("services.domains"):
+                domain_rows = conn.execute(
+                    f"""
+                    SELECT service_row_id, match_kind, domain
+                    FROM service_domains
+                    WHERE service_row_id IN ({placeholders})
+                    ORDER BY service_row_id, match_kind, domain
+                    """,
+                    row_ids,
+                ).fetchall()
+            for row_id, match_kind, domain in domain_rows:
+                domain_counts[row_id] = domain_counts.get(row_id, 0) + 1
+                item = {"match_kind": match_kind, "domain": domain}
+                if include_domains:
+                    domains_by_service.setdefault(row_id, []).append(item)
+                elif len(domain_samples.setdefault(row_id, [])) < 3:
+                    domain_samples[row_id].append(item)
         services = []
-        for row_id, service_id, display_name, category in rows:
-            domains = conn.execute(
-                "SELECT match_kind, domain FROM service_domains WHERE service_row_id=? ORDER BY match_kind, domain",
-                (row_id,),
-            ).fetchall()
-            services.append(
-                {
+        with _timed_stage("services.shape"):
+            for row_id, service_id, display_name, category in rows:
+                item = {
                     "service_id": service_id,
                     "display_name": display_name,
                     "category": category,
-                    "domains": [{"match_kind": d[0], "domain": d[1]} for d in domains],
+                    "domain_count": domain_counts.get(row_id, 0),
                 }
-            )
+                if include_domains:
+                    item["domains"] = domains_by_service.get(row_id, [])
+                else:
+                    item["sample_domains"] = domain_samples.get(row_id, [])
+                services.append(item)
     return {"services": services}
 
 
