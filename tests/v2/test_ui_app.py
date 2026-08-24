@@ -60,6 +60,27 @@ def test_backup_page_does_not_auto_probe_default_migration_path(tmp_path, monkey
     assert "/api/migration/detect?source_path=${encodeURIComponent(body.source_path)}" in js.text
 
 
+def test_dashboard_live_initializes_after_panel_exists_and_has_terminal_states(tmp_path, monkeypatch):
+    webapp = _fresh_webapp(tmp_path, monkeypatch)
+    client = _client(webapp)
+    js = client.get("/ui-static/app.js").text
+    assert "setTimeout(() => {" in js
+    assert "liveActivityShell()" in js
+    assert "Connected - no recent activity" in js
+    assert "Reconnecting" in js
+
+
+def test_upstream_table_defaults_to_display_order_and_does_not_truncate_addresses(tmp_path, monkeypatch):
+    webapp = _fresh_webapp(tmp_path, monkeypatch)
+    client = _client(webapp)
+    js = client.get("/ui-static/app.js").text
+    css = client.get("/ui-static/app.css").text
+    assert 'data-grid-id="upstream-profiles" data-grid-default-sort-column="1" data-grid-default-sort-direction="asc" data-grid-ignore-stored-sort="1"' in js
+    assert "endpoint-chip" in js
+    assert 'class="mono truncate"' not in js
+    assert ".endpoint-chip" in css
+
+
 def test_session_endpoint_returns_csrf_for_refresh_recovery(tmp_path, monkeypatch):
     webapp = _fresh_webapp(tmp_path, monkeypatch)
     client = _client(webapp)

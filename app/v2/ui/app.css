@@ -227,6 +227,9 @@ tr:last-child td { border-bottom: 0; }
 .ts-value.muted { font-style: italic; }
 .faint { color: var(--faint); }
 .truncate { max-width: 34ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.endpoint-cell { white-space: normal; min-width: min(260px, 70vw); }
+.endpoint-list { display: flex; flex-wrap: wrap; gap: 5px; align-items: flex-start; max-width: 100%; }
+.endpoint-chip { display: inline-block; padding: 3px 6px; border: 1px solid var(--line); border-radius: var(--r-1); background: var(--surface-2); color: var(--text); white-space: normal; overflow-wrap: anywhere; word-break: break-word; max-width: 100%; }
 
 /* Shared data-grid (data-grid.js): sortable/resizable table headers, used
    across the major operator tables instead of a one-off per page. */

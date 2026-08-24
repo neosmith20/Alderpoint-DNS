@@ -151,15 +151,26 @@
 
   function restoreSort(table) {
     if (!table.dataset.gridId) return;
+    if (table.dataset.gridIgnoreStoredSort === "1") return false;
     const stored = readStorage(SORT_KEY_PREFIX + table.dataset.gridId);
-    if (!stored) return;
+    if (!stored) return false;
     const parts = stored.split(":");
     const columnIndex = Number(parts[0]);
     const direction = parts[1];
     const headers = Array.from(table.querySelectorAll(":scope > thead > tr > th"));
-    if (Number.isNaN(columnIndex) || !headers[columnIndex]) return;
-    if ("noSort" in headers[columnIndex].dataset) return;
-    if (direction !== "asc" && direction !== "desc") return;
+    if (Number.isNaN(columnIndex) || !headers[columnIndex]) return false;
+    if ("noSort" in headers[columnIndex].dataset) return false;
+    if (direction !== "asc" && direction !== "desc") return false;
+    applySort(table, columnIndex, direction, false);
+    return true;
+  }
+
+  function applyDefaultSort(table) {
+    if (!table.dataset.gridDefaultSortColumn) return;
+    const columnIndex = Number(table.dataset.gridDefaultSortColumn);
+    const direction = table.dataset.gridDefaultSortDirection === "desc" ? "desc" : "asc";
+    const headers = Array.from(table.querySelectorAll(":scope > thead > tr > th"));
+    if (Number.isNaN(columnIndex) || !headers[columnIndex] || "noSort" in headers[columnIndex].dataset) return;
     applySort(table, columnIndex, direction, false);
   }
 
@@ -201,7 +212,7 @@
       });
       restoreWidths(table);
     }
-    restoreSort(table);
+    if (!restoreSort(table)) applyDefaultSort(table);
   }
 
   function initAllIn(root) {
@@ -245,13 +256,16 @@
     const th = handle.closest("th");
     const table = handle.closest("table[data-grid]");
     if (!th || !table) return;
-    drag = { th: th, table: table, startX: event.clientX, startWidth: th.offsetWidth };
+    drag = { th: th, table: table, startX: event.clientX, startWidth: th.offsetWidth, startTableWidth: table.offsetWidth };
     event.preventDefault();
   });
   document.addEventListener("pointermove", (event) => {
     if (!drag) return;
-    const next = Math.max(MIN_COLUMN_WIDTH, drag.startWidth + (event.clientX - drag.startX));
+    const delta = event.clientX - drag.startX;
+    const next = Math.max(MIN_COLUMN_WIDTH, drag.startWidth + delta);
+    const nextTableWidth = Math.max(drag.startTableWidth, drag.startTableWidth + Math.max(0, delta));
     drag.th.style.width = next + "px";
+    drag.table.style.width = nextTableWidth + "px";
   });
   document.addEventListener("pointerup", () => {
     if (!drag) return;

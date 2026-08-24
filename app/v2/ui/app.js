@@ -748,11 +748,13 @@
   function loadSlowDashboardPanels(rangeMinutes, granularity, topMode) {
     const token = loadToken;
     if (rangeMinutes === "live") {
-      const el = document.getElementById("dashboard-activity-panel");
-      if (el) {
+      setTimeout(() => {
+        if (token !== loadToken || state.route !== "dashboard") return;
+        const el = document.getElementById("dashboard-activity-panel");
+        if (!el) return;
         el.innerHTML = liveActivityShell();
         startLiveActivity(token, topMode);
-      }
+      }, 0);
       refreshDashboardTopDomains(token, 60, topMode);
       return;
     }
@@ -789,7 +791,7 @@
       <span class="metric-inline">Blocked: <strong data-live-blocked>0%</strong></span>
       <button type="button" data-action="dashboard-live-pause">${state.dashboardLivePaused ? "Resume" : "Pause"}</button>
     </div>
-    <div id="dashboard-live-chart">${activityChart({ buckets: [], granularity: "minute" })}</div>`;
+    <div id="dashboard-live-chart"><div class="empty">Loading activity...</div></div>`;
   }
 
   function cleanupDashboardLive() {
@@ -814,7 +816,7 @@
         return;
       }
       try {
-        if (status) status.textContent = "Live";
+        if (status) status.textContent = "Connecting";
         const data = await api("/api/analytics/live-activity?seconds=180&bucket_seconds=5", { signal: undefined });
         if (token !== loadToken || state.route !== "dashboard") return;
         if (data.degraded) {
@@ -829,7 +831,10 @@
         const chart = document.getElementById("dashboard-live-chart");
         if (chart) {
           chart.querySelectorAll(".ts-svg-host").forEach((host) => { if (host.__apdnsRO) host.__apdnsRO.disconnect(); });
-          chart.innerHTML = activityChart({ buckets: data.buckets || [], granularity: "minute" });
+          const buckets = data.buckets || [];
+          const total = buckets.reduce((s, b) => s + (Number(b.total_queries) || 0), 0);
+          if (status) status.textContent = total > 0 ? "Connected" : "Connected - no recent activity";
+          chart.innerHTML = activityChart({ buckets, granularity: "minute" });
         }
         const now = Date.now();
         if (now - topRefresh > 30000) {
@@ -1318,12 +1323,16 @@
   function upstreamsTable(items) {
     if (!items.length) return `<div class="empty">No upstream profiles configured. BIND performs normal native recursive resolution until one is added and enabled.</div>`;
     const rows = items.map((u, i) => {
-      const addr = (u.endpoints || []).map((e) => e.address).join(", ") || "-";
+      const endpoints = u.endpoints || [];
+      const addr = endpoints.map((e) => e.address).join(", ") || "-";
+      const endpointMarkup = endpoints.length
+        ? `<div class="endpoint-list">${endpoints.map((e) => `<code class="endpoint-chip">${esc(e.address)}</code>`).join("")}</div>`
+        : `<span class="muted">-</span>`;
       return `<tr data-upstream-row="${esc(u.upstream_profile_id)}">
         <td>${esc(u.name)}<br><span class="muted mono">${esc(u.upstream_profile_id)}</span></td>
         <td class="mono"><span class="badge info">#${esc(u.order || i + 1)}</span></td>
         <td class="mono">${esc(u.transport)}</td>
-        <td class="mono truncate" title="${esc(addr)}">${esc(addr)}</td>
+        <td class="mono endpoint-cell" title="${esc(addr)}">${endpointMarkup}</td>
         <td>${esc(u.strategy)}</td>
         <td>${u.enabled ? '<span class="badge ok">enabled</span>' : '<span class="badge warn">disabled</span>'}</td>
         <td class="field-row" data-no-sort>
@@ -1340,7 +1349,7 @@
         </td>
       </tr>`;
     }).join("");
-    return `<div class="table-wrap"><table data-grid data-grid-id="upstream-profiles"><thead><tr><th>Name</th><th>Order</th><th>Transport</th><th>Address</th><th>Strategy</th><th>Status</th><th data-no-sort>Actions</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    return `<div class="table-wrap"><table data-grid data-grid-id="upstream-profiles" data-grid-default-sort-column="1" data-grid-default-sort-direction="asc" data-grid-ignore-stored-sort="1"><thead><tr><th>Name</th><th>Display Order</th><th>Transport</th><th>Addresses</th><th>Strategy</th><th>Status</th><th data-no-sort>Actions</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
 
   function routeForm(upstreams) {
@@ -2652,7 +2661,8 @@
         const host = document.getElementById("upstreams-table-host");
         if (host && result.upstreams) host.innerHTML = upstreamsTable(result.upstreams);
         else await loadPage("upstreams");
-        toast("Upstream order saved", "ok");
+        const moved = (result.upstreams || []).find((u) => u.upstream_profile_id === id);
+        toast(moved ? `${moved.name} moved to display position ${moved.order}.` : "Upstream order saved", "ok");
         return;
       }
     });
