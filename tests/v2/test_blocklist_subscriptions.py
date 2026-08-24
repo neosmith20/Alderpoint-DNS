@@ -344,13 +344,30 @@ class TestBlocklistApiRoutes:
 
             refreshed = client.post("/api/blocklists/http-sub/refresh", headers=headers)
             assert refreshed.status_code == 200, refreshed.text
-            assert refreshed.json()["status"] == "succeeded"
-            assert refreshed.json()["runtime"]["promoted"] is True
+            assert refreshed.json()["status"] == "queued"
+            job_id = refreshed.json()["job_id"]
+            for _ in range(50):
+                job = client.get(f"/api/blocklists/jobs/{job_id}").json()
+                if job["status"] != "running":
+                    break
+                time.sleep(0.1)
+            assert job["status"] == "succeeded", job
+            assert job["runtime"]["promoted"] is True
+            assert job["results"]["http-sub"]["status"] == "succeeded"
         finally:
             server.shutdown()
 
-        listed = client.get("/api/blocklists").json()["subscriptions"]
+        payload = client.get("/api/blocklists").json()
+        listed = payload["subscriptions"]
         assert listed[0]["rule_count"] == 1
+        assert listed[0]["last_success_at"]
+        assert listed[0]["next_update_at"]
+        assert listed[0]["effective_interval_seconds"] == 86400
+
+        interval = client.post("/api/blocklists/http-sub/interval", json={"update_interval_seconds": 0}, headers=headers)
+        assert interval.status_code == 200
+        listed = client.get("/api/blocklists").json()["subscriptions"]
+        assert listed[0]["effective_interval_seconds"] == 0
 
         toggled = client.post("/api/blocklists/http-sub/toggle", headers=headers)
         assert toggled.status_code == 200

@@ -525,6 +525,56 @@ class TestApplianceBackupApiRoutes:
         assert client.get("/api/backup/appliance").status_code == 401
         assert client.post("/api/backup/appliance").status_code == 401
 
+    def test_uploaded_restore_archive_listing_and_delete_are_separate_from_backups(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        webapp_a = self._fresh_webapp(tmp_path / "a", monkeypatch)
+        client_a = TestClient(webapp_a.app)
+        client_a.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12", "create_local_dns": False})
+        login_a = client_a.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
+        csrf_a = login_a.json()["csrf"]
+        passphrase = "delete uploaded archive passphrase"
+        created = client_a.post("/api/backup/appliance", json={"passphrase": passphrase}, headers={"X-CSRF-Token": csrf_a})
+        backup_bytes = (tmp_path / "a" / "state" / "backups" / created.json()["name"]).read_bytes()
+
+        webapp_b = self._fresh_webapp(tmp_path / "b", monkeypatch)
+        client_b = TestClient(webapp_b.app)
+        client_b.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12", "create_local_dns": False})
+        login_b = client_b.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
+        csrf_b = login_b.json()["csrf"]
+
+        local_backup = client_b.post("/api/backup/appliance", headers={"X-CSRF-Token": csrf_b})
+        assert local_backup.status_code == 200
+        upload = client_b.post(
+            "/api/backup/appliance/upload",
+            json={"filename": "owner-v2.apdnsbak", "data_base64": base64.b64encode(backup_bytes).decode("ascii"), "passphrase": passphrase},
+            headers={"X-CSRF-Token": csrf_b},
+        )
+        assert upload.status_code == 200, upload.text
+
+        listed = client_b.get("/api/backup/appliance").json()
+        assert [b["name"] for b in listed["backups"]] == [local_backup.json()["name"]]
+        assert listed["safety_backups"] == []
+        assert len(listed["uploaded_archives"]) == 1
+        archive = listed["uploaded_archives"][0]
+        assert archive["original_filename"] == "owner-v2.apdnsbak"
+        assert archive["archive_id"] != archive["name"]
+        assert listed["uploaded_storage_bytes"] == archive["size_bytes"]
+
+        settings = client_b.post(
+            "/api/backup/appliance/upload-settings",
+            json={"retention_seconds": 0, "remove_after_successful_restore": True},
+            headers={"X-CSRF-Token": csrf_b},
+        )
+        assert settings.status_code == 200
+
+        deleted = client_b.delete(f"/api/backup/appliance/uploads/{archive['archive_id']}", headers={"X-CSRF-Token": csrf_b})
+        assert deleted.status_code == 200, deleted.text
+        after = client_b.get("/api/backup/appliance").json()
+        assert after["uploaded_archives"] == []
+        assert after["uploaded_storage_bytes"] == 0
+        assert [b["name"] for b in after["backups"]] == [local_backup.json()["name"]]
+
     def test_portable_backup_upload_preview_restore_over_http(self, tmp_path, monkeypatch):
         from fastapi.testclient import TestClient
 
@@ -638,8 +688,9 @@ class TestApplianceBackupApiRoutes:
         assert payload["source_version"] == "1.1.1"
         assert payload["migration_preview"]["included_components"]
 
-        listed = client.get("/api/backup/appliance").json()["backups"]
-        assert [b for b in listed if b["name"] == payload["backup_name"]]
+        listed = client.get("/api/backup/appliance").json()
+        assert [b for b in listed["uploaded_archives"] if b["name"] == payload["backup_name"]]
+        assert not [b for b in listed["backups"] if b["name"] == payload["backup_name"]]
 
     def test_restore_legacy_v111_tar_gz_migrates_into_v2_control_db(self, tmp_path, monkeypatch):
         from fastapi.testclient import TestClient

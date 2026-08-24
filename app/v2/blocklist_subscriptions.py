@@ -29,7 +29,9 @@ Safety:
 from __future__ import annotations
 
 import sqlite3
+import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from app import custom_rules as v1_custom_rules
@@ -49,6 +51,28 @@ class RefreshResult:
     ok: bool
     rule_count: int
     message: str
+    duration_ms: int = 0
+    checked_at: str = ""
+    next_update_at: str | None = None
+    next_retry_at: str | None = None
+    etag: str = ""
+    last_modified: str = ""
+
+
+@dataclass(frozen=True)
+class PreparedRefresh:
+    subscription_id: str
+    ok: bool
+    domains: list[tuple[str, str]]
+    warnings: list[str]
+    message: str
+    rule_count: int
+    duration_ms: int
+    checked_at: str
+    next_update_at: str | None
+    next_retry_at: str | None
+    etag: str = ""
+    last_modified: str = ""
 
 
 def _service_id_for(subscription_id: str) -> str:
@@ -116,16 +140,64 @@ def _is_transient_fetch_error(exc: Exception) -> bool:
     return False
 
 
-def _fetch_bytes(url: str) -> bytes:
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc).replace(microsecond=0)
+
+
+def _iso(stamp: datetime | None) -> str | None:
+    return stamp.isoformat() if stamp is not None else None
+
+
+def _effective_interval_seconds(sub: dict, default_interval_seconds: int = 86400) -> int:
+    override = sub.get("update_interval_seconds")
+    if override is not None:
+        return max(0, int(override))
+    return max(0, int(default_interval_seconds))
+
+
+def _next_success_time(sub: dict, checked: datetime, default_interval_seconds: int = 86400) -> str | None:
+    seconds = _effective_interval_seconds(sub, default_interval_seconds)
+    if seconds <= 0:
+        return None
+    import random
+
+    jitter = random.randint(0, min(900, max(0, seconds // 10)))
+    return _iso(checked + timedelta(seconds=seconds + jitter))
+
+
+def _next_retry_time(sub: dict, checked: datetime) -> str:
+    failures = int(sub.get("failure_count") or 0) + 1
+    delay = min(3600, 60 * (2 ** min(failures - 1, 6)))
+    return _iso(checked + timedelta(seconds=delay)) or checked.isoformat()
+
+
+def _fetch_bytes(url: str, *, etag: str = "", last_modified: str = "") -> tuple[bytes | None, str, str]:
+    import urllib.error
     import urllib.request
 
     opener = urllib.request.build_opener(v1_importer._HttpOnlyRedirectHandler())
-    request = urllib.request.Request(url, headers={"User-Agent": "AlderpointDNS-V2-BlocklistRefresh/1"})
-    with opener.open(request, timeout=15) as response:
-        return response.read(v1_importer.MAX_API_RESPONSE_BYTES + 1)
+    headers = {"User-Agent": "AlderpointDNS-V2-BlocklistRefresh/1"}
+    if etag:
+        headers["If-None-Match"] = etag
+    if last_modified:
+        headers["If-Modified-Since"] = last_modified
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with opener.open(request, timeout=15) as response:
+            body = response.read(v1_importer.MAX_API_RESPONSE_BYTES + 1)
+            return body, response.headers.get("ETag", "") or etag, response.headers.get("Last-Modified", "") or last_modified
+    except urllib.error.HTTPError as exc:
+        if exc.code == 304:
+            return None, etag, last_modified
+        raise
 
 
 def fetch_and_parse(url: str) -> tuple[list[tuple[str, str]], list[str]]:
+    domains, warnings, _etag, _last_modified, _not_modified = fetch_and_parse_with_metadata(url)
+    return domains, warnings
+
+
+def fetch_and_parse_with_metadata(url: str, *, etag: str = "", last_modified: str = "") -> tuple[list[tuple[str, str]], list[str], str, str, bool]:
     """Real HTTP GET (reusing app.importer's own audited fetch safety:
     http(s)-only redirects, size cap) -- raises BlocklistSubscriptionError
     on any fetch/parse failure, never returns a partial/ambiguous result.
@@ -154,7 +226,7 @@ def fetch_and_parse(url: str) -> tuple[list[tuple[str, str]], list[str]]:
     last_exc: Exception | None = None
     for attempt in range(1, max_attempts + 1):
         try:
-            body = _fetch_bytes(sanitized)
+            body, response_etag, response_last_modified = _fetch_bytes(sanitized, etag=etag, last_modified=last_modified)
             last_exc = None
             break
         except Exception as exc:  # noqa: BLE001 -- classified below, always re-raised or retried
@@ -165,6 +237,8 @@ def fetch_and_parse(url: str) -> tuple[list[tuple[str, str]], list[str]]:
             raise BlocklistSubscriptionError(f"fetch failed: {exc}") from exc
     if last_exc is not None:  # pragma: no cover -- defensive, unreachable (loop always breaks or raises)
         raise BlocklistSubscriptionError(f"fetch failed: {last_exc}") from last_exc
+    if body is None:
+        return [], [], etag, last_modified, True
     if len(body) > v1_importer.MAX_API_RESPONSE_BYTES:
         raise BlocklistSubscriptionError(f"response exceeds {v1_importer.MAX_API_RESPONSE_BYTES // (1024 * 1024)} MiB limit")
     try:
@@ -175,25 +249,11 @@ def fetch_and_parse(url: str) -> tuple[list[tuple[str, str]], list[str]]:
     domains, warnings = _parse_domains(text)
     if not domains:
         raise BlocklistSubscriptionError("no valid domains found in the fetched content")
-    return domains, warnings
+    return domains, warnings, response_etag, response_last_modified, False
 
 
-def refresh_subscription(conn: sqlite3.Connection, subscription_id: str) -> RefreshResult:
-    """Fetches, parses, and -- only if that succeeds -- replaces this
-    subscription's own service content. A failure never touches the
-    subscription's previously-compiled service, and is recorded on the
-    subscription row for the operator to see."""
-    sub = store.get_blocklist_subscription(conn, subscription_id)
-    if sub is None:
-        raise BlocklistSubscriptionError(f"unknown subscription: {subscription_id!r}")
-
-    try:
-        domains, warnings = fetch_and_parse(sub["url"])
-    except BlocklistSubscriptionError as exc:
-        store.record_blocklist_refresh_result(conn, subscription_id, "failed", str(exc))
-        return RefreshResult(ok=False, rule_count=sub["rule_count"], message=str(exc))
-
-    service_id = _service_id_for(subscription_id)
+def _apply_domains(conn: sqlite3.Connection, sub: dict, domains: list[tuple[str, str]]) -> None:
+    service_id = _service_id_for(sub["subscription_id"])
     conn.execute(
         "DELETE FROM service_domains WHERE service_row_id IN (SELECT id FROM service_definitions WHERE service_id = ?)",
         (service_id,),
@@ -211,9 +271,72 @@ def refresh_subscription(conn: sqlite3.Connection, subscription_id: str) -> Refr
         from dataclasses import replace as _dc_replace
         store.save_policy_layer(conn, "global", "singleton", _dc_replace(global_layer, service_blocking_ruleset_id=SUBSCRIPTION_RULESET_ID))
 
+
+def prepare_refresh(sub: dict, *, default_interval_seconds: int = 86400) -> PreparedRefresh:
+    checked_dt = _utc_now()
+    checked = checked_dt.isoformat()
+    started = time.perf_counter()
+    try:
+        domains, warnings, etag, last_modified, not_modified = fetch_and_parse_with_metadata(
+            sub["url"], etag=sub.get("etag") or "", last_modified=sub.get("last_modified") or "",
+        )
+    except BlocklistSubscriptionError as exc:
+        duration = int((time.perf_counter() - started) * 1000)
+        return PreparedRefresh(
+            subscription_id=sub["subscription_id"], ok=False, domains=[], warnings=[],
+            message=str(exc), rule_count=int(sub.get("rule_count") or 0), duration_ms=duration,
+            checked_at=checked, next_update_at=sub.get("next_update_at"),
+            next_retry_at=_next_retry_time(sub, checked_dt),
+            etag=sub.get("etag") or "", last_modified=sub.get("last_modified") or "",
+        )
+    duration = int((time.perf_counter() - started) * 1000)
+    if not_modified:
+        return PreparedRefresh(
+            subscription_id=sub["subscription_id"], ok=True, domains=[], warnings=[],
+            message="not modified; previous list retained", rule_count=int(sub.get("rule_count") or 0),
+            duration_ms=duration, checked_at=checked, next_update_at=_next_success_time(sub, checked_dt, default_interval_seconds),
+            next_retry_at=None, etag=etag, last_modified=last_modified,
+        )
     message = f"refreshed: {len(domains)} domains" + (f" ({len(warnings)} warning(s))" if warnings else "")
-    store.record_blocklist_refresh_result(conn, subscription_id, "succeeded", "; ".join(warnings), len(domains))
-    return RefreshResult(ok=True, rule_count=len(domains), message=message)
+    return PreparedRefresh(
+        subscription_id=sub["subscription_id"], ok=True, domains=domains, warnings=warnings,
+        message=message, rule_count=len(domains), duration_ms=duration, checked_at=checked,
+        next_update_at=_next_success_time(sub, checked_dt, default_interval_seconds),
+        next_retry_at=None, etag=etag, last_modified=last_modified,
+    )
+
+
+def apply_prepared_refresh(conn: sqlite3.Connection, prepared: PreparedRefresh) -> RefreshResult:
+    sub = store.get_blocklist_subscription(conn, prepared.subscription_id)
+    if sub is None:
+        raise BlocklistSubscriptionError(f"unknown subscription: {prepared.subscription_id!r}")
+    if prepared.ok and prepared.domains:
+        _apply_domains(conn, sub, prepared.domains)
+    store.record_blocklist_refresh_result(
+        conn, prepared.subscription_id, "succeeded" if prepared.ok else "failed",
+        "" if prepared.ok else prepared.message, prepared.rule_count,
+        checked_at=prepared.checked_at, duration_ms=prepared.duration_ms,
+        next_update_at=prepared.next_update_at, next_retry_at=prepared.next_retry_at,
+        etag=prepared.etag, last_modified=prepared.last_modified,
+    )
+    return RefreshResult(
+        ok=prepared.ok, rule_count=prepared.rule_count, message=prepared.message,
+        duration_ms=prepared.duration_ms, checked_at=prepared.checked_at,
+        next_update_at=prepared.next_update_at, next_retry_at=prepared.next_retry_at,
+        etag=prepared.etag, last_modified=prepared.last_modified,
+    )
+
+
+def refresh_subscription(conn: sqlite3.Connection, subscription_id: str) -> RefreshResult:
+    """Fetches, parses, and -- only if that succeeds -- replaces this
+    subscription's own service content. A failure never touches the
+    subscription's previously-compiled service, and is recorded on the
+    subscription row for the operator to see."""
+    sub = store.get_blocklist_subscription(conn, subscription_id)
+    if sub is None:
+        raise BlocklistSubscriptionError(f"unknown subscription: {subscription_id!r}")
+
+    return apply_prepared_refresh(conn, prepare_refresh(sub))
 
 
 def remove_subscription_service(conn: sqlite3.Connection, subscription_id: str) -> None:

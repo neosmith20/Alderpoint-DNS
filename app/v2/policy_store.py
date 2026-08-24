@@ -1263,10 +1263,36 @@ def ensure_blocklist_subscription_schema(conn: sqlite3.Connection) -> None:
             last_refresh_at TEXT,
             last_status TEXT NOT NULL DEFAULT 'never_refreshed',
             last_error TEXT NOT NULL DEFAULT '',
-            rule_count INTEGER NOT NULL DEFAULT 0
+            rule_count INTEGER NOT NULL DEFAULT 0,
+            last_checked_at TEXT,
+            last_success_at TEXT,
+            next_update_at TEXT,
+            update_duration_ms INTEGER NOT NULL DEFAULT 0,
+            update_interval_seconds INTEGER,
+            etag TEXT NOT NULL DEFAULT '',
+            last_modified TEXT NOT NULL DEFAULT '',
+            failure_count INTEGER NOT NULL DEFAULT 0,
+            next_retry_at TEXT,
+            update_in_progress INTEGER NOT NULL DEFAULT 0
         )
         """
     )
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(blocklist_subscriptions)").fetchall()}
+    additions = {
+        "last_checked_at": "TEXT",
+        "last_success_at": "TEXT",
+        "next_update_at": "TEXT",
+        "update_duration_ms": "INTEGER NOT NULL DEFAULT 0",
+        "update_interval_seconds": "INTEGER",
+        "etag": "TEXT NOT NULL DEFAULT ''",
+        "last_modified": "TEXT NOT NULL DEFAULT ''",
+        "failure_count": "INTEGER NOT NULL DEFAULT 0",
+        "next_retry_at": "TEXT",
+        "update_in_progress": "INTEGER NOT NULL DEFAULT 0",
+    }
+    for column, ddl in additions.items():
+        if column not in existing:
+            conn.execute(f"ALTER TABLE blocklist_subscriptions ADD COLUMN {column} {ddl}")
 
 
 def create_blocklist_subscription(conn: sqlite3.Connection, subscription_id: str, name: str, url: str, category: str = "") -> None:
@@ -1282,22 +1308,36 @@ def create_blocklist_subscription(conn: sqlite3.Connection, subscription_id: str
 
 def list_blocklist_subscriptions(conn: sqlite3.Connection) -> list[dict]:
     ensure_blocklist_subscription_schema(conn)
-    cols = ["id", "subscription_id", "name", "url", "category", "enabled", "created_at", "last_refresh_at", "last_status", "last_error", "rule_count"]
+    cols = [
+        "id", "subscription_id", "name", "url", "category", "enabled", "created_at",
+        "last_refresh_at", "last_status", "last_error", "rule_count",
+        "last_checked_at", "last_success_at", "next_update_at", "update_duration_ms",
+        "update_interval_seconds", "etag", "last_modified", "failure_count",
+        "next_retry_at", "update_in_progress",
+    ]
     rows = conn.execute(f"SELECT {', '.join(cols)} FROM blocklist_subscriptions ORDER BY subscription_id").fetchall()
     out = [dict(zip(cols, row)) for row in rows]
     for row in out:
         row["enabled"] = bool(row["enabled"])
+        row["update_in_progress"] = bool(row["update_in_progress"])
     return out
 
 
 def get_blocklist_subscription(conn: sqlite3.Connection, subscription_id: str) -> dict | None:
     ensure_blocklist_subscription_schema(conn)
-    cols = ["id", "subscription_id", "name", "url", "category", "enabled", "created_at", "last_refresh_at", "last_status", "last_error", "rule_count"]
+    cols = [
+        "id", "subscription_id", "name", "url", "category", "enabled", "created_at",
+        "last_refresh_at", "last_status", "last_error", "rule_count",
+        "last_checked_at", "last_success_at", "next_update_at", "update_duration_ms",
+        "update_interval_seconds", "etag", "last_modified", "failure_count",
+        "next_retry_at", "update_in_progress",
+    ]
     row = conn.execute(f"SELECT {', '.join(cols)} FROM blocklist_subscriptions WHERE subscription_id = ?", (subscription_id,)).fetchone()
     if row is None:
         return None
     result = dict(zip(cols, row))
     result["enabled"] = bool(result["enabled"])
+    result["update_in_progress"] = bool(result["update_in_progress"])
     return result
 
 
@@ -1313,15 +1353,79 @@ def delete_blocklist_subscription(conn: sqlite3.Connection, subscription_id: str
 
 def record_blocklist_refresh_result(
     conn: sqlite3.Connection, subscription_id: str, status: str, error: str = "", rule_count: int | None = None,
+    *, checked_at: str | None = None, duration_ms: int | None = None,
+    next_update_at: str | None = None, next_retry_at: str | None = None,
+    etag: str | None = None, last_modified: str | None = None,
 ) -> None:
     ensure_blocklist_subscription_schema(conn)
-    if rule_count is None:
-        conn.execute(
-            "UPDATE blocklist_subscriptions SET last_refresh_at = ?, last_status = ?, last_error = ? WHERE subscription_id = ?",
-            (_now(), status, error, subscription_id),
+    checked = checked_at or _now()
+    existing = get_blocklist_subscription(conn, subscription_id) or {}
+    failure_count = 0 if status == "succeeded" else int(existing.get("failure_count") or 0) + 1
+    success_at = checked if status == "succeeded" else existing.get("last_success_at")
+    count = int(rule_count) if rule_count is not None else int(existing.get("rule_count") or 0)
+    values = {
+        "last_refresh_at": checked,
+        "last_checked_at": checked,
+        "last_success_at": success_at,
+        "last_status": status,
+        "last_error": error,
+        "rule_count": count,
+        "update_duration_ms": int(duration_ms or 0),
+        "next_update_at": next_update_at,
+        "next_retry_at": next_retry_at,
+        "etag": etag if etag is not None else existing.get("etag", ""),
+        "last_modified": last_modified if last_modified is not None else existing.get("last_modified", ""),
+        "failure_count": failure_count,
+        "update_in_progress": 0,
+    }
+    conn.execute(
+        """
+        UPDATE blocklist_subscriptions
+        SET last_refresh_at=:last_refresh_at, last_checked_at=:last_checked_at,
+            last_success_at=:last_success_at, last_status=:last_status,
+            last_error=:last_error, rule_count=:rule_count,
+            update_duration_ms=:update_duration_ms, next_update_at=:next_update_at,
+            next_retry_at=:next_retry_at, etag=:etag, last_modified=:last_modified,
+            failure_count=:failure_count, update_in_progress=:update_in_progress
+        WHERE subscription_id=:subscription_id
+        """,
+        {**values, "subscription_id": subscription_id},
+    )
+
+
+def set_blocklist_update_interval(conn: sqlite3.Connection, subscription_id: str, seconds: int | None) -> None:
+    ensure_blocklist_subscription_schema(conn)
+    conn.execute("UPDATE blocklist_subscriptions SET update_interval_seconds = ? WHERE subscription_id = ?", (seconds, subscription_id))
+
+
+def set_blocklist_next_update(conn: sqlite3.Connection, subscription_id: str, next_update_at: str | None) -> None:
+    ensure_blocklist_subscription_schema(conn)
+    conn.execute("UPDATE blocklist_subscriptions SET next_update_at = ? WHERE subscription_id = ?", (next_update_at, subscription_id))
+
+
+def set_blocklist_update_in_progress(conn: sqlite3.Connection, subscription_id: str, in_progress: bool) -> None:
+    ensure_blocklist_subscription_schema(conn)
+    conn.execute("UPDATE blocklist_subscriptions SET update_in_progress = ? WHERE subscription_id = ?", (int(in_progress), subscription_id))
+
+
+def blocklist_settings(conn: sqlite3.Connection) -> dict[str, str]:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS blocklist_update_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
         )
-    else:
-        conn.execute(
-            "UPDATE blocklist_subscriptions SET last_refresh_at = ?, last_status = ?, last_error = ?, rule_count = ? WHERE subscription_id = ?",
-            (_now(), status, error, rule_count, subscription_id),
-        )
+        """
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO blocklist_update_settings(key, value) VALUES ('default_interval_seconds', '86400')"
+    )
+    return {row[0]: row[1] for row in conn.execute("SELECT key, value FROM blocklist_update_settings")}
+
+
+def set_blocklist_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
+    blocklist_settings(conn)
+    conn.execute(
+        "INSERT INTO blocklist_update_settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, value),
+    )

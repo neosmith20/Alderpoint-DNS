@@ -25,6 +25,7 @@ scripts/v2/alderpointdns_v2_ctl.py already uses, for testing.
 from __future__ import annotations
 
 import hmac
+import hashlib
 import ipaddress
 import json
 import os
@@ -34,9 +35,10 @@ import sqlite3
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from contextvars import ContextVar
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -174,6 +176,24 @@ _session_touch_next_due: dict[str, float] = {}
 _extended_schemas_ready = False
 _extended_schemas_error = ""
 _extended_schemas_lock = threading.Lock()
+_active_uploaded_archives: set[str] = set()
+_active_uploaded_archives_lock = threading.Lock()
+_blocklist_jobs: dict[str, dict[str, Any]] = {}
+_blocklist_jobs_lock = threading.Lock()
+_blocklist_running: set[str] = set()
+_blocklist_running_lock = threading.Lock()
+
+UPLOAD_RETENTION_DEFAULT_SECONDS = 24 * 3600
+BLOCKLIST_INTERVAL_PRESETS: tuple[tuple[int, str], ...] = (
+    (0, "Manual Only"),
+    (3600, "1 hour"),
+    (21600, "6 hours"),
+    (43200, "12 hours"),
+    (86400, "1 day"),
+    (259200, "3 days"),
+    (604800, "1 week"),
+)
+BLOCKLIST_UPDATE_CONCURRENCY = 3
 
 
 def _add_timing(name: str, duration_ms: float) -> None:
@@ -2656,6 +2676,137 @@ def _appliance_backup_path_from_name(name: str) -> Path:
     return path
 
 
+def _uploaded_archive_id(name: str) -> str:
+    secret = _serializer_instance().secret_key
+    digest = hmac.new(str(secret).encode("utf-8"), name.encode("utf-8"), hashlib.sha256).hexdigest()
+    return digest[:32]
+
+
+def _uploaded_archive_name_from_id(archive_id: str) -> str:
+    if not re.fullmatch(r"[a-f0-9]{32}", archive_id or ""):
+        raise ApiError(400, "validation_error", "invalid archive id")
+    for path in _uploaded_archive_paths():
+        if _uploaded_archive_id(path.name) == archive_id:
+            return path.name
+    raise ApiError(404, "not_found", "uploaded archive not found")
+
+
+def _uploaded_archive_paths() -> list[Path]:
+    return [
+        p for p in _backup_dir().iterdir()
+        if p.is_file() and p.name.startswith("uploaded-") and (p.name.endswith(".apdnsbak") or p.name.endswith(".tar.gz"))
+    ] if _backup_dir().exists() else []
+
+
+def _upload_settings(conn: sqlite3.Connection) -> dict[str, Any]:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS uploaded_archive_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
+    defaults = {
+        "retention_seconds": str(UPLOAD_RETENTION_DEFAULT_SECONDS),
+        "remove_after_successful_restore": "0",
+    }
+    conn.executemany("INSERT OR IGNORE INTO uploaded_archive_settings(key, value) VALUES (?, ?)", defaults.items())
+    rows = {r[0]: r[1] for r in conn.execute("SELECT key, value FROM uploaded_archive_settings")}
+    retention = int(rows.get("retention_seconds") or UPLOAD_RETENTION_DEFAULT_SECONDS)
+    return {
+        "retention_seconds": retention,
+        "retention_label": "Manual Only" if retention <= 0 else f"{retention // 3600} hour(s)",
+        "remove_after_successful_restore": rows.get("remove_after_successful_restore") == "1",
+    }
+
+
+def _set_upload_settings(conn: sqlite3.Connection, retention_seconds: int, remove_after_successful_restore: bool) -> None:
+    allowed = {0, 3600, 6 * 3600, 24 * 3600, 7 * 24 * 3600}
+    if retention_seconds not in allowed:
+        raise ApiError(400, "validation_error", "uploaded archive retention must be Manual Only, 1 hour, 6 hours, 24 hours, or 7 days")
+    _upload_settings(conn)
+    conn.execute(
+        "INSERT INTO uploaded_archive_settings(key, value) VALUES ('retention_seconds', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (str(retention_seconds),),
+    )
+    conn.execute(
+        "INSERT INTO uploaded_archive_settings(key, value) VALUES ('remove_after_successful_restore', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        ("1" if remove_after_successful_restore else "0",),
+    )
+
+
+def _backup_original_filename(name: str) -> str:
+    match = re.match(r"uploaded-\d+(?:-\d+)?-(.+)$", name)
+    return match.group(1) if match else name
+
+
+def _archive_restore_status(path: Path) -> str:
+    try:
+        with _db() as conn:
+            row = conn.execute(
+                "SELECT status FROM restore_jobs WHERE backup_path = ? ORDER BY id DESC LIMIT 1",
+                (str(path),),
+            ).fetchone()
+            return row[0] if row else "not restored"
+    except Exception:
+        return "unknown"
+
+
+def _uploaded_archive_row(path: Path) -> dict[str, Any]:
+    stat = path.stat()
+    status = "valid"
+    detected_format = "unknown"
+    source_version = "unknown"
+    try:
+        manifest = _validate_appliance_backup_any(path)
+        detected_format = manifest.backup_format
+        source_version = manifest.source_version
+    except Exception as exc:  # noqa: BLE001 -- status only; validation endpoint reports detail
+        status = f"invalid: {exc}"
+    return {
+        "archive_id": _uploaded_archive_id(path.name),
+        "name": path.name,
+        "original_filename": _backup_original_filename(path.name),
+        "detected_format": detected_format,
+        "source_version": source_version,
+        "uploaded_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+        "size_bytes": stat.st_size,
+        "validation_status": status,
+        "restore_status": _archive_restore_status(path),
+    }
+
+
+def _cleanup_uploaded_archives(retention_seconds: int) -> dict[str, Any]:
+    failures: list[str] = []
+    removed = 0
+    if retention_seconds > 0:
+        cutoff = time.time() - retention_seconds
+        for path in _uploaded_archive_paths():
+            if path.stat().st_mtime >= cutoff:
+                continue
+            with _active_uploaded_archives_lock:
+                if path.name in _active_uploaded_archives:
+                    continue
+            try:
+                path.unlink()
+                removed += 1
+            except OSError as exc:
+                failures.append(f"{path.name}: {exc}")
+    for root in (STAGING_DIR / "backup-imports", STATE_DIR / "restore-staging"):
+        if not root.exists():
+            continue
+        for child in root.iterdir():
+            try:
+                if child.is_dir() and child.stat().st_mtime < time.time() - 3600:
+                    shutil.rmtree(child)
+                elif child.is_file() and child.stat().st_mtime < time.time() - 3600:
+                    child.unlink()
+            except OSError as exc:
+                failures.append(f"{child.name}: {exc}")
+    return {"removed": removed, "failures": failures}
+
+
 def _appliance_cert_files() -> list[backup_restore.CertFile]:
     return [
         backup_restore.CertFile(ACTIVE_CERT_PATH, "server.crt"),
@@ -2731,16 +2882,36 @@ class ApplianceBackupUploadRequest(BaseModel):
     passphrase: Optional[str] = None
 
 
+class UploadedArchiveSettingsRequest(BaseModel):
+    retention_seconds: int = UPLOAD_RETENTION_DEFAULT_SECONDS
+    remove_after_successful_restore: bool = False
+
+
 @app.get("/api/backup/appliance")
 def list_appliance_backups(admin=Depends(current_admin)):
     rows = []
-    backup_files = list(_backup_dir().glob("*.apdnsbak")) + list(_backup_dir().glob("*.tar.gz"))
+    with _db() as conn:
+        upload_settings = _upload_settings(conn)
+    cleanup = _cleanup_uploaded_archives(int(upload_settings["retention_seconds"]))
+    backup_files = [
+        p for p in _backup_dir().glob("*.apdnsbak")
+        if not p.name.startswith("uploaded-") and not p.name.startswith("pre-restore-safety-")
+    ]
     for p in sorted(backup_files, key=lambda x: x.stat().st_mtime, reverse=True):
         stat = p.stat()
         rows.append({
             "name": p.name, "size_bytes": stat.st_size,
             "created_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
         })
+    safety_rows = []
+    for p in sorted(_backup_dir().glob("pre-restore-safety-*.apdnsbak"), key=lambda x: x.stat().st_mtime, reverse=True):
+        stat = p.stat()
+        safety_rows.append({
+            "name": p.name, "size_bytes": stat.st_size,
+            "created_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+        })
+    uploaded = [_uploaded_archive_row(p) for p in sorted(_uploaded_archive_paths(), key=lambda x: x.stat().st_mtime, reverse=True)]
+    uploaded_storage = sum(int(row["size_bytes"]) for row in uploaded)
     with _db() as conn:
         jobs = conn.execute(
             "SELECT id, started_at, finished_at, status, backup_path, detail_json "
@@ -2748,6 +2919,11 @@ def list_appliance_backups(admin=Depends(current_admin)):
         ).fetchall()
     return {
         "backups": rows,
+        "uploaded_archives": uploaded,
+        "safety_backups": safety_rows,
+        "uploaded_storage_bytes": uploaded_storage,
+        "uploaded_archive_settings": upload_settings,
+        "cleanup": cleanup,
         "restore_jobs": [
             {
                 "id": r[0], "started_at": r[1], "finished_at": r[2], "status": r[3],
@@ -2756,6 +2932,14 @@ def list_appliance_backups(admin=Depends(current_admin)):
             for r in jobs
         ],
     }
+
+
+@app.post("/api/backup/appliance/upload-settings")
+def update_uploaded_archive_settings_route(req: UploadedArchiveSettingsRequest, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    with _db() as conn:
+        _set_upload_settings(conn, req.retention_seconds, req.remove_after_successful_restore)
+    return {"status": "updated"}
 
 
 @app.post("/api/backup/appliance")
@@ -2839,6 +3023,27 @@ def upload_appliance_backup_route(req: ApplianceBackupUploadRequest, admin=Depen
             pass
 
 
+@app.delete("/api/backup/appliance/uploads/{archive_id}")
+def delete_uploaded_archive_route(archive_id: str, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    name = _uploaded_archive_name_from_id(archive_id)
+    with _active_uploaded_archives_lock:
+        if name in _active_uploaded_archives:
+            raise ApiError(409, "conflict", "archive is currently being previewed or restored")
+        _active_uploaded_archives.add(name)
+    try:
+        path = _appliance_backup_path_from_name(name)
+        if not path.name.startswith("uploaded-"):
+            raise ApiError(400, "validation_error", "only uploaded restore archives can be deleted here")
+        size = path.stat().st_size
+        path.unlink()
+        _cleanup_uploaded_archives(0)
+        return {"status": "deleted", "archive_id": archive_id, "filename": _backup_original_filename(name), "size_bytes": size}
+    finally:
+        with _active_uploaded_archives_lock:
+            _active_uploaded_archives.discard(name)
+
+
 class ApplianceBackupValidateRequest(BaseModel):
     passphrase: Optional[str] = None
 
@@ -2849,11 +3054,17 @@ def validate_appliance_backup_route(name: str, req: ApplianceBackupValidateReque
     path = _appliance_backup_path_from_name(name)
     if not path.exists():
         raise ApiError(404, "not_found", "backup not found")
+    with _active_uploaded_archives_lock:
+        if name.startswith("uploaded-"):
+            _active_uploaded_archives.add(name)
     try:
         manifest = _validate_appliance_backup_any(path, passphrase=req.passphrase or None)
+        return _appliance_manifest_response(name, path, manifest, passphrase=req.passphrase or None)
     except (backup_selective.SelectiveRestoreError, backup_restore.ApplianceBackupError, backup_restore.ApplianceRestoreError) as exc:
         raise ApiError(400, "backup_invalid", str(exc)) from exc
-    return _appliance_manifest_response(name, path, manifest, passphrase=req.passphrase or None)
+    finally:
+        with _active_uploaded_archives_lock:
+            _active_uploaded_archives.discard(name)
 
 
 class ApplianceRestoreRequest(BaseModel):
@@ -2873,6 +3084,11 @@ def restore_appliance_backup_route(name: str, req: ApplianceRestoreRequest, admi
     path = _appliance_backup_path_from_name(name)
     if not path.exists():
         raise ApiError(404, "not_found", "backup not found")
+    with _active_uploaded_archives_lock:
+        if name.startswith("uploaded-"):
+            if name in _active_uploaded_archives:
+                raise ApiError(409, "conflict", "archive is currently being previewed or restored")
+            _active_uploaded_archives.add(name)
 
     # Real defect fixed here (found while proving this out): restore_jobs
     # bookkeeping lives in control.db, which a *successful* restore
@@ -2893,6 +3109,8 @@ def restore_appliance_backup_route(name: str, req: ApplianceRestoreRequest, admi
                 "INSERT INTO restore_jobs(started_at, finished_at, status, backup_path, detail_json) VALUES (?, ?, ?, ?, ?)",
                 (started, finished, "failed", str(path), json.dumps({"error": str(exc)})),
             )
+        with _active_uploaded_archives_lock:
+            _active_uploaded_archives.discard(name)
         raise ApiError(400, error_kind, str(exc)) from exc
 
     key = _backup_key(_secrets())
@@ -2903,8 +3121,12 @@ def restore_appliance_backup_route(name: str, req: ApplianceRestoreRequest, admi
     if req.selected_categories:
         sensitive = {"administrator_accounts", "tls_private_keys"} & set(req.selected_categories)
         if sensitive and not req.acknowledge_sensitive:
+            with _active_uploaded_archives_lock:
+                _active_uploaded_archives.discard(name)
             raise ApiError(400, "confirmation_required", f"explicit acknowledgement required for sensitive category/categories: {', '.join(sorted(sensitive))}")
         if not req.archive_digest:
+            with _active_uploaded_archives_lock:
+                _active_uploaded_archives.discard(name)
             raise ApiError(400, "validation_error", "archive_digest from the restore preview is required")
         try:
             selected = backup_selective.stage_selected_restore(
@@ -2976,7 +3198,15 @@ def restore_appliance_backup_route(name: str, req: ApplianceRestoreRequest, admi
                 (started, finished, "succeeded", str(path), json.dumps(detail)),
             )
             job_id = cur.lastrowid
+            upload_settings = _upload_settings(conn)
         shutil.rmtree(rollback_root, ignore_errors=True)
+        if name.startswith("uploaded-") and upload_settings.get("remove_after_successful_restore"):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                detail["cleanup_error"] = "uploaded archive could not be removed after restore"
+        with _active_uploaded_archives_lock:
+            _active_uploaded_archives.discard(name)
         return {"status": "succeeded", "job_id": job_id, "backup_name": name, **detail}
 
     if path.name.endswith(".tar.gz"):
@@ -3040,6 +3270,14 @@ def restore_appliance_backup_route(name: str, req: ApplianceRestoreRequest, admi
                 (started, finished, "succeeded", str(path), json.dumps(detail)),
             )
             job_id = cur.lastrowid
+            upload_settings = _upload_settings(conn)
+        if name.startswith("uploaded-") and upload_settings.get("remove_after_successful_restore"):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                detail["cleanup_error"] = "uploaded archive could not be removed after restore"
+        with _active_uploaded_archives_lock:
+            _active_uploaded_archives.discard(name)
         return {"status": "succeeded", "job_id": job_id, "backup_name": name, **detail}
 
     try:
@@ -3105,7 +3343,15 @@ def restore_appliance_backup_route(name: str, req: ApplianceRestoreRequest, admi
             (started, finished, "succeeded", str(path), json.dumps(detail)),
         )
         job_id = cur.lastrowid
+        upload_settings = _upload_settings(conn)
+    if name.startswith("uploaded-") and upload_settings.get("remove_after_successful_restore"):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            detail["cleanup_error"] = "uploaded archive could not be removed after restore"
     shutil.rmtree(rollback_root, ignore_errors=True)
+    with _active_uploaded_archives_lock:
+        _active_uploaded_archives.discard(name)
     return {"status": "succeeded", "job_id": job_id, "backup_name": name, **detail}
 
 
@@ -3284,10 +3530,153 @@ class BlocklistSubscriptionCreate(BaseModel):
     subscription_id: str = Field(default="", max_length=64)
 
 
+class BlocklistSettingsRequest(BaseModel):
+    default_interval_seconds: int = 86400
+
+
+class BlocklistIntervalRequest(BaseModel):
+    update_interval_seconds: Optional[int] = None
+
+
+def _validate_blocklist_interval(value: Optional[int]) -> Optional[int]:
+    if value is None:
+        return None
+    allowed = {seconds for seconds, _ in BLOCKLIST_INTERVAL_PRESETS}
+    if int(value) not in allowed:
+        raise ApiError(400, "validation_error", "update interval must be Manual Only, 1 hour, 6 hours, 12 hours, 1 day, 3 days, or 1 week")
+    return int(value)
+
+
+def _blocklist_default_interval(conn: sqlite3.Connection) -> int:
+    settings = store.blocklist_settings(conn)
+    try:
+        return _validate_blocklist_interval(int(settings.get("default_interval_seconds") or "86400")) or 0
+    except Exception:
+        return 86400
+
+
+def _blocklist_interval_label(seconds: Optional[int], default_seconds: int) -> str:
+    effective = default_seconds if seconds is None else int(seconds)
+    labels = dict(BLOCKLIST_INTERVAL_PRESETS)
+    return labels.get(effective, f"{effective // 3600} hour(s)")
+
+
+def _new_blocklist_job(kind: str, ids: list[str]) -> str:
+    job_id = uuid.uuid4().hex[:12]
+    now = datetime.now(timezone.utc).isoformat()
+    with _blocklist_jobs_lock:
+        _blocklist_jobs[job_id] = {
+            "job_id": job_id, "kind": kind, "subscription_ids": ids, "status": "running",
+            "started_at": now, "finished_at": None, "results": {}, "runtime": {}, "error": "",
+        }
+        for old_id, job in list(_blocklist_jobs.items()):
+            finished = job.get("finished_at")
+            if finished and len(_blocklist_jobs) > 50:
+                _blocklist_jobs.pop(old_id, None)
+    return job_id
+
+
+def _finish_blocklist_job(job_id: str, *, status: str, results: dict[str, Any], runtime: dict[str, Any] | None = None, error: str = "") -> None:
+    with _blocklist_jobs_lock:
+        job = _blocklist_jobs.get(job_id)
+        if not job:
+            return
+        job.update({
+            "status": status, "finished_at": datetime.now(timezone.utc).isoformat(),
+            "results": results, "runtime": runtime or {}, "error": error,
+        })
+
+
+def _run_blocklist_refresh_job(job_id: str, ids: list[str]) -> None:
+    acquired: list[str] = []
+    try:
+        with _blocklist_running_lock:
+            busy = [sid for sid in ids if sid in _blocklist_running]
+            if busy:
+                raise ApiError(409, "conflict", f"update already running for: {', '.join(busy)}")
+            _blocklist_running.update(ids)
+            acquired = list(ids)
+        with _db() as conn:
+            default_interval = _blocklist_default_interval(conn)
+            subs = [store.get_blocklist_subscription(conn, sid) for sid in ids]
+            missing = [sid for sid, sub in zip(ids, subs) if sub is None]
+            if missing:
+                raise ApiError(404, "not_found", f"unknown subscription(s): {', '.join(missing)}")
+            for sid in ids:
+                store.set_blocklist_update_in_progress(conn, sid, True)
+        prepared: dict[str, blocklist_subscriptions.PreparedRefresh] = {}
+        workers = min(BLOCKLIST_UPDATE_CONCURRENCY, max(1, len(subs)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(blocklist_subscriptions.prepare_refresh, sub, default_interval_seconds=default_interval): sub["subscription_id"] for sub in subs if sub}
+            for future in as_completed(futures):
+                sid = futures[future]
+                prepared[sid] = future.result()
+
+        holder: dict[str, blocklist_subscriptions.RefreshResult] = {}
+
+        def _mutate(conn):
+            for sid in ids:
+                prep = prepared[sid]
+                holder[sid] = blocklist_subscriptions.apply_prepared_refresh(conn, prep)
+
+        runtime = _mutate_and_promote(_mutate)
+        results = {
+            sid: {
+                "status": "succeeded" if result.ok else "failed",
+                "rule_count": result.rule_count,
+                "message": result.message,
+                "duration_ms": result.duration_ms,
+                "next_update_at": result.next_update_at,
+                "next_retry_at": result.next_retry_at,
+            }
+            for sid, result in holder.items()
+        }
+        succeeded = sum(1 for r in results.values() if r["status"] == "succeeded")
+        status = "succeeded" if succeeded == len(results) else "partial" if succeeded else "failed"
+        _finish_blocklist_job(job_id, status=status, results=results, runtime={"promoted": runtime.promoted})
+    except Exception as exc:  # noqa: BLE001 -- surfaced in job result
+        with _db() as conn:
+            for sid in acquired:
+                try:
+                    store.set_blocklist_update_in_progress(conn, sid, False)
+                except Exception:
+                    pass
+        _finish_blocklist_job(job_id, status="failed", results={}, error=str(exc))
+    finally:
+        with _blocklist_running_lock:
+            for sid in acquired:
+                _blocklist_running.discard(sid)
+
+
 @app.get("/api/blocklists")
 def list_blocklist_subscriptions_route(admin=Depends(current_admin)):
     with _db() as conn:
-        return {"subscriptions": store.list_blocklist_subscriptions(conn)}
+        settings = store.blocklist_settings(conn)
+        default_interval = _blocklist_default_interval(conn)
+        subs = store.list_blocklist_subscriptions(conn)
+    for sub in subs:
+        sub["effective_interval_seconds"] = default_interval if sub.get("update_interval_seconds") is None else sub.get("update_interval_seconds")
+        sub["effective_interval_label"] = _blocklist_interval_label(sub.get("update_interval_seconds"), default_interval)
+    with _blocklist_jobs_lock:
+        jobs = sorted(_blocklist_jobs.values(), key=lambda j: j.get("started_at") or "", reverse=True)[:20]
+    return {
+        "subscriptions": subs,
+        "settings": {
+            "default_interval_seconds": default_interval,
+            "interval_presets": [{"seconds": s, "label": label} for s, label in BLOCKLIST_INTERVAL_PRESETS],
+            **settings,
+        },
+        "jobs": jobs,
+    }
+
+
+@app.post("/api/blocklists/settings")
+def update_blocklist_settings_route(req: BlocklistSettingsRequest, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    value = _validate_blocklist_interval(req.default_interval_seconds)
+    with _db() as conn:
+        store.set_blocklist_setting(conn, "default_interval_seconds", str(value))
+    return {"status": "updated", "default_interval_seconds": value}
 
 
 @app.post("/api/blocklists")
@@ -3298,9 +3687,25 @@ def create_blocklist_subscription_route(req: BlocklistSubscriptionCreate, admin=
             store.ensure_blocklist_subscription_schema(conn)
             subscription_id = req.subscription_id.strip() or _unique_id(conn, "blocklist_subscriptions", "subscription_id", req.name)
             store.create_blocklist_subscription(conn, subscription_id, req.name, req.url, req.category)
+            default_interval = _blocklist_default_interval(conn)
+            if default_interval > 0:
+                jitter = min(900, max(0, default_interval // 10))
+                next_run = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=default_interval + (hash(subscription_id) % (jitter + 1) if jitter else 0))
+                store.set_blocklist_next_update(conn, subscription_id, next_run.isoformat())
     except PolicyStoreError as exc:
         raise ApiError(409, "conflict", str(exc)) from exc
     return {"status": "created"}
+
+
+@app.post("/api/blocklists/{subscription_id}/interval")
+def update_blocklist_interval_route(subscription_id: str, req: BlocklistIntervalRequest, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    value = _validate_blocklist_interval(req.update_interval_seconds)
+    with _db() as conn:
+        if store.get_blocklist_subscription(conn, subscription_id) is None:
+            raise ApiError(404, "not_found", "unknown subscription")
+        store.set_blocklist_update_interval(conn, subscription_id, value)
+    return {"status": "updated", "update_interval_seconds": value}
 
 
 @app.post("/api/blocklists/{subscription_id}/toggle")
@@ -3332,16 +3737,40 @@ def delete_blocklist_subscription_route(subscription_id: str, admin=Depends(curr
 @app.post("/api/blocklists/{subscription_id}/refresh")
 def refresh_blocklist_subscription_route(subscription_id: str, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
     check_csrf(admin, x_csrf_token)
-    holder: dict = {}
-
-    def _mutate(conn):
+    with _db() as conn:
         if store.get_blocklist_subscription(conn, subscription_id) is None:
             raise ApiError(404, "not_found", "unknown subscription")
-        holder["result"] = blocklist_subscriptions.refresh_subscription(conn, subscription_id)
+    with _blocklist_running_lock:
+        if subscription_id in _blocklist_running:
+            raise ApiError(409, "conflict", "update already running for this subscription")
+    job_id = _new_blocklist_job("single", [subscription_id])
+    threading.Thread(target=_run_blocklist_refresh_job, args=(job_id, [subscription_id]), daemon=True).start()
+    return {"status": "queued", "job_id": job_id}
 
-    result = _mutate_and_promote(_mutate)
-    r = holder["result"]
-    return {"status": "succeeded" if r.ok else "failed", "rule_count": r.rule_count, "message": r.message, "runtime": {"promoted": result.promoted}}
+
+@app.post("/api/blocklists/refresh-all")
+def refresh_all_blocklists_route(admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    with _db() as conn:
+        ids = [s["subscription_id"] for s in store.list_blocklist_subscriptions(conn) if s["enabled"]]
+    if not ids:
+        return {"status": "empty", "job_id": None, "message": "no enabled blocklists"}
+    with _blocklist_running_lock:
+        busy = [sid for sid in ids if sid in _blocklist_running]
+        if busy:
+            raise ApiError(409, "conflict", f"update already running for: {', '.join(busy)}")
+    job_id = _new_blocklist_job("all", ids)
+    threading.Thread(target=_run_blocklist_refresh_job, args=(job_id, ids), daemon=True).start()
+    return {"status": "queued", "job_id": job_id, "count": len(ids)}
+
+
+@app.get("/api/blocklists/jobs/{job_id}")
+def blocklist_job_route(job_id: str, admin=Depends(current_admin)):
+    with _blocklist_jobs_lock:
+        job = _blocklist_jobs.get(job_id)
+    if not job:
+        raise ApiError(404, "not_found", "blocklist update job not found")
+    return job
 
 
 # --- software updates (beta-rescue priority 4) ------------------------------

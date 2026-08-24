@@ -3,7 +3,7 @@ Description=Periodic Alderpoint DNS V2 subscribed Blocklist refresh
 
 [Timer]
 OnBootSec=15min
-OnUnitActiveSec=24h
+OnUnitActiveSec=1h
 Persistent=true
 
 [Install]

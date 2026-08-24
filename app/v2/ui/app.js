@@ -482,6 +482,16 @@
     return promise;
   }
 
+  async function waitBlocklistJob(jobId) {
+    if (!jobId) return null;
+    for (let i = 0; i < 60; i += 1) {
+      const job = await api(`/api/blocklists/jobs/${encodeURIComponent(jobId)}`);
+      if (job.status && job.status !== "running") return job;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(1000 + i * 100, 2500)));
+    }
+    return { status: "running", job_id: jobId, error: "update is still running" };
+  }
+
   function jsonForm(form) {
     const data = new FormData(form);
     const body = {};
@@ -1289,6 +1299,8 @@
           <div class="muted" data-upload-hint>Choose a native backup file or drop it here.</div>
         </form>
         ${applianceBackupTable(applianceBackups.backups || [])}
+        ${uploadedArchiveSection(applianceBackups)}
+        ${safetyBackupTable(applianceBackups.safety_backups || [])}
         ${restoreJobs(applianceBackups.restore_jobs || [])}
       </div></section>
       <div class="grid two">
@@ -1298,8 +1310,39 @@
   }
 
   function applianceBackupTable(backups) {
-    if (!backups.length) return `<div class="empty">No appliance backups.</div>`;
-    return `<div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>Name</th><th>Created</th><th>Size</th><th>Restore</th></tr></thead><tbody>${backups.map((b) => `<tr><td class="mono">${esc(b.name)}</td><td>${ts(b.created_at)}</td><td>${esc(b.size_bytes)}</td><td><button data-validate-appliance-backup="${esc(b.name)}">Preview</button><input name="passphrase" type="password" data-omit-empty="1" placeholder="passphrase if required"></td></tr><tr id="preview-${esc(b.name).replace(/[^A-Za-z0-9_-]/g, "-")}" class="restore-preview-row" hidden><td colspan="4"></td></tr>`).join("")}</tbody></table></div>`;
+    const body = backups.length ? `<div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>Name</th><th>Created</th><th>Size</th><th>Restore</th></tr></thead><tbody>${backups.map((b) => `<tr><td class="mono">${esc(b.name)}</td><td>${ts(b.created_at)}</td><td>${esc(b.size_bytes)}</td><td><button data-validate-appliance-backup="${esc(b.name)}">Preview</button><input name="passphrase" type="password" data-omit-empty="1" placeholder="passphrase if required"></td></tr><tr id="preview-${esc(b.name).replace(/[^A-Za-z0-9_-]/g, "-")}" class="restore-preview-row" hidden><td colspan="4"></td></tr>`).join("")}</tbody></table></div>` : `<div class="empty">No appliance-created backups.</div>`;
+    return `<section class="subpanel"><h3>Appliance-created Backups</h3>${body}</section>`;
+  }
+
+  function uploadedArchiveSection(data) {
+    const archives = data.uploaded_archives || [];
+    const settings = data.uploaded_archive_settings || {};
+    const cleanup = data.cleanup || {};
+    const rows = archives.map((a) => `<tr>
+      <td>${esc(a.original_filename)}<br><span class="muted mono">${esc(a.name)}</span></td>
+      <td>${esc(a.detected_format)}<br><span class="muted">${esc(a.source_version)}</span></td>
+      <td>${ts(a.uploaded_at)}</td>
+      <td>${esc(a.size_bytes)}</td>
+      <td><span class="badge ${a.validation_status === "valid" ? "ok" : "bad"}">${esc(a.validation_status)}</span></td>
+      <td>${esc(a.restore_status)}</td>
+      <td class="field-row"><button data-validate-appliance-backup="${esc(a.name)}">Preview</button><input name="passphrase" type="password" data-omit-empty="1" placeholder="passphrase if required"><button class="danger" data-delete-uploaded-archive="${esc(a.archive_id)}" data-filename="${esc(a.original_filename)}" data-size="${esc(a.size_bytes)}">Delete</button></td>
+    </tr><tr id="preview-${esc(a.name).replace(/[^A-Za-z0-9_-]/g, "-")}" class="restore-preview-row" hidden><td colspan="7"></td></tr>`).join("");
+    const failures = (cleanup.failures || []).length ? `<div class="alert error">${esc(cleanup.failures.join("; "))}</div>` : "";
+    return `<section class="subpanel"><h3>Uploaded Restore Archives</h3>
+      <div class="strip"><div><span>Total storage</span><strong>${esc(data.uploaded_storage_bytes || 0)} bytes</strong></div><div><span>Retention</span><strong>${esc(settings.retention_label || "")}</strong></div><div><span>Cleanup</span><strong>${esc(cleanup.removed || 0)} removed</strong></div></div>
+      ${failures}
+      <form data-form="uploaded-archive-settings" class="field-row">
+        <label>Retention <select name="retention_seconds"><option value="86400" ${settings.retention_seconds === 86400 ? "selected" : ""}>24 hours</option><option value="3600" ${settings.retention_seconds === 3600 ? "selected" : ""}>1 hour</option><option value="21600" ${settings.retention_seconds === 21600 ? "selected" : ""}>6 hours</option><option value="604800" ${settings.retention_seconds === 604800 ? "selected" : ""}>7 days</option><option value="0" ${settings.retention_seconds === 0 ? "selected" : ""}>Manual Only</option></select></label>
+        <label><input type="checkbox" name="remove_after_successful_restore" value="true" data-bool="1" ${settings.remove_after_successful_restore ? "checked" : ""}> Remove uploaded archive after successful restore</label>
+        <button>Save</button>
+      </form>
+      ${archives.length ? `<div class="table-wrap" style="margin-top:12px"><table data-grid data-grid-id="uploaded-restore-archives"><thead><tr><th>Original filename</th><th>Format / Version</th><th>Uploaded</th><th>Size</th><th>Validation</th><th>Restore status</th><th data-no-sort>Actions</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty">No uploaded restore archives.</div>`}
+    </section>`;
+  }
+
+  function safetyBackupTable(backups) {
+    if (!backups.length) return "";
+    return `<section class="subpanel"><h3>Pre-restore Safety Backups</h3><div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>Name</th><th>Created</th><th>Size</th></tr></thead><tbody>${backups.map((b) => `<tr><td class="mono">${esc(b.name)}</td><td>${ts(b.created_at)}</td><td>${esc(b.size_bytes)}</td></tr>`).join("")}</tbody></table></div></section>`;
   }
 
   function backupPreviewId(name) {
@@ -1489,24 +1532,49 @@
 
   async function blocklists() {
     const data = await api("/api/blocklists");
+    const presets = (data.settings && data.settings.interval_presets) || [];
     const rows = (data.subscriptions || []).map((s) => `
       <tr>
         <td>${esc(s.name)}<br><span class="muted mono">${esc(s.subscription_id)}</span></td>
         <td class="truncate" title="${esc(s.url)}">${esc(s.url)}</td>
         <td><span class="badge ${s.enabled ? "ok" : "inherit"}">${s.enabled ? "enabled" : "disabled"}</span></td>
-        <td><span class="badge ${tone(s.last_status)}">${esc(s.last_status)}</span>${s.last_error ? `<br><span class="muted">${esc(s.last_error)}</span>` : ""}</td>
         <td>${esc(s.rule_count)}</td>
-        <td>${ts(s.last_refresh_at, "never")}</td>
-        <td class="field-row">
-          <button data-blocklist-refresh="${esc(s.subscription_id)}">Refresh</button>
-          <button data-blocklist-toggle="${esc(s.subscription_id)}">${s.enabled ? "Disable" : "Enable"}</button>
-          <button data-blocklist-delete="${esc(s.subscription_id)}" class="danger">Delete</button>
+        <td>${ts(s.last_success_at || s.last_refresh_at, "never")}</td>
+        <td>${s.effective_interval_seconds ? ts(s.next_retry_at || s.next_update_at, "not scheduled") : "Manual Only"}</td>
+        <td>${esc(s.effective_interval_label || "")}</td>
+        <td><span class="badge ${s.update_in_progress ? "warn" : tone(s.last_status)}">${s.update_in_progress ? "updating" : esc(s.last_status)}</span>${s.last_error ? `<br><span class="muted">${esc(s.last_error)}</span>` : ""}${s.update_duration_ms ? `<br><span class="muted">${esc(s.update_duration_ms)} ms</span>` : ""}</td>
+        <td data-no-sort>
+          <div class="row-actions">
+            <button type="button" class="row-actions__trigger" data-row-menu-toggle aria-haspopup="true" aria-expanded="false" aria-label="Actions for ${esc(s.name)}">&ctdot;</button>
+            <div class="row-actions__menu" hidden role="menu">
+              <button type="button" role="menuitem" data-blocklist-edit="${esc(s.subscription_id)}">Edit interval</button>
+              <button type="button" role="menuitem" data-blocklist-refresh="${esc(s.subscription_id)}">Update Now</button>
+              <button type="button" role="menuitem" data-blocklist-toggle="${esc(s.subscription_id)}">${s.enabled ? "Disable" : "Enable"}</button>
+              <div class="overflow-menu__divider" role="separator"></div>
+              <button type="button" role="menuitem" data-blocklist-delete="${esc(s.subscription_id)}" class="danger">Delete</button>
+            </div>
+          </div>
         </td>
+      </tr>
+      <tr class="row-edit" id="blocklist-interval-${esc(s.subscription_id).replace(/[^A-Za-z0-9_-]/g, "-")}" hidden><td colspan="9">
+        <form data-form="blocklist-interval" data-subscription-id="${esc(s.subscription_id)}" class="field-row">
+          <label>Update interval <select name="update_interval_seconds"><option value="">Use global default</option>${presets.map((p) => `<option value="${esc(p.seconds)}" ${s.update_interval_seconds === p.seconds ? "selected" : ""}>${esc(p.label)}</option>`).join("")}</select></label>
+          <button>Save</button>
+        </form>
+      </td>
       </tr>`).join("");
-    return page("Blocklists", "Subscribed, refreshable domain-block feeds. A failed refresh keeps the previous valid list enforced -- it never clears filtering on error. Refreshed automatically every 24h, or on demand below.", `<button data-refresh>Refresh page</button>`, `
-      <section class="panel"><div class="panel__head"><h2>Subscriptions</h2></div><div class="panel__body">
-        ${(data.subscriptions || []).length ? `<div class="table-wrap"><table data-grid data-grid-id="blocklist-subscriptions"><thead><tr><th>Name</th><th>URL</th><th>Enabled</th><th>Last status</th><th>Rules</th><th>Last refresh</th><th data-no-sort>Actions</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty">No blocklist subscriptions yet.</div>`}
+    const jobRows = (data.jobs || []).slice(0, 5).map((j) => `<tr><td>${ts(j.started_at)}</td><td><span class="badge ${tone(j.status)}">${esc(j.status)}</span></td><td>${esc(j.kind)}</td><td>${esc((j.subscription_ids || []).join(", "))}</td><td>${esc(j.error || Object.values(j.results || {}).map((r) => r.message).join("; "))}</td></tr>`).join("");
+    return page("Blocklists", "Subscribed, refreshable domain-block feeds. A failed refresh keeps the previous valid list enforced -- it never clears filtering on error.", `<button data-blocklist-refresh-all class="primary">Update All</button><button data-refresh>Refresh page</button>`, `
+      <section class="panel"><div class="panel__head"><h2>Update Schedule</h2></div><div class="panel__body">
+        <form data-form="blocklist-settings" class="field-row">
+          <label>Global default Update Interval <select name="default_interval_seconds">${presets.map((p) => `<option value="${esc(p.seconds)}" ${Number(data.settings.default_interval_seconds) === Number(p.seconds) ? "selected" : ""}>${esc(p.label)}</option>`).join("")}</select></label>
+          <button>Save</button>
+        </form>
       </div></section>
+      <section class="panel"><div class="panel__head"><h2>Subscriptions</h2></div><div class="panel__body">
+        ${(data.subscriptions || []).length ? `<div class="table-wrap"><table data-grid data-grid-id="blocklist-subscriptions"><thead><tr><th>Name</th><th>URL</th><th>Enabled</th><th>Rules</th><th>Last successful update</th><th>Next update</th><th>Effective interval</th><th>Status</th><th data-no-sort>Actions</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty">No blocklist subscriptions yet.</div>`}
+      </div></section>
+      ${jobRows ? `<section class="panel"><div class="panel__head"><h2>Recent Updates</h2></div><div class="panel__body"><div class="table-wrap"><table><thead><tr><th>Started</th><th>Status</th><th>Scope</th><th>Sources</th><th>Result</th></tr></thead><tbody>${jobRows}</tbody></table></div></div></section>` : ""}
       <section class="panel"><div class="panel__head"><h2>Add Subscription</h2></div><div class="panel__body">
         <form data-form="blocklist-create"><div class="form-grid">
           <label>Name<input name="name" required placeholder="StevenBlack Unified Hosts"></label>
@@ -2302,14 +2370,36 @@
       }
       const blRefresh = ev.target.closest("[data-blocklist-refresh]");
       if (blRefresh) {
+        closeRowActionMenus();
         const id = blRefresh.dataset.blocklistRefresh;
         const res = await api(`/api/blocklists/${encodeURIComponent(id)}/refresh`, { method: "POST" });
-        await loadPage("blocklists");
-        toast(`${id}: ${res.message}`, res.status === "succeeded" ? "ok" : "bad");
+        toast(`${id}: update queued`, "info");
+        (async () => {
+          const job = await waitBlocklistJob(res.job_id);
+          if (state.route === "blocklists") await loadPage("blocklists");
+          const result = job && job.results ? job.results[id] : null;
+          toast(`${id}: ${result ? result.message : (job.error || job.status)}`, result && result.status === "succeeded" ? "ok" : "bad");
+        })().catch((e) => toast(e.message, "bad"));
+        return;
+      }
+      const blRefreshAll = ev.target.closest("[data-blocklist-refresh-all]");
+      if (blRefreshAll) {
+        const res = await api("/api/blocklists/refresh-all", { method: "POST" });
+        if (!res.job_id) {
+          toast(res.message || "No enabled blocklists", "info");
+          return;
+        }
+        toast(`Updating ${res.count} blocklist source(s)`, "info");
+        (async () => {
+          const job = await waitBlocklistJob(res.job_id);
+          if (state.route === "blocklists") await loadPage("blocklists");
+          toast(`Update All ${job.status}`, job.status === "succeeded" ? "ok" : job.status === "partial" ? "warn" : "bad");
+        })().catch((e) => toast(e.message, "bad"));
         return;
       }
       const blToggle = ev.target.closest("[data-blocklist-toggle]");
       if (blToggle) {
+        closeRowActionMenus();
         const id = blToggle.dataset.blocklistToggle;
         await api(`/api/blocklists/${encodeURIComponent(id)}/toggle`, { method: "POST" });
         await loadPage("blocklists");
@@ -2318,11 +2408,30 @@
       }
       const blDelete = ev.target.closest("[data-blocklist-delete]");
       if (blDelete) {
+        closeRowActionMenus();
         const id = blDelete.dataset.blocklistDelete;
         if (!confirm(`Delete subscription ${id}? Its domains will stop being blocked.`)) return;
         await api(`/api/blocklists/${encodeURIComponent(id)}`, { method: "DELETE" });
         await loadPage("blocklists");
         toast("Subscription deleted", "ok");
+        return;
+      }
+      const blEdit = ev.target.closest("[data-blocklist-edit]");
+      if (blEdit) {
+        closeRowActionMenus();
+        const id = blEdit.dataset.blocklistEdit.replace(/[^A-Za-z0-9_-]/g, "-");
+        const row = document.getElementById(`blocklist-interval-${id}`);
+        if (row) row.hidden = !row.hidden;
+        return;
+      }
+      const uploadDelete = ev.target.closest("[data-delete-uploaded-archive]");
+      if (uploadDelete) {
+        const filename = uploadDelete.dataset.filename;
+        const size = uploadDelete.dataset.size;
+        if (!confirm(`Delete uploaded restore archive "${filename}" (${size} bytes)?`)) return;
+        await api(`/api/backup/appliance/uploads/${encodeURIComponent(uploadDelete.dataset.deleteUploadedArchive)}`, { method: "DELETE" });
+        await loadPage("backup");
+        toast("Uploaded archive deleted", "ok");
         return;
       }
 
@@ -2641,6 +2750,13 @@
       toast(`Cleared ${res.aggregate_buckets_cleared} aggregate bucket(s), ${res.aggregate_dimension_rows_cleared} dimension row(s)${res.raw_history_cleared ? `, ${res.raw_partition_files_removed} raw history file(s)` : " (raw history kept)"}`, "ok");
     } else if (type === "blocklist-create") {
       await api("/api/blocklists", { method: "POST", body: JSON.stringify(body) });
+    } else if (type === "blocklist-settings") {
+      await api("/api/blocklists/settings", { method: "POST", body: JSON.stringify({ default_interval_seconds: Number(body.default_interval_seconds) }) });
+    } else if (type === "blocklist-interval") {
+      const value = body.update_interval_seconds === "" || body.update_interval_seconds === undefined ? null : Number(body.update_interval_seconds);
+      await api(`/api/blocklists/${encodeURIComponent(form.dataset.subscriptionId)}/interval`, { method: "POST", body: JSON.stringify({ update_interval_seconds: value }) });
+    } else if (type === "uploaded-archive-settings") {
+      await api("/api/backup/appliance/upload-settings", { method: "POST", body: JSON.stringify({ retention_seconds: Number(body.retention_seconds), remove_after_successful_restore: Boolean(body.remove_after_successful_restore) }) });
     } else if (type === "cache-flush") {
       const layer = form.dataset.layer;
       const payload = { layer };

@@ -19,8 +19,11 @@ app/v2/blocklist_subscriptions.py's own safe-failure contract).
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 
 sys.path.insert(0, "/opt/alderpointdns-v2")
+
+from concurrent.futures import ThreadPoolExecutor, as_completed  # noqa: E402
 
 from app.v2 import blocklist_subscriptions as bl  # noqa: E402
 from app.v2 import policy_store as store  # noqa: E402
@@ -31,17 +34,42 @@ def main() -> int:
     if not webapp.CONTROL_DB.exists():
         print("control.db not found; nothing to refresh")
         return 0
+    now = datetime.now(timezone.utc)
     with webapp._db() as conn:
-        subs = [s for s in store.list_blocklist_subscriptions(conn) if s["enabled"]]
+        all_subs = [s for s in store.list_blocklist_subscriptions(conn) if s["enabled"]]
+        default_interval = int(store.blocklist_settings(conn).get("default_interval_seconds") or "86400")
+    subs = []
+    for sub in all_subs:
+        effective = default_interval if sub.get("update_interval_seconds") is None else int(sub.get("update_interval_seconds") or 0)
+        if effective <= 0:
+            continue
+        due_raw = sub.get("next_retry_at") or sub.get("next_update_at") or ""
+        if not due_raw:
+            subs.append(sub)
+            continue
+        try:
+            due = datetime.fromisoformat(due_raw)
+            if due.tzinfo is None:
+                due = due.replace(tzinfo=timezone.utc)
+        except ValueError:
+            subs.append(sub)
+            continue
+        if due <= now:
+            subs.append(sub)
     if not subs:
         print("no enabled subscriptions")
         return 0
 
+    prepared = {}
+    with ThreadPoolExecutor(max_workers=min(3, max(1, len(subs)))) as pool:
+        futures = {pool.submit(bl.prepare_refresh, sub, default_interval_seconds=default_interval): sub["subscription_id"] for sub in subs}
+        for future in as_completed(futures):
+            prepared[futures[future]] = future.result()
     results = {}
 
     def _mutate(conn):
         for sub in subs:
-            results[sub["subscription_id"]] = bl.refresh_subscription(conn, sub["subscription_id"])
+            results[sub["subscription_id"]] = bl.apply_prepared_refresh(conn, prepared[sub["subscription_id"]])
 
     try:
         webapp._mutate_and_promote(_mutate)
