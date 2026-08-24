@@ -1231,26 +1231,31 @@ def cmd_discovery_worker(args: argparse.Namespace) -> int:
 
     def _drain_once() -> int:
         processed = 0
-        with control_db.connect(CONTROL_DB) as conn:
-            for f in sorted(inbox.glob("*.jsonl")):
-                try:
-                    observations = []
-                    for line in f.read_text(encoding="utf-8").splitlines():
-                        if not line.strip():
-                            continue
-                        obj = json.loads(line)
-                        observations.append(
-                            observed_clients.Observation(
-                                obj["source_ip"],
-                                obj.get("hostname_candidate", ""),
-                                obj.get("hostname_source", "dns"),
-                                float(obj.get("ts", time.time())),
-                            )
+        for f in sorted(inbox.glob("*.jsonl"))[:256]:
+            try:
+                observations = []
+                for line in f.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    obj = json.loads(line)
+                    observations.append(
+                        observed_clients.Observation(
+                            obj["source_ip"],
+                            obj.get("hostname_candidate", ""),
+                            obj.get("hostname_source", "dns"),
+                            float(obj.get("ts", time.time())),
                         )
+                    )
+                # Keep SQLite write-locks short: file I/O and JSON parsing
+                # happen before this point, and each inbox file commits
+                # independently so a DNS burst cannot block routine UI/API
+                # reads for an entire discovery backlog.
+                with control_db.connect(CONTROL_DB) as conn:
                     processed += observed_clients.apply_observations(conn, observations)
-                    f.unlink()
-                except Exception as exc:  # noqa: BLE001
-                    log.error("failed processing discovery inbox file %s: %s", f, exc)
+                f.unlink()
+            except Exception as exc:  # noqa: BLE001
+                log.error("failed processing discovery inbox file %s: %s", f, exc)
+                with control_db.connect(CONTROL_DB) as conn:
                     conn.execute("UPDATE observed_client_stats SET last_error=? WHERE id=1", (str(exc)[:512],))
         return processed
 
