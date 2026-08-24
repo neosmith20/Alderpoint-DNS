@@ -1238,8 +1238,8 @@
       <div class="strip">
         <div class="metric"><strong>${managed.clients.length}</strong><span>Managed</span></div>
         <div class="metric"><strong>${dstat.observed_count ?? (observed.items || observed.observed_clients || []).length}</strong><span>Observed</span></div>
-        <div class="metric"><strong>${dstat.evictions ?? 0}</strong><span>Discovery evictions</span></div>
-        <div class="metric"><strong>${dstat.dropped_observations ?? 0}</strong><span>Dropped observations</span></div>
+        <div class="metric"><strong>${dstat.evicted ?? 0}</strong><span>Discovery evictions</span></div>
+        <div class="metric"><strong>${dstat.dropped == null ? "not tracked" : dstat.dropped}</strong><span>Dropped observations</span></div>
       </div>
       <div class="split">
         <div class="grid">
@@ -1823,10 +1823,49 @@
       </dialog>`;
   }
 
+  function removeDeletedBlocklistSubscription(id) {
+    // Stale-response protection: a GET already in flight (or one that
+    // slips in before this same DELETE's own state.routeCache
+    // invalidation, in api(), takes effect for the next fetch) must
+    // never repaint this row -- blocklists() itself drops any id in
+    // this set from whatever the next real fetch returns, and clears
+    // the set once consumed (a later legitimately-recreated subscription
+    // reusing the same id, e.g. after Add Subscription, must never stay
+    // hidden).
+    state.blocklistDeletedIds = state.blocklistDeletedIds || new Set();
+    state.blocklistDeletedIds.add(id);
+    if (state.blocklistSubscriptions) {
+      state.blocklistSubscriptions = state.blocklistSubscriptions.filter((s) => s.subscription_id !== id);
+    }
+    // An open Edit Blocklist dialog for exactly this subscription is no
+    // longer editing anything real -- close it rather than leaving it
+    // open on a row that's about to vanish out from under it.
+    const dialog = document.getElementById("blocklist-edit-dialog");
+    const form = dialog && dialog.querySelector("form");
+    if (dialog && dialog.open && form && form.dataset.subscriptionId === id) {
+      dialog.close();
+    }
+    const trigger = document.querySelector(`[data-blocklist-delete="${CSS.escape(id)}"]`);
+    const row = trigger && trigger.closest("tr");
+    if (row) row.remove();
+    // Attention card and its count update immediately too, from the
+    // already-updated in-memory list -- not only once the background
+    // reconcile's own fresh fetch resolves. Disappears entirely (not an
+    // empty card) if this was the last subscription requiring attention.
+    const attentionSection = document.querySelector(".attention-card")?.closest("section.panel");
+    if (attentionSection && state.blocklistSubscriptions) {
+      const replacement = blocklistAttentionCard(state.blocklistSubscriptions);
+      if (replacement) attentionSection.outerHTML = replacement;
+      else attentionSection.remove();
+    }
+  }
+
   async function blocklists() {
     const data = await api("/api/blocklists");
     const presets = (data.settings && data.settings.interval_presets) || [];
-    const subscriptions = data.subscriptions || [];
+    const deletedIds = state.blocklistDeletedIds;
+    state.blocklistDeletedIds = null; // consumed -- see removeDeletedBlocklistSubscription's own comment
+    const subscriptions = (data.subscriptions || []).filter((s) => !deletedIds || !deletedIds.has(s.subscription_id));
     state.blocklistSubscriptions = subscriptions;
     const rows = subscriptions.map((s) => `
       <tr>
@@ -2733,9 +2772,34 @@
         closeRowActionMenus();
         const id = blDelete.dataset.blocklistDelete;
         if (!confirm(`Delete subscription ${id}? Its domains will stop being blocked.`)) return;
-        await api(`/api/blocklists/${encodeURIComponent(id)}`, { method: "DELETE" });
-        await loadPage("blocklists");
+        blDelete.disabled = true;
+        try {
+          await api(`/api/blocklists/${encodeURIComponent(id)}`, { method: "DELETE" });
+        } catch (err) {
+          blDelete.disabled = false;
+          toast(err.message, "bad");
+          return;
+        }
+        // Real defect fixed here (owner-reported live): waiting on a
+        // full loadPage("blocklists") round trip for the row to
+        // disappear left a real, observable window -- worse under real
+        // backend latency, or a route-cache "shell"/an already-in-flight
+        // GET from just before the delete resolving after it -- where a
+        // successfully deleted subscription stayed visible until an
+        // unrelated manual page reload. The server-side delete is
+        // already committed by the time this runs; there is nothing
+        // left to wait on for THIS row specifically, so it comes out of
+        // the DOM immediately, synchronously, not after any async
+        // reconcile.
+        removeDeletedBlocklistSubscription(id);
         toast("Subscription deleted", "ok");
+        // Authoritative background reconcile -- counts, next-due times,
+        // recent-updates history, everything else the row's own removal
+        // above didn't touch. Real defect (see this function's own
+        // reconcile logic in blocklists() above) already made this the
+        // exact same DELETE call's own mutation clear state.routeCache,
+        // so this is always a genuinely fresh fetch, never a stale shell.
+        if (state.route === "blocklists") await loadPage("blocklists");
         return;
       }
       const blEdit = ev.target.closest("[data-blocklist-edit]");

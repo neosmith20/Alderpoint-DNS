@@ -414,6 +414,93 @@ class TestBlocklistApiRoutes:
         assert client.get("/api/blocklists").status_code == 401
         assert client.post("/api/blocklists", json={"subscription_id": "x", "name": "x", "url": "http://x"}).status_code == 401
 
+    def test_deleted_subscription_is_immediately_absent_from_a_fresh_list_call(self, tmp_path, monkeypatch):
+        """Real defect fixed here (owner-reported live, blocklist Delete
+        UI-consistency pass): the backend side of "deleted row stays
+        visible until manual refresh" -- a fresh GET /api/blocklists
+        issued immediately after a successful DELETE must never include
+        the deleted subscription. (The client-side half -- immediate DOM
+        removal, stale-in-flight-GET protection, route-cache
+        invalidation -- is proven in the Chromium browser harness.)"""
+        from fastapi.testclient import TestClient
+
+        webapp = self._fresh_webapp(tmp_path, monkeypatch)
+        client = TestClient(webapp.app)
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12"})
+        csrf = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"}).json()["csrf"]
+        headers = {"X-CSRF-Token": csrf}
+        created = client.post("/api/blocklists", json={
+            "subscription_id": "gone-fast", "name": "Gone Fast", "url": "http://example.invalid/list.txt",
+        }, headers=headers)
+        assert created.status_code == 200, created.text
+        assert any(s["subscription_id"] == "gone-fast" for s in client.get("/api/blocklists").json()["subscriptions"])
+
+        deleted = client.delete("/api/blocklists/gone-fast", headers=headers)
+        assert deleted.status_code == 200, deleted.text
+
+        listed = client.get("/api/blocklists").json()["subscriptions"]
+        assert not any(s["subscription_id"] == "gone-fast" for s in listed), (
+            "a fresh list call immediately after DELETE must never still include the deleted subscription"
+        )
+
+    def test_deletion_during_a_running_update_job_does_not_fail_the_whole_job(self, tmp_path, monkeypatch):
+        """Real defect fixed here (owner-reported live, blocklist Delete
+        UI-consistency pass): the row's own Delete control is disabled
+        client-side while update_in_progress, but this is defense in
+        depth for any path that reaches the server regardless -- a
+        subscription deleted while Update Now/Update All has it staged
+        used to raise uncaught inside the job's own commit transaction,
+        rolling back and failing every OTHER subscription in that same
+        job too, not just the deleted one."""
+        from fastapi.testclient import TestClient
+
+        webapp = self._fresh_webapp(tmp_path, monkeypatch)
+        client = TestClient(webapp.app)
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12"})
+        csrf = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"}).json()["csrf"]
+        headers = {"X-CSRF-Token": csrf}
+
+        good = _serve("good-job.example\n")
+        deleted = _serve("about-to-be-deleted.example\n")
+        try:
+            for sid, name, server in (("job-good", "Good", good), ("job-deleted", "Deleted Mid-Job", deleted)):
+                r = client.post("/api/blocklists", json={
+                    "subscription_id": sid, "name": name, "url": f"http://127.0.0.1:{server.server_address[1]}/list.txt",
+                }, headers=headers)
+                assert r.status_code == 200, r.text
+
+            real_prepare_refresh = webapp.blocklist_subscriptions.prepare_refresh
+
+            def _prepare_then_delete(sub, **kwargs):
+                prepared = real_prepare_refresh(sub, **kwargs)
+                if sub["subscription_id"] == "job-deleted":
+                    d = client.delete("/api/blocklists/job-deleted", headers=headers)
+                    assert d.status_code == 200, d.text
+                return prepared
+
+            monkeypatch.setattr(webapp.blocklist_subscriptions, "prepare_refresh", _prepare_then_delete)
+
+            res = client.post("/api/blocklists/refresh-all", headers=headers)
+            assert res.status_code == 200, res.text
+            job_id = res.json()["job_id"]
+            job = None
+            for _ in range(50):
+                job = client.get(f"/api/blocklists/jobs/{job_id}").json()
+                if job["status"] != "running":
+                    break
+                time.sleep(0.1)
+            assert job["status"] == "succeeded", job
+            assert job["results"]["job-good"]["status"] == "succeeded"
+            assert "job-deleted" not in job["results"]
+        finally:
+            good.shutdown()
+            deleted.shutdown()
+
+        listed = client.get("/api/blocklists").json()["subscriptions"]
+        good_row = next(s for s in listed if s["subscription_id"] == "job-good")
+        assert good_row["last_status"] == "succeeded"
+        assert not any(s["subscription_id"] == "job-deleted" for s in listed)
+
 
 class TestConsecutiveFailureTracking:
     """Pre-DoH reliability pass, part 3 (owner-clarified semantics): the
@@ -726,6 +813,73 @@ class TestOrchestratorExitCode:
         finally:
             good.shutdown()
             bad.shutdown()
+
+    def test_subscription_deleted_mid_run_does_not_fail_the_whole_batch(self, tmp_path, monkeypatch):
+        """Real defect fixed here (owner-reported live: blocklist Delete
+        UI-consistency pass): an operator deleting a subscription in the
+        real, narrow window between the orchestrator's own initial due-
+        subscription read and its results actually being applied used to
+        raise BlocklistSubscriptionError uncaught inside _mutate,
+        rolling back and failing the ENTIRE batch -- one legitimate
+        delete would have reported a false total orchestration failure
+        for every other subscription refreshed in that same run too."""
+        monkeypatch.setenv("ALDERPOINTDNS_V2_APP_ROOT", str(tmp_path / "opt"))
+        monkeypatch.setenv("ALDERPOINTDNS_V2_CONFIG_ROOT", str(tmp_path / "etc"))
+        monkeypatch.setenv("ALDERPOINTDNS_V2_STATE_ROOT", str(tmp_path / "state"))
+        (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+        dbpath = tmp_path / "state" / "control.db"
+        control_db.initialize(dbpath)
+        store.ensure_schema(dbpath)
+
+        good = _serve("good-orchestrator.example\n")
+        deleted = _serve("about-to-be-deleted.example\n")
+        try:
+            from datetime import datetime, timedelta, timezone
+
+            past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+            with control_db.connect(dbpath) as conn:
+                store.create_blocklist_subscription(conn, "orch-good", "Good", f"http://127.0.0.1:{good.server_address[1]}/list.txt")
+                store.create_blocklist_subscription(conn, "orch-deleted", "Deleted Mid-Run", f"http://127.0.0.1:{deleted.server_address[1]}/list.txt")
+                store.set_blocklist_next_update(conn, "orch-good", past)
+                store.set_blocklist_next_update(conn, "orch-deleted", past)
+
+            _pop_webapp_module()
+            mod = self._import_script()
+
+            # Simulate the real race: the operator's own delete lands
+            # while this run's own fetch/prepare phase is still in
+            # flight, before the mutate-and-promote transaction applies
+            # the prepared results.
+            real_prepare_refresh = mod.bl.prepare_refresh
+
+            def _prepare_then_delete(sub, **kwargs):
+                prepared = real_prepare_refresh(sub, **kwargs)
+                if sub["subscription_id"] == "orch-deleted":
+                    with control_db.connect(dbpath) as conn:
+                        mod.bl.remove_subscription_service(conn, "orch-deleted")
+                        store.delete_blocklist_subscription(conn, "orch-deleted")
+                return prepared
+
+            monkeypatch.setattr(mod.bl, "prepare_refresh", _prepare_then_delete)
+            exit_code = mod.main()
+            assert exit_code == 0, "a subscription deleted mid-run must not fail the whole orchestration"
+
+            run_state = __import__("json").loads(mod.webapp.BLOCKLIST_REFRESH_STATE_FILE.read_text())
+            assert run_state["orchestration_ok"] is True
+            # The deleted subscription is neither succeeded nor failed --
+            # it simply no longer exists to have a result at all.
+            assert run_state["total"] == 1
+            assert run_state["succeeded"] == 1
+            assert run_state["failed"] == 0
+
+            with control_db.connect(dbpath) as conn:
+                # The OTHER, unrelated subscription's real success is
+                # preserved -- not rolled back by the deleted one's race.
+                assert store.get_blocklist_subscription(conn, "orch-good")["last_status"] == "succeeded"
+                assert store.get_blocklist_subscription(conn, "orch-deleted") is None
+        finally:
+            good.shutdown()
+            deleted.shutdown()
 
     def test_no_control_db_is_a_clean_noop_not_a_failure(self, tmp_path, monkeypatch):
         monkeypatch.setenv("ALDERPOINTDNS_V2_APP_ROOT", str(tmp_path / "opt"))

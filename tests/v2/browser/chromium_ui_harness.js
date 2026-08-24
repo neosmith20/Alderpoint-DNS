@@ -1601,6 +1601,91 @@ async function main() {
       proof.push("blocklist-edit-recovery-row-shows-succeeded");
     }
 
+    // Delete-row-stays-visible-until-manual-refresh fix (owner-reported
+    // live): a real Delete must remove the row from the visible table
+    // immediately -- no reload, no route navigation -- and it must stay
+    // gone afterward (not resurrected by any stale in-flight response).
+    await evalJs(`document.querySelectorAll('.toast').forEach((n) => n.remove()); true`);
+    await evalJs(`(() => {
+      const f = document.querySelector('form[data-form="blocklist-create"]');
+      f.querySelector('[name=name]').value = 'Delete Test Blocklist ${suffix}';
+      f.querySelector('[name=url]').value = 'http://delete-test-${suffix}.invalid/list.txt';
+      f.requestSubmit();
+      return true;
+    })()`);
+    await waitFor(`document.body.innerText.includes("Delete Test Blocklist ${suffix}")`, "delete-test blocklist subscription created");
+    await evalJs(`window.confirm = () => true; true`);
+    await evalJs(`(() => {
+      const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Delete Test Blocklist ${suffix}'));
+      row.querySelector('[data-blocklist-delete]').click();
+      return true;
+    })()`);
+    // Deliberately NOT a waitFor -- the row disappearing must be
+    // immediate/synchronous, not merely eventual within some timeout.
+    // A short fixed settle covers the real DELETE request's own round
+    // trip (unavoidable: the click handler awaits it before touching
+    // the DOM), after which the row must already be gone.
+    await sleep(500);
+    const deletedImmediately = await evalJs(`!Array.from(document.querySelectorAll('tr')).some((r) => r.textContent.includes('Delete Test Blocklist ${suffix}'))`);
+    if (!deletedImmediately) throw new Error("deleted blocklist subscription row is still visible shortly after Delete -- did not disappear immediately");
+    proof.push("blocklist-delete-row-disappears-immediately");
+    await waitFor(`document.querySelector('.toast.ok') && document.querySelector('.toast.ok').textContent.includes("deleted")`, "delete success toast shown");
+    // Stays gone after the background reconcile's own fresh fetch too
+    // (not just the optimistic local removal, which alone wouldn't
+    // catch a server-side inconsistency).
+    await sleep(1000);
+    if (await evalJs(`document.body.innerText.includes("Delete Test Blocklist ${suffix}")`)) {
+      throw new Error("deleted blocklist subscription reappeared after the background reconcile -- a stale response resurrected it");
+    }
+    // Stays gone after a real route navigation away and back too.
+    await route("dashboard");
+    await route("blocklists");
+    if (await evalJs(`document.body.innerText.includes("Delete Test Blocklist ${suffix}")`)) {
+      throw new Error("deleted blocklist subscription reappeared after navigating away and back");
+    }
+    proof.push("blocklist-delete-row-stays-gone-after-navigation");
+
+    // Deleting the LAST subscription requiring attention must remove
+    // the page-level attention card completely, immediately -- not
+    // just that one row.
+    await evalJs(`(() => {
+      const f = document.querySelector('form[data-form="blocklist-create"]');
+      f.querySelector('[name=name]').value = 'Delete Attention Test ${suffix}';
+      f.querySelector('[name=url]').value = 'http://delete-attention-${suffix}.invalid/list.txt';
+      f.requestSubmit();
+      return true;
+    })()`);
+    await waitFor(`document.body.innerText.includes("Delete Attention Test ${suffix}")`, "delete-attention-test subscription created");
+    for (let i = 0; i < 3; i++) {
+      await evalJs(`document.querySelectorAll('.toast').forEach((n) => n.remove()); true`);
+      await waitFor(`(() => {
+        const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Delete Attention Test ${suffix}'));
+        const btn = row && row.querySelector('[data-blocklist-refresh]');
+        return btn && !btn.disabled;
+      })()`, `delete-attention-test refresh button ready for attempt #${i + 1}`);
+      await evalJs(`(() => {
+        const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Delete Attention Test ${suffix}'));
+        row.querySelector('[data-blocklist-refresh]').click();
+        return true;
+      })()`);
+      await waitFor(`(() => {
+        const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Delete Attention Test ${suffix}'));
+        return row && row.textContent.includes('failed') && !row.textContent.includes('updating');
+      })()`, `delete-attention-test refresh failure #${i + 1} settled`, 300);
+      await sleep(750);
+    }
+    await waitFor(`document.body.innerText.includes("needs attention") && document.body.innerText.includes("Delete Attention Test ${suffix}")`, "attention card visible before delete");
+    await evalJs(`(() => {
+      const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Delete Attention Test ${suffix}'));
+      row.querySelector('[data-blocklist-delete]').click();
+      return true;
+    })()`);
+    await sleep(500);
+    if (await evalJs(`document.body.innerText.includes("needs attention")`)) {
+      throw new Error("attention card is still present immediately after deleting the only subscription requiring attention");
+    }
+    proof.push("blocklist-delete-clears-attention-card-immediately");
+
     // Network Configuration (beta-rescue priority 4): read-only
     // discoverability/status proof. Deliberately never submits the
     // apply form in this shared, real-networked harness environment --

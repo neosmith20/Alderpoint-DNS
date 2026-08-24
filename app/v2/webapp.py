@@ -4180,7 +4180,17 @@ def _run_blocklist_refresh_job(job_id: str, ids: list[str]) -> None:
             with _timed_stage("blocklist_job.stage_db_mutation"):
                 with control_db.connect(staged_db, create_if_missing=False) as staged_conn:
                     for sid in ids:
-                        blocklist_subscriptions.apply_prepared_refresh(staged_conn, prepared[sid])
+                        try:
+                            blocklist_subscriptions.apply_prepared_refresh(staged_conn, prepared[sid])
+                        except blocklist_subscriptions.BlocklistSubscriptionError:
+                            # Same real defect/fix as the live_metadata_commit
+                            # stage below (see its own comment) -- this
+                            # staged-copy mutation runs FIRST, so a
+                            # subscription deleted mid-job must be
+                            # tolerated here too, not just in the later
+                            # stage, or this raise alone already fails the
+                            # whole job before ever reaching that fix.
+                            pass
             with _timed_stage("blocklist_job.compile_promote"):
                 with control_db.connect(staged_db, create_if_missing=False) as staged_conn:
                     runtime = _compile_and_promote_from_conn(staged_conn)
@@ -4194,7 +4204,25 @@ def _run_blocklist_refresh_job(job_id: str, ids: list[str]) -> None:
                 conn.execute("BEGIN IMMEDIATE")
                 try:
                     for sid in ids:
-                        holder[sid] = blocklist_subscriptions.apply_prepared_refresh(conn, prepared[sid])
+                        try:
+                            holder[sid] = blocklist_subscriptions.apply_prepared_refresh(conn, prepared[sid])
+                        except blocklist_subscriptions.BlocklistSubscriptionError:
+                            # Real defect fixed here (owner-reported live:
+                            # blocklist Delete UI-consistency pass): a
+                            # subscription deleted while this job (Update
+                            # Now/Update All) was in flight -- the row's
+                            # own Delete control is normally disabled
+                            # while update_in_progress, but this is
+                            # defense in depth for any path that reaches
+                            # here regardless -- used to raise uncaught,
+                            # rolling back and failing every OTHER
+                            # subscription in this same batch too. Simply
+                            # skipped: deleting it was a deliberate
+                            # operator action, not a source failure, and
+                            # apply_prepared_refresh's own
+                            # get_blocklist_subscription check already
+                            # guarantees it never resurrects the row.
+                            pass
                     conn.execute("COMMIT")
                 except BaseException:
                     conn.execute("ROLLBACK")
@@ -4792,9 +4820,9 @@ def discovery_status(admin=Depends(current_admin)):
             **_extended_schemas_snapshot(),
             "detail": _extended_schemas_error or "extended control schemas are warming up",
             "observed_count": 0,
-            "dropped": 0,
+            "dropped": None,
             "evicted": 0,
-            "coalesced": 0,
+            "coalesced": None,
             "last_error": _extended_schemas_error,
             "settings": {},
             "queue_depth": 0,

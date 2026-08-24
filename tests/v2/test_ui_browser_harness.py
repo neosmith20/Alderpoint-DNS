@@ -118,6 +118,9 @@ def test_chromium_management_ui_harness(tmp_path):
         assert "blocklist-edit-cancel-with-changes-prompts-and-discards" in result.stdout
         assert "blocklist-edit-recovery-clears-attention-card" in result.stdout
         assert "blocklist-edit-recovery-row-shows-succeeded" in result.stdout
+        assert "blocklist-delete-row-disappears-immediately" in result.stdout
+        assert "blocklist-delete-row-stays-gone-after-navigation" in result.stdout
+        assert "blocklist-delete-clears-attention-card-immediately" in result.stdout
     finally:
         server.terminate()
         try:

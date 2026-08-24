@@ -112,7 +112,27 @@ def main() -> int:
 
     def _mutate(conn):
         for sub in subs:
-            results[sub["subscription_id"]] = bl.apply_prepared_refresh(conn, prepared[sub["subscription_id"]])
+            sid = sub["subscription_id"]
+            try:
+                results[sid] = bl.apply_prepared_refresh(conn, prepared[sid])
+            except bl.BlocklistSubscriptionError:
+                # Real defect fixed here (owner preview, blocklist Delete
+                # UI-consistency pass): an operator deleting a
+                # subscription in the real, narrow window between this
+                # run's own initial due-subscription read and this
+                # transaction actually applying its results used to
+                # raise uncaught here -- rolling back EVERY subscription
+                # in this batch (not just the deleted one) and reporting
+                # a full orchestration failure for what is a perfectly
+                # legitimate operator action unrelated to any of the
+                # others. A subscription that no longer exists by the
+                # time its own prepared refresh is applied is simply
+                # skipped (not counted as failed -- deleting it was a
+                # deliberate choice, not a broken source), same
+                # principle as the deleted-row-can't-be-resurrected
+                # contract apply_prepared_refresh's own get_blocklist_subscription
+                # check already enforces at the single-subscription level.
+                print(f"{sid}: skipped -- deleted before this refresh applied")
 
     try:
         webapp._mutate_and_promote(_mutate)
