@@ -265,6 +265,8 @@ cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-blocklist-refresh.service" "$PKG/l
 cp "$SOURCE_DIR/packaging/v2/alderpointdns-v2-blocklist-refresh.timer" "$PKG/lib/systemd/system/alderpointdns-v2-blocklist-refresh.timer"
 cp "$SOURCE_DIR/scripts/v2/alderpointdns_v2_blocklist_refresh.py" "$PKG/opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_blocklist_refresh.py"
 chmod 0755 "$PKG/opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_blocklist_refresh.py"
+cp "$SOURCE_DIR/scripts/v2/alderpointdns_v2_dns_benchmark.py" "$PKG/opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_dns_benchmark.py"
+chmod 0755 "$PKG/opt/alderpointdns-v2/scripts/v2/alderpointdns_v2_dns_benchmark.py"
 # BIND architecture correction (Gate #3): the real packaged V2 BIND
 # recursive-cache backend unit + its AppArmor local override (see
 # packaging/v2/postinst's own apparmor block for why this must be

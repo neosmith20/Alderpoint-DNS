@@ -182,6 +182,9 @@ _blocklist_jobs: dict[str, dict[str, Any]] = {}
 _blocklist_jobs_lock = threading.Lock()
 _blocklist_running: set[str] = set()
 _blocklist_running_lock = threading.Lock()
+_dns_benchmark_lock = threading.Lock()
+_dns_benchmark_running = False
+_dns_benchmark_last_error = ""
 
 UPLOAD_RETENTION_DEFAULT_SECONDS = 24 * 3600
 BLOCKLIST_INTERVAL_PRESETS: tuple[tuple[int, str], ...] = (
@@ -3613,6 +3616,102 @@ def cache_flush_route(req: CacheFlushRequest, admin=Depends(current_admin), x_cs
             raise ApiError(400, "validation_error", str(exc)) from exc
         results.append({"context": r.context, "scope": r.scope, "target": r.target, "ok": r.ok, "message": r.message})
     return {"results": results}
+
+
+# --- DNS Performance diagnostics -------------------------------------------
+
+
+def _dns_benchmark_runner() -> None:
+    global _dns_benchmark_running, _dns_benchmark_last_error
+    from app.v2.dns_performance import BenchmarkCase, run_benchmark, save_report
+
+    def _blocked_domain() -> str:
+        for path in sorted((STATE_DIR / "compiled" / "blocked-domains").glob("*.txt")):
+            try:
+                for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    value = line.strip().strip(".")
+                    if value and len(value) < 180 and " " not in value:
+                        return value + "."
+            except OSError:
+                continue
+        return "0--0.info."
+
+    def _local_domain() -> str:
+        try:
+            with control_db.connect(CONTROL_DB) as conn:
+                row = conn.execute("SELECT name FROM local_dns_records WHERE enabled=1 ORDER BY updated_at DESC LIMIT 1").fetchone()
+                if row and row[0]:
+                    return str(row[0]).rstrip(".") + "."
+        except sqlite3.Error:
+            pass
+        return "localhost."
+
+    try:
+        cases = [
+            BenchmarkCase("Local DNS answer", "alderpoint-controlled", "127.0.0.1", 53, _local_domain(), 1, "udp", 10000),
+            BenchmarkCase("Filtering/block answer", "alderpoint-controlled", "127.0.0.1", 53, _blocked_domain(), 1, "udp", 10000),
+            BenchmarkCase("dnsdist/BIND hot A response", "hot-cache/client-observed", "127.0.0.1", 53, "example.com.", 1, "udp", 10000),
+            BenchmarkCase("BIND direct hot A response", "backend-cache/direct-bind", "127.0.0.1", 5453, "example.com.", 1, "udp", 10000, 0.2),
+            BenchmarkCase("DoT initial TLS query", "encrypted-dns/initial-handshake", "127.0.0.1", 853, "example.com.", 1, "dot", 100),
+            BenchmarkCase("DoT established query", "encrypted-dns/established-connection", "127.0.0.1", 853, "example.com.", 1, "dot-established", 1000),
+            BenchmarkCase("DoH initial TLS query", "encrypted-dns/initial-handshake", "127.0.0.1", 9443, "example.com.", 1, "doh", 100),
+            BenchmarkCase("DoH established query", "encrypted-dns/established-connection", "127.0.0.1", 9443, "example.com.", 1, "doh-established", 1000),
+            BenchmarkCase("Cold unique forwarded lookup", "cold-external/client-observed", "127.0.0.1", 53, f"apdns-cold-{int(time.time())}.example.com.", 1, "udp", 10),
+        ]
+        save_report(run_benchmark(cases))
+        _dns_benchmark_last_error = ""
+    except Exception as exc:  # noqa: BLE001
+        _dns_benchmark_last_error = str(exc)
+    finally:
+        with _dns_benchmark_lock:
+            _dns_benchmark_running = False
+
+
+@app.get("/api/dns/performance")
+def dns_performance_route(admin=Depends(current_admin)):
+    from app.v2 import cache_control
+    from app.v2.dns_performance import read_report
+
+    bind_layer = []
+    for name, stats_port, _rndc_port in _bind_context_ports():
+        bind_layer.append({"context": name, **cache_control.bind_cache_stats(stats_port, timeout=0.05)})
+    with _dns_benchmark_lock:
+        running = _dns_benchmark_running
+        last_error = _dns_benchmark_last_error
+    return {
+        "benchmark_running": running,
+        "last_error": last_error,
+        "report": read_report(),
+        "bind_cache": bind_layer,
+        "dnsdist": {
+            "scope": "read-only summary",
+            "note": "dnsdist has no exposed administrative channel; packet-cache behavior is measured by the safe benchmark and DNS-query latency.",
+        },
+    }
+
+
+@app.post("/api/dns/performance/benchmark")
+def dns_performance_benchmark_route(admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    global _dns_benchmark_running
+    check_csrf(admin, x_csrf_token)
+    with _dns_benchmark_lock:
+        if _dns_benchmark_running:
+            return {"status": "already_running"}
+        _dns_benchmark_running = True
+    threading.Thread(target=_dns_benchmark_runner, name="dns-performance-benchmark", daemon=True).start()
+    return {"status": "started"}
+
+
+@app.delete("/api/dns/performance")
+def dns_performance_clear_route(admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    check_csrf(admin, x_csrf_token)
+    from app.v2.dns_performance import REPORT_PATH
+
+    try:
+        REPORT_PATH.unlink()
+    except FileNotFoundError:
+        pass
+    return {"status": "cleared"}
 
 
 # --- Network Configuration (beta-rescue priority 4) --------------------------

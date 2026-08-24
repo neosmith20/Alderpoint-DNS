@@ -1664,11 +1664,39 @@
   // password). Matches V1.1.1's own separate administration.html /
   // system_logs_results.html templates.
   async function health() {
-    const [h, s, n, d] = await Promise.all([api("/api/health"), api("/api/system/status"), api("/api/node-identity"), api("/api/discovery/status")]);
+    const [h, s, n, d, dnsPerf] = await Promise.all([api("/api/health"), api("/api/system/status"), api("/api/node-identity"), api("/api/discovery/status"), api("/api/dns/performance").catch((e) => ({ error: e.message }))]);
     return page("System Status", "Operational status separates DNS/runtime health from optional subsystem degradation.", `<button data-copy-perf>Copy UI Performance Report</button><button data-clear-perf>Clear Measurements</button><button data-refresh>Refresh</button>`, `
       <div class="strip"><div class="metric"><strong>${esc(h.status)}</strong><span>Overall</span></div><div class="metric"><strong>${esc(s.version)}</strong><span>Version</span></div><div class="metric"><strong>${s.compiled_runtime_present ? "yes" : "no"}</strong><span>Compiled runtime</span></div><div class="metric"><strong>${esc(d.observed_count ?? 0)}</strong><span>Observed clients</span></div></div>
       <section class="panel"><div class="panel__head"><h2>UI Performance</h2></div><div class="panel__body"><p class="muted">Recent in-browser route and API timings are kept only in this browser session. Copy the report after reproducing slow navigation.</p>${performanceSummaryTable()}</div></section>
+      <section class="panel"><div class="panel__head"><h2>DNS Performance</h2><div class="actions"><button data-run-dns-benchmark>Run Safe DNS Benchmark</button><button data-copy-dns-perf>Copy DNS Performance Report</button><button data-clear-dns-perf>Clear Benchmark Measurements</button></div></div><div class="panel__body">${dnsPerformancePanel(dnsPerf)}</div></section>
       <div class="grid two"><section class="panel"><div class="panel__head"><h2>Components</h2></div><div class="panel__body">${componentList(h.components || {})}</div></section><section class="panel"><div class="panel__head"><h2>Node Identity</h2></div><div class="panel__body">${tableFromRows([n], 1)}</div></section></div>`);
+  }
+
+  function dnsPerformancePanel(data) {
+    if (data.error) return `<div class="alert warn">${esc(data.error)}</div>`;
+    const report = data.report;
+    const bind = data.bind_cache || [];
+    const bindRows = bind.map((b) => ({ context: b.context, cache_hits: b.hits ?? "", cache_misses: b.misses ?? "", hit_ratio: b.hit_ratio == null ? "" : `${Math.round(b.hit_ratio * 1000) / 10}%` }));
+    const cases = report && report.cases ? report.cases.map((c) => ({
+      case: c.name,
+      scope: c.scope,
+      protocol: c.protocol,
+      count: c.summary.count,
+      p50_ms: c.summary.p50_ms ?? "",
+      p95_ms: c.summary.p95_ms ?? "",
+      p99_ms: c.summary.p99_ms ?? "",
+      max_ms: c.summary.max_ms ?? "",
+      timeouts: c.summary.timeouts,
+      errors: c.summary.errors,
+    })) : [];
+    return `
+      <p class="muted">Safe benchmarks use a monotonic timer around the DNS exchange. Cold external totals include upstream or authoritative network waiting outside Alderpoint control.</p>
+      ${data.benchmark_running ? `<div class="alert info">DNS benchmark is running. Refresh this page for results.</div>` : ""}
+      ${data.last_error ? `<div class="alert warn">${esc(data.last_error)}</div>` : ""}
+      <div class="grid two">
+        <div><h3>Latest Benchmark</h3>${report ? `<p class="muted">Generated ${ts(report.generated_at, "")}; duration ${esc(report.duration_seconds)}s.</p>${tableFromRows(cases, 20, undefined, "dns-performance")}` : `<div class="empty">No DNS benchmark report yet.</div>`}</div>
+        <div><h3>BIND Cache Counters</h3>${bindRows.length ? tableFromRows(bindRows, 10, undefined, "bind-cache-performance") : `<div class="empty">No BIND cache counters available.</div>`}<p class="muted">${esc((data.dnsdist || {}).note || "")}</p></div>
+      </div>`;
   }
 
   function performanceSummaryTable() {
@@ -2395,6 +2423,30 @@
       if (ev.target.closest("[data-clear-perf]")) {
         clearPerformanceMeasurements();
         toast("UI performance measurements cleared", "ok");
+        await loadPage("health");
+        return;
+      }
+      if (ev.target.closest("[data-copy-dns-perf]")) {
+        const report = await api("/api/dns/performance", { background: true });
+        const text = JSON.stringify({
+          copied_at: new Date().toISOString(),
+          route: state.route,
+          dns_performance: report,
+        }, null, 2);
+        if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(text);
+        else window.prompt("Copy DNS Performance Report", text);
+        toast("DNS performance report copied", "ok");
+        return;
+      }
+      if (ev.target.closest("[data-clear-dns-perf]")) {
+        await api("/api/dns/performance", { method: "DELETE", csrf: true });
+        toast("DNS benchmark measurements cleared", "ok");
+        await loadPage("health");
+        return;
+      }
+      if (ev.target.closest("[data-run-dns-benchmark]")) {
+        const res = await api("/api/dns/performance/benchmark", { method: "POST", csrf: true });
+        toast(res.status === "already_running" ? "DNS benchmark is already running" : "DNS benchmark started", "ok");
         await loadPage("health");
         return;
       }
