@@ -1763,10 +1763,72 @@
     return `<div class="table-wrap"><table><thead><tr><th>Time</th><th>Severity</th><th>Message</th></tr></thead><tbody>${entries.map((e) => `<tr><td class="mono">${esc(e.ts)}</td><td><span class="badge ${e.severity === "error" || e.severity === "crit" || e.severity === "alert" || e.severity === "emerg" ? "bad" : e.severity === "warning" ? "warn" : "info"}">${esc(e.severity)}</span></td><td class="mono">${esc(e.message)}</td></tr>`).join("")}</tbody></table></div>`;
   }
 
+  function blocklistAttentionCard(subscriptions) {
+    // Conditionally rendered: absent entirely (not an empty placeholder,
+    // no reserved space) unless at least one ENABLED subscription has
+    // hit BLOCKLIST_ATTENTION_THRESHOLD consecutive failures. A disabled
+    // subscription's attention_required is always false (see
+    // policy_store.py's _decorate_blocklist_subscription), so disabling
+    // a failing list removes it from this card on the very next render.
+    const affected = subscriptions.filter((s) => s.attention_required);
+    if (!affected.length) return "";
+    const items = affected.map((s) => `
+      <div class="attention-card__item">
+        <h3>${esc(s.name)}</h3>
+        <p>Failed ${esc(s.consecutive_failure_count)} consecutive updates. Its previous working content remains active.${s.last_error ? ` Last error: ${esc(s.last_error)}.` : ""}</p>
+        <div class="attention-card__meta">
+          <span>Last attempted: ${ts(s.last_checked_at, "never")}</span>
+          <span>Last successful update: ${ts(s.last_success_at, "never")}</span>
+          <span>Next retry: ${ts(s.next_retry_at, "not scheduled")}</span>
+        </div>
+        <div class="attention-card__actions">
+          <button type="button" data-blocklist-edit="${esc(s.subscription_id)}">Edit Blocklist</button>
+          <button type="button" data-blocklist-refresh="${esc(s.subscription_id)}">Update Now</button>
+          <button type="button" data-blocklist-toggle="${esc(s.subscription_id)}">Disable</button>
+          <button type="button" data-blocklist-delete="${esc(s.subscription_id)}" class="danger">Delete</button>
+        </div>
+      </div>`).join("");
+    const heading = affected.length === 1
+      ? "1 blocklist needs attention"
+      : `${affected.length} blocklists need attention`;
+    return `<section class="panel"><div class="panel__head"><h2>${esc(heading)}</h2></div><div class="panel__body"><div class="attention-card">${items}</div></div></section>`;
+  }
+
+  function blocklistEditDialogMarkup(presets) {
+    const options = `<option value="">Use global default</option>${presets.map((p) => `<option value="${esc(p.seconds)}">${esc(p.label)}</option>`).join("")}`;
+    return `
+      <dialog class="app-dialog" id="blocklist-edit-dialog" aria-labelledby="blocklist-edit-title">
+        <form id="blocklist-edit-form" novalidate>
+          <div class="app-dialog__head">
+            <div><h2 id="blocklist-edit-title">Edit Blocklist</h2><p data-edit-subtitle></p></div>
+            <button type="button" class="app-dialog__close" data-dialog-cancel aria-label="Close dialog">&times;</button>
+          </div>
+          <div class="app-dialog__body">
+            <div class="field" data-field="name"><label for="bl-edit-name">Display name</label><input id="bl-edit-name" name="name" required maxlength="128"><small class="field-error"></small></div>
+            <div class="field" data-field="url"><label for="bl-edit-url">Source URL</label><input id="bl-edit-url" name="url" required maxlength="2048" type="url"><small class="field-error"></small></div>
+            <div class="form-grid">
+              <div class="field" data-field="category"><label for="bl-edit-category">Category</label><input id="bl-edit-category" name="category" maxlength="128"><small class="field-error"></small></div>
+              <div class="field" data-field="update_interval_seconds"><label for="bl-edit-interval">Update interval</label><select id="bl-edit-interval" name="update_interval_seconds">${options}</select><small class="field-error"></small></div>
+            </div>
+            <label class="row"><input type="checkbox" name="enabled" id="bl-edit-enabled"> Enabled</label>
+            <p class="field-hint">Parser format (hosts/AdGuard-style) is auto-detected from the downloaded content -- there is nothing to select here.</p>
+          </div>
+          <div class="app-dialog__foot">
+            <span class="hint" data-edit-status></span>
+            <button type="button" data-dialog-cancel>Cancel</button>
+            <button type="submit" data-edit-action="save">Save</button>
+            <button type="submit" data-edit-action="save-update" class="primary">Save &amp; Update Now</button>
+          </div>
+        </form>
+      </dialog>`;
+  }
+
   async function blocklists() {
     const data = await api("/api/blocklists");
     const presets = (data.settings && data.settings.interval_presets) || [];
-    const rows = (data.subscriptions || []).map((s) => `
+    const subscriptions = data.subscriptions || [];
+    state.blocklistSubscriptions = subscriptions;
+    const rows = subscriptions.map((s) => `
       <tr>
         <td>${esc(s.name)}<br><span class="muted mono">${esc(s.subscription_id)}</span></td>
         <td class="truncate" title="${esc(s.url)}">${esc(s.url)}</td>
@@ -1775,12 +1837,12 @@
         <td>${ts(s.last_success_at || s.last_refresh_at, "never")}</td>
         <td>${s.effective_interval_seconds ? ts(s.next_retry_at || s.next_update_at, "not scheduled") : "Manual Only"}</td>
         <td>${esc(s.effective_interval_label || "")}</td>
-        <td><span class="badge ${s.update_in_progress ? "warn" : tone(s.last_status)}">${s.update_in_progress ? "updating" : esc(s.last_status)}</span>${s.last_error ? `<br><span class="muted">${esc(s.last_error)}</span>` : ""}${s.update_duration_ms ? `<br><span class="muted">${esc(s.update_duration_ms)} ms</span>` : ""}</td>
+        <td><span class="badge ${s.update_in_progress ? "warn" : tone(s.last_status)}">${s.update_in_progress ? "updating" : esc(s.last_status)}</span>${s.consecutive_failure_count ? `<br><span class="muted">${esc(s.consecutive_failure_count)} consecutive failure(s)</span>` : ""}${s.last_error ? `<br><span class="muted">${esc(s.last_error)}</span>` : ""}${s.update_duration_ms ? `<br><span class="muted">${esc(s.update_duration_ms)} ms</span>` : ""}</td>
         <td class="actions-cell" data-no-sort>
           <div class="row-actions">
             <button type="button" class="row-actions__trigger" data-row-menu-toggle aria-haspopup="true" aria-expanded="false" aria-label="More actions for ${esc(s.name)}">&ctdot;</button>
             <div class="row-actions__menu" hidden role="menu" aria-label="Actions for ${esc(s.name)}">
-              <button type="button" role="menuitem" data-blocklist-edit="${esc(s.subscription_id)}" ${s.update_in_progress ? "disabled" : ""}>Edit Update Interval</button>
+              <button type="button" role="menuitem" data-blocklist-edit="${esc(s.subscription_id)}" ${s.update_in_progress ? "disabled" : ""}>Edit Blocklist</button>
               <button type="button" role="menuitem" data-blocklist-refresh="${esc(s.subscription_id)}" ${s.update_in_progress ? "disabled" : ""}>Update Now</button>
               <button type="button" role="menuitem" data-blocklist-toggle="${esc(s.subscription_id)}" ${s.update_in_progress ? "disabled" : ""}>${s.enabled ? "Disable" : "Enable"}</button>
               <div class="overflow-menu__divider" role="separator"></div>
@@ -1788,16 +1850,10 @@
             </div>
           </div>
         </td>
-      </tr>
-      <tr class="row-edit" id="blocklist-interval-${esc(s.subscription_id).replace(/[^A-Za-z0-9_-]/g, "-")}" hidden><td colspan="9">
-        <form data-form="blocklist-interval" data-subscription-id="${esc(s.subscription_id)}" class="field-row">
-          <label>Update interval <select name="update_interval_seconds"><option value="">Use global default</option>${presets.map((p) => `<option value="${esc(p.seconds)}" ${s.update_interval_seconds === p.seconds ? "selected" : ""}>${esc(p.label)}</option>`).join("")}</select></label>
-          <button>Save</button>
-        </form>
-      </td>
       </tr>`).join("");
     const jobRows = (data.jobs || []).slice(0, 5).map((j) => `<tr><td>${ts(j.started_at)}</td><td><span class="badge ${tone(j.status)}">${esc(j.status)}</span></td><td>${esc(j.kind)}</td><td>${esc((j.subscription_ids || []).join(", "))}</td><td>${esc(j.error || Object.values(j.results || {}).map((r) => r.message).join("; "))}</td></tr>`).join("");
     return page("Blocklists", "Subscribed, refreshable domain-block feeds. A failed refresh keeps the previous valid list enforced -- it never clears filtering on error.", `<button data-blocklist-refresh-all class="primary">Update All</button><button data-refresh>Refresh page</button>`, `
+      ${blocklistAttentionCard(subscriptions)}
       <section class="panel"><div class="panel__head"><h2>Update Schedule</h2></div><div class="panel__body">
         <form data-form="blocklist-settings" class="field-row">
           <label>Global default Update Interval <select name="default_interval_seconds">${presets.map((p) => `<option value="${esc(p.seconds)}" ${Number(data.settings.default_interval_seconds) === Number(p.seconds) ? "selected" : ""}>${esc(p.label)}</option>`).join("")}</select></label>
@@ -1805,7 +1861,7 @@
         </form>
       </div></section>
       <section class="panel"><div class="panel__head"><h2>Subscriptions</h2></div><div class="panel__body">
-        ${(data.subscriptions || []).length ? `<div class="table-wrap"><table data-grid data-grid-id="blocklist-subscriptions"><thead><tr><th>Name</th><th>URL</th><th>Enabled</th><th>Rules</th><th>Last successful update</th><th>Next update</th><th>Effective interval</th><th>Status</th><th class="actions-cell" data-no-sort aria-label="Actions"></th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty">No blocklist subscriptions yet.</div>`}
+        ${subscriptions.length ? `<div class="table-wrap"><table data-grid data-grid-id="blocklist-subscriptions"><thead><tr><th>Name</th><th>URL</th><th>Enabled</th><th>Rules</th><th>Last successful update</th><th>Next update</th><th>Effective interval</th><th>Status</th><th class="actions-cell" data-no-sort aria-label="Actions"></th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty">No blocklist subscriptions yet.</div>`}
       </div></section>
       ${jobRows ? `<section class="panel"><div class="panel__head"><h2>Recent Updates</h2></div><div class="panel__body"><div class="table-wrap"><table><thead><tr><th>Started</th><th>Status</th><th>Scope</th><th>Sources</th><th>Result</th></tr></thead><tbody>${jobRows}</tbody></table></div></div></section>` : ""}
       <section class="panel"><div class="panel__head"><h2>Add Subscription</h2></div><div class="panel__body">
@@ -1814,7 +1870,8 @@
           <label>Category<input name="category" placeholder="ads_trackers"></label>
         </div><label>URL<input name="url" required placeholder="https://example.com/hosts.txt"></label>
         <button class="primary">Add subscription</button></form>
-      </div></section>`);
+      </div></section>
+      ${blocklistEditDialogMarkup(presets)}`);
   }
 
   async function cache() {
@@ -2684,9 +2741,14 @@
       const blEdit = ev.target.closest("[data-blocklist-edit]");
       if (blEdit) {
         closeRowActionMenus();
-        const id = blEdit.dataset.blocklistEdit.replace(/[^A-Za-z0-9_-]/g, "-");
-        const row = document.getElementById(`blocklist-interval-${id}`);
-        if (row) row.hidden = !row.hidden;
+        openBlocklistEditDialog(blEdit.dataset.blocklistEdit, blEdit);
+        return;
+      }
+      const blDialogCancel = ev.target.closest("[data-dialog-cancel]");
+      if (blDialogCancel) {
+        const dialog = blDialogCancel.closest("dialog");
+        const form = dialog && dialog.querySelector("form");
+        if (form) closeBlocklistEditDialog(form);
         return;
       }
       const uploadDelete = ev.target.closest("[data-delete-uploaded-archive]");
@@ -2855,6 +2917,148 @@
       ev.preventDefault();
       await submitOnce(form, handleForm);
     });
+
+    // Edit Blocklist dialog: intercepted separately from the generic
+    // data-form dispatcher above (this form deliberately has no
+    // data-form attribute) because Save vs. Save & Update Now need two
+    // different request bodies from one submit event -- ev.submitter
+    // (the real <button> that triggered submission) tells them apart.
+    document.body.addEventListener("submit", async (ev) => {
+      if (ev.target.id !== "blocklist-edit-form") return;
+      ev.preventDefault();
+      const action = (ev.submitter && ev.submitter.dataset.editAction) || "save";
+      await submitBlocklistEdit(ev.target, action);
+    });
+    // "cancel" (Esc) and "close" on <dialog> deliberately do not bubble
+    // (HTML spec) -- capture-phase delegation on document.body still
+    // sees them on the way down, so this works the same way every other
+    // delegated listener in this app does, without needing a per-render
+    // "attach once the dialog exists" hook.
+    document.body.addEventListener("cancel", (ev) => {
+      if (ev.target.id !== "blocklist-edit-dialog") return;
+      const form = ev.target.querySelector("form");
+      if (form && isBlocklistEditDirty(form) && !confirm("Discard unsaved changes to this blocklist?")) {
+        ev.preventDefault();
+      }
+    }, true);
+    document.body.addEventListener("close", (ev) => {
+      if (ev.target.id !== "blocklist-edit-dialog") return;
+      const el = state.blocklistEditReturnFocus;
+      state.blocklistEditReturnFocus = null;
+      if (el && document.body.contains(el)) el.focus();
+    }, true);
+  }
+
+  function openBlocklistEditDialog(subscriptionId, triggerEl) {
+    const sub = (state.blocklistSubscriptions || []).find((s) => s.subscription_id === subscriptionId);
+    const dialog = document.getElementById("blocklist-edit-dialog");
+    if (!sub || !dialog) return;
+    const form = dialog.querySelector("form");
+    form.dataset.subscriptionId = subscriptionId;
+    form.elements.name.value = sub.name;
+    form.elements.url.value = sub.url;
+    form.elements.category.value = sub.category || "";
+    form.elements.update_interval_seconds.value = sub.update_interval_seconds == null ? "" : String(sub.update_interval_seconds);
+    form.elements.enabled.checked = sub.enabled;
+    form.dataset.initial = JSON.stringify(blocklistEditSnapshot(form));
+    clearBlocklistEditErrors(form);
+    dialog.querySelector("[data-edit-subtitle]").textContent = `${sub.name} (${sub.subscription_id})`;
+    dialog.querySelector("[data-edit-status]").textContent = "";
+    state.blocklistEditReturnFocus = triggerEl || null;
+    dialog.showModal();
+    form.elements.name.focus();
+  }
+
+  function blocklistEditSnapshot(form) {
+    return {
+      name: form.elements.name.value.trim(),
+      url: form.elements.url.value.trim(),
+      category: form.elements.category.value.trim(),
+      update_interval_seconds: form.elements.update_interval_seconds.value,
+      enabled: form.elements.enabled.checked,
+    };
+  }
+
+  function isBlocklistEditDirty(form) {
+    const initial = JSON.parse(form.dataset.initial || "{}");
+    const current = blocklistEditSnapshot(form);
+    return Object.keys(current).some((k) => current[k] !== initial[k]);
+  }
+
+  function closeBlocklistEditDialog(form, opts) {
+    const dialog = form.closest("dialog");
+    if (!(opts && opts.skipConfirm) && isBlocklistEditDirty(form)) {
+      if (!confirm("Discard unsaved changes to this blocklist?")) return false;
+    }
+    dialog.close();
+    return true;
+  }
+
+  function clearBlocklistEditErrors(form) {
+    form.querySelectorAll(".field[data-invalid]").forEach((f) => {
+      delete f.dataset.invalid;
+      const err = f.querySelector(".field-error");
+      if (err) err.textContent = "";
+      const input = f.querySelector("input,select");
+      if (input) input.removeAttribute("aria-invalid");
+    });
+  }
+
+  function showBlocklistFieldError(form, field, message) {
+    const wrap = field && form.querySelector(`[data-field="${field}"]`);
+    if (!wrap) {
+      toast(message, "bad");
+      return;
+    }
+    wrap.dataset.invalid = "true";
+    const err = wrap.querySelector(".field-error");
+    if (err) err.textContent = message;
+    const input = wrap.querySelector("input,select");
+    if (input) {
+      input.setAttribute("aria-invalid", "true");
+      input.focus();
+    }
+  }
+
+  async function submitBlocklistEdit(form, action) {
+    const subscriptionId = form.dataset.subscriptionId;
+    const initial = JSON.parse(form.dataset.initial || "{}");
+    const current = blocklistEditSnapshot(form);
+    if (!current.name) return showBlocklistFieldError(form, "name", "Display name is required.");
+    if (!current.url) return showBlocklistFieldError(form, "url", "Source URL is required.");
+    clearBlocklistEditErrors(form);
+    const body = {};
+    if (current.name !== initial.name) body.name = current.name;
+    if (current.url !== initial.url) body.url = current.url;
+    if (current.category !== initial.category) body.category = current.category;
+    if (current.update_interval_seconds !== initial.update_interval_seconds) {
+      body.update_interval_seconds = current.update_interval_seconds === "" ? null : Number(current.update_interval_seconds);
+    }
+    if (current.enabled !== initial.enabled) body.enabled = current.enabled;
+    if (action === "save-update") body.trigger_update = true;
+    const statusEl = form.querySelector("[data-edit-status]");
+    const buttons = form.querySelectorAll("button");
+    buttons.forEach((b) => { b.disabled = true; });
+    try {
+      const res = await api(`/api/blocklists/${encodeURIComponent(subscriptionId)}`, { method: "PATCH", body: JSON.stringify(body) });
+      if (action === "save-update" && res.job_id) {
+        if (statusEl) statusEl.textContent = "Updating...";
+        const job = await waitBlocklistJob(res.job_id);
+        const ok = job.status === "succeeded";
+        if (statusEl) statusEl.textContent = ok ? "Updated successfully." : `Update ${job.status}.`;
+        toast(ok ? "Blocklist saved and updated" : `Blocklist saved; update ${job.status}`, ok ? "ok" : "bad");
+      } else {
+        toast("Blocklist saved", "ok");
+      }
+      closeBlocklistEditDialog(form, { skipConfirm: true });
+      await loadPage("blocklists");
+    } catch (err) {
+      const field = err.body && err.body.field;
+      if (field) showBlocklistFieldError(form, field, err.body.detail || err.message);
+      else toast(err.message, "bad");
+    } finally {
+      buttons.forEach((b) => { b.disabled = false; });
+    }
   }
 
   async function handleForm(form) {

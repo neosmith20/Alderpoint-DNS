@@ -1469,6 +1469,138 @@ async function main() {
     // for import/backup.
     await sleep(1000);
 
+    // Full Edit Blocklist workflow + three-consecutive-failure attention
+    // card (pre-DoH reliability pass, part 3, owner-clarified scope).
+    // Continues directly from the subscription just created/failed
+    // above -- app.confirm() is mocked the same way the Delete flow
+    // above does it, so the dialog's own real window.confirm()
+    // unsaved-changes prompt can be asserted on instead of blocking the
+    // whole harness on a real native dialog.
+    await evalJs(`window.confirm = (msg) => { window.__confirmCalls = (window.__confirmCalls||0)+1; window.__confirmMessage = msg; return window.__confirmReturn !== false; }; true`);
+    for (let i = 0; i < 2; i++) {
+      await evalJs(`document.querySelectorAll('.toast').forEach((n) => n.remove()); true`);
+      // Real defect this works around (found via this very extension):
+      // clicking Update Now again before the PREVIOUS attempt's own
+      // "updating"/update_in_progress state has cleared and the page has
+      // reloaded starts a job the server queues behind the running one
+      // (or 409s) -- either way, waiting on generic "failed" text
+      // anywhere on the page raced the reload and could match a stale
+      // toast from the earlier attempt while this one was still
+      // in-flight. Gate the click on the row's own button being enabled
+      // again, and the wait afterward on THIS row specifically showing
+      // failed and no longer "updating".
+      await waitFor(`(() => {
+        const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Browser Test Blocklist ${suffix}'));
+        const btn = row && row.querySelector('[data-blocklist-refresh]');
+        return btn && !btn.disabled;
+      })()`, `blocklist refresh button ready for attempt #${i + 2}`);
+      await evalJs(`(() => {
+        const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Browser Test Blocklist ${suffix}'));
+        row.querySelector('[data-blocklist-refresh]').click();
+        return true;
+      })()`);
+      // Extra-generous tries (vs. waitFor's own 45s default): a real
+      // fetch failure here is fast (socket.gaierror is explicitly
+      // non-retryable, see blocklist_subscriptions._is_transient_fetch_error),
+      // but the client's own waitBlocklistJob polling backs off up to
+      // 2.5s/poll and the whole round trip (click -> job -> reload) can
+      // legitimately take longer than 45s on a host under heavy combined
+      // chromium+build load elsewhere in this same test session --
+      // found live via this very harness flaking only on its 3rd+
+      // sequential real Chromium launch in one pytest run, never in
+      // isolation.
+      await waitFor(`(() => {
+        const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Browser Test Blocklist ${suffix}'));
+        return row && row.textContent.includes('failed') && !row.textContent.includes('updating');
+      })()`, `blocklist refresh failure #${i + 2} fully settled`, 300);
+      await sleep(750);
+    }
+    await waitFor(`document.body.innerText.includes("needs attention") && document.body.innerText.includes("Browser Test Blocklist ${suffix}")`, "attention card visible after 3 consecutive failures");
+    proof.push("blocklist-attention-card-shown-after-3-failures");
+
+    // Open Edit Blocklist from the attention card itself (one of its
+    // real listed actions), verify every field is prepopulated with the
+    // subscription's actual current values, and that focus lands in the
+    // dialog (real keyboard-operable modal, not just visually present).
+    await evalJs(`document.querySelector('.attention-card [data-blocklist-edit]').click(); true`);
+    await waitFor(`document.getElementById('blocklist-edit-dialog') && document.getElementById('blocklist-edit-dialog').open`, "Edit Blocklist dialog open");
+    await waitFor(`document.activeElement && document.activeElement.id === 'bl-edit-name'`, "focus moved into the Edit Blocklist dialog");
+    const prepop = await evalJs(`JSON.stringify({
+      name: document.getElementById('bl-edit-name').value,
+      url: document.getElementById('bl-edit-url').value,
+      subtitle: document.querySelector('[data-edit-subtitle]').textContent,
+    })`);
+    const prepopVal = JSON.parse(prepop);
+    if (prepopVal.name !== `Browser Test Blocklist ${suffix}`) throw new Error(`Edit Blocklist did not prepopulate name: ${prepop}`);
+    if (!prepopVal.url.includes(`blocklist-refresh-${suffix}.invalid`)) throw new Error(`Edit Blocklist did not prepopulate url: ${prepop}`);
+    proof.push("blocklist-edit-dialog-prepopulated");
+
+    // 390px mobile: the dialog must never cause page-level horizontal
+    // overflow (same real check pattern already used for the dashboard
+    // chart above).
+    await cdp("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+    await sleep(150);
+    const mobileFit = await evalJs(`(() => {
+      const d = document.getElementById('blocklist-edit-dialog');
+      const r = d.getBoundingClientRect();
+      return { withinViewport: r.width <= window.innerWidth, bodyScrollWidth: document.body.scrollWidth, innerWidth: window.innerWidth };
+    })()`);
+    if (!mobileFit.withinViewport) throw new Error(`Edit Blocklist dialog overflows a 390px viewport: ${JSON.stringify(mobileFit)}`);
+    if (mobileFit.bodyScrollWidth > mobileFit.innerWidth + 1) throw new Error(`Edit Blocklist dialog causes page-level horizontal overflow at 390px: ${JSON.stringify(mobileFit)}`);
+    proof.push("blocklist-edit-dialog-fits-390px-mobile");
+    await cdp("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+    await sleep(150);
+
+    // Cancel with no changes: must not prompt (nothing to discard).
+    const confirmCallsBefore = await evalJs(`window.__confirmCalls || 0`);
+    await evalJs(`document.querySelector('#blocklist-edit-dialog [data-dialog-cancel]').click(); true`);
+    await waitFor(`!document.getElementById('blocklist-edit-dialog').open`, "Edit Blocklist dialog closed via Cancel (no changes)");
+    const confirmCallsAfterCleanCancel = await evalJs(`window.__confirmCalls || 0`);
+    if (confirmCallsAfterCleanCancel !== confirmCallsBefore) throw new Error("Cancel with no edits must not prompt to discard unsaved changes");
+    await waitFor(`document.activeElement && document.activeElement.hasAttribute('data-blocklist-edit')`, "focus returned to the action trigger after closing the dialog");
+    proof.push("blocklist-edit-cancel-no-changes-no-prompt");
+
+    // Reopen, make a real edit, Cancel -> must prompt; accepting the
+    // (mocked) prompt discards the edit and the server-side value is
+    // untouched.
+    await evalJs(`document.querySelector('.attention-card [data-blocklist-edit]').click(); true`);
+    await waitFor(`document.getElementById('blocklist-edit-dialog').open`, "Edit Blocklist dialog reopened");
+    await evalJs(`(() => { const el = document.getElementById('bl-edit-name'); el.value = 'Changed But Discarded'; el.dispatchEvent(new Event('input', {bubbles:true})); return true; })()`);
+    await evalJs(`document.querySelector('#blocklist-edit-dialog [data-dialog-cancel]').click(); true`);
+    await waitFor(`!document.getElementById('blocklist-edit-dialog').open`, "Edit Blocklist dialog closed via Cancel (with changes, confirmed)");
+    const confirmCallsAfterDirtyCancel = await evalJs(`window.__confirmCalls || 0`);
+    if (confirmCallsAfterDirtyCancel <= confirmCallsAfterCleanCancel) throw new Error("Cancel with real unsaved edits must prompt to discard unsaved changes");
+    if (await evalJs(`document.body.innerText.includes("Changed But Discarded")`)) throw new Error("Cancelled edit must not have been persisted");
+    proof.push("blocklist-edit-cancel-with-changes-prompts-and-discards");
+
+    // Full recovery: open once more, correct the URL to a real, valid
+    // local source, and Save & Update Now -- proves the edited source
+    // downloads/validates/promotes, the current failure clears, and the
+    // page-level attention card disappears completely (not just this
+    // one row's own status). Only test_chromium_management_ui_harness's
+    // own pytest wrapper stands up the local blocklist-content server
+    // this needs (APDNS_TEST_BLOCKLIST_URL) -- the other, narrower
+    // wrappers sharing this same main() (timezone/dashboard-chart
+    // proofs) don't, so this step degrades to a skip for them rather
+    // than failing a scenario that was never about blocklists.
+    const workingUrl = process.env.APDNS_TEST_BLOCKLIST_URL;
+    if (!workingUrl) {
+      console.log("skipping blocklist-edit recovery proof: APDNS_TEST_BLOCKLIST_URL not set by this wrapper");
+    } else {
+      await evalJs(`document.querySelector('.attention-card [data-blocklist-edit]').click(); true`);
+      await waitFor(`document.getElementById('blocklist-edit-dialog').open`, "Edit Blocklist dialog reopened for recovery");
+      await evalJs(`(() => { document.getElementById('bl-edit-url').value = ${JSON.stringify(workingUrl)}; return true; })()`);
+      await evalJs(`document.querySelector('#blocklist-edit-dialog [data-edit-action="save-update"]').click(); true`);
+      await waitFor(`!document.getElementById('blocklist-edit-dialog').open`, "Edit Blocklist dialog closed after Save & Update Now");
+      await waitForOkOrError(`!document.body.innerText.includes("needs attention")`, "attention card cleared after successful recovery");
+      proof.push("blocklist-edit-recovery-clears-attention-card");
+      await waitFor(`(() => {
+        const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Browser Test Blocklist ${suffix}'));
+        return row && row.textContent.includes('succeeded') && !row.textContent.includes('consecutive failure');
+      })()`, "recovered subscription row shows succeeded status", 300);
+      proof.push("blocklist-edit-recovery-row-shows-succeeded");
+    }
+
     // Network Configuration (beta-rescue priority 4): read-only
     // discoverability/status proof. Deliberately never submits the
     // apply form in this shared, real-networked harness environment --

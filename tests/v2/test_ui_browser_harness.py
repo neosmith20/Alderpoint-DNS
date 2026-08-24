@@ -1,13 +1,37 @@
+import http.server
 import os
 import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from urllib.request import urlopen
 
 import pytest
+
+
+def _serve_blocklist(content: str) -> http.server.HTTPServer:
+    """Real local HTTP server for the Edit Blocklist recovery proof: the
+    browser harness needs one genuinely fetchable, valid blocklist URL to
+    correct the deliberately-broken subscription into -- a live public
+    URL isn't appropriate for an automated, possibly-offline test host."""
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            body = content.encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
 
 
 def _free_port() -> int:
@@ -64,13 +88,16 @@ def test_chromium_management_ui_harness(tmp_path):
         stderr=subprocess.STDOUT,
         text=True,
     )
+    blocklist_server = _serve_blocklist("recovered-blocklist-proof.example\n")
     try:
         _wait_http(f"http://127.0.0.1:{port}/api/setup/status")
+        blocklist_port = blocklist_server.server_address[1]
         harness_env = env.copy()
         harness_env.update({
             "APDNS_UI_BASE": f"http://127.0.0.1:{port}",
             "APDNS_CHROME_PORT": str(_free_port()),
             "APDNS_CHROME_PROFILE": str(tmp_path / "chrome-profile"),
+            "APDNS_TEST_BLOCKLIST_URL": f"http://127.0.0.1:{blocklist_port}/list.txt",
         })
         result = subprocess.run(
             ["node", str(repo / "tests/v2/browser/chromium_ui_harness.js")],
@@ -84,6 +111,13 @@ def test_chromium_management_ui_harness(tmp_path):
         assert "setup-login" in result.stdout
         assert "backup-restore-workflow" in result.stdout
         assert "logout-session-invalidation" in result.stdout
+        assert "blocklist-attention-card-shown-after-3-failures" in result.stdout
+        assert "blocklist-edit-dialog-prepopulated" in result.stdout
+        assert "blocklist-edit-dialog-fits-390px-mobile" in result.stdout
+        assert "blocklist-edit-cancel-no-changes-no-prompt" in result.stdout
+        assert "blocklist-edit-cancel-with-changes-prompts-and-discards" in result.stdout
+        assert "blocklist-edit-recovery-clears-attention-card" in result.stdout
+        assert "blocklist-edit-recovery-row-shows-succeeded" in result.stdout
     finally:
         server.terminate()
         try:
@@ -91,6 +125,7 @@ def test_chromium_management_ui_harness(tmp_path):
         except subprocess.TimeoutExpired:
             server.kill()
             server.wait(timeout=10)
+        blocklist_server.shutdown()
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required for the Chromium DevTools harness")

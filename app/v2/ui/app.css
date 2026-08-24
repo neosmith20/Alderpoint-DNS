@@ -326,6 +326,52 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .password-toggle { flex: 0 0 auto; min-height: 30px; padding: 4px 10px; }
 .empty { padding: var(--s-5); border: 1px dashed var(--line-2); border-radius: var(--r-2); color: var(--muted); background: var(--surface-2); }
 
+/* Full Edit workflow dialog (pre-DoH reliability pass, part 3) -- the
+   first native <dialog> in this app: real modal semantics (focus
+   containment, Esc-to-close, a real ::backdrop) for free, so keyboard
+   and mobile operation don't need custom focus-trap JS. */
+dialog.app-dialog {
+  width: min(560px, calc(100vw - 32px));
+  max-height: min(88vh, 720px);
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+dialog.app-dialog::backdrop { background: color-mix(in srgb, #000 55%, transparent); }
+dialog.app-dialog[open] { display: flex; flex-direction: column; }
+.app-dialog__head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--s-3); padding: var(--s-4); border-bottom: 1px solid var(--line); flex: 0 0 auto; }
+.app-dialog__head h2 { margin: 0; font-size: 16px; }
+.app-dialog__head p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+.app-dialog__close { flex: 0 0 auto; width: 32px; height: 32px; min-height: 32px; padding: 0; border-radius: var(--r-2); }
+.app-dialog__body { padding: var(--s-4); overflow-y: auto; display: grid; gap: var(--s-3); min-height: 0; }
+.app-dialog__foot { display: flex; align-items: center; justify-content: flex-end; gap: var(--s-2); padding: var(--s-4); border-top: 1px solid var(--line); flex: 0 0 auto; flex-wrap: wrap; }
+.app-dialog__foot .hint { margin-right: auto; color: var(--muted); font-size: 12px; }
+.field { display: grid; gap: 4px; }
+.field label { font-size: 13px; color: var(--muted); }
+.field[data-invalid="true"] input, .field[data-invalid="true"] select { border-color: var(--bad); }
+.field-error { color: var(--bad); font-size: 12px; }
+.field-hint { color: var(--muted); font-size: 12px; }
+
+/* Page-level "needs attention" card -- conditionally rendered only when
+   at least one enabled subscription has hit the failure threshold (see
+   policy_store.py's BLOCKLIST_ATTENTION_THRESHOLD); absent entirely,
+   never an empty placeholder, when nothing needs attention. */
+.attention-card { display: grid; gap: var(--s-3); }
+.attention-card__item { display: grid; gap: 6px; padding: var(--s-3); border: 1px solid var(--line); border-radius: var(--r-2); background: var(--surface); }
+.attention-card__item h3 { margin: 0; font-size: 14px; }
+.attention-card__meta { display: flex; flex-wrap: wrap; gap: var(--s-2) var(--s-4); color: var(--muted); font-size: 12px; }
+.attention-card__actions { display: flex; flex-wrap: wrap; gap: var(--s-2); margin-top: 2px; }
+
+@media (max-width: 480px) {
+  dialog.app-dialog { width: calc(100vw - 16px); max-height: 92vh; }
+  .app-dialog__foot { justify-content: stretch; }
+  .app-dialog__foot button { flex: 1 1 auto; }
+  .app-dialog__foot .hint { flex-basis: 100%; margin-right: 0; text-align: center; }
+}
+
 .tabs { display: flex; gap: var(--s-1); flex-wrap: wrap; border-bottom: 1px solid var(--line); }
 .tabs button { border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom-color: transparent; }
 .tabs button.active { background: var(--surface); color: var(--accent); border-color: var(--line); border-bottom-color: var(--surface); }
