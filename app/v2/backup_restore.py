@@ -44,6 +44,7 @@ operational" is enforced structurally, not just documented.
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import os
@@ -70,6 +71,8 @@ MAX_ARCHIVE_BYTES = 1_000_000_000
 MAX_EXPANDED_BYTES = 4_000_000_000
 MAX_COMPRESSION_RATIO = 200
 PRODUCT_ID = "alderpointdns-v2-appliance"
+LEGACY_V1_PRODUCT_ID = "alderpointdns-v1-appliance"
+LEGACY_V1_DB_ARCHIVE_RELPATH = "var/lib/alderpointdns/alderpointdns.db"
 
 # Cross-appliance portability (native upload/restore, milestone 1): a backup
 # meant to move to a *different* appliance cannot be encrypted with a key
@@ -96,6 +99,16 @@ MAX_ARCHIVE_MEMBERS = 64
 MAX_MEMBER_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB per member
 MAX_TOTAL_EXTRACTED_BYTES = 4 * 1024 * 1024 * 1024  # 4 GiB total
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024  # 512 MiB compressed/encrypted upload
+LEGACY_V1_MAX_ARCHIVE_MEMBERS = 2048
+LEGACY_V1_MANIFEST_MAX_BYTES = 1 * 1024 * 1024
+LEGACY_V1_ALLOWED_PREFIXES = (
+    "var/lib/alderpointdns/",
+    "etc/alderpointdns/",
+    "etc/bind/",
+    "etc/dnsdist/",
+    "etc/systemd/system/",
+    "etc/sudoers.d/",
+)
 
 
 class ApplianceBackupError(RuntimeError):
@@ -141,6 +154,9 @@ class ApplianceManifest:
     product: str = PRODUCT_ID
     source_node_id: Optional[str] = None
     key_mode: str = "local"
+    backup_format: str = "v2-native"
+    migration_preview: Optional[dict] = None
+    unsupported_categories: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -353,6 +369,185 @@ def _validate_member_name(name: str) -> None:
     parts = path.parts
     if not parts or any(part in ("", ".", "..") for part in parts):
         raise ApplianceRestoreError(f"backup archive contains an unsafe path: {name!r}")
+
+
+def _sha256_stream(fh) -> str:
+    h = hashlib.sha256()
+    for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+        h.update(chunk)
+    return h.hexdigest()
+
+
+def _legacy_v1_member_allowed(name: str) -> bool:
+    if name == MANIFEST_NAME:
+        return True
+    return any(name.startswith(prefix) for prefix in LEGACY_V1_ALLOWED_PREFIXES)
+
+
+def _read_legacy_v1_manifest(tar: tarfile.TarFile) -> dict:
+    try:
+        member = tar.getmember(MANIFEST_NAME)
+    except KeyError as exc:
+        raise ApplianceRestoreError("V1 backup archive is missing manifest.json") from exc
+    if not member.isfile():
+        raise ApplianceRestoreError("V1 backup manifest is not a regular file")
+    if member.size <= 0 or member.size > LEGACY_V1_MANIFEST_MAX_BYTES:
+        raise ApplianceRestoreError("V1 backup manifest size is outside the supported bounds")
+    fh = tar.extractfile(member)
+    if fh is None:
+        raise ApplianceRestoreError("V1 backup manifest is unreadable")
+    try:
+        data = json.loads(fh.read(member.size + 1).decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ApplianceRestoreError(f"V1 backup manifest is not valid JSON: {exc}") from exc
+    required = {"backup_format_version", "alderpointdns_app_version", "created_at", "included_components", "sha256_checksums"}
+    missing = sorted(required - set(data))
+    if missing:
+        raise ApplianceRestoreError(f"V1 backup manifest is missing required field(s): {', '.join(missing)}")
+    if data.get("backup_format_version") != 1:
+        raise ApplianceRestoreError(f"unsupported V1 backup format version {data.get('backup_format_version')!r}")
+    if not isinstance(data.get("sha256_checksums"), dict):
+        raise ApplianceRestoreError("V1 backup manifest sha256_checksums is invalid")
+    return data
+
+
+def _classify_legacy_v1_components(manifest: dict) -> tuple[list[str], list[str]]:
+    included = set(manifest.get("included_components") or [])
+    restorable: list[str] = []
+    unsupported: list[str] = []
+    migrated = {
+        "sqlite_data": "configuration, admins, clients, local DNS, filtering, upstreams, notifications, analytics archive",
+        "custom_rules": "custom filtering rules",
+        "client_aliases": "clients and identifiers",
+        "analytics_history": "legacy query-history archive registration",
+        "user_auth_data": "compatible admin password hashes",
+    }
+    for key in sorted(included):
+        if key in migrated:
+            label = migrated[key]
+            if label not in restorable:
+                restorable.append(label)
+        else:
+            unsupported.append(key)
+    if "sqlite_data" not in included:
+        unsupported.append("missing sqlite_data: no V1 control database to migrate")
+    return restorable, sorted(set(unsupported))
+
+
+def validate_legacy_v1_backup(backup_path: Path) -> ApplianceManifest:
+    """Validate a released V1.1.1 gzip-compressed tar backup by content.
+
+    This intentionally supports the real V1.1.1 ``.tar.gz`` native backup
+    layout only. The importer never trusts the filename and never unpacks
+    V1 files over V2 paths; the verified SQLite database is later consumed
+    by the schema-aware V1->V2 migration pipeline.
+    """
+    archive_size = backup_path.stat().st_size if backup_path.exists() else 0
+    if archive_size > MAX_ARCHIVE_BYTES or archive_size > MAX_UPLOAD_BYTES:
+        raise ApplianceRestoreError("backup file exceeds the configured upload/archive size limit")
+    try:
+        tar = tarfile.open(backup_path, mode="r:gz")
+    except tarfile.TarError as exc:
+        raise ApplianceRestoreError(f"backup is not a valid gzip-compressed tar archive: {exc}") from exc
+    try:
+        manifest_data = _read_legacy_v1_manifest(tar)
+        members = tar.getmembers()
+        if len(members) > LEGACY_V1_MAX_ARCHIVE_MEMBERS:
+            raise ApplianceRestoreError("V1 backup archive contains too many entries")
+        seen: set[str] = set()
+        expanded_size = 0
+        for member in members:
+            _validate_member_name(member.name)
+            if member.name in seen:
+                raise ApplianceRestoreError(f"V1 backup archive contains a duplicate entry: {member.name!r}")
+            seen.add(member.name)
+            if not _legacy_v1_member_allowed(member.name):
+                raise ApplianceRestoreError(f"V1 backup archive contains an unexpected entry: {member.name!r}")
+            if not (member.isfile() or member.isdir()):
+                raise ApplianceRestoreError(f"V1 backup archive contains a non-regular/special entry: {member.name!r}")
+            if member.isfile():
+                if member.size < 0 or member.size > MAX_MEMBER_BYTES:
+                    raise ApplianceRestoreError(f"V1 backup archive entry size is outside the supported bounds: {member.name!r}")
+                expanded_size += member.size
+                if expanded_size > MAX_TOTAL_EXTRACTED_BYTES or expanded_size > MAX_EXPANDED_BYTES:
+                    raise ApplianceRestoreError("V1 backup archive expanded size exceeds the configured safety limit")
+        if archive_size > 0 and expanded_size / max(archive_size, 1) > MAX_COMPRESSION_RATIO:
+            raise ApplianceRestoreError("V1 backup archive compression ratio exceeds the configured safety limit")
+
+        checksums = manifest_data["sha256_checksums"]
+        if LEGACY_V1_DB_ARCHIVE_RELPATH not in checksums:
+            raise ApplianceRestoreError("V1 backup does not include the required SQLite database")
+        for relpath, expected in checksums.items():
+            _validate_member_name(relpath)
+            if not _legacy_v1_member_allowed(relpath):
+                raise ApplianceRestoreError(f"V1 manifest references an unexpected path: {relpath!r}")
+            try:
+                member = tar.getmember(relpath)
+            except KeyError as exc:
+                raise ApplianceRestoreError(f"V1 backup manifest references missing entry: {relpath!r}") from exc
+            if not member.isfile():
+                raise ApplianceRestoreError(f"V1 backup manifest references a non-regular entry: {relpath!r}")
+            fh = tar.extractfile(member)
+            if fh is None:
+                raise ApplianceRestoreError(f"V1 backup entry is unreadable: {relpath!r}")
+            actual = _sha256_stream(fh)
+            if actual != expected:
+                raise ApplianceRestoreError(f"V1 backup checksum mismatch for {relpath!r}")
+
+        restorable, unsupported = _classify_legacy_v1_components(manifest_data)
+        return ApplianceManifest(
+            format_version=int(manifest_data["backup_format_version"]),
+            product=LEGACY_V1_PRODUCT_ID,
+            created_at=str(manifest_data.get("created_at", "")),
+            source_version=str(manifest_data.get("alderpointdns_app_version", "v1.x")),
+            source_node_id=manifest_data.get("source_node_id"),
+            control_db_schema_version=manifest_data.get("database_schema_version"),
+            contents=restorable,
+            secret_count=0,
+            cert_files=[],
+            raw_query_history_included="analytics_history" in set(manifest_data.get("included_components") or []),
+            key_mode="none",
+            backup_format="v1.1.1-tar.gz",
+            migration_preview={
+                "included_components": sorted(set(manifest_data.get("included_components") or [])),
+                "restorable_content": restorable,
+                "unsupported_components": unsupported,
+            },
+            unsupported_categories=unsupported,
+        )
+    finally:
+        tar.close()
+
+
+def stage_legacy_v1_restore(backup_path: Path, staging_dir: Path):
+    from app.v2 import migration as mig
+    from app.v2 import migration_convert as mconv
+
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir)
+    staging_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    manifest = validate_legacy_v1_backup(backup_path)
+    extract_root = staging_dir / "v1-extract"
+    extract_root.mkdir(mode=0o700)
+    try:
+        with tarfile.open(backup_path, mode="r:gz") as tar:
+            db_member = tar.getmember(LEGACY_V1_DB_ARCHIVE_RELPATH)
+            fh = tar.extractfile(db_member)
+            if fh is None:
+                raise ApplianceRestoreError("V1 backup database entry is unreadable")
+            db_path = extract_root / "alderpointdns.db"
+            with open(db_path, "wb") as out:
+                shutil.copyfileobj(fh, out, length=1024 * 1024)
+            os.chmod(db_path, 0o600)
+    except tarfile.TarError as exc:
+        raise ApplianceRestoreError(f"V1 backup extraction failed: {exc}") from exc
+
+    try:
+        mconv.detect_source(db_path)
+        state = mig.run_migration(db_path, staging_dir / "v1-migration")
+    except (mconv.MigrationConvertError, mig.MigrationError) as exc:
+        raise ApplianceRestoreError(f"V1 backup migration failed: {exc}") from exc
+    return state, manifest
 
 
 def _validate_archive_members(

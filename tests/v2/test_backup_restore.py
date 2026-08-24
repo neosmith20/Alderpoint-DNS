@@ -30,6 +30,7 @@ from cryptography.fernet import Fernet
 from app.v2 import backup_restore as br
 from app.v2 import control_db, policy_store as store
 from app.v2.secret_store import SecretStore
+from tests.v2._v1_fixture import build_v1_fixture
 
 DNSDIST_INSTALLED = shutil.which("dnsdist") is not None
 
@@ -240,6 +241,104 @@ def _fake_nxdomain_upstream(port: int, stop_event) -> "threading.Thread":
     thread = threading.Thread(target=_serve, daemon=True)
     thread.start()
     return thread
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _v111_tar_gz_fixture(
+    tmp_path: Path,
+    db_path: Path,
+    *,
+    components: list[str] | None = None,
+    extra_members: list[tarfile.TarInfo] | None = None,
+    extra_payloads: dict[str, bytes] | None = None,
+) -> Path:
+    components = components or ["sqlite_data", "custom_rules", "client_aliases", "user_auth_data", "analytics_history"]
+    extra_payloads = extra_payloads or {}
+    checksums = {br.LEGACY_V1_DB_ARCHIVE_RELPATH: _sha256_file(db_path)}
+    for name, payload in extra_payloads.items():
+        checksums[name] = __import__("hashlib").sha256(payload).hexdigest()
+    manifest = {
+        "backup_format_version": 1,
+        "alderpointdns_app_version": "1.1.1",
+        "database_schema_version": "fixture-v1.1.1",
+        "created_at": "2026-08-23T00:00:00+00:00",
+        "source_node_id": "v1-fixture",
+        "included_components": components,
+        "sha256_checksums": checksums,
+        "purpose": "manual",
+        "purpose_metadata": {},
+    }
+    path = tmp_path / "alderpointdns-backup-20260823T000000Z.tar.gz"
+    with tarfile.open(path, mode="w:gz") as tar:
+        mbytes = json.dumps(manifest).encode("utf-8")
+        minfo = tarfile.TarInfo("manifest.json")
+        minfo.size = len(mbytes)
+        tar.addfile(minfo, io.BytesIO(mbytes))
+        tar.add(db_path, arcname=br.LEGACY_V1_DB_ARCHIVE_RELPATH)
+        for name, payload in extra_payloads.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            tar.addfile(info, io.BytesIO(payload))
+        for info in extra_members or []:
+            tar.addfile(info)
+    return path
+
+
+class TestLegacyV111BackupCompatibility:
+    def test_accepts_archive_created_by_released_v1_backup_module(self, tmp_path, monkeypatch):
+        import app.backup as v1backup
+
+        source_db = build_v1_fixture(tmp_path / "v1" / "alderpointdns.db")
+        monkeypatch.setattr(v1backup, "DB_PATH", source_db)
+        monkeypatch.setattr(v1backup, "DB_ARCHIVE_RELPATH", br.LEGACY_V1_DB_ARCHIVE_RELPATH)
+        monkeypatch.setattr(v1backup, "BACKUP_DIR", tmp_path / "v1-backups")
+        monkeypatch.setattr(v1backup, "STAGING_DIR", tmp_path / "v1-staging")
+        components = {key: False for key in v1backup.COMPONENT_KEYS}
+        components["sqlite_data"] = True
+
+        archive = v1backup.create_backup(components)
+        manifest = br.validate_legacy_v1_backup(archive)
+
+        assert archive.name.endswith(".tar.gz")
+        assert manifest.backup_format == "v1.1.1-tar.gz"
+        assert manifest.source_version.startswith("1.1.1")
+
+    def test_validates_released_v111_tar_gz_layout_by_content(self, tmp_path):
+        source_db = build_v1_fixture(tmp_path / "v1" / "alderpointdns.db")
+        archive = _v111_tar_gz_fixture(tmp_path, source_db)
+
+        manifest = br.validate_legacy_v1_backup(archive)
+
+        assert manifest.backup_format == "v1.1.1-tar.gz"
+        assert manifest.product == br.LEGACY_V1_PRODUCT_ID
+        assert manifest.source_version == "1.1.1"
+        assert "configuration, admins, clients, local DNS, filtering, upstreams, notifications, analytics archive" in manifest.contents
+
+    def test_v111_rejects_symlink_before_extracting(self, tmp_path):
+        source_db = build_v1_fixture(tmp_path / "v1" / "alderpointdns.db")
+        link = tarfile.TarInfo("var/lib/alderpointdns/compiled/bad-link")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "/etc/passwd"
+        archive = _v111_tar_gz_fixture(tmp_path, source_db, extra_members=[link])
+
+        with pytest.raises(br.ApplianceRestoreError, match="non-regular|special"):
+            br.validate_legacy_v1_backup(archive)
+
+    def test_v111_rejects_traversal_manifest_path(self, tmp_path):
+        source_db = build_v1_fixture(tmp_path / "v1" / "alderpointdns.db")
+        archive = _v111_tar_gz_fixture(tmp_path, source_db, extra_payloads={"../escape": b"bad"})
+
+        with pytest.raises(br.ApplianceRestoreError):
+            br.validate_legacy_v1_backup(archive)
 
 
 @pytest.mark.skipif(not DNSDIST_INSTALLED, reason="requires installed dnsdist")
@@ -512,6 +611,75 @@ class TestApplianceBackupApiRoutes:
         records = client.get("/api/local-dns").json()["records"]
         assert {r["name"] for r in records} == {"unchanged.lan"}
         assert client.get("/api/backup/appliance").json()["backups"] == []
+
+    def test_upload_previews_legacy_v111_tar_gz_backup(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        webapp = self._fresh_webapp(tmp_path, monkeypatch)
+        client = TestClient(webapp.app)
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12", "create_local_dns": False})
+        login = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
+        csrf = login.json()["csrf"]
+
+        source_db = build_v1_fixture(tmp_path / "v1" / "alderpointdns.db")
+        archive = _v111_tar_gz_fixture(tmp_path, source_db)
+        upload = client.post(
+            "/api/backup/appliance/upload",
+            json={
+                "filename": "alderpointdns-backup-20260823T000000Z.tar.gz",
+                "data_base64": base64.b64encode(archive.read_bytes()).decode("ascii"),
+            },
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert upload.status_code == 200, upload.text
+        payload = upload.json()
+        assert payload["backup_format"] == "v1.1.1-tar.gz"
+        assert payload["backup_name"].endswith(".tar.gz")
+        assert payload["source_version"] == "1.1.1"
+        assert payload["migration_preview"]["included_components"]
+
+        listed = client.get("/api/backup/appliance").json()["backups"]
+        assert [b for b in listed if b["name"] == payload["backup_name"]]
+
+    def test_restore_legacy_v111_tar_gz_migrates_into_v2_control_db(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+        from app.v2 import migration as mig
+
+        monkeypatch.setitem(mig._STAGE_FUNCS, "health_check", lambda state: None)
+
+        webapp = self._fresh_webapp(tmp_path, monkeypatch)
+        client = TestClient(webapp.app)
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12", "create_local_dns": False})
+        login = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"})
+        csrf = login.json()["csrf"]
+
+        source_db = build_v1_fixture(tmp_path / "v1" / "alderpointdns.db", upstream_protocol="plain", dot_enabled=False)
+        archive = _v111_tar_gz_fixture(tmp_path, source_db)
+        upload = client.post(
+            "/api/backup/appliance/upload",
+            json={
+                "filename": "alderpointdns-backup-20260823T000000Z.tar.gz",
+                "data_base64": base64.b64encode(archive.read_bytes()).decode("ascii"),
+            },
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert upload.status_code == 200, upload.text
+        name = upload.json()["backup_name"]
+
+        restored = client.post(
+            f"/api/backup/appliance/{name}/restore",
+            json={"confirmation": name},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert restored.status_code == 200, restored.text
+        assert restored.json()["backup_format"] == "v1.1.1-tar.gz"
+        assert restored.json()["pre_restore_backup"].startswith("pre-restore-safety-")
+
+        with control_db.connect(webapp.CONTROL_DB) as conn:
+            local_names = {r[0] for r in conn.execute("SELECT name FROM local_dns_records").fetchall()}
+            clients = {r[0] for r in conn.execute("SELECT name FROM clients").fetchall()}
+        assert {"nas.lan", "printer.lan"} <= local_names
+        assert "Kids Laptop" in clients
 
     def test_runtime_promotion_failure_rolls_back_restored_control_state(self, tmp_path, monkeypatch):
         from fastapi.testclient import TestClient

@@ -1282,7 +1282,7 @@
         </form>
         <form data-form="appliance-upload" class="backup-upload" data-drop-upload>
           <label class="dropzone">Upload and preview native backup
-            <input type="file" name="file" accept=".apdnsbak">
+            <input type="file" name="file" accept=".apdnsbak,.tar.gz">
           </label>
           <label>Restore passphrase <input name="passphrase" type="password" autocomplete="current-password" data-omit-empty="1" placeholder="if backup is portable"></label>
           <button>Upload and preview</button>
@@ -2500,7 +2500,7 @@
     } else if (type === "appliance-upload") {
       const fileInput = form.querySelector('input[type=file]');
       const file = fileInput && fileInput.files[0];
-      if (!file) throw new Error("choose a native .apdnsbak backup to upload");
+      if (!file) throw new Error("choose a native .apdnsbak or V1.1.1 .tar.gz backup to upload");
       const data_base64 = await fileToBase64(file);
       const payload = { filename: file.name, data_base64 };
       if (body.passphrase) payload.passphrase = body.passphrase;

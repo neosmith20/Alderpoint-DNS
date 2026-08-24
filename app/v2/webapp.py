@@ -55,6 +55,7 @@ from app.v2 import statistics_control
 from app.v2 import control_db
 from app.v2 import dnscrypt_provisioning
 from app.v2 import import_migration
+from app.v2 import migration as v1_migration
 from app.v2 import migration_convert
 from app.v2 import node_identity
 from app.v2 import notification_store
@@ -2645,7 +2646,8 @@ def restore_secret_backup(name: str, req: SecretRestoreRequest, admin=Depends(cu
 
 
 def _appliance_backup_path_from_name(name: str) -> Path:
-    if "/" in name or "\\" in name or name.startswith(".") or not name.endswith(".apdnsbak"):
+    valid_suffix = name.endswith(".apdnsbak") or name.endswith(".tar.gz")
+    if "/" in name or "\\" in name or name.startswith(".") or not valid_suffix:
         raise ApiError(400, "validation_error", "invalid backup name")
     path = (_backup_dir() / name).resolve()
     if path.parent != _backup_dir().resolve():
@@ -2669,6 +2671,10 @@ def _appliance_source_version() -> str:
 
 def _appliance_backup_warnings(manifest: backup_restore.ApplianceManifest) -> list[str]:
     warnings: list[str] = []
+    if manifest.backup_format == "v1.1.1-tar.gz":
+        warnings.append("legacy V1.1.1 backup: restore will migrate recoverable data into V2 schema; V1 runtime files are not unpacked over V2")
+        warnings.extend([f"unsupported V1 component: {name}" for name in manifest.unsupported_categories])
+        return warnings
     live_schema = backup_restore._control_db_schema_version(CONTROL_DB)
     if manifest.control_db_schema_version is not None and live_schema is not None:
         if manifest.control_db_schema_version > live_schema:
@@ -2687,6 +2693,7 @@ def _appliance_backup_warnings(manifest: backup_restore.ApplianceManifest) -> li
 def _appliance_manifest_response(name: str, path: Path, manifest: backup_restore.ApplianceManifest) -> dict[str, Any]:
     return {
         "status": "valid", "backup_name": name, "created_at": manifest.created_at,
+        "backup_format": manifest.backup_format,
         "product": manifest.product, "source_version": manifest.source_version,
         "source_node_id": manifest.source_node_id, "key_mode": manifest.key_mode,
         "contents": manifest.contents, "secret_count": manifest.secret_count,
@@ -2694,8 +2701,18 @@ def _appliance_manifest_response(name: str, path: Path, manifest: backup_restore
         "control_db_schema_version": manifest.control_db_schema_version,
         "raw_query_history_included": manifest.raw_query_history_included,
         "size_bytes": path.stat().st_size,
+        "migration_preview": manifest.migration_preview,
+        "unsupported_categories": manifest.unsupported_categories,
         "warnings": _appliance_backup_warnings(manifest),
     }
+
+
+def _validate_appliance_backup_any(path: Path, *, passphrase: Optional[str] = None) -> backup_restore.ApplianceManifest:
+    if path.name.endswith(".apdnsbak"):
+        return backup_restore.validate_appliance_backup(path, _backup_key(_secrets()), passphrase=passphrase)
+    if path.name.endswith(".tar.gz"):
+        return backup_restore.validate_legacy_v1_backup(path)
+    raise backup_restore.ApplianceRestoreError("unsupported appliance backup filename")
 
 
 class ApplianceBackupCreateRequest(BaseModel):
@@ -2711,7 +2728,8 @@ class ApplianceBackupUploadRequest(BaseModel):
 @app.get("/api/backup/appliance")
 def list_appliance_backups(admin=Depends(current_admin)):
     rows = []
-    for p in sorted(_backup_dir().glob("*.apdnsbak"), key=lambda x: x.stat().st_mtime, reverse=True):
+    backup_files = list(_backup_dir().glob("*.apdnsbak")) + list(_backup_dir().glob("*.tar.gz"))
+    for p in sorted(backup_files, key=lambda x: x.stat().st_mtime, reverse=True):
         stat = p.stat()
         rows.append({
             "name": p.name, "size_bytes": stat.st_size,
@@ -2720,7 +2738,7 @@ def list_appliance_backups(admin=Depends(current_admin)):
     with _db() as conn:
         jobs = conn.execute(
             "SELECT id, started_at, finished_at, status, backup_path, detail_json "
-            "FROM restore_jobs WHERE backup_path LIKE '%.apdnsbak' ORDER BY id DESC LIMIT 20"
+            "FROM restore_jobs WHERE backup_path LIKE '%.apdnsbak' OR backup_path LIKE '%.tar.gz' ORDER BY id DESC LIMIT 20"
         ).fetchall()
     return {
         "backups": rows,
@@ -2772,8 +2790,8 @@ def upload_appliance_backup_route(req: ApplianceBackupUploadRequest, admin=Depen
     original = Path(req.filename).name
     if not original or original.startswith(".") or "/" in req.filename or "\\" in req.filename:
         raise ApiError(400, "validation_error", "invalid backup filename")
-    if not original.endswith(".apdnsbak"):
-        raise ApiError(400, "validation_error", "native appliance backups must end in .apdnsbak")
+    if not (original.endswith(".apdnsbak") or original.endswith(".tar.gz")):
+        raise ApiError(400, "validation_error", "native appliance backups must end in .apdnsbak or released V1 .tar.gz")
     try:
         data = _b64.b64decode(req.data_base64, validate=True)
     except (binascii.Error, ValueError) as exc:
@@ -2786,15 +2804,16 @@ def upload_appliance_backup_route(req: ApplianceBackupUploadRequest, admin=Depen
     staging_root = STAGING_DIR / "backup-imports"
     staging_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(staging_root, 0o700)
-    staged_path = staging_root / f"upload-{int(time.time() * 1000)}.apdnsbak"
+    suffix = ".tar.gz" if original.endswith(".tar.gz") else ".apdnsbak"
+    staged_path = staging_root / f"upload-{int(time.time() * 1000)}{suffix}"
     try:
         with open(staged_path, "wb") as fh:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
         os.chmod(staged_path, 0o600)
-        manifest = backup_restore.validate_appliance_backup(staged_path, _backup_key(_secrets()), passphrase=req.passphrase or None)
-        safe_original = re.sub(r"[^A-Za-z0-9_.-]+", "-", original).strip(".-") or "uploaded.apdnsbak"
+        manifest = _validate_appliance_backup_any(staged_path, passphrase=req.passphrase or None)
+        safe_original = re.sub(r"[^A-Za-z0-9_.-]+", "-", original).strip(".-") or f"uploaded{suffix}"
         dest = _backup_dir() / f"uploaded-{int(time.time())}-{safe_original}"
         counter = 1
         while dest.exists():
@@ -2825,7 +2844,7 @@ def validate_appliance_backup_route(name: str, req: ApplianceBackupValidateReque
     if not path.exists():
         raise ApiError(404, "not_found", "backup not found")
     try:
-        manifest = backup_restore.validate_appliance_backup(path, _backup_key(_secrets()), passphrase=req.passphrase or None)
+        manifest = _validate_appliance_backup_any(path, passphrase=req.passphrase or None)
     except (backup_restore.ApplianceBackupError, backup_restore.ApplianceRestoreError) as exc:
         raise ApiError(400, "backup_invalid", str(exc)) from exc
     return _appliance_manifest_response(name, path, manifest)
@@ -2870,6 +2889,70 @@ def restore_appliance_backup_route(name: str, req: ApplianceRestoreRequest, admi
     staging_dir = STATE_DIR / "restore-staging" / f"job-{int(time.time() * 1000)}"
     rollback_root = STATE_DIR / "restore-rollback" / f"job-{int(time.time() * 1000)}"
     pre_restore_backup_path: Optional[Path] = None
+
+    if path.name.endswith(".tar.gz"):
+        try:
+            state, legacy_manifest = backup_restore.stage_legacy_v1_restore(path, staging_dir)
+        except backup_restore.ApplianceRestoreError as exc:
+            _record_failure(exc, "restore_failed")
+            return  # pragma: no cover -- _record_failure always raises
+
+        try:
+            pre_restore_backup_path = _backup_dir() / f"pre-restore-safety-{int(time.time())}.apdnsbak"
+            backup_restore.create_appliance_backup(
+                CONTROL_DB, _secrets(), key, pre_restore_backup_path,
+                cert_files=_appliance_cert_files(), source_version=_appliance_source_version(),
+            )
+            promoted = v1_migration.promote_to_live(
+                state,
+                live_control_db=CONTROL_DB,
+                live_secrets_dir=SECRETS_DIR,
+                live_compiled_dir=STATE_DIR / "compiled",
+                live_listen_address=_configured_listen_address(),
+                allow_overwrite=True,
+            )
+            result = _mutate_and_promote(lambda conn: None)
+            runtime_promoted = result.promoted
+        except Exception as exc:
+            if pre_restore_backup_path is not None and pre_restore_backup_path.exists():
+                try:
+                    safety_stage = STATE_DIR / "restore-staging" / f"safety-{int(time.time() * 1000)}"
+                    safety_rollback = STATE_DIR / "restore-rollback" / f"safety-{int(time.time() * 1000)}"
+                    safety = backup_restore.stage_appliance_restore(pre_restore_backup_path, key, safety_stage)
+                    backup_restore.promote_appliance_restore(
+                        safety, CONTROL_DB, SECRETS_DIR, _appliance_cert_files(), rollback_root=safety_rollback,
+                    )
+                    _mutate_and_promote(lambda conn: None)
+                    shutil.rmtree(safety_stage, ignore_errors=True)
+                    shutil.rmtree(safety_rollback, ignore_errors=True)
+                except Exception:
+                    pass
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            _record_failure(exc, "restore_failed")
+            return  # pragma: no cover -- _record_failure always raises
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+
+        finished = datetime.now(timezone.utc).isoformat()
+        detail = {
+            "backup_format": legacy_manifest.backup_format,
+            "control_db_restored": True,
+            "secret_count_restored": promoted.get("secrets_promoted", 0),
+            "certs_restored": [],
+            "runtime_promoted": runtime_promoted,
+            "runtime_error": None,
+            "pre_restore_backup": pre_restore_backup_path.name if pre_restore_backup_path else None,
+            "migration_object_counts": state.object_counts,
+            "migration_warnings": state.warnings + legacy_manifest.unsupported_categories,
+        }
+        with _db() as conn:
+            cur = conn.execute(
+                "INSERT INTO restore_jobs(started_at, finished_at, status, backup_path, detail_json) VALUES (?, ?, ?, ?, ?)",
+                (started, finished, "succeeded", str(path), json.dumps(detail)),
+            )
+            job_id = cur.lastrowid
+        return {"status": "succeeded", "job_id": job_id, "backup_name": name, **detail}
+
     try:
         staged = backup_restore.stage_appliance_restore(path, key, staging_dir, passphrase=req.passphrase or None)
     except backup_restore.ApplianceBackupKeyError as exc:
