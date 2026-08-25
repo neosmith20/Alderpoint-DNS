@@ -1699,8 +1699,11 @@ async function main() {
     // immediate/synchronous, not merely eventual within some timeout.
     // A short fixed settle covers the real DELETE request's own round
     // trip (unavoidable: the click handler awaits it before touching
-    // the DOM), after which the row must already be gone.
-    await sleep(500);
+    // the DOM) plus the pending-state DOM patch the click handler now
+    // also does just before that request (real, if small, added
+    // synchronous work from the Delete pending-UX pass), after which
+    // the row must already be gone.
+    await sleep(1500);
     const deletedImmediately = await evalJs(`!Array.from(document.querySelectorAll('tr')).some((r) => r.textContent.includes('Delete Test Blocklist ${suffix}'))`);
     if (!deletedImmediately) throw new Error("deleted blocklist subscription row is still visible shortly after Delete -- did not disappear immediately");
     proof.push("blocklist-delete-row-disappears-immediately");
@@ -1755,7 +1758,10 @@ async function main() {
       row.querySelector('[data-blocklist-delete]').click();
       return true;
     })()`);
-    await sleep(500);
+    // Same widened-but-still-fixed settle as the row-immediacy check
+    // above, same reason (the pending-state DOM patch the click handler
+    // now also does first is real, if small, added synchronous work).
+    await sleep(1500);
     if (await evalJs(`document.body.innerText.includes("needs attention")`)) {
       throw new Error("attention card is still present immediately after deleting the only subscription requiring attention");
     }
@@ -1773,6 +1779,212 @@ async function main() {
       throw new Error("deleted subscription's own TABLE ROW is still present even though its attention card cleared -- the delete handler found the wrong element for a subscription rendered in two places");
     }
     proof.push("blocklist-delete-removes-row-even-when-also-in-attention-card");
+
+    // Delete pending-UX (owner-reported live: after confirming Delete,
+    // there is no visual feedback while the request is running -- "the
+    // UI appears unresponsive until the success notification appears").
+    // Real click path throughout; a real DELETE is normally too fast
+    // (~20-35ms server-side, per this pass's own Server-Timing
+    // measurement) to reliably assert a transient state against, so
+    // this throttles the network first -- the pending UI must already
+    // be visible before the (still in-flight, artificially slowed)
+    // request resolves, not just eventually.
+    async function createPendingUxBlocklist(name) {
+      await evalJs(`(() => {
+        const f = document.querySelector('form[data-form="blocklist-create"]');
+        f.querySelector('[name=name]').value = ${JSON.stringify(name)};
+        f.querySelector('[name=category]').value = 'test';
+        f.querySelector('[name=url]').value = 'http://pending-ux-' + Math.random().toString(16).slice(2) + '.invalid/list.txt';
+        f.requestSubmit();
+        return true;
+      })()`);
+      await waitFor(`document.body.innerText.includes(${JSON.stringify(name)})`, `${name} created`);
+      // Part 2's own initial-pull-on-create means the row starts out
+      // briefly disabled on its own; let that settle before this
+      // section's own throttled delete, so the two don't race.
+      await waitFor(`(() => {
+        const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes(${JSON.stringify(name)}));
+        const btn = row && row.querySelector('[data-blocklist-delete]');
+        return btn && !btn.disabled;
+      })()`, `${name} initial pull settled`, 300);
+    }
+
+    // Scenario 1: plain row (no attention card involved).
+    await createPendingUxBlocklist(`Pending UX A ${suffix}`);
+    await evalJs(`window.confirm = () => true; true`);
+    await cdp("Network.emulateNetworkConditions", { offline: false, latency: 2000, downloadThroughput: -1, uploadThroughput: -1 });
+    await sleep(200); // let the throttle actually propagate under real host load, same rationale as the setBlockedURLs settle below
+    await evalJs(`(() => {
+      const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Pending UX A ${suffix}'));
+      row.querySelector('[data-row-menu-toggle]').click();
+      return true;
+    })()`);
+    await sleep(100);
+    await evalJs(`(() => {
+      const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Pending UX A ${suffix}'));
+      row.querySelector('[data-blocklist-delete]').click();
+      return true;
+    })()`);
+    // Deliberately a short fixed settle, not a waitFor -- the pending
+    // state must already be up now, not eventually.
+    await sleep(250);
+    const pendingSnap = await evalJs(`(() => {
+      const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Pending UX A ${suffix}'));
+      if (!row) return null;
+      return {
+        isPending: row.classList.contains('is-pending'),
+        ariaBusy: row.getAttribute('aria-busy') === 'true',
+        hasSpinner: !!row.querySelector('.pending-indicator__spinner'),
+        hasDeletingText: row.textContent.includes('Deleting'),
+        srStatus: (row.querySelector('.sr-only[role="status"]') || {}).textContent || '',
+        editDisabled: row.querySelector('[data-blocklist-edit]').disabled,
+        refreshDisabled: row.querySelector('[data-blocklist-refresh]').disabled,
+        toggleDisabled: row.querySelector('[data-blocklist-toggle]').disabled,
+        deleteDisabled: row.querySelector('[data-blocklist-delete]').disabled,
+      };
+    })()`);
+    if (!pendingSnap) throw new Error("row vanished instead of showing a pending state immediately after confirming Delete");
+    if (!pendingSnap.isPending || !pendingSnap.ariaBusy || !pendingSnap.hasSpinner || !pendingSnap.hasDeletingText) {
+      throw new Error(`Delete confirmation did not produce immediate visible pending feedback: ${JSON.stringify(pendingSnap)}`);
+    }
+    if (!pendingSnap.srStatus.includes("Deleting")) throw new Error(`no accessible status message while pending: ${JSON.stringify(pendingSnap)}`);
+    if (!pendingSnap.editDisabled || !pendingSnap.refreshDisabled || !pendingSnap.toggleDisabled || !pendingSnap.deleteDisabled) {
+      throw new Error(`not every action was disabled while the row is pending: ${JSON.stringify(pendingSnap)}`);
+    }
+    proof.push("blocklist-delete-immediate-pending-feedback");
+
+    // Duplicate-request guard: a second Delete click while still
+    // pending must not prompt confirm() again or fire a second request.
+    await evalJs(`window.__confirmCallsWhilePending = 0; window.confirm = () => { window.__confirmCallsWhilePending++; return true; }; true`);
+    await evalJs(`(() => {
+      const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Pending UX A ${suffix}'));
+      row.querySelector('[data-blocklist-delete]').click();
+      return true;
+    })()`);
+    if ((await evalJs(`window.__confirmCallsWhilePending`)) !== 0) {
+      throw new Error("a second Delete click while pending re-prompted/re-fired instead of being ignored");
+    }
+    proof.push("blocklist-delete-duplicate-click-prevented");
+
+    // Mobile: the pending row must not cause horizontal page overflow.
+    await cdp("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+    await sleep(150);
+    const pendingMobileFit = await evalJs(`({ bodyScrollWidth: document.body.scrollWidth, innerWidth: window.innerWidth })`);
+    if (pendingMobileFit.bodyScrollWidth > pendingMobileFit.innerWidth + 1) {
+      throw new Error(`pending Delete row causes horizontal overflow at 390px: ${JSON.stringify(pendingMobileFit)}`);
+    }
+    await cdp("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+    proof.push("blocklist-delete-pending-fits-390px-mobile");
+
+    // Let the throttled DELETE actually finish -- success removes the row.
+    await cdp("Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+    await waitFor(`!Array.from(document.querySelectorAll('tr')).some((r) => r.textContent.includes('Pending UX A ${suffix}'))`, "pending row removed after Delete succeeds", 300);
+    proof.push("blocklist-delete-pending-then-success-removes-row");
+    await waitFor(`document.querySelector('form[data-form="blocklist-create"]')`, "blocklists page settled after scenario A's own background reconcile");
+
+    // Scenario 2: a subscription currently in the attention card too --
+    // both representations must show the pending state simultaneously.
+    await evalJs(`document.querySelectorAll('.toast').forEach((n) => n.remove()); true`);
+    await createPendingUxBlocklist(`Pending UX B ${suffix}`);
+    for (let i = 0; i < 2; i++) {
+      await waitFor(`(() => {
+        const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Pending UX B ${suffix}'));
+        const btn = row && row.querySelector('[data-blocklist-refresh]');
+        return btn && !btn.disabled;
+      })()`, `pending-ux-b refresh ready #${i + 2}`);
+      await evalJs(`(() => {
+        const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Pending UX B ${suffix}'));
+        row.querySelector('[data-blocklist-refresh]').click();
+        return true;
+      })()`);
+      await waitFor(`(() => {
+        const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Pending UX B ${suffix}'));
+        return row && row.textContent.includes('failed') && !row.textContent.includes('updating');
+      })()`, `pending-ux-b failure #${i + 2} settled`, 300);
+      await sleep(500);
+    }
+    await waitFor(`document.body.innerText.includes("needs attention") && document.body.innerText.includes("Pending UX B ${suffix}")`, "pending-ux-b attention card visible");
+    await evalJs(`window.confirm = () => true; true`);
+    await cdp("Network.emulateNetworkConditions", { offline: false, latency: 2000, downloadThroughput: -1, uploadThroughput: -1 });
+    await sleep(200); // same propagation settle as scenario A above
+    await evalJs(`(() => {
+      const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Pending UX B ${suffix}'));
+      row.querySelector('[data-row-menu-toggle]').click();
+      return true;
+    })()`);
+    await sleep(100);
+    await evalJs(`(() => {
+      const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Pending UX B ${suffix}'));
+      row.querySelector('[data-blocklist-delete]').click();
+      return true;
+    })()`);
+    await sleep(250);
+    const bothPending = await evalJs(`(() => {
+      const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Pending UX B ${suffix}'));
+      const item = document.querySelector('[data-attention-item]');
+      return {
+        rowPending: !!(row && row.classList.contains('is-pending')),
+        cardPending: !!(item && item.classList.contains('is-pending') && item.textContent.includes('Deleting')),
+      };
+    })()`);
+    if (!bothPending.rowPending || !bothPending.cardPending) {
+      throw new Error(`table row and attention-card entry did not show the same pending state simultaneously: ${JSON.stringify(bothPending)}`);
+    }
+    proof.push("blocklist-delete-pending-row-and-attention-card-match");
+    await cdp("Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+    await waitFor(`!document.body.innerText.includes("needs attention") && !Array.from(document.querySelectorAll('tr')).some((r) => r.textContent.includes('Pending UX B ${suffix}'))`, "pending-ux-b row and attention card both gone after success", 300);
+    await waitFor(`document.querySelector('form[data-form="blocklist-create"]')`, "blocklists page settled after scenario B's own background reconcile");
+
+    // Scenario 3: failure path. Network.setBlockedURLs blocks the
+    // DELETE request outright (net::ERR_BLOCKED_BY_CLIENT) from the
+    // moment it's set, before the click even happens -- a deterministic
+    // fetch failure, not a timing race. (Found live during this same
+    // investigation: toggling `offline` mid-flight against an
+    // already-in-progress, merely latency-delayed request does not
+    // reliably fail it -- the simulated delay still runs to completion
+    // and the request can still succeed once it elapses, regardless of
+    // `offline` having been toggled on and back off during the wait.)
+    await evalJs(`document.querySelectorAll('.toast').forEach((n) => n.remove()); true`);
+    await createPendingUxBlocklist(`Pending UX C ${suffix}`);
+    await evalJs(`window.confirm = () => true; true`);
+    await cdp("Network.setBlockedURLs", { urls: ["*/api/blocklists/*"] });
+    // Real settle (found live under heavy combined host load during
+    // this same pass): the CDP command's own acknowledgment does not
+    // guarantee the block has actually propagated through the browser's
+    // network process yet under severe CPU contention -- give it real
+    // headroom before relying on it, same rationale as every other
+    // "extra-generous" wait already in this file for this class of
+    // host.
+    await sleep(200);
+    await evalJs(`(() => {
+      const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Pending UX C ${suffix}'));
+      row.querySelector('[data-row-menu-toggle]').click();
+      return true;
+    })()`);
+    await sleep(100);
+    await evalJs(`(() => {
+      const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Pending UX C ${suffix}'));
+      row.querySelector('[data-blocklist-delete]').click();
+      return true;
+    })()`);
+    await sleep(1000);
+    await cdp("Network.setBlockedURLs", { urls: [] });
+    const afterFailure = await evalJs(`(() => {
+      const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Pending UX C ${suffix}'));
+      if (!row) return null;
+      return {
+        stillPending: row.classList.contains('is-pending'),
+        deleteEnabled: !row.querySelector('[data-blocklist-delete]').disabled,
+        badToast: !!document.querySelector('.toast.bad'),
+        falselyReportedSuccess: Array.from(document.querySelectorAll('.toast.ok')).some((t) => t.textContent.includes('deleted')),
+      };
+    })()`);
+    if (!afterFailure) throw new Error("a failed Delete removed the row -- must keep the subscription visible");
+    if (afterFailure.stillPending) throw new Error("a failed Delete left the row stuck in the pending/Deleting state");
+    if (!afterFailure.deleteEnabled) throw new Error("a failed Delete did not restore the row's own actions");
+    if (!afterFailure.badToast) throw new Error("a failed Delete did not display the real error");
+    if (afterFailure.falselyReportedSuccess) throw new Error("a failed Delete falsely reported success");
+    proof.push("blocklist-delete-failure-restores-row-and-actions");
 
     // Network Configuration (beta-rescue priority 4): read-only
     // discoverability/status proof. Deliberately never submits the

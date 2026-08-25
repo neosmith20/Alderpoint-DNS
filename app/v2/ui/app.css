@@ -453,3 +453,24 @@ dialog.app-dialog[open] { display: flex; flex-direction: column; }
   .form-grid, .query-filter, .grid.two, .grid.three, .grid.four { grid-template-columns: 1fr; }
   table { min-width: 560px; }
 }
+
+/* Real UX defect fixed here (owner-reported live): asynchronous row-
+   level actions (blocklist Delete first, then audited across every
+   other blocklist action for the same silent-wait problem) had no
+   visible feedback while their request was in flight -- the row looked
+   dead, not busy. Generic, reusable across any row/card: .is-pending
+   dims the content without hiding it (the operator can still read what
+   is about to change), .pending-indicator is a compact spinner + label
+   sized to fit inside a table cell without adding horizontal scroll on
+   its own, and [aria-busy="true"] plus a visually-hidden live-region
+   message (.sr-only, added right alongside it) are what actually carry
+   this to assistive tech -- the dimming/spinner are sighted-only cues. */
+tr.is-pending, .attention-card__item.is-pending { opacity: .55; transition: opacity .12s ease; }
+tr.is-pending td { pointer-events: none; }
+.pending-indicator { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-muted, var(--text)); white-space: nowrap; }
+.pending-indicator__spinner { width: 13px; height: 13px; border-radius: 50%; border: 2px solid var(--line-2); border-top-color: var(--text); flex: none; animation: pending-spin .7s linear infinite; }
+@keyframes pending-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .pending-indicator__spinner { animation: none; border-top-color: var(--line-2); }
+}
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }

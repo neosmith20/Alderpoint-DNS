@@ -17,9 +17,34 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
+
+# Real latency-diagnostics slice (owner-reported live: blocklist Delete
+# has no visible feedback while the request is running -- the operator
+# can't tell if it's slow because of SQLite, staged compilation,
+# validation, promotion, or something else entirely). Every stage/
+# validate/promote call below now accepts an optional timing_callback
+# (name, duration_ms) -- the exact same (name, duration) shape
+# webapp.py's own _add_timing already expects, so a caller there can
+# just pass _add_timing straight through and have every substage show
+# up in the real Server-Timing response header with zero new plumbing.
+# None (the default, used by every caller that hasn't been updated to
+# pass one) is a true no-op -- this module still knows nothing about
+# HTTP requests or webapp.py's own timing contextvar.
+TimingCallback = Callable[[str, float], None]
+
+
+def _time(callback: Optional[TimingCallback], name: str, fn):
+    if callback is None:
+        return fn()
+    started = time.perf_counter()
+    try:
+        return fn()
+    finally:
+        callback(name, (time.perf_counter() - started) * 1000.0)
 
 
 class StagingError(Exception):
@@ -106,7 +131,7 @@ class Artifact:
 
 
 def stage_validate_promote_all(
-    staging_root: Path, artifacts: list["Artifact"]
+    staging_root: Path, artifacts: list["Artifact"], timing_callback: Optional[TimingCallback] = None,
 ) -> list[PromotionResult]:
     """Coherent multi-artifact promotion (BIND architecture correction,
     Gate #3): stages and validates *every* artifact first, and only
@@ -122,8 +147,13 @@ def stage_validate_promote_all(
     """
     staged: list[tuple[Artifact, Path, ValidationResult]] = []
     for artifact in artifacts:
-        staged_path = stage(staging_root, artifact.name, artifact.content)
-        validation = artifact.validator(staged_path)
+        staged_path = _time(timing_callback, "stage.write", lambda: stage(staging_root, artifact.name, artifact.content))
+        # Real substage this names for the first time (latency-
+        # diagnostics slice): the validator is an external binary
+        # (dnsdist --check-config, named-checkconf, ...) run via
+        # subprocess -- process spawn + the binary's own real config
+        # parse, not free, and previously invisible in Server-Timing.
+        validation = _time(timing_callback, "stage.validate", lambda: artifact.validator(staged_path))
         if not validation.ok:
             raise ValidationFailedError(
                 f"validation failed for staged artifact {artifact.name!r} "
@@ -136,21 +166,26 @@ def stage_validate_promote_all(
     for artifact, staged_path, validation in staged:
         live_path = Path(artifact.live_path)
         previous_backup: Optional[Path] = None
-        if live_path.exists():
-            # Real defect found live during Gate #3 multi-context BIND
-            # acceptance testing: an artifact name containing "/" (e.g.
-            # "ctx0/named.conf", used for each BIND context's own
-            # promoted config) produced a backup path
-            # ".ctx0/named.conf.previous" whose parent directory was
-            # never created, crashing every promotion after the first
-            # one for that artifact (once live_path already existed).
-            # Flattening the name for the backup filename avoids
-            # creating any nested directory structure under
-            # staging_root that stage()'s own atomic-write path wasn't
-            # designed to need.
-            previous_backup = staging_root / f".{artifact.name.replace('/', '__')}.previous"
-            shutil.copy2(live_path, previous_backup)
-        _atomic_write(live_path, artifact.content)
+
+        def _promote_one(artifact=artifact, live_path=live_path):
+            nonlocal previous_backup
+            if live_path.exists():
+                # Real defect found live during Gate #3 multi-context BIND
+                # acceptance testing: an artifact name containing "/" (e.g.
+                # "ctx0/named.conf", used for each BIND context's own
+                # promoted config) produced a backup path
+                # ".ctx0/named.conf.previous" whose parent directory was
+                # never created, crashing every promotion after the first
+                # one for that artifact (once live_path already existed).
+                # Flattening the name for the backup filename avoids
+                # creating any nested directory structure under
+                # staging_root that stage()'s own atomic-write path wasn't
+                # designed to need.
+                previous_backup = staging_root / f".{artifact.name.replace('/', '__')}.previous"
+                shutil.copy2(live_path, previous_backup)
+            _atomic_write(live_path, artifact.content)
+
+        _time(timing_callback, "stage.promote_write", _promote_one)
         results.append(
             PromotionResult(
                 promoted=True,
@@ -170,6 +205,7 @@ def stage_validate_promote(
     live_path: Path,
     validator: Validator,
     health_check: Optional[HealthCheck] = None,
+    timing_callback: Optional[TimingCallback] = None,
 ) -> PromotionResult:
     """The full pipeline. Never writes ``live_path`` unless validation
     passes; if a health check is supplied and fails after promotion, the
@@ -177,8 +213,8 @@ def stage_validate_promote(
     ``rolled_back=True`` — the caller must treat that as "promotion did not
     actually succeed" even though bytes briefly hit ``live_path``.
     """
-    staged_path = stage(staging_root, name, content)
-    validation = validator(staged_path)
+    staged_path = _time(timing_callback, "stage.write", lambda: stage(staging_root, name, content))
+    validation = _time(timing_callback, "stage.validate", lambda: validator(staged_path))
     if not validation.ok:
         raise ValidationFailedError(
             f"validation failed for staged artifact {name!r}", validator_output=validation.output
@@ -187,18 +223,22 @@ def stage_validate_promote(
     live_path = Path(live_path)
     previous_backup: Optional[Path] = None
     had_previous = live_path.exists()
-    if had_previous:
-        # Same fix as stage_validate_promote_all's own identical backup
-        # path construction -- see its comment.
-        previous_backup = staging_root / f".{name.replace('/', '__')}.previous"
-        shutil.copy2(live_path, previous_backup)
 
-    _atomic_write(live_path, content)
+    def _promote_one():
+        nonlocal previous_backup
+        if had_previous:
+            # Same fix as stage_validate_promote_all's own identical backup
+            # path construction -- see its comment.
+            previous_backup = staging_root / f".{name.replace('/', '__')}.previous"
+            shutil.copy2(live_path, previous_backup)
+        _atomic_write(live_path, content)
+
+    _time(timing_callback, "stage.promote_write", _promote_one)
 
     health_ok: Optional[bool] = None
     rolled_back = False
     if health_check is not None:
-        health_ok = health_check()
+        health_ok = _time(timing_callback, "stage.health_check", health_check)
         if not health_ok:
             if had_previous and previous_backup is not None:
                 _atomic_write(live_path, previous_backup.read_text(encoding="utf-8"))

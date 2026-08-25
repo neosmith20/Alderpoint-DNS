@@ -35,6 +35,7 @@ module never touches the live path until validation passes).
 from __future__ import annotations
 
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,7 +61,7 @@ from app.v2.ecs_policy import EcsPolicy, server_uses_client_subnet
 from app.v2.network_match import NetworkScope
 from app.v2.policy_compiler import compile_cache_profile, compile_effective_policy
 from app.v2.policy_model import PolicyLayer
-from app.v2.runtime_staging import Artifact, PromotionResult, ValidationResult, stage_validate_promote, stage_validate_promote_all
+from app.v2.runtime_staging import Artifact, PromotionResult, TimingCallback, ValidationResult, stage_validate_promote, stage_validate_promote_all
 
 _ECS_MODE_MAP = {"disabled": "disabled", "preserve": "preserve", "custom": "custom"}
 _DEFAULT_NETWORK_ID = "__default__"
@@ -490,6 +491,13 @@ def recompile_and_promote(
     # on a subsequent restart). Real installs must always pass the real
     # writable state root (STATE_DIR / "bind").
     live_bind_state_root: "Path | None" = None,
+    # Real latency-diagnostics slice (owner-reported live, blocklist
+    # Delete): optional (name, duration_ms) sink, forwarded unchanged
+    # to runtime_staging's own stage/validate/promote calls below. None
+    # (every caller not yet updated to pass one) is a true no-op --
+    # this module still has no idea what an HTTP request or a
+    # Server-Timing header is.
+    timing_callback: Optional[TimingCallback] = None,
 ) -> RuntimeCompileResult:
     """The real, single code path from "control.db changed" to "compiled
     dnsdist (and, when wired, BIND) config on disk validated by the real
@@ -499,8 +507,11 @@ def recompile_and_promote(
     failure, per §18.
     """
     try:
+        _build_started = time.perf_counter()
         bindings = build_bindings(conn, now=now)
         local_dns_records = store.load_local_dns_records(conn)
+        if timing_callback is not None:
+            timing_callback("compile.build_bindings", (time.perf_counter() - _build_started) * 1000.0)
         # compile_multi_policy_dnsdist_config()'s local-DNS compiler
         # silently skips PTR rows (needs a different matcher than the
         # forward record it's paired with -- not implemented yet);
@@ -702,7 +713,7 @@ def recompile_and_promote(
                     validator=dnsdist_check_config_validator(dnsdist_binary),
                 )
             )
-            results = stage_validate_promote_all(staging_dir, artifacts)
+            results = stage_validate_promote_all(staging_dir, artifacts, timing_callback=timing_callback)
             result = results[-1]
         else:
             result: PromotionResult = stage_validate_promote(
@@ -711,6 +722,7 @@ def recompile_and_promote(
                 content=config_text,
                 live_path=live_dnsdist_conf_path,
                 validator=dnsdist_check_config_validator(dnsdist_binary),
+                timing_callback=timing_callback,
             )
     except Exception as exc:  # ValidationFailedError, StagingError
         raise RuntimeCompileError(f"runtime validation/promotion failed: {exc}") from exc

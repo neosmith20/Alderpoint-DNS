@@ -1818,6 +1818,50 @@
     return `<div class="table-wrap"><table><thead><tr><th>Time</th><th>Severity</th><th>Message</th></tr></thead><tbody>${entries.map((e) => `<tr><td class="mono">${esc(e.ts)}</td><td><span class="badge ${e.severity === "error" || e.severity === "crit" || e.severity === "alert" || e.severity === "emerg" ? "bad" : e.severity === "warning" ? "warn" : "info"}">${esc(e.severity)}</span></td><td class="mono">${esc(e.message)}</td></tr>`).join("")}</tbody></table></div>`;
   }
 
+  // Real UX defect fixed here (owner-reported live: Delete confirmed,
+  // then nothing visible happens until the success toast -- "the UI
+  // appears unresponsive"). state.blocklistPendingActions maps
+  // subscription_id -> a short label ("Deleting…", "Updating…", …) for
+  // every blocklist subscription with an async action currently in
+  // flight against it. Every render of that subscription's row AND its
+  // attention-card item (blocklistRowHtml / blocklistAttentionItemHtml
+  // below) checks this map, so the pending visual survives not just the
+  // instant, direct DOM patch setBlocklistRowPending makes but any
+  // later full re-render too (a background reconcile from an unrelated
+  // action, a route revisit) -- there is no separate "don't clobber
+  // this" guard to keep in sync the way blocklistEditDialogOpen() is,
+  // because the pending state is derived data, not a side channel.
+  function blocklistPendingIndicator(label) {
+    return `<span class="pending-indicator"><span class="pending-indicator__spinner" aria-hidden="true"></span>${esc(label)}</span>`;
+  }
+
+  function blocklistPendingLabel(id) {
+    return state.blocklistPendingActions && state.blocklistPendingActions.get(id);
+  }
+
+  function blocklistAttentionItemHtml(s) {
+    const pending = blocklistPendingLabel(s.subscription_id);
+    const disabledAttr = pending ? "disabled" : "";
+    return `
+      <div class="attention-card__item${pending ? " is-pending" : ""}" ${pending ? 'aria-busy="true"' : ""} data-attention-item="${esc(s.subscription_id)}">
+        <h3>${esc(s.name)}</h3>
+        ${pending
+          ? `<p>${blocklistPendingIndicator(pending)}<span class="sr-only" role="status">${esc(s.name)}: ${esc(pending)}</span></p>`
+          : `<p>Failed ${esc(s.consecutive_failure_count)} consecutive updates. Its previous working content remains active.${s.last_error ? ` Last error: ${esc(s.last_error)}.` : ""}</p>
+        <div class="attention-card__meta">
+          <span>Last attempted: ${ts(s.last_checked_at, "never")}</span>
+          <span>Last successful update: ${ts(s.last_success_at, "never")}</span>
+          <span>Next retry: ${ts(s.next_retry_at, "not scheduled")}</span>
+        </div>`}
+        <div class="attention-card__actions">
+          <button type="button" data-blocklist-edit="${esc(s.subscription_id)}" ${disabledAttr}>Edit Blocklist</button>
+          <button type="button" data-blocklist-refresh="${esc(s.subscription_id)}" ${disabledAttr}>Update Now</button>
+          <button type="button" data-blocklist-toggle="${esc(s.subscription_id)}" ${disabledAttr}>Disable</button>
+          <button type="button" data-blocklist-delete="${esc(s.subscription_id)}" class="danger" ${disabledAttr}>Delete</button>
+        </div>
+      </div>`;
+  }
+
   function blocklistAttentionCard(subscriptions) {
     // Conditionally rendered: absent entirely (not an empty placeholder,
     // no reserved space) unless at least one ENABLED subscription has
@@ -1827,22 +1871,7 @@
     // a failing list removes it from this card on the very next render.
     const affected = subscriptions.filter((s) => s.attention_required);
     if (!affected.length) return "";
-    const items = affected.map((s) => `
-      <div class="attention-card__item">
-        <h3>${esc(s.name)}</h3>
-        <p>Failed ${esc(s.consecutive_failure_count)} consecutive updates. Its previous working content remains active.${s.last_error ? ` Last error: ${esc(s.last_error)}.` : ""}</p>
-        <div class="attention-card__meta">
-          <span>Last attempted: ${ts(s.last_checked_at, "never")}</span>
-          <span>Last successful update: ${ts(s.last_success_at, "never")}</span>
-          <span>Next retry: ${ts(s.next_retry_at, "not scheduled")}</span>
-        </div>
-        <div class="attention-card__actions">
-          <button type="button" data-blocklist-edit="${esc(s.subscription_id)}">Edit Blocklist</button>
-          <button type="button" data-blocklist-refresh="${esc(s.subscription_id)}">Update Now</button>
-          <button type="button" data-blocklist-toggle="${esc(s.subscription_id)}">Disable</button>
-          <button type="button" data-blocklist-delete="${esc(s.subscription_id)}" class="danger">Delete</button>
-        </div>
-      </div>`).join("");
+    const items = affected.map(blocklistAttentionItemHtml).join("");
     const heading = affected.length === 1
       ? "1 blocklist needs attention"
       : `${affected.length} blocklists need attention`;
@@ -1931,6 +1960,57 @@
       if (replacement) attentionSection.outerHTML = replacement;
       else attentionSection.remove();
     }
+    if (state.blocklistPendingActions) state.blocklistPendingActions.delete(id);
+  }
+
+  // Applies (label truthy) or clears (label falsy) the pending-action
+  // visual for one subscription's row AND attention-card item, patching
+  // whichever of the two is currently in the live DOM directly (no
+  // reload, no flicker on the rest of the page) from the subscription's
+  // own current in-memory data -- the same data restoring to "normal"
+  // after a failed action re-renders from, so failure recovery and the
+  // initial pending application share one code path and can never drift
+  // out of sync with each other.
+  function setBlocklistRowPending(id, label) {
+    state.blocklistPendingActions = state.blocklistPendingActions || new Map();
+    if (label) state.blocklistPendingActions.set(id, label);
+    else state.blocklistPendingActions.delete(id);
+    const sub = (state.blocklistSubscriptions || []).find((s) => s.subscription_id === id);
+    if (!sub) return;
+    const row = document.querySelector(`[data-blocklist-row="${CSS.escape(id)}"]`);
+    if (row) row.outerHTML = blocklistRowHtml(sub);
+    const attnItem = document.querySelector(`[data-attention-item="${CSS.escape(id)}"]`);
+    if (attnItem) attnItem.outerHTML = blocklistAttentionItemHtml(sub);
+  }
+
+  function blocklistRowHtml(s) {
+    const pending = blocklistPendingLabel(s.subscription_id);
+    const disabledAttr = (pending || s.update_in_progress) ? "disabled" : "";
+    return `
+      <tr class="${pending ? "is-pending" : ""}" ${pending ? 'aria-busy="true"' : ""} data-blocklist-row="${esc(s.subscription_id)}">
+        <td>${esc(s.name)}<br><span class="muted mono">${esc(s.subscription_id)}</span></td>
+        <td class="truncate" title="${esc(s.url)}">${esc(s.url)}</td>
+        <td><span class="badge ${s.enabled ? "ok" : "inherit"}">${s.enabled ? "enabled" : "disabled"}</span></td>
+        <td>${esc(s.rule_count)}</td>
+        <td>${ts(s.last_success_at || s.last_refresh_at, "never")}</td>
+        <td>${s.effective_interval_seconds ? ts(s.next_retry_at || s.next_update_at, "not scheduled") : "Manual Only"}</td>
+        <td>${esc(s.effective_interval_label || "")}</td>
+        <td>${pending
+          ? `${blocklistPendingIndicator(pending)}<span class="sr-only" role="status">${esc(s.name)}: ${esc(pending)}</span>`
+          : `<span class="badge ${s.update_in_progress ? "warn" : tone(s.last_status)}">${s.update_in_progress ? "updating" : esc(s.last_status)}</span>${s.consecutive_failure_count ? `<br><span class="muted">${esc(s.consecutive_failure_count)} consecutive failure(s)</span>` : ""}${s.last_error ? `<br><span class="muted">${esc(s.last_error)}</span>` : ""}${s.update_duration_ms ? `<br><span class="muted">${esc(s.update_duration_ms)} ms</span>` : ""}`}</td>
+        <td class="actions-cell" data-no-sort>
+          <div class="row-actions">
+            <button type="button" class="row-actions__trigger" data-row-menu-toggle aria-haspopup="true" aria-expanded="false" aria-label="More actions for ${esc(s.name)}" ${disabledAttr}>&ctdot;</button>
+            <div class="row-actions__menu" hidden role="menu" aria-label="Actions for ${esc(s.name)}">
+              <button type="button" role="menuitem" data-blocklist-edit="${esc(s.subscription_id)}" ${disabledAttr}>Edit Blocklist</button>
+              <button type="button" role="menuitem" data-blocklist-refresh="${esc(s.subscription_id)}" ${disabledAttr}>Update Now</button>
+              <button type="button" role="menuitem" data-blocklist-toggle="${esc(s.subscription_id)}" ${disabledAttr}>${s.enabled ? "Disable" : "Enable"}</button>
+              <div class="overflow-menu__divider" role="separator"></div>
+              <button type="button" role="menuitem" data-blocklist-delete="${esc(s.subscription_id)}" class="danger" ${disabledAttr}>Delete</button>
+            </div>
+          </div>
+        </td>
+      </tr>`;
   }
 
   async function blocklists() {
@@ -1940,29 +2020,7 @@
     state.blocklistDeletedIds = null; // consumed -- see removeDeletedBlocklistSubscription's own comment
     const subscriptions = (data.subscriptions || []).filter((s) => !deletedIds || !deletedIds.has(s.subscription_id));
     state.blocklistSubscriptions = subscriptions;
-    const rows = subscriptions.map((s) => `
-      <tr>
-        <td>${esc(s.name)}<br><span class="muted mono">${esc(s.subscription_id)}</span></td>
-        <td class="truncate" title="${esc(s.url)}">${esc(s.url)}</td>
-        <td><span class="badge ${s.enabled ? "ok" : "inherit"}">${s.enabled ? "enabled" : "disabled"}</span></td>
-        <td>${esc(s.rule_count)}</td>
-        <td>${ts(s.last_success_at || s.last_refresh_at, "never")}</td>
-        <td>${s.effective_interval_seconds ? ts(s.next_retry_at || s.next_update_at, "not scheduled") : "Manual Only"}</td>
-        <td>${esc(s.effective_interval_label || "")}</td>
-        <td><span class="badge ${s.update_in_progress ? "warn" : tone(s.last_status)}">${s.update_in_progress ? "updating" : esc(s.last_status)}</span>${s.consecutive_failure_count ? `<br><span class="muted">${esc(s.consecutive_failure_count)} consecutive failure(s)</span>` : ""}${s.last_error ? `<br><span class="muted">${esc(s.last_error)}</span>` : ""}${s.update_duration_ms ? `<br><span class="muted">${esc(s.update_duration_ms)} ms</span>` : ""}</td>
-        <td class="actions-cell" data-no-sort>
-          <div class="row-actions">
-            <button type="button" class="row-actions__trigger" data-row-menu-toggle aria-haspopup="true" aria-expanded="false" aria-label="More actions for ${esc(s.name)}">&ctdot;</button>
-            <div class="row-actions__menu" hidden role="menu" aria-label="Actions for ${esc(s.name)}">
-              <button type="button" role="menuitem" data-blocklist-edit="${esc(s.subscription_id)}" ${s.update_in_progress ? "disabled" : ""}>Edit Blocklist</button>
-              <button type="button" role="menuitem" data-blocklist-refresh="${esc(s.subscription_id)}" ${s.update_in_progress ? "disabled" : ""}>Update Now</button>
-              <button type="button" role="menuitem" data-blocklist-toggle="${esc(s.subscription_id)}" ${s.update_in_progress ? "disabled" : ""}>${s.enabled ? "Disable" : "Enable"}</button>
-              <div class="overflow-menu__divider" role="separator"></div>
-              <button type="button" role="menuitem" data-blocklist-delete="${esc(s.subscription_id)}" class="danger" ${s.update_in_progress ? "disabled" : ""}>Delete</button>
-            </div>
-          </div>
-        </td>
-      </tr>`).join("");
+    const rows = subscriptions.map(blocklistRowHtml).join("");
     const jobRows = (data.jobs || []).slice(0, 5).map((j) => `<tr><td>${ts(j.started_at)}</td><td><span class="badge ${tone(j.status)}">${esc(j.status)}</span></td><td>${esc(j.kind)}</td><td>${esc((j.subscription_ids || []).join(", "))}</td><td>${esc(j.error || Object.values(j.results || {}).map((r) => r.message).join("; "))}</td></tr>`).join("");
     return page("Blocklists", "Subscribed, refreshable domain-block feeds. A failed refresh keeps the previous valid list enforced -- it never clears filtering on error.", `<button data-blocklist-refresh-all class="primary">Update All</button><button data-refresh>Refresh page</button>`, `
       ${blocklistAttentionCard(subscriptions)}
@@ -2804,52 +2862,125 @@
       }
       const blRefresh = ev.target.closest("[data-blocklist-refresh]");
       if (blRefresh) {
-        closeRowActionMenus();
         const id = blRefresh.dataset.blocklistRefresh;
-        const res = await api(`/api/blocklists/${encodeURIComponent(id)}/refresh`, { method: "POST" });
+        // Same silent-wait problem audited and fixed across every
+        // blocklist action this pass (owner-reported live, found via
+        // Delete first): immediate row-level pending feedback and a
+        // duplicate-submission guard, not just Delete's.
+        if (state.blocklistPendingActions && state.blocklistPendingActions.has(id)) return;
+        closeRowActionMenus();
+        setBlocklistRowPending(id, "Updating…");
+        let res;
+        try {
+          res = await api(`/api/blocklists/${encodeURIComponent(id)}/refresh`, { method: "POST" });
+        } catch (err) {
+          setBlocklistRowPending(id, null);
+          toast(err.message, "bad");
+          return;
+        }
         toast(`${id}: update queued`, "info");
         (async () => {
           const job = await waitBlocklistJob(res.job_id);
+          setBlocklistRowPending(id, null);
           if (state.route === "blocklists" && !blocklistEditDialogOpen()) await loadPage("blocklists");
           const result = job && job.results ? job.results[id] : null;
           toast(`${id}: ${result ? result.message : (job.error || job.status)}`, result && result.status === "succeeded" ? "ok" : "bad");
-        })().catch((e) => toast(e.message, "bad"));
+        })().catch((e) => { setBlocklistRowPending(id, null); toast(e.message, "bad"); });
         return;
       }
       const blRefreshAll = ev.target.closest("[data-blocklist-refresh-all]");
       if (blRefreshAll) {
-        const res = await api("/api/blocklists/refresh-all", { method: "POST" });
+        if (blRefreshAll.disabled) return;
+        // Update All affects every currently-enabled subscription at
+        // once -- each of their rows/attention-card items gets the same
+        // pending treatment, and the button itself is disabled for the
+        // duration so a second click can't queue a second batch on top
+        // of the first (the server's own per-subscription lock would
+        // reject the overlap anyway; this just avoids firing a request
+        // that's certain to come back as a conflict for every row).
+        const targetIds = (state.blocklistSubscriptions || []).filter((s) => s.enabled).map((s) => s.subscription_id);
+        blRefreshAll.disabled = true;
+        targetIds.forEach((id) => setBlocklistRowPending(id, "Updating…"));
+        let res;
+        try {
+          res = await api("/api/blocklists/refresh-all", { method: "POST" });
+        } catch (err) {
+          targetIds.forEach((id) => setBlocklistRowPending(id, null));
+          blRefreshAll.disabled = false;
+          toast(err.message, "bad");
+          return;
+        }
         if (!res.job_id) {
+          targetIds.forEach((id) => setBlocklistRowPending(id, null));
+          blRefreshAll.disabled = false;
           toast(res.message || "No enabled blocklists", "info");
           return;
         }
         toast(`Updating ${res.count} blocklist source(s)`, "info");
         (async () => {
           const job = await waitBlocklistJob(res.job_id);
+          targetIds.forEach((id) => setBlocklistRowPending(id, null));
           if (state.route === "blocklists" && !blocklistEditDialogOpen()) await loadPage("blocklists");
+          const btn = document.querySelector("[data-blocklist-refresh-all]");
+          if (btn) btn.disabled = false;
           toast(`Update All ${job.status}`, job.status === "succeeded" ? "ok" : job.status === "partial" ? "warn" : "bad");
-        })().catch((e) => toast(e.message, "bad"));
+        })().catch((e) => {
+          targetIds.forEach((id) => setBlocklistRowPending(id, null));
+          const btn = document.querySelector("[data-blocklist-refresh-all]");
+          if (btn) btn.disabled = false;
+          toast(e.message, "bad");
+        });
         return;
       }
       const blToggle = ev.target.closest("[data-blocklist-toggle]");
       if (blToggle) {
-        closeRowActionMenus();
         const id = blToggle.dataset.blocklistToggle;
-        await api(`/api/blocklists/${encodeURIComponent(id)}/toggle`, { method: "POST" });
-        await loadPage("blocklists");
+        if (state.blocklistPendingActions && state.blocklistPendingActions.has(id)) return;
+        closeRowActionMenus();
+        const enabling = blToggle.textContent.trim() === "Enable";
+        setBlocklistRowPending(id, enabling ? "Enabling…" : "Disabling…");
+        try {
+          await api(`/api/blocklists/${encodeURIComponent(id)}/toggle`, { method: "POST" });
+        } catch (err) {
+          setBlocklistRowPending(id, null);
+          toast(err.message, "bad");
+          return;
+        }
+        setBlocklistRowPending(id, null);
+        if (!blocklistEditDialogOpen()) await loadPage("blocklists");
         toast("Subscription updated", "ok");
         return;
       }
       const blDelete = ev.target.closest("[data-blocklist-delete]");
       if (blDelete) {
-        closeRowActionMenus();
         const id = blDelete.dataset.blocklistDelete;
+        // Duplicate-request / rapid-double-click guard: the pending row
+        // already renders every action button disabled, which already
+        // stops a real click from reaching here a second time, but a
+        // synthetic/very-fast second dispatch before that re-render
+        // lands must not be able to fire a second real DELETE either.
+        if (state.blocklistPendingActions && state.blocklistPendingActions.has(id)) return;
+        closeRowActionMenus();
         if (!confirm(`Delete subscription ${id}? Its domains will stop being blocked.`)) return;
-        blDelete.disabled = true;
+        // Real UX defect fixed here (owner-reported live: confirmed
+        // Delete, then nothing visible happens until the success toast
+        // -- "the UI appears unresponsive"). Both live representations
+        // of this subscription (the main table row and, if present, its
+        // attention-card entry) go into a visible Deleting… state --
+        // dimmed but not blanked, a compact spinner, aria-busy, an
+        // accessible status message, and every action for it disabled
+        // -- immediately, before the DELETE request even goes out, not
+        // after it resolves. The rest of the page is untouched.
+        setBlocklistRowPending(id, "Deleting…");
         try {
           await api(`/api/blocklists/${encodeURIComponent(id)}`, { method: "DELETE" });
         } catch (err) {
-          blDelete.disabled = false;
+          // Failure: restore the normal row/card state and actions from
+          // the same (unchanged -- the DELETE never committed)
+          // in-memory data setBlocklistRowPending always renders from,
+          // keep the subscription visible, and show the real error.
+          // Never silently reports success or leaves the row stuck.
+          setBlocklistRowPending(id, null);
           toast(err.message, "bad");
           return;
         }
@@ -2872,7 +3003,7 @@
         // reconcile logic in blocklists() above) already made this the
         // exact same DELETE call's own mutation clear state.routeCache,
         // so this is always a genuinely fresh fetch, never a stale shell.
-        if (state.route === "blocklists") await loadPage("blocklists");
+        if (state.route === "blocklists" && !blocklistEditDialogOpen()) await loadPage("blocklists");
         return;
       }
       const blEdit = ev.target.closest("[data-blocklist-edit]");
@@ -3202,10 +3333,18 @@
     const statusEl = form.querySelector("[data-edit-status]");
     const buttons = form.querySelectorAll("button");
     buttons.forEach((b) => { b.disabled = true; });
+    // Same row-level pending treatment as every other blocklist action
+    // (owner-reported live, audited across the whole page): the dialog
+    // itself already disables its own buttons and shows an in-dialog
+    // status, but the row behind it -- what the operator sees once the
+    // dialog closes -- should never look idle/interactive while this is
+    // still in flight either.
+    setBlocklistRowPending(subscriptionId, "Saving…");
     try {
       const res = await api(`/api/blocklists/${encodeURIComponent(subscriptionId)}`, { method: "PATCH", body: JSON.stringify(body) });
       if (action === "save-update" && res.job_id) {
         if (statusEl) statusEl.textContent = "Updating...";
+        setBlocklistRowPending(subscriptionId, "Updating…");
         const job = await waitBlocklistJob(res.job_id);
         const ok = job.status === "succeeded";
         if (statusEl) statusEl.textContent = ok ? "Updated successfully." : `Update ${job.status}.`;
@@ -3221,6 +3360,7 @@
       else toast(err.message, "bad");
     } finally {
       buttons.forEach((b) => { b.disabled = false; });
+      setBlocklistRowPending(subscriptionId, null);
     }
   }
 

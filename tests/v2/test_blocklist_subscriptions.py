@@ -522,6 +522,48 @@ class TestBlocklistApiRoutes:
         assert listed["effective_interval_seconds"] == 0
         assert not listed["next_update_at"]
 
+    def test_delete_exposes_server_timing_substages(self, tmp_path, monkeypatch):
+        """Latency-diagnostics slice (owner-reported live: Delete has no
+        visible feedback while the request is running). Confirms the
+        real DELETE response carries a Server-Timing header with the
+        substages this pass added -- SQLite lock-wait, the mutation
+        itself, staged compile (build_bindings), and the real stage/
+        validate/promote work (subprocess validator calls included) --
+        so the actual bottleneck is diagnosable from a real request, not
+        just asserted in prose. Doesn't assert exact magnitudes (real
+        host timing varies); just that every stage this pass named is
+        actually present and non-negative."""
+        from fastapi.testclient import TestClient
+
+        webapp = self._fresh_webapp(tmp_path, monkeypatch)
+        client = TestClient(webapp.app)
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12"})
+        csrf = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"}).json()["csrf"]
+        headers = {"X-CSRF-Token": csrf}
+
+        created = client.post("/api/blocklists", json={
+            "subscription_id": "timing-sub", "name": "Timing Sub", "url": "http://timing-sub.invalid/list.txt",
+        }, headers=headers)
+        assert created.status_code == 200, created.text
+        job_id = created.json()["job_id"]
+        for _ in range(50):
+            job = client.get(f"/api/blocklists/jobs/{job_id}").json()
+            if job["status"] != "running":
+                break
+            time.sleep(0.1)
+
+        deleted = client.delete("/api/blocklists/timing-sub", headers=headers)
+        assert deleted.status_code == 200, deleted.text
+        timing_header = deleted.headers.get("Server-Timing", "")
+        assert timing_header, "DELETE response is missing a Server-Timing header entirely"
+        stages = {}
+        for entry in timing_header.split(", "):
+            name, _, dur = entry.partition(";dur=")
+            stages[name] = float(dur)
+        for expected in ("sqlite", "promote.lock_wait", "promote.mutate", "compile.build_bindings", "stage.write", "stage.validate", "stage.promote_write", "promote.commit"):
+            assert expected in stages, f"Server-Timing header is missing the {expected!r} substage: {timing_header}"
+            assert stages[expected] >= 0, f"{expected} substage has a negative duration: {timing_header}"
+
     def test_unauthenticated_routes_are_rejected(self, tmp_path, monkeypatch):
         from fastapi.testclient import TestClient
 

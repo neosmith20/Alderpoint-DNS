@@ -1395,9 +1395,20 @@ def _mutate_and_promote(mutate_fn) -> runtime_compile.RuntimeCompileResult:
     disk either).
     """
     with _db() as conn:
-        conn.execute("BEGIN IMMEDIATE")
+        # Real latency-diagnostics slice (owner-reported live, blocklist
+        # Delete has no visible feedback): BEGIN IMMEDIATE blocks for as
+        # long as SQLite's own busy_timeout (10s) if another write
+        # transaction -- most plausibly a blocklist refresh job's own
+        # brief live_metadata_commit stage -- already holds the write
+        # lock. Timed separately from the mutation itself so "waiting
+        # for an existing blocklist job" is a real, visible number
+        # instead of folding invisibly into the same figure as the
+        # mutation's own (normally sub-millisecond) work.
+        with _timed_stage("promote.lock_wait"):
+            conn.execute("BEGIN IMMEDIATE")
         try:
-            mutate_fn(conn)
+            with _timed_stage("promote.mutate"):
+                mutate_fn(conn)
             dot, doh, doq, doh3, dnscrypt = _encrypted_transport_configs(conn)
             # BIND architecture correction (Gate #3, multi-context
             # acceptance closure): live policy mutations recompile+
@@ -1427,12 +1438,14 @@ def _mutate_and_promote(mutate_fn) -> runtime_compile.RuntimeCompileResult:
             result = runtime_compile.recompile_and_promote(
                 conn, STAGING_DIR, COMPILED_DNSDIST_CONF,
                 listen_address=_configured_listen_address(), dot=dot, doh=doh, doq=doq, doh3=doh3, dnscrypt=dnscrypt,
+                timing_callback=_add_timing,
                 **bind_kwargs,
             )
         except BaseException:
             conn.execute("ROLLBACK")
             raise
-        conn.execute("COMMIT")
+        with _timed_stage("promote.commit"):
+            conn.execute("COMMIT")
         return result
 
 
@@ -1452,6 +1465,7 @@ def _compile_and_promote_from_conn(conn: sqlite3.Connection) -> runtime_compile.
     return runtime_compile.recompile_and_promote(
         conn, STAGING_DIR, COMPILED_DNSDIST_CONF,
         listen_address=_configured_listen_address(), dot=dot, doh=doh, doq=doq, doh3=doh3, dnscrypt=dnscrypt,
+        timing_callback=_add_timing,
         **bind_kwargs,
     )
 
