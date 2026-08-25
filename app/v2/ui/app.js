@@ -33,6 +33,7 @@
     applianceTimezone: null,
     routeCache: new Map(),
     inFlightGets: new Map(),
+    mutationEpoch: 0,
     perfHistory: loadPerfHistory(),
     lastNavClickAt: 0,
     currentNavigationId: "",
@@ -475,7 +476,26 @@
     if (!/^(GET|HEAD)$/.test(method)) opts.headers["X-CSRF-Token"] = state.csrf;
     else if (!opts.signal && pageLoadController) opts.signal = pageLoadController.signal;
     const cacheKey = method === "GET" ? `${method} ${path}` : "";
-    if (cacheKey && state.inFlightGets.has(cacheKey)) return state.inFlightGets.get(cacheKey);
+    // Real defect fixed here (found via the instrumented restore-race
+    // trace, beta-rescue continuation): an in-flight GET dedup keyed only
+    // on path had no notion of *when* it started relative to a mutation.
+    // A GET issued just before a POST/PUT/DELETE (e.g. one still in
+    // flight from an unrelated earlier render) could still be sitting in
+    // this map, unresolved, at the exact moment a later caller -- after
+    // that mutation's own state.routeCache.clear() already ran -- asked
+    // for the same path; the dedup below would hand back that older,
+    // pre-mutation promise instead of firing a fresh request, so the
+    // caller could render data from before the mutation even though it
+    // asked for "now". mutationEpoch is bumped every time a non-GET
+    // response clears the route cache (see below); a cached in-flight GET
+    // is only reused if it was registered in the *current* epoch -- one
+    // registered before the last mutation is treated as a miss instead,
+    // same principle as the blocklist page's own deletedIds guard against
+    // a stale in-flight response resolving after its own mutation.
+    if (cacheKey) {
+      const inFlight = state.inFlightGets.get(cacheKey);
+      if (inFlight && inFlight.epoch === state.mutationEpoch) return inFlight.promise;
+    }
     const started = nowMs();
     const requestEntry = { type: "api", route: state.route, path: path.split("?", 1)[0], method, request_id: requestId, timestamp: absNow(), navigation_id: perfOptions.navigationId, background: perfOptions.background };
     const promise = (async () => {
@@ -504,8 +524,20 @@
       }
       return body || {};
     })();
-    if (cacheKey) state.inFlightGets.set(cacheKey, promise.finally(() => state.inFlightGets.delete(cacheKey)));
-    if (!/^(GET|HEAD)$/.test(method)) state.routeCache.clear();
+    if (cacheKey) {
+      const epoch = state.mutationEpoch;
+      const tracked = promise.finally(() => {
+        // Only remove our own registration -- a newer request for the
+        // same path (a later epoch) may have already replaced this entry.
+        const current = state.inFlightGets.get(cacheKey);
+        if (current && current.epoch === epoch) state.inFlightGets.delete(cacheKey);
+      });
+      state.inFlightGets.set(cacheKey, { epoch, promise: tracked });
+    }
+    if (!/^(GET|HEAD)$/.test(method)) {
+      state.routeCache.clear();
+      state.mutationEpoch += 1;
+    }
     return promise;
   }
 
