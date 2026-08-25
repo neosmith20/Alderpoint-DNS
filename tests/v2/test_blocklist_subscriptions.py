@@ -365,12 +365,41 @@ class TestBlocklistApiRoutes:
                 "subscription_id": "http-sub", "name": "HTTP Sub", "url": f"http://127.0.0.1:{port}/list.txt",
             }, headers=headers)
             assert created.status_code == 200, created.text
+            # Real defect fixed (owner-reported live: "adding a blocklist
+            # subscription does not automatically download/process/apply
+            # it") -- creation now kicks off the new subscription's own
+            # first real update job immediately, same as an explicit
+            # "Update Now" would, without waiting for a scheduled
+            # interval or a separate manual refresh.
+            assert created.json()["job_id"], created.text
+            create_job_id = created.json()["job_id"]
+            immediate = client.get("/api/blocklists").json()["subscriptions"][0]
+            assert immediate["update_in_progress"] is True, immediate
 
             dup = client.post("/api/blocklists", json={
                 "subscription_id": "http-sub", "name": "HTTP Sub", "url": f"http://127.0.0.1:{port}/list.txt",
             }, headers=headers)
             assert dup.status_code == 409
 
+            # The subscription's own initial-pull job is already running
+            # (proven above by update_in_progress), so an explicit refresh
+            # attempted right now correctly 409s -- exactly the "prevent
+            # duplicate concurrent jobs" contract, over the real backend
+            # lock, not just the client-side disabled button.
+            immediate_refresh = client.post("/api/blocklists/http-sub/refresh", headers=headers)
+            assert immediate_refresh.status_code == 409, immediate_refresh.text
+
+            for _ in range(50):
+                job = client.get(f"/api/blocklists/jobs/{create_job_id}").json()
+                if job["status"] != "running":
+                    break
+                time.sleep(0.1)
+            assert job["status"] == "succeeded", job
+            assert job["runtime"]["promoted"] is True
+            assert job["results"]["http-sub"]["status"] == "succeeded"
+
+            # Now that the initial pull has finished, an explicit "Update
+            # Now" refresh is a normal, separate, successful operation.
             refreshed = client.post("/api/blocklists/http-sub/refresh", headers=headers)
             assert refreshed.status_code == 200, refreshed.text
             assert refreshed.json()["status"] == "queued"
@@ -405,6 +434,93 @@ class TestBlocklistApiRoutes:
         deleted = client.delete("/api/blocklists/http-sub", headers=headers)
         assert deleted.status_code == 200
         assert client.get("/api/blocklists").json()["subscriptions"] == []
+
+    def test_new_subscription_initial_pull_failure_stays_editable_and_preserves_runtime(self, tmp_path, monkeypatch):
+        """Part 2, failure branch: a new subscription whose first real
+        pull fails must not be silently dropped or blocked from editing,
+        must show the real error, and -- since a brand-new subscription
+        has no prior good content of its own -- must never let the
+        failed pull's own (empty) domain set anywhere near a runtime
+        promotion. A second, working subscription created in the same
+        job batch proves the one failure does not damage the other."""
+        from fastapi.testclient import TestClient
+
+        webapp = self._fresh_webapp(tmp_path, monkeypatch)
+        client = TestClient(webapp.app)
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12"})
+        csrf = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"}).json()["csrf"]
+        headers = {"X-CSRF-Token": csrf}
+
+        created = client.post("/api/blocklists", json={
+            "subscription_id": "will-fail", "name": "Will Fail", "url": "http://blocklist-initial-pull-failure.invalid/list.txt",
+        }, headers=headers)
+        assert created.status_code == 200, created.text
+        job_id = created.json()["job_id"]
+        assert job_id
+        job = None
+        for _ in range(50):
+            job = client.get(f"/api/blocklists/jobs/{job_id}").json()
+            if job["status"] != "running":
+                break
+            time.sleep(0.1)
+        assert job["status"] == "failed", job
+        assert job["results"]["will-fail"]["status"] == "failed"
+        assert job["runtime"]["promoted"] is False, "a failed initial pull with nothing successfully downloaded must never promote a runtime"
+
+        listed = client.get("/api/blocklists").json()["subscriptions"]
+        assert len(listed) == 1, "a failed initial pull must not remove the subscription"
+        sub = listed[0]
+        assert sub["subscription_id"] == "will-fail"
+        assert sub["last_error"], "the real fetch error must be visible, not swallowed"
+        assert sub["consecutive_failure_count"] == 1
+        assert sub["update_in_progress"] is False, "must not be left stuck showing updating forever"
+
+        renamed = client.patch("/api/blocklists/will-fail", json={"name": "Still Editable"}, headers=headers)
+        assert renamed.status_code == 200, renamed.text
+        assert renamed.json()["subscription"]["name"] == "Still Editable"
+
+    def test_manual_only_default_interval_still_performs_the_initial_pull(self, tmp_path, monkeypatch):
+        """Part 2, requirement 9: "Manual Only" (here, the appliance-wide
+        default update interval set to 0/manual) controls FUTURE
+        scheduled refreshes only -- it must never suppress a newly
+        created subscription's own first real pull."""
+        from fastapi.testclient import TestClient
+
+        webapp = self._fresh_webapp(tmp_path, monkeypatch)
+        client = TestClient(webapp.app)
+        client.post("/api/setup", json={"username": "admin", "password": "correcthorsebattery12", "confirm_password": "correcthorsebattery12"})
+        csrf = client.post("/api/login", json={"username": "admin", "password": "correcthorsebattery12"}).json()["csrf"]
+        headers = {"X-CSRF-Token": csrf}
+
+        settings = client.post("/api/blocklists/settings", json={"default_interval_seconds": 0}, headers=headers)
+        assert settings.status_code == 200, settings.text
+
+        server = _serve("manual-only-initial-pull.example\n")
+        try:
+            port = server.server_address[1]
+            created = client.post("/api/blocklists", json={
+                "subscription_id": "manual-only-sub", "name": "Manual Only Sub", "url": f"http://127.0.0.1:{port}/list.txt",
+            }, headers=headers)
+            assert created.status_code == 200, created.text
+            job_id = created.json()["job_id"]
+            assert job_id, "Manual Only must not suppress the initial pull job"
+            job = None
+            for _ in range(50):
+                job = client.get(f"/api/blocklists/jobs/{job_id}").json()
+                if job["status"] != "running":
+                    break
+                time.sleep(0.1)
+            assert job["status"] == "succeeded", job
+        finally:
+            server.shutdown()
+
+        listed = client.get("/api/blocklists").json()["subscriptions"][0]
+        assert listed["rule_count"] == 1
+        assert listed["last_success_at"]
+        # Manual Only means no FUTURE scheduled run, even though the
+        # initial pull above already happened.
+        assert listed["effective_interval_seconds"] == 0
+        assert not listed["next_update_at"]
 
     def test_unauthenticated_routes_are_rejected(self, tmp_path, monkeypatch):
         from fastapi.testclient import TestClient
@@ -468,6 +584,19 @@ class TestBlocklistApiRoutes:
                     "subscription_id": sid, "name": name, "url": f"http://127.0.0.1:{server.server_address[1]}/list.txt",
                 }, headers=headers)
                 assert r.status_code == 200, r.text
+                # Creation now kicks off its own initial-pull job (see
+                # create_blocklist_subscription_route) -- let it finish
+                # before this test's own deliberate refresh-all below, so
+                # the two don't race over the same subscription_ids and
+                # the refresh-all attempt below isn't itself rejected as
+                # a duplicate concurrent job.
+                create_job_id = r.json()["job_id"]
+                for _ in range(50):
+                    job = client.get(f"/api/blocklists/jobs/{create_job_id}").json()
+                    if job["status"] != "running":
+                        break
+                    time.sleep(0.1)
+                assert job["status"] == "succeeded", job
 
             real_prepare_refresh = webapp.blocklist_subscriptions.prepare_refresh
 

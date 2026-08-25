@@ -474,7 +474,25 @@
     const requestId = Math.random().toString(16).slice(2, 14);
     opts.headers["X-Request-ID"] = requestId;
     if (!/^(GET|HEAD)$/.test(method)) opts.headers["X-CSRF-Token"] = state.csrf;
-    else if (!opts.signal && pageLoadController) opts.signal = pageLoadController.signal;
+    // Real defect fixed here (found via the Part 2 initial-pull trace):
+    // a background: true GET (one explicitly meant to keep running
+    // after/independent of whatever page-load triggered it -- job-status
+    // polling, live-refresh ticks) still got pageLoadController's signal
+    // attached whenever it didn't supply its own, so the very next
+    // loadPage() call -- even an unrelated one, e.g. submitOnce's own
+    // generic post-submit reload -- aborted it out from under its
+    // caller. waitBlocklistJob's poll (used by blocklist create AND
+    // refresh/refresh-all) hit this in practice: the create form's own
+    // handler fires an async poll-and-reconcile, submitOnce's own
+    // `await loadPage(state.route)` runs immediately after and aborts
+    // that poll's very first request, and the poll loop had no retry
+    // for an aborted fetch -- so the whole background reconcile died
+    // silently and the row stayed stuck showing "updating" forever,
+    // even though the real backend job had already finished (correctly,
+    // fast) by then. background requests without an explicit signal of
+    // their own now simply run unsignaled instead of inheriting one
+    // meant to cancel a completely different, page-load-scoped fetch.
+    else if (!opts.signal && !perfOptions.background && pageLoadController) opts.signal = pageLoadController.signal;
     const cacheKey = method === "GET" ? `${method} ${path}` : "";
     // Real defect fixed here (found via the instrumented restore-race
     // trace, beta-rescue continuation): an in-flight GET dedup keyed only
@@ -544,7 +562,12 @@
   async function waitBlocklistJob(jobId) {
     if (!jobId) return null;
     for (let i = 0; i < 60; i += 1) {
-      const job = await api(`/api/blocklists/jobs/${encodeURIComponent(jobId)}`);
+      // background: true -- this poll must survive whatever page-load
+      // happens to run concurrently (including the very submitOnce
+      // reload that follows the mutation which started this poll); see
+      // api()'s own comment on why background requests no longer
+      // inherit pageLoadController's abort signal.
+      const job = await api(`/api/blocklists/jobs/${encodeURIComponent(jobId)}`, { background: true });
       if (job.status && job.status !== "running") return job;
       await new Promise((resolve) => setTimeout(resolve, Math.min(1000 + i * 100, 2500)));
     }
@@ -1877,9 +1900,27 @@
     if (dialog && dialog.open && form && form.dataset.subscriptionId === id) {
       dialog.close();
     }
-    const trigger = document.querySelector(`[data-blocklist-delete="${CSS.escape(id)}"]`);
-    const row = trigger && trigger.closest("tr");
-    if (row) row.remove();
+    // Real defect fixed here (owner-reported live, 80cd344's own fix
+    // did not survive this case): a subscription that also currently
+    // needs attention renders its Delete control TWICE -- once in the
+    // attention card (a <div>, not a table row) and once in the main
+    // table's row-actions menu -- both sharing the same
+    // data-blocklist-delete="<id>" attribute. A plain, single
+    // querySelector() returns document order's first match, which is
+    // the attention card's one (it renders above the table) regardless
+    // of which control was actually clicked; .closest("tr") on that
+    // element is always null, so the real table row was silently never
+    // removed -- everything else (state, toast, the attention card
+    // itself) updated correctly, which is exactly why this looked like
+    // a full success right up until the row stayed on screen. Removing
+    // every matching row (there is normally exactly one; querySelectorAll
+    // makes that not an assumption) instead of trusting the first match
+    // fixes it regardless of how many places currently render this
+    // subscription's Delete control.
+    document.querySelectorAll(`[data-blocklist-delete="${CSS.escape(id)}"]`).forEach((trigger) => {
+      const row = trigger.closest("tr");
+      if (row) row.remove();
+    });
     // Attention card and its count update immediately too, from the
     // already-updated in-memory list -- not only once the background
     // reconcile's own fresh fetch resolves. Disappears entirely (not an
@@ -2769,7 +2810,7 @@
         toast(`${id}: update queued`, "info");
         (async () => {
           const job = await waitBlocklistJob(res.job_id);
-          if (state.route === "blocklists") await loadPage("blocklists");
+          if (state.route === "blocklists" && !blocklistEditDialogOpen()) await loadPage("blocklists");
           const result = job && job.results ? job.results[id] : null;
           toast(`${id}: ${result ? result.message : (job.error || job.status)}`, result && result.status === "succeeded" ? "ok" : "bad");
         })().catch((e) => toast(e.message, "bad"));
@@ -2785,7 +2826,7 @@
         toast(`Updating ${res.count} blocklist source(s)`, "info");
         (async () => {
           const job = await waitBlocklistJob(res.job_id);
-          if (state.route === "blocklists") await loadPage("blocklists");
+          if (state.route === "blocklists" && !blocklistEditDialogOpen()) await loadPage("blocklists");
           toast(`Update All ${job.status}`, job.status === "succeeded" ? "ok" : job.status === "partial" ? "warn" : "bad");
         })().catch((e) => toast(e.message, "bad"));
         return;
@@ -3075,6 +3116,32 @@
     };
   }
 
+  function blocklistEditDialogOpen() {
+    // Real defect fixed here (found via the Part 2 initial-pull trace):
+    // every background reconcile below (a blocklist refresh/refresh-all/
+    // create's own async poll-and-reload, none of them awaited by the
+    // click that started them) used to call loadPage("blocklists")
+    // unconditionally whenever the operator was still on that route --
+    // with no regard for whether the Edit Blocklist dialog happened to
+    // be open at that exact moment. loadPage() replaces the whole #page
+    // subtree via innerHTML, which destroys the live dialog element
+    // (and, critically, the plain DOM property assignments
+    // openBlocklistEditDialog put on its form -- form.dataset.initial,
+    // the prepopulated field values) and replaces it with a fresh,
+    // closed one from the new render. The next real interaction with
+    // "that" dialog -- Cancel, in particular -- was then reading
+    // isBlocklistEditDirty() off a form that was never actually
+    // populated for this session, tripped a false "dirty" reading, and
+    // fired an unwanted discard-changes confirm() the operator never
+    // asked for. Every background reconcile now skips its reload while
+    // this dialog is open; the data it would have refreshed is exactly
+    // what a subsequent legitimate navigation/reload already re-fetches
+    // anyway, so nothing is lost, only deferred past the moment it
+    // would have been actively disruptive.
+    const dialog = document.getElementById("blocklist-edit-dialog");
+    return !!(dialog && dialog.open);
+  }
+
   function isBlocklistEditDirty(form) {
     const initial = JSON.parse(form.dataset.initial || "{}");
     const current = blocklistEditSnapshot(form);
@@ -3327,7 +3394,29 @@
       const res = await api("/api/statistics/clear", { method: "POST", body: JSON.stringify(body) });
       toast(`Cleared ${res.aggregate_buckets_cleared} aggregate bucket(s), ${res.aggregate_dimension_rows_cleared} dimension row(s)${res.raw_history_cleared ? `, ${res.raw_partition_files_removed} raw history file(s)` : " (raw history kept)"}`, "ok");
     } else if (type === "blocklist-create") {
-      await api("/api/blocklists", { method: "POST", body: JSON.stringify(body) });
+      // Real defect fixed here (owner-reported live: "adding a
+      // blocklist subscription does not automatically download/
+      // process/apply it"). The backend now kicks off the new
+      // subscription's own first real update job as part of creating
+      // it (see create_blocklist_subscription_route) and already
+      // returns with update_in_progress already true, so the generic
+      // reload this handler falls through to (submitOnce's own,
+      // right below -- not skipped here) already shows the new row as
+      // Queued/Updating instead of a misleading blank "never". This
+      // background poll is what makes it transition to Succeeded/
+      // Failed on its own afterward, same pattern as the existing
+      // per-row "Update Now" (data-blocklist-refresh) handler --
+      // without it, the operator would have to notice and manually
+      // refresh to ever see the real outcome.
+      const createRes = await api("/api/blocklists", { method: "POST", body: JSON.stringify(body) });
+      if (createRes.job_id) {
+        (async () => {
+          const job = await waitBlocklistJob(createRes.job_id);
+          if (state.route === "blocklists" && !blocklistEditDialogOpen()) await loadPage("blocklists");
+          const result = job && job.results ? job.results[createRes.subscription_id] : null;
+          toast(`${createRes.subscription_id}: ${result ? result.message : (job.error || job.status)}`, result && result.status === "succeeded" ? "ok" : "bad");
+        })().catch((e) => toast(e.message, "bad"));
+      }
     } else if (type === "blocklist-settings") {
       await api("/api/blocklists/settings", { method: "POST", body: JSON.stringify({ default_interval_seconds: Number(body.default_interval_seconds) }) });
     } else if (type === "blocklist-interval") {

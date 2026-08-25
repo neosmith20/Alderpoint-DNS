@@ -1425,9 +1425,8 @@ async function main() {
     proof.push("cache-flush-attempted");
 
     // Subscribed Blocklists (beta-rescue priority 3B): create a real
-    // subscription, then exercise the real FAILURE path explicitly
-    // (an unreachable URL) -- item 4's checklist calls out
-    // "add/refresh/failure" by name, not just the happy path.
+    // subscription -- item 4's checklist calls out "add/refresh/
+    // failure" by name, not just the happy path.
     await route("blocklists");
     await waitFor(`document.querySelector('form[data-form="blocklist-create"]')`, "blocklist create form");
     // subscription_id is also no longer operator-entered (same central
@@ -1436,6 +1435,14 @@ async function main() {
     // id, surfaced back in the table's own data-blocklist-refresh
     // attribute, which is what this harness now reads instead of
     // assuming an id it chose itself.
+    // Real defect fixed here (owner-reported live: "adding a blocklist
+    // subscription does not automatically download/process/apply it").
+    // A newly created subscription must start its own real first pull
+    // on its own -- no Update Now click, no page reload -- and land on
+    // Succeeded or Failed by itself. This creates one pointed at an
+    // unreachable URL specifically so the automatic FAILURE path is
+    // proven without ever touching the (now redundant for this) Update
+    // Now button.
     await evalJs(`(() => {
       const f = document.querySelector('form[data-form="blocklist-create"]');
       f.querySelector('[name=name]').value = 'Browser Test Blocklist ${suffix}';
@@ -1446,15 +1453,71 @@ async function main() {
     })()`);
     await waitFor(`document.body.innerText.includes("Browser Test Blocklist ${suffix}")`, "blocklist subscription created");
     proof.push("blocklist-subscription-created");
-    await evalJs(`document.querySelectorAll('.toast').forEach((n) => n.remove()); true`);
-    await evalJs(`(() => {
+    // The row must show queued/updating essentially immediately -- not
+    // "never", not blank -- while its own automatic initial pull is
+    // still in flight. A short, immediate (not a 45s-patient waitFor)
+    // check: the create response and the reload it triggers both come
+    // back well within a second on a real local server.
+    const initialPullQueuedQuickly = await evalJs(`(() => {
       const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Browser Test Blocklist ${suffix}'));
-      if (!row) throw new Error('created blocklist row not found');
-      row.querySelector('[data-blocklist-refresh]').click();
-      return true;
+      return !!row && (row.textContent.includes('updating') || row.textContent.includes('never'));
     })()`);
-    await waitFor(`document.body.innerText.includes("failed") || document.querySelector('.toast.bad')`, "blocklist refresh failure surfaced cleanly");
+    if (!initialPullQueuedQuickly) throw new Error("newly created blocklist row did not show a queued/updating status shortly after creation");
+    proof.push("blocklist-new-subscription-shows-queued-status");
+    await evalJs(`document.querySelectorAll('.toast').forEach((n) => n.remove()); true`);
+    // No click anywhere here -- the automatic initial pull job (already
+    // running per the previous check) must reach "failed" on its own.
+    await waitFor(`document.body.innerText.includes("failed") || document.querySelector('.toast.bad')`, "blocklist initial pull failure surfaced automatically, with no Update Now click and no page reload", 300);
+    proof.push("blocklist-initial-pull-failure-automatic");
+    // Still editable, not silently dropped, and the real error is
+    // visible (not swallowed) -- requirement 7.
+    await waitFor(`(() => {
+      const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Browser Test Blocklist ${suffix}'));
+      const btn = row && row.querySelector('[data-blocklist-refresh]');
+      return btn && !btn.disabled;
+    })()`, "failed subscription's own controls re-enabled (not stuck updating)", 300);
+    if (!(await evalJs(`(() => {
+      const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Browser Test Blocklist ${suffix}'));
+      return row && /fetch failed|name or service|not known|error/i.test(row.textContent);
+    })()`))) {
+      throw new Error("failed initial pull did not surface a real error message in the row");
+    }
     proof.push("blocklist-refresh-failure-handled");
+
+    // Real success counterpart of the same defect: a subscription
+    // pointed at a real, working source must reach Succeeded on its
+    // own too, with rule count/duration/last update populated -- also
+    // with no click and no reload. Only test_chromium_management_ui_
+    // harness's own pytest wrapper stands up the local blocklist-
+    // content server this needs (APDNS_TEST_BLOCKLIST_URL); the other,
+    // narrower wrappers sharing this same main() don't, so this step
+    // degrades to a skip for them.
+    const initialPullWorkingUrl = process.env.APDNS_TEST_BLOCKLIST_URL;
+    if (!initialPullWorkingUrl) {
+      console.log("skipping automatic-successful-initial-pull proof: APDNS_TEST_BLOCKLIST_URL not set by this wrapper");
+    } else {
+      await evalJs(`document.querySelectorAll('.toast').forEach((n) => n.remove()); true`);
+      await evalJs(`(() => {
+        const f = document.querySelector('form[data-form="blocklist-create"]');
+        f.querySelector('[name=name]').value = 'Auto Success Blocklist ${suffix}';
+        f.querySelector('[name=category]').value = 'test';
+        f.querySelector('[name=url]').value = ${JSON.stringify(initialPullWorkingUrl)};
+        f.requestSubmit();
+        return true;
+      })()`);
+      await waitFor(`document.body.innerText.includes("Auto Success Blocklist ${suffix}")`, "auto-success blocklist subscription created");
+      // No click anywhere here either.
+      await waitFor(`(() => {
+        const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Auto Success Blocklist ${suffix}'));
+        return row && row.textContent.includes('succeeded') && !row.textContent.includes('updating');
+      })()`, "new subscription's own initial pull reached Succeeded automatically, with no Update Now click and no page reload", 300);
+      const autoSuccessRow = await evalJs(`(() => {
+        const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Auto Success Blocklist ${suffix}'));
+        return row ? row.textContent : '';
+      })()`);
+      if (!/\d+\s*ms/.test(autoSuccessRow)) throw new Error(`succeeded initial pull row did not show a duration: ${autoSuccessRow}`);
+      proof.push("blocklist-initial-pull-success-automatic");
+    }
     // Real defect this works around (found via this very extension,
     // beta-rescue continuation): the refresh click handler's own
     // `await loadPage("blocklists")` reload can still be in flight
@@ -1614,6 +1677,18 @@ async function main() {
       return true;
     })()`);
     await waitFor(`document.body.innerText.includes("Delete Test Blocklist ${suffix}")`, "delete-test blocklist subscription created");
+    // Creation now starts its own real initial pull immediately (Part 2)
+    // -- the row's Delete control is deliberately disabled while that
+    // update_in_progress, same as during any other refresh. A real
+    // operator's own click would no-op on a disabled button exactly the
+    // same way; wait for it to settle (this URL fails fast) before
+    // clicking, same pattern as every other "button ready" wait in this
+    // file.
+    await waitFor(`(() => {
+      const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Delete Test Blocklist ${suffix}'));
+      const btn = row && row.querySelector('[data-blocklist-delete]');
+      return btn && !btn.disabled;
+    })()`, "delete-test blocklist's own initial pull settled, Delete control enabled", 300);
     await evalJs(`window.confirm = () => true; true`);
     await evalJs(`(() => {
       const row = [...document.querySelectorAll('tr')].find((r) => r.textContent.includes('Delete Test Blocklist ${suffix}'));
@@ -1685,6 +1760,19 @@ async function main() {
       throw new Error("attention card is still present immediately after deleting the only subscription requiring attention");
     }
     proof.push("blocklist-delete-clears-attention-card-immediately");
+    // Real defect this specifically catches (owner-reported live,
+    // 80cd344's own delete fix did not survive this exact case): a
+    // subscription needing attention renders its Delete control twice
+    // (attention card + main table row), and the handler's own DOM
+    // lookup used to grab whichever one comes first in document order
+    // -- the attention card's, never inside a <tr> -- so the real table
+    // row was silently left behind even though the attention card
+    // itself (state-driven, not DOM-lookup-driven) correctly cleared.
+    // The check above alone would have missed exactly this.
+    if (await evalJs(`Array.from(document.querySelectorAll('tr')).some((r) => r.textContent.includes('Delete Attention Test ${suffix}'))`)) {
+      throw new Error("deleted subscription's own TABLE ROW is still present even though its attention card cleared -- the delete handler found the wrong element for a subscription rendered in two places");
+    }
+    proof.push("blocklist-delete-removes-row-even-when-also-in-attention-card");
 
     // Network Configuration (beta-rescue priority 4): read-only
     // discoverability/status proof. Deliberately never submits the

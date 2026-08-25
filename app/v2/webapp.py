@@ -4292,6 +4292,26 @@ def update_blocklist_settings_route(req: BlocklistSettingsRequest, admin=Depends
 
 @app.post("/api/blocklists")
 def create_blocklist_subscription_route(req: BlocklistSubscriptionCreate, admin=Depends(current_admin), x_csrf_token: Optional[str] = CsrfHeader):
+    """A newly added subscription must not just sit inert until either a
+    manual "Update Now" click or (if it even has a scheduled interval --
+    Manual Only sets none at all, see below) its first scheduled run,
+    possibly a day or more away (owner-reported live: "adding a
+    blocklist subscription does not automatically download/process/
+    apply it"). This route now kicks off exactly the same background
+    job machinery refresh_blocklist_subscription_route uses (staged
+    compile+promote, never the live control.db held open across a
+    download) for this one new subscription, immediately, unconditionally
+    of the update_interval_seconds/Manual Only setting -- that setting
+    controls FUTURE scheduled refreshes only (store.set_blocklist_next_
+    update below is still only set when there IS a real recurring
+    interval), never whether a just-created subscription gets its first
+    real pull. update_in_progress is set True inside the SAME short
+    creation transaction (not left for the background job's own later
+    status-mark stage to catch up to) so the row the client immediately
+    re-fetches after this response already shows Queued/Updating instead
+    of a misleading blank "never" for however long the job takes to
+    reach that stage on its own.
+    """
     check_csrf(admin, x_csrf_token)
     try:
         with _db() as conn:
@@ -4303,9 +4323,12 @@ def create_blocklist_subscription_route(req: BlocklistSubscriptionCreate, admin=
                 jitter = min(900, max(0, default_interval // 10))
                 next_run = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=default_interval + (hash(subscription_id) % (jitter + 1) if jitter else 0))
                 store.set_blocklist_next_update(conn, subscription_id, next_run.isoformat())
+            store.set_blocklist_update_in_progress(conn, subscription_id, True)
     except PolicyStoreError as exc:
         raise ApiError(409, "conflict", str(exc)) from exc
-    return {"status": "created"}
+    job_id = _new_blocklist_job("single", [subscription_id])
+    threading.Thread(target=_run_blocklist_refresh_job, args=(job_id, [subscription_id]), daemon=True).start()
+    return {"status": "created", "subscription_id": subscription_id, "job_id": job_id}
 
 
 @app.post("/api/blocklists/{subscription_id}/interval")
