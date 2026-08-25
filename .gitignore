@@ -68,3 +68,9 @@ dev/
 benchmarks/v2_analytics/data/
 benchmarks/v2_analytics/results/*.json.tmp
 vendor-runtime-v2-analytics/
+
+# Go/Svelte control-plane migration: regenerable build artifacts and
+# dependency caches, not the deliverable itself.
+go/frontend/node_modules/
+go/frontend/package-lock.json
+/dist/

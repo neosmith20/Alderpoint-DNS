@@ -1,0 +1,32 @@
+# Versioned desired-state configuration for the Go control plane.
+# Loaded and schema-validated at startup (unknown fields rejected).
+# Never used as a high-frequency transactional store -- that's SQLite's job.
+schema_version: 1
+
+appliance:
+  name: alderpointdns
+  timezone: UTC
+
+web:
+  listen_address: 0.0.0.0
+  listen_port: 8444
+  tls_cert_path: ""
+  tls_key_path: ""
+
+blocklists:
+  staging_dir: /var/lib/alderpointdns-go/blocklists/staging
+  runtime_dir: /var/lib/alderpointdns-go/blocklists/runtime
+  pull_timeout_seconds: 30
+  # Scheduler tick: how often the in-process interval scheduler checks for
+  # due subscriptions. Bounded, single goroutine, never one goroutine per
+  # subscription.
+  scheduler_tick_seconds: 30
+  max_concurrent_pulls: 3
+
+local_dns:
+  staging_dir: /var/lib/alderpointdns-go/local-dns/staging
+  runtime_dir: /var/lib/alderpointdns-go/local-dns/runtime
+
+auth:
+  session_ttl_seconds: 43200
+  last_seen_update_interval_seconds: 60

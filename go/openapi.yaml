@@ -1,0 +1,106 @@
+openapi: 3.0.3
+info:
+  title: Alderpoint DNS Go control plane (Milestone 1)
+  version: "1.0.0"
+  description: >
+    Milestone 1 API contract. frontend/src/api.ts is hand-maintained against
+    this file (see frontend/src/api.contract.test.ts, which checks every
+    path below has a matching call site) rather than fully code-generated
+    -- openapi-typescript's current release had a peer-dependency conflict
+    with this project's toolchain versions during Milestone 1; switching to
+    generated types is a cheap follow-up, not a blocker (see migration
+    report "known limitations").
+paths:
+  /api/health:
+    get:
+      summary: Liveness/readiness + schema version
+      security: []
+  /api/setup/status:
+    get:
+      summary: Whether first-run setup is still required
+      security: []
+  /api/setup:
+    post:
+      summary: Create the first admin account (only while setup_required)
+      security: []
+  /api/login:
+    post:
+      summary: Authenticate, set session cookie, return CSRF token
+      security: []
+  /api/logout:
+    post:
+      summary: Destroy the current session
+  /api/session:
+    get:
+      summary: Validate the current session, return username + CSRF token
+  /api/session/revoke-others:
+    post:
+      summary: Revoke every other session for this admin
+  /api/blocklists:
+    get:
+      summary: List subscriptions + global settings
+    post:
+      summary: Create a subscription; triggers an immediate first pull
+  /api/blocklists/settings:
+    post:
+      summary: Set the global default update interval
+  /api/blocklists/{id}/interval:
+    post:
+      summary: Set one subscription's update interval (0 = Manual Only)
+  /api/blocklists/{id}/toggle:
+    post:
+      summary: Enable/disable a subscription
+  /api/blocklists/{id}:
+    delete:
+      summary: Delete a subscription and its runtime artifact
+  /api/blocklists/{id}/refresh:
+    post:
+      summary: "Update Now for one subscription"
+  /api/blocklists/refresh-all:
+    post:
+      summary: "Update All enabled subscriptions"
+  /api/blocklists/jobs/{id}:
+    get:
+      summary: Poll background job state
+  /api/local-dns:
+    get:
+      summary: List Local DNS records
+    post:
+      summary: Create a Local DNS record (synchronous stage+promote)
+  /api/local-dns/{id}:
+    patch:
+      summary: Edit a Local DNS record (synchronous stage+promote)
+    delete:
+      summary: Delete a Local DNS record (synchronous stage+promote)
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: alderpointdns_v2_session
+  schemas:
+    Subscription:
+      type: object
+      properties:
+        subscription_id: { type: string }
+        name: { type: string }
+        url: { type: string }
+        category: { type: string }
+        enabled: { type: boolean }
+        last_status: { type: string, nullable: true }
+        rule_count: { type: integer, nullable: true }
+        failure_count: { type: integer }
+        attention_required: { type: boolean }
+        effective_interval_seconds: { type: integer }
+        update_in_progress: { type: boolean }
+    LocalDnsRecord:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        record_type: { type: string, enum: [A, AAAA, CNAME, PTR] }
+        value: { type: string }
+        ttl: { type: integer }
+        enabled: { type: boolean }
+security:
+  - sessionCookie: []

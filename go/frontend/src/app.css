@@ -1,0 +1,5 @@
+/* App.svelte owns real styling via CSS custom properties; this file is
+   intentionally minimal. */
+* {
+  box-sizing: border-box;
+}
