@@ -12,10 +12,13 @@
   // the Go control plane natively; DNS Activity/Top Domains come through
   // the pyanalytics compatibility boundary (internal/pyanalytics, a
   // read-only reader of Python's own aggregates.db -- see its doc
-  // comment). Top Blocked Domains is honestly reported unavailable
-  // through that boundary (needs Python's raw Parquet/DuckDB path, which
-  // conflicts with this project's CGO_ENABLED=0 requirement) rather than
-  // faked -- see PARITY_MATRIX.md.
+  // comment). Top Blocked Domains reads through a second, narrower
+  // boundary (internal/rawquerylog, a pure-Go Parquet reader over
+  // Python's raw per-query history) that's optional at startup
+  // (-query-log-dir) -- the API's own `degraded` flag is what this page
+  // actually renders on, so this card is real whenever that reader is
+  // configured and honestly degraded when it isn't, never hardcoded
+  // either way here.
 
   type RangeMode = "live" | "1h" | "24h" | "7d";
   const RANGE_LABELS: Record<RangeMode, string> = { live: "Live", "1h": "Last hour", "24h": "Last 24 hours", "7d": "Last 7 days" };
@@ -287,10 +290,10 @@
   </div>
 
   <p class="hint scope-note">
-    Blocklists and Local DNS are natively Go-owned. DNS Activity and Top Domains are read through a
-    temporary read-only compatibility boundary to Python's analytics store (see
-    <code>internal/pyanalytics</code>). Top Blocked Domains, Clients, and Upstreams are not migrated
-    yet -- see the parity matrix.
+    Blocklists and Local DNS are natively Go-owned. DNS Activity, Top Domains, and Top Blocked
+    Domains are read through temporary read-only compatibility boundaries to Python's analytics store
+    (see <code>internal/pyanalytics</code> and <code>internal/rawquerylog</code>). Clients and
+    Upstreams mini-tables are not migrated yet -- see the parity matrix.
   </p>
 </section>
 

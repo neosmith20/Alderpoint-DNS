@@ -14,6 +14,7 @@ import (
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/policy"
 	"alderpointdns/go-controlplane/internal/pyanalytics"
+	"alderpointdns/go-controlplane/internal/rawquerylog"
 	"alderpointdns/go-controlplane/internal/upstreams"
 )
 
@@ -35,6 +36,14 @@ type Server struct {
 	// never as a programming error. See internal/pyanalytics's doc
 	// comment for exactly what this compatibility boundary is.
 	Analytics *pyanalytics.Reader
+
+	// RawQueryLog is nil unless -query-log-dir was given a real path at
+	// startup -- same "nil means degraded, never a programming error"
+	// contract as Analytics above. See internal/rawquerylog's doc
+	// comment: a second, narrower compatibility boundary over Python's
+	// raw per-query Parquet history (not the aggregates.db buckets
+	// Analytics reads).
+	RawQueryLog *rawquerylog.Reader
 
 	Version    string
 	StartedAt  time.Time
@@ -69,6 +78,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/analytics/live-activity", requireAuth(s.handleAnalyticsLiveActivity))
 	mux.HandleFunc("GET /api/analytics/top-domains", requireAuth(s.handleAnalyticsTopDomains))
 	mux.HandleFunc("GET /api/analytics/top-blocked-domains", requireAuth(s.handleAnalyticsTopBlockedDomains))
+	mux.HandleFunc("GET /api/analytics/query-log", requireAuth(s.handleAnalyticsQueryLog))
 
 	mux.HandleFunc("GET /api/blocklists", requireAuth(s.handleListBlocklists))
 	mux.HandleFunc("POST /api/blocklists", requireAuth(s.handleCreateBlocklist))

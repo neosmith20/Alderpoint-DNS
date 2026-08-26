@@ -151,13 +151,21 @@ async function main() {
       check("DataGrid resize handle present to test drag-resize", false, "th or handle not found");
     }
 
-    // --- Dashboard: Top Blocked Domains honestly reports unavailable ---
-    const degradedNotes = await page.$$eval(".degraded-note", (els) => els.map((e) => e.textContent));
-    check(
-      "Top Blocked Domains honestly reports unavailable (not faked, not silently hidden)",
-      degradedNotes.some((t) => t.includes("Parquet") || t.includes("DuckDB") || t.includes("Unavailable")),
-      degradedNotes.join(" | "),
-    );
+    // --- Dashboard: Top Blocked Domains is real when -query-log-dir is
+    // configured (this harness always starts the server that way -- see
+    // main()). The honest-degraded path for when it's NOT configured is
+    // exercised by acceptance.py instead (no browser needed for that
+    // shape), so this isn't duplicated here.
+    const blockedDomainRowsFn = () => {
+      const h3 = [...document.querySelectorAll("h3")].find((e) => e.textContent?.includes("Top Blocked Domains"));
+      const card = h3?.closest(".card");
+      return card ? card.querySelectorAll(".data-grid tbody tr:not(.empty-row)").length : -1;
+    };
+    const blockedDomainCards = await page.$$eval("h3", (els) => els.filter((e) => e.textContent?.includes("Top Blocked Domains")).length);
+    check("Top Blocked Domains card renders on the Dashboard", blockedDomainCards === 1, `count=${blockedDomainCards}`);
+    await page.waitForFunction(blockedDomainRowsFn, { timeout: 3000 }).catch(() => {});
+    const blockedRows = await page.evaluate(blockedDomainRowsFn);
+    check("Top Blocked Domains renders real rows, not the honest-unavailable placeholder", blockedRows > 0, `rows=${blockedRows}`);
 
     // --- Dashboard: card customization (hide, reorder, persistence) ---
     await page.click(".customize-btn");
@@ -205,6 +213,46 @@ async function main() {
     const reshowIdx = labelsAfter.findIndex((l) => l.includes("Top Blocked Domains"));
     if (reshowIdx >= 0) await checkboxesAfter[reshowIdx].click();
     await page.click(".customize-btn");
+
+    // --- Nav: Query Log (internal/rawquerylog -- raw Parquet compatibility boundary) ---
+    let clickedQueryLog = false;
+    for (const btn of await page.$$(".sidebar .item")) {
+      if ((await btn.evaluate((el) => el.textContent?.trim())) === "Query Log") {
+        await btn.click();
+        clickedQueryLog = true;
+        break;
+      }
+    }
+    check("Query Log nav item exists and is clickable", clickedQueryLog);
+    await page.waitForSelector("#analytics-heading", { timeout: 3000 }).catch(() => {});
+    check("Query Log page content rendered", (await page.$("#analytics-heading")) !== null);
+
+    // Real rows from the seeded fixture (started with -query-log-dir
+    // pointed at go/tests/fixtures/make_query_log_fixture.py's output),
+    // not a mocked/empty grid. `:not(.empty-row)` excludes the DataGrid's
+    // own pre-existing placeholder row -- the same race-condition class
+    // already found and fixed for Upstreams/Backup/Filters elsewhere in
+    // this file, closed more generally here since Query Log's grid has
+    // no per-row .actions cell to key off of instead.
+    await page.waitForFunction(() => document.querySelectorAll(".data-grid tbody tr:not(.empty-row)").length > 0, { timeout: 5000 }).catch(() => {});
+    let queryLogRows = await page.$$eval(".data-grid tbody tr:not(.empty-row)", (rows) => rows.length);
+    check("Query Log grid renders real rows from the raw Parquet fixture", queryLogRows === 3, `rows=${queryLogRows}`);
+
+    // Domain filter narrows the grid to a real, server-side-filtered result.
+    await page.type('input[aria-label="Filter by domain"]', "acceptance-blocked.example.com.");
+    await Promise.all([
+      page.waitForFunction(() => document.querySelectorAll(".data-grid tbody tr:not(.empty-row)").length === 2, { timeout: 3000 }),
+      page.click('.filters button[type="submit"]'),
+    ]);
+    queryLogRows = await page.$$eval(".data-grid tbody tr:not(.empty-row)", (rows) => rows.length);
+    check("Query Log domain filter narrows the grid server-side", queryLogRows === 2, `rows=${queryLogRows}`);
+    const activeFilterBadge = await page.$eval(".filters .badge", (el) => el.textContent).catch(() => "");
+    check("Query Log shows an active-filter badge while a filter is set", activeFilterBadge.includes("1 active filter"), activeFilterBadge);
+
+    await page.click(".filters .clear-filters");
+    await page.waitForFunction(() => document.querySelectorAll(".data-grid tbody tr:not(.empty-row)").length === 3, { timeout: 3000 }).catch(() => {});
+    queryLogRows = await page.$$eval(".data-grid tbody tr:not(.empty-row)", (rows) => rows.length);
+    check("clearing filters restores the full grid", queryLogRows === 3, `rows=${queryLogRows}`);
 
     // --- Nav: Local DNS (click by visible text; XPath is gone from modern Puppeteer) ---
     const navButtons = await page.$$(".sidebar .item");
@@ -601,6 +649,7 @@ async function main() {
     ];
     const ROUTES = [
       { path: "/ui/dashboard", heading: "#dashboard-heading" },
+      { path: "/ui/analytics", heading: "#analytics-heading" },
       { path: "/ui/blocklists", heading: "#blocklists-heading" },
       { path: "/ui/localdns", heading: "#localdns-heading" },
       { path: "/ui/upstreams", heading: "#upstreams-heading" },

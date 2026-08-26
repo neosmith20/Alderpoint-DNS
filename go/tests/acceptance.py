@@ -69,6 +69,7 @@ def main():
     p.add_argument("--fixture-base", required=True)
     p.add_argument("--cookiejar", default="/tmp/apdns-go-acceptance-cj.txt")
     p.add_argument("--backups-dir", default=None, help="the server's -backups-dir, for a real (not just corrupt-payload) upload round-trip test")
+    p.add_argument("--query-log-dir", default=None, help="the server's -query-log-dir, pre-seeded with go/tests/fixtures/make_query_log_fixture.py, for a real (not just degraded-path) Query Log test")
     args = p.parse_args()
     B, FB, CJ = args.base, args.fixture_base, args.cookiejar
 
@@ -417,6 +418,38 @@ def main():
     check("deleting a backup returns 200", delete_backup == "200", delete_backup)
     listed_backups_final = curl_json("GET", f"{B}/api/backup/appliance", cookie=CJ)
     check("deleted backup no longer appears in the list", not any(b["filename"] == backup1_name for b in listed_backups_final["backups"]), listed_backups_final)
+
+    # --- Query Log (internal/rawquerylog -- the raw-Parquet compatibility boundary) ---
+    if args.query_log_dir:
+        # A real, pre-seeded Parquet fixture (go/tests/fixtures/make_query_log_fixture.py)
+        # is on disk under the server's own -query-log-dir -- this is a
+        # genuine end-to-end read, not just the degraded-path shape.
+        ql_all = curl_json("GET", f"{B}/api/analytics/query-log?minutes=1440&limit=50", cookie=CJ)
+        check("query-log reads real rows from the raw Parquet fixture", ql_all.get("degraded") is False and len(ql_all.get("rows", [])) >= 3, ql_all)
+        check("query-log reports files_considered", ql_all.get("files_considered", 0) > 0, ql_all)
+
+        ql_domain = curl_json("GET", f"{B}/api/analytics/query-log?minutes=1440&domain=acceptance-blocked.example.com.", cookie=CJ)
+        check("query-log domain filter matches exactly", all(r["domain"] == "acceptance-blocked.example.com." for r in ql_domain["rows"]) and len(ql_domain["rows"]) == 2, ql_domain)
+
+        ql_blocked = curl_json("GET", f"{B}/api/analytics/query-log?minutes=1440&blocked_only=true", cookie=CJ)
+        check("query-log blocked_only filter excludes allowed rows", all(r["blocked"] for r in ql_blocked["rows"]) and len(ql_blocked["rows"]) == 2, ql_blocked)
+
+        ql_client = curl_json("GET", f"{B}/api/analytics/query-log?minutes=1440&client=10.10.10.6", cookie=CJ)
+        check("query-log client filter matches exactly", len(ql_client["rows"]) == 1 and ql_client["rows"][0]["domain"] == "acceptance-allowed.example.com.", ql_client)
+
+        ql_search = curl_json("GET", f"{B}/api/analytics/query-log?minutes=1440&search=laptop", cookie=CJ)
+        check("query-log search filter matches a substring across fields", len(ql_search["rows"]) == 2 and all(r["client_name"] == "laptop" for r in ql_search["rows"]), ql_search)
+
+        top_blocked = curl_json("GET", f"{B}/api/analytics/top-blocked-domains?minutes=1440&limit=10", cookie=CJ)
+        check("top-blocked-domains is real, not the honest-unavailable placeholder", top_blocked.get("degraded") is False, top_blocked)
+        check("top-blocked-domains includes the fixture's real blocked domain with the right count",
+              any(row[0] == "acceptance-blocked.example.com." and row[1] == 2 for row in top_blocked.get("rows", [])), top_blocked)
+    else:
+        ql_degraded = curl_json("GET", f"{B}/api/analytics/query-log?minutes=60", cookie=CJ)
+        check("query-log honestly reports degraded when -query-log-dir isn't configured", ql_degraded.get("degraded") is True and ql_degraded.get("rows") == [], ql_degraded)
+
+        top_blocked_degraded = curl_json("GET", f"{B}/api/analytics/top-blocked-domains?minutes=60", cookie=CJ)
+        check("top-blocked-domains honestly reports degraded when -query-log-dir isn't configured", top_blocked_degraded.get("degraded") is True, top_blocked_degraded)
 
     print(f"\n{len([r for r in results if r[1] == PASS])}/{len(results)} checks passed.")
 

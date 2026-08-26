@@ -3,9 +3,11 @@ package httpapi
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"alderpointdns/go-controlplane/internal/pyanalytics"
+	"alderpointdns/go-controlplane/internal/rawquerylog"
 )
 
 // analyticsUnavailable is the shared "no reader configured at all" reason
@@ -197,14 +199,121 @@ func (s *Server) handleAnalyticsTopDomains(w http.ResponseWriter, r *http.Reques
 	WriteJSON(w, http.StatusOK, resp)
 }
 
-// handleAnalyticsTopBlockedDomains is honestly, permanently unavailable
-// through this compatibility boundary -- see pyanalytics's doc comment.
-// Returns the same degraded shape Python's endpoints use so a frontend
-// that already handles a Python-style degraded response needs no special
-// case for this one.
+// rawQueryLogUnavailable mirrors analyticsUnavailable for the second,
+// narrower compatibility boundary (see internal/rawquerylog).
+const rawQueryLogUnavailable = "raw query-log reader not configured (no -query-log-dir path given at startup)"
+
+// handleAnalyticsTopBlockedDomains used to be honestly, permanently
+// unavailable through the pyanalytics boundary alone (it only has
+// pre-aggregated bucket counts, not per-query domain detail) -- now real
+// when -query-log-dir is configured, via internal/rawquerylog's
+// TopDomains(blockedOnly=true) reading actual per-query rows. Still
+// honestly degraded (not silently hidden) when that reader isn't wired
+// up, same as every other analytics handler's nil-reader contract.
 func (s *Server) handleAnalyticsTopBlockedDomains(w http.ResponseWriter, r *http.Request) {
+	minutes := floatQuery(r, "minutes", 60, 1, 31*24*60)
+	limit := intQuery(r, "limit", 20, 1, 500)
+
+	if s.RawQueryLog == nil {
+		WriteJSON(w, http.StatusOK, map[string]any{
+			"rows": []any{}, "columns": []string{"domain", "count"}, "degraded": true,
+			"degraded_reason": "blocked-domain breakdown needs the raw query-log reader (-query-log-dir); " + rawQueryLogUnavailable,
+		})
+		return
+	}
+	counts, filesConsidered, err := s.RawQueryLog.TopDomains(r.Context(), minutes, true, limit)
+	if err != nil {
+		WriteJSON(w, http.StatusOK, map[string]any{"rows": []any{}, "columns": []string{"domain", "count"}, "degraded": true, "degraded_reason": err.Error()})
+		return
+	}
+	out := make([][2]any, 0, len(counts))
+	for _, c := range counts {
+		out = append(out, [2]any{c.Domain, c.Count})
+	}
+	now := float64(time.Now().Unix())
 	WriteJSON(w, http.StatusOK, map[string]any{
-		"rows": []any{}, "columns": []string{"domain", "count"}, "degraded": true,
-		"degraded_reason": "blocked-domain breakdown requires Python's raw Parquet/DuckDB query path, which this pure-Go (CGO_ENABLED=0) compatibility boundary deliberately does not include -- see PARITY_MATRIX.md",
+		"rows": out, "columns": []string{"domain", "count"}, "degraded": false,
+		"window":           map[string]any{"start": now - minutes*60, "end": now, "minutes": minutes},
+		"files_considered": filesConsidered,
 	})
+}
+
+// handleAnalyticsQueryLog mirrors GET /api/analytics/query-log's contract
+// (filters/limit/offset/degraded shape), reading from internal/rawquerylog
+// -- the raw-Parquet compatibility boundary, not pyanalytics's
+// pre-aggregated buckets. search is an optional post-scan substring match
+// across every returned row's string fields, matching Python's own
+// "intentionally post-query and bounded" design (the allowlisted
+// equality filters narrow the actual scan; search never widens it).
+func (s *Server) handleAnalyticsQueryLog(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	minutes := floatQuery(r, "minutes", 1440, 1, 31*24*60)
+	limit := intQuery(r, "limit", rawquerylog.DefaultLimit, 1, rawquerylog.MaxLimit)
+	offset := intQuery(r, "offset", 0, 0, rawquerylog.MaxOffset)
+	search := strings.TrimSpace(q.Get("search"))
+
+	filters := rawquerylog.Filters{
+		Client:      q.Get("client"),
+		Domain:      q.Get("domain"),
+		QType:       q.Get("qtype"),
+		Protocol:    q.Get("protocol"),
+		RCode:       q.Get("rcode"),
+		Upstream:    q.Get("upstream"),
+		CacheStatus: q.Get("cache_status"),
+		BlockedOnly: q.Get("blocked_only") == "true" || q.Get("blocked_only") == "1",
+	}
+	filtersJSON := map[string]any{"minutes": minutes, "search": search}
+	for key, value := range map[string]string{
+		"client": filters.Client, "domain": filters.Domain, "qtype": filters.QType,
+		"protocol": filters.Protocol, "rcode": filters.RCode, "upstream": filters.Upstream,
+		"cache_status": filters.CacheStatus,
+	} {
+		if value != "" {
+			filtersJSON[key] = value
+		}
+	}
+	if filters.BlockedOnly {
+		filtersJSON["blocked"] = true
+	}
+
+	if s.RawQueryLog == nil {
+		WriteJSON(w, http.StatusOK, map[string]any{
+			"rows": []any{}, "degraded": true, "degraded_reason": rawQueryLogUnavailable,
+			"limit": limit, "offset": offset, "filters": filtersJSON,
+		})
+		return
+	}
+	result, err := s.RawQueryLog.RecentQueryLog(r.Context(), minutes, filters, limit, offset)
+	if err != nil {
+		WriteJSON(w, http.StatusOK, map[string]any{
+			"rows": []any{}, "degraded": true, "degraded_reason": err.Error(),
+			"limit": limit, "offset": offset, "filters": filtersJSON,
+		})
+		return
+	}
+	rows := result.Rows
+	if search != "" {
+		needle := strings.ToLower(search)
+		filtered := make([]rawquerylog.LogRow, 0, len(rows))
+		for _, row := range rows {
+			if strings.Contains(strings.ToLower(rowSearchText(row)), needle) {
+				filtered = append(filtered, row)
+			}
+		}
+		rows = filtered
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{
+		"rows": rows, "degraded": false, "files_considered": result.FilesConsidered,
+		"limit": limit, "offset": offset, "filters": filtersJSON,
+	})
+}
+
+// rowSearchText concatenates a row's string fields for the optional
+// post-scan "search" filter -- matching Python's own `" ".join(str(v) for
+// v in row)` behavior applied to every column, not just a chosen few.
+func rowSearchText(row rawquerylog.LogRow) string {
+	return strings.Join([]string{
+		row.Client, row.ClientName, row.Domain, row.QType, row.Protocol, row.RCode,
+		row.BlockReason, row.Upstream, row.CacheStatus, row.CacheProfileID,
+	}, " ")
 }

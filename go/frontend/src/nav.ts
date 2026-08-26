@@ -36,7 +36,12 @@ export const NAV_GROUPS: NavGroup[] = [
     label: "DNS",
     icon: "dns",
     items: [
-      { id: "analytics", label: "Query Log", icon: "dns" },
+      {
+        id: "analytics",
+        label: "Query Log",
+        icon: "dns",
+        load: () => import("./lib/QueryLogView.svelte") as unknown as Promise<{ default: Component }>,
+      },
       {
         id: "clients",
         label: "Clients",

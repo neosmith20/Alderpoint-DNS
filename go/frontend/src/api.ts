@@ -215,6 +215,48 @@ export interface AnalyticsTopRowsResponse {
   aggregation_note?: string;
 }
 
+export interface QueryLogRow {
+  id: number;
+  ts: number;
+  client: string;
+  client_name: string;
+  domain: string;
+  qtype: string;
+  protocol: string;
+  rcode: string;
+  latency_ms: number;
+  blocked: boolean;
+  block_reason: string;
+  upstream: string;
+  cache_status: string;
+  cache_profile_id: string;
+}
+
+export interface QueryLogFilters {
+  minutes: number;
+  search?: string;
+  domain?: string;
+  client?: string;
+  qtype?: string;
+  protocol?: string;
+  rcode?: string;
+  upstream?: string;
+  cache_status?: string;
+  blocked_only?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+export interface QueryLogResponse {
+  rows: QueryLogRow[];
+  degraded: boolean;
+  degraded_reason?: string;
+  files_considered?: number;
+  limit: number;
+  offset: number;
+  filters: Record<string, unknown>;
+}
+
 export class ApiError extends Error {
   status: number;
   code: string;
@@ -295,6 +337,22 @@ export const api = {
     req<AnalyticsTopRowsResponse>(`/api/analytics/top-domains?minutes=${minutes}&limit=${limit}`, undefined, signal),
   analyticsTopBlockedDomains: (minutes: number, limit: number, signal?: AbortSignal) =>
     req<AnalyticsTopRowsResponse>(`/api/analytics/top-blocked-domains?minutes=${minutes}&limit=${limit}`, undefined, signal),
+  analyticsQueryLog: (filters: QueryLogFilters, signal?: AbortSignal) => {
+    const params = new URLSearchParams();
+    params.set("minutes", String(filters.minutes));
+    if (filters.search) params.set("search", filters.search);
+    if (filters.domain) params.set("domain", filters.domain);
+    if (filters.client) params.set("client", filters.client);
+    if (filters.qtype) params.set("qtype", filters.qtype);
+    if (filters.protocol) params.set("protocol", filters.protocol);
+    if (filters.rcode) params.set("rcode", filters.rcode);
+    if (filters.upstream) params.set("upstream", filters.upstream);
+    if (filters.cache_status) params.set("cache_status", filters.cache_status);
+    if (filters.blocked_only) params.set("blocked_only", "true");
+    params.set("limit", String(filters.limit ?? 100));
+    params.set("offset", String(filters.offset ?? 0));
+    return req<QueryLogResponse>(`/api/analytics/query-log?${params.toString()}`, undefined, signal);
+  },
 
   listBlocklists: (signal?: AbortSignal) => req<BlocklistsResponse>("/api/blocklists", undefined, signal),
   createBlocklist: (name: string, url: string, category: string) =>

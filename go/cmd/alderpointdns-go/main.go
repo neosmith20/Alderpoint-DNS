@@ -31,6 +31,7 @@ import (
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/policy"
 	"alderpointdns/go-controlplane/internal/pyanalytics"
+	"alderpointdns/go-controlplane/internal/rawquerylog"
 	"alderpointdns/go-controlplane/internal/upstreams"
 )
 
@@ -123,6 +124,7 @@ func runWeb(args []string) {
 	migrationsDir := fs.String("migrations", "./schema/migrations", "migrations directory")
 	addr := fs.String("addr", "", "listen address override (host:port); defaults to config web.listen_address:listen_port")
 	analyticsDBPath := fs.String("analytics-db", "", "optional read-only path to Python's analytics/aggregates.db (compatibility boundary, see internal/pyanalytics); empty = Dashboard analytics reports degraded")
+	queryLogDir := fs.String("query-log-dir", "", "optional read-only path to Python's analytics/queries/ raw Parquet history (compatibility boundary, see internal/rawquerylog); empty = Query Log reports degraded")
 	backupsDir := fs.String("backups-dir", "./data/backups", "directory for stored/uploaded appliance backups (see internal/backup)")
 	backupRetentionMaxCount := fs.Int("backup-retention-max-count", 0, "keep at most N manual backups, oldest pruned first (0 = unlimited; the pre-restore safety backup is never pruned)")
 	backupRetentionMaxAgeDays := fs.Int("backup-retention-max-age-days", 0, "prune manual backups older than N days (0 = unlimited)")
@@ -180,12 +182,22 @@ func runWeb(args []string) {
 		}
 	}
 
+	// Raw query-log compatibility boundary: same "optional, never fatal"
+	// contract as Analytics above. No Open()/connection step needed --
+	// internal/rawquerylog.Reader is a stateless directory-path wrapper
+	// that tolerates a not-yet-existing root (nothing ingested there yet)
+	// the same way it tolerates one that exists.
+	var rawQueryLogReader *rawquerylog.Reader
+	if *queryLogDir != "" {
+		rawQueryLogReader = &rawquerylog.Reader{Root: *queryLogDir}
+	}
+
 	srv := &httpapi.Server{
 		DB: db, Auth: &auth.Store{DB: db}, Blocklists: blSvc, LocalDNS: ldSvc, Upstreams: upSvc, Clients: clientsSvc, Policy: policySvc, CustomRules: customRulesSvc, Backup: backupSvc,
 		StaticDir: *staticDir, Log: logger, Version: Version, StartedAt: startedAt,
 		SessionTTL: cfg.SessionTTL(), LastSeen: cfg.LastSeenUpdateInterval(),
 		ApplianceName: cfg.Appliance.Name, ApplianceTimezone: cfg.Appliance.Timezone,
-		Analytics: analyticsReader,
+		Analytics: analyticsReader, RawQueryLog: rawQueryLogReader,
 	}
 
 	listenAddr := *addr
