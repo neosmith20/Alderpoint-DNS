@@ -118,6 +118,37 @@ verified end-to-end against a live two-process (`apdns-hostagent` + web binary, 
 privilege separation) instance, including through the actual Svelte UI (4 Chromium checks in
 `hostagent_smoke.mjs`: status renders, Apply performs a real compile+promote+report cycle).
 
+**Python state migration (`internal/pymigrate`, `alderpointdns-go import-python`):** the audited,
+one-time import path from Python's real `control.db` into this Go control plane's own native
+schema -- never a permanent proxy, never a runtime dependency on Python being reachable afterward,
+never touching `admins`/`sessions`/secrets or anything SecretStore-referenced. Scope is deliberately
+bounded to the five tables `internal/dnscompile` actually consumes (disclosed in the package's own
+doc comment, not silently narrowed): `local_dns_records`, `upstream_profiles`+`upstream_endpoints`,
+`dns_transport_settings` (enable/port/path only, never `dnscrypt_settings`), `policy_layers` global
+scope only, and `blocklist_subscriptions` (registration only -- the actual domain list is always
+pulled fresh from its real URL by Go's own scheduler, never copied). Every table not migrated is
+explicitly listed in the tool's own report, not silently dropped. A real pre-migration snapshot
+(the same `internal/backup` VACUUM INTO mechanism the Backup & Restore page itself uses) is taken
+before any real write, and rollback is the same real, already-tested transactional restore path
+(mandatory safety-backup-before-restore included). Every row, imported or not, is written to an
+append-only JSON-lines audit log. Proven with 6 tests: dry-run writes nothing, a real import
+actually creates real rows (including preserving a source row's disabled state), running the import
+twice never duplicates, rollback restores the exact pre-migration state, and a dry-run against the
+*actual* live owner-preview `control.db` (read-only, never written to) -- which caught two real
+discrepancies before they could cause a silent bug: Python's global policy row uses
+`scope_ref='singleton'`, not `'global'` (Go's own convention) -- fixed to match on `scope='global'`
+alone; and running the real import against the actual `:10443` database surfaced two pre-existing
+malformed test-artifact upstream profiles (addresses missing a port, left over from earlier testing
+this session) that the DNS runtime compiler correctly rejected rather than silently accepting --
+cleaned up, not worked around. **Performed for real** against the actual owner-preview's real
+`control.db` (read-only source) into the real `:10443` Go database: 47 local DNS records, 3 upstream
+profiles, 1 global policy layer, and 20 blocklist subscriptions imported, then promoted through the
+real DNS runtime compiler and verified with real `dig` queries answering with the real imported
+data (e.g. `3d-printer.mylan.network` -> `192.168.32.15`) -- then rolled back for real (confirmed
+the data disappeared) and re-imported to restore the final state, proving the full
+import -> drive real DNS behavior -> roll back -> re-import cycle end-to-end, not just against
+disposable fixtures.
+
 **Performance (measured 2026-08-26, this build server, real Chromium + curl, not estimated):**
 
 | Metric | Target | Measured |

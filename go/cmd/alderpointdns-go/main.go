@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -35,6 +36,7 @@ import (
 	"alderpointdns/go-controlplane/internal/notifications"
 	"alderpointdns/go-controlplane/internal/policy"
 	"alderpointdns/go-controlplane/internal/pyanalytics"
+	"alderpointdns/go-controlplane/internal/pymigrate"
 	"alderpointdns/go-controlplane/internal/rawquerylog"
 	"alderpointdns/go-controlplane/internal/tlscert"
 	"alderpointdns/go-controlplane/internal/upstreams"
@@ -53,6 +55,8 @@ func main() {
 		runWeb(os.Args[2:])
 	case "migrate":
 		runMigrate(os.Args[2:])
+	case "import-python":
+		runImportPython(os.Args[2:])
 	case "version":
 		// Plain stdout, nothing else -- Software Updates' staged-package
 		// verification (internal/hostagentd's ops_update.go) execs a
@@ -61,8 +65,85 @@ func main() {
 		// caller claimed before ever trusting it as an update target.
 		fmt.Println(Version)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q (want: web, migrate, version)\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q (want: web, migrate, import-python, version)\n", os.Args[1])
 		os.Exit(2)
+	}
+}
+
+// runImportPython is the CLI entry point for internal/pymigrate -- the
+// audited, one-time import from Python's real control.db into this
+// control plane's own native schema. See that package's own doc
+// comment for exactly what is and isn't migrated. Always prints the
+// full report as JSON to stdout (for scripting/audit) and a short
+// human summary to stderr.
+func runImportPython(args []string) {
+	fs := flag.NewFlagSet("import-python", flag.ExitOnError)
+	dbPath := fs.String("db", "./data/alderpointdns-go.db", "this control plane's own sqlite database path")
+	migrationsDir := fs.String("migrations", "./schema/migrations", "migrations directory")
+	pythonControlDB := fs.String("python-control-db", "", "path to Python's real control.db (read-only; required)")
+	dryRun := fs.Bool("dry-run", true, "report what would be imported without writing anything (default true -- pass -dry-run=false to actually import)")
+	auditLogPath := fs.String("audit-log", "./data/import-python-audit.jsonl", "append-only JSON-lines audit log path")
+	blocklistsStagingDir := fs.String("blocklists-staging-dir", "./data/blocklists/staging", "")
+	blocklistsRuntimeDir := fs.String("blocklists-runtime-dir", "./data/blocklists/runtime", "")
+	localDNSStagingDir := fs.String("local-dns-staging-dir", "./data/local-dns/staging", "")
+	localDNSRuntimeDir := fs.String("local-dns-runtime-dir", "./data/local-dns/runtime", "")
+	backupsDir := fs.String("backups-dir", "./data/backups", "directory for the pre-migration snapshot (real, restorable via the Backup & Restore page too)")
+	rollbackFilename := fs.String("rollback", "", "instead of importing, roll back to this previously-taken snapshot filename and exit")
+	fs.Parse(args)
+
+	if *pythonControlDB == "" && *rollbackFilename == "" {
+		fmt.Fprintln(os.Stderr, "-python-control-db is required (unless -rollback is given)")
+		os.Exit(2)
+	}
+
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	ctx := context.Background()
+
+	db, err := openDB(ctx, *dbPath, *migrationsDir, logger)
+	if err != nil {
+		logger.Error("db init failed", "err", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	im := &pymigrate.Importer{
+		PythonControlDBPath: *pythonControlDB,
+		LocalDNS:            &localdns.Service{DB: db, StagingDir: *localDNSStagingDir, RuntimeDir: *localDNSRuntimeDir},
+		Upstreams:           &upstreams.Service{DB: db},
+		DNSTransports:       &dnstransports.Service{DB: db},
+		Policy:              &policy.Service{DB: db},
+		Blocklists:          &blocklists.Service{DB: db, HTTPClient: http.DefaultClient, StagingDir: *blocklistsStagingDir, RuntimeDir: *blocklistsRuntimeDir, MaxConcurrent: 3, Log: logger},
+		Backup:              &backup.Service{DB: db, Dir: *backupsDir, Version: Version},
+		AuditLogPath:        *auditLogPath,
+	}
+
+	if *rollbackFilename != "" {
+		safety, err := im.Rollback(ctx, *rollbackFilename)
+		if err != nil {
+			logger.Error("rollback failed", "err", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "rolled back to %q -- a safety backup of the pre-rollback state was taken: %s\n", *rollbackFilename, safety.Filename)
+		return
+	}
+
+	report, err := im.Run(ctx, *dryRun)
+	if err != nil {
+		logger.Error("import failed", "err", err)
+		os.Exit(1)
+	}
+	pymigrate.SortResultsForDisplay(report.Results)
+	body, _ := json.MarshalIndent(report, "", "  ")
+	fmt.Println(string(body))
+
+	fmt.Fprintf(os.Stderr, "\n--- %s summary ---\n", map[bool]string{true: "DRY RUN (nothing written)", false: "REAL IMPORT"}[*dryRun])
+	for _, table := range []string{"local_dns_records", "upstream_profiles", "dns_transport_settings", "policy_layers", "blocklist_subscriptions"} {
+		s := report.Tables[table]
+		fmt.Fprintf(os.Stderr, "%-24s source=%-4d imported=%-4d skipped=%-4d rejected=%d\n", table, s.SourceCount, s.Imported, s.Skipped, s.Rejected)
+	}
+	if !*dryRun {
+		fmt.Fprintf(os.Stderr, "\npre-migration snapshot: %s\n", report.SnapshotFilename)
+		fmt.Fprintf(os.Stderr, "to roll back: alderpointdns-go import-python -db %s -rollback %s\n", *dbPath, report.SnapshotFilename)
 	}
 }
 
