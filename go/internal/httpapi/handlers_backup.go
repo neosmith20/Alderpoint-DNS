@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -24,6 +25,21 @@ func backupErrorStatus(err error) (int, string) {
 	default:
 		return http.StatusInternalServerError, "internal_error"
 	}
+}
+
+// handleListBackupCategories exposes internal/backup.CategoryOrder/
+// Categories so the frontend's selective-restore picker reflects the
+// server's real table grouping instead of a hardcoded, driftable copy.
+func (s *Server) handleListBackupCategories(w http.ResponseWriter, r *http.Request) {
+	type category struct {
+		Name   string   `json:"name"`
+		Tables []string `json:"tables"`
+	}
+	out := make([]category, 0, len(backup.CategoryOrder))
+	for _, name := range backup.CategoryOrder {
+		out = append(out, category{Name: name, Tables: backup.Categories[name]})
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"categories": out})
 }
 
 func (s *Server) handleListBackups(w http.ResponseWriter, r *http.Request) {
@@ -97,8 +113,22 @@ func (s *Server) handlePreviewBackup(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, info)
 }
 
+// handleRestoreBackup's request body is optional -- an empty/absent body
+// (or "categories": []) restores everything, matching the historical
+// all-or-nothing behavior; a non-empty "categories" list restores only
+// those categories (see internal/backup.Categories), leaving every other
+// table's live data untouched.
 func (s *Server) handleRestoreBackup(w http.ResponseWriter, r *http.Request) {
-	safety, err := s.Backup.Restore(r.Context(), r.PathValue("name"))
+	var body struct {
+		Categories []string `json:"categories"`
+	}
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil && err != io.EOF {
+			Err(http.StatusBadRequest, "validation_error", "invalid JSON body").WriteJSON(w)
+			return
+		}
+	}
+	safety, err := s.Backup.Restore(r.Context(), r.PathValue("name"), body.Categories)
 	if err != nil {
 		status, code := backupErrorStatus(err)
 		WriteJSON(w, status, map[string]any{"error": code, "detail": err.Error(), "safety_backup": safety})

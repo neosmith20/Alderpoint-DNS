@@ -76,14 +76,60 @@ var tablesToBackUp = []string{
 	"custom_rules",
 }
 
+// Categories groups tablesToBackUp into the units a selective restore
+// picks from -- real functionality (per PARITY_MATRIX.md's "true
+// selective restore" gap), not the all-or-nothing restore this package
+// started with. CategoryOrder is the stable display/iteration order;
+// every table in tablesToBackUp must appear in exactly one category
+// (enforced by a test).
+var Categories = map[string][]string{
+	"admin_accounts": {"admins", "login_attempts"},
+	"blocklists":     {"blocklist_settings", "blocklist_subscriptions", "blocklist_jobs"},
+	"local_dns":      {"local_dns_records"},
+	"upstreams":      {"upstream_profiles", "upstream_endpoints"},
+	"clients":        {"client_groups", "clients", "client_identifiers", "client_group_members"},
+	"policy":         {"policy_layers", "policy_networks"},
+	"custom_rules":   {"custom_rules"},
+}
+
+var CategoryOrder = []string{
+	"admin_accounts", "blocklists", "local_dns", "upstreams", "clients", "policy", "custom_rules",
+}
+
+// tablesForCategories resolves category names to their tables. An empty
+// input means "every category" (the historical all-or-nothing behavior).
+// An unknown category name is a real validation error, not silently
+// ignored.
+func tablesForCategories(categories []string) ([]string, error) {
+	if len(categories) == 0 {
+		return tablesToBackUp, nil
+	}
+	seen := map[string]bool{}
+	var tables []string
+	for _, cat := range categories {
+		tabs, ok := Categories[cat]
+		if !ok {
+			return nil, fmt.Errorf("%w: unknown category %q", ErrInvalidArchive, cat)
+		}
+		for _, t := range tabs {
+			if !seen[t] {
+				seen[t] = true
+				tables = append(tables, t)
+			}
+		}
+	}
+	return tables, nil
+}
+
 type Manifest struct {
-	FormatVersion          int      `json:"format_version"`
-	CreatedAt              string   `json:"created_at"`
-	SourceVersion          string   `json:"source_version"`
-	ControlDBSchemaVersion int      `json:"control_db_schema_version"`
-	Contents               []string `json:"contents"`
-	Product                string   `json:"product"`
-	Reason                 string   `json:"reason,omitempty"` // "manual" | "pre-restore-safety"
+	FormatVersion          int            `json:"format_version"`
+	CreatedAt              string         `json:"created_at"`
+	SourceVersion          string         `json:"source_version"`
+	ControlDBSchemaVersion int            `json:"control_db_schema_version"`
+	Contents               []string       `json:"contents"`
+	Product                string         `json:"product"`
+	Reason                 string         `json:"reason,omitempty"` // "manual" | "pre-restore-safety"
+	TableCounts            map[string]int `json:"table_counts,omitempty"`
 }
 
 type BackupInfo struct {
@@ -96,6 +142,13 @@ type Service struct {
 	DB      *sql.DB
 	Dir     string
 	Version string
+
+	// Retention (both 0 = disabled, the historical "keep everything"
+	// behavior). Applied only to "manual" backups after a successful
+	// Create -- the mandatory pre-restore safety backup is never pruned
+	// automatically; deleting it is always an explicit operator action.
+	RetentionMaxCount   int
+	RetentionMaxAgeDays int
 }
 
 func (s *Service) ensureDir() error {
@@ -106,6 +159,22 @@ func currentSchemaVersion(ctx context.Context, db *sql.DB) (int, error) {
 	var v int
 	err := db.QueryRowContext(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&v)
 	return v, err
+}
+
+// tableCounts gives a manifest real, structured contents (a per-table row
+// count) instead of the opaque "control_db" blob label this package
+// started with -- the "structured preview" a caller can show without
+// ever extracting the archive's control.db payload.
+func (s *Service) tableCounts(ctx context.Context) (map[string]int, error) {
+	counts := make(map[string]int, len(tablesToBackUp))
+	for _, table := range tablesToBackUp {
+		var n int
+		if err := s.DB.QueryRowContext(ctx, fmt.Sprintf(`SELECT count(*) FROM %s`, table)).Scan(&n); err != nil {
+			return nil, fmt.Errorf("counting %s: %w", table, err)
+		}
+		counts[table] = n
+	}
+	return counts, nil
 }
 
 // Create takes a real, consistent snapshot (SQLite VACUUM INTO -- never a
@@ -141,10 +210,16 @@ func (s *Service) Create(ctx context.Context, reason string) (BackupInfo, error)
 		return BackupInfo{}, ErrTooLarge
 	}
 
+	counts, err := s.tableCounts(ctx)
+	if err != nil {
+		return BackupInfo{}, err
+	}
+
 	manifest := Manifest{
 		FormatVersion: 1, CreatedAt: time.Now().UTC().Format(time.RFC3339),
 		SourceVersion: s.Version, ControlDBSchemaVersion: schemaVersion,
-		Contents: []string{"control_db"}, Product: productID, Reason: reason,
+		Contents: append([]string{}, CategoryOrder...), Product: productID, Reason: reason,
+		TableCounts: counts,
 	}
 	manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
@@ -179,7 +254,65 @@ func (s *Service) Create(ctx context.Context, reason string) (BackupInfo, error)
 	if err := os.WriteFile(fullPath, buf.Bytes(), 0o640); err != nil {
 		return BackupInfo{}, err
 	}
-	return BackupInfo{Manifest: manifest, Filename: filename, SizeBytes: int64(buf.Len())}, nil
+	info := BackupInfo{Manifest: manifest, Filename: filename, SizeBytes: int64(buf.Len())}
+
+	if reason == "manual" {
+		// Retention is best-effort housekeeping, not part of the backup's
+		// own success -- a pruning failure (e.g. a transient stat error on
+		// one old file) is logged-by-caller-if-it-cares, never turned into
+		// a failed backup. The backup that was just created has already
+		// been written to disk successfully by this point.
+		_ = s.applyRetention(context.Background())
+	}
+	return info, nil
+}
+
+// applyRetention prunes only "manual" backups, oldest first, down to
+// RetentionMaxCount and/or below RetentionMaxAgeDays (whichever is
+// enabled; 0 means that limit is off). The pre-restore safety backup
+// Restore always takes is never touched here -- it is deleted only by an
+// explicit Delete call, same as any backup an operator chooses to remove.
+func (s *Service) applyRetention(ctx context.Context) error {
+	if s.RetentionMaxCount <= 0 && s.RetentionMaxAgeDays <= 0 {
+		return nil
+	}
+	all, err := s.List(ctx)
+	if err != nil {
+		return err
+	}
+	var manual []BackupInfo
+	for _, b := range all {
+		if b.Reason == "manual" {
+			manual = append(manual, b)
+		}
+	}
+	// s.List already sorts newest-first by CreatedAt; oldest-first makes
+	// the pruning logic below read naturally.
+	sort.Slice(manual, func(i, j int) bool { return manual[i].CreatedAt < manual[j].CreatedAt })
+
+	cutoff := time.Time{}
+	if s.RetentionMaxAgeDays > 0 {
+		cutoff = time.Now().UTC().AddDate(0, 0, -s.RetentionMaxAgeDays)
+	}
+
+	toDelete := map[string]bool{}
+	if s.RetentionMaxCount > 0 && len(manual) > s.RetentionMaxCount {
+		for _, b := range manual[:len(manual)-s.RetentionMaxCount] {
+			toDelete[b.Filename] = true
+		}
+	}
+	if !cutoff.IsZero() {
+		for _, b := range manual {
+			createdAt, err := time.Parse(time.RFC3339, b.CreatedAt)
+			if err == nil && createdAt.Before(cutoff) {
+				toDelete[b.Filename] = true
+			}
+		}
+	}
+	for filename := range toDelete {
+		_ = s.Delete(filename) // best-effort; a single stale/racing file never blocks the rest
+	}
+	return nil
 }
 
 func writeTarEntry(tw *tar.Writer, name string, data []byte) error {
@@ -294,10 +427,23 @@ func (s *Service) Delete(filename string) error {
 // Any failure at any point rolls back that transaction and returns an
 // error; the live database is provably unchanged (see the regression
 // test that forces a failure partway through and asserts this).
-func (s *Service) Restore(ctx context.Context, filename string) (safetyBackup BackupInfo, err error) {
+//
+// categories is optional: empty/nil restores every category (the
+// historical all-or-nothing behavior); a non-empty list restores only
+// those categories' tables, leaving every other table's live data
+// untouched -- real selective restore, not a cosmetic checkbox. The
+// safety backup taken first is always a *full* backup regardless of
+// categories, since it exists to undo this restore, not to mirror its
+// scope.
+func (s *Service) Restore(ctx context.Context, filename string, categories []string) (safetyBackup BackupInfo, err error) {
 	safetyBackup, err = s.Create(ctx, "pre-restore-safety")
 	if err != nil {
 		return BackupInfo{}, fmt.Errorf("aborting restore: mandatory safety backup failed: %w", err)
+	}
+
+	tables, err := tablesForCategories(categories)
+	if err != nil {
+		return safetyBackup, err
 	}
 
 	if strings.ContainsAny(filename, "/\\") {
@@ -340,7 +486,7 @@ func (s *Service) Restore(ctx context.Context, filename string) (safetyBackup Ba
 	}
 	tmpDB.Close()
 
-	if err := s.applyRestore(ctx, tmpPath); err != nil {
+	if err := s.applyRestore(ctx, tmpPath, tables); err != nil {
 		return safetyBackup, err
 	}
 	return safetyBackup, nil
@@ -396,9 +542,11 @@ func extractControlDB(path string) ([]byte, Manifest, error) {
 }
 
 // applyRestore does the actual transactional copy: ATTACH the extracted
-// backup file read-only, DELETE+INSERT each table inside one transaction,
-// DETACH. A failure anywhere rolls back the whole transaction.
-func (s *Service) applyRestore(ctx context.Context, backupDBPath string) error {
+// backup file read-only, DELETE+INSERT each requested table inside one
+// transaction, DETACH. A failure anywhere rolls back the whole
+// transaction -- tables not in `tables` are never touched, live or
+// rolled back.
+func (s *Service) applyRestore(ctx context.Context, backupDBPath string, tables []string) error {
 	conn, err := s.DB.Conn(ctx)
 	if err != nil {
 		return err
@@ -416,7 +564,7 @@ func (s *Service) applyRestore(ctx context.Context, backupDBPath string) error {
 	}
 	defer tx.Rollback()
 
-	for _, table := range tablesToBackUp {
+	for _, table := range tables {
 		var exists int
 		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM restoresrc.sqlite_master WHERE type='table' AND name=?`, table).Scan(&exists); err != nil {
 			return err

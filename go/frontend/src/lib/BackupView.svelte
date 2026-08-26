@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, ApiError, type BackupInfo } from "../api";
+  import { api, ApiError, type BackupInfo, type BackupCategory } from "../api";
   import { StaleGuard } from "../staleGuard";
   import { router } from "../router.svelte";
   import { timestampPref } from "../timestamp.svelte";
@@ -16,6 +16,7 @@
   // backup and a transactional (all-or-nothing) apply, and deletion.
 
   let backups = $state<BackupInfo[]>([]);
+  let categories = $state<BackupCategory[]>([]);
   let loadError = $state("");
   const guard = new StaleGuard();
 
@@ -28,6 +29,12 @@
 
   let restoreTarget = $state<string | null>(null);
   let restoreConfirmText = $state("");
+  // null = "full restore, every category" (the default -- and critically,
+  // this must NOT depend on `categories` having finished loading yet: the
+  // picker fetch is async and opening the dialog immediately after
+  // creating a backup can win the race). Only becomes a concrete Set once
+  // the operator actually toggles a checkbox.
+  let restoreCategoryOverrides = $state<Set<string> | null>(null);
   let restoreBusy = $state(false);
   let restoreError = $state("");
   let restoreResult = $state("");
@@ -48,6 +55,12 @@
 
   onMount(() => {
     refresh();
+    api
+      .listBackupCategories(router.signal())
+      .then((resp) => (categories = resp.categories))
+      .catch(() => {
+        /* selective-restore picker degrades to "no per-category breakdown", not fatal */
+      });
   });
 
   async function createBackup() {
@@ -84,15 +97,50 @@
     restoreConfirmText = "";
     restoreError = "";
     restoreResult = "";
+    restoreCategoryOverrides = null; // reset to "full restore" every time the dialog opens
+  }
+
+  function categoryChecked(name: string): boolean {
+    return restoreCategoryOverrides === null || restoreCategoryOverrides.has(name);
+  }
+
+  function toggleRestoreCategory(name: string) {
+    // First toggle from the implicit "everything checked" state: build an
+    // explicit set of every *other* category, i.e. deselect just this one.
+    const base = restoreCategoryOverrides ?? new Set(categories.map((c) => c.name));
+    const next = new Set(base);
+    if (next.has(name)) next.delete(name);
+    else next.add(name);
+    restoreCategoryOverrides = next;
+  }
+
+  function categoryCount(b: BackupInfo, cat: BackupCategory): number {
+    if (!b.table_counts) return 0;
+    return cat.tables.reduce((sum, t) => sum + (b.table_counts?.[t] ?? 0), 0);
+  }
+
+  // Only a real, explicit "everything unchecked" (an empty non-null
+  // override set) should disable the button -- not the mere absence of a
+  // loaded category list, which would otherwise make the button
+  // incorrectly unavailable for the entire time the async fetch is in
+  // flight.
+  function restoreBlockedByCategories(): boolean {
+    return restoreCategoryOverrides !== null && restoreCategoryOverrides.size === 0;
   }
 
   async function confirmRestore(b: BackupInfo) {
-    if (restoreConfirmText !== b.filename) return;
+    if (restoreConfirmText !== b.filename || restoreBlockedByCategories()) return;
     restoreBusy = true;
     restoreError = "";
     try {
-      const resp = await api.restoreBackup(b.filename);
-      restoreResult = `Restored. A safety backup of the previous state was saved as "${resp.safety_backup.filename}".`;
+      // null override (or one that covers every known category) means a
+      // full restore -- send an empty list, which the server treats the
+      // same way. Otherwise send exactly the categories still checked.
+      const isFullRestore = restoreCategoryOverrides === null || restoreCategoryOverrides.size === categories.length;
+      const chosen = isFullRestore ? [] : [...restoreCategoryOverrides!];
+      const resp = await api.restoreBackup(b.filename, chosen);
+      const scope = isFullRestore ? "Restored." : `Restored (${chosen.join(", ")} only).`;
+      restoreResult = `${scope} A safety backup of the previous state was saved as "${resp.safety_backup.filename}".`;
       restoreTarget = null;
       await refresh();
     } catch (err) {
@@ -127,7 +175,8 @@
   <p class="scope-note">
     Native Go backup format (not yet byte-compatible with Python's encrypted <code>.apdnsbak</code>
     or V1.1.1's <code>.tar.gz</code>) -- see the parity matrix. Covers this control plane's own data
-    (blocklists, Local DNS, DNS Settings, Clients &amp; Access, Filters).
+    (blocklists, Local DNS, DNS Settings, Clients &amp; Access, Filters), and supports restoring just
+    the categories you choose instead of everything at once.
   </p>
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
 
@@ -166,16 +215,33 @@
         {#if restoreTarget === b.filename}
           <div class="restore-confirm">
             <p>
-              This replaces current data (except your active session) with this backup's contents.
-              A safety backup of the current state is taken automatically first. Type the filename to
-              confirm:
+              This replaces current data (except your active session) with this backup's contents,
+              for the categories selected below. A safety backup of the current state is taken
+              automatically first.
             </p>
+            {#if categories.length > 0}
+              <fieldset class="category-picker">
+                <legend>Restore these categories:</legend>
+                {#each categories as cat (cat.name)}
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={categoryChecked(cat.name)}
+                      onchange={() => toggleRestoreCategory(cat.name)}
+                    />
+                    {cat.name.replaceAll("_", " ")}
+                    {#if b.table_counts}<span class="count">({categoryCount(b, cat)} rows)</span>{/if}
+                  </label>
+                {/each}
+              </fieldset>
+            {/if}
+            <p>Type the filename to confirm:</p>
             <code>{b.filename}</code>
-            <input bind:value={restoreConfirmText} aria-label="Type the filename to confirm restore" />
+            <input class="filename-confirm" bind:value={restoreConfirmText} aria-label="Type the filename to confirm restore" />
             <div class="actions">
               <button
                 class="danger"
-                disabled={restoreConfirmText !== b.filename || restoreBusy}
+                disabled={restoreConfirmText !== b.filename || restoreBlockedByCategories() || restoreBusy}
                 onclick={() => confirmRestore(b)}
               >
                 {restoreBusy ? "Restoring…" : "Confirm restore"}
@@ -200,5 +266,9 @@
   .success { color: #16a34a; }
   .restore-confirm { margin-top: 0.6rem; padding: 0.75rem; border-radius: 6px; background: var(--attention-bg); display: flex; flex-direction: column; gap: 0.5rem; max-width: 28rem; }
   .restore-confirm p { margin: 0; font-size: 0.85rem; }
+  .category-picker { border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem 0.75rem; display: flex; flex-direction: column; gap: 0.3rem; }
+  .category-picker legend { font-size: 0.8rem; opacity: 0.75; padding: 0 0.3rem; }
+  .category-picker label { display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; }
+  .category-picker .count { opacity: 0.6; font-size: 0.8rem; }
   .danger { background: var(--badge-danger-bg); color: var(--badge-danger-fg); }
 </style>

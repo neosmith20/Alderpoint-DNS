@@ -562,13 +562,27 @@ async function main() {
     const filenameText = await page.$eval(".restore-confirm code", (el) => el.textContent.trim());
     const confirmBtnDisabledBefore = await page.$eval(".restore-confirm .danger", (el) => el.disabled);
     check("restore confirm button is disabled before typing the filename", confirmBtnDisabledBefore);
-    await page.type(".restore-confirm input", "wrong-filename.tar");
+    await page.type(".restore-confirm input.filename-confirm", "wrong-filename.tar");
     const stillDisabled = await page.$eval(".restore-confirm .danger", (el) => el.disabled);
     check("restore confirm button stays disabled for a non-matching filename", stillDisabled);
-    await page.$eval(".restore-confirm input", (el) => (el.value = ""));
-    await page.type(".restore-confirm input", filenameText);
+    await page.$eval(".restore-confirm input.filename-confirm", (el) => (el.value = ""));
+    await page.type(".restore-confirm input.filename-confirm", filenameText);
     const nowEnabled = await page.$eval(".restore-confirm .danger", (el) => !el.disabled);
     check("restore confirm button enables once the typed filename matches exactly", nowEnabled);
+
+    // Selective restore: the category picker defaults to every category
+    // checked; unchecking all of them must re-disable the confirm button
+    // even though the filename still matches, and rechecking restores it.
+    const categoryCheckboxes = await page.$$(".category-picker input[type=checkbox]");
+    check("restore dialog renders a per-category picker", categoryCheckboxes.length > 0, `count=${categoryCheckboxes.length}`);
+    const allCheckedInitially = await page.$$eval(".category-picker input[type=checkbox]", (els) => els.every((el) => el.checked));
+    check("every category is checked by default (full restore)", allCheckedInitially);
+    for (const cb of categoryCheckboxes) await cb.click(); // uncheck every category
+    const disabledWithNoCategories = await page.$eval(".restore-confirm .danger", (el) => el.disabled);
+    check("restore confirm button disables again when no category is selected", disabledWithNoCategories);
+    for (const cb of categoryCheckboxes) await cb.click(); // recheck every category
+    const enabledAgain = await page.$eval(".restore-confirm .danger", (el) => !el.disabled);
+    check("restore confirm button re-enables once at least one category is selected", enabledAgain);
 
     await Promise.all([
       page.waitForSelector(".success", { timeout: 5000 }),

@@ -118,6 +118,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/custom-rules/bulk-delete", requireAuth(s.handleBulkDeleteCustomRules))
 	mux.HandleFunc("POST /api/custom-rules/reorder", requireAuth(s.handleReorderCustomRules))
 
+	mux.HandleFunc("GET /api/backup/categories", requireAuth(s.handleListBackupCategories))
 	mux.HandleFunc("GET /api/backup/appliance", requireAuth(s.handleListBackups))
 	mux.HandleFunc("POST /api/backup/appliance", requireAuth(s.handleCreateBackup))
 	mux.HandleFunc("POST /api/backup/appliance/upload", requireAuth(s.handleUploadBackup))

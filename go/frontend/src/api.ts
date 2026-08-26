@@ -63,6 +63,12 @@ export interface BackupInfo {
   contents: string[];
   product: string;
   reason?: string;
+  table_counts?: Record<string, number>;
+}
+
+export interface BackupCategory {
+  name: string;
+  tables: string[];
 }
 
 export interface CustomRule {
@@ -402,7 +408,11 @@ export const api = {
     return res.json();
   },
   previewBackup: (name: string) => req<BackupInfo>(`/api/backup/appliance/${encodeURIComponent(name)}/validate`, { method: "POST" }),
-  restoreBackup: (name: string) =>
-    req<{ status: string; safety_backup: BackupInfo }>(`/api/backup/appliance/${encodeURIComponent(name)}/restore`, { method: "POST" }),
+  listBackupCategories: (signal?: AbortSignal) => req<{ categories: BackupCategory[] }>("/api/backup/categories", undefined, signal),
+  restoreBackup: (name: string, categories?: string[]) =>
+    req<{ status: string; safety_backup: BackupInfo }>(`/api/backup/appliance/${encodeURIComponent(name)}/restore`, {
+      method: "POST",
+      body: JSON.stringify({ categories: categories ?? [] }),
+    }),
   deleteBackup: (name: string) => req<{ status: string }>(`/api/backup/appliance/${encodeURIComponent(name)}`, { method: "DELETE" }),
 };

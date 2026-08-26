@@ -341,6 +341,42 @@ def main():
 
     preview1 = curl_json("POST", f"{B}/api/backup/appliance/{backup1_name}/validate", cookie=CJ, csrf=csrf)
     check("preview reads the manifest without error", preview1.get("filename") == backup1_name, preview1)
+    check("backup manifest reports structured per-table row counts", isinstance(preview1.get("table_counts"), dict) and "local_dns_records" in preview1["table_counts"], preview1)
+
+    categories_resp = curl_json("GET", f"{B}/api/backup/categories", cookie=CJ)
+    category_names = [c["name"] for c in categories_resp.get("categories", [])]
+    check("backup categories endpoint lists the expected categories",
+          {"local_dns", "custom_rules", "clients"}.issubset(set(category_names)), categories_resp)
+
+    # --- selective restore: only the chosen category's live data should roll back ---
+    curl_json("POST", f"{B}/api/local-dns", cookie=CJ, csrf=csrf, body={"name": "selective-before.lan", "record_type": "A", "value": "10.0.0.50", "ttl": 300, "enabled": True})
+    curl_json("PUT", f"{B}/api/custom-rules/{rule1_id}", cookie=CJ, csrf=csrf, body={"rule_type": "block", "pattern": "selective-before.example.com"})
+    backup2 = curl_json("POST", f"{B}/api/backup/appliance", cookie=CJ, csrf=csrf)
+    backup2_name = backup2["backup"]["filename"]
+
+    curl_json("POST", f"{B}/api/local-dns", cookie=CJ, csrf=csrf, body={"name": "selective-after.lan", "record_type": "A", "value": "10.0.0.51", "ttl": 300, "enabled": True})
+    curl_json("PUT", f"{B}/api/custom-rules/{rule1_id}", cookie=CJ, csrf=csrf, body={"rule_type": "block", "pattern": "selective-after.example.com"})
+
+    selective_restore = curl_json("POST", f"{B}/api/backup/appliance/{backup2_name}/restore", cookie=CJ, csrf=csrf, body={"categories": ["local_dns"]})
+    check("selective restore succeeds", selective_restore.get("status") == "restored", selective_restore)
+
+    dns_after_selective = curl_json("GET", f"{B}/api/local-dns", cookie=CJ)
+    dns_names_after = {r["name"] for r in dns_after_selective["records"]}
+    check("selective restore rolled back the restored category (local_dns)",
+          "selective-before.lan" in dns_names_after and "selective-after.lan" not in dns_names_after, dns_after_selective)
+
+    rules_after_selective = curl_json("GET", f"{B}/api/custom-rules", cookie=CJ)
+    r1_after_selective = next(r for r in rules_after_selective["rules"] if r["id"] == rule1_id)
+    check("selective restore left an unselected category (custom_rules) untouched",
+          r1_after_selective["pattern"] == "selective-after.example.com", rules_after_selective)
+
+    unknown_category_restore = curl_status("POST", f"{B}/api/backup/appliance/{backup2_name}/restore", cookie=CJ, csrf=csrf, body={"categories": ["not_a_real_category"]})
+    check("restoring with an unknown category is rejected", unknown_category_restore == "400", unknown_category_restore)
+
+    curl_status("DELETE", f"{B}/api/backup/appliance/{backup2_name}", cookie=CJ, csrf=csrf)
+    listed_backups_after_selective = curl_json("GET", f"{B}/api/backup/appliance", cookie=CJ)
+    check("the safety backup taken during the selective restore is also listed",
+          any(b["reason"] == "pre-restore-safety" for b in listed_backups_after_selective.get("backups", [])), listed_backups_after_selective)
 
     bad_upload = subprocess.run(
         ["curl", "-sk", "-b", CJ, "-H", f"X-CSRF-Token: {csrf}", "-X", "POST",

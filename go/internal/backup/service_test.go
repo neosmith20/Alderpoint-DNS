@@ -103,7 +103,7 @@ func TestRestoreRoundTripsData(t *testing.T) {
 	}
 	seedOneLocalDNSRecord(t, s.DB, "changed.lan")
 
-	safety, err := s.Restore(ctx, backupOfOriginal.Filename)
+	safety, err := s.Restore(ctx, backupOfOriginal.Filename, nil)
 	if err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
@@ -126,9 +126,158 @@ func TestRestoreRoundTripsData(t *testing.T) {
 	}
 }
 
+func TestEveryBackedUpTableBelongsToExactlyOneCategory(t *testing.T) {
+	seen := map[string]int{}
+	for _, tabs := range Categories {
+		for _, tab := range tabs {
+			seen[tab]++
+		}
+	}
+	for _, table := range tablesToBackUp {
+		if seen[table] != 1 {
+			t.Fatalf("table %q belongs to %d categories, want exactly 1", table, seen[table])
+		}
+	}
+	for table := range seen {
+		found := false
+		for _, t2 := range tablesToBackUp {
+			if t2 == table {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("category table %q is not in tablesToBackUp", table)
+		}
+	}
+}
+
+func TestCreateManifestReportsRealTableCounts(t *testing.T) {
+	s := newTestService(t)
+	ctx := context.Background()
+	seedOneLocalDNSRecord(t, s.DB, "host1.lan")
+	seedOneLocalDNSRecord(t, s.DB, "host2.lan")
+
+	info, err := s.Create(ctx, "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.TableCounts["local_dns_records"] != 2 {
+		t.Fatalf("expected local_dns_records count=2 in manifest, got %+v", info.TableCounts)
+	}
+	if info.TableCounts["custom_rules"] != 0 {
+		t.Fatalf("expected custom_rules count=0, got %d", info.TableCounts["custom_rules"])
+	}
+}
+
+func seedOneCustomRule(t *testing.T, db *sql.DB, pattern string) {
+	t.Helper()
+	_, err := db.Exec(`INSERT INTO custom_rules(rule_type, pattern, enabled, priority, created_at) VALUES('block', ?, 1, 0, '2026-01-01T00:00:00Z')`, pattern)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSelectiveRestoreOnlyTouchesChosenCategory(t *testing.T) {
+	s := newTestService(t)
+	ctx := context.Background()
+	seedOneLocalDNSRecord(t, s.DB, "original.lan")
+	seedOneCustomRule(t, s.DB, "original.example.com")
+	backupOfOriginal, err := s.Create(ctx, "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Change both categories' live data after the backup.
+	if _, err := s.DB.Exec(`DELETE FROM local_dns_records`); err != nil {
+		t.Fatal(err)
+	}
+	seedOneLocalDNSRecord(t, s.DB, "changed.lan")
+	if _, err := s.DB.Exec(`DELETE FROM custom_rules`); err != nil {
+		t.Fatal(err)
+	}
+	seedOneCustomRule(t, s.DB, "changed.example.com")
+
+	// Restore only local_dns -- custom_rules must be left exactly as it
+	// is now ("changed.example.com"), not rolled back to the backup.
+	if _, err := s.Restore(ctx, backupOfOriginal.Filename, []string{"local_dns"}); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+
+	var dnsName string
+	if err := s.DB.QueryRowContext(ctx, `SELECT name FROM local_dns_records`).Scan(&dnsName); err != nil {
+		t.Fatal(err)
+	}
+	if dnsName != "original.lan" {
+		t.Fatalf("expected local_dns restored to 'original.lan', got %q", dnsName)
+	}
+
+	var rulePattern string
+	if err := s.DB.QueryRowContext(ctx, `SELECT pattern FROM custom_rules`).Scan(&rulePattern); err != nil {
+		t.Fatal(err)
+	}
+	if rulePattern != "changed.example.com" {
+		t.Fatalf("selective restore touched an unselected category: custom_rules pattern is %q, want unchanged 'changed.example.com'", rulePattern)
+	}
+}
+
+func TestRestoreRejectsUnknownCategory(t *testing.T) {
+	s := newTestService(t)
+	ctx := context.Background()
+	seedOneLocalDNSRecord(t, s.DB, "host1.lan")
+	backupOfOriginal, err := s.Create(ctx, "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Restore(ctx, backupOfOriginal.Filename, []string{"not_a_real_category"}); err == nil {
+		t.Fatal("expected an error for an unknown category")
+	}
+}
+
+func TestRetentionMaxCountPrunesOldestManualBackupsOnly(t *testing.T) {
+	s := newTestService(t)
+	s.RetentionMaxCount = 2
+	ctx := context.Background()
+	seedOneLocalDNSRecord(t, s.DB, "host1.lan")
+
+	var last BackupInfo
+	for i := 0; i < 4; i++ {
+		info, err := s.Create(ctx, "manual")
+		if err != nil {
+			t.Fatal(err)
+		}
+		last = info
+	}
+	// A safety backup must never be pruned by manual-backup retention.
+	safety, err := s.Restore(ctx, last.Filename, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := s.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manualCount, safetyFound := 0, false
+	for _, b := range list {
+		if b.Reason == "manual" {
+			manualCount++
+		}
+		if b.Filename == safety.Filename {
+			safetyFound = true
+		}
+	}
+	if manualCount > s.RetentionMaxCount {
+		t.Fatalf("expected at most %d manual backups after retention, got %d: %+v", s.RetentionMaxCount, manualCount, list)
+	}
+	if !safetyFound {
+		t.Fatalf("expected the pre-restore safety backup to survive retention pruning, got %+v", list)
+	}
+}
+
 func TestRestoreOfMissingArchiveReturnsNotFound(t *testing.T) {
 	s := newTestService(t)
-	if _, err := s.Restore(context.Background(), "no-such-file.tar"); err != ErrNotFound {
+	if _, err := s.Restore(context.Background(), "no-such-file.tar", nil); err != ErrNotFound {
 		t.Fatalf("expected ErrNotFound for a missing archive, got %v", err)
 	}
 }
@@ -147,7 +296,7 @@ func TestRestoreOfCorruptArchiveLeavesLiveDataUntouched(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := s.Restore(ctx, "corrupt.tar")
+	_, err := s.Restore(ctx, "corrupt.tar", nil)
 	if err == nil {
 		t.Fatal("expected an error restoring a corrupt archive")
 	}

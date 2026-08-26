@@ -124,6 +124,8 @@ func runWeb(args []string) {
 	addr := fs.String("addr", "", "listen address override (host:port); defaults to config web.listen_address:listen_port")
 	analyticsDBPath := fs.String("analytics-db", "", "optional read-only path to Python's analytics/aggregates.db (compatibility boundary, see internal/pyanalytics); empty = Dashboard analytics reports degraded")
 	backupsDir := fs.String("backups-dir", "./data/backups", "directory for stored/uploaded appliance backups (see internal/backup)")
+	backupRetentionMaxCount := fs.Int("backup-retention-max-count", 0, "keep at most N manual backups, oldest pruned first (0 = unlimited; the pre-restore safety backup is never pruned)")
+	backupRetentionMaxAgeDays := fs.Int("backup-retention-max-age-days", 0, "prune manual backups older than N days (0 = unlimited)")
 	fs.Parse(args)
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -158,7 +160,10 @@ func runWeb(args []string) {
 	clientsSvc := &clients.Service{DB: db}
 	policySvc := &policy.Service{DB: db}
 	customRulesSvc := &customrules.Service{DB: db}
-	backupSvc := &backup.Service{DB: db, Dir: *backupsDir, Version: Version}
+	backupSvc := &backup.Service{
+		DB: db, Dir: *backupsDir, Version: Version,
+		RetentionMaxCount: *backupRetentionMaxCount, RetentionMaxAgeDays: *backupRetentionMaxAgeDays,
+	}
 
 	// Analytics compatibility boundary: optional, never fatal. A missing
 	// or unreadable path means Dashboard analytics reports degraded, not
