@@ -81,7 +81,12 @@ export const NAV_GROUPS: NavGroup[] = [
         icon: "blocklists",
         load: () => import("./lib/BlocklistsView.svelte") as unknown as Promise<{ default: Component }>,
       },
-      { id: "encryption", label: "Encryption", icon: "security" },
+      {
+        id: "encryption",
+        label: "Encryption",
+        icon: "security",
+        load: () => import("./lib/EncryptionView.svelte") as unknown as Promise<{ default: Component }>,
+      },
     ],
   },
   {

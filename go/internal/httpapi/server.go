@@ -11,25 +11,34 @@ import (
 	"alderpointdns/go-controlplane/internal/blocklists"
 	"alderpointdns/go-controlplane/internal/clients"
 	"alderpointdns/go-controlplane/internal/customrules"
+	"alderpointdns/go-controlplane/internal/dnstransports"
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/policy"
 	"alderpointdns/go-controlplane/internal/pyanalytics"
 	"alderpointdns/go-controlplane/internal/rawquerylog"
+	"alderpointdns/go-controlplane/internal/tlscert"
 	"alderpointdns/go-controlplane/internal/upstreams"
 )
 
 type Server struct {
-	DB          *sql.DB
-	Auth        *auth.Store
-	Blocklists  *blocklists.Service
-	LocalDNS    *localdns.Service
-	Upstreams   *upstreams.Service
-	Clients     *clients.Service
-	Policy      *policy.Service
-	CustomRules *customrules.Service
-	Backup      *backup.Service
-	StaticDir   string
-	Log         *slog.Logger
+	DB            *sql.DB
+	Auth          *auth.Store
+	Blocklists    *blocklists.Service
+	LocalDNS      *localdns.Service
+	Upstreams     *upstreams.Service
+	Clients       *clients.Service
+	Policy        *policy.Service
+	CustomRules   *customrules.Service
+	Backup        *backup.Service
+	DNSTransports *dnstransports.Service
+	StaticDir     string
+	Log           *slog.Logger
+
+	// TLSCert is nil unless -tls-cert-path was given a real path at
+	// startup -- nil means the Encryption page's TLS status always
+	// reports {"active": false}, never an error. See internal/tlscert's
+	// doc comment.
+	TLSCert *tlscert.Reader
 
 	// Analytics is nil unless -analytics-db was given a real path at
 	// startup -- every analytics handler must treat nil as "degraded",
@@ -135,6 +144,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/backup/appliance/{name}/validate", requireAuth(s.handlePreviewBackup))
 	mux.HandleFunc("POST /api/backup/appliance/{name}/restore", requireAuth(s.handleRestoreBackup))
 	mux.HandleFunc("DELETE /api/backup/appliance/{name}", requireAuth(s.handleDeleteBackup))
+
+	mux.HandleFunc("GET /api/dns-transports", requireAuth(s.handleGetDNSTransports))
+	mux.HandleFunc("PUT /api/dns-transports", requireAuth(s.handleUpdateDNSTransports))
+	mux.HandleFunc("GET /api/tls/status", requireAuth(s.handleTLSStatus))
 
 	mux.HandleFunc("/", s.handleStatic)
 

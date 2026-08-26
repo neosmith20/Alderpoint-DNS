@@ -577,6 +577,51 @@ async function main() {
     const disabledCount = await page.$$eval(".data-grid tbody tr.row-pending", (rows) => rows.length);
     check("bulk-disable actually disabled both selected rules", disabledCount === 2, `disabled=${disabledCount}`);
 
+    // --- Nav: Encryption (internal/dnstransports + internal/tlscert) ---
+    let clickedEncryption = false;
+    for (const btn of await page.$$(".sidebar .item")) {
+      if ((await btn.evaluate((el) => el.textContent?.trim())) === "Encryption") {
+        await btn.click();
+        clickedEncryption = true;
+        break;
+      }
+    }
+    check("Encryption nav item exists and is clickable", clickedEncryption);
+    await page.waitForSelector("#encryption-heading", { timeout: 3000 }).catch(() => {});
+    check("Encryption page content rendered", (await page.$("#encryption-heading")) !== null);
+
+    // TLS status renders real data (harness always starts the server with
+    // -tls-cert-status-path pointed at a real certificate -- see main()).
+    await page.waitForSelector(".cert-info", { timeout: 3000 }).catch(() => {});
+    const certSubject = await page.$eval(".cert-info dd", (el) => el.textContent).catch(() => "");
+    check("TLS status renders a real certificate subject, not the unavailable placeholder", certSubject.includes("CN="), certSubject);
+
+    // DoT toggle + port round-trip through a real save.
+    const dotCheckbox = await page.$(".transports fieldset:nth-of-type(1) input[type=checkbox]");
+    await dotCheckbox.click();
+    const dotPortInput = await page.$(".transports fieldset:nth-of-type(1) input[type=number]");
+    // Triple-click-to-select-all is unreliable on a number input in
+    // headless Chromium -- a real bug this caught: it left "853" in
+    // place and typing appended "8853" after it, producing "8538853",
+    // which silently failed the input's max="65535" constraint and
+    // blocked the native form submission with no visible error. Clear
+    // the value directly instead, same pattern already used elsewhere
+    // in this file for text inputs.
+    await page.$eval(".transports fieldset:nth-of-type(1) input[type=number]", (el) => (el.value = ""));
+    await dotPortInput.type("8853");
+    await Promise.all([
+      page.waitForSelector(".transports .success", { timeout: 3000 }),
+      page.click(".transports button[type=submit]"),
+    ]);
+    const saveText = await page.$eval(".transports .success", (el) => el.textContent);
+    check("saving DNS Transport settings reports success", saveText.includes("Saved"), saveText);
+
+    await page.reload({ waitUntil: "networkidle0" });
+    await page.waitForSelector(".transports", { timeout: 3000 });
+    const dotPortAfterReload = await page.$eval(".transports fieldset:nth-of-type(1) input[type=number]", (el) => el.value);
+    const dotCheckedAfterReload = await page.$eval(".transports fieldset:nth-of-type(1) input[type=checkbox]", (el) => el.checked);
+    check("DNS Transport settings actually persisted server-side (survive a full page reload)", dotPortAfterReload === "8853" && dotCheckedAfterReload === true, `port=${dotPortAfterReload} checked=${dotCheckedAfterReload}`);
+
     // --- Nav: Backup & Restore ---
     let clickedBackup = false;
     for (const btn of await page.$$(".sidebar .item")) {
@@ -655,6 +700,7 @@ async function main() {
       { path: "/ui/upstreams", heading: "#upstreams-heading" },
       { path: "/ui/clients", heading: "#clients-heading" },
       { path: "/ui/filtering", heading: "#filtering-heading" },
+      { path: "/ui/encryption", heading: "#encryption-heading" },
       { path: "/ui/backup", heading: "#backup-heading" },
       { path: "/ui/administration", heading: "#admin-heading" },
     ];

@@ -70,6 +70,7 @@ def main():
     p.add_argument("--cookiejar", default="/tmp/apdns-go-acceptance-cj.txt")
     p.add_argument("--backups-dir", default=None, help="the server's -backups-dir, for a real (not just corrupt-payload) upload round-trip test")
     p.add_argument("--query-log-dir", default=None, help="the server's -query-log-dir, pre-seeded with go/tests/fixtures/make_query_log_fixture.py, for a real (not just degraded-path) Query Log test")
+    p.add_argument("--tls-cert-status-path", default=None, help="the server's -tls-cert-status-path, for a real (not just degraded-path) TLS status test")
     args = p.parse_args()
     B, FB, CJ = args.base, args.fixture_base, args.cookiejar
 
@@ -450,6 +451,35 @@ def main():
 
         top_blocked_degraded = curl_json("GET", f"{B}/api/analytics/top-blocked-domains?minutes=60", cookie=CJ)
         check("top-blocked-domains honestly reports degraded when -query-log-dir isn't configured", top_blocked_degraded.get("degraded") is True, top_blocked_degraded)
+
+    # --- Encryption (internal/dnstransports native settings storage + internal/tlscert read-only boundary) ---
+    transports_initial = curl_json("GET", f"{B}/api/dns-transports", cookie=CJ)
+    check("dns-transports GET returns real defaults", transports_initial.get("dot_port") == 853 and transports_initial.get("doh_path") == "/dns-query", transports_initial)
+    check("dnscrypt is honestly never provisioned (no secrets store yet)", transports_initial.get("dnscrypt_identity_provisioned") is False, transports_initial)
+
+    transports_update = curl_json("PUT", f"{B}/api/dns-transports", cookie=CJ, csrf=csrf, body={
+        "dot_enabled": True, "dot_port": 8853, "doh_enabled": True, "doh_port": 8443, "doh_path": "/custom-query",
+        "doq_enabled": False, "doq_port": 853, "doh3_enabled": False, "doh3_port": 443,
+        "dnscrypt_enabled": True, "dnscrypt_port": 5444, "dnscrypt_provider_name": "acceptance.provider.example",
+    })
+    check("dns-transports PUT round-trips every field", transports_update.get("dot_port") == 8853 and transports_update.get("doh_path") == "/custom-query" and transports_update.get("dnscrypt_provider_name") == "acceptance.provider.example", transports_update)
+
+    transports_reloaded = curl_json("GET", f"{B}/api/dns-transports", cookie=CJ)
+    check("dns-transports change actually persisted server-side", transports_reloaded.get("dot_port") == 8853, transports_reloaded)
+
+    transports_bad_port = curl_json("PUT", f"{B}/api/dns-transports", cookie=CJ, csrf=csrf, body={
+        "dot_port": 99999, "doh_port": 443, "doh_path": "/dns-query", "doq_port": 853, "doh3_port": 443,
+        "dnscrypt_port": 5443, "dnscrypt_provider_name": "x",
+    })
+    check("dns-transports rejects an out-of-range port", transports_bad_port.get("error") == "validation_error", transports_bad_port)
+
+    if args.tls_cert_status_path:
+        tls_status = curl_json("GET", f"{B}/api/tls/status", cookie=CJ)
+        check("tls status reads a real certificate from the configured path", tls_status.get("active") is True and tls_status.get("subject"), tls_status)
+        check("tls status reports a real validity window", bool(tls_status.get("not_valid_after")), tls_status)
+    else:
+        tls_status_degraded = curl_json("GET", f"{B}/api/tls/status", cookie=CJ)
+        check("tls status honestly reports inactive when -tls-cert-status-path isn't configured", tls_status_degraded.get("active") is False, tls_status_degraded)
 
     print(f"\n{len([r for r in results if r[1] == PASS])}/{len(results)} checks passed.")
 

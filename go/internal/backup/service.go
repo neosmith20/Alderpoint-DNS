@@ -286,9 +286,22 @@ func (s *Service) applyRetention(ctx context.Context) error {
 			manual = append(manual, b)
 		}
 	}
-	// s.List already sorts newest-first by CreatedAt; oldest-first makes
-	// the pruning logic below read naturally.
-	sort.Slice(manual, func(i, j int) bool { return manual[i].CreatedAt < manual[j].CreatedAt })
+	// Sort oldest-first by the file's own mtime, not the manifest's
+	// CreatedAt string -- a real bug this package's own test caught:
+	// CreatedAt has only second resolution, so two manual backups
+	// created within the same wall-clock second (routine in a fast
+	// create loop, e.g. this package's own retention test) tie under a
+	// CreatedAt-string sort, and sort.Slice is not stable -- retention
+	// could then prune the *newer* of the two ties instead of the older
+	// one. mtime has nanosecond resolution and reflects real creation
+	// order even for same-second backups.
+	mtime := make(map[string]time.Time, len(manual))
+	for _, b := range manual {
+		if stat, err := os.Stat(filepath.Join(s.Dir, b.Filename)); err == nil {
+			mtime[b.Filename] = stat.ModTime()
+		}
+	}
+	sort.Slice(manual, func(i, j int) bool { return mtime[manual[i].Filename].Before(mtime[manual[j].Filename]) })
 
 	cutoff := time.Time{}
 	if s.RetentionMaxAgeDays > 0 {

@@ -247,6 +247,32 @@ export interface QueryLogFilters {
   offset?: number;
 }
 
+export interface DnsTransportSettings {
+  dot_enabled: boolean;
+  dot_port: number;
+  doh_enabled: boolean;
+  doh_port: number;
+  doh_path: string;
+  doq_enabled: boolean;
+  doq_port: number;
+  doh3_enabled: boolean;
+  doh3_port: number;
+  dnscrypt_enabled: boolean;
+  dnscrypt_port: number;
+  dnscrypt_provider_name: string;
+  dnscrypt_identity_provisioned: boolean;
+}
+
+export interface TlsStatus {
+  active: boolean;
+  subject?: string;
+  not_valid_before?: string;
+  not_valid_after?: string;
+  san?: string[];
+  is_self_signed?: boolean;
+  error?: string;
+}
+
 export interface QueryLogResponse {
   rows: QueryLogRow[];
   degraded: boolean;
@@ -353,6 +379,11 @@ export const api = {
     params.set("offset", String(filters.offset ?? 0));
     return req<QueryLogResponse>(`/api/analytics/query-log?${params.toString()}`, undefined, signal);
   },
+
+  getDnsTransports: (signal?: AbortSignal) => req<DnsTransportSettings>("/api/dns-transports", undefined, signal),
+  updateDnsTransports: (settings: DnsTransportSettings) =>
+    req<DnsTransportSettings>("/api/dns-transports", { method: "PUT", body: JSON.stringify(settings) }),
+  tlsStatus: (signal?: AbortSignal) => req<TlsStatus>("/api/tls/status", undefined, signal),
 
   listBlocklists: (signal?: AbortSignal) => req<BlocklistsResponse>("/api/blocklists", undefined, signal),
   createBlocklist: (name: string, url: string, category: string) =>

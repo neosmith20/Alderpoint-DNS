@@ -27,11 +27,13 @@ import (
 	"alderpointdns/go-controlplane/internal/config"
 	"alderpointdns/go-controlplane/internal/customrules"
 	"alderpointdns/go-controlplane/internal/dbmigrate"
+	"alderpointdns/go-controlplane/internal/dnstransports"
 	"alderpointdns/go-controlplane/internal/httpapi"
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/policy"
 	"alderpointdns/go-controlplane/internal/pyanalytics"
 	"alderpointdns/go-controlplane/internal/rawquerylog"
+	"alderpointdns/go-controlplane/internal/tlscert"
 	"alderpointdns/go-controlplane/internal/upstreams"
 )
 
@@ -128,6 +130,7 @@ func runWeb(args []string) {
 	backupsDir := fs.String("backups-dir", "./data/backups", "directory for stored/uploaded appliance backups (see internal/backup)")
 	backupRetentionMaxCount := fs.Int("backup-retention-max-count", 0, "keep at most N manual backups, oldest pruned first (0 = unlimited; the pre-restore safety backup is never pruned)")
 	backupRetentionMaxAgeDays := fs.Int("backup-retention-max-age-days", 0, "prune manual backups older than N days (0 = unlimited)")
+	tlsCertStatusPath := fs.String("tls-cert-status-path", "", "optional read-only path to Python's DNS-transport server.crt (compatibility boundary, see internal/tlscert; never the private key); empty = Encryption page's TLS status always reports inactive")
 	fs.Parse(args)
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -162,6 +165,7 @@ func runWeb(args []string) {
 	clientsSvc := &clients.Service{DB: db}
 	policySvc := &policy.Service{DB: db}
 	customRulesSvc := &customrules.Service{DB: db}
+	dnsTransportsSvc := &dnstransports.Service{DB: db}
 	backupSvc := &backup.Service{
 		DB: db, Dir: *backupsDir, Version: Version,
 		RetentionMaxCount: *backupRetentionMaxCount, RetentionMaxAgeDays: *backupRetentionMaxAgeDays,
@@ -192,12 +196,22 @@ func runWeb(args []string) {
 		rawQueryLogReader = &rawquerylog.Reader{Root: *queryLogDir}
 	}
 
+	// TLS-cert-status compatibility boundary: same "optional, never
+	// fatal" contract. No Open() step -- internal/tlscert.Reader is a
+	// stateless file-path wrapper that tolerates a not-yet-existing file
+	// the same way it tolerates a real one.
+	var tlsCertReader *tlscert.Reader
+	if *tlsCertStatusPath != "" {
+		tlsCertReader = &tlscert.Reader{CertPath: *tlsCertStatusPath}
+	}
+
 	srv := &httpapi.Server{
 		DB: db, Auth: &auth.Store{DB: db}, Blocklists: blSvc, LocalDNS: ldSvc, Upstreams: upSvc, Clients: clientsSvc, Policy: policySvc, CustomRules: customRulesSvc, Backup: backupSvc,
-		StaticDir: *staticDir, Log: logger, Version: Version, StartedAt: startedAt,
+		DNSTransports: dnsTransportsSvc,
+		StaticDir:     *staticDir, Log: logger, Version: Version, StartedAt: startedAt,
 		SessionTTL: cfg.SessionTTL(), LastSeen: cfg.LastSeenUpdateInterval(),
 		ApplianceName: cfg.Appliance.Name, ApplianceTimezone: cfg.Appliance.Timezone,
-		Analytics: analyticsReader, RawQueryLog: rawQueryLogReader,
+		Analytics: analyticsReader, RawQueryLog: rawQueryLogReader, TLSCert: tlsCertReader,
 	}
 
 	listenAddr := *addr
