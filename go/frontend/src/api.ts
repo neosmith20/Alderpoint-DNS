@@ -468,6 +468,11 @@ export const api = {
   updateDnsTransports: (settings: DnsTransportSettings) =>
     req<DnsTransportSettings>("/api/dns-transports", { method: "PUT", body: JSON.stringify(settings) }),
   tlsStatus: (signal?: AbortSignal) => req<TlsStatus>("/api/tls/status", undefined, signal),
+  tlsReplace: (certificatePem: string, privateKeyPem: string) =>
+    req<{ status: string; restart_required: boolean; subject: string; not_valid_after: string }>("/api/tls/replace", {
+      method: "POST",
+      body: JSON.stringify({ certificate_pem: certificatePem, private_key_pem: privateKeyPem }),
+    }),
 
   listNotificationProviders: (signal?: AbortSignal) => req<{ providers: NotificationProvider[] }>("/api/notifications", undefined, signal),
   createNotificationProvider: (kind: string, displayName: string, endpoint: string) =>

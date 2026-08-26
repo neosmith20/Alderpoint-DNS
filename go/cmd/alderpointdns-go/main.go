@@ -38,7 +38,6 @@ import (
 	"alderpointdns/go-controlplane/internal/pyanalytics"
 	"alderpointdns/go-controlplane/internal/pymigrate"
 	"alderpointdns/go-controlplane/internal/rawquerylog"
-	"alderpointdns/go-controlplane/internal/tlscert"
 	"alderpointdns/go-controlplane/internal/upstreams"
 )
 
@@ -221,7 +220,6 @@ func runWeb(args []string) {
 	backupsDir := fs.String("backups-dir", "./data/backups", "directory for stored/uploaded appliance backups (see internal/backup)")
 	backupRetentionMaxCount := fs.Int("backup-retention-max-count", 0, "keep at most N manual backups, oldest pruned first (0 = unlimited; the pre-restore safety backup is never pruned)")
 	backupRetentionMaxAgeDays := fs.Int("backup-retention-max-age-days", 0, "prune manual backups older than N days (0 = unlimited)")
-	tlsCertStatusPath := fs.String("tls-cert-status-path", "", "optional read-only path to Python's DNS-transport server.crt (compatibility boundary, see internal/tlscert; never the private key); empty = Encryption page's TLS status always reports inactive")
 	hostagentSocket := fs.String("hostagent-socket", "", "unix socket path for apdns-hostagent (see internal/hostagent, internal/hostagentd); empty = Cache/Replication/Network/Logs/Software-Updates all report unavailable")
 	dnsRuntimeDnsdistAddr := fs.String("dns-runtime-dnsdist-addr", "", "the real dnsdist listen address apdns-hostagent was started with for this deployment (see internal/dnscompile, internal/dnsruntime); empty = DNS Runtime compilation is unavailable, matching -hostagent-socket's own contract")
 	dnsRuntimeBindProxyAddr := fs.String("dns-runtime-bind-proxy-addr", "", "the real BIND PROXYv2 backend address apdns-hostagent compiles named.conf to listen on (127.0.0.1:<bind-proxy-port>); required together with -dns-runtime-dnsdist-addr")
@@ -291,15 +289,6 @@ func runWeb(args []string) {
 		rawQueryLogReader = &rawquerylog.Reader{Root: *queryLogDir}
 	}
 
-	// TLS-cert-status compatibility boundary: same "optional, never
-	// fatal" contract. No Open() step -- internal/tlscert.Reader is a
-	// stateless file-path wrapper that tolerates a not-yet-existing file
-	// the same way it tolerates a real one.
-	var tlsCertReader *tlscert.Reader
-	if *tlsCertStatusPath != "" {
-		tlsCertReader = &tlscert.Reader{CertPath: *tlsCertStatusPath}
-	}
-
 	// Host-agent client: same "optional, never fatal" contract. No
 	// connection is opened at startup -- hostagent.Client dials fresh
 	// per call, so an agent that isn't running yet (or ever) never
@@ -347,8 +336,8 @@ func runWeb(args []string) {
 		StaticDir: *staticDir, Log: logger, Version: Version, StartedAt: startedAt,
 		SessionTTL: cfg.SessionTTL(), LastSeen: cfg.LastSeenUpdateInterval(),
 		ApplianceName: cfg.Appliance.Name, ApplianceTimezone: cfg.Appliance.Timezone,
-		Analytics: analyticsReader, RawQueryLog: rawQueryLogReader, TLSCert: tlsCertReader, HostAgent: hostAgentClient,
-		DNSRuntime: dnsRuntimeOrch,
+		Analytics: analyticsReader, RawQueryLog: rawQueryLogReader, HostAgent: hostAgentClient,
+		DNSRuntime: dnsRuntimeOrch, TLSCertPath: cfg.Web.TLSCertPath, TLSKeyPath: cfg.Web.TLSKeyPath,
 	}
 
 	listenAddr := *addr

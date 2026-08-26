@@ -19,7 +19,6 @@ import (
 	"alderpointdns/go-controlplane/internal/policy"
 	"alderpointdns/go-controlplane/internal/pyanalytics"
 	"alderpointdns/go-controlplane/internal/rawquerylog"
-	"alderpointdns/go-controlplane/internal/tlscert"
 	"alderpointdns/go-controlplane/internal/upstreams"
 )
 
@@ -38,11 +37,15 @@ type Server struct {
 	StaticDir     string
 	Log           *slog.Logger
 
-	// TLSCert is nil unless -tls-cert-path was given a real path at
-	// startup -- nil means the Encryption page's TLS status always
-	// reports {"active": false}, never an error. See internal/tlscert's
-	// doc comment.
-	TLSCert *tlscert.Reader
+	// TLSCertPath/TLSKeyPath are this control plane's OWN real,
+	// currently-served management TLS certificate/key -- the same
+	// paths appliance.yaml's web.tls_cert_path/tls_key_path already
+	// point at (the web server needs them just to start). Upload/
+	// replace (POST /api/tls/replace) writes here; a restart is
+	// required to actually serve the new pair, matching Python's own
+	// real, disclosed behavior for the identical reason (a process-
+	// level TLS listener does not hot-reload its certificate).
+	TLSCertPath, TLSKeyPath string
 
 	// HostAgent is nil unless -hostagent-socket was given at startup --
 	// nil means Cache/Replication/Network/Logs/Software-Updates all
@@ -169,6 +172,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/dns-transports", requireAuth(s.handleGetDNSTransports))
 	mux.HandleFunc("PUT /api/dns-transports", requireAuth(s.handleUpdateDNSTransports))
 	mux.HandleFunc("GET /api/tls/status", requireAuth(s.handleTLSStatus))
+	mux.HandleFunc("POST /api/tls/replace", requireAuth(s.handleTLSReplace))
 
 	mux.HandleFunc("GET /api/notifications", requireAuth(s.handleListNotificationProviders))
 	mux.HandleFunc("POST /api/notifications", requireAuth(s.handleCreateNotificationProvider))

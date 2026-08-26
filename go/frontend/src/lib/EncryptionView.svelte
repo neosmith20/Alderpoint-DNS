@@ -5,20 +5,23 @@
   import { timestampPref } from "../timestamp.svelte";
   import DnsRuntimeBadge from "./DnsRuntimeBadge.svelte";
 
-  // Encryption. Two independently-scoped native pieces, each with its
-  // own disclosed gap -- see internal/dnstransports and internal/tlscert:
+  // Encryption. Two independently-scoped native pieces:
   //
-  //  - DNS Transport settings (DoT/DoH/DoQ/DoH3/DNSCrypt enable+port) are
-  //    real native-Go storage. DoT and DoH now compile into and
-  //    auto-apply to the real DNS runtime (internal/dnscompile,
-  //    internal/dnsruntime) -- see the dns_runtime feedback below Save.
+  //  - TLS Certificate: this control plane's OWN real management
+  //    certificate (the same one its HTTPS listener serves, and DoT/DoH
+  //    reuse -- matching Python's own "single appliance-wide cert"
+  //    design). Real upload/replace (internal/tlscert's write side,
+  //    field-matched against Python's own app/v2/tls_cert.py): a bad
+  //    replacement is validated BEFORE anything on disk changes and
+  //    never touches the currently-working certificate. Matches
+  //    Python's own real, disclosed behavior: promoting a new
+  //    certificate needs a restart to actually take effect (a
+  //    process-level TLS listener does not hot-reload), not a defect.
+  //  - DNS Transport settings (DoT/DoH/DoQ/DoH3/DNSCrypt enable+port).
+  //    DoT and DoH compile into and auto-apply to the real DNS runtime.
   //    DoQ/DoH3/DNSCrypt are not compiled yet (each needs its own
-  //    listener wiring; DNSCrypt additionally needs a Go-native secrets
-  //    store for its identity material, which doesn't exist yet).
-  //  - TLS status is real and read-only (a genuine read of Python's own
-  //    DNS-transport certificate, when -tls-cert-status-path is
-  //    configured) -- there is no "replace" here, since promoting a new
-  //    certificate needs that same unreachable live restart.
+  //    listener wiring; DNSCrypt additionally needs identity/
+  //    certificate generation this pass didn't build).
 
   let settings = $state<DnsTransportSettings | null>(null);
   let loadError = $state("");
@@ -28,6 +31,11 @@
   let dnsRuntimeResult = $state<DNSRuntimeApplyResult | null>(null);
 
   let tls = $state<TlsStatus | null>(null);
+  let certFile: FileList | undefined = $state();
+  let keyFile: FileList | undefined = $state();
+  let replaceBusy = $state(false);
+  let replaceError = $state("");
+  let replaceResult = $state("");
 
   async function loadAll() {
     loadError = "";
@@ -44,6 +52,26 @@
   onMount(() => {
     loadAll();
   });
+
+  async function replaceCert(e: Event) {
+    e.preventDefault();
+    const cf = certFile?.[0];
+    const kf = keyFile?.[0];
+    if (!cf || !kf) return;
+    replaceBusy = true;
+    replaceError = "";
+    replaceResult = "";
+    try {
+      const [certificatePem, privateKeyPem] = await Promise.all([cf.text(), kf.text()]);
+      const result = await api.tlsReplace(certificatePem, privateKeyPem);
+      replaceResult = `Promoted: ${result.subject}. A restart is required for this control plane to actually serve it.`;
+      await loadAll();
+    } catch (err) {
+      replaceError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      replaceBusy = false;
+    }
+  }
 
   async function save() {
     if (!settings) return;
@@ -65,9 +93,9 @@
 <section aria-labelledby="encryption-heading" class="encryption">
   <h2 id="encryption-heading">Encryption</h2>
   <p class="scope-note">
-    DNS Transport settings are stored natively; DoT and DoH now compile into and auto-apply to the
-    real DNS runtime (DoQ/DoH3/DNSCrypt not yet). TLS status is a real, read-only view of Python's
-    own DNS-transport certificate -- see the parity matrix for the full scope.
+    TLS Certificate is this control plane's own real, replaceable management certificate (also
+    reused by DoT/DoH). DNS Transport settings are stored natively; DoT and DoH compile into and
+    auto-apply to the real DNS runtime (DoQ/DoH3/DNSCrypt not yet) -- see the parity matrix.
   </p>
 
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
@@ -95,6 +123,15 @@
         <dd>{tls.is_self_signed ? "Yes" : "No"}</dd>
       </dl>
     {/if}
+
+    <form onsubmit={replaceCert} class="replace-form">
+      <h4>Replace certificate</h4>
+      <label>Certificate (PEM) <input type="file" bind:files={certFile} accept=".crt,.pem" aria-label="Certificate file" required /></label>
+      <label>Private key (PEM) <input type="file" bind:files={keyFile} accept=".key,.pem" aria-label="Private key file" required /></label>
+      <button type="submit" disabled={replaceBusy || !certFile?.[0] || !keyFile?.[0]}>{replaceBusy ? "Uploading…" : "Upload & Replace"}</button>
+      {#if replaceResult}<p class="success" role="status">{replaceResult}</p>{/if}
+      {#if replaceError}<p class="error" role="alert">{replaceError}</p>{/if}
+    </form>
   </div>
 
   {#if settings}
@@ -149,6 +186,9 @@
   .cert-info { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1rem; font-size: 0.9rem; }
   .cert-info dt { opacity: 0.7; }
   .cert-info dd { margin: 0; }
+  .replace-form { display: flex; flex-direction: column; gap: 0.5rem; border-top: 1px solid var(--border); padding-top: 0.75rem; margin-top: 0.25rem; }
+  .replace-form h4 { margin: 0; font-size: 0.85rem; }
+  .replace-form label { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.85rem; }
   .transports fieldset { border: 1px solid var(--border); border-radius: 6px; padding: 0.6rem 0.9rem; display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; }
   .transports legend { padding: 0 0.3rem; font-weight: 600; }
   .transports label { display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; }

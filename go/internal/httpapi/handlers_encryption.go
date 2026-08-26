@@ -3,9 +3,11 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 
 	"alderpointdns/go-controlplane/internal/dnstransports"
+	"alderpointdns/go-controlplane/internal/tlscert"
 )
 
 func transportsJSON(s dnstransports.Settings) map[string]any {
@@ -48,19 +50,60 @@ func (s *Server) handleUpdateDNSTransports(w http.ResponseWriter, r *http.Reques
 	WriteJSON(w, http.StatusOK, out)
 }
 
-// handleTLSStatus is nil-reader-safe like every other optional
-// compatibility boundary (Analytics, RawQueryLog): {"active": false}
-// when -tls-cert-path wasn't configured, matching Python's own shape for
-// "no certificate provisioned" rather than a 500.
+// handleTLSStatus reports this control plane's OWN real, currently-
+// configured management TLS certificate (TLSCertPath/TLSKeyPath) --
+// {"active": false} when neither is configured (an appliance running
+// plain HTTP, or the fields aren't wired at this deployment), matching
+// Python's own shape for "no certificate provisioned" rather than a
+// 500.
 func (s *Server) handleTLSStatus(w http.ResponseWriter, r *http.Request) {
-	if s.TLSCert == nil {
+	if s.TLSCertPath == "" || s.TLSKeyPath == "" {
 		WriteJSON(w, http.StatusOK, map[string]any{"active": false})
 		return
 	}
-	status, err := s.TLSCert.Status()
+	status, err := (&tlscert.Reader{CertPath: s.TLSCertPath}).Status()
 	if err != nil {
 		WriteJSON(w, http.StatusOK, map[string]any{"active": false, "error": err.Error()})
 		return
 	}
 	WriteJSON(w, http.StatusOK, status)
+}
+
+type tlsReplaceRequest struct {
+	CertificatePEM string `json:"certificate_pem"`
+	PrivateKeyPEM  string `json:"private_key_pem"`
+}
+
+// handleTLSReplace is the real upload/replace workflow, field-matched
+// against Python's own POST /api/tls/replace (app/v2/webapp.py's
+// tls_replace, read directly): validate first (nothing touched on
+// failure), atomically promote on success, and report
+// restart_required=true -- the same honest contract Python's own
+// comment gives for exactly the same reason (a process-level TLS
+// listener does not hot-reload its certificate; this is standard
+// behavior, not a defect, so this handler doesn't pretend otherwise).
+func (s *Server) handleTLSReplace(w http.ResponseWriter, r *http.Request) {
+	if s.TLSCertPath == "" || s.TLSKeyPath == "" {
+		Err(http.StatusServiceUnavailable, "unavailable", "this deployment has no management TLS cert/key path configured").WriteJSON(w)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1 MiB cap -- a cert+key pair is a few KB
+	if err != nil {
+		Err(http.StatusBadRequest, "validation_error", "invalid request body").WriteJSON(w)
+		return
+	}
+	var req tlsReplaceRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		Err(http.StatusBadRequest, "validation_error", "invalid JSON body").WriteJSON(w)
+		return
+	}
+	info, err := tlscert.StageValidatePromote([]byte(req.CertificatePEM), []byte(req.PrivateKeyPEM), s.TLSCertPath, s.TLSKeyPath)
+	if err != nil {
+		Err(http.StatusBadRequest, "invalid_certificate", err.Error()).WriteJSON(w)
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{
+		"status": "promoted", "restart_required": true,
+		"subject": info.Subject, "not_valid_after": info.NotAfter,
+	})
 }
