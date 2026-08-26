@@ -54,6 +54,9 @@ const (
 	OpUpdateCheck = "update.check"
 	OpUpdateStage = "update.stage"
 	OpUpdateApply = "update.apply"
+
+	OpDNSRuntimeStatus  = "dns_runtime.status"
+	OpDNSRuntimePromote = "dns_runtime.promote"
 )
 
 // Request is the single JSON line a client writes. RequestID is

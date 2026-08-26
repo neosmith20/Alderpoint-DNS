@@ -27,6 +27,7 @@ import (
 	"alderpointdns/go-controlplane/internal/config"
 	"alderpointdns/go-controlplane/internal/customrules"
 	"alderpointdns/go-controlplane/internal/dbmigrate"
+	"alderpointdns/go-controlplane/internal/dnsruntime"
 	"alderpointdns/go-controlplane/internal/dnstransports"
 	"alderpointdns/go-controlplane/internal/hostagent"
 	"alderpointdns/go-controlplane/internal/httpapi"
@@ -141,6 +142,8 @@ func runWeb(args []string) {
 	backupRetentionMaxAgeDays := fs.Int("backup-retention-max-age-days", 0, "prune manual backups older than N days (0 = unlimited)")
 	tlsCertStatusPath := fs.String("tls-cert-status-path", "", "optional read-only path to Python's DNS-transport server.crt (compatibility boundary, see internal/tlscert; never the private key); empty = Encryption page's TLS status always reports inactive")
 	hostagentSocket := fs.String("hostagent-socket", "", "unix socket path for apdns-hostagent (see internal/hostagent, internal/hostagentd); empty = Cache/Replication/Network/Logs/Software-Updates all report unavailable")
+	dnsRuntimeDnsdistAddr := fs.String("dns-runtime-dnsdist-addr", "", "the real dnsdist listen address apdns-hostagent was started with for this deployment (see internal/dnscompile, internal/dnsruntime); empty = DNS Runtime compilation is unavailable, matching -hostagent-socket's own contract")
+	dnsRuntimeBindProxyAddr := fs.String("dns-runtime-bind-proxy-addr", "", "the real BIND PROXYv2 backend address apdns-hostagent compiles named.conf to listen on (127.0.0.1:<bind-proxy-port>); required together with -dns-runtime-dnsdist-addr")
 	fs.Parse(args)
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -226,6 +229,22 @@ func runWeb(args []string) {
 		hostAgentClient = hostagent.NewClient(*hostagentSocket)
 	}
 
+	// DNS runtime compiler: same "optional, never fatal" contract as
+	// every other boundary above. Requires both a host-agent AND the
+	// dnsdist/BIND deployment addresses that agent was configured with
+	// -- see internal/dnsruntime's doc comment for why the two sides
+	// must agree on these fixed values.
+	var dnsRuntimeOrch *dnsruntime.Orchestrator
+	if hostAgentClient != nil && *dnsRuntimeDnsdistAddr != "" && *dnsRuntimeBindProxyAddr != "" {
+		dnsRuntimeOrch = &dnsruntime.Orchestrator{
+			LocalDNS: ldSvc, CustomRules: customRulesSvc, Blocklists: blSvc, Upstreams: upSvc, DNSTransports: dnsTransportsSvc, Policy: policySvc,
+			HostAgent: hostAgentClient, DnsdistListenAddress: *dnsRuntimeDnsdistAddr, BindBackendAddress: *dnsRuntimeBindProxyAddr,
+			TLSCertPath: cfg.Web.TLSCertPath, TLSKeyPath: cfg.Web.TLSKeyPath,
+		}
+	} else if *dnsRuntimeDnsdistAddr != "" || *dnsRuntimeBindProxyAddr != "" {
+		logger.Warn("DNS runtime compiler not wired: -dns-runtime-dnsdist-addr, -dns-runtime-bind-proxy-addr, and -hostagent-socket must all be set together")
+	}
+
 	srv := &httpapi.Server{
 		DB: db, Auth: &auth.Store{DB: db}, Blocklists: blSvc, LocalDNS: ldSvc, Upstreams: upSvc, Clients: clientsSvc, Policy: policySvc, CustomRules: customRulesSvc, Backup: backupSvc,
 		DNSTransports: dnsTransportsSvc, Notifications: notificationsSvc,
@@ -233,6 +252,7 @@ func runWeb(args []string) {
 		SessionTTL: cfg.SessionTTL(), LastSeen: cfg.LastSeenUpdateInterval(),
 		ApplianceName: cfg.Appliance.Name, ApplianceTimezone: cfg.Appliance.Timezone,
 		Analytics: analyticsReader, RawQueryLog: rawQueryLogReader, TLSCert: tlsCertReader, HostAgent: hostAgentClient,
+		DNSRuntime: dnsRuntimeOrch,
 	}
 
 	listenAddr := *addr

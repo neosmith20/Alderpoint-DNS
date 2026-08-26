@@ -11,6 +11,7 @@ import (
 	"alderpointdns/go-controlplane/internal/blocklists"
 	"alderpointdns/go-controlplane/internal/clients"
 	"alderpointdns/go-controlplane/internal/customrules"
+	"alderpointdns/go-controlplane/internal/dnsruntime"
 	"alderpointdns/go-controlplane/internal/dnstransports"
 	"alderpointdns/go-controlplane/internal/hostagent"
 	"alderpointdns/go-controlplane/internal/localdns"
@@ -51,6 +52,13 @@ type Server struct {
 	// into privileged host operations, and even then only through this
 	// one narrow, allowlisted client -- never directly.
 	HostAgent *hostagent.Client
+
+	// DNSRuntime is nil unless a full DNS-runtime deployment (host-agent
+	// plus BIND/dnsdist listen/proxy addresses) was configured at
+	// startup -- nil means the DNS Runtime page always honestly reports
+	// "unavailable" rather than a compile error. See
+	// internal/dnsruntime's doc comment.
+	DNSRuntime *dnsruntime.Orchestrator
 
 	// Analytics is nil unless -analytics-db was given a real path at
 	// startup -- every analytics handler must treat nil as "degraded",
@@ -186,6 +194,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/updates/status", requireAuth(s.handleUpdateCheck))
 	mux.HandleFunc("POST /api/updates/stage", requireAuth(s.handleUpdateStage))
 	mux.HandleFunc("POST /api/updates/apply", requireAuth(s.handleUpdateApply))
+
+	mux.HandleFunc("GET /api/dns-runtime/status", requireAuth(s.handleDNSRuntimeStatus))
+	mux.HandleFunc("POST /api/dns-runtime/apply", requireAuth(s.handleDNSRuntimeApply))
 
 	mux.HandleFunc("/", s.handleStatic)
 

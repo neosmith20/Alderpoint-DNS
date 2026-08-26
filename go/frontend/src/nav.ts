@@ -166,6 +166,12 @@ export const NAV_GROUPS: NavGroup[] = [
         icon: "system",
         load: () => import("./lib/LogsView.svelte") as unknown as Promise<{ default: Component }>,
       },
+      {
+        id: "dnsruntime",
+        label: "DNS Runtime",
+        icon: "system",
+        load: () => import("./lib/DnsRuntimeView.svelte") as unknown as Promise<{ default: Component }>,
+      },
     ],
   },
 ];

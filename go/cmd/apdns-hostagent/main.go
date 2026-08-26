@@ -46,6 +46,16 @@ func main() {
 	webServiceUnit := flag.String("web-service-unit", "", "systemd unit to restart on update apply (empty = Software Updates apply unavailable)")
 	webHealthURL := flag.String("web-health-url", "", "URL to poll after a restart to confirm health (empty = Software Updates apply unavailable)")
 
+	dnsRuntimeStagingDir := flag.String("dns-runtime-staging-dir", "/var/lib/apdns-hostagent/dns-staging", "staging directory for compiled BIND/dnsdist config (see internal/hostagentd/ops_dnsruntime.go)")
+	dnsRuntimeBindLivePath := flag.String("dns-runtime-bind-conf", "", "live named.conf path this agent manages (empty = DNS Runtime unavailable)")
+	dnsRuntimeDnsdistLivePath := flag.String("dns-runtime-dnsdist-conf", "", "live dnsdist.conf path this agent manages (empty = DNS Runtime unavailable)")
+	dnsRuntimeBindDir := flag.String("dns-runtime-bind-dir", "", "BIND's own working directory (named.conf's directory clause) -- must be a real, writable, AppArmor-allowed path (e.g. under /var/lib/bind)")
+	dnsRuntimeBindPlainPort := flag.Int("dns-runtime-bind-plain-port", 15453, "BIND's unproxied loopback listener port")
+	dnsRuntimeBindProxyPort := flag.Int("dns-runtime-bind-proxy-port", 15553, "BIND's PROXYv2 listener port -- dnsdist's default pool forwards here")
+	dnsRuntimeBindStatsPort := flag.Int("dns-runtime-bind-stats-port", 18153, "BIND's statistics-channels port")
+	dnsRuntimeBindRNDCPort := flag.Int("dns-runtime-bind-rndc-port", 19553, "BIND's rndc control-channel port")
+	dnsRuntimeDnsdistListenAddr := flag.String("dns-runtime-dnsdist-listen-addr", "", "the real address dnsdist listens on for this deployment (empty = DNS Runtime unavailable)")
+
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -98,6 +108,20 @@ func main() {
 		updateCfg.HealthCheck = healthCheckFunc(*webHealthURL)
 	}
 	hostagentd.RegisterUpdateOps(s, updateCfg)
+
+	if *dnsRuntimeBindLivePath != "" && *dnsRuntimeDnsdistLivePath != "" && *dnsRuntimeBindDir != "" && *dnsRuntimeDnsdistListenAddr != "" {
+		if err := hostagentd.RegisterDNSRuntimeOps(s, hostagentd.DNSRuntimeConfig{
+			StagingDir: *dnsRuntimeStagingDir, BindLivePath: *dnsRuntimeBindLivePath, DnsdistLivePath: *dnsRuntimeDnsdistLivePath,
+			BindDirectory: *dnsRuntimeBindDir, BindLogPath: filepath.Join(*dnsRuntimeBindDir, "named.log"),
+			BindPlainPort: *dnsRuntimeBindPlainPort, BindProxyPort: *dnsRuntimeBindProxyPort, BindStatsPort: *dnsRuntimeBindStatsPort, BindRNDCPort: *dnsRuntimeBindRNDCPort,
+			DnsdistListenAddress: *dnsRuntimeDnsdistListenAddr,
+		}); err != nil {
+			logger.Error("DNS runtime ops not registered", "err", err)
+			os.Exit(1)
+		}
+	} else {
+		logger.Info("DNS runtime compilation not configured -- -dns-runtime-bind-conf, -dns-runtime-dnsdist-conf, -dns-runtime-bind-dir, and -dns-runtime-dnsdist-listen-addr are all required together")
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	stop := make(chan os.Signal, 1)

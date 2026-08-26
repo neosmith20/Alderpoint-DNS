@@ -626,4 +626,21 @@ export const api = {
       body: JSON.stringify({ categories: categories ?? [] }),
     }),
   deleteBackup: (name: string) => req<{ status: string }>(`/api/backup/appliance/${encodeURIComponent(name)}`, { method: "DELETE" }),
+
+  dnsRuntimeStatus: (signal?: AbortSignal) => req<DNSRuntimeStatus>("/api/dns-runtime/status", undefined, signal),
+  applyDNSRuntime: () => req<DNSRuntimeApplyResult>("/api/dns-runtime/apply", { method: "POST" }),
 };
+
+export interface DNSRuntimeStatus {
+  bind_running: boolean;
+  dnsdist_running: boolean;
+}
+
+export interface DNSRuntimeApplyResult {
+  attempted: boolean;
+  promoted: boolean;
+  rolled_back: boolean;
+  stage?: string;
+  detail?: string;
+  error?: string;
+}

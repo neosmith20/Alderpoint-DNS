@@ -44,7 +44,7 @@ func (s *Server) handleCreateLocalDNS(w http.ResponseWriter, r *http.Request) {
 		ErrField(http.StatusBadRequest, "validation_error", err.Error(), "value").WriteJSON(w)
 		return
 	}
-	WriteJSON(w, http.StatusCreated, map[string]any{"status": "created", "record": rec})
+	WriteJSON(w, http.StatusCreated, map[string]any{"status": "created", "record": rec, "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
 }
 
 type updateLocalDNSRequest struct {
@@ -72,7 +72,7 @@ func (s *Server) handleUpdateLocalDNS(w http.ResponseWriter, r *http.Request) {
 		ErrField(http.StatusBadRequest, "validation_error", err.Error(), "value").WriteJSON(w)
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"status": "updated", "record": rec})
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "updated", "record": rec, "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
 }
 
 func (s *Server) handleDeleteLocalDNS(w http.ResponseWriter, r *http.Request) {
@@ -88,5 +88,5 @@ func (s *Server) handleDeleteLocalDNS(w http.ResponseWriter, r *http.Request) {
 		Err(http.StatusInternalServerError, "internal_error", "delete failed").WriteJSON(w)
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"status": "deleted"})
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "deleted", "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
 }

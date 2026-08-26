@@ -109,6 +109,20 @@ async function main() {
     const versionText = await page.$eval(".updates .card p", (el) => el.textContent).catch(() => "");
     check("Software Updates page shows the real current version", versionText.trim().length > 0 && versionText.trim() !== "…", versionText);
 
+    // --- DNS Runtime (internal/dnscompile, internal/hostagentd/ops_dnsruntime.go) ---
+    check("DNS Runtime nav item exists and is clickable", await clickNav("DNS Runtime"));
+    await page.waitForSelector("#dnsruntime-heading", { timeout: 3000 }).catch(() => {});
+    check("DNS Runtime page content rendered", (await page.$("#dnsruntime-heading")) !== null);
+    await page.waitForFunction(() => document.querySelector(".dnsruntime .row") !== null, { timeout: 3000 }).catch(() => {});
+    const runtimeRowText = await page.$eval(".dnsruntime .row", (el) => el.textContent).catch(() => "");
+    check("DNS Runtime page shows real BIND/dnsdist process status", /running|not running/.test(runtimeRowText), runtimeRowText);
+    await Promise.all([
+      page.waitForFunction(() => document.querySelector(".dnsruntime .success, .dnsruntime .error") !== null, { timeout: 8000 }),
+      page.click(".dnsruntime button"),
+    ]);
+    const applyResultText = await page.$eval(".dnsruntime .success, .dnsruntime .error", (el) => el.textContent).catch(() => "");
+    check("Apply Runtime Changes performs a real compile+promote and reports a real result", applyResultText.length > 0, applyResultText);
+
     const failed = results.filter((r) => !r.pass);
     console.log(`\n${results.length - failed.length}/${results.length} checks passed.`);
     if (failed.length > 0) process.exitCode = 1;
