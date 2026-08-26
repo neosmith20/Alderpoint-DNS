@@ -4,6 +4,14 @@
 
 **Roadmap:** `docs/v2/v2-roadmap.md`.
 
+**Implementation-language note (added 2026-08-25):** the management/control-plane implementation is
+migrating from Python/FastAPI to Go, with the frontend migrating from the hand-rolled `app/v2/ui`
+SPA to Svelte 5 + strict TypeScript — see `v2-roadmap.md`'s "Management/control-plane implementation
+language and frontend framework" section. This workflow matrix's target *semantics* are unchanged by
+that migration; `go/PARITY_MATRIX.md` (on `v2/go-control-plane-migration`) tracks the Go/Svelte
+implementation status of each row below route by route and must not be read as superseding the
+required semantics here — it is additive tracking, not a relaxed bar.
+
 **V1 baseline:** the exact accepted V1.1.1 release is the minimum operator-workflow baseline unless
 the owner explicitly approves replacing or removing a workflow.
 

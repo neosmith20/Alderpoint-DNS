@@ -1,7 +1,20 @@
 # Alderpoint DNS V2 — Go/Svelte Migration, Milestone 1
 
-Status: **Milestone 1 complete.** Real, tested, deployed. Scope and known
-gaps are stated plainly below rather than hidden.
+> **Reclassification (2026-08-25, per explicit governing instruction):** this document is retained
+> as accurate historical evidence of what it actually delivered, but its framing below overstates
+> that delivery. Blocklists + Local DNS is a **foundation slice** — it proves the architecture
+> (Go control-plane API shape, Svelte 5 + strict TS toolchain, auth/session/CSRF, staged-deploy
+> pattern, isolated preview pipeline) — **it is not a completed frontend migration milestone** and
+> must not be cited as one. The authoritative, current tracking document for the full
+> Go/Svelte management-application rewrite is `go/PARITY_MATRIX.md`; the current status and hard
+> release gate are recorded in `docs/v2/v2-roadmap.md`'s "Management/control-plane implementation
+> language and frontend framework" section. Every claim below (tests, build proof, performance
+> measurements, deployment procedure) remains factually accurate for the two pages it covers and is
+> unchanged.
+
+Status: **Milestone 1 complete for its actual scope (Blocklists + Local DNS foundation slice).**
+Real, tested, deployed. Scope and known gaps are stated plainly below rather than hidden. This is
+not frontend parity — see the reclassification note above.
 
 ## Identity / safety
 

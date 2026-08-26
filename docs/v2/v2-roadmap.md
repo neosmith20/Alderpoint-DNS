@@ -6,6 +6,42 @@
 workflow-parity matrix. No other document may claim V1 parity unless that contract says the
 workflow has passed.
 
+## Management/control-plane implementation language and frontend framework (added 2026-08-25)
+
+Decided by an isolated architecture-stop bake-off (`spike/go-rust-bakeoff-20260825` @ `61010a8`,
+`bakeoff/report/REPORT.md`) comparing the current Python/FastAPI control plane against Go and Rust
+contenders on the same vertical slice, fixtures, and API contract:
+
+- **Go is the selected management/control-plane implementation language**, replacing Python/FastAPI
+  for this layer. Rust was competitive (~1.4-2x faster) but pulls in a C toolchain requirement and
+  far more transitive dependencies for a marginal gain the bake-off's own "close enough +
+  substantially simpler to maintain" rule didn't justify.
+- **Svelte 5 with strict TypeScript is the selected frontend**, replacing the hand-rolled
+  `app/v2/ui/app.js` SPA, on the same shared data-grid/navigation/timestamp mechanics this roadmap
+  already requires.
+- The DNS hot path and Locked Architecture below are unchanged by this decision — only the
+  management/control-plane layer moves.
+
+**Current state, corrected (2026-08-25):** `v2/go-control-plane-migration` @ `a086828` has
+implemented **Blocklists and Local DNS only** (auth/session/CSRF foundation, staged-deploy pattern,
+isolated `:10443` owner-preview pipeline, amd64/arm64 build proof). This is a **foundation slice
+proving the architecture is sound — it is explicitly not completed frontend parity** and must never
+be described as such. The authoritative, current tracking document for what remains is
+`go/PARITY_MATRIX.md` in that worktree/branch: a route-by-route matrix covering all ~20 V2
+navigation pages and 116 Python API routes, cross-referenced against this roadmap's workstreams and
+the workflow-parity contract below.
+
+**Hard release gate:** complete Go/Svelte management parity — every row of `go/PARITY_MATRIX.md`
+at `done (owner-accepted)`, full workflow/browser/security/performance/migration/rollback testing
+passed, and Alex's explicit acceptance of the deployed application — is a required precondition,
+governed by the same "Final Product Experience" and "Hard release rule" sections below (those
+sections' requirements apply to the Go/Svelte application, not a separate lower bar). **The Python
+management application (`app/v2/webapp.py` + `app/v2/ui/*`) cannot be retired, and the Go/Svelte
+application cannot be promoted onto the normal management port, until that gate passes and Alex has
+explicitly approved promotion.** No RC, tag, public package, or release may be created before that
+gate passes. `:10443` remains an isolated development/owner-testing port only for the duration of
+this migration, not a second permanent management surface.
+
 **Historical inputs:** `docs/v2/roadmap-reference/*`, `docs/v2/architecture-map.md`,
 `docs/v2/rc-ready-gate3.md`, `docs/v2/v1-parity-audit.md`, and `docs/progress.md` are retained as
 evidence and project history. Where they conflict with this roadmap or the workflow-parity
