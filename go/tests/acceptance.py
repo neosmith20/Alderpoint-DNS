@@ -154,6 +154,12 @@ def main():
     })
     check("create local-dns record rejects an invalid IP", bad_rec.get("error") == "validation_error", bad_rec)
 
+    # --- dashboard summary: real counts, not fabricated ---
+    summary = curl_json("GET", f"{B}/api/dashboard/summary", cookie=CJ)
+    check("dashboard summary reflects the blocklist just deleted above", summary.get("blocklists", {}).get("total") == 0, summary)
+    check("dashboard summary reflects the local-dns record just created", summary.get("local_dns", {}).get("total") == 1, summary)
+    check("dashboard summary reports enabled local-dns count", summary.get("local_dns", {}).get("enabled") == 1, summary)
+
     edit = curl_json("PATCH", f"{B}/api/local-dns/{rec_id}", cookie=CJ, csrf=csrf, body={"value": "10.0.0.10"})
     check("edit local-dns record", edit.get("record", {}).get("value") == "10.0.0.10", edit)
 

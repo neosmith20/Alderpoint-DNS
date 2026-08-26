@@ -47,6 +47,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/session/revoke-others", requireAuth(s.handleRevokeOtherSessions))
 	mux.HandleFunc("POST /api/session/password", requireAuth(s.handleChangePassword))
 	mux.HandleFunc("GET /api/system/status", requireAuth(s.handleSystemStatus))
+	mux.HandleFunc("GET /api/dashboard/summary", requireAuth(s.handleDashboardSummary))
 
 	mux.HandleFunc("GET /api/blocklists", requireAuth(s.handleListBlocklists))
 	mux.HandleFunc("POST /api/blocklists", requireAuth(s.handleCreateBlocklist))

@@ -56,7 +56,7 @@ target, not the defect — literal bug-for-bug parity is not the goal.
 
 | Page | Route | Python API | Controls | Tables | Charts/live | Polling | States | Go API | Svelte | Browser test | Owner accepted |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| Dashboard | `dashboard` | `GET /api/health`, `/api/system/status`, `/api/replication/health`, `/api/discovery/status`, `/api/analytics/recent`, `/api/clients`, `/api/discovery/observed-clients`, `/api/upstreams`, `/api/analytics/timeseries`, `/api/analytics/live-activity`, `/api/analytics/{top-domains,top-blocked-domains}` | Refresh; range select (Live/1h/24h/7d); top-domains mode select; live pause/resume; **card add/remove/reorder + persistence (not yet in Python V2 either — new V2 requirement)** | Upstreams mini-table, Top-domains table, client mini-list | DNS Activity SVG time-series (queries + blocked), live 1s mode | `setInterval` 1000ms in live mode only, cleared on route leave | degraded banner, live status states (Connecting/Connected/Paused/Reconnecting/Degraded), empty states | not started | not started | not started | not started |
+| Dashboard | `dashboard` | `GET /api/health`, `/api/system/status`, `/api/replication/health`, `/api/discovery/status`, `/api/analytics/recent`, `/api/clients`, `/api/discovery/observed-clients`, `/api/upstreams`, `/api/analytics/timeseries`, `/api/analytics/live-activity`, `/api/analytics/{top-domains,top-blocked-domains}` | Refresh; range select (Live/1h/24h/7d); top-domains mode select; live pause/resume; **card add/remove/reorder + persistence (not yet in Python V2 either — new V2 requirement)** | Upstreams mini-table, Top-domains table, client mini-list | DNS Activity SVG time-series (queries + blocked), live 1s mode | `setInterval` 1000ms in live mode only, cleared on route leave | degraded banner, live status states (Connecting/Connected/Paused/Reconnecting/Degraded), empty states | **in progress** — new `GET /api/dashboard/summary` (Go-native only: blocklists + local-dns counts, no Python compatibility boundary). Analytics/upstreams/clients/live-activity endpoints above are genuinely **not started** and require a deliberate cross-service compatibility-boundary design (Python owns that data in a separate SQLite/Parquet store; the two backends have independent, non-interchangeable session stores despite sharing a cookie name, so a naive cookie-forward proxy won't authenticate — needs its own design pass, not a rushed proxy) | **in progress** — `DashboardView.svelte` shows only the real Go-owned cards (Blocklists, Local DNS) and explicitly discloses its own incomplete scope in-page rather than implying full parity; no charts, no live activity, no card customization yet | done for what's built (Chromium: lands on Dashboard by default, cards render real counts, scope-disclosure text asserted present) | not started |
 
 ## DNS group
 
@@ -122,6 +122,31 @@ target, not the defect — literal bug-for-bug parity is not the goal.
    decisions in the roadmap, not yet built in Python V2 either. Build against the roadmap's stated
    semantic classes (allow/block/regex/rewrite/precedence/bulk/validate/import), not against a
    Python implementation that doesn't exist yet.
+
+## Sequencing note: the Python compatibility-boundary design gate
+
+Nearly every remaining page beyond what's built (Query Log, Clients, Clients & Access, DNS
+Settings/Upstreams, Cache, Filters, Encryption, Import, Backup/Restore, Replication, Statistics,
+System Status's fuller scope, Network Configuration, Notifications, Software Updates) depends on
+data that currently lives only in Python's separate stores (policy `control.db` tables the Go
+schema doesn't have yet, the analytics Parquet/DuckDB/aggregate-SQLite pipeline, discovery). The
+governing task's Phase 4 explicitly pre-authorizes a tracked, temporary Go<->Python compatibility
+boundary for exactly this. Two real technical facts constrain how that boundary can work safely:
+
+1. **The two backends' sessions are not interchangeable**, despite sharing a cookie name
+   (`alderpointdns_v2_session`, deliberately matched for parity) -- each has its own independent
+   session table. A naive "forward the incoming cookie to Python" proxy will not authenticate.
+2. **"Do not duplicate authoritative state"** (governing task, Phase 4) rules out silently copying
+   Python's policy/analytics data into Go's own SQLite -- the boundary has to be a read path
+   (proxy or direct read-only access to Python's existing stores), not a second copy.
+
+Designing that boundary correctly (service-to-service auth, or scoped read-only access to Python's
+SQLite/Parquet files under WAL) is real work deserving its own careful pass, not something to
+rush inside an unrelated page's slice. Per the governing task's explicit allowance to reorder for a
+documented technical dependency: **Dashboard, Query Log, Clients, and DNS Settings/Upstreams are
+each blocked on this boundary for their full scope** and were intentionally built only to the
+extent they don't need it (Dashboard above). The compatibility-boundary design is the next
+dedicated piece of work, ahead of resuming those pages' remaining scope.
 
 ## Non-goals carried over from Milestone 1 (still correct, restated here)
 

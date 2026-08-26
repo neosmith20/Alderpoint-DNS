@@ -113,6 +113,12 @@ export const api = {
   revokeOtherSessions: () => req<{ status: string; revoked_count: number }>("/api/session/revoke-others", { method: "POST" }),
   systemStatus: () =>
     req<{ version: string; uptime_seconds: number; appliance_name: string; appliance_timezone: string }>("/api/system/status"),
+  dashboardSummary: (signal?: AbortSignal) =>
+    req<{
+      appliance_name: string;
+      blocklists: { total: number; enabled: number; attention_required: number; total_rules: number };
+      local_dns: { total: number; enabled: number };
+    }>("/api/dashboard/summary", undefined, signal),
 
   listBlocklists: (signal?: AbortSignal) => req<BlocklistsResponse>("/api/blocklists", undefined, signal),
   createBlocklist: (name: string, url: string, category: string) =>

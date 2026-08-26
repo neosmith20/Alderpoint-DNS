@@ -23,7 +23,12 @@ export interface NavGroup {
   items: NavItem[];
 }
 
-export const TOP_LEVEL: NavItem = { id: "dashboard", label: "Dashboard", icon: "dashboard" };
+export const TOP_LEVEL: NavItem = {
+  id: "dashboard",
+  label: "Dashboard",
+  icon: "dashboard",
+  load: () => import("./lib/DashboardView.svelte") as unknown as Promise<{ default: Component }>,
+};
 
 export const NAV_GROUPS: NavGroup[] = [
   {

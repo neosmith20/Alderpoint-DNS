@@ -68,10 +68,19 @@ async function main() {
     ]);
     check("login reaches the app shell", true);
 
-    // --- Lands on the first implemented route, not a blank/coming-soon page ---
+    // --- Lands on the URL-synced default route with real rendered content ---
     await page.waitForFunction(() => location.pathname.startsWith("/ui/"), { timeout: 3000 });
     let path = new URL(page.url()).pathname;
-    check("post-login route is a real page, not /ui/dashboard placeholder", path !== "/ui/dashboard", path);
+    check("post-login URL is synced to a /ui/ route (not left at /)", path.startsWith("/ui/"), path);
+    check("post-login landing route renders a real heading, not a coming-soon panel", (await page.$("h2")) !== null);
+
+    // --- Dashboard: real (not fake) summary cards ---
+    check("landed on Dashboard by default", path === "/ui/dashboard", path);
+    await page.waitForSelector(".card .big", { timeout: 3000 }).catch(() => {});
+    const cardCount = (await page.$$(".card")).length;
+    check("Dashboard renders summary cards", cardCount >= 2, `found ${cardCount}`);
+    const scopeNote = await page.$eval(".scope-note", (el) => el.textContent).catch(() => "");
+    check("Dashboard discloses its own incomplete scope rather than implying full parity", scopeNote.includes("not migrated yet"), scopeNote);
 
     // --- Nav: Local DNS (click by visible text; XPath is gone from modern Puppeteer) ---
     const navButtons = await page.$$(".sidebar .item");
