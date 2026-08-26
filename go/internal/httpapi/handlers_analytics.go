@@ -308,6 +308,32 @@ func (s *Server) handleAnalyticsQueryLog(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+// handleStatisticsExport mirrors GET /api/statistics/export: a
+// downloadable JSON dump of the aggregates store's own two tables.
+// Deliberately does not include raw per-query history (same as Python's
+// own export) -- that's already exportable via the Query Log's filters.
+// Deliberately read-only: there is no Go-native "Clear" here (see
+// PARITY_MATRIX.md's Statistics row) -- clearing would mean writing to
+// Python's live, actively-written aggregates.db/Parquet tree through a
+// mount this control plane deliberately only ever holds read-only.
+func (s *Server) handleStatisticsExport(w http.ResponseWriter, r *http.Request) {
+	if s.Analytics == nil {
+		Err(http.StatusServiceUnavailable, "unavailable", analyticsUnavailable).WriteJSON(w)
+		return
+	}
+	buckets, dims, err := s.Analytics.ExportAll(r.Context())
+	if err != nil {
+		Err(http.StatusInternalServerError, "internal_error", err.Error()).WriteJSON(w)
+		return
+	}
+	w.Header().Set("Content-Disposition", `attachment; filename="alderpointdns-go-statistics-export.json"`)
+	WriteJSON(w, http.StatusOK, map[string]any{
+		"format_version": 1, "generated_at": time.Now().UTC().Format(time.RFC3339),
+		"aggregate_time_buckets": buckets, "aggregate_dimension_counts": dims,
+		"raw_query_history_included": false,
+	})
+}
+
 // rowSearchText concatenates a row's string fields for the optional
 // post-scan "search" filter -- matching Python's own `" ".join(str(v) for
 // v in row)` behavior applied to every column, not just a chosen few.

@@ -192,6 +192,63 @@ func FillGaps(rows []Bucket, start, end float64, granularity string) []Bucket {
 	return out
 }
 
+// ExportRow is one row of ExportAll's output -- every column of
+// time_buckets or dimension_counts, named, matching
+// app/v2/statistics_control.py's export_statistics shape (a full,
+// unfiltered dump of both tables) closely enough for the same "download
+// everything the aggregate store has" purpose. Deliberately a generic
+// map, not a fixed struct: time_buckets and dimension_counts have
+// different columns, and this is a one-off export path, not a query hot
+// path worth a typed schema for.
+type ExportRow = map[string]any
+
+// ExportAll dumps every row of time_buckets and dimension_counts,
+// unfiltered -- the Go-native equivalent of Python's statistics export
+// (GET /api/statistics/export). Raw per-query history is deliberately
+// NOT included here either, same as Python's own export: it's already
+// exportable via the Query Log's own filters (internal/rawquerylog), and
+// including it here would make this export's size unbounded.
+func (r *Reader) ExportAll(ctx context.Context) (buckets []ExportRow, dims []ExportRow, err error) {
+	buckets, err = queryAllRows(ctx, r.db, `SELECT * FROM time_buckets ORDER BY bucket_start`)
+	if err != nil {
+		return nil, nil, err
+	}
+	dims, err = queryAllRows(ctx, r.db, `SELECT * FROM dimension_counts ORDER BY bucket_start`)
+	if err != nil {
+		return nil, nil, err
+	}
+	return buckets, dims, nil
+}
+
+func queryAllRows(ctx context.Context, db *sql.DB, query string) ([]ExportRow, error) {
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	out := []ExportRow{}
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return nil, err
+		}
+		row := make(ExportRow, len(cols))
+		for i, c := range cols {
+			row[c] = vals[i]
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
 // FillLiveGaps is FillGaps's 1-second-bucket equivalent for live_buckets,
 // matching analytics_live_activity's inline fill loop (every whole
 // second in range gets a bucket, not just every step-th one).

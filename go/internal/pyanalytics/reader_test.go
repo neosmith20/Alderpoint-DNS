@@ -61,6 +61,30 @@ func newTestReader(t *testing.T) *Reader {
 	return r
 }
 
+func TestExportAllReturnsEveryRowOfBothTables(t *testing.T) {
+	r := newTestReader(t)
+	buckets, dims, err := r.ExportAll(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buckets) != 2 {
+		t.Fatalf("expected 2 time_buckets rows, got %d: %+v", len(buckets), buckets)
+	}
+	if len(dims) != 3 {
+		t.Fatalf("expected 3 dimension_counts rows, got %d: %+v", len(dims), dims)
+	}
+	// Spot-check real column values came through, not just row counts.
+	found := false
+	for _, b := range buckets {
+		if b["bucket_start"] == int64(60) && b["total_queries"] == int64(10) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected to find the bucket_start=60 row with total_queries=10, got %+v", buckets)
+	}
+}
+
 func TestPingSucceedsAgainstARealSchema(t *testing.T) {
 	r := newTestReader(t)
 	if err := r.Ping(context.Background()); err != nil {

@@ -622,6 +622,21 @@ async function main() {
     const dotCheckedAfterReload = await page.$eval(".transports fieldset:nth-of-type(1) input[type=checkbox]", (el) => el.checked);
     check("DNS Transport settings actually persisted server-side (survive a full page reload)", dotPortAfterReload === "8853" && dotCheckedAfterReload === true, `port=${dotPortAfterReload} checked=${dotCheckedAfterReload}`);
 
+    // --- Nav: Statistics (internal/pyanalytics.ExportAll) ---
+    let clickedStatistics = false;
+    for (const btn of await page.$$(".sidebar .item")) {
+      if ((await btn.evaluate((el) => el.textContent?.trim())) === "Statistics") {
+        await btn.click();
+        clickedStatistics = true;
+        break;
+      }
+    }
+    check("Statistics nav item exists and is clickable", clickedStatistics);
+    await page.waitForSelector("#statistics-heading", { timeout: 3000 }).catch(() => {});
+    check("Statistics page content rendered", (await page.$("#statistics-heading")) !== null);
+    const exportHref = await page.$eval(".export-link", (el) => el.getAttribute("href")).catch(() => null);
+    check("Statistics export link points at the real export endpoint", exportHref === "/api/statistics/export", exportHref);
+
     // --- Nav: Backup & Restore ---
     let clickedBackup = false;
     for (const btn of await page.$$(".sidebar .item")) {
@@ -702,6 +717,7 @@ async function main() {
       { path: "/ui/filtering", heading: "#filtering-heading" },
       { path: "/ui/encryption", heading: "#encryption-heading" },
       { path: "/ui/backup", heading: "#backup-heading" },
+      { path: "/ui/statistics", heading: "#statistics-heading" },
       { path: "/ui/administration", heading: "#admin-heading" },
     ];
     for (const theme of ["light", "dark"]) {

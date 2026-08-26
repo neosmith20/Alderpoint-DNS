@@ -481,6 +481,16 @@ def main():
         tls_status_degraded = curl_json("GET", f"{B}/api/tls/status", cookie=CJ)
         check("tls status honestly reports inactive when -tls-cert-status-path isn't configured", tls_status_degraded.get("active") is False, tls_status_degraded)
 
+    # --- Statistics export (internal/pyanalytics.ExportAll) ---
+    stats_status = curl_status("GET", f"{B}/api/statistics/export", cookie=CJ)
+    if stats_status == "200":
+        stats_export = curl_json("GET", f"{B}/api/statistics/export", cookie=CJ)
+        check("statistics export returns the real aggregate table shape",
+              "aggregate_time_buckets" in stats_export and "aggregate_dimension_counts" in stats_export and stats_export.get("raw_query_history_included") is False,
+              {k: stats_export.get(k) for k in ("format_version", "raw_query_history_included")} | {"bucket_count": len(stats_export.get("aggregate_time_buckets", []))})
+    else:
+        check("statistics export honestly reports unavailable when analytics isn't configured", stats_status == "503", stats_status)
+
     print(f"\n{len([r for r in results if r[1] == PASS])}/{len(results)} checks passed.")
 
 
