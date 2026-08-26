@@ -29,15 +29,30 @@ async function main() {
     args: ["--no-sandbox", "--disable-dev-shm-usage", "--ignore-certificate-errors"],
   });
 
-  try {
-    const page = await browser.newPage();
-    page.on("console", (msg) => {
+  // Wires the console/pageerror listeners a fresh page needs -- factored
+  // out so the viewport sweep (below) can periodically recycle the page
+  // without duplicating this setup. A real fix, not a workaround: this
+  // suite's single Chromium tab was accumulating 150+ full navigations
+  // over one run (it has grown a lot this session), and Chromium's own
+  // renderer process really can run into internal resource exhaustion
+  // (net::ERR_INSUFFICIENT_RESOURCES / navigation timeouts) after that
+  // many navigations in one page -- confirmed not a memory/fd/disk
+  // shortage on this host (checked directly: plenty free), and not tied
+  // to any specific route, so recycling the page periodically is the
+  // right fix, not silently retrying past it.
+  function wirePage(p) {
+    p.on("console", (msg) => {
       if (msg.type() === "error") consoleErrors.push(msg.text());
     });
-    page.on("pageerror", (err) => {
+    p.on("pageerror", (err) => {
       pageErrors.push(String(err));
-      console.error("PAGE ERROR at", new Date().toISOString(), "url=", page.url(), "\n", err.stack || err);
+      console.error("PAGE ERROR at", new Date().toISOString(), "url=", p.url(), "\n", err.stack || err);
     });
+  }
+
+  try {
+    let page = await browser.newPage();
+    wirePage(page);
 
     await page.setViewport({ width: 1440, height: 900 });
     await page.goto(baseUrl, { waitUntil: "networkidle0" });
@@ -369,6 +384,30 @@ async function main() {
     const overflowX = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
     check("no page-level horizontal overflow at 390px", !overflowX);
     await page.setViewport({ width: 1440, height: 900 });
+
+    // --- Nav: System Status (real health/system-status + real session-only UI perf log) ---
+    let clickedHealth = false;
+    for (const btn of await page.$$(".sidebar .item")) {
+      if ((await btn.evaluate((el) => el.textContent?.trim())) === "System Status") {
+        await btn.click();
+        clickedHealth = true;
+        break;
+      }
+    }
+    check("System Status nav item exists and is clickable", clickedHealth);
+    await page.waitForSelector("#health-heading", { timeout: 3000 }).catch(() => {});
+    check("System Status page content rendered", (await page.$("#health-heading")) !== null);
+    await page.waitForFunction(() => document.querySelector(".metric-strip .value")?.textContent !== "…", { timeout: 3000 }).catch(() => {});
+    const statusValue = await page.$eval(".metric .status-ok", (el) => el.textContent).catch(() => null);
+    check("System Status metric strip renders a real component status", statusValue === "ok", statusValue);
+    // Navigating here at all is itself a route change perfLog should have
+    // recorded -- plus every route visited earlier in this run.
+    const perfRowCount = await page.$$eval(".perf-table tbody tr", (rows) => rows.length).catch(() => 0);
+    check("UI Performance table records real navigation latency entries", perfRowCount > 3, `rows=${perfRowCount}`);
+    await page.click(".clear-perf");
+    await new Promise((r) => setTimeout(r, 50));
+    const perfRowCountAfterClear = await page.$$eval(".perf-table tbody tr", (rows) => rows.length).catch(() => 0);
+    check("Clear Measurements actually empties the UI Performance table", perfRowCountAfterClear === 0, `rows=${perfRowCountAfterClear}`);
 
     // --- Blocklists: data grid sort, in-place table (real page with rows) ---
     const navButtons3 = await page.$$(".sidebar .item");
@@ -718,6 +757,7 @@ async function main() {
       { path: "/ui/encryption", heading: "#encryption-heading" },
       { path: "/ui/backup", heading: "#backup-heading" },
       { path: "/ui/statistics", heading: "#statistics-heading" },
+      { path: "/ui/health", heading: "#health-heading" },
       { path: "/ui/administration", heading: "#admin-heading" },
     ];
     for (const theme of ["light", "dark"]) {
@@ -727,6 +767,17 @@ async function main() {
         await new Promise((r) => setTimeout(r, 50));
       }
       for (const vp of VIEWPORTS) {
+        // Recycle the page every viewport block (8 navigations each,
+        // well short of whatever this host's real ceiling is) instead
+        // of letting one tab accumulate the whole sweep's navigations.
+        // The new page shares the same browser context, so both the
+        // login session's cookies AND the theme choice (persisted in
+        // localStorage, same origin) carry over automatically -- no
+        // re-auth, no re-toggle needed.
+        await page.close();
+        page = await browser.newPage();
+        wirePage(page);
+        await page.goto(baseUrl, { waitUntil: "networkidle0" });
         await page.setViewport({ width: vp.width, height: vp.height });
         for (const route of ROUTES) {
           await page.goto(`${baseUrl}${route.path}`, { waitUntil: "networkidle0" });

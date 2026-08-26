@@ -321,7 +321,10 @@ async function req<T>(path: string, init?: RequestInit, signal?: AbortSignal): P
 }
 
 export const api = {
-  health: () => req<{ status: string; version: string; uptime_seconds: number }>("/api/health"),
+  health: () =>
+    req<{ status: string; version: string; uptime_seconds: number; components: Record<string, { status: string; schema_version?: number; detail?: string }> }>(
+      "/api/health",
+    ),
   setupStatus: () => req<{ setup_required: boolean }>("/api/setup/status"),
   setup: (body: {
     username: string;

@@ -7,6 +7,8 @@
   // (see nav.ts) show a plain "not yet available" panel: an honest,
   // non-interactive state, not a fake working page.
   import { findItem } from "../nav";
+  import { router } from "../router.svelte";
+  import { perfLog } from "../perfLog.svelte";
   import Icon from "./Icon.svelte";
   import type { Component } from "svelte";
 
@@ -23,7 +25,12 @@
     loadError = "";
     showSkeleton = false;
 
-    if (!item?.load) return; // no component to load -- "coming soon" branch below
+    if (!item?.load) {
+      // Still a real, final render state (the "not yet available" panel)
+      // worth timing -- it's what the operator actually sees land.
+      perfLog.record(id, performance.now() - router.navStartedAt);
+      return;
+    }
 
     let cancelled = false;
     const skeletonTimer = setTimeout(() => {
@@ -35,6 +42,7 @@
       .then((mod) => {
         if (cancelled) return;
         comp = mod.default;
+        perfLog.record(id, performance.now() - router.navStartedAt);
       })
       .catch((err) => {
         if (cancelled) return;

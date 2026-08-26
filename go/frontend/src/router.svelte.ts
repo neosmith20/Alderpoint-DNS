@@ -18,6 +18,11 @@ function routeIdFromPath(path: string): string {
 class Router {
   current = $state(routeIdFromPath(location.pathname));
   private controller: AbortController | undefined;
+  /** performance.now() at the moment the current route change was
+   * requested -- RouteLoader reads this to record real "navigate ->
+   * component ready" latency in perfLog (System Status's UI Performance
+   * table). Not exported further than that one read site. */
+  navStartedAt = performance.now();
 
   /** AbortSignal for the currently-active route; a page's data loads should
    * pass this to fetch/api calls so navigating away cancels them. */
@@ -37,6 +42,7 @@ class Router {
   private setRoute(id: string): void {
     this.controller?.abort();
     this.controller = new AbortController();
+    this.navStartedAt = performance.now();
     this.current = id;
   }
 
