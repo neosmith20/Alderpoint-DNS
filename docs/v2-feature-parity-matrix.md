@@ -56,7 +56,7 @@ The current-status column describes private engineering evidence. Private checkp
 | amd64 + arm64 packaging | Partial/history varies | Static Go builds, install/upgrade/rollback proof | Static CGO-free builds proven in foundation; full appliance packaging open | MANDATORY V2 |
 | Complete owner UI acceptance | N/A | Every route and workflow tested on live preview | In progress; incomplete application cannot pass | MANDATORY V2 |
 | DHCP server | Intentionally absent | **DO NOT IMPLEMENT** | Out of scope | OUT OF SCOPE |
-| Router/firewall/NAT | Absent | **DO NOT IMPLEMENT** | Out of scope | OUT OF SCOPE |
+| Firewall/NAT/general gateway functions | Absent | **DO NOT IMPLEMENT** | Out of scope | OUT OF SCOPE |
 
 ## Current private checkpoint
 

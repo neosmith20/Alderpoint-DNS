@@ -69,7 +69,7 @@ V2 will not be published until all agreed capabilities and workflows are complet
 - sub-50 ms ordinary warm management interactions/API targets and preserved sub-10 ms hot DNS p99 target
 - fresh installation, upgrade, recovery, amd64/arm64 packaging, security review, and owner acceptance
 
-DHCP, router, firewall, and NAT functionality remain intentionally out of scope.
+DHCP, firewall, NAT, and general network-gateway functionality remain intentionally out of scope.
 
 ## Delivery governance
 
@@ -89,6 +89,6 @@ To control engineering cost and avoid repeated work:
 ## Full planning documents
 
 - [V2 Master Architecture and Delivery Plan](docs/v2-architecture-plan.md)
-- [V2 Mandatory Feature / Parity Matrix](docs/v2-adguard-parity-matrix.md)
+- [V2 Mandatory Feature / Parity Matrix](docs/v2-feature-parity-matrix.md)
 
 These documents remain the public architecture, implementation-status, and release-governance record for V2.

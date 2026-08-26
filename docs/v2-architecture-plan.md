@@ -38,16 +38,15 @@ The existing two-page Go foundation is explicitly **not** frontend parity. Disab
 
 Alderpoint DNS V2 is a **DNS-only appliance**.
 
-It exists to provide a faster, more secure, easier-to-use DNS filtering and management platform that offers the useful DNS capabilities expected from AdGuard Home while improving architecture, failure isolation, deployment safety, analytics storage, performance, and administration.
+It exists to provide a faster, more secure, easier-to-use DNS filtering and management platform with strong architecture, failure isolation, deployment safety, analytics storage, performance, and administration.
 
 ### Explicitly out of scope
 
 - **DHCP server functionality** — intentionally excluded.
-- Router functions.
 - Firewall/NAT functions.
 - General network gateway functionality.
 
-DHCP belongs on a router/router OS and must not be added to Alderpoint DNS simply for checkbox parity with AdGuard Home.
+DHCP is outside this DNS appliance's product boundary and must not be added merely for checkbox parity.
 
 ---
 
@@ -238,9 +237,7 @@ cache:
 DNS availability comes first at boot: dnsdist/BIND become operational and clients can resolve
 immediately; any cache recovery/prewarm work happens in the background afterward, never as a
 startup gate. Failure of persistent cache/warm-state storage must degrade only to a cold cache —
-never to a DNS outage, startup failure, or failure propagating into control.db/analytics. See
-`docs/v2-adguard-parity-matrix.md` for why this is an Alderpoint-specific enhancement, not an
-AdGuard-parity requirement.
+never to a DNS outage, startup failure, or failure propagating into control.db/analytics. See `docs/v2-feature-parity-matrix.md` for the associated Alderpoint-specific resilience gate.
 
 ---
 
@@ -429,7 +426,7 @@ V2 is not allowed to regress working V1 features, including:
 - backup/restore
 - encrypted backups
 - replication
-- AdGuard/Pi-hole migration
+- migration from AdGuard Home and Pi-hole
 - native import/export
 - notifications
 - audit logging
@@ -627,11 +624,11 @@ Alderpoint DNS V2 succeeds when it is:
 - overly secure by default
 - easy to administer
 - resilient when analytics/UI/update components fail
-- at least feature-parity with the agreed useful AdGuard DNS feature set
+- complete coverage of the agreed mandatory DNS-appliance capability set
 - architecturally cleaner than V1
 - straightforward to upgrade from V1
 - easy to recover
 - understandable by an operator without knowing internal database schemas
 - delivered through a polished, fast, complete Svelte interface with no placeholder routes, dead controls, timestamp ambiguity, container-network leakage, or unexplained waiting
 
-The product is not trying to clone AdGuard's implementation. It is trying to deliver the useful DNS-appliance capability set with stronger failure isolation, safer deployment, better storage behavior, and an Alderpoint-native UI/architecture.
+The product is designed to deliver the mandatory DNS-appliance capability set with strong failure isolation, safe deployment, bounded storage, high performance, and an Alderpoint-native UI and architecture.
