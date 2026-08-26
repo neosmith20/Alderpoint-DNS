@@ -1,18 +1,20 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, ApiError, type UpstreamProfile, type UpstreamEndpointInput } from "../api";
+  import { api, ApiError, type UpstreamProfile, type UpstreamEndpointInput, type DNSRuntimeApplyResult } from "../api";
   import { StaleGuard } from "../staleGuard";
   import { router } from "../router.svelte";
   import DataGrid from "./DataGrid.svelte";
+  import DnsRuntimeBadge from "./DnsRuntimeBadge.svelte";
   import type { Column } from "./datagrid";
 
   // Native Go implementation (own schema/CRUD, not a Python proxy) --
-  // see internal/upstreams's doc comment for exactly what's preserved
+  // see internal/upstreams's doc comment for what's preserved
   // (transport/strategy/endpoint validation, the last-enabled-managed-
-  // upstream confirm dance, reorder) and what's deliberately not yet
-  // wired (no compiled dnsdist-config generation -- every mutation's
-  // `runtime.promoted` is unconditionally true because there is no
-  // compile step yet, disclosed here and in PARITY_MATRIX.md).
+  // upstream confirm dance, reorder). Every mutation now compiles and
+  // auto-applies through the real DNS runtime (internal/dnscompile,
+  // internal/dnsruntime) -- see the dns_runtime feedback below each
+  // action, matching every other resolver-affecting page's own
+  // auto-apply contract.
 
   let profiles = $state<UpstreamProfile[]>([]);
   let nativeRecursionActive = $state(false);
@@ -31,6 +33,7 @@
   let formEndpoints = $state<UpstreamEndpointInput[]>([{ address: "", priority: 0, weight: 1, tls_hostname: "", doh_path: "" }]);
   let formBusy = $state(false);
   let formError = $state("");
+  let dnsRuntimeResult = $state<DNSRuntimeApplyResult | null>(null);
 
   async function refresh(): Promise<void> {
     const token = guard.start();
@@ -95,11 +98,8 @@
         })),
     };
     try {
-      if (editingId) {
-        await api.updateUpstream(editingId, body);
-      } else {
-        await api.createUpstream(body);
-      }
+      const resp = editingId ? await api.updateUpstream(editingId, body) : await api.createUpstream(body);
+      dnsRuntimeResult = resp.dns_runtime ?? null;
       resetForm();
       await refresh();
     } catch (err) {
@@ -119,13 +119,15 @@
   }
 
   async function onEnable(p: UpstreamProfile) {
-    await withPending(p.upstream_profile_id, () => api.enableUpstream(p.upstream_profile_id));
+    const resp = await withPending(p.upstream_profile_id, () => api.enableUpstream(p.upstream_profile_id));
+    dnsRuntimeResult = resp.dns_runtime ?? null;
     await refresh();
   }
 
   async function onDisable(p: UpstreamProfile, confirmed = false) {
     try {
-      await withPending(p.upstream_profile_id, () => api.disableUpstream(p.upstream_profile_id, confirmed));
+      const resp = await withPending(p.upstream_profile_id, () => api.disableUpstream(p.upstream_profile_id, confirmed));
+      dnsRuntimeResult = resp.dns_runtime ?? null;
       confirmLastFor = null;
       await refresh();
     } catch (err) {
@@ -140,7 +142,8 @@
 
   async function onDelete(p: UpstreamProfile, confirmed = false) {
     try {
-      await withPending(p.upstream_profile_id, () => api.deleteUpstream(p.upstream_profile_id, confirmed));
+      const resp = await withPending(p.upstream_profile_id, () => api.deleteUpstream(p.upstream_profile_id, confirmed));
+      dnsRuntimeResult = resp.dns_runtime ?? null;
       confirmLastFor = null;
       await refresh();
     } catch (err) {
@@ -159,7 +162,8 @@
     const j = i + dir;
     if (j < 0 || j >= ids.length) return;
     [ids[i], ids[j]] = [ids[j], ids[i]];
-    await api.reorderUpstreams(ids);
+    const resp = await api.reorderUpstreams(ids);
+    dnsRuntimeResult = resp.dns_runtime ?? null;
     await refresh();
   }
 
@@ -184,6 +188,7 @@
     </p>
   {/if}
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
+  <DnsRuntimeBadge result={dnsRuntimeResult} />
 
   <form onsubmit={submitForm} class="profile-form">
     <h3>{editingId ? `Edit "${editingId}"` : "Add upstream profile"}</h3>

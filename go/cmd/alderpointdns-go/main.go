@@ -325,6 +325,21 @@ func runWeb(args []string) {
 	} else if *dnsRuntimeDnsdistAddr != "" || *dnsRuntimeBindProxyAddr != "" {
 		logger.Warn("DNS runtime compiler not wired: -dns-runtime-dnsdist-addr, -dns-runtime-bind-proxy-addr, and -hostagent-socket must all be set together")
 	}
+	if dnsRuntimeOrch != nil {
+		// A completed blocklist pull job is the moment a subscription's
+		// domain list may have actually changed -- unlike its own HTTP
+		// handler, which returns before the background pull finishes.
+		// Applying here (not from the handler) is what makes Blocklists
+		// consistent with every other DNS-runtime-affecting mutation:
+		// auto-applies once the change is actually real, never a
+		// separate manual step a caller has to remember.
+		blSvc.OnJobComplete = func() {
+			res := dnsRuntimeOrch.Apply(context.Background())
+			if res.Attempted && !res.Promoted {
+				logger.Warn("DNS runtime apply after blocklist refresh did not promote", "rolled_back", res.RolledBack, "stage", res.Stage, "detail", res.Detail, "error", res.Error)
+			}
+		}
+	}
 
 	srv := &httpapi.Server{
 		DB: db, Auth: &auth.Store{DB: db}, Blocklists: blSvc, LocalDNS: ldSvc, Upstreams: upSvc, Clients: clientsSvc, Policy: policySvc, CustomRules: customRulesSvc, Backup: backupSvc,

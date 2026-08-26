@@ -43,7 +43,9 @@ func (s *Server) handleUpdateDNSTransports(w http.ResponseWriter, r *http.Reques
 		Err(http.StatusInternalServerError, "internal_error", err.Error()).WriteJSON(w)
 		return
 	}
-	WriteJSON(w, http.StatusOK, transportsJSON(updated))
+	out := transportsJSON(updated)
+	out["dns_runtime"] = s.applyDNSRuntimeBestEffort(r)
+	WriteJSON(w, http.StatusOK, out)
 }
 
 // handleTLSStatus is nil-reader-safe like every other optional

@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, ApiError, EMPTY_POLICY_LAYER, type CustomRule } from "../api";
+  import { api, ApiError, EMPTY_POLICY_LAYER, type CustomRule, type DNSRuntimeApplyResult } from "../api";
   import { StaleGuard } from "../staleGuard";
   import { router } from "../router.svelte";
   import DataGrid from "./DataGrid.svelte";
+  import DnsRuntimeBadge from "./DnsRuntimeBadge.svelte";
   import type { Column } from "./datagrid";
   import PolicyEditor from "./PolicyEditor.svelte";
 
@@ -31,6 +32,7 @@
   let editRewriteTarget = $state("");
 
   let selected = $state<Set<number>>(new Set());
+  let dnsRuntimeResult = $state<DNSRuntimeApplyResult | null>(null);
 
   async function refresh() {
     const token = guard.start();
@@ -56,7 +58,8 @@
     addError = "";
     addBusy = true;
     try {
-      await api.createCustomRule(ruleType, pattern, ruleType === "rewrite" ? rewriteTarget : null);
+      const resp = await api.createCustomRule(ruleType, pattern, ruleType === "rewrite" ? rewriteTarget : null);
+      dnsRuntimeResult = resp.dns_runtime ?? null;
       pattern = "";
       rewriteTarget = "";
       await refresh();
@@ -74,18 +77,21 @@
   }
 
   async function saveEdit(r: CustomRule) {
-    await api.updateCustomRule(r.id, r.rule_type, editPattern, r.rule_type === "rewrite" ? editRewriteTarget : null);
+    const resp = await api.updateCustomRule(r.id, r.rule_type, editPattern, r.rule_type === "rewrite" ? editRewriteTarget : null);
+    dnsRuntimeResult = resp.dns_runtime ?? null;
     editingId = null;
     await refresh();
   }
 
   async function toggleRule(r: CustomRule) {
-    await api.toggleCustomRule(r.id, !r.enabled);
+    const resp = await api.toggleCustomRule(r.id, !r.enabled);
+    dnsRuntimeResult = resp.dns_runtime ?? null;
     await refresh();
   }
 
   async function deleteRule(r: CustomRule) {
-    await api.deleteCustomRule(r.id);
+    const resp = await api.deleteCustomRule(r.id);
+    dnsRuntimeResult = resp.dns_runtime ?? null;
     await refresh();
   }
 
@@ -97,17 +103,20 @@
   }
 
   async function bulkEnable() {
-    await api.bulkEnableCustomRules([...selected]);
+    const resp = await api.bulkEnableCustomRules([...selected]);
+    dnsRuntimeResult = resp.dns_runtime ?? null;
     selected = new Set();
     await refresh();
   }
   async function bulkDisable() {
-    await api.bulkDisableCustomRules([...selected]);
+    const resp = await api.bulkDisableCustomRules([...selected]);
+    dnsRuntimeResult = resp.dns_runtime ?? null;
     selected = new Set();
     await refresh();
   }
   async function bulkDelete() {
-    await api.bulkDeleteCustomRules([...selected]);
+    const resp = await api.bulkDeleteCustomRules([...selected]);
+    dnsRuntimeResult = resp.dns_runtime ?? null;
     selected = new Set();
     await refresh();
   }
@@ -151,6 +160,7 @@
       import V1's free-text AdGuard-syntax rules -- see the parity matrix.
     </p>
     {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
+    <DnsRuntimeBadge result={dnsRuntimeResult} />
 
     <form onsubmit={addRule} class="add-form">
       <label>

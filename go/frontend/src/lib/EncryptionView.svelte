@@ -1,20 +1,20 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, ApiError, type DnsTransportSettings, type TlsStatus } from "../api";
+  import { api, ApiError, type DnsTransportSettings, type TlsStatus, type DNSRuntimeApplyResult } from "../api";
   import { router } from "../router.svelte";
   import { timestampPref } from "../timestamp.svelte";
+  import DnsRuntimeBadge from "./DnsRuntimeBadge.svelte";
 
   // Encryption. Two independently-scoped native pieces, each with its
   // own disclosed gap -- see internal/dnstransports and internal/tlscert:
   //
   //  - DNS Transport settings (DoT/DoH/DoQ/DoH3/DNSCrypt enable+port) are
-  //    real native-Go storage, but saving here has no compiled-runtime
-  //    effect yet -- the same disclosed gap as DNS Settings/Upstreams.
-  //    Making a saved setting here actually answer encrypted DNS queries
-  //    needs the live-runtime-control path PARITY_MATRIX.md's Cache row
-  //    documents as currently infeasible (BIND/dnsdist run inside the
-  //    Python preview container, on a network this control plane cannot
-  //    reach without modifying that container).
+  //    real native-Go storage. DoT and DoH now compile into and
+  //    auto-apply to the real DNS runtime (internal/dnscompile,
+  //    internal/dnsruntime) -- see the dns_runtime feedback below Save.
+  //    DoQ/DoH3/DNSCrypt are not compiled yet (each needs its own
+  //    listener wiring; DNSCrypt additionally needs a Go-native secrets
+  //    store for its identity material, which doesn't exist yet).
   //  - TLS status is real and read-only (a genuine read of Python's own
   //    DNS-transport certificate, when -tls-cert-status-path is
   //    configured) -- there is no "replace" here, since promoting a new
@@ -25,6 +25,7 @@
   let saveError = $state("");
   let saveResult = $state("");
   let saving = $state(false);
+  let dnsRuntimeResult = $state<DNSRuntimeApplyResult | null>(null);
 
   let tls = $state<TlsStatus | null>(null);
 
@@ -51,7 +52,8 @@
     saveResult = "";
     try {
       settings = await api.updateDnsTransports(settings);
-      saveResult = "Saved. Not yet wired to a live listener -- see the scope note below.";
+      dnsRuntimeResult = settings.dns_runtime ?? null;
+      saveResult = "Saved.";
     } catch (err) {
       saveError = err instanceof ApiError ? err.message : String(err);
     } finally {
@@ -63,9 +65,9 @@
 <section aria-labelledby="encryption-heading" class="encryption">
   <h2 id="encryption-heading">Encryption</h2>
   <p class="scope-note">
-    DNS Transport settings are stored natively but not yet wired to a live dnsdist listener. TLS
-    status is a real, read-only view of Python's own DNS-transport certificate. See the parity
-    matrix for why: both need control of a live process this control plane cannot currently reach.
+    DNS Transport settings are stored natively; DoT and DoH now compile into and auto-apply to the
+    real DNS runtime (DoQ/DoH3/DNSCrypt not yet). TLS status is a real, read-only view of Python's
+    own DNS-transport certificate -- see the parity matrix for the full scope.
   </p>
 
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
@@ -134,6 +136,7 @@
       </div>
       {#if saveResult}<p class="success" role="status">{saveResult}</p>{/if}
       {#if saveError}<p class="error" role="alert">{saveError}</p>{/if}
+      <DnsRuntimeBadge result={dnsRuntimeResult} />
     </form>
   {/if}
 </section>

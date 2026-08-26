@@ -47,7 +47,7 @@ func (s *Server) handleCreateCustomRule(w http.ResponseWriter, r *http.Request) 
 		Err(status, code, err.Error()).WriteJSON(w)
 		return
 	}
-	WriteJSON(w, http.StatusCreated, map[string]any{"status": "created", "id": id})
+	WriteJSON(w, http.StatusCreated, map[string]any{"status": "created", "id": id, "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
 }
 
 func (s *Server) handleUpdateCustomRule(w http.ResponseWriter, r *http.Request) {
@@ -66,7 +66,7 @@ func (s *Server) handleUpdateCustomRule(w http.ResponseWriter, r *http.Request) 
 		Err(status, code, err.Error()).WriteJSON(w)
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"status": "updated"})
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "updated", "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
 }
 
 func (s *Server) handleToggleCustomRule(w http.ResponseWriter, r *http.Request) {
@@ -87,7 +87,7 @@ func (s *Server) handleToggleCustomRule(w http.ResponseWriter, r *http.Request) 
 		Err(status, code, err.Error()).WriteJSON(w)
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"status": "updated"})
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "updated", "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
 }
 
 func (s *Server) handleDeleteCustomRule(w http.ResponseWriter, r *http.Request) {
@@ -101,7 +101,7 @@ func (s *Server) handleDeleteCustomRule(w http.ResponseWriter, r *http.Request) 
 		Err(status, code, err.Error()).WriteJSON(w)
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"status": "deleted"})
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "deleted", "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
 }
 
 type bulkRuleIDsRequest struct {
@@ -126,7 +126,7 @@ func (s *Server) bulkSetEnabled(w http.ResponseWriter, r *http.Request, enabled 
 		Err(http.StatusInternalServerError, "internal_error", "bulk update failed").WriteJSON(w)
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"status": "updated", "count": n})
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "updated", "count": n, "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
 }
 
 func (s *Server) handleBulkDeleteCustomRules(w http.ResponseWriter, r *http.Request) {
@@ -140,7 +140,7 @@ func (s *Server) handleBulkDeleteCustomRules(w http.ResponseWriter, r *http.Requ
 		Err(http.StatusInternalServerError, "internal_error", "bulk delete failed").WriteJSON(w)
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"status": "deleted", "count": n})
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "deleted", "count": n, "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
 }
 
 type reorderRulesRequest struct {

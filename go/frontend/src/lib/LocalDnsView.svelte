@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, type LocalDnsRecord } from "../api";
+  import { api, type LocalDnsRecord, type DNSRuntimeApplyResult } from "../api";
   import { StaleGuard } from "../staleGuard";
   import { router } from "../router.svelte";
   import DataGrid from "./DataGrid.svelte";
+  import DnsRuntimeBadge from "./DnsRuntimeBadge.svelte";
   import type { Column } from "./datagrid";
 
   let records = $state<LocalDnsRecord[]>([]);
@@ -12,6 +13,7 @@
   let editingId = $state<number | null>(null);
   let editValue = $state("");
   let editTTL = $state(300);
+  let dnsRuntimeResult = $state<DNSRuntimeApplyResult | null>(null);
 
   let newName = $state("");
   let newType = $state<LocalDnsRecord["record_type"]>("A");
@@ -48,7 +50,8 @@
     addError = "";
     addBusy = true;
     try {
-      await api.createLocalDNS({ name: newName, record_type: newType, value: newValue, ttl: newTTL, enabled: true });
+      const resp = await api.createLocalDNS({ name: newName, record_type: newType, value: newValue, ttl: newTTL, enabled: true });
+      dnsRuntimeResult = resp.dns_runtime ?? null;
       newName = "";
       newValue = "";
       await refresh();
@@ -66,20 +69,23 @@
   }
 
   async function saveEdit(r: LocalDnsRecord) {
-    await api.updateLocalDNS(r.id, { value: editValue, ttl: editTTL });
+    const resp = await api.updateLocalDNS(r.id, { value: editValue, ttl: editTTL });
+    dnsRuntimeResult = resp.dns_runtime ?? null;
     editingId = null;
     await refresh();
   }
 
   async function toggleEnabled(r: LocalDnsRecord) {
-    await api.updateLocalDNS(r.id, { enabled: !r.enabled });
+    const resp = await api.updateLocalDNS(r.id, { enabled: !r.enabled });
+    dnsRuntimeResult = resp.dns_runtime ?? null;
     await refresh();
   }
 
   async function deleteRecord(r: LocalDnsRecord) {
     pendingDelete = new Set(pendingDelete).add(r.id);
     try {
-      await api.deleteLocalDNS(r.id);
+      const resp = await api.deleteLocalDNS(r.id);
+      dnsRuntimeResult = resp.dns_runtime ?? null;
       await refresh();
     } catch (err) {
       loadError = err instanceof Error ? err.message : String(err);
@@ -120,6 +126,8 @@
     <button type="submit" disabled={addBusy}>{addBusy ? "Adding…" : "Add record"}</button>
     {#if addError}<p class="error" role="alert">{addError}</p>{/if}
   </form>
+
+  <DnsRuntimeBadge result={dnsRuntimeResult} />
 
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
 

@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, type Subscription, type IntervalPreset } from "../api";
+  import { api, type Subscription, type IntervalPreset, type DNSRuntimeApplyResult } from "../api";
   import { StaleGuard } from "../staleGuard";
   import { router } from "../router.svelte";
   import DataGrid from "./DataGrid.svelte";
+  import DnsRuntimeBadge from "./DnsRuntimeBadge.svelte";
   import type { Column } from "./datagrid";
 
   let subs = $state<Subscription[]>([]);
@@ -21,6 +22,7 @@
   let addError = $state("");
 
   const guard = new StaleGuard();
+  let dnsRuntimeResult = $state<DNSRuntimeApplyResult | null>(null);
 
   export async function refresh(): Promise<void> {
     const token = guard.start();
@@ -89,7 +91,8 @@
   }
 
   async function onToggle(sub: Subscription) {
-    await api.toggleBlocklist(sub.subscription_id);
+    const resp = await api.toggleBlocklist(sub.subscription_id);
+    dnsRuntimeResult = resp.dns_runtime ?? null;
     await refresh();
   }
 
@@ -116,7 +119,8 @@
   async function onDelete(sub: Subscription) {
     pendingDelete = new Set(pendingDelete).add(sub.subscription_id);
     try {
-      await api.deleteBlocklist(sub.subscription_id);
+      const resp = await api.deleteBlocklist(sub.subscription_id);
+      dnsRuntimeResult = resp.dns_runtime ?? null;
       await refresh();
     } catch (err) {
       loadError = err instanceof Error ? err.message : String(err);
@@ -171,6 +175,7 @@
   </form>
 
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
+  <DnsRuntimeBadge result={dnsRuntimeResult} />
 
   <DataGrid gridId="blocklist-subscriptions" {columns} rows={subs} rowKey={(s) => s.subscription_id} {rowClass} emptyMessage="No blocklist subscriptions yet.">
     {#snippet cell(sub, colKey)}

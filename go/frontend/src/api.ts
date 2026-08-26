@@ -187,7 +187,7 @@ export interface UpstreamProfileInput {
 
 export interface UpstreamMutationResult {
   status: string;
-  runtime: { promoted: boolean; binding_count: number };
+  dns_runtime?: DNSRuntimeApplyResult;
   was_last_enabled?: boolean;
 }
 
@@ -261,6 +261,7 @@ export interface DnsTransportSettings {
   dnscrypt_port: number;
   dnscrypt_provider_name: string;
   dnscrypt_identity_provisioned: boolean;
+  dns_runtime?: DNSRuntimeApplyResult;
 }
 
 export interface TlsStatus {
@@ -520,23 +521,23 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ update_interval_seconds: seconds }),
     }),
-  toggleBlocklist: (id: string) => req<{ status: string }>(`/api/blocklists/${encodeURIComponent(id)}/toggle`, { method: "POST" }),
-  deleteBlocklist: (id: string) => req<{ status: string }>(`/api/blocklists/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  toggleBlocklist: (id: string) => req<{ status: string; dns_runtime?: DNSRuntimeApplyResult }>(`/api/blocklists/${encodeURIComponent(id)}/toggle`, { method: "POST" }),
+  deleteBlocklist: (id: string) => req<{ status: string; dns_runtime?: DNSRuntimeApplyResult }>(`/api/blocklists/${encodeURIComponent(id)}`, { method: "DELETE" }),
   refreshOne: (id: string) => req<{ status: string; job_id: number }>(`/api/blocklists/${encodeURIComponent(id)}/refresh`, { method: "POST" }),
   refreshAll: () => req<{ status: string; job_id: number | null; count?: number }>("/api/blocklists/refresh-all", { method: "POST" }),
   getJob: (id: number) => req<Job>(`/api/blocklists/jobs/${id}`),
 
   listLocalDNS: (signal?: AbortSignal) => req<{ records: LocalDnsRecord[] }>("/api/local-dns", undefined, signal),
   createLocalDNS: (rec: Omit<LocalDnsRecord, "id">) =>
-    req<{ record: LocalDnsRecord }>("/api/local-dns", { method: "POST", body: JSON.stringify(rec) }),
+    req<{ record: LocalDnsRecord; dns_runtime?: DNSRuntimeApplyResult }>("/api/local-dns", { method: "POST", body: JSON.stringify(rec) }),
   updateLocalDNS: (id: number, patch: Partial<Pick<LocalDnsRecord, "value" | "ttl" | "enabled">>) =>
-    req<{ record: LocalDnsRecord }>(`/api/local-dns/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
-  deleteLocalDNS: (id: number) => req<{ status: string }>(`/api/local-dns/${id}`, { method: "DELETE" }),
+    req<{ record: LocalDnsRecord; dns_runtime?: DNSRuntimeApplyResult }>(`/api/local-dns/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  deleteLocalDNS: (id: number) => req<{ status: string; dns_runtime?: DNSRuntimeApplyResult }>(`/api/local-dns/${id}`, { method: "DELETE" }),
 
   listUpstreams: (signal?: AbortSignal) =>
     req<{ upstreams: UpstreamProfile[]; native_recursion_active: boolean }>("/api/upstreams", undefined, signal),
   createUpstream: (body: UpstreamProfileInput) =>
-    req<{ status: string; upstream_profile_id: string }>("/api/upstreams", { method: "POST", body: JSON.stringify(body) }),
+    req<{ status: string; upstream_profile_id: string; dns_runtime?: DNSRuntimeApplyResult }>("/api/upstreams", { method: "POST", body: JSON.stringify(body) }),
   updateUpstream: (id: string, body: UpstreamProfileInput) =>
     req<UpstreamMutationResult>(`/api/upstreams/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(body) }),
   enableUpstream: (id: string) => req<UpstreamMutationResult>(`/api/upstreams/${encodeURIComponent(id)}/enable`, { method: "POST" }),
@@ -551,7 +552,7 @@ export const api = {
       body: JSON.stringify({ confirm_last: confirmLast }),
     }),
   reorderUpstreams: (orderedIds: string[]) =>
-    req<{ status: string; upstreams: UpstreamProfile[] }>("/api/upstreams/reorder", {
+    req<{ status: string; upstreams: UpstreamProfile[]; dns_runtime?: DNSRuntimeApplyResult }>("/api/upstreams/reorder", {
       method: "POST",
       body: JSON.stringify({ ordered_upstream_profile_ids: orderedIds }),
     }),
@@ -582,24 +583,24 @@ export const api = {
 
   listCustomRules: (signal?: AbortSignal) => req<{ rules: CustomRule[] }>("/api/custom-rules", undefined, signal),
   createCustomRule: (ruleType: string, pattern: string, rewriteTarget: string | null) =>
-    req<{ status: string; id: number }>("/api/custom-rules", {
+    req<{ status: string; id: number; dns_runtime?: DNSRuntimeApplyResult }>("/api/custom-rules", {
       method: "POST",
       body: JSON.stringify({ rule_type: ruleType, pattern, rewrite_target: rewriteTarget }),
     }),
   updateCustomRule: (id: number, ruleType: string, pattern: string, rewriteTarget: string | null) =>
-    req<{ status: string }>(`/api/custom-rules/${id}`, {
+    req<{ status: string; dns_runtime?: DNSRuntimeApplyResult }>(`/api/custom-rules/${id}`, {
       method: "PUT",
       body: JSON.stringify({ rule_type: ruleType, pattern, rewrite_target: rewriteTarget }),
     }),
   toggleCustomRule: (id: number, enabled: boolean) =>
-    req<{ status: string }>(`/api/custom-rules/${id}/toggle`, { method: "POST", body: JSON.stringify({ enabled }) }),
-  deleteCustomRule: (id: number) => req<{ status: string }>(`/api/custom-rules/${id}`, { method: "DELETE" }),
+    req<{ status: string; dns_runtime?: DNSRuntimeApplyResult }>(`/api/custom-rules/${id}/toggle`, { method: "POST", body: JSON.stringify({ enabled }) }),
+  deleteCustomRule: (id: number) => req<{ status: string; dns_runtime?: DNSRuntimeApplyResult }>(`/api/custom-rules/${id}`, { method: "DELETE" }),
   bulkEnableCustomRules: (ids: number[]) =>
-    req<{ status: string; count: number }>("/api/custom-rules/bulk-enable", { method: "POST", body: JSON.stringify({ ids }) }),
+    req<{ status: string; count: number; dns_runtime?: DNSRuntimeApplyResult }>("/api/custom-rules/bulk-enable", { method: "POST", body: JSON.stringify({ ids }) }),
   bulkDisableCustomRules: (ids: number[]) =>
-    req<{ status: string; count: number }>("/api/custom-rules/bulk-disable", { method: "POST", body: JSON.stringify({ ids }) }),
+    req<{ status: string; count: number; dns_runtime?: DNSRuntimeApplyResult }>("/api/custom-rules/bulk-disable", { method: "POST", body: JSON.stringify({ ids }) }),
   bulkDeleteCustomRules: (ids: number[]) =>
-    req<{ status: string; count: number }>("/api/custom-rules/bulk-delete", { method: "POST", body: JSON.stringify({ ids }) }),
+    req<{ status: string; count: number; dns_runtime?: DNSRuntimeApplyResult }>("/api/custom-rules/bulk-delete", { method: "POST", body: JSON.stringify({ ids }) }),
   reorderCustomRules: (orderedIds: number[]) =>
     req<{ status: string; rules: CustomRule[] }>("/api/custom-rules/reorder", { method: "POST", body: JSON.stringify({ ordered_ids: orderedIds }) }),
 

@@ -90,6 +90,19 @@ type Service struct {
 	MaxConcurrent int
 	Log           *slog.Logger
 
+	// OnJobComplete, if set, is called after every pull job finishes
+	// (success or failure) -- the moment a subscription's runtime
+	// domain file may have actually changed, unlike Create/RefreshOne/
+	// RefreshAll's own HTTP handlers, which return before the
+	// background pull is done. Wired to the DNS runtime compiler's
+	// Apply (see cmd/alderpointdns-go/main.go) so a completed refresh's
+	// domains reach the live runtime automatically, the same "resolver-
+	// affecting mutations auto-apply" contract every other mutation
+	// here already has. Never called synchronously from an HTTP
+	// handler's own goroutine -- runJob already runs in its own
+	// goroutine, so this never blocks a request.
+	OnJobComplete func()
+
 	sem      chan struct{}
 	initOnce sync.Once
 
@@ -404,6 +417,10 @@ func (s *Service) runJob(jobID int64, subscriptionIDs []string) {
 	resultsJSON, _ := json.Marshal(outcomes)
 	s.DB.ExecContext(ctx, `UPDATE blocklist_jobs SET state='succeeded', results=?, finished_at=? WHERE id=?`,
 		string(resultsJSON), now(), jobID)
+
+	if s.OnJobComplete != nil {
+		s.OnJobComplete()
+	}
 }
 
 func (s *Service) pullOne(ctx context.Context, subID string) pullOutcome {

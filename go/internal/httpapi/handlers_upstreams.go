@@ -44,14 +44,6 @@ func profileJSON(p upstreams.Profile) map[string]any {
 	}
 }
 
-// runtimeStub is disclosed, not silently faked: no dnsdist-config
-// generation exists yet (see internal/upstreams's doc comment), so every
-// mutation here always reports promoted=true, binding_count=0 rather
-// than pretending to have proven a real compiled-runtime effect.
-func runtimeStub() map[string]any {
-	return map[string]any{"promoted": true, "binding_count": 0}
-}
-
 func (s *Server) handleListUpstreams(w http.ResponseWriter, r *http.Request) {
 	profiles, nativeRecursion, err := s.Upstreams.List(r.Context())
 	if err != nil {
@@ -114,7 +106,7 @@ func (s *Server) handleCreateUpstream(w http.ResponseWriter, r *http.Request) {
 		upstreamValidationError(err).WriteJSON(w)
 		return
 	}
-	WriteJSON(w, http.StatusCreated, map[string]any{"status": "created", "upstream_profile_id": id})
+	WriteJSON(w, http.StatusCreated, map[string]any{"status": "created", "upstream_profile_id": id, "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
 }
 
 func (s *Server) handleUpdateUpstream(w http.ResponseWriter, r *http.Request) {
@@ -135,7 +127,7 @@ func (s *Server) handleUpdateUpstream(w http.ResponseWriter, r *http.Request) {
 		upstreamValidationError(err).WriteJSON(w)
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"status": "updated", "runtime": runtimeStub()})
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "updated", "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
 }
 
 // lastUpstreamConfirmRequest mirrors LastUpstreamConfirm: disabling or
@@ -155,7 +147,7 @@ func (s *Server) handleEnableUpstream(w http.ResponseWriter, r *http.Request) {
 		Err(http.StatusNotFound, "not_found", "unknown upstream profile").WriteJSON(w)
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"status": "enabled", "runtime": runtimeStub()})
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "enabled", "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
 }
 
 func (s *Server) handleDisableUpstream(w http.ResponseWriter, r *http.Request) {
@@ -176,7 +168,7 @@ func (s *Server) handleDisableUpstream(w http.ResponseWriter, r *http.Request) {
 		Err(http.StatusNotFound, "not_found", "unknown upstream profile").WriteJSON(w)
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"status": "disabled", "was_last_enabled": isLast, "runtime": runtimeStub()})
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "disabled", "was_last_enabled": isLast, "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
 }
 
 func (s *Server) handleDeleteUpstream(w http.ResponseWriter, r *http.Request) {
@@ -197,7 +189,7 @@ func (s *Server) handleDeleteUpstream(w http.ResponseWriter, r *http.Request) {
 		Err(http.StatusNotFound, "not_found", "unknown upstream profile").WriteJSON(w)
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"status": "deleted", "was_last_enabled": isLast, "runtime": runtimeStub()})
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "deleted", "was_last_enabled": isLast, "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
 }
 
 type reorderUpstreamsRequest struct {
@@ -223,5 +215,5 @@ func (s *Server) handleReorderUpstreams(w http.ResponseWriter, r *http.Request) 
 	for _, p := range profiles {
 		out = append(out, profileJSON(p))
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"status": "reordered", "upstreams": out})
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "reordered", "upstreams": out, "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
 }

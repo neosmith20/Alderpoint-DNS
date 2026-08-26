@@ -82,7 +82,7 @@ func (s *Server) handleBlocklistSettings(w http.ResponseWriter, r *http.Request)
 		ErrField(http.StatusBadRequest, "validation_error", err.Error(), "default_interval_seconds").WriteJSON(w)
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"status": "updated", "default_interval_seconds": req.DefaultIntervalSeconds})
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "updated", "default_interval_seconds": req.DefaultIntervalSeconds, "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
 }
 
 type intervalRequest struct {
@@ -100,7 +100,7 @@ func (s *Server) handleSetBlocklistInterval(w http.ResponseWriter, r *http.Reque
 		ErrField(http.StatusBadRequest, "validation_error", err.Error(), "update_interval_seconds").WriteJSON(w)
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"status": "updated", "update_interval_seconds": req.UpdateIntervalSeconds})
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "updated", "update_interval_seconds": req.UpdateIntervalSeconds, "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
 }
 
 func (s *Server) handleToggleBlocklist(w http.ResponseWriter, r *http.Request) {
@@ -109,7 +109,7 @@ func (s *Server) handleToggleBlocklist(w http.ResponseWriter, r *http.Request) {
 		Err(http.StatusNotFound, "not_found", "unknown subscription").WriteJSON(w)
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"status": "updated"})
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "updated", "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
 }
 
 func (s *Server) handleDeleteBlocklist(w http.ResponseWriter, r *http.Request) {
@@ -118,7 +118,7 @@ func (s *Server) handleDeleteBlocklist(w http.ResponseWriter, r *http.Request) {
 		Err(http.StatusNotFound, "not_found", "unknown subscription").WriteJSON(w)
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"status": "deleted"})
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "deleted", "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
 }
 
 func (s *Server) handleRefreshOneBlocklist(w http.ResponseWriter, r *http.Request) {
