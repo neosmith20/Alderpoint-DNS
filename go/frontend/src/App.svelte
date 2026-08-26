@@ -2,8 +2,11 @@
   import { onMount } from "svelte";
   import { api, setCsrfToken, ApiError } from "./api";
   import { loadTheme, applyTheme, type Theme } from "./theme";
-  import BlocklistsView from "./lib/BlocklistsView.svelte";
-  import LocalDnsView from "./lib/LocalDnsView.svelte";
+  import { router } from "./router.svelte";
+  import { defaultRouteId, findItem, groupOf } from "./nav";
+  import Nav from "./lib/Nav.svelte";
+  import RouteLoader from "./lib/RouteLoader.svelte";
+  import Icon from "./lib/Icon.svelte";
 
   type Phase = "loading" | "setup" | "login" | "app";
   let phase = $state<Phase>("loading");
@@ -18,10 +21,7 @@
   let busy = $state(false);
 
   let theme = $state<Theme>("light");
-  let tab = $state<"blocklists" | "local-dns">("blocklists");
-
-  let blocklistsView = $state<BlocklistsView>();
-  let localDnsView = $state<LocalDnsView>();
+  let mobileNavOpen = $state(false);
 
   onMount(async () => {
     theme = loadTheme();
@@ -39,7 +39,7 @@
       if (sess.authenticated) {
         setCsrfToken(sess.csrf);
         authedUsername = sess.username;
-        phase = "app";
+        enterApp();
         return;
       }
     } catch {
@@ -47,6 +47,18 @@
     }
     phase = "login";
   });
+
+  function enterApp() {
+    phase = "app";
+    // Landing at "/" or an unknown/not-yet-built route on first entry:
+    // send the operator to the first implemented page rather than a blank
+    // or "coming soon" landing.
+    const item = findItem(router.current);
+    if (!item?.load) router.navigate(defaultRouteId(), true);
+  }
+
+  const activeLabel = $derived(findItem(router.current)?.label ?? "");
+  const activeGroupLabel = $derived(groupOf(router.current)?.label);
 
   function toggleTheme() {
     theme = theme === "light" ? "dark" : "light";
@@ -81,7 +93,7 @@
       setCsrfToken(resp.csrf);
       authedUsername = username;
       password = "";
-      phase = "app";
+      enterApp();
     } catch (err) {
       phaseError = err instanceof ApiError ? err.message : String(err);
     } finally {
@@ -98,21 +110,17 @@
     }
   }
 
-  $effect(() => {
-    if (phase === "app") {
-      if (tab === "blocklists") blocklistsView?.refresh();
-      if (tab === "local-dns") localDnsView?.refresh();
-    }
-  });
 </script>
 
-<div class="shell">
-  <header>
-    <h1>Alderpoint DNS <span class="badge-preview">Go Migration Preview</span></h1>
-    <button class="theme-toggle" onclick={toggleTheme} aria-label="Toggle color theme">
-      {theme === "light" ? "🌙" : "☀️"}
-    </button>
-  </header>
+<div class="shell" class:app-shell={phase === "app"}>
+  {#if phase !== "app"}
+    <header>
+      <h1>Alderpoint DNS <span class="badge-preview">Go Migration Preview</span></h1>
+      <button class="theme-toggle" onclick={toggleTheme} aria-label="Toggle color theme">
+        {theme === "light" ? "🌙" : "☀️"}
+      </button>
+    </header>
+  {/if}
 
   {#if phase === "loading"}
     <main class="centered"><p>Loading…</p></main>
@@ -143,21 +151,38 @@
       </form>
     </main>
   {:else}
-    <nav aria-label="Main">
-      <button class:active={tab === "blocklists"} onclick={() => (tab = "blocklists")}>Blocklists</button>
-      <button class:active={tab === "local-dns"} onclick={() => (tab = "local-dns")}>Local DNS</button>
-      <span class="spacer"></span>
-      <span class="whoami">{authedUsername}</span>
-      <button onclick={doLogout}>Log out</button>
-    </nav>
-    <main>
-      <div class:hidden={tab !== "blocklists"}>
-        <BlocklistsView bind:this={blocklistsView} />
+    <div class="app-layout">
+      <Nav bind:mobileOpen={mobileNavOpen} />
+      <div class="content-col">
+        <header class="topbar">
+          <button
+            class="menu-btn"
+            onclick={() => (mobileNavOpen = !mobileNavOpen)}
+            aria-label="Toggle navigation menu"
+            aria-expanded={mobileNavOpen}
+          >
+            <Icon name="menu" />
+          </button>
+          <div class="crumb">
+            {#if activeGroupLabel}<span class="crumb-group">{activeGroupLabel}</span>{/if}
+            <span class="crumb-page">{activeLabel}</span>
+          </div>
+          <span class="spacer"></span>
+          <button class="theme-toggle" onclick={toggleTheme} aria-label="Toggle color theme">
+            {theme === "light" ? "🌙" : "☀️"}
+          </button>
+          <span class="whoami">{authedUsername}</span>
+          <button class="logout-btn" onclick={doLogout} aria-label="Log out">
+            <Icon name="logout" size={16} />
+          </button>
+        </header>
+        <main>
+          {#key router.current}
+            <RouteLoader routeId={router.current} />
+          {/key}
+        </main>
       </div>
-      <div class:hidden={tab !== "local-dns"}>
-        <LocalDnsView bind:this={localDnsView} />
-      </div>
-    </main>
+    </div>
   {/if}
 </div>
 
@@ -169,6 +194,7 @@
     --badge-ok-bg: #dcfce7; --badge-ok-fg: #166534;
     --badge-warn-bg: #fef9c3; --badge-warn-fg: #854d0e;
     --badge-danger-bg: #fecaca; --badge-danger-fg: #991b1b;
+    --nav-hover-bg: #f1f5f9;
   }
   :global(:root[data-theme="dark"]) {
     --bg: #0f172a; --fg: #e2e8f0; --border: #334155; --card-bg: #1e293b;
@@ -177,6 +203,7 @@
     --badge-ok-bg: #14532d; --badge-ok-fg: #bbf7d0;
     --badge-warn-bg: #713f12; --badge-warn-fg: #fef08a;
     --badge-danger-bg: #7f1d1d; --badge-danger-fg: #fecaca;
+    --nav-hover-bg: #273449;
   }
   :global(body) { margin: 0; background: var(--bg); color: var(--fg); font-family: system-ui, sans-serif; }
   :global(input, select) { padding: 0.4rem; border-radius: 4px; border: 1px solid var(--border); background: var(--card-bg); color: inherit; }
@@ -187,7 +214,8 @@
   :global(.add-form label) { display: flex; flex-direction: column; font-size: 0.85rem; gap: 0.25rem; }
   :global(.hidden) { display: none; }
 
-  .shell { max-width: 72rem; margin: 0 auto; padding: 0 1rem 2rem; }
+  .shell:not(.app-shell) { max-width: 72rem; margin: 0 auto; padding: 0 1rem 2rem; }
+  .shell.app-shell { height: 100vh; overflow: hidden; }
   header { display: flex; justify-content: space-between; align-items: center; padding: 1rem 0; }
   h1 { font-size: 1.2rem; display: flex; align-items: center; gap: 0.6rem; }
   .badge-preview { font-size: 0.7rem; font-weight: normal; background: var(--badge-warn-bg); color: var(--badge-warn-fg); padding: 0.15rem 0.5rem; border-radius: 999px; }
@@ -196,13 +224,25 @@
   .auth-form { display: flex; flex-direction: column; gap: 0.75rem; width: 22rem; max-width: 90vw; background: var(--card-bg); padding: 1.5rem; border-radius: 8px; border: 1px solid var(--border); }
   .auth-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; }
   .checkbox { flex-direction: row !important; align-items: center; gap: 0.5rem !important; }
-  nav { display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0; border-bottom: 1px solid var(--border); margin-bottom: 1rem; }
-  nav button { background: transparent; color: var(--fg); }
-  nav button.active { background: var(--accent); color: var(--accent-fg); }
   .spacer { flex: 1; }
   .whoami { font-size: 0.85rem; opacity: 0.8; }
 
-  @media (max-width: 480px) {
-    nav { flex-wrap: wrap; }
+  .app-layout { display: flex; height: 100%; }
+  .content-col { flex: 1; min-width: 0; display: flex; flex-direction: column; height: 100%; }
+  .topbar {
+    display: flex; align-items: center; gap: 0.75rem;
+    padding: 0.6rem 1rem; border-bottom: 1px solid var(--border);
+    background: var(--card-bg); flex-shrink: 0;
+  }
+  .menu-btn { display: none; background: transparent; color: var(--fg); padding: 0.35rem; }
+  .crumb { display: flex; align-items: baseline; gap: 0.45rem; font-size: 0.95rem; min-width: 0; }
+  .crumb-group { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.65; }
+  .crumb-page { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .logout-btn { background: transparent; color: var(--fg); padding: 0.4rem; border-radius: 6px; }
+  .logout-btn:hover { background: var(--nav-hover-bg); }
+  .app-layout main { flex: 1; overflow-y: auto; padding: 1.25rem; }
+
+  @media (max-width: 760px) {
+    .menu-btn { display: inline-flex; }
   }
 </style>

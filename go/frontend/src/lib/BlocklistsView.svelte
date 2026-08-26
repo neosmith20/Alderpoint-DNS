@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { api, type Subscription, type IntervalPreset } from "../api";
   import { StaleGuard } from "../staleGuard";
 
@@ -32,6 +33,13 @@
       loadError = err instanceof Error ? err.message : String(err);
     }
   }
+
+  // Loaded on demand by RouteLoader when this page is routed to -- own our
+  // own initial data fetch rather than relying on the shell to know we
+  // need one (RouteLoader is generic across every future page).
+  onMount(() => {
+    refresh();
+  });
 
   async function pollJob(subscriptionId: string, jobId: number) {
     for (let i = 0; i < 120; i++) {
