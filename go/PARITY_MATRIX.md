@@ -21,7 +21,28 @@ as the functional reference, per the roadmap.
 before it's deployed to `:10443`, not deferred to the end. Run the Chromium harness with
 `cd go/tests/browser && npm install && node chromium_smoke.mjs <https-base-url> <username> <password>`
 against a **fresh** (`setup_required: true`) instance -- it drives real setup/login and must not be
-pointed at the live owner preview, whose credentials are Alex's.
+pointed at the live owner preview, whose credentials are Alex's. `go/tests/browser/perf_measure.mjs`
+(same invocation shape) measures real client-side navigation latency.
+
+**Performance (measured 2026-08-26, this build server, real Chromium + curl, not estimated):**
+
+| Metric | Target | Measured |
+|---|--:|--:|
+| Cold load to first usable screen | < 2000 ms | 1038 ms |
+| Route click -> new heading visible (p50, 4 routes) | < 50 ms | 17-29 ms |
+| Route click -> new heading visible (max observed) | -- | 38 ms |
+| Idle RSS after setup+login | < 25 MB (known-missed, see `MILESTONE_1_REPORT.md`) | 33.5 MB |
+| `GET /api/health` (p95 / p99, n=150) | < 25 ms / < 50 ms | 6.95 / 9.33 ms |
+| `GET /api/dashboard/summary` (p95 / p99) | < 25 ms / < 50 ms | 7.13 / 8.07 ms |
+| `GET /api/analytics/timeseries` (p95 / p99) | < 25 ms / < 50 ms | 8.18 / 8.87 ms |
+| `GET /api/analytics/top-domains` (p95 / p99) | < 25 ms / < 50 ms | 17.15 / 18.40 ms |
+| `GET /api/blocklists` (p95 / p99) | < 25 ms / < 50 ms | 7.00 / 7.29 ms |
+| `GET /api/local-dns` (p95 / p99) | < 25 ms / < 50 ms | 6.91 / 7.20 ms |
+
+All gates met except idle RSS, which was already a known, root-caused, disclosed miss from
+Milestone 1 (146 MB -> 36.4 MB fix landed then; 33.5 MB here is consistent, not a new regression --
+no auth/session code changed this slice). `top-domains` is the slowest endpoint (a `GROUP BY`
+across 24 hours of hour-granularity `dimension_counts` rows) but is still ~3x under its p99 budget.
 
 **Authoritative target surface** (per the governing task): the union of (a) what Python V2 actually
 does today, (b) required V1.1.1 workflow semantics per `docs/v2/v1-workflow-parity-contract.md`,
@@ -56,7 +77,7 @@ target, not the defect — literal bug-for-bug parity is not the goal.
 
 | Page | Route | Python API | Controls | Tables | Charts/live | Polling | States | Go API | Svelte | Browser test | Owner accepted |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| Dashboard | `dashboard` | `GET /api/health`, `/api/system/status`, `/api/replication/health`, `/api/discovery/status`, `/api/analytics/recent`, `/api/clients`, `/api/discovery/observed-clients`, `/api/upstreams`, `/api/analytics/timeseries`, `/api/analytics/live-activity`, `/api/analytics/{top-domains,top-blocked-domains}` | Refresh; range select (Live/1h/24h/7d); top-domains mode select; live pause/resume; **card add/remove/reorder + persistence (not yet in Python V2 either — new V2 requirement)** | Upstreams mini-table, Top-domains table, client mini-list | DNS Activity SVG time-series (queries + blocked), live 1s mode | `setInterval` 1000ms in live mode only, cleared on route leave | degraded banner, live status states (Connecting/Connected/Paused/Reconnecting/Degraded), empty states | **in progress** — new `GET /api/dashboard/summary` (Go-native only: blocklists + local-dns counts, no Python compatibility boundary). Analytics/upstreams/clients/live-activity endpoints above are genuinely **not started** and require a deliberate cross-service compatibility-boundary design (Python owns that data in a separate SQLite/Parquet store; the two backends have independent, non-interchangeable session stores despite sharing a cookie name, so a naive cookie-forward proxy won't authenticate — needs its own design pass, not a rushed proxy) | **in progress** — `DashboardView.svelte` shows only the real Go-owned cards (Blocklists, Local DNS) and explicitly discloses its own incomplete scope in-page rather than implying full parity; no charts, no live activity, no card customization yet | done for what's built (Chromium: lands on Dashboard by default, cards render real counts, scope-disclosure text asserted present) | not started |
+| Dashboard | `dashboard` | `GET /api/health`, `/api/system/status`, `/api/replication/health`, `/api/discovery/status`, `/api/analytics/recent`, `/api/clients`, `/api/discovery/observed-clients`, `/api/upstreams`, `/api/analytics/timeseries`, `/api/analytics/live-activity`, `/api/analytics/{top-domains,top-blocked-domains}` | Refresh; range select (Live/1h/24h/7d); top-domains mode select; live pause/resume; **card add/remove/reorder + persistence (not yet in Python V2 either — new V2 requirement)** | Upstreams mini-table, Top-domains table, client mini-list | DNS Activity SVG time-series (queries + blocked), live 1s mode | `setInterval` 1000ms in live mode only, cleared on route leave | degraded banner, live status states (Connecting/Connected/Paused/Reconnecting/Degraded), empty states | **in progress** -- `GET /api/dashboard/summary` (Go-native: blocklists + local-dns + `analytics_available`) plus `GET /api/analytics/{timeseries,live-activity,top-domains,top-blocked-domains}` now real, backed by `internal/pyanalytics` (the compatibility boundary -- read-only SQLite read of Python's own `analytics/aggregates.db`, mounted read-only into the Go container; proven against the actually-live preview's actively-written data, not just a copy; see that package's doc comment). `top-blocked-domains` is honestly, permanently degraded through this boundary (needs Python's raw Parquet/DuckDB path, incompatible with this project's `CGO_ENABLED=0` build). Still missing: Upstreams mini-table, client mini-list -- those need the *policy* boundary (a separate, not-yet-built piece; see the Sequencing note) | **in progress** -- `DashboardView.svelte`: real cards (Blocklists, Local DNS, DNS Activity chart, Top Domains, Top Blocked Domains-with-honest-unavailable), full range selector including live 1s polling (cleared on mode change/route-away), card add/remove/reorder with persistence. Upstreams/clients cards not built (blocked on the policy boundary) | done for everything built (66 Chromium checks: range switching, live polling doesn't error, chart renders both series, DataGrid sort-changes-order + drag-resize-changes-width + width-persists-across-reload, customize hide/reorder/persist across reload, honest degraded text for Top Blocked Domains, full 4-route x 3-viewport x 2-theme sweep with zero horizontal overflow) | not started |
 
 ## DNS group
 
@@ -101,8 +122,8 @@ target, not the defect — literal bug-for-bug parity is not the goal.
 
 | Item | Source | Go API | Svelte | Browser test | Owner accepted |
 |---|---|---|---|---|---|
-| Nav shell: 4 groups (DNS/Security/Operations/System) + Dashboard, accordion multi-open pref, collapsed flyout, keyboard/pointer/touch | `app.js` GROUP_ORDER + accordion fix history in `v1-workflow-parity-contract.md` | n/a | in progress (`Nav.svelte`, `nav.ts`: full IA, accordion+persist (Administration's "keep multiple open" toggle wired in `navPrefs.ts`), collapsed flyout, off-canvas drawer <760px; Escape handled; arrow-key roving focus not yet added) | in progress (Chromium: nav-item clicks route correctly, 390px menu button + drawer open/close + Escape-close + no horizontal overflow all asserted; collapsed-rail flyout and keyboard roving focus not yet asserted) | not started |
-| Shared data grid (sort/resize/persist/overflow) | `data-grid.js` | n/a | done (`DataGrid.svelte`; used by both existing pages, replacing their ad hoc `<table>` markup) | in progress -- Chromium confirms it renders and a sortable header exists; sort-order-on-click, drag-resize, and width-persistence-across-reload are not yet individually Chromium-asserted | not started |
+| Nav shell: 4 groups (DNS/Security/Operations/System) + Dashboard, accordion multi-open pref, collapsed flyout, keyboard/pointer/touch | `app.js` GROUP_ORDER + accordion fix history in `v1-workflow-parity-contract.md` | n/a | in progress (`Nav.svelte`, `nav.ts`: full IA, accordion+persist (Administration's "keep multiple open" toggle wired in `navPrefs.ts`), collapsed flyout, off-canvas drawer <760px; Escape handled; arrow-key roving focus not yet added) | in progress -- Chromium now sweeps all 4 implemented routes x 3 viewports (1440/1024/390) x 2 themes (24 checks, all pass: real content renders, zero horizontal overflow) plus 390px drawer open/Escape-close; the collapsed-rail (1120px) flyout and keyboard roving focus specifically are still not individually Chromium-asserted | not started |
+| Shared data grid (sort/resize/persist/overflow) | `data-grid.js` | n/a | done (`DataGrid.svelte`; used by every existing page's tables, replacing ad hoc `<table>` markup) | done -- Chromium proves each mechanic actually works, not just renders: clicking a sortable header changes row order (asc then desc), dragging the resize handle changes the column's real pixel width, and that width survives a full page reload (localStorage per gridId) | not started |
 | Theme (light/dark), design tokens, local SVG icons | roadmap "Final Product Experience" | n/a | in progress (light/dark CSS-var tokens carried over from Milestone 1; icon set added this slice; no dedicated design-system pass yet) | done (Chromium: theme toggle flips `data-theme`) | not started |
 | Timestamp engine (3 modes, instant reformat) | `app.js` timestamp display | n/a | done (`timestamp.svelte.ts`: reactive singleton, Administration owns the picker; not yet consumed by any *other* page's table, since neither existing page has a timestamp column yet) | done (Chromium: mode change updates the on-screen preview instantly) | not started |
 | Toasts, dialogs, confirmation flows, action menus (kebab/overflow) | `app.js` shared UI | n/a | not started | not started | not started |
@@ -125,28 +146,39 @@ target, not the defect — literal bug-for-bug parity is not the goal.
 
 ## Sequencing note: the Python compatibility-boundary design gate
 
-Nearly every remaining page beyond what's built (Query Log, Clients, Clients & Access, DNS
-Settings/Upstreams, Cache, Filters, Encryption, Import, Backup/Restore, Replication, Statistics,
-System Status's fuller scope, Network Configuration, Notifications, Software Updates) depends on
-data that currently lives only in Python's separate stores (policy `control.db` tables the Go
-schema doesn't have yet, the analytics Parquet/DuckDB/aggregate-SQLite pipeline, discovery). The
-governing task's Phase 4 explicitly pre-authorizes a tracked, temporary Go<->Python compatibility
-boundary for exactly this. Two real technical facts constrain how that boundary can work safely:
+Two real technical facts constrain how any Go<->Python compatibility boundary can work safely:
 
 1. **The two backends' sessions are not interchangeable**, despite sharing a cookie name
    (`alderpointdns_v2_session`, deliberately matched for parity) -- each has its own independent
    session table. A naive "forward the incoming cookie to Python" proxy will not authenticate.
 2. **"Do not duplicate authoritative state"** (governing task, Phase 4) rules out silently copying
    Python's policy/analytics data into Go's own SQLite -- the boundary has to be a read path
-   (proxy or direct read-only access to Python's existing stores), not a second copy.
+   (direct read-only access to Python's existing stores, or a proxy with its own auth), not a
+   second copy.
 
-Designing that boundary correctly (service-to-service auth, or scoped read-only access to Python's
-SQLite/Parquet files under WAL) is real work deserving its own careful pass, not something to
-rush inside an unrelated page's slice. Per the governing task's explicit allowance to reorder for a
-documented technical dependency: **Dashboard, Query Log, Clients, and DNS Settings/Upstreams are
-each blocked on this boundary for their full scope** and were intentionally built only to the
-extent they don't need it (Dashboard above). The compatibility-boundary design is the next
-dedicated piece of work, ahead of resuming those pages' remaining scope.
+**Analytics boundary: designed and built** (`internal/pyanalytics`, 2026-08-26). Shape: a direct
+read-only SQLite connection to Python's own `analytics/aggregates.db`, mounted read-only into the
+Go container (only the `analytics/` subdirectory -- never `control.db`, admins, or secrets). No new
+auth surface needed at all, because it never goes through Python's HTTP API or session system in
+the first place -- fact 1 above is sidestepped entirely rather than solved. Verified safe (WAL mode
+means concurrent readers never block Python's writer) and verified working against the actually-
+live, actively-written preview database, not just a static copy. This unblocks Dashboard's
+DNS-Activity/Top-Domains data (done, see the Dashboard row) and, going forward, Query Log's
+underlying data (still needs its own page built) and any other page that only needs
+*read-only analytics*.
+
+**Policy boundary: still not built.** DNS Settings/Upstreams, Clients & Access, Filters, and every
+page whose data lives in Python's `control.db` policy tables (not analytics) needs either (a) a
+native Go schema + CRUD for that domain (the Blocklists/Local DNS/Dashboard pattern -- Go owns it
+outright, no boundary at all, the actual end-state per the Definition of Done's "no permanent
+dependency on the Python web application") or (b) a *write-capable* boundary, which is a much bigger
+trust/consistency problem than the read-only analytics case above (a write needs to go through
+Python's own validation/staging/promotion, or Go needs to reimplement that safely itself) and is
+not something to design in passing. Given the Definition of Done explicitly rules out a permanent
+proxy, **native Go schema + CRUD is the intended target, not a boundary** -- DNS Settings/Upstreams
+is next, built the same way Blocklists/Local DNS/Local DNS already are: real Go tables, real Go
+service logic, informed by reading Python's `policy_store.py`/`policy_model.py` for the exact
+semantics to preserve, not proxied.
 
 ## Non-goals carried over from Milestone 1 (still correct, restated here)
 

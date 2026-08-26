@@ -26,6 +26,7 @@ import (
 	"alderpointdns/go-controlplane/internal/dbmigrate"
 	"alderpointdns/go-controlplane/internal/httpapi"
 	"alderpointdns/go-controlplane/internal/localdns"
+	"alderpointdns/go-controlplane/internal/pyanalytics"
 )
 
 // Version is overridden at build time: -ldflags "-X main.Version=..."
@@ -116,6 +117,7 @@ func runWeb(args []string) {
 	staticDir := fs.String("static", "./frontend/dist", "compiled frontend dist dir")
 	migrationsDir := fs.String("migrations", "./schema/migrations", "migrations directory")
 	addr := fs.String("addr", "", "listen address override (host:port); defaults to config web.listen_address:listen_port")
+	analyticsDBPath := fs.String("analytics-db", "", "optional read-only path to Python's analytics/aggregates.db (compatibility boundary, see internal/pyanalytics); empty = Dashboard analytics reports degraded")
 	fs.Parse(args)
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -147,11 +149,27 @@ func runWeb(args []string) {
 	}
 	ldSvc := &localdns.Service{DB: db, StagingDir: cfg.LocalDNS.StagingDir, RuntimeDir: cfg.LocalDNS.RuntimeDir}
 
+	// Analytics compatibility boundary: optional, never fatal. A missing
+	// or unreadable path means Dashboard analytics reports degraded, not
+	// a startup crash -- "DNS works if analytics is dead" applies to this
+	// control plane's own dashboard too.
+	var analyticsReader *pyanalytics.Reader
+	if *analyticsDBPath != "" {
+		reader, err := pyanalytics.Open(*analyticsDBPath)
+		if err != nil {
+			logger.Warn("analytics reader unavailable at startup; dashboard analytics will report degraded", "path", *analyticsDBPath, "err", err)
+		} else {
+			analyticsReader = reader
+			defer reader.Close()
+		}
+	}
+
 	srv := &httpapi.Server{
 		DB: db, Auth: &auth.Store{DB: db}, Blocklists: blSvc, LocalDNS: ldSvc,
 		StaticDir: *staticDir, Log: logger, Version: Version, StartedAt: startedAt,
 		SessionTTL: cfg.SessionTTL(), LastSeen: cfg.LastSeenUpdateInterval(),
 		ApplianceName: cfg.Appliance.Name, ApplianceTimezone: cfg.Appliance.Timezone,
+		Analytics: analyticsReader,
 	}
 
 	listenAddr := *addr

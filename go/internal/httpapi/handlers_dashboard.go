@@ -2,17 +2,19 @@ package httpapi
 
 import "net/http"
 
-// handleDashboardSummary backs the Dashboard page's *real, currently-
-// available* subset: whatever the Go control plane genuinely owns today
-// (blocklists, local DNS). It deliberately does NOT include analytics,
-// live DNS activity, upstreams, or observed clients -- those live in
-// Python's separate analytics/policy stores and are not yet reachable
-// through any Go compatibility boundary. Returning fabricated numbers for
-// them would violate the "no fake data" rule as surely as a hardcoded
-// placeholder would, so they're simply absent rather than faked -- see
-// PARITY_MATRIX.md's Dashboard row for the tracked remaining scope and
-// why it isn't done here.
+// handleDashboardSummary backs the Dashboard page's non-analytics cards
+// (blocklists, local DNS -- what the Go control plane owns natively) plus
+// a cheap analytics-reachability flag so the page can show one coherent
+// degraded banner without a wasted round trip; the actual analytics data
+// comes from the /api/analytics/* endpoints in handlers_analytics.go via
+// the pyanalytics compatibility boundary -- see that package's doc
+// comment for its exact, deliberately limited scope.
 func (s *Server) handleDashboardSummary(w http.ResponseWriter, r *http.Request) {
+	analyticsAvailable := false
+	if s.Analytics != nil {
+		analyticsAvailable = s.Analytics.Ping(r.Context()) == nil
+	}
+
 	subs, err := s.Blocklists.List(r.Context())
 	if err != nil {
 		Err(http.StatusInternalServerError, "internal_error", "failed to load blocklist summary").WriteJSON(w)
@@ -44,7 +46,8 @@ func (s *Server) handleDashboardSummary(w http.ResponseWriter, r *http.Request) 
 	}
 
 	WriteJSON(w, http.StatusOK, map[string]any{
-		"appliance_name": s.ApplianceName,
+		"appliance_name":      s.ApplianceName,
+		"analytics_available": analyticsAvailable,
 		"blocklists": map[string]any{
 			"total":              len(subs),
 			"enabled":            enabledBlocklists,

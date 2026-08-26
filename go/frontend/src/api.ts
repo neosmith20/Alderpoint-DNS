@@ -53,6 +53,30 @@ export interface LocalDnsRecord {
   enabled: boolean;
 }
 
+export interface AnalyticsBucket {
+  bucket_start: number;
+  bucket_start_iso: string;
+  total_queries: number;
+  blocked_queries: number;
+  cache_hits: number;
+  cache_misses: number;
+}
+
+export interface AnalyticsTimeseriesResponse {
+  degraded: boolean;
+  degraded_reason?: string;
+  granularity?: string;
+  buckets: AnalyticsBucket[];
+}
+
+export interface AnalyticsTopRowsResponse {
+  rows: [string, number][];
+  columns: string[];
+  degraded: boolean;
+  degraded_reason?: string;
+  aggregation_note?: string;
+}
+
 export class ApiError extends Error {
   status: number;
   code: string;
@@ -116,9 +140,23 @@ export const api = {
   dashboardSummary: (signal?: AbortSignal) =>
     req<{
       appliance_name: string;
+      analytics_available: boolean;
       blocklists: { total: number; enabled: number; attention_required: number; total_rules: number };
       local_dns: { total: number; enabled: number };
     }>("/api/dashboard/summary", undefined, signal),
+
+  analyticsTimeseries: (minutes: number, granularity: "minute" | "hour" | "day", signal?: AbortSignal) =>
+    req<AnalyticsTimeseriesResponse>(`/api/analytics/timeseries?minutes=${minutes}&granularity=${granularity}`, undefined, signal),
+  analyticsLiveActivity: (seconds: number, signal?: AbortSignal) =>
+    req<AnalyticsTimeseriesResponse & { current_qps: number; current_blocked_percent: number; rolling_10s_qps: number }>(
+      `/api/analytics/live-activity?seconds=${seconds}`,
+      undefined,
+      signal,
+    ),
+  analyticsTopDomains: (minutes: number, limit: number, signal?: AbortSignal) =>
+    req<AnalyticsTopRowsResponse>(`/api/analytics/top-domains?minutes=${minutes}&limit=${limit}`, undefined, signal),
+  analyticsTopBlockedDomains: (minutes: number, limit: number, signal?: AbortSignal) =>
+    req<AnalyticsTopRowsResponse>(`/api/analytics/top-blocked-domains?minutes=${minutes}&limit=${limit}`, undefined, signal),
 
   listBlocklists: (signal?: AbortSignal) => req<BlocklistsResponse>("/api/blocklists", undefined, signal),
   createBlocklist: (name: string, url: string, category: string) =>

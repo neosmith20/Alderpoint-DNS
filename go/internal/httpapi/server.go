@@ -9,6 +9,7 @@ import (
 	"alderpointdns/go-controlplane/internal/auth"
 	"alderpointdns/go-controlplane/internal/blocklists"
 	"alderpointdns/go-controlplane/internal/localdns"
+	"alderpointdns/go-controlplane/internal/pyanalytics"
 )
 
 type Server struct {
@@ -18,6 +19,12 @@ type Server struct {
 	LocalDNS   *localdns.Service
 	StaticDir  string
 	Log        *slog.Logger
+
+	// Analytics is nil unless -analytics-db was given a real path at
+	// startup -- every analytics handler must treat nil as "degraded",
+	// never as a programming error. See internal/pyanalytics's doc
+	// comment for exactly what this compatibility boundary is.
+	Analytics *pyanalytics.Reader
 
 	Version    string
 	StartedAt  time.Time
@@ -48,6 +55,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/session/password", requireAuth(s.handleChangePassword))
 	mux.HandleFunc("GET /api/system/status", requireAuth(s.handleSystemStatus))
 	mux.HandleFunc("GET /api/dashboard/summary", requireAuth(s.handleDashboardSummary))
+	mux.HandleFunc("GET /api/analytics/timeseries", requireAuth(s.handleAnalyticsTimeseries))
+	mux.HandleFunc("GET /api/analytics/live-activity", requireAuth(s.handleAnalyticsLiveActivity))
+	mux.HandleFunc("GET /api/analytics/top-domains", requireAuth(s.handleAnalyticsTopDomains))
+	mux.HandleFunc("GET /api/analytics/top-blocked-domains", requireAuth(s.handleAnalyticsTopBlockedDomains))
 
 	mux.HandleFunc("GET /api/blocklists", requireAuth(s.handleListBlocklists))
 	mux.HandleFunc("POST /api/blocklists", requireAuth(s.handleCreateBlocklist))

@@ -50,45 +50,45 @@ func ValidateInterval(seconds int) error {
 }
 
 type Subscription struct {
-	ID                     int64   `json:"-"`
-	SubscriptionID         string  `json:"subscription_id"`
-	Name                   string  `json:"name"`
-	URL                    string  `json:"url"`
-	Category               string  `json:"category"`
-	Enabled                bool    `json:"enabled"`
-	CreatedAt              string  `json:"created_at"`
-	LastRefreshAt          *string `json:"last_refresh_at"`
-	LastStatus             *string `json:"last_status"`
-	LastError              *string `json:"last_error"`
-	RuleCount              *int    `json:"rule_count"`
-	LastSuccessAt          *string `json:"last_success_at"`
-	NextUpdateAt           *string `json:"next_update_at"`
-	UpdateDurationMs       *int    `json:"update_duration_ms"`
-	UpdateIntervalSeconds  *int    `json:"update_interval_seconds"`
-	FailureCount           int     `json:"failure_count"`
-	FirstFailureAt         *string `json:"first_failure_at"`
-	UpdateInProgress       bool    `json:"update_in_progress"`
-	EffectiveIntervalSecs  int     `json:"effective_interval_seconds"`
-	AttentionRequired      bool    `json:"attention_required"`
+	ID                    int64   `json:"-"`
+	SubscriptionID        string  `json:"subscription_id"`
+	Name                  string  `json:"name"`
+	URL                   string  `json:"url"`
+	Category              string  `json:"category"`
+	Enabled               bool    `json:"enabled"`
+	CreatedAt             string  `json:"created_at"`
+	LastRefreshAt         *string `json:"last_refresh_at"`
+	LastStatus            *string `json:"last_status"`
+	LastError             *string `json:"last_error"`
+	RuleCount             *int    `json:"rule_count"`
+	LastSuccessAt         *string `json:"last_success_at"`
+	NextUpdateAt          *string `json:"next_update_at"`
+	UpdateDurationMs      *int    `json:"update_duration_ms"`
+	UpdateIntervalSeconds *int    `json:"update_interval_seconds"`
+	FailureCount          int     `json:"failure_count"`
+	FirstFailureAt        *string `json:"first_failure_at"`
+	UpdateInProgress      bool    `json:"update_in_progress"`
+	EffectiveIntervalSecs int     `json:"effective_interval_seconds"`
+	AttentionRequired     bool    `json:"attention_required"`
 }
 
 type Job struct {
-	ID               int64           `json:"id"`
-	Kind             string          `json:"kind"`
-	SubscriptionIDs  []string        `json:"subscription_ids"`
-	State            string          `json:"state"`
-	Results          json.RawMessage `json:"results,omitempty"`
-	StartedAt        string          `json:"started_at"`
-	FinishedAt       *string         `json:"finished_at"`
+	ID              int64           `json:"id"`
+	Kind            string          `json:"kind"`
+	SubscriptionIDs []string        `json:"subscription_ids"`
+	State           string          `json:"state"`
+	Results         json.RawMessage `json:"results,omitempty"`
+	StartedAt       string          `json:"started_at"`
+	FinishedAt      *string         `json:"finished_at"`
 }
 
 type Service struct {
-	DB             *sql.DB
-	HTTPClient     *http.Client
-	StagingDir     string
-	RuntimeDir     string
-	MaxConcurrent  int
-	Log            *slog.Logger
+	DB            *sql.DB
+	HTTPClient    *http.Client
+	StagingDir    string
+	RuntimeDir    string
+	MaxConcurrent int
+	Log           *slog.Logger
 
 	sem      chan struct{}
 	initOnce sync.Once

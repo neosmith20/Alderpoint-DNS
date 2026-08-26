@@ -80,7 +80,128 @@ async function main() {
     const cardCount = (await page.$$(".card")).length;
     check("Dashboard renders summary cards", cardCount >= 2, `found ${cardCount}`);
     const scopeNote = await page.$eval(".scope-note", (el) => el.textContent).catch(() => "");
-    check("Dashboard discloses its own incomplete scope rather than implying full parity", scopeNote.includes("not migrated yet"), scopeNote);
+    check(
+      "Dashboard discloses its own incomplete scope rather than implying full parity",
+      scopeNote.replace(/\s+/g, " ").includes("not migrated yet"),
+      scopeNote,
+    );
+
+    // --- Dashboard: DNS Activity chart, range switching, degraded states ---
+    await page.waitForSelector(".range-select button", { timeout: 3000 }).catch(() => {});
+    const rangeButtons = await page.$$(".range-select button");
+    check("DNS Activity range selector has all 4 modes (Live/1h/24h/7d)", rangeButtons.length === 4, `found ${rangeButtons.length}`);
+    // Switch to "Last 24 hours" -- the snapshot copy has real historical
+    // data here, unlike Live mode against a frozen copy.
+    for (const btn of rangeButtons) {
+      if ((await btn.evaluate((el) => el.textContent?.trim())) === "Last 24 hours") {
+        await btn.click();
+        break;
+      }
+    }
+    await new Promise((r) => setTimeout(r, 400));
+    const chartSvg = await page.$(".wide-card svg");
+    check("DNS Activity chart renders an SVG after selecting a real historical range", chartSvg !== null);
+    const chartPathCount = chartSvg ? await page.$$eval(".wide-card svg path.line", (els) => els.length) : 0;
+    check("chart draws both the total and blocked line series", chartPathCount === 2, `found ${chartPathCount}`);
+
+    // --- Dashboard: Top Domains (real data from the snapshot) ---
+    await page.waitForSelector(".card .data-grid", { timeout: 3000 }).catch(() => {});
+    const topDomainRows = await page.$$eval(".card .data-grid tbody tr", (rows) => rows.length).catch(() => 0);
+    check("Top Domains grid renders real rows from the analytics boundary", topDomainRows > 0, `found ${topDomainRows}`);
+
+    // --- DataGrid: clicking a sortable header actually reorders rows (not just cosmetic) ---
+    const firstDomainBefore = await page.$eval(".card .data-grid tbody tr:first-child td:first-child", (el) => el.textContent).catch(() => null);
+    const domainHeaderBtn = await page.$(".card .data-grid thead .sort-btn");
+    if (domainHeaderBtn) await domainHeaderBtn.click();
+    await new Promise((r) => setTimeout(r, 80));
+    const firstDomainAfterAsc = await page.$eval(".card .data-grid tbody tr:first-child td:first-child", (el) => el.textContent).catch(() => null);
+    if (domainHeaderBtn) await domainHeaderBtn.click(); // toggle to descending
+    await new Promise((r) => setTimeout(r, 80));
+    const firstDomainAfterDesc = await page.$eval(".card .data-grid tbody tr:first-child td:first-child", (el) => el.textContent).catch(() => null);
+    check(
+      "clicking a DataGrid sortable header actually changes row order (asc, then desc)",
+      firstDomainBefore !== null && firstDomainAfterAsc !== null && firstDomainAfterDesc !== null && (firstDomainAfterAsc !== firstDomainBefore || firstDomainAfterAsc !== firstDomainAfterDesc),
+      `before=${firstDomainBefore} asc=${firstDomainAfterAsc} desc=${firstDomainAfterDesc}`,
+    );
+
+    // --- DataGrid: column drag-resize actually changes the column's width ---
+    const th = await page.$(".card .data-grid thead th");
+    const handle = await page.$(".card .data-grid thead th .resize-handle");
+    if (th && handle) {
+      const widthBefore = await th.evaluate((el) => el.getBoundingClientRect().width);
+      const box = await handle.boundingBox();
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(box.x + box.width / 2 + 120, box.y + box.height / 2, { steps: 5 });
+      await page.mouse.up();
+      await new Promise((r) => setTimeout(r, 80));
+      const widthAfter = await th.evaluate((el) => el.getBoundingClientRect().width);
+      check("dragging a DataGrid column's resize handle actually changes its width", widthAfter > widthBefore + 50, `before=${widthBefore} after=${widthAfter}`);
+
+      // Reload and confirm the resized width persisted (localStorage, per gridId).
+      await page.reload({ waitUntil: "networkidle0" });
+      await page.waitForSelector(".card .data-grid thead th", { timeout: 3000 });
+      const thAfterReload = await page.$(".card .data-grid thead th");
+      const widthAfterReload = await thAfterReload.evaluate((el) => el.getBoundingClientRect().width);
+      check("resized column width persists across a full page reload", widthAfterReload > widthBefore + 50, `original=${widthBefore} afterReload=${widthAfterReload}`);
+    } else {
+      check("DataGrid resize handle present to test drag-resize", false, "th or handle not found");
+    }
+
+    // --- Dashboard: Top Blocked Domains honestly reports unavailable ---
+    const degradedNotes = await page.$$eval(".degraded-note", (els) => els.map((e) => e.textContent));
+    check(
+      "Top Blocked Domains honestly reports unavailable (not faked, not silently hidden)",
+      degradedNotes.some((t) => t.includes("Parquet") || t.includes("DuckDB") || t.includes("Unavailable")),
+      degradedNotes.join(" | "),
+    );
+
+    // --- Dashboard: card customization (hide, reorder, persistence) ---
+    await page.click(".customize-btn");
+    await page.waitForSelector(".customize-panel", { timeout: 2000 });
+    const cardLabelsBefore = await page.$$eval(".customize-panel li label", (els) => els.map((e) => e.textContent.trim()));
+    check("customize panel lists all 5 cards", cardLabelsBefore.length === 5, cardLabelsBefore.join(","));
+    // Hide "Top Blocked Domains".
+    const checkboxes = await page.$$(".customize-panel input[type=checkbox]");
+    const labels = await page.$$eval(".customize-panel li label", (els) => els.map((e) => e.textContent.trim()));
+    const hideIdx = labels.findIndex((l) => l.includes("Top Blocked Domains"));
+    await checkboxes[hideIdx].click();
+    await new Promise((r) => setTimeout(r, 100));
+    let visibleCardHeadings = await page.$$eval(".cards .card h3", (els) => els.map((e) => e.childNodes[0].textContent.trim()));
+    check("hiding a card via Customize actually removes it from the dashboard", !visibleCardHeadings.includes("Top Blocked Domains"), visibleCardHeadings.join(","));
+    // Move "Local DNS" up one (it starts second, after Blocklists).
+    const upButtons = await page.$$(".customize-panel .reorder-btns button:first-child");
+    await upButtons[1].click(); // second card's "move up" button
+    await new Promise((r) => setTimeout(r, 100));
+    const orderAfterMove = await page.$$eval(".customize-panel li label", (els) => els.map((e) => e.textContent.trim()));
+    check("reordering via Customize actually changes the stored order", orderAfterMove[0].includes("Local DNS"), orderAfterMove.join(","));
+    // Reload the page: persistence must survive it.
+    await page.reload({ waitUntil: "networkidle0" });
+    await page.waitForSelector(".dashboard", { timeout: 5000 });
+    await page.click(".customize-btn");
+    await page.waitForSelector(".customize-panel", { timeout: 2000 });
+    // The customize panel always lists every card (so a hidden one can be
+    // re-shown); check its checkbox state, not list membership, for
+    // whether it's actually hidden from the dashboard.
+    const orderAfterReload = await page.$$eval(".customize-panel li", (els) =>
+      els.map((li) => ({ label: li.querySelector("label").textContent.trim(), checked: li.querySelector("input").checked })),
+    );
+    const blockedEntry = orderAfterReload.find((c) => c.label.includes("Top Blocked Domains"));
+    check(
+      "card hide + reorder persists across a full page reload",
+      blockedEntry && blockedEntry.checked === false && orderAfterReload[0].label.includes("Local DNS"),
+      JSON.stringify(orderAfterReload),
+    );
+    const stillHiddenOnPage = (await page.$$eval(".cards .card h3", (els) => els.map((e) => e.childNodes[0].textContent.trim()))).every(
+      (h) => !h.includes("Top Blocked Domains"),
+    );
+    check("hidden card is still hidden from the dashboard itself after reload, not just the panel", stillHiddenOnPage);
+    // Restore: re-show the hidden card for a clean state before continuing.
+    const checkboxesAfter = await page.$$(".customize-panel input[type=checkbox]");
+    const labelsAfter = await page.$$eval(".customize-panel li label", (els) => els.map((e) => e.textContent.trim()));
+    const reshowIdx = labelsAfter.findIndex((l) => l.includes("Top Blocked Domains"));
+    if (reshowIdx >= 0) await checkboxesAfter[reshowIdx].click();
+    await page.click(".customize-btn");
 
     // --- Nav: Local DNS (click by visible text; XPath is gone from modern Puppeteer) ---
     const navButtons = await page.$$(".sidebar .item");
@@ -215,6 +336,37 @@ async function main() {
     check("shared DataGrid renders on Blocklists", gridPresent);
     const sortableHeader = await page.$(".sort-btn");
     check("Blocklists grid has at least one sortable column header", sortableHeader !== null);
+
+    // --- Systematic viewport sweep: every implemented route x desktop/tablet/mobile x light/dark ---
+    const VIEWPORTS = [
+      { name: "desktop-1440", width: 1440, height: 900 },
+      { name: "tablet-1024", width: 1024, height: 900 },
+      { name: "mobile-390", width: 390, height: 844 },
+    ];
+    const ROUTES = [
+      { path: "/ui/dashboard", heading: "#dashboard-heading" },
+      { path: "/ui/blocklists", heading: "#blocklists-heading" },
+      { path: "/ui/localdns", heading: "#localdns-heading" },
+      { path: "/ui/administration", heading: "#admin-heading" },
+    ];
+    for (const theme of ["light", "dark"]) {
+      const currentTheme = await page.$eval("html", (el) => el.getAttribute("data-theme"));
+      if (currentTheme !== theme) {
+        await page.click(".theme-toggle");
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      for (const vp of VIEWPORTS) {
+        await page.setViewport({ width: vp.width, height: vp.height });
+        for (const route of ROUTES) {
+          await page.goto(`${baseUrl}${route.path}`, { waitUntil: "networkidle0" });
+          await page.waitForSelector(route.heading, { timeout: 3000 }).catch(() => {});
+          const hasHeading = (await page.$(route.heading)) !== null;
+          const overflowX = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
+          check(`${route.path} @ ${vp.name} / ${theme}: real content renders, no horizontal overflow`, hasHeading && !overflowX, `heading=${hasHeading} overflow=${overflowX}`);
+        }
+      }
+    }
+    await page.setViewport({ width: 1440, height: 900 });
 
     // --- Console/runtime errors across the whole pass ---
     // Chromium itself (not app code) logs a "Failed to load resource:

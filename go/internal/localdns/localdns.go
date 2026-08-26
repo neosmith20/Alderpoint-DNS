@@ -203,7 +203,10 @@ func (s *Service) stageAndPromote(ctx context.Context) error {
 	}
 	defer rows.Close()
 
-	type line struct{ name, rtype, value string; ttl int }
+	type line struct {
+		name, rtype, value string
+		ttl                int
+	}
 	var lines []line
 	for rows.Next() {
 		var l line

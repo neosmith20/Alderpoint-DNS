@@ -16,12 +16,12 @@ import (
 const CurrentSchemaVersion = 1
 
 type Config struct {
-	SchemaVersion int             `yaml:"schema_version"`
-	Appliance     ApplianceSec    `yaml:"appliance"`
-	Web           WebSec          `yaml:"web"`
-	Blocklists    BlocklistsSec   `yaml:"blocklists"`
-	LocalDNS      LocalDNSSec     `yaml:"local_dns"`
-	Auth          AuthSec         `yaml:"auth"`
+	SchemaVersion int           `yaml:"schema_version"`
+	Appliance     ApplianceSec  `yaml:"appliance"`
+	Web           WebSec        `yaml:"web"`
+	Blocklists    BlocklistsSec `yaml:"blocklists"`
+	LocalDNS      LocalDNSSec   `yaml:"local_dns"`
+	Auth          AuthSec       `yaml:"auth"`
 }
 
 type ApplianceSec struct {
@@ -37,11 +37,11 @@ type WebSec struct {
 }
 
 type BlocklistsSec struct {
-	StagingDir            string `yaml:"staging_dir"`
-	RuntimeDir            string `yaml:"runtime_dir"`
-	PullTimeoutSeconds    int    `yaml:"pull_timeout_seconds"`
-	SchedulerTickSeconds  int    `yaml:"scheduler_tick_seconds"`
-	MaxConcurrentPulls    int    `yaml:"max_concurrent_pulls"`
+	StagingDir           string `yaml:"staging_dir"`
+	RuntimeDir           string `yaml:"runtime_dir"`
+	PullTimeoutSeconds   int    `yaml:"pull_timeout_seconds"`
+	SchedulerTickSeconds int    `yaml:"scheduler_tick_seconds"`
+	MaxConcurrentPulls   int    `yaml:"max_concurrent_pulls"`
 }
 
 type LocalDNSSec struct {
@@ -50,8 +50,8 @@ type LocalDNSSec struct {
 }
 
 type AuthSec struct {
-	SessionTTLSeconds              int `yaml:"session_ttl_seconds"`
-	LastSeenUpdateIntervalSeconds  int `yaml:"last_seen_update_interval_seconds"`
+	SessionTTLSeconds             int `yaml:"session_ttl_seconds"`
+	LastSeenUpdateIntervalSeconds int `yaml:"last_seen_update_interval_seconds"`
 }
 
 // Load reads, strictly parses (unknown fields rejected), and validates path.
