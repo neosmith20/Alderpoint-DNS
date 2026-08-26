@@ -182,6 +182,15 @@
   .sidebar.collapsed .chevron {
     display: none;
   }
+  /* Collapsed rail: only the icon remains once its label is hidden --
+     center it in the narrow rail instead of leaving it flush against
+     the button's own left padding, which read as visibly off-center. */
+  .sidebar.collapsed .item,
+  .sidebar.collapsed .group-toggle {
+    justify-content: center;
+    padding-left: 0;
+    padding-right: 0;
+  }
 
   .item {
     display: flex;

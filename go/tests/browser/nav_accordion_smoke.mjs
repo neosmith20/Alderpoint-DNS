@@ -108,6 +108,20 @@ async function main() {
     // group's toggle replaces the first flyout, not adds to it. ---
     await page.click(".rail-toggle");
     await new Promise((r) => setTimeout(r, 80));
+
+    // Collapsed rail: the icon (all that's left once the label is
+    // hidden) must be horizontally centered in its button, not flush
+    // left against the button's own padding.
+    const centering = await page.$eval(".sidebar.collapsed .top-level", (el) => {
+      const btn = el.getBoundingClientRect();
+      const icon = el.querySelector("svg")?.getBoundingClientRect();
+      if (!icon) return null;
+      const leftGap = icon.left - btn.left;
+      const rightGap = btn.right - icon.right;
+      return Math.abs(leftGap - rightGap);
+    });
+    check("collapsed rail: the icon is horizontally centered in its button", centering !== null && centering < 2, `gap difference=${centering}px`);
+
     const toggles = await page.$$(".sidebar.collapsed .group-toggle");
     let dnsToggle, systemToggle;
     for (const t of toggles) {
