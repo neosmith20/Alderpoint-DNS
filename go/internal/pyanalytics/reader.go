@@ -88,8 +88,42 @@ type Reader struct {
 // lazily opens on first query) -- callers must still treat any query
 // error as "analytics degraded", never as a fatal startup condition, per
 // "DNS works if analytics is dead" applying equally to this dashboard.
+//
+// Real defect found live once this control plane's own container
+// actually ran as its unprivileged UID instead of root (see
+// internal/deployperm's regression test), root-caused in two layers:
+//
+//  1. Without an explicit "mode=ro" URI parameter, SQLite's default
+//     open mode is read-write -- needed even for a plain SELECT, since
+//     the rollback-journal locking protocol may create/delete a
+//     "-journal" sidecar file next to the database on every
+//     transaction. "mode=ro" (matching internal/hostagentd/
+//     ops_replication.go's control.db reader) fixes that half.
+//  2. Python's real aggregates.db is left running in WAL journal mode
+//     (confirmed live: "PRAGMA journal_mode" reports "wal"), which
+//     needs to open/create a "-shm" shared-memory index file to
+//     coordinate with the real, actively-writing Python process even
+//     for a read -- and "mode=ro" alone does not exempt WAL databases
+//     from that. On a genuinely read-only mount where those sidecar
+//     files can never be created, that still fails with the exact same
+//     SQLite error 14/SQLITE_CANTOPEN as case 1, which is why this
+//     looked "fixed" against mode=ro alone during isolated review but
+//     still failed against the real live file. "immutable=1" is
+//     SQLite's real, documented answer for exactly this shape of
+//     problem: it tells this connection to skip the WAL/journal
+//     change-detection machinery entirely and just read the main
+//     database file's current contents directly -- correct here
+//     specifically because this reader's whole contract is already
+//     "tolerant of a query returning slightly-stale/degraded data,
+//     never blocking" (the same "DNS works if analytics is dead"
+//     posture as everywhere else in this boundary), not a guarantee of
+//     seeing every write the instant it commits.
+//
+// Root could always silently get full read-write access regardless of
+// either real issue, masking both; a genuinely UID-restricted,
+// genuinely read-only bind mount cannot.
 func Open(path string) (*Reader, error) {
-	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(2000)")
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro&immutable=1&_pragma=busy_timeout(2000)")
 	if err != nil {
 		return nil, fmt.Errorf("open analytics reader: %w", err)
 	}

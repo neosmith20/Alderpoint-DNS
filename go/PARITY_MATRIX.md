@@ -45,6 +45,28 @@ integration test -- root running the agent, a real unprivileged system user runn
 -- which caught a real bug (an 0600 socket file that silently blocked the legitimate client before
 authorization ever ran) no unit test could have found.
 
+**Deployed-UID integration defect found and fixed (real, live, on :10443):** once the container
+actually ran as its real unprivileged UID (see above) instead of root, Dashboard analytics and Top
+Domains broke outright ("Analytics degraded: unable to open database file (14)") -- root-caused in
+`internal/pyanalytics`, `internal/deployperm`'s doc comment, two real layers: (1) Python's
+`analytics`/`certs` mount directories are genuinely group-restricted (`_dnsdist:bind`, mode 750/640)
+on the host, and podman's `--user UID:GID` does not automatically grant a container process any of
+that host user's real supplementary group memberships -- fixed with `--group-add 103` (the real
+`bind` GID) on the container's own `podman run`, the narrowest possible grant (one specific existing
+GID, not a broader mount or permission change). (2) Python's live `aggregates.db` is WAL-mode
+(confirmed live), which needs to open/create a `-shm` coordination file even for a read; SQLite's
+`mode=ro` alone doesn't exempt WAL databases from that, so a genuinely read-only mount still failed
+the same way -- fixed with SQLite's own `immutable=1` URI parameter, telling this reader (whose
+whole contract is already "tolerant of slightly-stale data, never blocking") to skip WAL
+change-detection and read the main file directly. Root always had full read-write access regardless
+of either issue, masking both until the container ran unprivileged for real. A permanent, real
+regression test (`internal/deployperm`, a genuine two-real-UID subprocess re-exec, not a mock)
+reproduces the exact live error against a real WAL-mode database and proves both fixes are actually
+necessary (each removed independently makes the test fail again, with the real corresponding SQLite
+error). Verified fixed end-to-end via real Chromium against a disposable instance mounting the same
+real live `aggregates.db`/`server.crt`, running as UID 996 with `--group-add 103`: real chart data,
+real Top Domains rows, zero "degraded" text anywhere on the page.
+
 **DNS Runtime Compiler (Local DNS, Custom Rules, Blocklists, DNS Settings, DNS Transports):**
 closes the "compiled Go state doesn't actually affect live DNS" gap every one of these rows
 previously disclosed. Two new pieces:
