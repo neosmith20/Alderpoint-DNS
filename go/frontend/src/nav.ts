@@ -61,7 +61,12 @@ export const NAV_GROUPS: NavGroup[] = [
         icon: "dns",
         load: () => import("./lib/UpstreamsView.svelte") as unknown as Promise<{ default: Component }>,
       },
-      { id: "cache", label: "Cache", icon: "dns" },
+      {
+        id: "cache",
+        label: "Cache",
+        icon: "dns",
+        load: () => import("./lib/CacheView.svelte") as unknown as Promise<{ default: Component }>,
+      },
     ],
   },
   {
@@ -106,7 +111,12 @@ export const NAV_GROUPS: NavGroup[] = [
         icon: "operations",
         load: () => import("./lib/BackupView.svelte") as unknown as Promise<{ default: Component }>,
       },
-      { id: "replication", label: "Replication", icon: "operations" },
+      {
+        id: "replication",
+        label: "Replication",
+        icon: "operations",
+        load: () => import("./lib/ReplicationView.svelte") as unknown as Promise<{ default: Component }>,
+      },
     ],
   },
   {
@@ -132,15 +142,30 @@ export const NAV_GROUPS: NavGroup[] = [
         icon: "system",
         load: () => import("./lib/AdministrationView.svelte") as unknown as Promise<{ default: Component }>,
       },
-      { id: "network", label: "Network Configuration", icon: "system" },
+      {
+        id: "network",
+        label: "Network Configuration",
+        icon: "system",
+        load: () => import("./lib/NetworkView.svelte") as unknown as Promise<{ default: Component }>,
+      },
       {
         id: "notifications",
         label: "Notifications",
         icon: "system",
         load: () => import("./lib/NotificationsView.svelte") as unknown as Promise<{ default: Component }>,
       },
-      { id: "updates", label: "Software Updates", icon: "system" },
-      { id: "logs", label: "Logs", icon: "system" },
+      {
+        id: "updates",
+        label: "Software Updates",
+        icon: "system",
+        load: () => import("./lib/UpdatesView.svelte") as unknown as Promise<{ default: Component }>,
+      },
+      {
+        id: "logs",
+        label: "Logs",
+        icon: "system",
+        load: () => import("./lib/LogsView.svelte") as unknown as Promise<{ default: Component }>,
+      },
     ],
   },
 ];

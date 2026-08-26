@@ -28,6 +28,7 @@ import (
 	"alderpointdns/go-controlplane/internal/customrules"
 	"alderpointdns/go-controlplane/internal/dbmigrate"
 	"alderpointdns/go-controlplane/internal/dnstransports"
+	"alderpointdns/go-controlplane/internal/hostagent"
 	"alderpointdns/go-controlplane/internal/httpapi"
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/notifications"
@@ -51,8 +52,15 @@ func main() {
 		runWeb(os.Args[2:])
 	case "migrate":
 		runMigrate(os.Args[2:])
+	case "version":
+		// Plain stdout, nothing else -- Software Updates' staged-package
+		// verification (internal/hostagentd's ops_update.go) execs a
+		// staged candidate binary with exactly this subcommand to
+		// confirm its self-reported version actually matches what the
+		// caller claimed before ever trusting it as an update target.
+		fmt.Println(Version)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q (want: web, migrate)\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q (want: web, migrate, version)\n", os.Args[1])
 		os.Exit(2)
 	}
 }
@@ -132,6 +140,7 @@ func runWeb(args []string) {
 	backupRetentionMaxCount := fs.Int("backup-retention-max-count", 0, "keep at most N manual backups, oldest pruned first (0 = unlimited; the pre-restore safety backup is never pruned)")
 	backupRetentionMaxAgeDays := fs.Int("backup-retention-max-age-days", 0, "prune manual backups older than N days (0 = unlimited)")
 	tlsCertStatusPath := fs.String("tls-cert-status-path", "", "optional read-only path to Python's DNS-transport server.crt (compatibility boundary, see internal/tlscert; never the private key); empty = Encryption page's TLS status always reports inactive")
+	hostagentSocket := fs.String("hostagent-socket", "", "unix socket path for apdns-hostagent (see internal/hostagent, internal/hostagentd); empty = Cache/Replication/Network/Logs/Software-Updates all report unavailable")
 	fs.Parse(args)
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -207,13 +216,23 @@ func runWeb(args []string) {
 		tlsCertReader = &tlscert.Reader{CertPath: *tlsCertStatusPath}
 	}
 
+	// Host-agent client: same "optional, never fatal" contract. No
+	// connection is opened at startup -- hostagent.Client dials fresh
+	// per call, so an agent that isn't running yet (or ever) never
+	// blocks this process from starting; every hostagent-backed handler
+	// already treats a dial failure as "unavailable", not an error.
+	var hostAgentClient *hostagent.Client
+	if *hostagentSocket != "" {
+		hostAgentClient = hostagent.NewClient(*hostagentSocket)
+	}
+
 	srv := &httpapi.Server{
 		DB: db, Auth: &auth.Store{DB: db}, Blocklists: blSvc, LocalDNS: ldSvc, Upstreams: upSvc, Clients: clientsSvc, Policy: policySvc, CustomRules: customRulesSvc, Backup: backupSvc,
 		DNSTransports: dnsTransportsSvc, Notifications: notificationsSvc,
 		StaticDir: *staticDir, Log: logger, Version: Version, StartedAt: startedAt,
 		SessionTTL: cfg.SessionTTL(), LastSeen: cfg.LastSeenUpdateInterval(),
 		ApplianceName: cfg.Appliance.Name, ApplianceTimezone: cfg.Appliance.Timezone,
-		Analytics: analyticsReader, RawQueryLog: rawQueryLogReader, TLSCert: tlsCertReader,
+		Analytics: analyticsReader, RawQueryLog: rawQueryLogReader, TLSCert: tlsCertReader, HostAgent: hostAgentClient,
 	}
 
 	listenAddr := *addr

@@ -273,6 +273,70 @@ export interface TlsStatus {
   error?: string;
 }
 
+// --- Host-agent-backed types (internal/hostagent / internal/hostagentd) ---
+
+export interface BindContextStatus {
+  name: string;
+  stats_port: number;
+  rndc_port: number;
+  reachable: boolean;
+  rndc_status?: string;
+}
+
+export interface CacheStatusResponse {
+  bind: BindContextStatus[];
+  dnsdist: { note: string };
+}
+
+export interface CacheFlushResult {
+  results: { context: string; ok: boolean; detail?: string }[];
+}
+
+export interface ReplicationPeer {
+  peer_node_id: string;
+  display_name: string;
+  url: string;
+  expected_cert_sha256: string;
+  expected_incoming_cert_sha256: string;
+  authorized: boolean;
+  direction: string;
+  last_attempt_at: string;
+  last_success_at: string;
+  last_error: string;
+  local_generation: number;
+  remote_known_generation: number;
+  lag: number;
+}
+
+export interface ReplicationStatusResponse {
+  node_identity: { node_id: string; display_name: string; created_at: string; regenerated_at?: string } | null;
+  peers: ReplicationPeer[];
+}
+
+export interface ReplicationSyncResult {
+  peer_node_id: string;
+  ok: boolean;
+  detail: string;
+  status_code?: number;
+  elapsed_ms: number;
+}
+
+export interface NetworkApplyResult {
+  status: string;
+  interface: string;
+  auto_revert_seconds: number;
+}
+
+export interface LogEntry {
+  time: string;
+  message: string;
+}
+
+export interface UpdateCheckResponse {
+  current_version: string;
+  staged: { version: string; sha256: string } | null;
+}
+
 export interface ImportHostsResult {
   imported: number;
   skipped: number;
@@ -415,6 +479,33 @@ export const api = {
   deleteNotificationProvider: (id: string) => req<{ status: string }>(`/api/notifications/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
   importHosts: (text: string) => req<ImportHostsResult>("/api/import/hosts", { method: "POST", body: text }),
+
+  cacheStatus: (signal?: AbortSignal) => req<CacheStatusResponse>("/api/cache/status", undefined, signal),
+  cacheFlush: (layer: "bind" | "dnsdist", opts?: { context?: string; scope?: string; target?: string }) =>
+    req<CacheFlushResult>("/api/cache/flush", { method: "POST", body: JSON.stringify({ layer, ...opts }) }),
+
+  replicationStatus: (signal?: AbortSignal) => req<ReplicationStatusResponse>("/api/replication/status", undefined, signal),
+  replicationSync: (peerNodeId: string) =>
+    req<ReplicationSyncResult>("/api/replication/sync", { method: "POST", body: JSON.stringify({ peer_node_id: peerNodeId }) }),
+
+  networkStatus: (iface: string, signal?: AbortSignal) =>
+    req<{ raw_addr_json: string }>(`/api/network/status?interface=${encodeURIComponent(iface)}`, undefined, signal),
+  networkApply: (iface: string, addresses: string[], gateway?: string) =>
+    req<NetworkApplyResult>("/api/network/apply", { method: "POST", body: JSON.stringify({ interface: iface, addresses, gateway }) }),
+  networkConfirm: (iface: string) => req<{ status: string }>("/api/network/confirm", { method: "POST", body: JSON.stringify({ interface: iface }) }),
+  networkRollback: (iface: string) => req<{ status: string }>("/api/network/rollback", { method: "POST", body: JSON.stringify({ interface: iface }) }),
+
+  logsListUnits: (signal?: AbortSignal) => req<{ units: string[] }>("/api/logs/units", undefined, signal),
+  logsRead: (unit: string, lines: number, signal?: AbortSignal) =>
+    req<{ unit: string; entries: LogEntry[] }>(`/api/logs/${encodeURIComponent(unit)}?lines=${lines}`, undefined, signal),
+
+  updateCheck: (signal?: AbortSignal) => req<UpdateCheckResponse>("/api/updates/status", undefined, signal),
+  updateStage: (claimedVersion: string, sha256: string, dataBase64: string) =>
+    req<{ status: string; version: string; sha256: string }>("/api/updates/stage", {
+      method: "POST",
+      body: JSON.stringify({ claimed_version: claimedVersion, sha256, data_base64: dataBase64 }),
+    }),
+  updateApply: () => req<{ status: string; version: string }>("/api/updates/apply", { method: "POST" }),
 
   listBlocklists: (signal?: AbortSignal) => req<BlocklistsResponse>("/api/blocklists", undefined, signal),
   createBlocklist: (name: string, url: string, category: string) =>

@@ -12,6 +12,7 @@ import (
 	"alderpointdns/go-controlplane/internal/clients"
 	"alderpointdns/go-controlplane/internal/customrules"
 	"alderpointdns/go-controlplane/internal/dnstransports"
+	"alderpointdns/go-controlplane/internal/hostagent"
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/notifications"
 	"alderpointdns/go-controlplane/internal/policy"
@@ -41,6 +42,15 @@ type Server struct {
 	// reports {"active": false}, never an error. See internal/tlscert's
 	// doc comment.
 	TLSCert *tlscert.Reader
+
+	// HostAgent is nil unless -hostagent-socket was given at startup --
+	// nil means Cache/Replication/Network/Logs/Software-Updates all
+	// honestly report unavailable, same nil-safe contract as every
+	// other optional boundary. See internal/hostagentd's doc comment:
+	// this is the ONLY thing that ever gives this web process reach
+	// into privileged host operations, and even then only through this
+	// one narrow, allowlisted client -- never directly.
+	HostAgent *hostagent.Client
 
 	// Analytics is nil unless -analytics-db was given a real path at
 	// startup -- every analytics handler must treat nil as "degraded",
@@ -158,6 +168,24 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("DELETE /api/notifications/{id}", requireAuth(s.handleDeleteNotificationProvider))
 
 	mux.HandleFunc("POST /api/import/hosts", requireAuth(s.handleImportHosts))
+
+	mux.HandleFunc("GET /api/cache/status", requireAuth(s.handleCacheStatus))
+	mux.HandleFunc("POST /api/cache/flush", requireAuth(s.handleCacheFlush))
+
+	mux.HandleFunc("GET /api/replication/status", requireAuth(s.handleReplicationStatus))
+	mux.HandleFunc("POST /api/replication/sync", requireAuth(s.handleReplicationSync))
+
+	mux.HandleFunc("GET /api/network/status", requireAuth(s.handleNetworkStatus))
+	mux.HandleFunc("POST /api/network/apply", requireAuth(s.handleNetworkApply))
+	mux.HandleFunc("POST /api/network/confirm", requireAuth(s.handleNetworkConfirm))
+	mux.HandleFunc("POST /api/network/rollback", requireAuth(s.handleNetworkRollback))
+
+	mux.HandleFunc("GET /api/logs/units", requireAuth(s.handleLogsListUnits))
+	mux.HandleFunc("GET /api/logs/{unit}", requireAuth(s.handleLogsRead))
+
+	mux.HandleFunc("GET /api/updates/status", requireAuth(s.handleUpdateCheck))
+	mux.HandleFunc("POST /api/updates/stage", requireAuth(s.handleUpdateStage))
+	mux.HandleFunc("POST /api/updates/apply", requireAuth(s.handleUpdateApply))
 
 	mux.HandleFunc("/", s.handleStatic)
 
