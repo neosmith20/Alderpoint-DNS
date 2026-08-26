@@ -70,13 +70,13 @@ export function setCsrfToken(token: string): void {
   csrfToken = token;
 }
 
-async function req<T>(path: string, init?: RequestInit): Promise<T> {
+async function req<T>(path: string, init?: RequestInit, signal?: AbortSignal): Promise<T> {
   const method = (init?.method ?? "GET").toUpperCase();
   const headers: Record<string, string> = { "Content-Type": "application/json", ...(init?.headers as any) };
   if (method !== "GET" && method !== "HEAD" && csrfToken) {
     headers["X-CSRF-Token"] = csrfToken;
   }
-  const res = await fetch(path, { ...init, method, headers, credentials: "include" });
+  const res = await fetch(path, { ...init, method, headers, credentials: "include", signal });
   if (!res.ok) {
     let body: any = {};
     try {
@@ -106,7 +106,7 @@ export const api = {
   logout: () => req<{ status: string }>("/api/logout", { method: "POST" }),
   session: () => req<{ authenticated: boolean; username: string; csrf: string }>("/api/session"),
 
-  listBlocklists: () => req<BlocklistsResponse>("/api/blocklists"),
+  listBlocklists: (signal?: AbortSignal) => req<BlocklistsResponse>("/api/blocklists", undefined, signal),
   createBlocklist: (name: string, url: string, category: string) =>
     req<{ subscription_id: string; job_id: number; subscription: Subscription }>("/api/blocklists", {
       method: "POST",
@@ -125,7 +125,7 @@ export const api = {
   refreshAll: () => req<{ status: string; job_id: number | null; count?: number }>("/api/blocklists/refresh-all", { method: "POST" }),
   getJob: (id: number) => req<Job>(`/api/blocklists/jobs/${id}`),
 
-  listLocalDNS: () => req<{ records: LocalDnsRecord[] }>("/api/local-dns"),
+  listLocalDNS: (signal?: AbortSignal) => req<{ records: LocalDnsRecord[] }>("/api/local-dns", undefined, signal),
   createLocalDNS: (rec: Omit<LocalDnsRecord, "id">) =>
     req<{ record: LocalDnsRecord }>("/api/local-dns", { method: "POST", body: JSON.stringify(rec) }),
   updateLocalDNS: (id: number, patch: Partial<Pick<LocalDnsRecord, "value" | "ttl" | "enabled">>) =>

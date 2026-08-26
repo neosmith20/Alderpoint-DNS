@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { api, type Subscription, type IntervalPreset } from "../api";
   import { StaleGuard } from "../staleGuard";
+  import { router } from "../router.svelte";
 
   let subs = $state<Subscription[]>([]);
   let presets = $state<IntervalPreset[]>([]);
@@ -22,7 +23,11 @@
   export async function refresh(): Promise<void> {
     const token = guard.start();
     try {
-      const resp = await api.listBlocklists();
+      // router.signal() ties this request to the current navigation: if the
+      // operator routes away before it resolves, the fetch itself is
+      // aborted (not just discarded client-side) -- no background network
+      // work continues off-route.
+      const resp = await api.listBlocklists(router.signal());
       if (!guard.isCurrent(token)) return; // a newer refresh already landed; discard this stale one
       subs = resp.subscriptions;
       presets = resp.settings.interval_presets;
@@ -30,6 +35,7 @@
       loadError = "";
     } catch (err) {
       if (!guard.isCurrent(token)) return;
+      if (err instanceof DOMException && err.name === "AbortError") return; // navigated away; not a real error
       loadError = err instanceof Error ? err.message : String(err);
     }
   }

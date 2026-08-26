@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { api, type LocalDnsRecord } from "../api";
   import { StaleGuard } from "../staleGuard";
+  import { router } from "../router.svelte";
 
   let records = $state<LocalDnsRecord[]>([]);
   let loadError = $state("");
@@ -22,12 +23,13 @@
   export async function refresh(): Promise<void> {
     const token = guard.start();
     try {
-      const resp = await api.listLocalDNS();
+      const resp = await api.listLocalDNS(router.signal());
       if (!guard.isCurrent(token)) return;
       records = resp.records;
       loadError = "";
     } catch (err) {
       if (!guard.isCurrent(token)) return;
+      if (err instanceof DOMException && err.name === "AbortError") return; // navigated away; not a real error
       loadError = err instanceof Error ? err.message : String(err);
     }
   }

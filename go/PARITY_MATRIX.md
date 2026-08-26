@@ -93,12 +93,12 @@ target, not the defect — literal bug-for-bug parity is not the goal.
 
 | Item | Source | Go API | Svelte | Browser test | Owner accepted |
 |---|---|---|---|---|---|
-| Nav shell: 4 groups (DNS/Security/Operations/System) + Dashboard, accordion multi-open pref, collapsed flyout, keyboard/pointer/touch | `app.js` GROUP_ORDER + accordion fix history in `v1-workflow-parity-contract.md` | n/a | not started | not started | not started |
+| Nav shell: 4 groups (DNS/Security/Operations/System) + Dashboard, accordion multi-open pref, collapsed flyout, keyboard/pointer/touch | `app.js` GROUP_ORDER + accordion fix history in `v1-workflow-parity-contract.md` | n/a | in progress (`Nav.svelte`, `nav.ts`: full IA, accordion+persist, collapsed flyout, off-canvas drawer <760px; Escape handled; arrow-key roving focus not yet added) | not started | not started |
 | Shared data grid (sort/resize/persist/overflow) | `data-grid.js` | n/a | not started | not started | not started |
-| Theme (light/dark), design tokens, local SVG icons | roadmap "Final Product Experience" | n/a | not started | not started | not started |
-| Timestamp engine (3 modes, instant reformat) | `app.js` timestamp display | n/a | not started | not started | not started |
+| Theme (light/dark), design tokens, local SVG icons | roadmap "Final Product Experience" | n/a | in progress (light/dark CSS-var tokens carried over from Milestone 1; icon set added this slice; no dedicated design-system pass yet) | not started | not started |
+| Timestamp engine (3 modes, instant reformat) | `app.js` timestamp display | n/a | in progress (`timestamp.ts`: formatting/sort-key logic done; not yet wired into any page, no Administration picker yet) | not started | not started |
 | Toasts, dialogs, confirmation flows, action menus | `app.js` shared UI | n/a | not started | not started | not started |
-| Route-level code splitting, cancellation, stale-response protection generalized from `staleGuard.ts` | governing task Phase 2 | n/a | not started | not started | not started |
+| Route-level code splitting, cancellation, stale-response protection generalized from `staleGuard.ts` | governing task Phase 2 | n/a | done — build-verified (`RouteLoader.svelte` dynamic `import()`; `dist/assets` shows per-page JS/CSS chunks split from the main bundle). `router.svelte.ts`'s per-navigation `AbortSignal` is wired into both existing pages' list fetches (`api.listBlocklists`/`listLocalDNS` now take a signal) -- routing away actually aborts the in-flight request, not just discards its result. Not yet threaded through every mutation call on those pages, and not yet a pattern documented for future pages beyond this example. | not started | not started |
 
 ---
 
