@@ -13,6 +13,7 @@ import (
 	"alderpointdns/go-controlplane/internal/customrules"
 	"alderpointdns/go-controlplane/internal/dnstransports"
 	"alderpointdns/go-controlplane/internal/localdns"
+	"alderpointdns/go-controlplane/internal/notifications"
 	"alderpointdns/go-controlplane/internal/policy"
 	"alderpointdns/go-controlplane/internal/pyanalytics"
 	"alderpointdns/go-controlplane/internal/rawquerylog"
@@ -31,6 +32,7 @@ type Server struct {
 	CustomRules   *customrules.Service
 	Backup        *backup.Service
 	DNSTransports *dnstransports.Service
+	Notifications *notifications.Service
 	StaticDir     string
 	Log           *slog.Logger
 
@@ -149,6 +151,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/dns-transports", requireAuth(s.handleGetDNSTransports))
 	mux.HandleFunc("PUT /api/dns-transports", requireAuth(s.handleUpdateDNSTransports))
 	mux.HandleFunc("GET /api/tls/status", requireAuth(s.handleTLSStatus))
+
+	mux.HandleFunc("GET /api/notifications", requireAuth(s.handleListNotificationProviders))
+	mux.HandleFunc("POST /api/notifications", requireAuth(s.handleCreateNotificationProvider))
+	mux.HandleFunc("POST /api/notifications/{id}/toggle", requireAuth(s.handleToggleNotificationProvider))
+	mux.HandleFunc("DELETE /api/notifications/{id}", requireAuth(s.handleDeleteNotificationProvider))
 
 	mux.HandleFunc("/", s.handleStatic)
 

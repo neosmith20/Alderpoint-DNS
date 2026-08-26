@@ -30,6 +30,7 @@ import (
 	"alderpointdns/go-controlplane/internal/dnstransports"
 	"alderpointdns/go-controlplane/internal/httpapi"
 	"alderpointdns/go-controlplane/internal/localdns"
+	"alderpointdns/go-controlplane/internal/notifications"
 	"alderpointdns/go-controlplane/internal/policy"
 	"alderpointdns/go-controlplane/internal/pyanalytics"
 	"alderpointdns/go-controlplane/internal/rawquerylog"
@@ -166,6 +167,7 @@ func runWeb(args []string) {
 	policySvc := &policy.Service{DB: db}
 	customRulesSvc := &customrules.Service{DB: db}
 	dnsTransportsSvc := &dnstransports.Service{DB: db}
+	notificationsSvc := &notifications.Service{DB: db}
 	backupSvc := &backup.Service{
 		DB: db, Dir: *backupsDir, Version: Version,
 		RetentionMaxCount: *backupRetentionMaxCount, RetentionMaxAgeDays: *backupRetentionMaxAgeDays,
@@ -207,8 +209,8 @@ func runWeb(args []string) {
 
 	srv := &httpapi.Server{
 		DB: db, Auth: &auth.Store{DB: db}, Blocklists: blSvc, LocalDNS: ldSvc, Upstreams: upSvc, Clients: clientsSvc, Policy: policySvc, CustomRules: customRulesSvc, Backup: backupSvc,
-		DNSTransports: dnsTransportsSvc,
-		StaticDir:     *staticDir, Log: logger, Version: Version, StartedAt: startedAt,
+		DNSTransports: dnsTransportsSvc, Notifications: notificationsSvc,
+		StaticDir: *staticDir, Log: logger, Version: Version, StartedAt: startedAt,
 		SessionTTL: cfg.SessionTTL(), LastSeen: cfg.LastSeenUpdateInterval(),
 		ApplianceName: cfg.Appliance.Name, ApplianceTimezone: cfg.Appliance.Timezone,
 		Analytics: analyticsReader, RawQueryLog: rawQueryLogReader, TLSCert: tlsCertReader,

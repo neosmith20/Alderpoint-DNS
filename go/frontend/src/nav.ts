@@ -128,7 +128,12 @@ export const NAV_GROUPS: NavGroup[] = [
         load: () => import("./lib/AdministrationView.svelte") as unknown as Promise<{ default: Component }>,
       },
       { id: "network", label: "Network Configuration", icon: "system" },
-      { id: "notifications", label: "Notifications", icon: "system" },
+      {
+        id: "notifications",
+        label: "Notifications",
+        icon: "system",
+        load: () => import("./lib/NotificationsView.svelte") as unknown as Promise<{ default: Component }>,
+      },
       { id: "updates", label: "Software Updates", icon: "system" },
       { id: "logs", label: "Logs", icon: "system" },
     ],

@@ -491,6 +491,31 @@ def main():
     else:
         check("statistics export honestly reports unavailable when analytics isn't configured", stats_status == "503", stats_status)
 
+    # --- Notifications (internal/notifications, native storage, no secrets) ---
+    bad_kind = curl_json("POST", f"{B}/api/notifications", cookie=CJ, csrf=csrf, body={"kind": "carrier-pigeon", "display_name": "x", "endpoint": "y"})
+    check("creating a notification provider rejects an invalid kind", bad_kind.get("error") == "validation_error", bad_kind)
+
+    provider1 = curl_json("POST", f"{B}/api/notifications", cookie=CJ, csrf=csrf, body={"kind": "slack", "display_name": "Ops Slack", "endpoint": "https://hooks.slack.example/xyz"})
+    check("creating a notification provider returns a provider_id", bool(provider1.get("provider_id")), provider1)
+    check("created provider defaults to enabled", provider1.get("enabled") is True, provider1)
+
+    listed_providers = curl_json("GET", f"{B}/api/notifications", cookie=CJ)
+    check("notification provider list contains the new provider", any(p["provider_id"] == provider1["provider_id"] and p["endpoint"] == "https://hooks.slack.example/xyz" for p in listed_providers.get("providers", [])), listed_providers)
+
+    toggle_result = curl_json("POST", f"{B}/api/notifications/{provider1['provider_id']}/toggle", cookie=CJ, csrf=csrf, body={"enabled": False})
+    check("toggling a notification provider succeeds", toggle_result.get("status") == "updated", toggle_result)
+    listed_after_toggle = curl_json("GET", f"{B}/api/notifications", cookie=CJ)
+    toggled = next((p for p in listed_after_toggle["providers"] if p["provider_id"] == provider1["provider_id"]), None)
+    check("toggle actually persisted enabled=false", toggled is not None and toggled["enabled"] is False, toggled)
+
+    delete_status = curl_status("DELETE", f"{B}/api/notifications/{provider1['provider_id']}", cookie=CJ, csrf=csrf)
+    check("deleting a notification provider returns 200", delete_status == "200", delete_status)
+    listed_final_providers = curl_json("GET", f"{B}/api/notifications", cookie=CJ)
+    check("deleted notification provider no longer appears in the list", not any(p["provider_id"] == provider1["provider_id"] for p in listed_final_providers.get("providers", [])), listed_final_providers)
+
+    delete_unknown = curl_status("DELETE", f"{B}/api/notifications/does-not-exist", cookie=CJ, csrf=csrf)
+    check("deleting an unknown notification provider returns 404", delete_unknown == "404", delete_unknown)
+
     print(f"\n{len([r for r in results if r[1] == PASS])}/{len(results)} checks passed.")
 
 

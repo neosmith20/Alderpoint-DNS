@@ -676,6 +676,36 @@ async function main() {
     const exportHref = await page.$eval(".export-link", (el) => el.getAttribute("href")).catch(() => null);
     check("Statistics export link points at the real export endpoint", exportHref === "/api/statistics/export", exportHref);
 
+    // --- Nav: Notifications (internal/notifications, native storage, no secrets) ---
+    let clickedNotifications = false;
+    for (const btn of await page.$$(".sidebar .item")) {
+      if ((await btn.evaluate((el) => el.textContent?.trim())) === "Notifications") {
+        await btn.click();
+        clickedNotifications = true;
+        break;
+      }
+    }
+    check("Notifications nav item exists and is clickable", clickedNotifications);
+    await page.waitForSelector("#notifications-heading", { timeout: 3000 }).catch(() => {});
+    check("Notifications page content rendered", (await page.$("#notifications-heading")) !== null);
+
+    await page.select(".add-form select", "slack");
+    await page.type('.add-form input[aria-label="Display name"]', "Ops Slack");
+    await page.type('.add-form input[aria-label="Endpoint"]', "https://hooks.slack.example/xyz");
+    await Promise.all([
+      page.waitForFunction(() => document.querySelectorAll(".data-grid tbody .actions").length > 0, { timeout: 3000 }),
+      page.click(".add-form button[type=submit]"),
+    ]);
+    let notificationRows = await page.$$eval(".data-grid tbody tr", (rows) => rows.length);
+    check("adding a notification provider adds a real row", notificationRows === 1, `rows=${notificationRows}`);
+    const providerEndpointText = await page.$eval(".data-grid tbody", (el) => el.textContent);
+    check("notification provider row shows the real endpoint", providerEndpointText.includes("https://hooks.slack.example/xyz"), providerEndpointText);
+
+    await page.click(".data-grid tbody .actions button"); // "Disable"
+    await new Promise((r) => setTimeout(r, 200));
+    const enabledCellText = await page.$eval(".data-grid tbody tr", (el) => el.textContent);
+    check("disabling a notification provider updates its Enabled cell to No", enabledCellText.includes("No"), enabledCellText);
+
     // --- Nav: Backup & Restore ---
     let clickedBackup = false;
     for (const btn of await page.$$(".sidebar .item")) {
@@ -758,6 +788,7 @@ async function main() {
       { path: "/ui/backup", heading: "#backup-heading" },
       { path: "/ui/statistics", heading: "#statistics-heading" },
       { path: "/ui/health", heading: "#health-heading" },
+      { path: "/ui/notifications", heading: "#notifications-heading" },
       { path: "/ui/administration", heading: "#admin-heading" },
     ];
     for (const theme of ["light", "dark"]) {

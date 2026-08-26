@@ -273,6 +273,16 @@ export interface TlsStatus {
   error?: string;
 }
 
+export interface NotificationProvider {
+  provider_id: string;
+  kind: "webhook" | "email_smtp" | "pushover" | "slack";
+  display_name: string;
+  endpoint: string;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface QueryLogResponse {
   rows: QueryLogRow[];
   degraded: boolean;
@@ -387,6 +397,16 @@ export const api = {
   updateDnsTransports: (settings: DnsTransportSettings) =>
     req<DnsTransportSettings>("/api/dns-transports", { method: "PUT", body: JSON.stringify(settings) }),
   tlsStatus: (signal?: AbortSignal) => req<TlsStatus>("/api/tls/status", undefined, signal),
+
+  listNotificationProviders: (signal?: AbortSignal) => req<{ providers: NotificationProvider[] }>("/api/notifications", undefined, signal),
+  createNotificationProvider: (kind: string, displayName: string, endpoint: string) =>
+    req<NotificationProvider>("/api/notifications", {
+      method: "POST",
+      body: JSON.stringify({ kind, display_name: displayName, endpoint }),
+    }),
+  toggleNotificationProvider: (id: string, enabled: boolean) =>
+    req<{ status: string }>(`/api/notifications/${encodeURIComponent(id)}/toggle`, { method: "POST", body: JSON.stringify({ enabled }) }),
+  deleteNotificationProvider: (id: string) => req<{ status: string }>(`/api/notifications/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
   listBlocklists: (signal?: AbortSignal) => req<BlocklistsResponse>("/api/blocklists", undefined, signal),
   createBlocklist: (name: string, url: string, category: string) =>
