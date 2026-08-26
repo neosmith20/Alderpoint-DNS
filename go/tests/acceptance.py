@@ -226,6 +226,42 @@ def main():
     del1_confirmed = curl_json("DELETE", f"{B}/api/upstreams/{up1_id}", cookie=CJ, csrf=csrf, body={"confirm_last": True})
     check("delete the final upstream with confirm succeeds", del1_confirmed.get("status") == "deleted", del1_confirmed)
 
+    # --- clients / groups (native Go schema/CRUD) ---
+    group1 = curl_json("POST", f"{B}/api/groups", cookie=CJ, csrf=csrf, body={"name": "Kids", "priority": 10})
+    check("create group returns an id", "group_id" in group1, group1)
+    group1_id = group1["group_id"]
+
+    dup_group = curl_json("POST", f"{B}/api/groups", cookie=CJ, csrf=csrf, body={"name": "Kids", "priority": 0})
+    check("duplicate group name is rejected", dup_group.get("error") == "conflict", dup_group)
+
+    client1 = curl_json("POST", f"{B}/api/clients", cookie=CJ, csrf=csrf, body={"name": "Tablet", "description": "Kitchen tablet"})
+    check("create client returns an id", "client_id" in client1, client1)
+    client1_id = client1["client_id"]
+
+    bad_id = curl_json("POST", f"{B}/api/clients/{client1_id}/identifiers", cookie=CJ, csrf=csrf, body={"kind": "ipv4", "value": "not-an-ip"})
+    check("invalid ipv4 identifier is rejected", bad_id.get("error") == "validation_error", bad_id)
+
+    good_id = curl_json("POST", f"{B}/api/clients/{client1_id}/identifiers", cookie=CJ, csrf=csrf, body={"kind": "ipv4", "value": "192.168.1.50"})
+    check("valid ipv4 identifier is accepted", good_id.get("status") == "created", good_id)
+
+    dup_id = curl_json("POST", f"{B}/api/clients/{client1_id}/identifiers", cookie=CJ, csrf=csrf, body={"kind": "ipv4", "value": "192.168.1.50"})
+    check("duplicate identifier is rejected", dup_id.get("error") == "conflict", dup_id)
+
+    assign = curl_json("POST", f"{B}/api/clients/{client1_id}/groups", cookie=CJ, csrf=csrf, body={"group_id": group1_id})
+    check("assigning a client to a group succeeds", assign.get("status") == "created", assign)
+
+    clients_listed = curl_json("GET", f"{B}/api/clients", cookie=CJ)
+    c1 = next((c for c in clients_listed.get("clients", []) if c["id"] == client1_id), None)
+    check(
+        "client list shows the identifier and group assignment",
+        c1 is not None and any(i["value"] == "192.168.1.50" for i in c1["identifiers"]) and any(g["group_id"] == group1_id for g in c1["groups"]),
+        c1,
+    )
+
+    groups_listed = curl_json("GET", f"{B}/api/groups", cookie=CJ)
+    g1 = next((g for g in groups_listed.get("groups", []) if g["group_id"] == group1_id), None)
+    check("group list shows the member", g1 is not None and any(m["id"] == client1_id for m in g1["members"]), g1)
+
     print(f"\n{len([r for r in results if r[1] == PASS])}/{len(results)} checks passed.")
 
 

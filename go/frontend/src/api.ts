@@ -53,6 +53,38 @@ export interface LocalDnsRecord {
   enabled: boolean;
 }
 
+export interface ClientIdentifier {
+  kind: "ipv4" | "ipv4_cidr" | "ipv6" | "ipv6_cidr" | "clientid";
+  value: string;
+}
+
+export interface ClientGroupRef {
+  group_id: string;
+  name: string;
+  priority: number;
+}
+
+export interface ManagedClient {
+  id: number;
+  name: string;
+  description: string;
+  enabled: boolean;
+  identifiers: ClientIdentifier[];
+  groups: ClientGroupRef[];
+}
+
+export interface ClientGroupMember {
+  id: number;
+  name: string;
+}
+
+export interface ClientGroup {
+  group_id: string;
+  name: string;
+  priority: number;
+  members: ClientGroupMember[];
+}
+
 export interface UpstreamEndpoint {
   address: string;
   tls_hostname: string | null;
@@ -246,4 +278,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ ordered_upstream_profile_ids: orderedIds }),
     }),
+
+  listGroups: (signal?: AbortSignal) => req<{ groups: ClientGroup[] }>("/api/groups", undefined, signal),
+  createGroup: (name: string, priority: number) =>
+    req<{ status: string; group_id: string }>("/api/groups", { method: "POST", body: JSON.stringify({ name, priority }) }),
+  listClients: (signal?: AbortSignal) => req<{ clients: ManagedClient[] }>("/api/clients", undefined, signal),
+  createClient: (name: string, description: string) =>
+    req<{ status: string; client_id: number }>("/api/clients", { method: "POST", body: JSON.stringify({ name, description }) }),
+  addClientIdentifier: (clientId: number, kind: string, value: string) =>
+    req<{ status: string }>(`/api/clients/${clientId}/identifiers`, { method: "POST", body: JSON.stringify({ kind, value }) }),
+  addClientToGroup: (clientId: number, groupId: string) =>
+    req<{ status: string }>(`/api/clients/${clientId}/groups`, { method: "POST", body: JSON.stringify({ group_id: groupId }) }),
 };

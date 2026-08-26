@@ -79,11 +79,18 @@
     return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" });
   }
 
+  // Defense-in-depth: a backend bug (a nil Go slice marshals to JSON
+  // `null`, not `[]`) has actually shipped `rows` as null before -- see
+  // internal/clients's regression test for the real story. That's fixed
+  // at the source now, but this component degrades to "no rows" instead
+  // of crashing if it ever happens again, here or in a future page.
+  const safeRows = $derived(rows ?? []);
+
   const sortedRows = $derived.by(() => {
-    if (!sortKey) return rows;
+    if (!sortKey) return safeRows;
     const col = columns.find((c) => c.key === sortKey);
-    if (!col?.sortValue) return rows;
-    const withKeys = rows.map((r) => ({ r, v: col.sortValue!(r) }));
+    if (!col?.sortValue) return safeRows;
+    const withKeys = safeRows.map((r) => ({ r, v: col.sortValue!(r) }));
     withKeys.sort((a, b) => compareValues(a.v, b.v) * (sortDir === "asc" ? 1 : -1));
     return withKeys.map((x) => x.r);
   });

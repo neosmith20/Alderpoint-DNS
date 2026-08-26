@@ -34,7 +34,10 @@ async function main() {
     page.on("console", (msg) => {
       if (msg.type() === "error") consoleErrors.push(msg.text());
     });
-    page.on("pageerror", (err) => pageErrors.push(String(err)));
+    page.on("pageerror", (err) => {
+      pageErrors.push(String(err));
+      console.error("PAGE ERROR at", new Date().toISOString(), "url=", page.url(), "\n", err.stack || err);
+    });
 
     await page.setViewport({ width: 1440, height: 900 });
     await page.goto(baseUrl, { waitUntil: "networkidle0" });
@@ -388,6 +391,58 @@ async function main() {
     const infoBanner = await page.$(".info-banner");
     check("native-recursion info banner appears once zero upstreams are enabled", infoBanner !== null);
 
+    // --- Nav: Clients ---
+    let clickedClients = false;
+    for (const btn of await page.$$(".sidebar .item")) {
+      if ((await btn.evaluate((el) => el.textContent?.trim())) === "Clients") {
+        await btn.click();
+        clickedClients = true;
+        break;
+      }
+    }
+    check("Clients nav item exists and is clickable", clickedClients);
+    await page.waitForSelector("#clients-heading", { timeout: 3000 }).catch(() => {});
+    check("Clients page content rendered", (await page.$("#clients-heading")) !== null);
+
+    // Create a group first (needed for the "assign group" workflow below).
+    const groupForms = await page.$$(".add-form");
+    await (await groupForms[1].$("input[required]")).type("Kids");
+    await Promise.all([
+      page.waitForFunction(() => document.querySelector(".group-list") !== null || /No groups/.test(document.body.textContent), { timeout: 3000 }),
+      groupForms[1].$eval("button[type=submit]", (el) => el.click()),
+    ]);
+    await new Promise((r) => setTimeout(r, 300));
+    const groupListText = await page.$eval(".group-list", (el) => el.textContent).catch(() => "");
+    check("creating a group adds a real entry to the group list", groupListText.includes("Kids"), groupListText);
+
+    // Create a managed client.
+    const clientForm = (await page.$$(".add-form"))[0];
+    await (await clientForm.$("input[required]")).type("Test Client");
+    await Promise.all([
+      page.waitForFunction(() => document.querySelectorAll(".data-grid tbody tr").length > 0 && document.querySelector(".data-grid tbody .actions"), { timeout: 3000 }),
+      clientForm.$eval("button[type=submit]", (el) => el.click()),
+    ]);
+    await new Promise((r) => setTimeout(r, 200));
+    const clientRows = await page.$$eval(".data-grid tbody tr", (rows) => rows.length);
+    check("creating a managed client adds a real row to the grid", clientRows === 1, `rows=${clientRows}`);
+
+    // Add an identifier: invalid first (must be rejected), then valid.
+    await page.click(".data-grid tbody .actions button"); // "Add identifier"
+    await page.waitForSelector(".inline-form input", { timeout: 2000 });
+    await page.type(".inline-form input", "not-an-ip");
+    await page.click(".inline-form button[type=submit]");
+    await new Promise((r) => setTimeout(r, 200));
+    const idError = await page.$eval(".inline-form .error", (el) => el.textContent).catch(() => "");
+    check("adding an invalid IPv4 identifier is rejected client-visibly", idError.length > 0, idError);
+    await page.$eval(".inline-form input", (el) => (el.value = ""));
+    await page.type(".inline-form input", "10.0.0.5");
+    await Promise.all([
+      page.waitForFunction(() => document.querySelector(".chips") && /10\.0\.0\.5/.test(document.querySelector(".data-grid tbody").textContent), { timeout: 3000 }),
+      page.click(".inline-form button[type=submit]"),
+    ]);
+    const chipsText = await page.$eval(".data-grid tbody .chips", (el) => el.textContent);
+    check("a valid identifier actually appears on the client row after saving", chipsText.includes("10.0.0.5"), chipsText);
+
     // --- Systematic viewport sweep: every implemented route x desktop/tablet/mobile x light/dark ---
     const VIEWPORTS = [
       { name: "desktop-1440", width: 1440, height: 900 },
@@ -399,6 +454,7 @@ async function main() {
       { path: "/ui/blocklists", heading: "#blocklists-heading" },
       { path: "/ui/localdns", heading: "#localdns-heading" },
       { path: "/ui/upstreams", heading: "#upstreams-heading" },
+      { path: "/ui/clients", heading: "#clients-heading" },
       { path: "/ui/administration", heading: "#admin-heading" },
     ];
     for (const theme of ["light", "dark"]) {

@@ -115,7 +115,7 @@ func (s *Service) List(ctx context.Context) ([]Profile, bool, error) {
 	}
 	defer rows.Close()
 
-	var profiles []Profile
+	profiles := []Profile{}
 	var rowIDs []int64
 	anyEnabled := false
 	for rows.Next() {

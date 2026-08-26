@@ -22,6 +22,7 @@ import (
 
 	"alderpointdns/go-controlplane/internal/auth"
 	"alderpointdns/go-controlplane/internal/blocklists"
+	"alderpointdns/go-controlplane/internal/clients"
 	"alderpointdns/go-controlplane/internal/config"
 	"alderpointdns/go-controlplane/internal/dbmigrate"
 	"alderpointdns/go-controlplane/internal/httpapi"
@@ -150,6 +151,7 @@ func runWeb(args []string) {
 	}
 	ldSvc := &localdns.Service{DB: db, StagingDir: cfg.LocalDNS.StagingDir, RuntimeDir: cfg.LocalDNS.RuntimeDir}
 	upSvc := &upstreams.Service{DB: db}
+	clientsSvc := &clients.Service{DB: db}
 
 	// Analytics compatibility boundary: optional, never fatal. A missing
 	// or unreadable path means Dashboard analytics reports degraded, not
@@ -167,7 +169,7 @@ func runWeb(args []string) {
 	}
 
 	srv := &httpapi.Server{
-		DB: db, Auth: &auth.Store{DB: db}, Blocklists: blSvc, LocalDNS: ldSvc, Upstreams: upSvc,
+		DB: db, Auth: &auth.Store{DB: db}, Blocklists: blSvc, LocalDNS: ldSvc, Upstreams: upSvc, Clients: clientsSvc,
 		StaticDir: *staticDir, Log: logger, Version: Version, StartedAt: startedAt,
 		SessionTTL: cfg.SessionTTL(), LastSeen: cfg.LastSeenUpdateInterval(),
 		ApplianceName: cfg.Appliance.Name, ApplianceTimezone: cfg.Appliance.Timezone,

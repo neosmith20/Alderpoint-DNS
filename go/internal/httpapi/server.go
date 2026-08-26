@@ -8,6 +8,7 @@ import (
 
 	"alderpointdns/go-controlplane/internal/auth"
 	"alderpointdns/go-controlplane/internal/blocklists"
+	"alderpointdns/go-controlplane/internal/clients"
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/pyanalytics"
 	"alderpointdns/go-controlplane/internal/upstreams"
@@ -19,6 +20,7 @@ type Server struct {
 	Blocklists *blocklists.Service
 	LocalDNS   *localdns.Service
 	Upstreams  *upstreams.Service
+	Clients    *clients.Service
 	StaticDir  string
 	Log        *slog.Logger
 
@@ -84,6 +86,13 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/upstreams/{id}/disable", requireAuth(s.handleDisableUpstream))
 	mux.HandleFunc("DELETE /api/upstreams/{id}", requireAuth(s.handleDeleteUpstream))
 	mux.HandleFunc("POST /api/upstreams/reorder", requireAuth(s.handleReorderUpstreams))
+
+	mux.HandleFunc("GET /api/groups", requireAuth(s.handleListGroups))
+	mux.HandleFunc("POST /api/groups", requireAuth(s.handleCreateGroup))
+	mux.HandleFunc("GET /api/clients", requireAuth(s.handleListClients))
+	mux.HandleFunc("POST /api/clients", requireAuth(s.handleCreateClient))
+	mux.HandleFunc("POST /api/clients/{id}/identifiers", requireAuth(s.handleAddClientIdentifier))
+	mux.HandleFunc("POST /api/clients/{id}/groups", requireAuth(s.handleAddClientGroup))
 
 	mux.HandleFunc("/", s.handleStatic)
 

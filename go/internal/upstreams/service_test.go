@@ -53,6 +53,21 @@ func TestCreateRejectsDoHWithoutTLSHostname(t *testing.T) {
 	}
 }
 
+// TestListNeverReturnsNilOnEmpty guards against the same real bug found
+// (and fixed) in the sibling internal/clients package: a nil Go slice
+// marshals to JSON `null`, which crashes the frontend's shared DataGrid
+// on `null.length`. See that package's identical test for the full story.
+func TestListNeverReturnsNilOnEmpty(t *testing.T) {
+	s := newTestService(t)
+	profiles, _, err := s.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profiles == nil {
+		t.Fatal("List on an empty table must return a non-nil empty slice, not nil (would marshal to JSON null)")
+	}
+}
+
 func TestCreateAndListRoundTrip(t *testing.T) {
 	s := newTestService(t)
 	ctx := context.Background()
