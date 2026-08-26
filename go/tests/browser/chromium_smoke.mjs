@@ -710,17 +710,27 @@ async function main() {
     const enabledCellText = await page.$eval(".data-grid tbody tr", (el) => el.textContent);
     check("disabling a notification provider updates its Enabled cell to No", enabledCellText.includes("No"), enabledCellText);
 
-    // --- Nav: Import (internal/importer, hosts-file source only) ---
+    // --- Nav: Import (internal/importer -- real preview/select/apply/rollback job workflow) ---
     const clickedImport = await clickNavItem(page, (t) => t === "Import");
     check("Import nav item exists and is clickable", clickedImport);
     await page.waitForSelector("#importexport-heading", { timeout: 3000 }).catch(() => {});
     check("Import page content rendered", (await page.$("#importexport-heading")) !== null);
 
     await page.type('textarea[aria-label="Hosts file contents"]', "10.0.0.42 chromium-import-test.lan");
-    await page.click(".import-view form button[type=submit]");
-    await page.waitForSelector(".result", { timeout: 3000 });
-    const importResultText = await page.$eval(".result", (el) => el.textContent);
-    check("importing a hosts file reports a real imported count", importResultText.includes("1") && importResultText.includes("imported"), importResultText);
+    await Promise.all([
+      page.waitForSelector(".plan-table tbody tr", { timeout: 3000 }),
+      page.click('.card button[type=submit]'),
+    ]);
+    const planRowText = await page.$eval(".plan-table tbody", (el) => el.textContent);
+    check("previewing a hosts file shows a real planned row before anything is written", planRowText.includes("chromium-import-test.lan"), planRowText);
+
+    await Promise.all([
+      page.waitForSelector(".success[role=status]", { timeout: 3000 }),
+      page.click('.card .actions button:not(.danger)'),
+    ]);
+    const importResultText = await page.$eval(".success[role=status]", (el) => el.textContent);
+    check("applying the import job reports a real imported count", importResultText.includes("1") && importResultText.includes("imported"), importResultText);
+    check("the applied job shows a rollback option (a real pre-apply snapshot was taken)", (await page.$(".card .danger")) !== null);
 
     // The imported record should now be a real row on Local DNS.
     await clickNavItem(page, (t) => t === "Local DNS");

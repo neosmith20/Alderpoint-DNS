@@ -344,6 +344,35 @@ export interface ImportHostsResult {
   errors: string[];
 }
 
+export interface ImportPlanRow {
+  index: number;
+  name: string;
+  record_type: string;
+  value: string;
+  ttl: number;
+  conflict: boolean;
+  conflict_detail?: string;
+}
+
+export interface ImportPlan {
+  source_type: string;
+  source_name: string;
+  rows: ImportPlanRow[];
+  parse_errors: string[];
+}
+
+export interface ImportJob {
+  id: number;
+  source_type: string;
+  source_name: string;
+  plan: ImportPlan;
+  status: "pending" | "applied";
+  result?: ImportHostsResult;
+  snapshot_filename?: string;
+  created_at: string;
+  applied_at?: string;
+}
+
 export interface NotificationProvider {
   provider_id: string;
   kind: "webhook" | "email_smtp" | "pushover" | "slack";
@@ -485,6 +514,21 @@ export const api = {
   deleteNotificationProvider: (id: string) => req<{ status: string }>(`/api/notifications/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
   importHosts: (text: string) => req<ImportHostsResult>("/api/import/hosts", { method: "POST", body: text }),
+
+  createImportJob: (sourceType: string, sourceName: string, text: string) =>
+    req<{ job_id: number; plan: ImportPlan }>("/api/import/jobs", {
+      method: "POST",
+      body: JSON.stringify({ source_type: sourceType, source_name: sourceName, text }),
+    }),
+  listImportJobs: (signal?: AbortSignal) => req<{ jobs: ImportJob[] }>("/api/import/jobs", undefined, signal),
+  getImportJob: (id: number) => req<ImportJob>(`/api/import/jobs/${id}`),
+  applyImportJob: (id: number, skipIndexes: number[]) =>
+    req<{ status: string; counts: ImportHostsResult; snapshot_filename?: string; dns_runtime?: DNSRuntimeApplyResult }>(`/api/import/jobs/${id}/apply`, {
+      method: "POST",
+      body: JSON.stringify({ skip_indexes: skipIndexes }),
+    }),
+  rollbackImportJob: (id: number) =>
+    req<{ status: string; safety_backup: string; dns_runtime?: DNSRuntimeApplyResult }>(`/api/import/jobs/${id}/rollback`, { method: "POST" }),
 
   cacheStatus: (signal?: AbortSignal) => req<CacheStatusResponse>("/api/cache/status", undefined, signal),
   cacheFlush: (layer: "bind" | "dnsdist", opts?: { context?: string; scope?: string; target?: string }) =>

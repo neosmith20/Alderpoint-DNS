@@ -14,6 +14,7 @@ import (
 	"alderpointdns/go-controlplane/internal/dnsruntime"
 	"alderpointdns/go-controlplane/internal/dnstransports"
 	"alderpointdns/go-controlplane/internal/hostagent"
+	"alderpointdns/go-controlplane/internal/importer"
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/notifications"
 	"alderpointdns/go-controlplane/internal/policy"
@@ -27,6 +28,11 @@ type Server struct {
 	Auth          *auth.Store
 	Blocklists    *blocklists.Service
 	LocalDNS      *localdns.Service
+	// Importer is nil unless wired at startup -- nil means the real
+	// preview/apply/rollback job workflow (POST /api/import/jobs etc.)
+	// reports unavailable; the older one-shot POST /api/import/hosts
+	// endpoint (s.LocalDNS-backed directly) is unaffected either way.
+	Importer *importer.Service
 	Upstreams     *upstreams.Service
 	Clients       *clients.Service
 	Policy        *policy.Service
@@ -180,6 +186,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("DELETE /api/notifications/{id}", requireAuth(s.handleDeleteNotificationProvider))
 
 	mux.HandleFunc("POST /api/import/hosts", requireAuth(s.handleImportHosts))
+	mux.HandleFunc("POST /api/import/jobs", requireAuth(s.handleCreateImportJob))
+	mux.HandleFunc("GET /api/import/jobs", requireAuth(s.handleListImportJobs))
+	mux.HandleFunc("GET /api/import/jobs/{id}", requireAuth(s.handleGetImportJob))
+	mux.HandleFunc("POST /api/import/jobs/{id}/apply", requireAuth(s.handleApplyImportJob))
+	mux.HandleFunc("POST /api/import/jobs/{id}/rollback", requireAuth(s.handleRollbackImportJob))
 
 	mux.HandleFunc("GET /api/cache/status", requireAuth(s.handleCacheStatus))
 	mux.HandleFunc("POST /api/cache/flush", requireAuth(s.handleCacheFlush))

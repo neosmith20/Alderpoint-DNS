@@ -32,6 +32,7 @@ import (
 	"alderpointdns/go-controlplane/internal/dnstransports"
 	"alderpointdns/go-controlplane/internal/hostagent"
 	"alderpointdns/go-controlplane/internal/httpapi"
+	"alderpointdns/go-controlplane/internal/importer"
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/notifications"
 	"alderpointdns/go-controlplane/internal/policy"
@@ -263,6 +264,7 @@ func runWeb(args []string) {
 		DB: db, Dir: *backupsDir, Version: Version,
 		RetentionMaxCount: *backupRetentionMaxCount, RetentionMaxAgeDays: *backupRetentionMaxAgeDays,
 	}
+	importerSvc := &importer.Service{DB: db, LocalDNS: ldSvc, Backup: backupSvc}
 
 	// Analytics compatibility boundary: optional, never fatal. A missing
 	// or unreadable path means Dashboard analytics reports degraded, not
@@ -332,7 +334,7 @@ func runWeb(args []string) {
 
 	srv := &httpapi.Server{
 		DB: db, Auth: &auth.Store{DB: db}, Blocklists: blSvc, LocalDNS: ldSvc, Upstreams: upSvc, Clients: clientsSvc, Policy: policySvc, CustomRules: customRulesSvc, Backup: backupSvc,
-		DNSTransports: dnsTransportsSvc, Notifications: notificationsSvc,
+		DNSTransports: dnsTransportsSvc, Notifications: notificationsSvc, Importer: importerSvc,
 		StaticDir: *staticDir, Log: logger, Version: Version, StartedAt: startedAt,
 		SessionTTL: cfg.SessionTTL(), LastSeen: cfg.LastSeenUpdateInterval(),
 		ApplianceName: cfg.Appliance.Name, ApplianceTimezone: cfg.Appliance.Timezone,
