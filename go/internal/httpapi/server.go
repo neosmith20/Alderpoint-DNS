@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"alderpointdns/go-controlplane/internal/auth"
+	"alderpointdns/go-controlplane/internal/backup"
 	"alderpointdns/go-controlplane/internal/blocklists"
 	"alderpointdns/go-controlplane/internal/clients"
 	"alderpointdns/go-controlplane/internal/customrules"
@@ -25,6 +26,7 @@ type Server struct {
 	Clients     *clients.Service
 	Policy      *policy.Service
 	CustomRules *customrules.Service
+	Backup      *backup.Service
 	StaticDir   string
 	Log         *slog.Logger
 
@@ -115,6 +117,13 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/custom-rules/bulk-disable", requireAuth(s.handleBulkDisableCustomRules))
 	mux.HandleFunc("POST /api/custom-rules/bulk-delete", requireAuth(s.handleBulkDeleteCustomRules))
 	mux.HandleFunc("POST /api/custom-rules/reorder", requireAuth(s.handleReorderCustomRules))
+
+	mux.HandleFunc("GET /api/backup/appliance", requireAuth(s.handleListBackups))
+	mux.HandleFunc("POST /api/backup/appliance", requireAuth(s.handleCreateBackup))
+	mux.HandleFunc("POST /api/backup/appliance/upload", requireAuth(s.handleUploadBackup))
+	mux.HandleFunc("POST /api/backup/appliance/{name}/validate", requireAuth(s.handlePreviewBackup))
+	mux.HandleFunc("POST /api/backup/appliance/{name}/restore", requireAuth(s.handleRestoreBackup))
+	mux.HandleFunc("DELETE /api/backup/appliance/{name}", requireAuth(s.handleDeleteBackup))
 
 	mux.HandleFunc("/", s.handleStatic)
 

@@ -21,6 +21,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"alderpointdns/go-controlplane/internal/auth"
+	"alderpointdns/go-controlplane/internal/backup"
 	"alderpointdns/go-controlplane/internal/blocklists"
 	"alderpointdns/go-controlplane/internal/clients"
 	"alderpointdns/go-controlplane/internal/config"
@@ -122,6 +123,7 @@ func runWeb(args []string) {
 	migrationsDir := fs.String("migrations", "./schema/migrations", "migrations directory")
 	addr := fs.String("addr", "", "listen address override (host:port); defaults to config web.listen_address:listen_port")
 	analyticsDBPath := fs.String("analytics-db", "", "optional read-only path to Python's analytics/aggregates.db (compatibility boundary, see internal/pyanalytics); empty = Dashboard analytics reports degraded")
+	backupsDir := fs.String("backups-dir", "./data/backups", "directory for stored/uploaded appliance backups (see internal/backup)")
 	fs.Parse(args)
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -156,6 +158,7 @@ func runWeb(args []string) {
 	clientsSvc := &clients.Service{DB: db}
 	policySvc := &policy.Service{DB: db}
 	customRulesSvc := &customrules.Service{DB: db}
+	backupSvc := &backup.Service{DB: db, Dir: *backupsDir, Version: Version}
 
 	// Analytics compatibility boundary: optional, never fatal. A missing
 	// or unreadable path means Dashboard analytics reports degraded, not
@@ -173,7 +176,7 @@ func runWeb(args []string) {
 	}
 
 	srv := &httpapi.Server{
-		DB: db, Auth: &auth.Store{DB: db}, Blocklists: blSvc, LocalDNS: ldSvc, Upstreams: upSvc, Clients: clientsSvc, Policy: policySvc, CustomRules: customRulesSvc,
+		DB: db, Auth: &auth.Store{DB: db}, Blocklists: blSvc, LocalDNS: ldSvc, Upstreams: upSvc, Clients: clientsSvc, Policy: policySvc, CustomRules: customRulesSvc, Backup: backupSvc,
 		StaticDir: *staticDir, Log: logger, Version: Version, StartedAt: startedAt,
 		SessionTTL: cfg.SessionTTL(), LastSeen: cfg.LastSeenUpdateInterval(),
 		ApplianceName: cfg.Appliance.Name, ApplianceTimezone: cfg.Appliance.Timezone,

@@ -53,6 +53,18 @@ export interface LocalDnsRecord {
   enabled: boolean;
 }
 
+export interface BackupInfo {
+  filename: string;
+  size_bytes: number;
+  format_version: number;
+  created_at: string;
+  source_version: string;
+  control_db_schema_version: number;
+  contents: string[];
+  product: string;
+  reason?: string;
+}
+
 export interface CustomRule {
   id: number;
   rule_type: "block" | "allow" | "regex_block" | "regex_allow" | "rewrite";
@@ -373,4 +385,24 @@ export const api = {
     req<{ status: string; count: number }>("/api/custom-rules/bulk-delete", { method: "POST", body: JSON.stringify({ ids }) }),
   reorderCustomRules: (orderedIds: number[]) =>
     req<{ status: string; rules: CustomRule[] }>("/api/custom-rules/reorder", { method: "POST", body: JSON.stringify({ ordered_ids: orderedIds }) }),
+
+  listBackups: (signal?: AbortSignal) => req<{ backups: BackupInfo[] }>("/api/backup/appliance", undefined, signal),
+  createBackup: () => req<{ status: string; backup: BackupInfo }>("/api/backup/appliance", { method: "POST" }),
+  uploadBackup: async (file: File): Promise<{ status: string; backup: BackupInfo }> => {
+    const res = await fetch(`/api/backup/appliance/upload?filename=${encodeURIComponent(file.name)}`, {
+      method: "POST",
+      headers: { "X-CSRF-Token": csrfToken },
+      credentials: "include",
+      body: file,
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new ApiError(res.status, body.error ?? "unknown_error", body.detail ?? res.statusText);
+    }
+    return res.json();
+  },
+  previewBackup: (name: string) => req<BackupInfo>(`/api/backup/appliance/${encodeURIComponent(name)}/validate`, { method: "POST" }),
+  restoreBackup: (name: string) =>
+    req<{ status: string; safety_backup: BackupInfo }>(`/api/backup/appliance/${encodeURIComponent(name)}/restore`, { method: "POST" }),
+  deleteBackup: (name: string) => req<{ status: string }>(`/api/backup/appliance/${encodeURIComponent(name)}`, { method: "DELETE" }),
 };

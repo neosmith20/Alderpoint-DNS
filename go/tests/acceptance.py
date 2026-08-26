@@ -16,6 +16,7 @@ Exits non-zero with a clear message on the first failure.
 """
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -67,6 +68,7 @@ def main():
     p.add_argument("--base", required=True)
     p.add_argument("--fixture-base", required=True)
     p.add_argument("--cookiejar", default="/tmp/apdns-go-acceptance-cj.txt")
+    p.add_argument("--backups-dir", default=None, help="the server's -backups-dir, for a real (not just corrupt-payload) upload round-trip test")
     args = p.parse_args()
     B, FB, CJ = args.base, args.fixture_base, args.cookiejar
 
@@ -328,6 +330,57 @@ def main():
     check("bulk-delete affects 2 rules", bulk_del.get("count") == 2, bulk_del)
     final_rules = curl_json("GET", f"{B}/api/custom-rules", cookie=CJ)
     check("only the un-deleted rule remains", [r["id"] for r in final_rules["rules"]] == [rule1_id], final_rules)
+
+    # --- backup & restore (native Go format; mandatory pre-restore safety backup; transactional) ---
+    backup1 = curl_json("POST", f"{B}/api/backup/appliance", cookie=CJ, csrf=csrf)
+    check("create backup returns a manifest", backup1.get("status") == "created", backup1)
+    backup1_name = backup1["backup"]["filename"]
+
+    listed_backups = curl_json("GET", f"{B}/api/backup/appliance", cookie=CJ)
+    check("backup list contains the new backup", any(b["filename"] == backup1_name for b in listed_backups.get("backups", [])), listed_backups)
+
+    preview1 = curl_json("POST", f"{B}/api/backup/appliance/{backup1_name}/validate", cookie=CJ, csrf=csrf)
+    check("preview reads the manifest without error", preview1.get("filename") == backup1_name, preview1)
+
+    bad_upload = subprocess.run(
+        ["curl", "-sk", "-b", CJ, "-H", f"X-CSRF-Token: {csrf}", "-X", "POST",
+         f"{B}/api/backup/appliance/upload?filename=corrupt-test.tar",
+         "--data-binary", "not a real tar archive"],
+        capture_output=True, text=True,
+    ).stdout
+    bad_upload_json = json.loads(bad_upload) if bad_upload.strip().startswith("{") else {"_raw": bad_upload}
+    check("uploading a corrupt archive is rejected", bad_upload_json.get("error") in ("invalid_archive", "archive_too_large"), bad_upload_json)
+
+    if args.backups_dir:
+        real_backup_path = os.path.join(args.backups_dir, backup1_name)
+        reupload = subprocess.run(
+            ["curl", "-sk", "-b", CJ, "-H", f"X-CSRF-Token: {csrf}", "-X", "POST",
+             f"{B}/api/backup/appliance/upload?filename=reuploaded-{backup1_name}",
+             "--data-binary", f"@{real_backup_path}"],
+            capture_output=True, text=True,
+        ).stdout
+        reupload_json = json.loads(reupload)
+        check("re-uploading a real backup archive succeeds", reupload_json.get("status") == "uploaded", reupload_json)
+        check("re-uploaded archive's schema_version matches the original", reupload_json.get("backup", {}).get("control_db_schema_version") == preview1.get("control_db_schema_version"), reupload_json)
+
+    # Change live data, then restore backup1 -- must come back exactly, and a safety backup must be taken automatically.
+    curl_json("POST", f"{B}/api/local-dns", cookie=CJ, csrf=csrf, body={"name": "post-backup.lan", "record_type": "A", "value": "10.0.0.77", "ttl": 300, "enabled": True})
+    before_restore = curl_json("GET", f"{B}/api/local-dns", cookie=CJ)
+    check("local-dns has the post-backup record before restoring", any(r["name"] == "post-backup.lan" for r in before_restore["records"]), before_restore)
+
+    restore_result = curl_json("POST", f"{B}/api/backup/appliance/{backup1_name}/restore", cookie=CJ, csrf=csrf)
+    check("restore succeeds and reports a safety backup", restore_result.get("status") == "restored" and "safety_backup" in restore_result, restore_result)
+
+    after_restore = curl_json("GET", f"{B}/api/local-dns", cookie=CJ)
+    check("post-backup record is gone after restoring the earlier backup", not any(r["name"] == "post-backup.lan" for r in after_restore["records"]), after_restore)
+
+    listed_backups_after = curl_json("GET", f"{B}/api/backup/appliance", cookie=CJ)
+    check("the automatic pre-restore safety backup is itself listed", any(b["filename"] == restore_result["safety_backup"]["filename"] for b in listed_backups_after["backups"]), listed_backups_after)
+
+    delete_backup = curl_status("DELETE", f"{B}/api/backup/appliance/{backup1_name}", cookie=CJ, csrf=csrf)
+    check("deleting a backup returns 200", delete_backup == "200", delete_backup)
+    listed_backups_final = curl_json("GET", f"{B}/api/backup/appliance", cookie=CJ)
+    check("deleted backup no longer appears in the list", not any(b["filename"] == backup1_name for b in listed_backups_final["backups"]), listed_backups_final)
 
     print(f"\n{len([r for r in results if r[1] == PASS])}/{len(results)} checks passed.")
 

@@ -496,7 +496,7 @@ async function main() {
     await page.select(".add-form select", "block");
     await page.type('.add-form input[placeholder*="example.com"]', "ads.example.com");
     await Promise.all([
-      page.waitForFunction(() => document.querySelectorAll(".data-grid tbody tr").length > 0, { timeout: 3000 }),
+      page.waitForFunction(() => document.querySelectorAll(".data-grid tbody .actions").length > 0, { timeout: 3000 }),
       page.click(".add-form button[type=submit]"),
     ]);
     let ruleRows = await page.$$eval(".data-grid tbody tr", (rows) => rows.length);
@@ -529,6 +529,56 @@ async function main() {
     const disabledCount = await page.$$eval(".data-grid tbody tr.row-pending", (rows) => rows.length);
     check("bulk-disable actually disabled both selected rules", disabledCount === 2, `disabled=${disabledCount}`);
 
+    // --- Nav: Backup & Restore ---
+    let clickedBackup = false;
+    for (const btn of await page.$$(".sidebar .item")) {
+      if ((await btn.evaluate((el) => el.textContent?.trim())) === "Backup & Restore") {
+        await btn.click();
+        clickedBackup = true;
+        break;
+      }
+    }
+    check("Backup & Restore nav item exists and is clickable", clickedBackup);
+    await page.waitForSelector("#backup-heading", { timeout: 3000 }).catch(() => {});
+    check("Backup & Restore page content rendered", (await page.$("#backup-heading")) !== null);
+
+    // Create a real backup. Wait for a real .actions cell, not just any
+    // <tr> -- the grid's pre-existing empty-state row is also a <tr> and
+    // would satisfy a naive "row count > 0" wait before the real backup
+    // actually lands (the exact bug already found and fixed for Upstreams
+    // earlier in this file).
+    const createBackupBtn = await page.$(".card button");
+    await Promise.all([
+      page.waitForFunction(() => document.querySelectorAll(".data-grid tbody .actions").length > 0, { timeout: 5000 }),
+      createBackupBtn.click(),
+    ]);
+    const backupRows = await page.$$eval(".data-grid tbody tr", (rows) => rows.length);
+    check("creating a backup adds a real row to the list", backupRows === 1, `rows=${backupRows}`);
+
+    // Restore requires typing the exact filename to confirm -- the button
+    // must stay disabled until the typed text matches exactly.
+    await page.click(".data-grid tbody .actions button"); // "Restore…"
+    await page.waitForSelector(".restore-confirm", { timeout: 2000 });
+    const filenameText = await page.$eval(".restore-confirm code", (el) => el.textContent.trim());
+    const confirmBtnDisabledBefore = await page.$eval(".restore-confirm .danger", (el) => el.disabled);
+    check("restore confirm button is disabled before typing the filename", confirmBtnDisabledBefore);
+    await page.type(".restore-confirm input", "wrong-filename.tar");
+    const stillDisabled = await page.$eval(".restore-confirm .danger", (el) => el.disabled);
+    check("restore confirm button stays disabled for a non-matching filename", stillDisabled);
+    await page.$eval(".restore-confirm input", (el) => (el.value = ""));
+    await page.type(".restore-confirm input", filenameText);
+    const nowEnabled = await page.$eval(".restore-confirm .danger", (el) => !el.disabled);
+    check("restore confirm button enables once the typed filename matches exactly", nowEnabled);
+
+    await Promise.all([
+      page.waitForSelector(".success", { timeout: 5000 }),
+      page.click(".restore-confirm .danger"),
+    ]);
+    const successText = await page.$eval(".success", (el) => el.textContent);
+    check("restoring reports the automatic safety backup by name", successText.includes("safety backup"), successText);
+    const rowsAfterRestore = await page.$$eval(".data-grid tbody tr", (rows) => rows.length);
+    check("the safety backup taken during restore appears in the list too", rowsAfterRestore === 2, `rows=${rowsAfterRestore}`);
+
     // --- Systematic viewport sweep: every implemented route x desktop/tablet/mobile x light/dark ---
     const VIEWPORTS = [
       { name: "desktop-1440", width: 1440, height: 900 },
@@ -542,6 +592,7 @@ async function main() {
       { path: "/ui/upstreams", heading: "#upstreams-heading" },
       { path: "/ui/clients", heading: "#clients-heading" },
       { path: "/ui/filtering", heading: "#filtering-heading" },
+      { path: "/ui/backup", heading: "#backup-heading" },
       { path: "/ui/administration", heading: "#admin-heading" },
     ];
     for (const theme of ["light", "dark"]) {
