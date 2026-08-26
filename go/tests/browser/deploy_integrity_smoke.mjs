@@ -59,6 +59,15 @@ async function main() {
       }
     });
     page.on("pageerror", (err) => pageErrors.push(String(err)));
+    // Explicit asset-status crawl: every /assets/ request across the
+    // whole run must return 200 -- the direct, real proof (not just
+    // "no console error") that no dynamic import or CSS preload ever
+    // 404s against the deployed release.
+    const assetStatuses = [];
+    page.on("response", (res) => {
+      const url = res.url();
+      if (url.includes("/assets/")) assetStatuses.push({ url, status: res.status() });
+    });
     await page.setViewport({ width: 1440, height: 900 });
     await page.goto(baseUrl, { waitUntil: "networkidle0" });
 
@@ -128,6 +137,12 @@ async function main() {
 
     check("zero unexpected browser console errors across the whole pass", consoleErrors.length === 0, consoleErrors.join(" | "));
     check("zero uncaught page errors across the whole pass", pageErrors.length === 0, pageErrors.join(" | "));
+    const badAssets = assetStatuses.filter((a) => a.status < 200 || a.status >= 300);
+    check(
+      `every /assets/ request returned 2xx (${assetStatuses.length} requests crawled)`,
+      badAssets.length === 0,
+      badAssets.map((a) => `${a.status} ${a.url}`).join(" | "),
+    );
 
     const failed = results.filter((r) => !r.pass);
     console.log(`\n${results.length - failed.length}/${results.length} checks passed.`);
