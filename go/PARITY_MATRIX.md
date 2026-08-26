@@ -87,7 +87,7 @@ target, not the defect — literal bug-for-bug parity is not the goal.
 | Clients | `clients` | `GET /api/clients`, `/api/discovery/observed-clients`, `/api/discovery/status`, `/api/groups`; `POST /api/clients`, `/clients/{id}/identifiers`, `/clients/{id}/groups`, `/discovery/observed-clients/{ip}/promote`; `DELETE /discovery/observed-clients/{ip}` | Metric strip; "Manage Client" (not "Promote" — locked owner decision) + Forget; Create Managed Client form; Explain link → Policies | Observed Clients grid, Managed Clients grid | — | none | unmanaged/client-N badges, empty | not started | not started | not started | not started |
 | Clients & Access (Policies) | `policies` | `GET /api/policy/global`, `/api/networks`, `/api/groups`, `/api/clients`; `PUT /policy/{global,network/{id},group/{id},client/{id}}`; `POST /networks`, `/groups`; `GET /policy/explain` | Global/Network/Group/Client policy editors (shared field set: filtering profile, safesearch, parental/security policy, blocking response mode+custom IP, upstream, fallback strategy, ECS mode, domain routing, query-log/statistics tri-state); Create Network/Group forms; Explain panel | expandable per-object editors | — | none | inherit badges | not started | not started | not started | not started |
 | Local DNS | `localdns` | `GET /api/local-dns`, `POST /api/local-dns` | Add Record form (name/type/value/TTL); **edit + delete are a Milestone-1 addition already, ahead of Python V2** | Records grid | — | none | — | **done** (Milestone 1) | **done** (Milestone 1) | not started | not started |
-| DNS Settings (Upstreams & Routing) | `upstreams` | `GET /api/upstreams`, `/api/domain-routing`; `POST /upstreams`, `PUT /upstreams/{id}`, `POST /upstreams/{id}/{enable,disable}`, `DELETE /upstreams/{id}`, `POST /upstreams/reorder`; `POST /domain-routing` | Create/Edit Upstream form; per-row Edit/Enable-Disable/Delete + up/down reorder; last-enabled confirm guard (locked owner decision: zero managed upstreams allowed with warning); Domain Route form | Upstream Profiles grid (ordered), Domain Routes grid | — | none | native-recursion info banner when zero enabled | not started | not started | not started | not started |
+| DNS Settings (Upstreams & Routing) | `upstreams` | `GET /api/upstreams`, `/api/domain-routing`; `POST /upstreams`, `PUT /upstreams/{id}`, `POST /upstreams/{id}/{enable,disable}`, `DELETE /upstreams/{id}`, `POST /upstreams/reorder`; `POST /domain-routing` | Create/Edit Upstream form; per-row Edit/Enable-Disable/Delete + up/down reorder; last-enabled confirm guard (locked owner decision: zero managed upstreams allowed with warning); Domain Route form | Upstream Profiles grid (ordered), Domain Routes grid | — | none | native-recursion info banner when zero enabled | **in progress** -- `internal/upstreams`: native Go schema (`0003_upstreams.sql`) + full CRUD, field-for-field matched against `policy_store.py` (transport/strategy/endpoint validation including DoH's tls_hostname requirement, the last-enabled-managed-upstream confirm dance, reorder that never drops an omitted id). **Not yet done**: Domain Routing (separate feature, not started), and no compiled dnsdist-config generation -- every mutation's `runtime.promoted` is unconditionally `true` because there's no compile step yet (disclosed in the package doc comment, not silently implied equivalent to Python's real compiled-runtime proof) | **in progress** -- `UpstreamsView.svelte`: create/edit form (dynamic per-endpoint rows, transport-conditional fields), DataGrid-backed profile table with address chips, enable/disable/delete/reorder, and the last-enabled confirm dialog rendered inline per-row (not a native `confirm()`). Domain Routing UI not built | done for everything built (9 Chromium checks: create adds a real row, Disable on the sole enabled profile shows the confirm dialog rather than silently succeeding, confirming actually disables it, the native-recursion banner appears, full 5-route x 3-viewport x 2-theme sweep) | not started |
 | Cache | `cache` | `GET /api/cache/status`, `POST /api/cache/flush` | Per-BIND-context flush form (scope/target); dnsdist packet-cache flush; Refresh | plain status table | — | none | unavailable badge, empty | not started | not started | not started | not started |
 
 ## Security group
@@ -167,18 +167,18 @@ DNS-Activity/Top-Domains data (done, see the Dashboard row) and, going forward, 
 underlying data (still needs its own page built) and any other page that only needs
 *read-only analytics*.
 
-**Policy boundary: still not built.** DNS Settings/Upstreams, Clients & Access, Filters, and every
-page whose data lives in Python's `control.db` policy tables (not analytics) needs either (a) a
-native Go schema + CRUD for that domain (the Blocklists/Local DNS/Dashboard pattern -- Go owns it
-outright, no boundary at all, the actual end-state per the Definition of Done's "no permanent
-dependency on the Python web application") or (b) a *write-capable* boundary, which is a much bigger
-trust/consistency problem than the read-only analytics case above (a write needs to go through
-Python's own validation/staging/promotion, or Go needs to reimplement that safely itself) and is
-not something to design in passing. Given the Definition of Done explicitly rules out a permanent
-proxy, **native Go schema + CRUD is the intended target, not a boundary** -- DNS Settings/Upstreams
-is next, built the same way Blocklists/Local DNS/Local DNS already are: real Go tables, real Go
-service logic, informed by reading Python's `policy_store.py`/`policy_model.py` for the exact
-semantics to preserve, not proxied.
+**Policy domains: native Go, not a boundary at all.** Clients & Access, Filters, and every other
+page whose data lives in Python's `control.db` policy tables needs either (a) a native Go schema +
+CRUD for that domain (the Blocklists/Local DNS/Upstreams pattern -- Go owns it outright, the actual
+end-state per the Definition of Done's "no permanent dependency on the Python web application") or
+(b) a *write-capable* boundary, which is a much bigger trust/consistency problem than the read-only
+analytics case above (a write needs to go through Python's own validation/staging/promotion, or Go
+needs to reimplement that safely itself) and is not something to design in passing. Given the
+Definition of Done explicitly rules out a permanent proxy, **native Go schema + CRUD is the intended
+target, not a boundary** -- proven now by `internal/upstreams` (real Go tables, real Go service
+logic, field-for-field matched against `policy_store.py`, no proxy, no boundary object at all -- see
+the DNS Settings/Upstreams row above). Clients & Access is next, same pattern, informed by reading
+`policy_model.py`/`policy_store.py`'s client/group/network policy tables for the exact semantics.
 
 ## Non-goals carried over from Milestone 1 (still correct, restated here)
 

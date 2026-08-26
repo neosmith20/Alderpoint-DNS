@@ -10,6 +10,7 @@ import (
 	"alderpointdns/go-controlplane/internal/blocklists"
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/pyanalytics"
+	"alderpointdns/go-controlplane/internal/upstreams"
 )
 
 type Server struct {
@@ -17,6 +18,7 @@ type Server struct {
 	Auth       *auth.Store
 	Blocklists *blocklists.Service
 	LocalDNS   *localdns.Service
+	Upstreams  *upstreams.Service
 	StaticDir  string
 	Log        *slog.Logger
 
@@ -74,6 +76,14 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/local-dns", requireAuth(s.handleCreateLocalDNS))
 	mux.HandleFunc("PATCH /api/local-dns/{id}", requireAuth(s.handleUpdateLocalDNS))
 	mux.HandleFunc("DELETE /api/local-dns/{id}", requireAuth(s.handleDeleteLocalDNS))
+
+	mux.HandleFunc("GET /api/upstreams", requireAuth(s.handleListUpstreams))
+	mux.HandleFunc("POST /api/upstreams", requireAuth(s.handleCreateUpstream))
+	mux.HandleFunc("PUT /api/upstreams/{id}", requireAuth(s.handleUpdateUpstream))
+	mux.HandleFunc("POST /api/upstreams/{id}/enable", requireAuth(s.handleEnableUpstream))
+	mux.HandleFunc("POST /api/upstreams/{id}/disable", requireAuth(s.handleDisableUpstream))
+	mux.HandleFunc("DELETE /api/upstreams/{id}", requireAuth(s.handleDeleteUpstream))
+	mux.HandleFunc("POST /api/upstreams/reorder", requireAuth(s.handleReorderUpstreams))
 
 	mux.HandleFunc("/", s.handleStatic)
 

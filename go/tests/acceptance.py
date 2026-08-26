@@ -169,6 +169,63 @@ def main():
     deleted = curl_json("DELETE", f"{B}/api/local-dns/{rec_id}", cookie=CJ, csrf=csrf)
     check("delete local-dns record", deleted.get("status") == "deleted", deleted)
 
+    # --- upstreams lifecycle (native Go schema/CRUD, not a Python proxy) ---
+    up1 = curl_json("POST", f"{B}/api/upstreams", cookie=CJ, csrf=csrf, body={
+        "name": "Primary", "transport": "plain", "strategy": "ordered",
+        "endpoints": [{"address": "9.9.9.9", "priority": 0, "weight": 1}],
+    })
+    check("create upstream returns an id", "upstream_profile_id" in up1, up1)
+    up1_id = up1["upstream_profile_id"]
+
+    doh_missing_tls = curl_json("POST", f"{B}/api/upstreams", cookie=CJ, csrf=csrf, body={
+        "name": "BadDoH", "transport": "doh", "strategy": "ordered",
+        "endpoints": [{"address": "1.1.1.1", "priority": 0, "weight": 1}],
+    })
+    check("DoH endpoint without tls_hostname is rejected", doh_missing_tls.get("error") == "invalid_upstream", doh_missing_tls)
+
+    listed = curl_json("GET", f"{B}/api/upstreams", cookie=CJ)
+    check("upstreams list contains the new profile", any(u["upstream_profile_id"] == up1_id for u in listed.get("upstreams", [])), listed)
+    check("native_recursion_active is false with an enabled upstream", listed.get("native_recursion_active") is False, listed)
+
+    updated = curl_json("PUT", f"{B}/api/upstreams/{up1_id}", cookie=CJ, csrf=csrf, body={
+        "name": "Primary Renamed", "transport": "plain", "strategy": "ordered",
+        "endpoints": [{"address": "9.9.9.9", "priority": 0, "weight": 1}, {"address": "149.112.112.112", "priority": 1, "weight": 1}],
+    })
+    check("update upstream succeeds", updated.get("status") == "updated", updated)
+    listed2 = curl_json("GET", f"{B}/api/upstreams", cookie=CJ)
+    updated_profile = next((u for u in listed2["upstreams"] if u["upstream_profile_id"] == up1_id), None)
+    check("update actually changed the name and added an endpoint", updated_profile and updated_profile["name"] == "Primary Renamed" and len(updated_profile["endpoints"]) == 2, updated_profile)
+
+    disable_no_confirm = curl_json("POST", f"{B}/api/upstreams/{up1_id}/disable", cookie=CJ, csrf=csrf, body={})
+    check("disabling the last enabled upstream without confirm is rejected (409)", disable_no_confirm.get("error") == "last_enabled_upstream", disable_no_confirm)
+    disable_confirmed = curl_json("POST", f"{B}/api/upstreams/{up1_id}/disable", cookie=CJ, csrf=csrf, body={"confirm_last": True})
+    check("disabling the last enabled upstream with confirm succeeds", disable_confirmed.get("status") == "disabled", disable_confirmed)
+    listed3 = curl_json("GET", f"{B}/api/upstreams", cookie=CJ)
+    check("native_recursion_active is true once the only upstream is disabled", listed3.get("native_recursion_active") is True, listed3)
+
+    reenable = curl_json("POST", f"{B}/api/upstreams/{up1_id}/enable", cookie=CJ, csrf=csrf)
+    check("re-enabling the upstream succeeds", reenable.get("status") == "enabled", reenable)
+
+    up2 = curl_json("POST", f"{B}/api/upstreams", cookie=CJ, csrf=csrf, body={
+        "name": "Secondary", "transport": "plain", "strategy": "ordered",
+        "endpoints": [{"address": "8.8.8.8", "priority": 0, "weight": 1}],
+    })
+    up2_id = up2["upstream_profile_id"]
+    reordered = curl_json("POST", f"{B}/api/upstreams/reorder", cookie=CJ, csrf=csrf, body={"ordered_upstream_profile_ids": [up2_id, up1_id]})
+    check("reorder actually changes list order", [u["upstream_profile_id"] for u in reordered.get("upstreams", [])][:2] == [up2_id, up1_id], reordered)
+
+    # Both up1 and up2 are enabled right now, so deleting up2 first is not
+    # "the last enabled upstream" -- must succeed outright, no confirm needed.
+    del2 = curl_json("DELETE", f"{B}/api/upstreams/{up2_id}", cookie=CJ, csrf=csrf, body={})
+    check("delete a non-last upstream succeeds outright", del2.get("status") == "deleted", del2)
+
+    # Now up1 is the sole enabled upstream -- deleting it without confirm
+    # must be rejected the same way disabling it was above.
+    delete_last_no_confirm = curl_json("DELETE", f"{B}/api/upstreams/{up1_id}", cookie=CJ, csrf=csrf, body={})
+    check("deleting the last enabled upstream without confirm is rejected (409)", delete_last_no_confirm.get("error") == "last_enabled_upstream", delete_last_no_confirm)
+    del1_confirmed = curl_json("DELETE", f"{B}/api/upstreams/{up1_id}", cookie=CJ, csrf=csrf, body={"confirm_last": True})
+    check("delete the final upstream with confirm succeeds", del1_confirmed.get("status") == "deleted", del1_confirmed)
+
     print(f"\n{len([r for r in results if r[1] == PASS])}/{len(results)} checks passed.")
 
 

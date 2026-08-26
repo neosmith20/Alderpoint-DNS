@@ -27,6 +27,7 @@ import (
 	"alderpointdns/go-controlplane/internal/httpapi"
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/pyanalytics"
+	"alderpointdns/go-controlplane/internal/upstreams"
 )
 
 // Version is overridden at build time: -ldflags "-X main.Version=..."
@@ -148,6 +149,7 @@ func runWeb(args []string) {
 		MaxConcurrent: cfg.Blocklists.MaxConcurrentPulls, Log: logger,
 	}
 	ldSvc := &localdns.Service{DB: db, StagingDir: cfg.LocalDNS.StagingDir, RuntimeDir: cfg.LocalDNS.RuntimeDir}
+	upSvc := &upstreams.Service{DB: db}
 
 	// Analytics compatibility boundary: optional, never fatal. A missing
 	// or unreadable path means Dashboard analytics reports degraded, not
@@ -165,7 +167,7 @@ func runWeb(args []string) {
 	}
 
 	srv := &httpapi.Server{
-		DB: db, Auth: &auth.Store{DB: db}, Blocklists: blSvc, LocalDNS: ldSvc,
+		DB: db, Auth: &auth.Store{DB: db}, Blocklists: blSvc, LocalDNS: ldSvc, Upstreams: upSvc,
 		StaticDir: *staticDir, Log: logger, Version: Version, StartedAt: startedAt,
 		SessionTTL: cfg.SessionTTL(), LastSeen: cfg.LastSeenUpdateInterval(),
 		ApplianceName: cfg.Appliance.Name, ApplianceTimezone: cfg.Appliance.Timezone,

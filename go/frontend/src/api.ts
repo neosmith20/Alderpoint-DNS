@@ -53,6 +53,46 @@ export interface LocalDnsRecord {
   enabled: boolean;
 }
 
+export interface UpstreamEndpoint {
+  address: string;
+  tls_hostname: string | null;
+  priority: number;
+  weight: number;
+  doh_path: string | null;
+}
+
+export interface UpstreamProfile {
+  upstream_profile_id: string;
+  name: string;
+  transport: "plain" | "dot" | "doh";
+  strategy: "ordered" | "failover" | "load_balanced";
+  enabled: boolean;
+  sort_order: number;
+  order: number;
+  endpoints: UpstreamEndpoint[];
+}
+
+export interface UpstreamEndpointInput {
+  address: string;
+  tls_hostname?: string | null;
+  priority: number;
+  weight: number;
+  doh_path?: string | null;
+}
+
+export interface UpstreamProfileInput {
+  name: string;
+  transport: string;
+  strategy: string;
+  endpoints: UpstreamEndpointInput[];
+}
+
+export interface UpstreamMutationResult {
+  status: string;
+  runtime: { promoted: boolean; binding_count: number };
+  was_last_enabled?: boolean;
+}
+
 export interface AnalyticsBucket {
   bucket_start: number;
   bucket_start_iso: string;
@@ -183,4 +223,27 @@ export const api = {
   updateLocalDNS: (id: number, patch: Partial<Pick<LocalDnsRecord, "value" | "ttl" | "enabled">>) =>
     req<{ record: LocalDnsRecord }>(`/api/local-dns/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteLocalDNS: (id: number) => req<{ status: string }>(`/api/local-dns/${id}`, { method: "DELETE" }),
+
+  listUpstreams: (signal?: AbortSignal) =>
+    req<{ upstreams: UpstreamProfile[]; native_recursion_active: boolean }>("/api/upstreams", undefined, signal),
+  createUpstream: (body: UpstreamProfileInput) =>
+    req<{ status: string; upstream_profile_id: string }>("/api/upstreams", { method: "POST", body: JSON.stringify(body) }),
+  updateUpstream: (id: string, body: UpstreamProfileInput) =>
+    req<UpstreamMutationResult>(`/api/upstreams/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(body) }),
+  enableUpstream: (id: string) => req<UpstreamMutationResult>(`/api/upstreams/${encodeURIComponent(id)}/enable`, { method: "POST" }),
+  disableUpstream: (id: string, confirmLast = false) =>
+    req<UpstreamMutationResult>(`/api/upstreams/${encodeURIComponent(id)}/disable`, {
+      method: "POST",
+      body: JSON.stringify({ confirm_last: confirmLast }),
+    }),
+  deleteUpstream: (id: string, confirmLast = false) =>
+    req<UpstreamMutationResult>(`/api/upstreams/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      body: JSON.stringify({ confirm_last: confirmLast }),
+    }),
+  reorderUpstreams: (orderedIds: string[]) =>
+    req<{ status: string; upstreams: UpstreamProfile[] }>("/api/upstreams/reorder", {
+      method: "POST",
+      body: JSON.stringify({ ordered_upstream_profile_ids: orderedIds }),
+    }),
 };

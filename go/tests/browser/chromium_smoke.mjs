@@ -337,6 +337,57 @@ async function main() {
     const sortableHeader = await page.$(".sort-btn");
     check("Blocklists grid has at least one sortable column header", sortableHeader !== null);
 
+    // --- Nav: DNS Settings / Upstreams ---
+    let clickedUpstreams = false;
+    for (const btn of await page.$$(".sidebar .item")) {
+      if ((await btn.evaluate((el) => el.textContent?.trim())) === "DNS Settings") {
+        await btn.click();
+        clickedUpstreams = true;
+        break;
+      }
+    }
+    check("DNS Settings nav item exists and is clickable", clickedUpstreams);
+    await page.waitForSelector("#upstreams-heading", { timeout: 3000 }).catch(() => {});
+    check("Upstreams page content rendered", (await page.$("#upstreams-heading")) !== null);
+
+    // Create a profile.
+    await page.type('.profile-form input[required]', "Test Upstream");
+    await page.type('.endpoint-row input[placeholder^="Address"]', "9.9.9.9");
+    await Promise.all([
+      // A real row has an .actions cell; the grid's pre-existing
+      // empty-state <tr> does not -- waiting on plain "tr count > 0"
+      // would already be satisfied by that empty-state row and race
+      // ahead of the actual creation response.
+      page.waitForFunction(() => document.querySelectorAll(".data-grid tbody .actions").length > 0, { timeout: 3000 }),
+      page.click('.profile-form button[type="submit"]'),
+    ]);
+    let rowCount = await page.$$eval(".data-grid tbody tr", (rows) => rows.length);
+    check("creating an upstream profile adds a real row to the grid", rowCount === 1, `rows=${rowCount}`);
+
+    // Disabling the only (last) enabled upstream must show the confirm dialog, not silently succeed.
+    const actionButtons = await page.$$(".data-grid tbody .actions button");
+    let disableClicked = false;
+    for (const btn of actionButtons) {
+      if ((await btn.evaluate((el) => el.textContent?.trim())) === "Disable") {
+        await btn.click();
+        disableClicked = true;
+        break;
+      }
+    }
+    check("Disable button exists for the created profile", disableClicked);
+    await page.waitForSelector(".confirm-last", { timeout: 2000 }).catch(() => {});
+    check("disabling the last enabled upstream shows a confirm dialog instead of silently succeeding", (await page.$(".confirm-last")) !== null);
+    const stillEnabled = await page.$eval(".data-grid tbody .badge", (el) => el.textContent.trim());
+    check("the profile is still shown as Enabled until the confirm dialog is accepted", stillEnabled === "Enabled", stillEnabled);
+    // Accept the confirmation.
+    const confirmBtn = await page.$(".confirm-last .danger");
+    await confirmBtn.click();
+    await new Promise((r) => setTimeout(r, 300));
+    const nowDisabled = await page.$eval(".data-grid tbody .badge", (el) => el.textContent.trim());
+    check("confirming disables the profile for real", nowDisabled === "Disabled");
+    const infoBanner = await page.$(".info-banner");
+    check("native-recursion info banner appears once zero upstreams are enabled", infoBanner !== null);
+
     // --- Systematic viewport sweep: every implemented route x desktop/tablet/mobile x light/dark ---
     const VIEWPORTS = [
       { name: "desktop-1440", width: 1440, height: 900 },
@@ -347,6 +398,7 @@ async function main() {
       { path: "/ui/dashboard", heading: "#dashboard-heading" },
       { path: "/ui/blocklists", heading: "#blocklists-heading" },
       { path: "/ui/localdns", heading: "#localdns-heading" },
+      { path: "/ui/upstreams", heading: "#upstreams-heading" },
       { path: "/ui/administration", heading: "#admin-heading" },
     ];
     for (const theme of ["light", "dark"]) {
