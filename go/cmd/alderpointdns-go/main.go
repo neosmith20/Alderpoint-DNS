@@ -151,6 +151,7 @@ func runWeb(args []string) {
 		DB: db, Auth: &auth.Store{DB: db}, Blocklists: blSvc, LocalDNS: ldSvc,
 		StaticDir: *staticDir, Log: logger, Version: Version, StartedAt: startedAt,
 		SessionTTL: cfg.SessionTTL(), LastSeen: cfg.LastSeenUpdateInterval(),
+		ApplianceName: cfg.Appliance.Name, ApplianceTimezone: cfg.Appliance.Timezone,
 	}
 
 	listenAddr := *addr

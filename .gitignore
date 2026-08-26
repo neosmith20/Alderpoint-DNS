@@ -73,4 +73,6 @@ vendor-runtime-v2-analytics/
 # dependency caches, not the deliverable itself.
 go/frontend/node_modules/
 go/frontend/package-lock.json
+go/tests/browser/node_modules/
+go/tests/browser/package-lock.json
 /dist/

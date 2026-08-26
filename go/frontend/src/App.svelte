@@ -50,11 +50,19 @@
 
   function enterApp() {
     phase = "app";
-    // Landing at "/" or an unknown/not-yet-built route on first entry:
-    // send the operator to the first implemented page rather than a blank
-    // or "coming soon" landing.
+    // router.current was resolved at module load (before we knew whether
+    // this visit would even reach the app) from whatever location.pathname
+    // was at the time -- typically "/" right after login, which
+    // routeIdFromPath() already defaults to defaultRouteId() in memory,
+    // but the URL bar itself was never updated to match. Sync it now via
+    // a history *replace* (not a new entry): landing at "/" or an
+    // unknown/not-yet-built route sends the operator to the first
+    // implemented page instead of a blank/coming-soon landing, and in
+    // every case the address bar ends up agreeing with what's on screen
+    // (bookmarking, reload, and back/forward all need this to be true).
     const item = findItem(router.current);
-    if (!item?.load) router.navigate(defaultRouteId(), true);
+    const target = item?.load ? router.current : defaultRouteId();
+    router.navigate(target, true);
   }
 
   const activeLabel = $derived(findItem(router.current)?.label ?? "");

@@ -160,6 +160,48 @@ func (s *Server) handleRevokeOtherSessions(w http.ResponseWriter, r *http.Reques
 	WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "revoked_count": n})
 }
 
+type changePasswordRequest struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
+func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	sess, _ := auth.FromContext(r.Context())
+	var req changePasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		Err(http.StatusBadRequest, "validation_error", "invalid request body").WriteJSON(w)
+		return
+	}
+	if len(req.NewPassword) < 12 || len(req.NewPassword) > 256 {
+		ErrField(http.StatusBadRequest, "validation_error", "password must be 12-256 characters", "new_password").WriteJSON(w)
+		return
+	}
+	err := s.Auth.ChangePassword(r.Context(), sess.AdminID, req.CurrentPassword, req.NewPassword)
+	if err == auth.ErrInvalidCredentials {
+		ErrField(http.StatusUnauthorized, "invalid_credentials", "current password is incorrect", "current_password").WriteJSON(w)
+		return
+	} else if err != nil {
+		Err(http.StatusInternalServerError, "internal_error", "password change failed").WriteJSON(w)
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+}
+
+// handleSystemStatus reports the appliance-level facts the Administration
+// page (timezone display) and future pages need. Deliberately small: only
+// what the Go control plane itself owns today (config, version, uptime).
+// It does not proxy Python's much larger /api/system/status (workers,
+// discovery, bind contexts, replication) -- see PARITY_MATRIX.md's
+// System Status row for that real remaining scope.
+func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
+	WriteJSON(w, http.StatusOK, map[string]any{
+		"version":            s.Version,
+		"uptime_seconds":     int(s.Uptime().Seconds()),
+		"appliance_name":     s.ApplianceName,
+		"appliance_timezone": s.ApplianceTimezone,
+	})
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	components := map[string]any{}
 	status := "ok"

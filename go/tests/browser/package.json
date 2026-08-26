@@ -1,0 +1,10 @@
+{
+  "name": "go-controlplane-browser-tests",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Real-Chromium (CDP via puppeteer-core, pointed at the system browser -- no bundled download) smoke/acceptance coverage for the Go/Svelte management app. Not part of the shipped appliance.",
+  "devDependencies": {
+    "puppeteer-core": "^25.9.0"
+  }
+}

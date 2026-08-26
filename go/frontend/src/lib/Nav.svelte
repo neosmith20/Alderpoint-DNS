@@ -2,6 +2,7 @@
   import Icon from "./Icon.svelte";
   import { NAV_GROUPS, TOP_LEVEL, type NavGroup } from "../nav";
   import { router } from "../router.svelte";
+  import { loadKeepMultipleOpen } from "../navPrefs";
 
   let { mobileOpen = $bindable(false) }: { mobileOpen?: boolean } = $props();
 
@@ -38,7 +39,12 @@
       return;
     }
     const next = new Set(openGroups);
-    if (next.has(id)) next.delete(id);
+    const wasOpen = next.has(id);
+    if (!loadKeepMultipleOpen() && !wasOpen) {
+      // Single-open accordion: opening one group closes every other.
+      next.clear();
+    }
+    if (wasOpen) next.delete(id);
     else next.add(id);
     openGroups = next;
     persistOpenGroups();

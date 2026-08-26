@@ -105,6 +105,14 @@ export const api = {
     req<{ status: string; csrf: string }>("/api/login", { method: "POST", body: JSON.stringify({ username, password }) }),
   logout: () => req<{ status: string }>("/api/logout", { method: "POST" }),
   session: () => req<{ authenticated: boolean; username: string; csrf: string }>("/api/session"),
+  changePassword: (currentPassword: string, newPassword: string) =>
+    req<{ status: string }>("/api/session/password", {
+      method: "POST",
+      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+    }),
+  revokeOtherSessions: () => req<{ status: string; revoked_count: number }>("/api/session/revoke-others", { method: "POST" }),
+  systemStatus: () =>
+    req<{ version: string; uptime_seconds: number; appliance_name: string; appliance_timezone: string }>("/api/system/status"),
 
   listBlocklists: (signal?: AbortSignal) => req<BlocklistsResponse>("/api/blocklists", undefined, signal),
   createBlocklist: (name: string, url: string, category: string) =>

@@ -184,3 +184,24 @@ func (s *Store) RevokeOtherSessions(ctx context.Context, adminID int64, keepID s
 	}
 	return res.RowsAffected()
 }
+
+// ChangePassword verifies currentPassword against the stored hash before
+// setting newPassword -- same "must prove you know the current password"
+// contract as app/v2/webapp.py's POST /api/session/password. The calling
+// session (and any other session belonging to this admin) is left alone;
+// the caller decides separately whether to also revoke other sessions.
+func (s *Store) ChangePassword(ctx context.Context, adminID int64, currentPassword, newPassword string) error {
+	var hash string
+	if err := s.DB.QueryRowContext(ctx, `SELECT password_hash FROM admins WHERE id=?`, adminID).Scan(&hash); err != nil {
+		return err
+	}
+	if !VerifyPassword(hash, currentPassword) {
+		return ErrInvalidCredentials
+	}
+	newHash, err := HashPassword(newPassword)
+	if err != nil {
+		return err
+	}
+	_, err = s.DB.ExecContext(ctx, `UPDATE admins SET password_hash=? WHERE id=?`, newHash, adminID)
+	return err
+}

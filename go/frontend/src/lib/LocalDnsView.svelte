@@ -3,6 +3,8 @@
   import { api, type LocalDnsRecord } from "../api";
   import { StaleGuard } from "../staleGuard";
   import { router } from "../router.svelte";
+  import DataGrid from "./DataGrid.svelte";
+  import type { Column } from "./datagrid";
 
   let records = $state<LocalDnsRecord[]>([]);
   let loadError = $state("");
@@ -87,6 +89,19 @@
       pendingDelete = next;
     }
   }
+
+  const columns: Column<LocalDnsRecord>[] = [
+    { key: "name", label: "Name", sortValue: (r) => r.name.toLowerCase(), minWidth: 14 },
+    { key: "type", label: "Type", sortValue: (r) => r.record_type, minWidth: 8 },
+    { key: "value", label: "Value", minWidth: 14 },
+    { key: "ttl", label: "TTL", sortValue: (r) => r.ttl, minWidth: 6 },
+    { key: "enabled", label: "Enabled", sortValue: (r) => (r.enabled ? 1 : 0), minWidth: 8 },
+    { key: "actions", label: "Actions", minWidth: 16 },
+  ];
+
+  function rowClass(r: LocalDnsRecord): string {
+    return pendingDelete.has(r.id) ? "row-pending" : "";
+  }
 </script>
 
 <section aria-labelledby="localdns-heading">
@@ -108,52 +123,44 @@
 
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
 
-  <div class="table-scroll">
-    <table aria-label="Local DNS records">
-      <thead><tr><th>Name</th><th>Type</th><th>Value</th><th>TTL</th><th>Enabled</th><th>Actions</th></tr></thead>
-      <tbody>
-        {#each records as r (r.id)}
-          <tr class:pending={pendingDelete.has(r.id)}>
-            <td>{r.name}</td>
-            <td>{r.record_type}</td>
-            <td>
-              {#if editingId === r.id}
-                <input bind:value={editValue} aria-label={`Edit value for ${r.name}`} />
-              {:else}
-                {r.value}
-              {/if}
-            </td>
-            <td>
-              {#if editingId === r.id}
-                <input type="number" min="1" bind:value={editTTL} style="width:5rem" aria-label={`Edit TTL for ${r.name}`} />
-              {:else}
-                {r.ttl}
-              {/if}
-            </td>
-            <td>{r.enabled ? "yes" : "no"}</td>
-            <td class="actions">
-              {#if editingId === r.id}
-                <button onclick={() => saveEdit(r)}>Save</button>
-                <button onclick={() => (editingId = null)}>Cancel</button>
-              {:else}
-                <button onclick={() => startEdit(r)}>Edit</button>
-                <button onclick={() => toggleEnabled(r)}>{r.enabled ? "Disable" : "Enable"}</button>
-                <button onclick={() => deleteRecord(r)} disabled={pendingDelete.has(r.id)} aria-busy={pendingDelete.has(r.id)}>
-                  {pendingDelete.has(r.id) ? "Deleting…" : "Delete"}
-                </button>
-              {/if}
-            </td>
-          </tr>
-        {/each}
-      </tbody>
-    </table>
-  </div>
+  <DataGrid gridId="local-dns-records" {columns} rows={records} rowKey={(r) => r.id} {rowClass} emptyMessage="No Local DNS records yet.">
+    {#snippet cell(r, colKey)}
+      {#if colKey === "name"}
+        {r.name}
+      {:else if colKey === "type"}
+        {r.record_type}
+      {:else if colKey === "value"}
+        {#if editingId === r.id}
+          <input bind:value={editValue} aria-label={`Edit value for ${r.name}`} />
+        {:else}
+          {r.value}
+        {/if}
+      {:else if colKey === "ttl"}
+        {#if editingId === r.id}
+          <input type="number" min="1" bind:value={editTTL} style="width:5rem" aria-label={`Edit TTL for ${r.name}`} />
+        {:else}
+          {r.ttl}
+        {/if}
+      {:else if colKey === "enabled"}
+        {r.enabled ? "yes" : "no"}
+      {:else if colKey === "actions"}
+        <div class="actions">
+          {#if editingId === r.id}
+            <button onclick={() => saveEdit(r)}>Save</button>
+            <button onclick={() => (editingId = null)}>Cancel</button>
+          {:else}
+            <button onclick={() => startEdit(r)}>Edit</button>
+            <button onclick={() => toggleEnabled(r)}>{r.enabled ? "Disable" : "Enable"}</button>
+            <button onclick={() => deleteRecord(r)} disabled={pendingDelete.has(r.id)} aria-busy={pendingDelete.has(r.id)}>
+              {pendingDelete.has(r.id) ? "Deleting…" : "Delete"}
+            </button>
+          {/if}
+        </div>
+      {/if}
+    {/snippet}
+  </DataGrid>
 </section>
 
 <style>
-  .table-scroll { overflow-x: auto; }
-  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
-  th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border); white-space: nowrap; }
-  tr.pending { opacity: 0.5; }
-  .actions { display: flex; gap: 0.4rem; }
+  .actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
 </style>

@@ -15,6 +15,14 @@ no HTML templates — it serves one SPA shell, `app/v2/ui/index.html`, plus `app
 separate legacy app and is **not** part of this rewrite's target surface — V2 already superseded it
 as the functional reference, per the roadmap.
 
+**Testing infrastructure:** `go/tests/acceptance.py` (black-box API, language-neutral) and
+`go/tests/browser/chromium_smoke.mjs` (real headless Chromium via `puppeteer-core` against
+`/usr/bin/chromium` -- no bundled download, no mocking) are both run against every coherent slice
+before it's deployed to `:10443`, not deferred to the end. Run the Chromium harness with
+`cd go/tests/browser && npm install && node chromium_smoke.mjs <https-base-url> <username> <password>`
+against a **fresh** (`setup_required: true`) instance -- it drives real setup/login and must not be
+pointed at the live owner preview, whose credentials are Alex's.
+
 **Authoritative target surface** (per the governing task): the union of (a) what Python V2 actually
 does today, (b) required V1.1.1 workflow semantics per `docs/v2/v1-workflow-parity-contract.md`,
 (c) accepted owner corrections already recorded in that contract and in `docs/v2/v2-roadmap.md`'s
@@ -83,7 +91,7 @@ target, not the defect — literal bug-for-bug parity is not the goal.
 |---|---|---|---|---|---|---|---|---|
 | Statistics | `statistics` | `GET /api/statistics/export`; `POST /statistics/clear` | Export link; Clear form (typed "CLEAR" confirm + raw-history option) | — | not started | not started | not started | not started |
 | System Status | `health` | `GET /api/health`, `/api/system/status`, `/api/node-identity`, `/api/discovery/status`, `/api/dns/performance`; `POST /dns/performance/benchmark`; `DELETE /dns/performance` | Copy UI Perf Report / Clear Measurements / Refresh; Run Safe DNS Benchmark / Copy DNS Perf Report / Clear | Metric strip, UI Performance table (session-only), DNS Performance panel, BIND Cache Counters, Components, Node Identity | not started | not started | not started | not started |
-| Administration | `administration` | `GET /api/system/status`; `POST /session/password`, `/session/revoke-others` | Change Password; Revoke Other Sessions; multi-open nav pref; **Timestamp Display selector (Browser Local / Appliance Time / UTC)** | — | not started | not started | not started | not started |
+| Administration | `administration` | `GET /api/system/status`; `POST /session/password`, `/session/revoke-others` | Change Password; Revoke Other Sessions; multi-open nav pref; **Timestamp Display selector (Browser Local / Appliance Time / UTC)** | — | done | done | done (Chromium, see below) | not started |
 | Network Configuration | `network` | `GET /api/network/status`; `POST /network/apply`, `/network/confirm` | Change config form (IPv4/IPv6 mode+address+gateway); pending-config confirm with ~120s auto-revert | Current Settings table | not started | not started | not started | not started |
 | Notifications | `notifications` | `GET /api/notifications`; `POST /notifications` | Create Provider (webhook/email_smtp/pushover/slack), write-only secret field | Providers grid | not started | not started | not started | not started |
 | Software Updates | `updates` | `GET /api/updates/{status,jobs}`; `PUT /updates/settings`; `POST /updates/upload`, `/updates/jobs/{id}/apply` | Metric strip; Private Feed form; Manual `.deb` upload+stage; per-job Apply (with reconnect-poll after restart) | Update Jobs grid | not started | not started | not started | not started |
@@ -93,11 +101,11 @@ target, not the defect — literal bug-for-bug parity is not the goal.
 
 | Item | Source | Go API | Svelte | Browser test | Owner accepted |
 |---|---|---|---|---|---|
-| Nav shell: 4 groups (DNS/Security/Operations/System) + Dashboard, accordion multi-open pref, collapsed flyout, keyboard/pointer/touch | `app.js` GROUP_ORDER + accordion fix history in `v1-workflow-parity-contract.md` | n/a | in progress (`Nav.svelte`, `nav.ts`: full IA, accordion+persist, collapsed flyout, off-canvas drawer <760px; Escape handled; arrow-key roving focus not yet added) | not started | not started |
-| Shared data grid (sort/resize/persist/overflow) | `data-grid.js` | n/a | not started | not started | not started |
-| Theme (light/dark), design tokens, local SVG icons | roadmap "Final Product Experience" | n/a | in progress (light/dark CSS-var tokens carried over from Milestone 1; icon set added this slice; no dedicated design-system pass yet) | not started | not started |
-| Timestamp engine (3 modes, instant reformat) | `app.js` timestamp display | n/a | in progress (`timestamp.ts`: formatting/sort-key logic done; not yet wired into any page, no Administration picker yet) | not started | not started |
-| Toasts, dialogs, confirmation flows, action menus | `app.js` shared UI | n/a | not started | not started | not started |
+| Nav shell: 4 groups (DNS/Security/Operations/System) + Dashboard, accordion multi-open pref, collapsed flyout, keyboard/pointer/touch | `app.js` GROUP_ORDER + accordion fix history in `v1-workflow-parity-contract.md` | n/a | in progress (`Nav.svelte`, `nav.ts`: full IA, accordion+persist (Administration's "keep multiple open" toggle wired in `navPrefs.ts`), collapsed flyout, off-canvas drawer <760px; Escape handled; arrow-key roving focus not yet added) | in progress (Chromium: nav-item clicks route correctly, 390px menu button + drawer open/close + Escape-close + no horizontal overflow all asserted; collapsed-rail flyout and keyboard roving focus not yet asserted) | not started |
+| Shared data grid (sort/resize/persist/overflow) | `data-grid.js` | n/a | done (`DataGrid.svelte`; used by both existing pages, replacing their ad hoc `<table>` markup) | in progress -- Chromium confirms it renders and a sortable header exists; sort-order-on-click, drag-resize, and width-persistence-across-reload are not yet individually Chromium-asserted | not started |
+| Theme (light/dark), design tokens, local SVG icons | roadmap "Final Product Experience" | n/a | in progress (light/dark CSS-var tokens carried over from Milestone 1; icon set added this slice; no dedicated design-system pass yet) | done (Chromium: theme toggle flips `data-theme`) | not started |
+| Timestamp engine (3 modes, instant reformat) | `app.js` timestamp display | n/a | done (`timestamp.svelte.ts`: reactive singleton, Administration owns the picker; not yet consumed by any *other* page's table, since neither existing page has a timestamp column yet) | done (Chromium: mode change updates the on-screen preview instantly) | not started |
+| Toasts, dialogs, confirmation flows, action menus (kebab/overflow) | `app.js` shared UI | n/a | not started | not started | not started |
 | Route-level code splitting, cancellation, stale-response protection generalized from `staleGuard.ts` | governing task Phase 2 | n/a | done — build-verified (`RouteLoader.svelte` dynamic `import()`; `dist/assets` shows per-page JS/CSS chunks split from the main bundle). `router.svelte.ts`'s per-navigation `AbortSignal` is wired into both existing pages' list fetches (`api.listBlocklists`/`listLocalDNS` now take a signal) -- routing away actually aborts the in-flight request, not just discards its result. Not yet threaded through every mutation call on those pages, and not yet a pattern documented for future pages beyond this example. | not started | not started |
 
 ---

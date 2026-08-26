@@ -3,6 +3,8 @@
   import { api, type Subscription, type IntervalPreset } from "../api";
   import { StaleGuard } from "../staleGuard";
   import { router } from "../router.svelte";
+  import DataGrid from "./DataGrid.svelte";
+  import type { Column } from "./datagrid";
 
   let subs = $state<Subscription[]>([]);
   let presets = $state<IntervalPreset[]>([]);
@@ -129,6 +131,22 @@
     const preset = presets.find((p) => p.seconds === sub.effective_interval_seconds);
     return preset?.label ?? `${sub.effective_interval_seconds}s`;
   }
+
+  const columns: Column<Subscription>[] = [
+    { key: "name", label: "Name", sortValue: (s) => s.name.toLowerCase(), minWidth: 14 },
+    { key: "status", label: "Status", sortValue: (s) => (s.attention_required ? 0 : s.last_status === "ok" ? 2 : 1) },
+    { key: "entries", label: "Entries", sortValue: (s) => s.rule_count ?? -1 },
+    { key: "interval", label: "Interval", minWidth: 12 },
+    { key: "job", label: "Job", minWidth: 8 },
+    { key: "actions", label: "Actions", minWidth: 20 },
+  ];
+
+  function rowClass(sub: Subscription): string {
+    const classes: string[] = [];
+    if (pendingDelete.has(sub.subscription_id)) classes.push("row-pending");
+    if (sub.attention_required) classes.push("row-attention");
+    return classes.join(" ");
+  }
 </script>
 
 <section aria-labelledby="blocklists-heading">
@@ -154,62 +172,49 @@
 
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
 
-  <div class="table-scroll">
-    <table aria-label="Blocklist subscriptions">
-      <thead>
-        <tr>
-          <th>Name</th><th>Status</th><th>Entries</th><th>Interval</th><th>Job</th><th>Actions</th>
-        </tr>
-      </thead>
-      <tbody>
-        {#each subs as sub (sub.subscription_id)}
-          <tr class:pending={pendingDelete.has(sub.subscription_id)} class:attention={sub.attention_required}>
-            <td>{sub.name}</td>
-            <td>
-              {#if sub.attention_required}
-                <span class="badge badge-attention" role="status">Needs attention ({sub.failure_count} failures)</span>
-              {:else if sub.last_status === "ok"}
-                <span class="badge badge-ok">OK</span>
-              {:else if sub.last_status === "error"}
-                <span class="badge badge-warn">1 failure</span>
-              {:else}
-                <span>never run</span>
-              {/if}
-            </td>
-            <td>{sub.rule_count ?? "-"}</td>
-            <td>
-              <select value={sub.update_interval_seconds ?? -1} onchange={(e) => onSetInterval(sub, Number((e.target as HTMLSelectElement).value))}>
-                <option value={-1}>Default ({fmtInterval(sub)})</option>
-                {#each presets as p}
-                  <option value={p.seconds}>{p.label}</option>
-                {/each}
-              </select>
-            </td>
-            <td>{jobPollers[sub.subscription_id] ?? "-"}</td>
-            <td class="actions">
-              <button onclick={() => onToggle(sub)}>{sub.enabled ? "Disable" : "Enable"}</button>
-              <button onclick={() => onRefreshOne(sub)} disabled={pendingRefresh.has(sub.subscription_id) || sub.update_in_progress} aria-busy={pendingRefresh.has(sub.subscription_id)}>
-                {pendingRefresh.has(sub.subscription_id) || sub.update_in_progress ? "Updating…" : "Update Now"}
-              </button>
-              <button onclick={() => onDelete(sub)} disabled={pendingDelete.has(sub.subscription_id)} aria-busy={pendingDelete.has(sub.subscription_id)}>
-                {pendingDelete.has(sub.subscription_id) ? "Deleting…" : "Delete"}
-              </button>
-            </td>
-          </tr>
-        {/each}
-      </tbody>
-    </table>
-  </div>
+  <DataGrid gridId="blocklist-subscriptions" {columns} rows={subs} rowKey={(s) => s.subscription_id} {rowClass} emptyMessage="No blocklist subscriptions yet.">
+    {#snippet cell(sub, colKey)}
+      {#if colKey === "name"}
+        {sub.name}
+      {:else if colKey === "status"}
+        {#if sub.attention_required}
+          <span class="badge badge-attention" role="status">Needs attention ({sub.failure_count} failures)</span>
+        {:else if sub.last_status === "ok"}
+          <span class="badge badge-ok">OK</span>
+        {:else if sub.last_status === "error"}
+          <span class="badge badge-warn">1 failure</span>
+        {:else}
+          <span>never run</span>
+        {/if}
+      {:else if colKey === "entries"}
+        {sub.rule_count ?? "-"}
+      {:else if colKey === "interval"}
+        <select value={sub.update_interval_seconds ?? -1} onchange={(e) => onSetInterval(sub, Number((e.target as HTMLSelectElement).value))}>
+          <option value={-1}>Default ({fmtInterval(sub)})</option>
+          {#each presets as p}
+            <option value={p.seconds}>{p.label}</option>
+          {/each}
+        </select>
+      {:else if colKey === "job"}
+        {jobPollers[sub.subscription_id] ?? "-"}
+      {:else if colKey === "actions"}
+        <div class="actions">
+          <button onclick={() => onToggle(sub)}>{sub.enabled ? "Disable" : "Enable"}</button>
+          <button onclick={() => onRefreshOne(sub)} disabled={pendingRefresh.has(sub.subscription_id) || sub.update_in_progress} aria-busy={pendingRefresh.has(sub.subscription_id)}>
+            {pendingRefresh.has(sub.subscription_id) || sub.update_in_progress ? "Updating…" : "Update Now"}
+          </button>
+          <button onclick={() => onDelete(sub)} disabled={pendingDelete.has(sub.subscription_id)} aria-busy={pendingDelete.has(sub.subscription_id)}>
+            {pendingDelete.has(sub.subscription_id) ? "Deleting…" : "Delete"}
+          </button>
+        </div>
+      {/if}
+    {/snippet}
+  </DataGrid>
 </section>
 
 <style>
   .section-header { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
-  .table-scroll { overflow-x: auto; }
-  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
-  th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border); white-space: nowrap; }
-  tr.pending { opacity: 0.5; }
-  tr.attention { background: var(--attention-bg); }
-  .actions { display: flex; gap: 0.4rem; }
+  .actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
   .badge { padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 0.78rem; }
   .badge-ok { background: var(--badge-ok-bg); color: var(--badge-ok-fg); }
   .badge-warn { background: var(--badge-warn-bg); color: var(--badge-warn-fg); }
