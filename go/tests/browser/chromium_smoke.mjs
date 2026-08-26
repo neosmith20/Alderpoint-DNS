@@ -706,6 +706,37 @@ async function main() {
     const enabledCellText = await page.$eval(".data-grid tbody tr", (el) => el.textContent);
     check("disabling a notification provider updates its Enabled cell to No", enabledCellText.includes("No"), enabledCellText);
 
+    // --- Nav: Import (internal/importer, hosts-file source only) ---
+    let clickedImport = false;
+    for (const btn of await page.$$(".sidebar .item")) {
+      if ((await btn.evaluate((el) => el.textContent?.trim())) === "Import") {
+        await btn.click();
+        clickedImport = true;
+        break;
+      }
+    }
+    check("Import nav item exists and is clickable", clickedImport);
+    await page.waitForSelector("#importexport-heading", { timeout: 3000 }).catch(() => {});
+    check("Import page content rendered", (await page.$("#importexport-heading")) !== null);
+
+    await page.type('textarea[aria-label="Hosts file contents"]', "10.0.0.42 chromium-import-test.lan");
+    await page.click(".import-view form button[type=submit]");
+    await page.waitForSelector(".result", { timeout: 3000 });
+    const importResultText = await page.$eval(".result", (el) => el.textContent);
+    check("importing a hosts file reports a real imported count", importResultText.includes("1") && importResultText.includes("imported"), importResultText);
+
+    // The imported record should now be a real row on Local DNS.
+    for (const btn of await page.$$(".sidebar .item")) {
+      if ((await btn.evaluate((el) => el.textContent?.trim())) === "Local DNS") {
+        await btn.click();
+        break;
+      }
+    }
+    await page.waitForSelector("#localdns-heading", { timeout: 3000 });
+    await page.waitForFunction(() => document.querySelector(".data-grid tbody")?.textContent?.includes("chromium-import-test.lan"), { timeout: 3000 }).catch(() => {});
+    const localDnsText = await page.$eval(".data-grid tbody", (el) => el.textContent);
+    check("the hosts-file import created a real Local DNS record", localDnsText.includes("chromium-import-test.lan"), localDnsText);
+
     // --- Nav: Backup & Restore ---
     let clickedBackup = false;
     for (const btn of await page.$$(".sidebar .item")) {
@@ -789,6 +820,7 @@ async function main() {
       { path: "/ui/statistics", heading: "#statistics-heading" },
       { path: "/ui/health", heading: "#health-heading" },
       { path: "/ui/notifications", heading: "#notifications-heading" },
+      { path: "/ui/importexport", heading: "#importexport-heading" },
       { path: "/ui/administration", heading: "#admin-heading" },
     ];
     for (const theme of ["light", "dark"]) {

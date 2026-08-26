@@ -94,7 +94,12 @@ export const NAV_GROUPS: NavGroup[] = [
     label: "Operations",
     icon: "operations",
     items: [
-      { id: "importexport", label: "Import", icon: "operations" },
+      {
+        id: "importexport",
+        label: "Import",
+        icon: "operations",
+        load: () => import("./lib/ImportView.svelte") as unknown as Promise<{ default: Component }>,
+      },
       {
         id: "backup",
         label: "Backup & Restore",

@@ -273,6 +273,12 @@ export interface TlsStatus {
   error?: string;
 }
 
+export interface ImportHostsResult {
+  imported: number;
+  skipped: number;
+  errors: string[];
+}
+
 export interface NotificationProvider {
   provider_id: string;
   kind: "webhook" | "email_smtp" | "pushover" | "slack";
@@ -407,6 +413,8 @@ export const api = {
   toggleNotificationProvider: (id: string, enabled: boolean) =>
     req<{ status: string }>(`/api/notifications/${encodeURIComponent(id)}/toggle`, { method: "POST", body: JSON.stringify({ enabled }) }),
   deleteNotificationProvider: (id: string) => req<{ status: string }>(`/api/notifications/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  importHosts: (text: string) => req<ImportHostsResult>("/api/import/hosts", { method: "POST", body: text }),
 
   listBlocklists: (signal?: AbortSignal) => req<BlocklistsResponse>("/api/blocklists", undefined, signal),
   createBlocklist: (name: string, url: string, category: string) =>

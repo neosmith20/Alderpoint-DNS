@@ -157,6 +157,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/notifications/{id}/toggle", requireAuth(s.handleToggleNotificationProvider))
 	mux.HandleFunc("DELETE /api/notifications/{id}", requireAuth(s.handleDeleteNotificationProvider))
 
+	mux.HandleFunc("POST /api/import/hosts", requireAuth(s.handleImportHosts))
+
 	mux.HandleFunc("/", s.handleStatic)
 
 	return Instrument(s.Log, mux)

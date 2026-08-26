@@ -516,6 +516,20 @@ def main():
     delete_unknown = curl_status("DELETE", f"{B}/api/notifications/does-not-exist", cookie=CJ, csrf=csrf)
     check("deleting an unknown notification provider returns 404", delete_unknown == "404", delete_unknown)
 
+    # --- Import (internal/importer, hosts-file source type only) ---
+    hosts_text = "127.0.0.1 accept-localhost\n10.0.0.5 accept-nas accept-nas.lan\nnot-an-ip broken.example.com\n# a comment\n\n"
+    import_result = subprocess.run(
+        ["curl", "-sk", "-b", CJ, "-H", f"X-CSRF-Token: {csrf}", "-X", "POST", f"{B}/api/import/hosts", "--data-binary", hosts_text],
+        capture_output=True, text=True,
+    ).stdout
+    import_json = json.loads(import_result)
+    check("importing a hosts file imports the valid entries", import_json.get("imported") == 3, import_json)
+    check("importing a hosts file skips the invalid line without aborting", import_json.get("skipped") == 1 and len(import_json.get("errors", [])) == 1, import_json)
+
+    local_dns_after_import = curl_json("GET", f"{B}/api/local-dns", cookie=CJ)
+    check("imported hosts-file records actually exist in Local DNS",
+          any(r["name"] == "accept-nas" and r["value"] == "10.0.0.5" for r in local_dns_after_import["records"]), local_dns_after_import)
+
     print(f"\n{len([r for r in results if r[1] == PASS])}/{len(results)} checks passed.")
 
 
