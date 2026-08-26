@@ -9,6 +9,7 @@ import (
 	"alderpointdns/go-controlplane/internal/auth"
 	"alderpointdns/go-controlplane/internal/blocklists"
 	"alderpointdns/go-controlplane/internal/clients"
+	"alderpointdns/go-controlplane/internal/customrules"
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/policy"
 	"alderpointdns/go-controlplane/internal/pyanalytics"
@@ -16,15 +17,16 @@ import (
 )
 
 type Server struct {
-	DB         *sql.DB
-	Auth       *auth.Store
-	Blocklists *blocklists.Service
-	LocalDNS   *localdns.Service
-	Upstreams  *upstreams.Service
-	Clients    *clients.Service
-	Policy     *policy.Service
-	StaticDir  string
-	Log        *slog.Logger
+	DB          *sql.DB
+	Auth        *auth.Store
+	Blocklists  *blocklists.Service
+	LocalDNS    *localdns.Service
+	Upstreams   *upstreams.Service
+	Clients     *clients.Service
+	Policy      *policy.Service
+	CustomRules *customrules.Service
+	StaticDir   string
+	Log         *slog.Logger
 
 	// Analytics is nil unless -analytics-db was given a real path at
 	// startup -- every analytics handler must treat nil as "degraded",
@@ -103,6 +105,16 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PUT /api/policy/client/{id}", requireAuth(s.handlePutClientPolicy))
 	mux.HandleFunc("GET /api/networks", requireAuth(s.handleListNetworks))
 	mux.HandleFunc("POST /api/networks", requireAuth(s.handleCreateNetwork))
+
+	mux.HandleFunc("GET /api/custom-rules", requireAuth(s.handleListCustomRules))
+	mux.HandleFunc("POST /api/custom-rules", requireAuth(s.handleCreateCustomRule))
+	mux.HandleFunc("PUT /api/custom-rules/{id}", requireAuth(s.handleUpdateCustomRule))
+	mux.HandleFunc("POST /api/custom-rules/{id}/toggle", requireAuth(s.handleToggleCustomRule))
+	mux.HandleFunc("DELETE /api/custom-rules/{id}", requireAuth(s.handleDeleteCustomRule))
+	mux.HandleFunc("POST /api/custom-rules/bulk-enable", requireAuth(s.handleBulkEnableCustomRules))
+	mux.HandleFunc("POST /api/custom-rules/bulk-disable", requireAuth(s.handleBulkDisableCustomRules))
+	mux.HandleFunc("POST /api/custom-rules/bulk-delete", requireAuth(s.handleBulkDeleteCustomRules))
+	mux.HandleFunc("POST /api/custom-rules/reorder", requireAuth(s.handleReorderCustomRules))
 
 	mux.HandleFunc("/", s.handleStatic)
 

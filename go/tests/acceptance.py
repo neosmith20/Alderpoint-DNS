@@ -294,6 +294,41 @@ def main():
     networks_listed = curl_json("GET", f"{B}/api/networks", cookie=CJ)
     check("network list contains the new network", any(n["cidr"] == "10.20.0.0/24" for n in networks_listed.get("networks", [])), networks_listed)
 
+    # --- custom filtering rules (native Go, new functionality) ---
+    bad_rewrite = curl_json("POST", f"{B}/api/custom-rules", cookie=CJ, csrf=csrf, body={"rule_type": "rewrite", "pattern": "example.com"})
+    check("rewrite rule without rewrite_target is rejected", bad_rewrite.get("error") == "validation_error", bad_rewrite)
+
+    rule1 = curl_json("POST", f"{B}/api/custom-rules", cookie=CJ, csrf=csrf, body={"rule_type": "block", "pattern": "ads.example.com"})
+    check("create block rule returns an id", "id" in rule1, rule1)
+    rule1_id = rule1["id"]
+    rule2 = curl_json("POST", f"{B}/api/custom-rules", cookie=CJ, csrf=csrf, body={"rule_type": "allow", "pattern": "safe.example.com"})
+    rule2_id = rule2["id"]
+    rule3 = curl_json("POST", f"{B}/api/custom-rules", cookie=CJ, csrf=csrf, body={"rule_type": "rewrite", "pattern": "internal.example.com", "rewrite_target": "10.0.0.9"})
+    rule3_id = rule3["id"]
+
+    listed_rules = curl_json("GET", f"{B}/api/custom-rules", cookie=CJ)
+    check("all 3 rules appear, in creation/priority order", [r["id"] for r in listed_rules["rules"]] == [rule1_id, rule2_id, rule3_id], listed_rules)
+
+    updated_rule = curl_json("PUT", f"{B}/api/custom-rules/{rule1_id}", cookie=CJ, csrf=csrf, body={"rule_type": "block", "pattern": "ads2.example.com"})
+    check("editing a rule succeeds", updated_rule.get("status") == "updated", updated_rule)
+
+    toggled = curl_json("POST", f"{B}/api/custom-rules/{rule1_id}/toggle", cookie=CJ, csrf=csrf, body={"enabled": False})
+    check("disabling a rule succeeds", toggled.get("status") == "updated", toggled)
+    after_toggle = curl_json("GET", f"{B}/api/custom-rules", cookie=CJ)
+    r1 = next(r for r in after_toggle["rules"] if r["id"] == rule1_id)
+    check("disabled rule shows enabled=false, edit persisted too", r1["enabled"] is False and r1["pattern"] == "ads2.example.com", r1)
+
+    reordered_rules = curl_json("POST", f"{B}/api/custom-rules/reorder", cookie=CJ, csrf=csrf, body={"ordered_ids": [rule3_id, rule1_id, rule2_id]})
+    check("reordering rules changes priority order", [r["id"] for r in reordered_rules.get("rules", [])] == [rule3_id, rule1_id, rule2_id], reordered_rules)
+
+    bulk_en = curl_json("POST", f"{B}/api/custom-rules/bulk-enable", cookie=CJ, csrf=csrf, body={"ids": [rule1_id, rule2_id]})
+    check("bulk-enable affects 2 rules", bulk_en.get("count") == 2, bulk_en)
+
+    bulk_del = curl_json("POST", f"{B}/api/custom-rules/bulk-delete", cookie=CJ, csrf=csrf, body={"ids": [rule2_id, rule3_id]})
+    check("bulk-delete affects 2 rules", bulk_del.get("count") == 2, bulk_del)
+    final_rules = curl_json("GET", f"{B}/api/custom-rules", cookie=CJ)
+    check("only the un-deleted rule remains", [r["id"] for r in final_rules["rules"]] == [rule1_id], final_rules)
+
     print(f"\n{len([r for r in results if r[1] == PASS])}/{len(results)} checks passed.")
 
 

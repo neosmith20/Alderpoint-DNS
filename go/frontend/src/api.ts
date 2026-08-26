@@ -53,6 +53,16 @@ export interface LocalDnsRecord {
   enabled: boolean;
 }
 
+export interface CustomRule {
+  id: number;
+  rule_type: "block" | "allow" | "regex_block" | "regex_allow" | "rewrite";
+  pattern: string;
+  rewrite_target: string | null;
+  enabled: boolean;
+  priority: number;
+  created_at: string;
+}
+
 export interface PolicyLayer {
   filtering_profile_id: string | null;
   safesearch_mode: string | null;
@@ -340,4 +350,27 @@ export const api = {
   listNetworks: (signal?: AbortSignal) => req<{ networks: { network_id: string; cidr: string }[] }>("/api/networks", undefined, signal),
   createNetwork: (cidr: string) =>
     req<{ status: string; network_id: string }>("/api/networks", { method: "POST", body: JSON.stringify({ cidr }) }),
+
+  listCustomRules: (signal?: AbortSignal) => req<{ rules: CustomRule[] }>("/api/custom-rules", undefined, signal),
+  createCustomRule: (ruleType: string, pattern: string, rewriteTarget: string | null) =>
+    req<{ status: string; id: number }>("/api/custom-rules", {
+      method: "POST",
+      body: JSON.stringify({ rule_type: ruleType, pattern, rewrite_target: rewriteTarget }),
+    }),
+  updateCustomRule: (id: number, ruleType: string, pattern: string, rewriteTarget: string | null) =>
+    req<{ status: string }>(`/api/custom-rules/${id}`, {
+      method: "PUT",
+      body: JSON.stringify({ rule_type: ruleType, pattern, rewrite_target: rewriteTarget }),
+    }),
+  toggleCustomRule: (id: number, enabled: boolean) =>
+    req<{ status: string }>(`/api/custom-rules/${id}/toggle`, { method: "POST", body: JSON.stringify({ enabled }) }),
+  deleteCustomRule: (id: number) => req<{ status: string }>(`/api/custom-rules/${id}`, { method: "DELETE" }),
+  bulkEnableCustomRules: (ids: number[]) =>
+    req<{ status: string; count: number }>("/api/custom-rules/bulk-enable", { method: "POST", body: JSON.stringify({ ids }) }),
+  bulkDisableCustomRules: (ids: number[]) =>
+    req<{ status: string; count: number }>("/api/custom-rules/bulk-disable", { method: "POST", body: JSON.stringify({ ids }) }),
+  bulkDeleteCustomRules: (ids: number[]) =>
+    req<{ status: string; count: number }>("/api/custom-rules/bulk-delete", { method: "POST", body: JSON.stringify({ ids }) }),
+  reorderCustomRules: (orderedIds: number[]) =>
+    req<{ status: string; rules: CustomRule[] }>("/api/custom-rules/reorder", { method: "POST", body: JSON.stringify({ ordered_ids: orderedIds }) }),
 };

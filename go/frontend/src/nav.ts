@@ -64,7 +64,12 @@ export const NAV_GROUPS: NavGroup[] = [
     label: "Security",
     icon: "security",
     items: [
-      { id: "filtering", label: "Filters", icon: "security" },
+      {
+        id: "filtering",
+        label: "Filters",
+        icon: "security",
+        load: () => import("./lib/CustomRulesView.svelte") as unknown as Promise<{ default: Component }>,
+      },
       {
         id: "blocklists",
         label: "Blocklists",

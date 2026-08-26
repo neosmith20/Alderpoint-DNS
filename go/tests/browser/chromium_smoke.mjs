@@ -478,6 +478,57 @@ async function main() {
     const persistedValue = await page.$eval(".policy-editor select", (el) => el.value);
     check("saved policy field actually persisted server-side (survives a full page reload)", persistedValue === "strict", persistedValue);
 
+    // --- Nav: Filters (custom rules + global policy) ---
+    let clickedFilters = false;
+    for (const btn of await page.$$(".sidebar .item")) {
+      if ((await btn.evaluate((el) => el.textContent?.trim())) === "Filters") {
+        await btn.click();
+        clickedFilters = true;
+        break;
+      }
+    }
+    check("Filters nav item exists and is clickable", clickedFilters);
+    await page.waitForSelector("#filtering-heading", { timeout: 3000 }).catch(() => {});
+    check("Filters page content rendered", (await page.$("#filtering-heading")) !== null);
+    check("Global Answer Policy editor renders on Filters", (await page.$(".policy-editor")) !== null);
+
+    // Add a block rule, then a rewrite rule (exercises the conditional field).
+    await page.select(".add-form select", "block");
+    await page.type('.add-form input[placeholder*="example.com"]', "ads.example.com");
+    await Promise.all([
+      page.waitForFunction(() => document.querySelectorAll(".data-grid tbody tr").length > 0, { timeout: 3000 }),
+      page.click(".add-form button[type=submit]"),
+    ]);
+    let ruleRows = await page.$$eval(".data-grid tbody tr", (rows) => rows.length);
+    check("adding a custom rule adds a real row", ruleRows === 1, `rows=${ruleRows}`);
+
+    await page.select(".add-form select", "rewrite");
+    await page.waitForSelector('.add-form input[placeholder="10.0.0.5"]', { timeout: 2000 });
+    const patternInputs = await page.$$(".add-form input");
+    await patternInputs[0].type("internal.example.com");
+    await patternInputs[1].type("10.0.0.9");
+    await Promise.all([
+      page.waitForFunction(() => document.querySelectorAll(".data-grid tbody tr").length > 1, { timeout: 3000 }),
+      page.click(".add-form button[type=submit]"),
+    ]);
+    const rowsText = await page.$eval(".data-grid tbody", (el) => el.textContent);
+    check("rewrite rule shows its target inline (pattern -> target)", rowsText.includes("internal.example.com") && rowsText.includes("10.0.0.9"), rowsText);
+
+    // Bulk select both rules and disable them.
+    const ruleCheckboxes = await page.$$(".data-grid tbody input[type=checkbox]");
+    for (const cb of ruleCheckboxes) await cb.click();
+    await page.waitForSelector(".bulk-bar", { timeout: 2000 });
+    const bulkButtons = await page.$$(".bulk-bar button");
+    for (const btn of bulkButtons) {
+      if ((await btn.evaluate((el) => el.textContent?.trim())) === "Disable") {
+        await btn.click();
+        break;
+      }
+    }
+    await new Promise((r) => setTimeout(r, 300));
+    const disabledCount = await page.$$eval(".data-grid tbody tr.row-pending", (rows) => rows.length);
+    check("bulk-disable actually disabled both selected rules", disabledCount === 2, `disabled=${disabledCount}`);
+
     // --- Systematic viewport sweep: every implemented route x desktop/tablet/mobile x light/dark ---
     const VIEWPORTS = [
       { name: "desktop-1440", width: 1440, height: 900 },
@@ -490,6 +541,7 @@ async function main() {
       { path: "/ui/localdns", heading: "#localdns-heading" },
       { path: "/ui/upstreams", heading: "#upstreams-heading" },
       { path: "/ui/clients", heading: "#clients-heading" },
+      { path: "/ui/filtering", heading: "#filtering-heading" },
       { path: "/ui/administration", heading: "#admin-heading" },
     ];
     for (const theme of ["light", "dark"]) {
