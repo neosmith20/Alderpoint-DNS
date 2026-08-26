@@ -566,7 +566,7 @@ Progress is counted only when a real end-to-end workflow has its Go API, Svelte 
 
 ## 11. Engineering-Agent Budget and Handoff Rules
 
-The original agent-usage plan did not hold: repeated broad prompts, duplicated context, concurrent CC/Dex usage, repeated full-suite runs, and premature checkpointing consumed the available monthly engineering budget and blocked work on the separate router-OS project.
+The original agent-usage plan did not hold: repeated broad prompts, duplicated context, concurrent implementation/review sessions, repeated full-suite runs, and premature checkpointing consumed the available engineering budget without completing the planned scope.
 
 The replacement rules are mandatory:
 
@@ -579,7 +579,6 @@ The replacement rules are mandatory:
 - concise reports: SHA, deployed version, completed parity rows, failures, and exact next row
 - no “natural stopping point” when no genuine owner decision or safety blocker exists
 - Dex reserved for high-value independent security/architecture/release gates
-- protect a separate fixed budget for the router-OS project
 
 The repository parity matrix is the backlog. Agent prose is not a substitute for completed product behavior.
 

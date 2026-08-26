@@ -77,7 +77,7 @@ The original two-week estimate was not achieved. The project will not substitute
 
 Progress is measured by complete, working, tested parity rows—not files, commits, scaffolding, or disabled “coming soon” navigation entries. Architecture and scope are now frozen around Go/Svelte and the committed parity contract.
 
-To protect the separate router-OS project’s budget:
+To control engineering cost and avoid repeated work:
 
 - one engineering agent works on Alderpoint at a time
 - prompts contain only the current delta, exact objective, constraints, proof, and stop condition
