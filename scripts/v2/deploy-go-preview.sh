@@ -49,6 +49,12 @@ mkdir -p "$RELEASE/frontend-dist/assets"
 cp -n "$GO_DIR/frontend/dist/assets/"* "$RELEASE/frontend-dist/assets/" 2>/dev/null || true
 chown -R "$WEB_UID:$WEB_GID" "$RELEASE/frontend-dist/assets"
 
+echo "+ syncing schema/migrations (the binary reads these from disk at startup --"
+echo "  a migration added in this commit is inert until this copy happens)"
+mkdir -p "$RELEASE/schema/migrations"
+cp "$GO_DIR/schema/migrations/"*.sql "$RELEASE/schema/migrations/"
+chown -R root:root "$RELEASE/schema"
+
 echo "+ atomically swapping index.html"
 cp "$GO_DIR/frontend/dist/index.html" "$RELEASE/frontend-dist/index.html.new"
 chown "$WEB_UID:$WEB_GID" "$RELEASE/frontend-dist/index.html.new"
