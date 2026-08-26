@@ -91,10 +91,34 @@ nohup setsid "$HOSTAGENT_DIR/apdns-hostagent" \
   -dns-runtime-bind-stats-port 28153 -dns-runtime-bind-rndc-port 29553 \
   -dns-runtime-dnsdist-listen-addr 127.0.0.1:25333 \
   > "$HOSTAGENT_DIR/hostagent.log" 2>&1 < /dev/null &
-disown
 
-echo "+ restarting the preview container"
-podman restart "$CONTAINER" >/dev/null
+echo "+ recreating the preview container (podman restart does NOT pick up a"
+echo "  changed command line -- e.g. a flag this deploy's own binary no longer"
+echo "  accepts -- only a real rm+run does; this bit a real deploy once already)"
+podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
+podman run -d --name "$CONTAINER" \
+  --user "$WEB_UID:$WEB_GID" \
+  --group-add 103 \
+  -p 10443:10443 \
+  -v /root/apdns-v2-preview-state/var-lib/analytics:/var/lib/alderpointdns-v2-analytics-ro:ro \
+  -v /root/apdns-v2-preview-state/var-lib/certs:/var/lib/alderpointdns-v2-certs-ro:ro \
+  -v "$RELEASE:/opt/alderpointdns-go:ro" \
+  -v /root/apdns-go-migration-preview-state/etc:/etc/alderpointdns-go \
+  -v /root/apdns-go-migration-preview-state/var-lib:/var/lib/alderpointdns-go \
+  -v /root/apdns-go-migration-preview-state/hostagent-socket:/run/apdns-hostagent \
+  debian:trixie-slim \
+  /opt/alderpointdns-go/alderpointdns-go web \
+    -db /var/lib/alderpointdns-go/data/app.db \
+    -config /etc/alderpointdns-go/appliance.yaml \
+    -static /opt/alderpointdns-go/frontend-dist \
+    -migrations /opt/alderpointdns-go/schema/migrations \
+    -analytics-db /var/lib/alderpointdns-v2-analytics-ro/aggregates.db \
+    -query-log-dir /var/lib/alderpointdns-v2-analytics-ro/queries \
+    -backups-dir /var/lib/alderpointdns-go/backups \
+    -hostagent-socket /run/apdns-hostagent/agent.sock \
+    -dns-runtime-dnsdist-addr 127.0.0.1:25333 \
+    -dns-runtime-bind-proxy-addr 127.0.0.1:25553 \
+    -addr 0.0.0.0:10443 >/dev/null
 
 sleep 2
 HEALTH="$(curl -sk https://127.0.0.1:10443/api/health)"
