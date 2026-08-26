@@ -53,6 +53,42 @@ export interface LocalDnsRecord {
   enabled: boolean;
 }
 
+export interface PolicyLayer {
+  filtering_profile_id: string | null;
+  safesearch_mode: string | null;
+  parental_policy_id: string | null;
+  security_policy_id: string | null;
+  service_blocking_ruleset_id: string | null;
+  blocking_response_mode: string | null;
+  custom_ipv4: string | null;
+  custom_ipv6: string | null;
+  upstream_profile_id: string | null;
+  fallback_strategy: string | null;
+  fallback_upstream_profile_id: string | null;
+  ecs_mode: string | null;
+  domain_routing_ruleset_id: string | null;
+  query_log_enabled: boolean | null;
+  statistics_enabled: boolean | null;
+}
+
+export const EMPTY_POLICY_LAYER: PolicyLayer = {
+  filtering_profile_id: null,
+  safesearch_mode: null,
+  parental_policy_id: null,
+  security_policy_id: null,
+  service_blocking_ruleset_id: null,
+  blocking_response_mode: null,
+  custom_ipv4: null,
+  custom_ipv6: null,
+  upstream_profile_id: null,
+  fallback_strategy: null,
+  fallback_upstream_profile_id: null,
+  ecs_mode: null,
+  domain_routing_ruleset_id: null,
+  query_log_enabled: null,
+  statistics_enabled: null,
+};
+
 export interface ClientIdentifier {
   kind: "ipv4" | "ipv4_cidr" | "ipv6" | "ipv6_cidr" | "clientid";
   value: string;
@@ -71,6 +107,7 @@ export interface ManagedClient {
   enabled: boolean;
   identifiers: ClientIdentifier[];
   groups: ClientGroupRef[];
+  policy: PolicyLayer;
 }
 
 export interface ClientGroupMember {
@@ -83,6 +120,7 @@ export interface ClientGroup {
   name: string;
   priority: number;
   members: ClientGroupMember[];
+  policy: PolicyLayer;
 }
 
 export interface UpstreamEndpoint {
@@ -289,4 +327,17 @@ export const api = {
     req<{ status: string }>(`/api/clients/${clientId}/identifiers`, { method: "POST", body: JSON.stringify({ kind, value }) }),
   addClientToGroup: (clientId: number, groupId: string) =>
     req<{ status: string }>(`/api/clients/${clientId}/groups`, { method: "POST", body: JSON.stringify({ group_id: groupId }) }),
+
+  getGlobalPolicy: (signal?: AbortSignal) => req<PolicyLayer>("/api/policy/global", undefined, signal),
+  putGlobalPolicy: (layer: PolicyLayer) =>
+    req<{ status: string; runtime: unknown }>("/api/policy/global", { method: "PUT", body: JSON.stringify(layer) }),
+  putNetworkPolicy: (id: string, layer: PolicyLayer) =>
+    req<{ status: string; runtime: unknown }>(`/api/policy/network/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(layer) }),
+  putGroupPolicy: (id: string, layer: PolicyLayer) =>
+    req<{ status: string; runtime: unknown }>(`/api/policy/group/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(layer) }),
+  putClientPolicy: (id: number, layer: PolicyLayer) =>
+    req<{ status: string; runtime: unknown }>(`/api/policy/client/${id}`, { method: "PUT", body: JSON.stringify(layer) }),
+  listNetworks: (signal?: AbortSignal) => req<{ networks: { network_id: string; cidr: string }[] }>("/api/networks", undefined, signal),
+  createNetwork: (cidr: string) =>
+    req<{ status: string; network_id: string }>("/api/networks", { method: "POST", body: JSON.stringify({ cidr }) }),
 };

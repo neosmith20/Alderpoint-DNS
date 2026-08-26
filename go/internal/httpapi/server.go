@@ -10,6 +10,7 @@ import (
 	"alderpointdns/go-controlplane/internal/blocklists"
 	"alderpointdns/go-controlplane/internal/clients"
 	"alderpointdns/go-controlplane/internal/localdns"
+	"alderpointdns/go-controlplane/internal/policy"
 	"alderpointdns/go-controlplane/internal/pyanalytics"
 	"alderpointdns/go-controlplane/internal/upstreams"
 )
@@ -21,6 +22,7 @@ type Server struct {
 	LocalDNS   *localdns.Service
 	Upstreams  *upstreams.Service
 	Clients    *clients.Service
+	Policy     *policy.Service
 	StaticDir  string
 	Log        *slog.Logger
 
@@ -93,6 +95,14 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/clients", requireAuth(s.handleCreateClient))
 	mux.HandleFunc("POST /api/clients/{id}/identifiers", requireAuth(s.handleAddClientIdentifier))
 	mux.HandleFunc("POST /api/clients/{id}/groups", requireAuth(s.handleAddClientGroup))
+
+	mux.HandleFunc("GET /api/policy/global", requireAuth(s.handleGetGlobalPolicy))
+	mux.HandleFunc("PUT /api/policy/global", requireAuth(s.handlePutGlobalPolicy))
+	mux.HandleFunc("PUT /api/policy/network/{id}", requireAuth(s.handlePutNetworkPolicy))
+	mux.HandleFunc("PUT /api/policy/group/{id}", requireAuth(s.handlePutGroupPolicy))
+	mux.HandleFunc("PUT /api/policy/client/{id}", requireAuth(s.handlePutClientPolicy))
+	mux.HandleFunc("GET /api/networks", requireAuth(s.handleListNetworks))
+	mux.HandleFunc("POST /api/networks", requireAuth(s.handleCreateNetwork))
 
 	mux.HandleFunc("/", s.handleStatic)
 

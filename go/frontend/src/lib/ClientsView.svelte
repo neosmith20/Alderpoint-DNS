@@ -5,14 +5,17 @@
   import { router } from "../router.svelte";
   import DataGrid from "./DataGrid.svelte";
   import type { Column } from "./datagrid";
+  import PolicyEditor from "./PolicyEditor.svelte";
 
   // Native Go implementation (own schema/CRUD) -- see internal/clients's
-  // doc comment for exactly what's covered (managed clients, identifiers,
-  // groups) and what's deliberately not here yet: the policy-layer
-  // system (shared across this page, Filters, and DNS Settings -- a
-  // separate pass) and Observed Clients/discovery (Python-owned live
-  // data, same shape of problem as Dashboard's analytics -- needs its
-  // own compatibility-boundary decision, not built here). This page is
+  // and internal/policy's doc comments for exactly what's covered
+  // (managed clients, identifiers, groups, per-client/per-group policy
+  // assignment via the shared PolicyEditor) and what's deliberately not
+  // here yet: Observed Clients/discovery (Python-owned live data, same
+  // shape of problem as Dashboard's analytics -- needs its own
+  // compatibility-boundary decision, not built here) and "effective
+  // policy explain" (global->network->group->client precedence
+  // resolution -- real separate logic, not built here). This page is
   // Managed Clients only, disclosed in-page below.
 
   let managedClients = $state<ManagedClient[]>([]);
@@ -37,6 +40,9 @@
 
   let groupAssignClientId = $state<number | null>(null);
   let groupAssignGroupId = $state("");
+
+  let policyEditorClientId = $state<number | null>(null);
+  let policyEditorGroupId = $state<string | null>(null);
 
   async function refresh() {
     const token = guard.start();
@@ -175,6 +181,7 @@
         <div class="actions">
           <button onclick={() => startAddIdentifier(c)}>Add identifier</button>
           <button onclick={() => startAssignGroup(c)} disabled={groups.length === 0}>Assign group</button>
+          <button onclick={() => (policyEditorClientId = policyEditorClientId === c.id ? null : c.id)}>Policy</button>
         </div>
         {#if identifierClientId === c.id}
           <form onsubmit={submitIdentifier} class="inline-form">
@@ -202,6 +209,11 @@
             <button type="button" onclick={() => (groupAssignClientId = null)}>Cancel</button>
           </form>
         {/if}
+        {#if policyEditorClientId === c.id}
+          <div class="inline-policy">
+            <PolicyEditor layer={c.policy} onSave={(l) => api.putClientPolicy(c.id, l).then(refresh)} />
+          </div>
+        {/if}
       {/if}
     {/snippet}
   </DataGrid>
@@ -212,7 +224,17 @@
   {:else}
     <ul class="group-list">
       {#each groups as g}
-        <li><strong>{g.name}</strong> (priority {g.priority}) -- {g.members.length} member{g.members.length === 1 ? "" : "s"}</li>
+        <li>
+          <div class="group-row">
+            <span><strong>{g.name}</strong> (priority {g.priority}) -- {g.members.length} member{g.members.length === 1 ? "" : "s"}</span>
+            <button onclick={() => (policyEditorGroupId = policyEditorGroupId === g.group_id ? null : g.group_id)}>Policy</button>
+          </div>
+          {#if policyEditorGroupId === g.group_id}
+            <div class="inline-policy">
+              <PolicyEditor layer={g.policy} onSave={(l) => api.putGroupPolicy(g.group_id, l).then(refresh)} />
+            </div>
+          {/if}
+        </li>
       {/each}
     </ul>
   {/if}
@@ -230,5 +252,7 @@
   .chip { background: var(--nav-hover-bg); padding: 0.1rem 0.5rem; border-radius: 999px; font-size: 0.78rem; }
   .actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
   .inline-form { display: flex; gap: 0.4rem; margin-top: 0.4rem; flex-wrap: wrap; align-items: center; }
-  .group-list { margin: 0; padding-left: 1.2rem; font-size: 0.9rem; }
+  .group-list { margin: 0; padding-left: 1.2rem; font-size: 0.9rem; display: flex; flex-direction: column; gap: 0.5rem; }
+  .group-row { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
+  .inline-policy { margin: 0.5rem 0 0.5rem -1.2rem; padding: 0.75rem; border: 1px solid var(--border); border-radius: 6px; background: var(--card-bg); }
 </style>

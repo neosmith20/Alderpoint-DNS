@@ -262,6 +262,38 @@ def main():
     g1 = next((g for g in groups_listed.get("groups", []) if g["group_id"] == group1_id), None)
     check("group list shows the member", g1 is not None and any(m["id"] == client1_id for m in g1["members"]), g1)
 
+    # --- shared policy-layer system (native Go, global/network/group/client) ---
+    global_before = curl_json("GET", f"{B}/api/policy/global", cookie=CJ)
+    check("global policy starts fully inherited (all fields null)", global_before.get("safesearch_mode") is None, global_before)
+
+    set_global = curl_json("PUT", f"{B}/api/policy/global", cookie=CJ, csrf=csrf, body={
+        "safesearch_mode": "strict", "query_log_enabled": True, "statistics_enabled": False,
+    })
+    check("setting global policy succeeds", set_global.get("status") == "updated", set_global)
+
+    global_after = curl_json("GET", f"{B}/api/policy/global", cookie=CJ)
+    check("global policy reflects the saved safesearch_mode", global_after.get("safesearch_mode") == "strict", global_after)
+    check("global policy statistics_enabled=false round-trips as false, not null", global_after.get("statistics_enabled") is False, global_after)
+
+    set_client_policy = curl_json("PUT", f"{B}/api/policy/client/{client1_id}", cookie=CJ, csrf=csrf, body={"safesearch_mode": "off"})
+    check("setting a client's policy succeeds", set_client_policy.get("status") == "updated", set_client_policy)
+    clients_with_policy = curl_json("GET", f"{B}/api/clients", cookie=CJ)
+    c1_policy = next((c for c in clients_with_policy["clients"] if c["id"] == client1_id), None)
+    check("GET /api/clients embeds the client's own policy (not the global one)", c1_policy and c1_policy["policy"]["safesearch_mode"] == "off", c1_policy)
+
+    set_group_policy = curl_json("PUT", f"{B}/api/policy/group/{group1_id}", cookie=CJ, csrf=csrf, body={"ecs_mode": "disabled"})
+    check("setting a group's policy succeeds", set_group_policy.get("status") == "updated", set_group_policy)
+    groups_with_policy = curl_json("GET", f"{B}/api/groups", cookie=CJ)
+    g1_policy = next((g for g in groups_with_policy["groups"] if g["group_id"] == group1_id), None)
+    check("GET /api/groups embeds the group's own policy", g1_policy and g1_policy["policy"]["ecs_mode"] == "disabled", g1_policy)
+
+    net1 = curl_json("POST", f"{B}/api/networks", cookie=CJ, csrf=csrf, body={"cidr": "10.20.0.0/24"})
+    check("create network returns an id", "network_id" in net1, net1)
+    dup_net = curl_json("POST", f"{B}/api/networks", cookie=CJ, csrf=csrf, body={"cidr": "10.20.0.0/24"})
+    check("duplicate network CIDR is rejected", dup_net.get("error") == "conflict", dup_net)
+    networks_listed = curl_json("GET", f"{B}/api/networks", cookie=CJ)
+    check("network list contains the new network", any(n["cidr"] == "10.20.0.0/24" for n in networks_listed.get("networks", [])), networks_listed)
+
     print(f"\n{len([r for r in results if r[1] == PASS])}/{len(results)} checks passed.")
 
 

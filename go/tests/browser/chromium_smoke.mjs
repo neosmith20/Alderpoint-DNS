@@ -443,6 +443,41 @@ async function main() {
     const chipsText = await page.$eval(".data-grid tbody .chips", (el) => el.textContent);
     check("a valid identifier actually appears on the client row after saving", chipsText.includes("10.0.0.5"), chipsText);
 
+    // --- Per-client policy editor (shared PolicyEditor) ---
+    const policyButtons = await page.$$(".data-grid tbody .actions button");
+    let policyClicked = false;
+    for (const btn of policyButtons) {
+      if ((await btn.evaluate((el) => el.textContent?.trim())) === "Policy") {
+        await btn.click();
+        policyClicked = true;
+        break;
+      }
+    }
+    check("Policy button opens the per-client policy editor", policyClicked);
+    await page.waitForSelector(".policy-editor select", { timeout: 2000 }).catch(() => {});
+    check("policy editor renders its field grid", (await page.$(".policy-editor .grid")) !== null);
+    // Change Safesearch to "Strict" and save; verify it actually persisted.
+    const selects = await page.$$(".policy-editor select");
+    await selects[0].select("strict");
+    await Promise.all([
+      page.waitForSelector(".policy-editor .ok", { timeout: 3000 }),
+      page.click(".policy-editor button[type=submit]"),
+    ]);
+    // Reload the whole page -- the saved value must survive a real
+    // server round trip, not just be a local echo.
+    await page.reload({ waitUntil: "networkidle0" });
+    await page.waitForSelector("#clients-heading", { timeout: 5000 });
+    const reopenButtons = await page.$$(".data-grid tbody .actions button");
+    for (const btn of reopenButtons) {
+      if ((await btn.evaluate((el) => el.textContent?.trim())) === "Policy") {
+        await btn.click();
+        break;
+      }
+    }
+    await page.waitForSelector(".policy-editor select", { timeout: 2000 });
+    const persistedValue = await page.$eval(".policy-editor select", (el) => el.value);
+    check("saved policy field actually persisted server-side (survives a full page reload)", persistedValue === "strict", persistedValue);
+
     // --- Systematic viewport sweep: every implemented route x desktop/tablet/mobile x light/dark ---
     const VIEWPORTS = [
       { name: "desktop-1440", width: 1440, height: 900 },

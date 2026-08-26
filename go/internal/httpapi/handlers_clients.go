@@ -32,7 +32,18 @@ func (s *Server) handleListGroups(w http.ResponseWriter, r *http.Request) {
 		Err(http.StatusInternalServerError, "internal_error", "failed to load groups").WriteJSON(w)
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"groups": groups})
+	// Matches Python's GET /api/groups, which embeds each group's policy
+	// layer directly rather than requiring a second round trip.
+	out := make([]map[string]any, 0, len(groups))
+	for _, g := range groups {
+		layer, err := s.Policy.Load(r.Context(), "group", g.GroupID)
+		if err != nil {
+			Err(http.StatusInternalServerError, "internal_error", "failed to load group policy").WriteJSON(w)
+			return
+		}
+		out = append(out, map[string]any{"group_id": g.GroupID, "name": g.Name, "priority": g.Priority, "members": g.Members, "policy": layer})
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"groups": out})
 }
 
 type createGroupRequest struct {
@@ -76,7 +87,21 @@ func (s *Server) handleListClients(w http.ResponseWriter, r *http.Request) {
 		Err(http.StatusInternalServerError, "internal_error", "failed to load clients").WriteJSON(w)
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"clients": list})
+	// Matches Python's GET /api/clients, which embeds each client's
+	// policy layer directly rather than requiring a second round trip.
+	out := make([]map[string]any, 0, len(list))
+	for _, c := range list {
+		layer, err := s.Policy.Load(r.Context(), "client", strconv.FormatInt(c.ID, 10))
+		if err != nil {
+			Err(http.StatusInternalServerError, "internal_error", "failed to load client policy").WriteJSON(w)
+			return
+		}
+		out = append(out, map[string]any{
+			"id": c.ID, "name": c.Name, "description": c.Description, "enabled": c.Enabled,
+			"identifiers": c.Identifiers, "groups": c.Groups, "policy": layer,
+		})
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"clients": out})
 }
 
 type createClientRequest struct {
