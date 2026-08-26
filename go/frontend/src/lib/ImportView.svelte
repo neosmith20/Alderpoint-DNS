@@ -23,6 +23,7 @@
   let rollbackBusy = $state(false);
   let rollbackError = $state("");
   let dnsRuntimeResult = $state<DNSRuntimeApplyResult | null>(null);
+  let dismissedJobIds = new Set<number>();
 
   async function preview(e: Event) {
     e.preventDefault();
@@ -78,10 +79,37 @@
   }
 
   function startOver() {
+    if (job) dismissedJobIds.add(job.id);
     job = null;
     sourceText = "";
     skipped = new Set();
   }
+
+  // A previewed-but-not-yet-applied job is a real, server-persisted row
+  // (import_jobs) -- not component-local state. Without this, navigating
+  // away (e.g. to Local DNS to sanity-check the preview) and back would
+  // silently drop the staged plan even though it still exists in the
+  // database, forcing a re-preview for no reason. Resume it on mount.
+  $effect(() => {
+    if (job) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { jobs } = await api.listImportJobs();
+        // Resume the most recent still-relevant job -- "pending" (previewed,
+        // not yet applied) or "applied" (its rollback control must stay
+        // reachable after navigating away and back, not just immediately
+        // after the apply click).
+        const resumable = jobs.find((j) => (j.status === "pending" || j.status === "applied") && !dismissedJobIds.has(j.id));
+        if (resumable && !cancelled) job = resumable;
+      } catch {
+        // best-effort resume only -- an empty form is still a safe fallback
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  });
 </script>
 
 <section aria-labelledby="importexport-heading" class="import-view">
