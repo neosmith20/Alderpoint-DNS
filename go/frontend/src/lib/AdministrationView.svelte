@@ -2,7 +2,6 @@
   import { onMount } from "svelte";
   import { api, ApiError } from "../api";
   import { timestampPref, type TimestampMode } from "../timestamp.svelte";
-  import { loadKeepMultipleOpen, saveKeepMultipleOpen } from "../navPrefs";
 
   let applianceName = $state("");
   let statusError = $state("");
@@ -16,8 +15,6 @@
 
   let revokeBusy = $state(false);
   let revokeResult = $state<string>("");
-
-  let keepMultipleOpen = $state(loadKeepMultipleOpen());
 
   onMount(async () => {
     try {
@@ -69,11 +66,6 @@
     timestampPref.setMode(mode);
   }
 
-  function onKeepMultipleOpenChange(value: boolean) {
-    keepMultipleOpen = value;
-    saveKeepMultipleOpen(value);
-  }
-
   const now = Date.now();
 </script>
 
@@ -99,14 +91,6 @@
       </label>
     </div>
     <p class="preview">Preview: <strong>{timestampPref.format(now)}</strong></p>
-  </div>
-
-  <div class="card">
-    <h3>Navigation</h3>
-    <label class="checkbox-row">
-      <input type="checkbox" checked={keepMultipleOpen} onchange={(e) => onKeepMultipleOpenChange((e.target as HTMLInputElement).checked)} />
-      Keep multiple navigation sections open
-    </label>
   </div>
 
   <div class="card">

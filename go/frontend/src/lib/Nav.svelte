@@ -1,53 +1,41 @@
 <script lang="ts">
   import Icon from "./Icon.svelte";
-  import { NAV_GROUPS, TOP_LEVEL, type NavGroup } from "../nav";
+  import { NAV_GROUPS, TOP_LEVEL, groupOf, type NavGroup } from "../nav";
   import { router } from "../router.svelte";
-  import { loadKeepMultipleOpen } from "../navPrefs";
 
   let { mobileOpen = $bindable(false) }: { mobileOpen?: boolean } = $props();
 
-  const OPEN_GROUPS_KEY = "apdns-go-nav-open-groups";
   const COLLAPSED_KEY = "apdns-go-nav-collapsed";
 
-  function loadOpenGroups(): Set<string> {
-    try {
-      const raw = localStorage.getItem(OPEN_GROUPS_KEY);
-      if (raw) return new Set(JSON.parse(raw));
-    } catch {
-      /* fall through to default */
-    }
-    // Default: every group open (the existing multiple-open preference).
-    return new Set(NAV_GROUPS.map((g) => g.id));
-  }
-
-  let openGroups = $state<Set<string>>(loadOpenGroups());
+  // Single-open accordion: at most one main section is open at a time,
+  // desktop or mobile (the collapsed rail's flyout is already naturally
+  // single-open via flyoutGroup below, so this only governs the expanded
+  // sidebar/drawer). Not persisted -- the route itself is the source of
+  // truth for which section should be open (see the $effect below), so
+  // there is nothing meaningful to remember across a reload beyond that.
+  let openGroupId = $state<string | null>(groupOf(router.current)?.id ?? null);
   let collapsed = $state(localStorage.getItem(COLLAPSED_KEY) === "1");
   let flyoutGroup = $state<string | null>(null);
   let navEl: HTMLElement | undefined;
 
-  function persistOpenGroups() {
-    try {
-      localStorage.setItem(OPEN_GROUPS_KEY, JSON.stringify([...openGroups]));
-    } catch {
-      /* best-effort */
-    }
-  }
+  // Navigating directly to a child route (a sidebar click is one case,
+  // but also a Dashboard card link, browser back/forward, or a deep
+  // link) must open exactly that child's own parent section and no
+  // other -- keeps the open section and the active route from ever
+  // disagreeing, regardless of how the route changed.
+  $effect(() => {
+    const group = groupOf(router.current);
+    if (group) openGroupId = group.id;
+  });
 
   function toggleGroup(id: string) {
     if (collapsed) {
       flyoutGroup = flyoutGroup === id ? null : id;
       return;
     }
-    const next = new Set(openGroups);
-    const wasOpen = next.has(id);
-    if (!loadKeepMultipleOpen() && !wasOpen) {
-      // Single-open accordion: opening one group closes every other.
-      next.clear();
-    }
-    if (wasOpen) next.delete(id);
-    else next.add(id);
-    openGroups = next;
-    persistOpenGroups();
+    // Opening a different section closes whichever was open; clicking
+    // the already-open section's own toggle collapses it.
+    openGroupId = openGroupId === id ? null : id;
   }
 
   function toggleCollapsed() {
@@ -111,13 +99,13 @@
         <button
           class="group-toggle"
           class:active={groupHasActive(group)}
-          aria-expanded={collapsed ? flyoutGroup === group.id : openGroups.has(group.id)}
+          aria-expanded={collapsed ? flyoutGroup === group.id : openGroupId === group.id}
           onclick={() => toggleGroup(group.id)}
         >
           <Icon name={group.icon} />
           <span class="label">{group.label}</span>
           {#if !collapsed}
-            <span class="chevron" class:open={openGroups.has(group.id)}>
+            <span class="chevron" class:open={openGroupId === group.id}>
               <Icon name="chevron" size={14} />
             </span>
           {/if}
@@ -143,7 +131,7 @@
               {/each}
             </ul>
           {/if}
-        {:else if openGroups.has(group.id)}
+        {:else if openGroupId === group.id}
           <ul class="panel">
             {#each group.items as item (item.id)}
               <li>

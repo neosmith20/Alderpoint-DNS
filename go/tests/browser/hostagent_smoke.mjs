@@ -44,12 +44,24 @@ async function main() {
     await Promise.all([page.waitForSelector(".app-layout", { timeout: 5000 }), page.click('button[type="submit"]')]);
     check("login reaches the app shell", true);
 
+    // Single-open sidebar accordion: an item is only in the DOM while its
+    // own section is open. Try the currently-open section first, then
+    // cycle through each section's own toggle until the target appears.
     async function clickNav(label) {
-      for (const btn of await page.$$(".sidebar .item")) {
-        if ((await btn.evaluate((el) => el.textContent?.trim())) === label) {
-          await btn.click();
-          return true;
+      const tryFind = async () => {
+        for (const btn of await page.$$(".sidebar .item")) {
+          if ((await btn.evaluate((el) => el.textContent?.trim())) === label) {
+            await btn.click();
+            return true;
+          }
         }
+        return false;
+      };
+      if (await tryFind()) return true;
+      for (const toggle of await page.$$(".sidebar .group-toggle")) {
+        await toggle.click();
+        await new Promise((r) => setTimeout(r, 40));
+        if (await tryFind()) return true;
       }
       return false;
     }

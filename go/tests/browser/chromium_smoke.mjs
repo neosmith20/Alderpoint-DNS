@@ -22,6 +22,32 @@ function check(name, cond, detail) {
 const consoleErrors = [];
 const pageErrors = [];
 
+// Single-open sidebar accordion: an item is only in the DOM while its
+// own section is the one open. Tries the currently-open section first
+// (the common case -- most nav sequences below stay within one section
+// for several steps); if the target isn't there, cycles through each
+// section's own toggle (each click closes whichever was open, per the
+// accordion) until it appears.
+async function clickNavItem(page, predicate) {
+  const tryFind = async () => {
+    for (const btn of await page.$$(".sidebar .item")) {
+      const text = await btn.evaluate((el) => el.textContent?.trim());
+      if (predicate(text)) {
+        await btn.click();
+        return true;
+      }
+    }
+    return false;
+  };
+  if (await tryFind()) return true;
+  for (const toggle of await page.$$(".sidebar .group-toggle")) {
+    await toggle.click();
+    await new Promise((r) => setTimeout(r, 40));
+    if (await tryFind()) return true;
+  }
+  return false;
+}
+
 async function main() {
   const browser = await puppeteer.launch({
     executablePath: process.env.CHROMIUM_PATH || "/usr/bin/chromium",
@@ -230,14 +256,7 @@ async function main() {
     await page.click(".customize-btn");
 
     // --- Nav: Query Log (internal/rawquerylog -- raw Parquet compatibility boundary) ---
-    let clickedQueryLog = false;
-    for (const btn of await page.$$(".sidebar .item")) {
-      if ((await btn.evaluate((el) => el.textContent?.trim())) === "Query Log") {
-        await btn.click();
-        clickedQueryLog = true;
-        break;
-      }
-    }
+    const clickedQueryLog = await clickNavItem(page, (t) => t === "Query Log");
     check("Query Log nav item exists and is clickable", clickedQueryLog);
     await page.waitForSelector("#analytics-heading", { timeout: 3000 }).catch(() => {});
     check("Query Log page content rendered", (await page.$("#analytics-heading")) !== null);
@@ -269,37 +288,42 @@ async function main() {
     queryLogRows = await page.$$eval(".data-grid tbody tr:not(.empty-row)", (rows) => rows.length);
     check("clearing filters restores the full grid", queryLogRows === 3, `rows=${queryLogRows}`);
 
-    // --- Nav: Local DNS (click by visible text; XPath is gone from modern Puppeteer) ---
-    const navButtons = await page.$$(".sidebar .item");
-    let clicked = false;
-    for (const btn of navButtons) {
-      const text = await btn.evaluate((el) => el.textContent?.trim());
-      if (text?.startsWith("Local DNS")) {
-        await btn.click();
-        clicked = true;
-        break;
-      }
-    }
+    // --- Nav: Local DNS ---
+    let clicked = await clickNavItem(page, (t) => t?.startsWith("Local DNS"));
     check("Local DNS nav item exists and is clickable", clicked);
     await page.waitForFunction(() => location.pathname === "/ui/localdns", { timeout: 3000 }).catch(() => {});
     check("clicking Local DNS navigates to /ui/localdns", new URL(page.url()).pathname === "/ui/localdns");
     await page.waitForSelector("#localdns-heading", { timeout: 3000 });
     check("Local DNS page content rendered", true);
 
+    // --- Sidebar: single-open accordion (A -> B closes A) ---
+    // Local DNS lives in the "dns" group -- navigating to it must have
+    // opened exactly that group's panel and no other.
+    let openPanelCount = await page.$$eval(".sidebar .group .panel", (els) => els.length);
+    check("opening the dns group leaves exactly one section panel open", openPanelCount === 1, `open=${openPanelCount}`);
+    let dnsPanelOpen = await page.$$eval(".sidebar .group", (groups) =>
+      groups.some((g) => g.querySelector(".panel") && g.querySelector(".group-toggle")?.textContent?.includes("DNS")),
+    );
+    check("the dns group specifically is the one open", dnsPanelOpen);
+
     // --- Nav: Administration ---
-    const navButtons2 = await page.$$(".sidebar .item");
-    clicked = false;
-    for (const btn of navButtons2) {
-      const text = await btn.evaluate((el) => el.textContent?.trim());
-      if (text?.startsWith("Administration")) {
-        await btn.click();
-        clicked = true;
-        break;
-      }
-    }
+    clicked = await clickNavItem(page, (t) => t?.startsWith("Administration"));
     check("Administration nav item exists and is clickable", clicked);
     await page.waitForSelector("#admin-heading", { timeout: 3000 }).catch(() => {});
     check("Administration page content rendered", (await page.$("#admin-heading")) !== null);
+
+    // Administration lives in the "system" group -- opening it must have
+    // closed the previously-open "dns" group (A -> B closes A), leaving
+    // exactly one panel open, and that one active child still visibly
+    // selected.
+    openPanelCount = await page.$$eval(".sidebar .group .panel", (els) => els.length);
+    check("opening the system group still leaves exactly one panel open", openPanelCount === 1, `open=${openPanelCount}`);
+    const systemPanelOpen = await page.$$eval(".sidebar .group", (groups) =>
+      groups.some((g) => g.querySelector(".panel") && g.querySelector(".group-toggle")?.textContent?.includes("System")),
+    );
+    check("opening Administration switches the open section to system (dns closes)", systemPanelOpen);
+    const adminActiveInPanel = await page.$$eval(".sidebar .panel .item.active", (els) => els.map((e) => e.textContent?.trim()));
+    check("the active child (Administration) is visibly selected within the open panel", adminActiveInPanel.some((t) => t?.startsWith("Administration")), adminActiveInPanel.join(","));
 
     // --- Timestamp mode: instant reformat, no reload ---
     const previewBefore = await page.$eval(".preview strong", (el) => el.textContent).catch(() => null);
@@ -346,12 +370,7 @@ async function main() {
     check("the new password actually authenticates after logout", (await page.$(".app-layout")) !== null);
 
     // Re-navigate to Administration for the revoke-sessions check below.
-    for (const btn of await page.$$(".sidebar .item")) {
-      if ((await btn.evaluate((el) => el.textContent?.trim()))?.startsWith("Administration")) {
-        await btn.click();
-        break;
-      }
-    }
+    await clickNavItem(page, (t) => t?.startsWith("Administration"));
     await page.waitForSelector("#admin-heading", { timeout: 3000 }).catch(() => {});
 
     // --- Revoke other sessions ---
@@ -368,6 +387,21 @@ async function main() {
     const themeAfter = await page.$eval("html", (el) => el.getAttribute("data-theme"));
     check("theme toggle actually flips data-theme", themeBefore !== themeAfter, `${themeBefore} -> ${themeAfter}`);
 
+    // --- Sidebar: direct-route navigation opens only that route's own
+    // parent section (not a sidebar click -- exercises the route-driven
+    // $effect path directly, e.g. a deep link or browser back/forward).
+    // Currently on Administration ("system" group open); navigating
+    // straight to a "security"-group route must switch to exactly that
+    // group, not leave "system" open alongside it. ---
+    await page.goto(new URL("/ui/blocklists", baseUrl).toString(), { waitUntil: "networkidle0" });
+    await page.waitForSelector(".sidebar", { timeout: 3000 });
+    const securityPanelOpenOnDirectNav = await page.$$eval(".sidebar .group", (groups) =>
+      groups.some((g) => g.querySelector(".panel") && g.querySelector(".group-toggle")?.textContent?.includes("Security")),
+    );
+    check("direct navigation to a child route opens only that child's parent section", securityPanelOpenOnDirectNav);
+    const panelsAfterDirectNav = await page.$$eval(".sidebar .group .panel", (els) => els.length);
+    check("direct navigation leaves exactly one section open, not the prior one too", panelsAfterDirectNav === 1, `open=${panelsAfterDirectNav}`);
+
     // --- Mobile viewport + drawer ---
     await page.setViewport({ width: 390, height: 844 });
     await new Promise((r) => setTimeout(r, 100));
@@ -377,6 +411,34 @@ async function main() {
     await new Promise((r) => setTimeout(r, 150));
     const drawerOpen = await page.$eval(".sidebar", (el) => el.classList.contains("mobile-open"));
     check("clicking menu button opens the mobile drawer", drawerOpen);
+
+    // --- Sidebar: single-open accordion inside the mobile drawer itself
+    // (same component/state as desktop, but worth proving directly on
+    // the actual mobile layout, not just inferring it from the desktop
+    // checks above). Currently on /ui/blocklists, so "security" should
+    // be the one open section in the drawer.
+    const securityOpenInDrawer = await page.$$eval(".sidebar.mobile-open .group", (groups) =>
+      groups.some((g) => g.querySelector(".panel") && g.querySelector(".group-toggle")?.textContent?.includes("Security")),
+    );
+    check("mobile drawer opens the current route's own section", securityOpenInDrawer);
+    let dnsToggle = null;
+    for (const btn of await page.$$(".sidebar.mobile-open .group-toggle")) {
+      if ((await btn.evaluate((el) => el.textContent?.trim())).includes("DNS")) {
+        dnsToggle = btn;
+        break;
+      }
+    }
+    if (dnsToggle) await dnsToggle.click();
+    await new Promise((r) => setTimeout(r, 50));
+    const panelsInDrawerAfterSwitch = await page.$$eval(".sidebar.mobile-open .group .panel", (els) => els.length);
+    check("opening a different section in the mobile drawer closes the previous one", panelsInDrawerAfterSwitch === 1, `open=${panelsInDrawerAfterSwitch}`);
+    const dnsOpenInDrawer = await page.$$eval(".sidebar.mobile-open .group", (groups) =>
+      groups.some((g) => g.querySelector(".panel") && g.querySelector(".group-toggle")?.textContent?.includes("DNS")),
+    );
+    check("the newly-clicked section (dns) is the one now open in the drawer", dnsOpenInDrawer);
+    const drawerStillOpenAfterGroupToggle = await page.$eval(".sidebar", (el) => el.classList.contains("mobile-open"));
+    check("toggling a section in the drawer does not itself close the drawer", drawerStillOpenAfterGroupToggle);
+
     await page.keyboard.press("Escape");
     await new Promise((r) => setTimeout(r, 150));
     const drawerClosedAfterEscape = await page.$eval(".sidebar", (el) => !el.classList.contains("mobile-open"));
@@ -386,14 +448,7 @@ async function main() {
     await page.setViewport({ width: 1440, height: 900 });
 
     // --- Nav: System Status (real health/system-status + real session-only UI perf log) ---
-    let clickedHealth = false;
-    for (const btn of await page.$$(".sidebar .item")) {
-      if ((await btn.evaluate((el) => el.textContent?.trim())) === "System Status") {
-        await btn.click();
-        clickedHealth = true;
-        break;
-      }
-    }
+    const clickedHealth = await clickNavItem(page, (t) => t === "System Status");
     check("System Status nav item exists and is clickable", clickedHealth);
     await page.waitForSelector("#health-heading", { timeout: 3000 }).catch(() => {});
     check("System Status page content rendered", (await page.$("#health-heading")) !== null);
@@ -410,16 +465,7 @@ async function main() {
     check("Clear Measurements actually empties the UI Performance table", perfRowCountAfterClear === 0, `rows=${perfRowCountAfterClear}`);
 
     // --- Blocklists: data grid sort, in-place table (real page with rows) ---
-    const navButtons3 = await page.$$(".sidebar .item");
-    clicked = false;
-    for (const btn of navButtons3) {
-      const text = await btn.evaluate((el) => el.textContent?.trim());
-      if (text?.startsWith("Blocklists")) {
-        await btn.click();
-        clicked = true;
-        break;
-      }
-    }
+    clicked = await clickNavItem(page, (t) => t?.startsWith("Blocklists"));
     check("Blocklists nav item exists and is clickable", clicked);
     await page.waitForSelector("#blocklists-heading", { timeout: 3000 }).catch(() => {});
     const gridPresent = (await page.$(".data-grid")) !== null;
@@ -428,14 +474,7 @@ async function main() {
     check("Blocklists grid has at least one sortable column header", sortableHeader !== null);
 
     // --- Nav: DNS Settings / Upstreams ---
-    let clickedUpstreams = false;
-    for (const btn of await page.$$(".sidebar .item")) {
-      if ((await btn.evaluate((el) => el.textContent?.trim())) === "DNS Settings") {
-        await btn.click();
-        clickedUpstreams = true;
-        break;
-      }
-    }
+    const clickedUpstreams = await clickNavItem(page, (t) => t === "DNS Settings");
     check("DNS Settings nav item exists and is clickable", clickedUpstreams);
     await page.waitForSelector("#upstreams-heading", { timeout: 3000 }).catch(() => {});
     check("Upstreams page content rendered", (await page.$("#upstreams-heading")) !== null);
@@ -479,14 +518,7 @@ async function main() {
     check("native-recursion info banner appears once zero upstreams are enabled", infoBanner !== null);
 
     // --- Nav: Clients ---
-    let clickedClients = false;
-    for (const btn of await page.$$(".sidebar .item")) {
-      if ((await btn.evaluate((el) => el.textContent?.trim())) === "Clients") {
-        await btn.click();
-        clickedClients = true;
-        break;
-      }
-    }
+    const clickedClients = await clickNavItem(page, (t) => t === "Clients");
     check("Clients nav item exists and is clickable", clickedClients);
     await page.waitForSelector("#clients-heading", { timeout: 3000 }).catch(() => {});
     check("Clients page content rendered", (await page.$("#clients-heading")) !== null);
@@ -566,14 +598,7 @@ async function main() {
     check("saved policy field actually persisted server-side (survives a full page reload)", persistedValue === "strict", persistedValue);
 
     // --- Nav: Filters (custom rules + global policy) ---
-    let clickedFilters = false;
-    for (const btn of await page.$$(".sidebar .item")) {
-      if ((await btn.evaluate((el) => el.textContent?.trim())) === "Filters") {
-        await btn.click();
-        clickedFilters = true;
-        break;
-      }
-    }
+    const clickedFilters = await clickNavItem(page, (t) => t === "Filters");
     check("Filters nav item exists and is clickable", clickedFilters);
     await page.waitForSelector("#filtering-heading", { timeout: 3000 }).catch(() => {});
     check("Filters page content rendered", (await page.$("#filtering-heading")) !== null);
@@ -617,14 +642,7 @@ async function main() {
     check("bulk-disable actually disabled both selected rules", disabledCount === 2, `disabled=${disabledCount}`);
 
     // --- Nav: Encryption (internal/dnstransports + internal/tlscert) ---
-    let clickedEncryption = false;
-    for (const btn of await page.$$(".sidebar .item")) {
-      if ((await btn.evaluate((el) => el.textContent?.trim())) === "Encryption") {
-        await btn.click();
-        clickedEncryption = true;
-        break;
-      }
-    }
+    const clickedEncryption = await clickNavItem(page, (t) => t === "Encryption");
     check("Encryption nav item exists and is clickable", clickedEncryption);
     await page.waitForSelector("#encryption-heading", { timeout: 3000 }).catch(() => {});
     check("Encryption page content rendered", (await page.$("#encryption-heading")) !== null);
@@ -662,14 +680,7 @@ async function main() {
     check("DNS Transport settings actually persisted server-side (survive a full page reload)", dotPortAfterReload === "8853" && dotCheckedAfterReload === true, `port=${dotPortAfterReload} checked=${dotCheckedAfterReload}`);
 
     // --- Nav: Statistics (internal/pyanalytics.ExportAll) ---
-    let clickedStatistics = false;
-    for (const btn of await page.$$(".sidebar .item")) {
-      if ((await btn.evaluate((el) => el.textContent?.trim())) === "Statistics") {
-        await btn.click();
-        clickedStatistics = true;
-        break;
-      }
-    }
+    const clickedStatistics = await clickNavItem(page, (t) => t === "Statistics");
     check("Statistics nav item exists and is clickable", clickedStatistics);
     await page.waitForSelector("#statistics-heading", { timeout: 3000 }).catch(() => {});
     check("Statistics page content rendered", (await page.$("#statistics-heading")) !== null);
@@ -677,14 +688,7 @@ async function main() {
     check("Statistics export link points at the real export endpoint", exportHref === "/api/statistics/export", exportHref);
 
     // --- Nav: Notifications (internal/notifications, native storage, no secrets) ---
-    let clickedNotifications = false;
-    for (const btn of await page.$$(".sidebar .item")) {
-      if ((await btn.evaluate((el) => el.textContent?.trim())) === "Notifications") {
-        await btn.click();
-        clickedNotifications = true;
-        break;
-      }
-    }
+    const clickedNotifications = await clickNavItem(page, (t) => t === "Notifications");
     check("Notifications nav item exists and is clickable", clickedNotifications);
     await page.waitForSelector("#notifications-heading", { timeout: 3000 }).catch(() => {});
     check("Notifications page content rendered", (await page.$("#notifications-heading")) !== null);
@@ -707,14 +711,7 @@ async function main() {
     check("disabling a notification provider updates its Enabled cell to No", enabledCellText.includes("No"), enabledCellText);
 
     // --- Nav: Import (internal/importer, hosts-file source only) ---
-    let clickedImport = false;
-    for (const btn of await page.$$(".sidebar .item")) {
-      if ((await btn.evaluate((el) => el.textContent?.trim())) === "Import") {
-        await btn.click();
-        clickedImport = true;
-        break;
-      }
-    }
+    const clickedImport = await clickNavItem(page, (t) => t === "Import");
     check("Import nav item exists and is clickable", clickedImport);
     await page.waitForSelector("#importexport-heading", { timeout: 3000 }).catch(() => {});
     check("Import page content rendered", (await page.$("#importexport-heading")) !== null);
@@ -726,26 +723,14 @@ async function main() {
     check("importing a hosts file reports a real imported count", importResultText.includes("1") && importResultText.includes("imported"), importResultText);
 
     // The imported record should now be a real row on Local DNS.
-    for (const btn of await page.$$(".sidebar .item")) {
-      if ((await btn.evaluate((el) => el.textContent?.trim())) === "Local DNS") {
-        await btn.click();
-        break;
-      }
-    }
+    await clickNavItem(page, (t) => t === "Local DNS");
     await page.waitForSelector("#localdns-heading", { timeout: 3000 });
     await page.waitForFunction(() => document.querySelector(".data-grid tbody")?.textContent?.includes("chromium-import-test.lan"), { timeout: 3000 }).catch(() => {});
     const localDnsText = await page.$eval(".data-grid tbody", (el) => el.textContent);
     check("the hosts-file import created a real Local DNS record", localDnsText.includes("chromium-import-test.lan"), localDnsText);
 
     // --- Nav: Backup & Restore ---
-    let clickedBackup = false;
-    for (const btn of await page.$$(".sidebar .item")) {
-      if ((await btn.evaluate((el) => el.textContent?.trim())) === "Backup & Restore") {
-        await btn.click();
-        clickedBackup = true;
-        break;
-      }
-    }
+    const clickedBackup = await clickNavItem(page, (t) => t === "Backup & Restore");
     check("Backup & Restore nav item exists and is clickable", clickedBackup);
     await page.waitForSelector("#backup-heading", { timeout: 3000 }).catch(() => {});
     check("Backup & Restore page content rendered", (await page.$("#backup-heading")) !== null);
