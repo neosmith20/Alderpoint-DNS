@@ -282,7 +282,15 @@ func (r *Reader) Health(ctx context.Context) AnalyticsHealth {
 	if v := r.lastManifest.Load(); v != nil {
 		m := v.(analyticssnapshot.Manifest)
 		generatedAt := m.GeneratedAt
-		age := float64(time.Now().Unix()) - generatedAt
+		// Sub-second precision on both sides (generatedAt already is,
+		// see analyticssnapshot.Refresh) -- mixing a truncated
+		// time.Now().Unix() with a fractional generatedAt produced a
+		// spurious small negative age immediately after a fresh
+		// publish, observed live on the first deploy of this design.
+		age := float64(time.Now().UnixNano())/1e9 - generatedAt
+		if age < 0 {
+			age = 0
+		}
 		h.SnapshotGeneratedAt = &generatedAt
 		h.SnapshotAgeSeconds = &age
 		h.SnapshotSourceJournalMode = m.SourceJournalMode
