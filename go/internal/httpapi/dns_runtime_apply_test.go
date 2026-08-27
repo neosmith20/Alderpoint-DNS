@@ -72,9 +72,13 @@ func newServerWithRealDNSRuntime(t *testing.T) (*Server, int) {
 	}
 	sockPath := filepath.Join(t.TempDir(), "agent.sock")
 	agent := &hostagentd.Server{SocketPath: sockPath, AllowedUID: uint32(os.Getuid()), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	if err := hostagentd.RegisterDNSRuntimeOps(agent, cfg); err != nil {
+	stop, err := hostagentd.RegisterDNSRuntimeOps(agent, cfg)
+	if err != nil {
 		t.Fatal(err)
 	}
+	// Otherwise the real named/dnsdist a promotion in this test brings
+	// up outlive it, orphaned under init.
+	t.Cleanup(stop)
 	agentCtx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go agent.Serve(agentCtx)

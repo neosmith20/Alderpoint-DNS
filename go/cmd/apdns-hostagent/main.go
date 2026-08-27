@@ -38,7 +38,9 @@ func main() {
 
 	journalDir := flag.String("journal-dir", "", "explicit journal directory for logs.read (empty = the host's own default journal)")
 	logUnits := flag.String("log-units", strings.Join(hostagentd.LogUnits, ","), "comma-separated allowlist of logical unit names")
-	logUnitMap := flag.String("log-unit-map", "", "comma-separated logical=real unit name overrides, e.g. apdns-go-web=apdns-go-web.service")
+	logUnitMap := flag.String("log-unit-map", "", "comma-separated logical=real name overrides -- a systemd unit name by default, or a container name / file path for names listed in -log-container-units / -log-file-units")
+	logContainerUnits := flag.String("log-container-units", "", "comma-separated subset of logical units that are podman/docker containers (matched via journald's CONTAINER_NAME= field, not -u)")
+	logFileUnits := flag.String("log-file-units", "", "comma-separated subset of logical units read from a plain slog-JSON log file instead of the journal")
 
 	currentBinaryPath := flag.String("current-binary", "", "path to the live web control-plane binary this agent may update (empty = Software Updates unavailable)")
 	updateStagingDir := flag.String("update-staging-dir", "/var/lib/apdns-hostagent/update-staging", "staging directory for a candidate update")
@@ -83,6 +85,8 @@ func main() {
 		Units:            strings.Split(*logUnits, ","),
 		JournalDir:       *journalDir,
 		UnitNameOverride: parseUnitMap(*logUnitMap),
+		ContainerUnits:   parseUnitSet(*logContainerUnits),
+		FileUnits:        parseUnitSet(*logFileUnits),
 	})
 
 	hostagentd.RegisterCacheOps(s, hostagentd.CacheConfig{
@@ -110,7 +114,11 @@ func main() {
 	hostagentd.RegisterUpdateOps(s, updateCfg)
 
 	if *dnsRuntimeBindLivePath != "" && *dnsRuntimeDnsdistLivePath != "" && *dnsRuntimeBindDir != "" && *dnsRuntimeDnsdistListenAddr != "" {
-		if err := hostagentd.RegisterDNSRuntimeOps(s, hostagentd.DNSRuntimeConfig{
+		// The returned stop func is intentionally discarded here: this
+		// process's whole job is to keep the real named/dnsdist runtime
+		// alive across its own restarts and updates (see
+		// RegisterDNSRuntimeOps's doc comment). Only tests call it.
+		if _, err := hostagentd.RegisterDNSRuntimeOps(s, hostagentd.DNSRuntimeConfig{
 			StagingDir: *dnsRuntimeStagingDir, BindLivePath: *dnsRuntimeBindLivePath, DnsdistLivePath: *dnsRuntimeDnsdistLivePath,
 			BindDirectory: *dnsRuntimeBindDir, BindLogPath: filepath.Join(*dnsRuntimeBindDir, "named.log"),
 			BindPlainPort: *dnsRuntimeBindPlainPort, BindProxyPort: *dnsRuntimeBindProxyPort, BindStatsPort: *dnsRuntimeBindStatsPort, BindRNDCPort: *dnsRuntimeBindRNDCPort,
@@ -135,6 +143,19 @@ func main() {
 		logger.Error("serve failed", "err", err)
 		os.Exit(1)
 	}
+}
+
+func parseUnitSet(spec string) map[string]bool {
+	if spec == "" {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, name := range strings.Split(spec, ",") {
+		if name != "" {
+			out[name] = true
+		}
+	}
+	return out
 }
 
 func parseUnitMap(spec string) map[string]string {

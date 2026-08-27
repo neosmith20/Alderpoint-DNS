@@ -50,9 +50,14 @@ func newDNSRuntimeConfig(t *testing.T) (*Server, DNSRuntimeConfig) {
 		HealthCheckRetryDelay: 100 * time.Millisecond,
 	}
 	s := &Server{}
-	if err := RegisterDNSRuntimeOps(s, cfg); err != nil {
+	stop, err := RegisterDNSRuntimeOps(s, cfg)
+	if err != nil {
 		t.Fatalf("RegisterDNSRuntimeOps: %v", err)
 	}
+	// Every real named/dnsdist process a promotion in this test starts
+	// must be gone by the time the test exits, or it's orphaned
+	// (reparented to init) and leaks for the life of the host.
+	t.Cleanup(stop)
 	return s, cfg
 }
 

@@ -114,20 +114,29 @@ type DNSPromoteResult struct {
 // RegisterDNSRuntimeOps wires dns.status/dns.promote. Generates a fresh
 // random rndc HMAC key for this process's own lifetime -- never
 // persisted, never returned in any API response.
-func RegisterDNSRuntimeOps(s *Server, cfg DNSRuntimeConfig) error {
+//
+// Returns a stop func that terminates whatever real named/dnsdist
+// processes this runtime has started. The production agent
+// (cmd/apdns-hostagent) intentionally never calls it -- the whole point
+// of this runtime is that the live DNS processes outlive the agent's
+// own restarts/updates. Tests that promote a real runtime MUST call it
+// via t.Cleanup, or the named/dnsdist processes it starts are orphaned
+// (reparented to init) once the test exits, silently leaking real
+// daemons and their memory across every test run.
+func RegisterDNSRuntimeOps(s *Server, cfg DNSRuntimeConfig) (func(), error) {
 	cfg.applyDefaults()
 	if cfg.StagingDir == "" || cfg.BindLivePath == "" || cfg.DnsdistLivePath == "" || cfg.BindDirectory == "" {
-		return fmt.Errorf("dns runtime: StagingDir, BindLivePath, DnsdistLivePath, and BindDirectory are required")
+		return nil, fmt.Errorf("dns runtime: StagingDir, BindLivePath, DnsdistLivePath, and BindDirectory are required")
 	}
 	if err := os.MkdirAll(cfg.StagingDir, 0o750); err != nil {
-		return fmt.Errorf("dns runtime: creating staging dir: %w", err)
+		return nil, fmt.Errorf("dns runtime: creating staging dir: %w", err)
 	}
 	if err := os.MkdirAll(cfg.BindDirectory, 0o750); err != nil {
-		return fmt.Errorf("dns runtime: creating BIND directory: %w", err)
+		return nil, fmt.Errorf("dns runtime: creating BIND directory: %w", err)
 	}
 	keyBytes := make([]byte, 32)
 	if _, err := rand.Read(keyBytes); err != nil {
-		return fmt.Errorf("dns runtime: generating rndc key: %w", err)
+		return nil, fmt.Errorf("dns runtime: generating rndc key: %w", err)
 	}
 	st := &dnsRuntimeState{cfg: cfg, rndcKeySecret: base64.StdEncoding.EncodeToString(keyBytes)}
 
@@ -150,7 +159,12 @@ func RegisterDNSRuntimeOps(s *Server, cfg DNSRuntimeConfig) error {
 		}
 		return st.promote(ctx, p)
 	})
-	return nil
+	return func() {
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		st.stopBind()
+		st.stopDnsdist()
+	}, nil
 }
 
 func (st *dnsRuntimeState) promote(ctx context.Context, p DNSPromoteParams) (*DNSPromoteResult, error) {
