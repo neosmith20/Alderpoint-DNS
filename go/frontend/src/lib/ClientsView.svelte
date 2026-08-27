@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, ApiError, type ManagedClient, type ClientGroup, type PolicyExplainResult } from "../api";
+  import { api, ApiError, type ManagedClient, type ClientGroup, type ClientIdentifier, type PolicyExplainResult } from "../api";
   import { StaleGuard } from "../staleGuard";
   import { router } from "../router.svelte";
   import DataGrid from "./DataGrid.svelte";
@@ -10,14 +10,17 @@
   // Native Go implementation (own schema/CRUD) -- see internal/clients's
   // and internal/policy's doc comments for exactly what's covered
   // (managed clients, identifiers, groups, per-client/per-group policy
-  // assignment via the shared PolicyEditor, and now "effective policy
-  // explain" -- global->network->group->client precedence resolution,
-  // GET /api/policy/explain, see internal/policy/effective.go) and
-  // what's deliberately not here yet: Observed Clients/discovery
-  // (Python-owned live data, same shape of problem as Dashboard's
-  // analytics -- needs its own compatibility-boundary decision, not
-  // built here). This page is Managed Clients only, disclosed in-page
-  // below.
+  // assignment via the shared PolicyEditor, "effective policy explain"
+  // -- global->network->group->client precedence resolution, GET
+  // /api/policy/explain, see internal/policy/effective.go -- and Strong
+  // ClientID: real generation/validation/revoke/regenerate/delete plus
+  // per-client explicit domain overrides, compiled into real dnsdist
+  // DoH-path/DoT+DoQ-SNI enforcement, see internal/clientid,
+  // internal/dnscompile) and what's deliberately not here yet: Observed
+  // Clients/discovery (Python-owned live data, same shape of problem as
+  // Dashboard's analytics -- needs its own compatibility-boundary
+  // decision, not built here). This page is Managed Clients only,
+  // disclosed in-page below.
 
   let managedClients = $state<ManagedClient[]>([]);
   let groups = $state<ClientGroup[]>([]);
@@ -35,7 +38,7 @@
   let addGroupError = $state("");
 
   let identifierClientId = $state<number | null>(null);
-  let identifierKind = $state<"ipv4" | "ipv4_cidr" | "ipv6" | "ipv6_cidr" | "clientid">("ipv4");
+  let identifierKind = $state<"ipv4" | "ipv4_cidr" | "ipv6" | "ipv6_cidr">("ipv4");
   let identifierValue = $state("");
   let identifierError = $state("");
 
@@ -48,6 +51,20 @@
   let explainClientId = $state<number | null>(null);
   let explainResult = $state<PolicyExplainResult | null>(null);
   let explainError = $state("");
+
+  // Strong ClientID: generate form.
+  let generateClientId = $state<number | null>(null);
+  let generateBits = $state<192 | 256>(256);
+  let generateLabel = $state("");
+  let generateBusy = $state(false);
+  let generateError = $state("");
+  let lastGenerated = $state<{ clientId: number; identifier: ClientIdentifier } | null>(null);
+
+  // Strong ClientID: per-client domain override form.
+  let overrideClientId = $state<number | null>(null);
+  let overrideType = $state<"block" | "allow">("block");
+  let overridePattern = $state("");
+  let overrideError = $state("");
 
   async function toggleExplain(c: ManagedClient) {
     if (explainClientId === c.id) {
@@ -146,11 +163,85 @@
     await refresh();
   }
 
+  function startGenerateClientID(c: ManagedClient) {
+    generateClientId = c.id;
+    generateLabel = "";
+    generateError = "";
+    lastGenerated = null;
+  }
+
+  async function submitGenerateClientID(e: Event) {
+    e.preventDefault();
+    if (generateClientId === null) return;
+    generateError = "";
+    generateBusy = true;
+    try {
+      const result = await api.generateClientID(generateClientId, generateBits, generateLabel);
+      lastGenerated = { clientId: generateClientId, identifier: result.identifier };
+      generateClientId = null;
+      await refresh();
+    } catch (err) {
+      generateError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      generateBusy = false;
+    }
+  }
+
+  async function revokeIdentifier(c: ManagedClient, id: ClientIdentifier) {
+    if (!confirm(`Revoke this Strong ClientID (${id.label || id.value.slice(0, 12) + "…"})? DoH/DoT/DoQ traffic using it will stop being recognized once applied.`)) return;
+    await api.revokeClientIdentifier(c.id, id.id);
+    await refresh();
+  }
+
+  async function regenerateIdentifier(c: ManagedClient, id: ClientIdentifier) {
+    if (!confirm(`Regenerate this Strong ClientID (${id.label || id.value.slice(0, 12) + "…"})? The old value stops working immediately once applied; a new one replaces it.`)) return;
+    const result = await api.regenerateClientIdentifier(c.id, id.id);
+    lastGenerated = { clientId: c.id, identifier: result.identifier };
+    await refresh();
+  }
+
+  async function deleteIdentifier(c: ManagedClient, id: ClientIdentifier) {
+    if (!confirm(`Permanently delete this identifier (${id.label || id.value.slice(0, 12) + "…"})? This cannot be undone.`)) return;
+    await api.deleteClientIdentifier(c.id, id.id);
+    if (lastGenerated?.identifier.id === id.id) lastGenerated = null;
+    await refresh();
+  }
+
+  function startAddOverride(c: ManagedClient) {
+    overrideClientId = c.id;
+    overridePattern = "";
+    overrideType = "block";
+    overrideError = "";
+  }
+
+  async function submitAddOverride(e: Event) {
+    e.preventDefault();
+    if (overrideClientId === null) return;
+    overrideError = "";
+    try {
+      await api.addClientDomainOverride(overrideClientId, overrideType, overridePattern);
+      overrideClientId = null;
+      await refresh();
+    } catch (err) {
+      overrideError = err instanceof ApiError ? err.message : String(err);
+    }
+  }
+
+  async function deleteOverride(c: ManagedClient, overrideId: number) {
+    await api.deleteClientDomainOverride(c.id, overrideId);
+    await refresh();
+  }
+
+  function copyToClipboard(text: string) {
+    navigator.clipboard?.writeText(text).catch(() => {});
+  }
+
   const columns: Column<ManagedClient>[] = [
     { key: "name", label: "Name", sortValue: (c) => c.name.toLowerCase(), minWidth: 12 },
-    { key: "identifiers", label: "Identifiers", minWidth: 16 },
+    { key: "identifiers", label: "Identifiers", minWidth: 20 },
+    { key: "overrides", label: "Strong ClientID Overrides", minWidth: 16 },
     { key: "groups", label: "Groups", minWidth: 12 },
-    { key: "actions", label: "Actions", minWidth: 16 },
+    { key: "actions", label: "Actions", minWidth: 18 },
   ];
 </script>
 
@@ -158,7 +249,9 @@
   <h2 id="clients-heading">Clients</h2>
   <p class="scope-note">
     Managed Clients only (native Go). Observed/discovered clients and per-client policy assignment
-    are not migrated yet -- see the parity matrix.
+    are not migrated yet -- see the parity matrix. Strong ClientID (DoH path / DoT+DoQ SNI identity)
+    is real: generated values are compiled into live dnsdist enforcement, with per-client explicit
+    domain overrides (deny beats allow beats default policy).
   </p>
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
 
@@ -186,9 +279,50 @@
       {#if colKey === "name"}
         {c.name}
       {:else if colKey === "identifiers"}
+        <div class="id-list">
+          {#each c.identifiers as id (id.id)}
+            {#if id.kind === "clientid"}
+              <div class="clientid-row" class:revoked={!!id.revoked_at}>
+                <div class="clientid-main">
+                  <span class="chip clientid-chip">Strong ClientID{id.label ? `: ${id.label}` : ""}</span>
+                  {#if id.revoked_at}<span class="badge revoked-badge">revoked</span>{/if}
+                  <code class="hexval" title={id.value}>{id.value.slice(0, 10)}…{id.value.slice(-6)} ({id.value.length * 4}-bit)</code>
+                  <button type="button" class="mini" onclick={() => copyToClipboard(id.value)}>Copy hex</button>
+                </div>
+                {#if !id.revoked_at}
+                  <div class="clientid-paths">
+                    <div><span class="path-label">DoH path:</span> <code>{id.doh_path}</code> <button type="button" class="mini" onclick={() => copyToClipboard(id.doh_path ?? "")}>Copy</button></div>
+                    <div><span class="path-label">DoT/DoQ SNI:</span> <code>{id.sni_hostname}</code> <button type="button" class="mini" onclick={() => copyToClipboard(id.sni_hostname ?? "")}>Copy</button></div>
+                  </div>
+                  <div class="clientid-actions">
+                    <button type="button" onclick={() => regenerateIdentifier(c, id)}>Regenerate</button>
+                    <button type="button" onclick={() => revokeIdentifier(c, id)}>Revoke</button>
+                    <button type="button" onclick={() => deleteIdentifier(c, id)}>Delete</button>
+                  </div>
+                {:else}
+                  <div class="clientid-actions">
+                    <button type="button" onclick={() => deleteIdentifier(c, id)}>Delete</button>
+                  </div>
+                {/if}
+              </div>
+            {:else}
+              <span class="chip">{id.kind}: {id.value}</span>
+            {/if}
+          {/each}
+          {#if lastGenerated && lastGenerated.clientId === c.id}
+            <p class="hint reveal-once">
+              New Strong ClientID generated -- shown once above; the full hex value is always retrievable via
+              "Copy hex" on its own row afterward.
+            </p>
+          {/if}
+        </div>
+      {:else if colKey === "overrides"}
         <span class="chips">
-          {#each c.identifiers as id}
-            <span class="chip">{id.kind}: {id.value}</span>
+          {#each c.domain_overrides as o (o.id)}
+            <span class="chip" class:override-block={o.override_type === "block"} class:override-allow={o.override_type === "allow"}>
+              {o.override_type}: {o.pattern}
+              <button type="button" class="chip-x" onclick={() => deleteOverride(c, o.id)} aria-label="Remove override">×</button>
+            </span>
           {/each}
         </span>
       {:else if colKey === "groups"}
@@ -199,11 +333,37 @@
         </span>
       {:else if colKey === "actions"}
         <div class="actions">
-          <button onclick={() => startAddIdentifier(c)}>Add identifier</button>
+          <button onclick={() => startGenerateClientID(c)}>Generate Strong ClientID</button>
+          <button onclick={() => startAddOverride(c)}>Add domain override</button>
+          <button onclick={() => startAddIdentifier(c)}>Add IP identifier</button>
           <button onclick={() => startAssignGroup(c)} disabled={groups.length === 0}>Assign group</button>
           <button onclick={() => (policyEditorClientId = policyEditorClientId === c.id ? null : c.id)}>Policy</button>
           <button onclick={() => toggleExplain(c)}>Explain</button>
         </div>
+        {#if generateClientId === c.id}
+          <form onsubmit={submitGenerateClientID} class="inline-form">
+            <select bind:value={generateBits}>
+              <option value={256}>256-bit (64 hex)</option>
+              <option value={192}>192-bit (48 hex)</option>
+            </select>
+            <input bind:value={generateLabel} placeholder="Label (optional)" aria-label="ClientID label" />
+            <button type="submit" disabled={generateBusy}>{generateBusy ? "Generating…" : "Generate"}</button>
+            <button type="button" onclick={() => (generateClientId = null)}>Cancel</button>
+            {#if generateError}<p class="error" role="alert">{generateError}</p>{/if}
+          </form>
+        {/if}
+        {#if overrideClientId === c.id}
+          <form onsubmit={submitAddOverride} class="inline-form">
+            <select bind:value={overrideType}>
+              <option value="block">Block</option>
+              <option value="allow">Allow</option>
+            </select>
+            <input required bind:value={overridePattern} placeholder="Domain (e.g. ads.example.com)" aria-label="Override domain" />
+            <button type="submit">Save</button>
+            <button type="button" onclick={() => (overrideClientId = null)}>Cancel</button>
+            {#if overrideError}<p class="error" role="alert">{overrideError}</p>{/if}
+          </form>
+        {/if}
         {#if identifierClientId === c.id}
           <form onsubmit={submitIdentifier} class="inline-form">
             <select bind:value={identifierKind}>
@@ -211,7 +371,6 @@
               <option value="ipv4_cidr">IPv4 CIDR</option>
               <option value="ipv6">IPv6</option>
               <option value="ipv6_cidr">IPv6 CIDR</option>
-              <option value="clientid">Strong ClientID</option>
             </select>
             <input required bind:value={identifierValue} placeholder="Value" aria-label="Identifier value" />
             <button type="submit">Save</button>
@@ -288,14 +447,18 @@
 
 <style>
   .clients { display: flex; flex-direction: column; gap: 1rem; }
-  .scope-note { font-size: 0.85rem; opacity: 0.75; max-width: 40rem; }
+  .scope-note { font-size: 0.85rem; opacity: 0.75; max-width: 44rem; }
   .hint { font-size: 0.85rem; opacity: 0.75; }
   .two-col { display: flex; flex-wrap: wrap; gap: 1rem; }
   .add-form { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); display: flex; flex-direction: column; gap: 0.5rem; min-width: 16rem; flex: 1; }
   .add-form h3 { margin: 0; }
   .add-form label { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.85rem; }
   .chips { display: flex; flex-wrap: wrap; gap: 0.3rem; }
-  .chip { background: var(--nav-hover-bg); padding: 0.1rem 0.5rem; border-radius: 999px; font-size: 0.78rem; }
+  .chip { background: var(--nav-hover-bg); padding: 0.1rem 0.5rem; border-radius: 999px; font-size: 0.78rem; display: inline-flex; align-items: center; gap: 0.3rem; }
+  .chip-x { background: none; border: none; cursor: pointer; padding: 0; font-size: 0.9rem; line-height: 1; opacity: 0.7; }
+  .chip-x:hover { opacity: 1; }
+  .override-block { background: color-mix(in srgb, red 12%, var(--nav-hover-bg)); }
+  .override-allow { background: color-mix(in srgb, green 12%, var(--nav-hover-bg)); }
   .actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
   .inline-form { display: flex; gap: 0.4rem; margin-top: 0.4rem; flex-wrap: wrap; align-items: center; }
   .group-list { margin: 0; padding-left: 1.2rem; font-size: 0.9rem; display: flex; flex-direction: column; gap: 0.5rem; }
@@ -304,4 +467,18 @@
   .explain-summary { font-size: 0.85rem; margin: 0 0 0.5rem; }
   .explain-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
   .explain-table th, .explain-table td { text-align: left; padding: 0.25rem 0.5rem; border-bottom: 1px solid var(--border); }
+
+  .id-list { display: flex; flex-direction: column; gap: 0.5rem; }
+  .clientid-row { border: 1px solid var(--border); border-radius: 6px; padding: 0.4rem 0.6rem; display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.78rem; background: var(--card-bg); }
+  .clientid-row.revoked { opacity: 0.6; }
+  .clientid-main { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+  .clientid-chip { background: var(--accent, #4a7); color: var(--accent-fg, #fff); }
+  .badge.revoked-badge { background: #a33; color: #fff; padding: 0.05rem 0.4rem; border-radius: 999px; font-size: 0.7rem; }
+  .hexval { font-family: monospace; }
+  .clientid-paths { display: flex; flex-direction: column; gap: 0.15rem; }
+  .path-label { opacity: 0.7; margin-right: 0.3rem; }
+  .clientid-paths code { font-family: monospace; word-break: break-all; }
+  .clientid-actions { display: flex; gap: 0.3rem; flex-wrap: wrap; }
+  .mini { font-size: 0.72rem; padding: 0.05rem 0.4rem; }
+  .reveal-once { font-style: italic; }
 </style>

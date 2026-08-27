@@ -118,14 +118,27 @@ export const EMPTY_POLICY_LAYER: PolicyLayer = {
 };
 
 export interface ClientIdentifier {
+  id: number;
   kind: "ipv4" | "ipv4_cidr" | "ipv6" | "ipv6_cidr" | "clientid";
   value: string;
+  label: string;
+  revoked_at?: string;
+  doh_path?: string;
+  sni_hostname?: string;
 }
 
 export interface ClientGroupRef {
   group_id: string;
   name: string;
   priority: number;
+}
+
+export interface ClientDomainOverride {
+  id: number;
+  client_id: number;
+  override_type: "block" | "allow";
+  pattern: string;
+  created_at: string;
 }
 
 export interface ManagedClient {
@@ -136,6 +149,7 @@ export interface ManagedClient {
   identifiers: ClientIdentifier[];
   groups: ClientGroupRef[];
   policy: PolicyLayer;
+  domain_overrides: ClientDomainOverride[];
 }
 
 export interface ClientGroupMember {
@@ -670,6 +684,40 @@ export const api = {
     req<{ status: string }>(`/api/clients/${clientId}/identifiers`, { method: "POST", body: JSON.stringify({ kind, value }) }),
   addClientToGroup: (clientId: number, groupId: string) =>
     req<{ status: string }>(`/api/clients/${clientId}/groups`, { method: "POST", body: JSON.stringify({ group_id: groupId }) }),
+
+  // Strong ClientID: the actual hex value is always generated
+  // server-side (internal/clientid's OS-backed CSPRNG) -- the caller
+  // only ever chooses the bit strength and a display label.
+  generateClientID: (clientId: number, bits: 192 | 256, label: string) =>
+    req<{ status: string; identifier: ClientIdentifier; dns_runtime?: DNSRuntimeApplyResult }>(
+      `/api/clients/${clientId}/identifiers/generate`,
+      { method: "POST", body: JSON.stringify({ bits, label }) },
+    ),
+  revokeClientIdentifier: (clientId: number, identifierId: number) =>
+    req<{ status: string; dns_runtime?: DNSRuntimeApplyResult }>(
+      `/api/clients/${clientId}/identifiers/${identifierId}/revoke`,
+      { method: "POST" },
+    ),
+  regenerateClientIdentifier: (clientId: number, identifierId: number) =>
+    req<{ status: string; identifier: ClientIdentifier; dns_runtime?: DNSRuntimeApplyResult }>(
+      `/api/clients/${clientId}/identifiers/${identifierId}/regenerate`,
+      { method: "POST" },
+    ),
+  deleteClientIdentifier: (clientId: number, identifierId: number) =>
+    req<{ status: string; dns_runtime?: DNSRuntimeApplyResult }>(
+      `/api/clients/${clientId}/identifiers/${identifierId}`,
+      { method: "DELETE" },
+    ),
+  addClientDomainOverride: (clientId: number, overrideType: "block" | "allow", pattern: string) =>
+    req<{ status: string; override: ClientDomainOverride; dns_runtime?: DNSRuntimeApplyResult }>(
+      `/api/clients/${clientId}/domain-overrides`,
+      { method: "POST", body: JSON.stringify({ override_type: overrideType, pattern }) },
+    ),
+  deleteClientDomainOverride: (clientId: number, overrideId: number) =>
+    req<{ status: string; dns_runtime?: DNSRuntimeApplyResult }>(
+      `/api/clients/${clientId}/domain-overrides/${overrideId}`,
+      { method: "DELETE" },
+    ),
 
   getGlobalPolicy: (signal?: AbortSignal) => req<PolicyLayer>("/api/policy/global", undefined, signal),
   // Only the global scope is ever compiled into the live DNS runtime
