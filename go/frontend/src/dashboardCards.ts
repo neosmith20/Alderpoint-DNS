@@ -15,6 +15,8 @@ export const ALL_CARDS: CardDef[] = [
   { id: "activity", label: "DNS Activity" },
   { id: "top-domains", label: "Top Domains" },
   { id: "top-blocked-domains", label: "Top Blocked Domains" },
+  { id: "clients", label: "Clients" },
+  { id: "upstreams", label: "Upstreams" },
 ];
 
 export interface CardState {

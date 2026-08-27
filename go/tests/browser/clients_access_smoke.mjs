@@ -288,6 +288,61 @@ async function main() {
     await page.waitForSelector(".network-list .policy-editor select", { timeout: 2000 }).catch(() => {});
     check("per-network policy editor opens", (await page.$(".network-list .policy-editor")) !== null);
 
+    // ================= Dashboard: Clients + Upstreams mini-panels =================
+    // These previously showed a "not migrated yet" disclosure -- the
+    // native Go clients/upstreams schema they depend on now exists, so
+    // this proves the real gap is closed, not just that the panel renders
+    // some placeholder text.
+    // The earlier "Test Client" was deleted by the delete-lifecycle check
+    // above -- create a fresh one so the Dashboard mini-panel check below
+    // has a real, still-existing managed client to find.
+    check("Clients nav item exists and is clickable (for a fresh dashboard-check client)", await clickNavItem(page, (t) => t === "Clients"));
+    await page.waitForSelector("#clients-heading", { timeout: 3000 }).catch(() => {});
+    const dashClientForm = (await page.$$(".add-form"))[0];
+    await (await dashClientForm.$("input[required]")).type("Dashboard Mini Client");
+    await Promise.all([
+      page.waitForFunction(() => document.querySelectorAll(".data-grid tbody tr").length > 0, { timeout: 3000 }),
+      dashClientForm.$eval("button[type=submit]", (el) => el.click()),
+    ]);
+    check("creating a second managed client for the dashboard check adds a real row", (await page.$$eval(".data-grid tbody tr", (rows) => rows.length)) > 0);
+
+    check("Upstreams nav item exists and is clickable", await clickNavItem(page, (t) => t === "DNS Settings"));
+    await page.waitForSelector("form.upstream-form, .upstreams input[required]", { timeout: 3000 }).catch(() => {});
+    const upstreamNameInput = await page.$(".upstreams input[required]");
+    if (upstreamNameInput) {
+      await upstreamNameInput.type("Dashboard Test Upstream");
+      const addrInput = await page.$(".upstreams .endpoint-row input");
+      if (addrInput) await addrInput.type("9.9.9.9");
+      await page.click(".upstreams form button[type=submit]").catch(() => {});
+      await new Promise((r) => setTimeout(r, 300));
+    }
+
+    check("Dashboard nav item exists and is clickable", await clickNavItem(page, (t) => t === "Dashboard"));
+    await page.waitForSelector("#dashboard-heading", { timeout: 3000 }).catch(() => {});
+    const clientsMiniFn = () => {
+      const h3 = [...document.querySelectorAll("h3")].find((e) => e.textContent?.trim() === "Clients");
+      const card = h3?.closest(".card");
+      return card ? card.textContent : "";
+    };
+    await page.waitForFunction(
+      (fn) => new Function(`return (${fn})()`)().includes("Dashboard Mini Client"),
+      { timeout: 5000 },
+      clientsMiniFn.toString(),
+    ).catch(() => {});
+    const clientsMiniText = await page.evaluate(clientsMiniFn);
+    check("Dashboard Clients mini-panel shows the real managed client created earlier", clientsMiniText.includes("Dashboard Mini Client"), clientsMiniText);
+    const upstreamsMiniFn = () => {
+      const h3 = [...document.querySelectorAll("h3")].find((e) => e.textContent?.trim() === "Upstreams");
+      const card = h3?.closest(".card");
+      return card ? card.textContent : "";
+    };
+    const upstreamsMiniText = await page.evaluate(upstreamsMiniFn);
+    check(
+      "Dashboard Upstreams mini-panel shows a real upstream profile row, not the empty state",
+      upstreamsMiniText.includes("Dashboard Test Upstream") || /9\.9\.9\.9|dot|doh|plain/i.test(upstreamsMiniText),
+      upstreamsMiniText,
+    );
+
     check("zero unexpected browser console errors", consoleErrors.filter((e) => !/Failed to load resource: the server responded with a status of/.test(e)).length === 0, consoleErrors.join(" | "));
     check("zero uncaught page errors", pageErrors.length === 0, pageErrors.join(" | "));
   } finally {

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, type AnalyticsBucket, type AnalyticsTopRowsResponse } from "../api";
+  import { api, type AnalyticsBucket, type AnalyticsTopRowsResponse, type ManagedClient, type ObservedClient, type UpstreamProfile } from "../api";
   import { router } from "../router.svelte";
   import { StaleGuard } from "../staleGuard";
   import { ALL_CARDS, loadCardOrder, saveCardOrder, type CardState } from "../dashboardCards";
@@ -38,9 +38,60 @@
   let cardOrder = $state<CardState[]>(loadCardOrder());
   let customizeOpen = $state(false);
 
+  // Clients/Upstreams mini-panels -- real data from internal/clients
+  // (managed clients), the observed-clients boundary (internal/pyanalytics,
+  // see GET /api/clients/observed's own doc comment), and internal/upstreams.
+  // These were the two Dashboard panels the parity matrix's Dashboard row
+  // recorded as blocked on "the policy boundary" -- that boundary (native
+  // Go internal/policy/internal/clients/internal/upstreams) now exists, so
+  // this closes the gap rather than leaving the stale disclosure in place.
+  let managedClients = $state<ManagedClient[] | null>(null);
+  let observedClients = $state<ObservedClient[] | null>(null);
+  let observedDegraded = $state(false);
+  let observedDegradedReason = $state("");
+  let upstreams = $state<UpstreamProfile[] | null>(null);
+  let clientsError = $state("");
+  let upstreamsError = $state("");
+
   const summaryGuard = new StaleGuard();
   const chartGuard = new StaleGuard();
   const topGuard = new StaleGuard();
+  const clientsGuard = new StaleGuard();
+  const upstreamsGuard = new StaleGuard();
+
+  async function loadClientsMini() {
+    const token = clientsGuard.start();
+    try {
+      const [clientsResp, observedResp] = await Promise.all([
+        api.listClients(router.signal()),
+        api.listObservedClients(router.signal()),
+      ]);
+      if (!clientsGuard.isCurrent(token)) return;
+      managedClients = clientsResp.clients;
+      observedClients = observedResp.observed;
+      observedDegraded = observedResp.degraded;
+      observedDegradedReason = observedResp.degraded_reason ?? "";
+      clientsError = "";
+    } catch (err) {
+      if (!clientsGuard.isCurrent(token)) return;
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      clientsError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  async function loadUpstreamsMini() {
+    const token = upstreamsGuard.start();
+    try {
+      const resp = await api.listUpstreams(router.signal());
+      if (!upstreamsGuard.isCurrent(token)) return;
+      upstreams = resp.upstreams;
+      upstreamsError = "";
+    } catch (err) {
+      if (!upstreamsGuard.isCurrent(token)) return;
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      upstreamsError = err instanceof Error ? err.message : String(err);
+    }
+  }
 
   async function loadSummary() {
     const token = summaryGuard.start();
@@ -143,6 +194,8 @@
   onMount(() => {
     loadSummary();
     loadTopDomains();
+    loadClientsMini();
+    loadUpstreamsMini();
   });
 
   // --- card customization ---
@@ -285,15 +338,95 @@
             </DataGrid>
           {/if}
         </div>
+      {:else if card.id === "clients"}
+        <div class="card wide-card">
+          <div class="card-head">
+            <h3>Clients</h3>
+            <button class="link" onclick={() => router.navigate("clients")}>Manage</button>
+          </div>
+          {#if clientsError}
+            <p class="degraded-note" role="status">Unable to load clients: {clientsError}</p>
+          {:else if managedClients === null || observedClients === null}
+            <p class="hint">Loading…</p>
+          {:else}
+            {@const unmanagedObserved = observedClients.filter((o) => !o.managed).slice(0, 5)}
+            {@const managedSlice = managedClients.slice(0, 5)}
+            {#if managedSlice.length === 0 && unmanagedObserved.length === 0}
+              <p class="hint">
+                No managed clients, and no DNS activity observed yet{observedDegraded ? ` (observed clients unavailable: ${observedDegradedReason || "unavailable"})` : ""}.
+              </p>
+            {:else}
+              <table class="mini-table">
+                <thead><tr><th>State</th><th>Name / address</th><th>Identifier</th></tr></thead>
+                <tbody>
+                  {#each managedSlice as c (c.id)}
+                    <tr>
+                      <td><span class="mini-badge mini-badge-ok">managed</span></td>
+                      <td>{c.name}</td>
+                      <td class="mono">
+                        {#if c.identifiers.length}
+                          {c.identifiers.map((i) => i.value).join(", ")}
+                        {:else}
+                          <span class="hint">none</span>
+                        {/if}
+                      </td>
+                    </tr>
+                  {/each}
+                  {#each unmanagedObserved as o (o.address)}
+                    <tr>
+                      <td><span class="mini-badge mini-badge-observed">observed</span></td>
+                      <td class="mono">{o.address}</td>
+                      <td class="mono"><span class="hint">{o.query_count} queries</span></td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+              {#if observedDegraded}
+                <p class="hint">Observed clients unavailable: {observedDegradedReason || "unavailable"} -- managed clients above are still real.</p>
+              {/if}
+            {/if}
+          {/if}
+        </div>
+      {:else if card.id === "upstreams"}
+        <div class="card wide-card">
+          <div class="card-head">
+            <h3>Upstreams</h3>
+            <button class="link" onclick={() => router.navigate("upstreams")}>Manage</button>
+          </div>
+          {#if upstreamsError}
+            <p class="degraded-note" role="status">Unable to load upstreams: {upstreamsError}</p>
+          {:else if upstreams === null}
+            <p class="hint">Loading…</p>
+          {:else if upstreams.length === 0}
+            <p class="hint">No upstream profiles configured.</p>
+          {:else}
+            <table class="mini-table">
+              <thead><tr><th>Name</th><th>Transport</th><th>Strategy</th><th>Enabled</th></tr></thead>
+              <tbody>
+                {#each upstreams.slice(0, 5) as u (u.upstream_profile_id)}
+                  <tr>
+                    <td>{u.name}</td>
+                    <td class="mono">{u.transport}</td>
+                    <td class="mono">{u.strategy}</td>
+                    <td>{u.enabled ? "yes" : "no"}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          {/if}
+        </div>
       {/if}
     {/each}
   </div>
 
   <p class="hint scope-note">
-    Blocklists and Local DNS are natively Go-owned. DNS Activity, Top Domains, and Top Blocked
-    Domains are read through temporary read-only compatibility boundaries to Python's analytics store
-    (see <code>internal/pyanalytics</code> and <code>internal/rawquerylog</code>). Clients and
-    Upstreams mini-tables are not migrated yet -- see the parity matrix.
+    Blocklists, Local DNS, Clients, and Upstreams are natively Go-owned. DNS Activity, Top Domains,
+    and Top Blocked Domains are read through temporary read-only compatibility boundaries to
+    Python's analytics store (see <code>internal/pyanalytics</code> and
+    <code>internal/rawquerylog</code>). The Clients mini-panel's "observed" rows come from that same
+    read-only analytics boundary, cross-referenced against managed identifiers -- see
+    <code>GET /api/clients/observed</code>'s own doc comment for what it discloses as narrower than
+    a real discovery worker.
   </p>
 </section>
 
@@ -324,4 +457,14 @@
   .range-select button.active { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
   .degraded-note { background: var(--badge-warn-bg); color: var(--badge-warn-fg); padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.85rem; }
   .scope-note { margin-top: 1.25rem; max-width: 44rem; }
+
+  .link { background: transparent; color: var(--accent); border: none; padding: 0; font-size: 0.85rem; cursor: pointer; text-decoration: underline; }
+  .mono { font-family: monospace; font-size: 0.85rem; }
+  .mini-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin-top: 0.5rem; }
+  .mini-table th { text-align: left; font-weight: 600; opacity: 0.7; padding: 0.25rem 0.5rem 0.25rem 0; border-bottom: 1px solid var(--border); }
+  .mini-table td { padding: 0.3rem 0.5rem 0.3rem 0; border-bottom: 1px solid var(--border); }
+  .mini-table tr:last-child td { border-bottom: none; }
+  .mini-badge { display: inline-block; padding: 0.1rem 0.45rem; border-radius: 999px; font-size: 0.72rem; }
+  .mini-badge-ok { background: var(--badge-ok-bg); color: var(--badge-ok-fg); }
+  .mini-badge-observed { background: var(--border); color: var(--fg); }
 </style>

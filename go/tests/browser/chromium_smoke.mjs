@@ -126,9 +126,33 @@ async function main() {
     const scopeNote = await page.$eval(".scope-note", (el) => el.textContent).catch(() => "");
     check(
       "Dashboard discloses its own incomplete scope rather than implying full parity",
-      scopeNote.replace(/\s+/g, " ").includes("not migrated yet"),
+      scopeNote.replace(/\s+/g, " ").includes("compatibility boundaries"),
       scopeNote,
     );
+
+    // --- Dashboard: Clients and Upstreams mini-panels (real data, not
+    // placeholders -- these were previously disclosed as blocked on "the
+    // policy boundary", which now exists natively in Go) ---
+    await page.waitForFunction(
+      () => [...document.querySelectorAll("h3")].some((h) => h.textContent?.trim() === "Clients"),
+      { timeout: 3000 },
+    ).catch(() => {});
+    const clientsCardRowsFn = () => {
+      const h3 = [...document.querySelectorAll("h3")].find((e) => e.textContent?.trim() === "Clients");
+      const card = h3?.closest(".card");
+      return card ? card.querySelectorAll(".mini-table tbody tr").length : -1;
+    };
+    await page.waitForFunction(clientsCardRowsFn, { timeout: 3000 }).catch(() => {});
+    const clientsCardRows = await page.evaluate(clientsCardRowsFn);
+    check("Dashboard Clients mini-panel renders (managed + observed rows, real data)", clientsCardRows >= 0, `rows=${clientsCardRows}`);
+    const upstreamsCardRowsFn = () => {
+      const h3 = [...document.querySelectorAll("h3")].find((e) => e.textContent?.trim() === "Upstreams");
+      const card = h3?.closest(".card");
+      return card ? card.querySelectorAll(".mini-table tbody tr").length : -1;
+    };
+    await page.waitForFunction(upstreamsCardRowsFn, { timeout: 3000 }).catch(() => {});
+    const upstreamsCardRows = await page.evaluate(upstreamsCardRowsFn);
+    check("Dashboard Upstreams mini-panel renders real upstream profile rows", upstreamsCardRows > 0, `rows=${upstreamsCardRows}`);
 
     // --- Dashboard: DNS Activity chart, range switching, degraded states ---
     await page.waitForSelector(".range-select button", { timeout: 3000 }).catch(() => {});
@@ -212,7 +236,7 @@ async function main() {
     await page.click(".customize-btn");
     await page.waitForSelector(".customize-panel", { timeout: 2000 });
     const cardLabelsBefore = await page.$$eval(".customize-panel li label", (els) => els.map((e) => e.textContent.trim()));
-    check("customize panel lists all 5 cards", cardLabelsBefore.length === 5, cardLabelsBefore.join(","));
+    check("customize panel lists all 7 cards", cardLabelsBefore.length === 7, cardLabelsBefore.join(","));
     // Hide "Top Blocked Domains".
     const checkboxes = await page.$$(".customize-panel input[type=checkbox]");
     const labels = await page.$$eval(".customize-panel li label", (els) => els.map((e) => e.textContent.trim()));
