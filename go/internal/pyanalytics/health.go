@@ -35,6 +35,7 @@ package pyanalytics
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -243,11 +244,20 @@ func (r *Reader) Health(ctx context.Context) AnalyticsHealth {
 	if h.DBReachable {
 		var last int64
 		var hasRow bool
-		row := r.db.QueryRowContext(ctx, `SELECT MAX(bucket_start) FROM live_buckets`)
-		var nullable *int64
-		if err := row.Scan(&nullable); err == nil && nullable != nil {
-			last, hasRow = *nullable, true
-		}
+		// Routed through run() like every other query in this package --
+		// touching r.db directly here would both skip the transient-
+		// corrupt retry and race against reset()'s connection swap (see
+		// reader.go's mu doc comment).
+		_ = r.run(ctx, func(db *sql.DB) error {
+			var nullable *int64
+			if err := db.QueryRowContext(ctx, `SELECT MAX(bucket_start) FROM live_buckets`).Scan(&nullable); err != nil {
+				return err
+			}
+			if nullable != nil {
+				last, hasRow = *nullable, true
+			}
+			return nil
+		})
 		if hasRow {
 			h.LastCommittedBucket = &last
 		}
