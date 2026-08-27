@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -101,6 +102,111 @@ func findAUnitWithRealJournalHistory(t *testing.T) string {
 	return ""
 }
 
+func TestLogsReadRejectsAnUnrecognizedSeverity(t *testing.T) {
+	s := &Server{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	RegisterLogsOps(s, LogsConfig{Units: []string{"apdns-go-web"}})
+	_, err := s.handlers["logs.read"](context.Background(), json.RawMessage(`{"unit":"apdns-go-web","lines":10,"severity":"not-a-real-priority"}`))
+	if err == nil {
+		t.Fatal("expected an error for an unrecognized severity")
+	}
+}
+
+func TestLogsListUnitsExposesAllUnitsValueAndSeverities(t *testing.T) {
+	s := &Server{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	RegisterLogsOps(s, LogsConfig{Units: []string{"a", "b"}})
+	result, err := s.handlers["logs.list_units"](context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _ := json.Marshal(result)
+	var decoded struct {
+		AllUnitsValue string   `json:"all_units_value"`
+		Severities    []string `json:"severities"`
+	}
+	if err := json.Unmarshal(out, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.AllUnitsValue != AllUnitsSentinel {
+		t.Fatalf("expected all_units_value %q, got %q", AllUnitsSentinel, decoded.AllUnitsValue)
+	}
+	if len(decoded.Severities) == 0 {
+		t.Fatal("expected a non-empty severities list")
+	}
+}
+
+// TestLogsReadAllMergesEveryAllowlistedUnitSortedByTime is a real
+// integration test (two real, currently-loaded systemd units, real
+// journalctl calls) proving unit="all" actually merges more than one
+// unit's own real journal history into one time-sorted result, not a
+// single unit renamed.
+func TestLogsReadAllMergesEveryAllowlistedUnitSortedByTime(t *testing.T) {
+	if _, err := exec.LookPath("journalctl"); err != nil {
+		t.Skip("journalctl not available in this environment")
+	}
+	units := findTwoUnitsWithRealJournalHistory(t)
+	if len(units) < 2 {
+		t.Skip("fewer than two systemd units on this host have queryable journal history")
+	}
+
+	s := &Server{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	RegisterLogsOps(s, LogsConfig{
+		Units: []string{"unit-a", "unit-b"},
+		UnitNameOverride: map[string]string{
+			"unit-a": units[0],
+			"unit-b": units[1],
+		},
+	})
+
+	result, err := s.handlers["logs.read"](context.Background(), json.RawMessage(`{"unit":"all","lines":10}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(result)
+	var decoded struct {
+		Entries []LogEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Entries) == 0 {
+		t.Fatal("expected at least one merged entry")
+	}
+	seenUnits := map[string]bool{}
+	for i, e := range decoded.Entries {
+		seenUnits[e.Unit] = true
+		if i > 0 && decoded.Entries[i-1].Time < e.Time {
+			t.Fatalf("expected entries sorted newest-first by time, got %+v then %+v", decoded.Entries[i-1], e)
+		}
+	}
+	if len(seenUnits) < 2 {
+		t.Fatalf("expected entries from both real units in the merge, got only %v", seenUnits)
+	}
+}
+
+func findTwoUnitsWithRealJournalHistory(t *testing.T) []string {
+	t.Helper()
+	out, err := exec.Command("systemctl", "list-units", "--type=service", "--no-legend", "--no-pager", "--plain").Output()
+	if err != nil {
+		return nil
+	}
+	found := []string{}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		unit := fields[0]
+		check, err := exec.Command("journalctl", "-u", unit, "-n", "1", "-o", "json", "--no-pager").Output()
+		if err == nil && len(strings.TrimSpace(string(check))) > 0 {
+			found = append(found, unit)
+			if len(found) == 2 {
+				return found
+			}
+		}
+	}
+	return found
+}
+
 func TestLogsReadClampsAnOutOfRangeLineCount(t *testing.T) {
 	s := &Server{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	RegisterLogsOps(s, LogsConfig{Units: []string{"apdns-go-web"}, JournalDir: filepath.Join(t.TempDir(), "does-not-exist")})
@@ -115,5 +221,126 @@ func TestLogsReadClampsAnOutOfRangeLineCount(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "not in the allowlist") {
 		t.Fatalf("clamping should happen silently, not reject the request: %v", err)
+	}
+}
+
+// TestLogsReadFileUnitTailsARealFile proves a FileUnits-registered
+// logical unit is read from a plain file, not journalctl -- this
+// preview's own apdns-hostagent runs via nohup, not a systemd unit or
+// container, so its log source has to be its own redirected stdout
+// file, in this codebase's own slog JSON-line shape.
+func TestLogsReadFileUnitTailsARealFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.log")
+	lines := []string{
+		`{"time":"2026-08-01T00:00:00Z","level":"INFO","msg":"starting up"}`,
+		`{"time":"2026-08-01T00:00:01Z","level":"ERROR","msg":"boom"}`,
+		`{"time":"2026-08-01T00:00:02Z","level":"INFO","msg":"recovered"}`,
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := &Server{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	RegisterLogsOps(s, LogsConfig{
+		Units:            []string{"apdns-hostagent"},
+		UnitNameOverride: map[string]string{"apdns-hostagent": path},
+		FileUnits:        map[string]bool{"apdns-hostagent": true},
+	})
+
+	result, err := s.handlers["logs.read"](context.Background(), json.RawMessage(`{"unit":"apdns-hostagent","lines":10}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(result)
+	var decoded struct {
+		Entries []LogEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Entries) != 3 {
+		t.Fatalf("expected all 3 real file lines, got %d: %+v", len(decoded.Entries), decoded.Entries)
+	}
+	if decoded.Entries[1].Time != "2026-08-01T00:00:01Z" {
+		t.Fatalf("expected the real parsed timestamp from the file's own JSON, got %+v", decoded.Entries[1])
+	}
+}
+
+// TestLogsReadFileUnitFiltersBySeverityAndTrimsLines proves severity
+// filtering and the lines cap both apply to a file source exactly like
+// a journal source: filter first (against the slog level mapped to a
+// journal-style priority name), then keep only the most recent `lines`.
+func TestLogsReadFileUnitFiltersBySeverityAndTrimsLines(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.log")
+	var lines []string
+	for i := 0; i < 5; i++ {
+		lines = append(lines, `{"time":"2026-08-01T00:00:0`+string(rune('0'+i))+`Z","level":"INFO","msg":"info line"}`)
+	}
+	lines = append(lines,
+		`{"time":"2026-08-01T00:00:05Z","level":"ERROR","msg":"first error"}`,
+		`not json at all`,
+		`{"time":"2026-08-01T00:00:06Z","level":"ERROR","msg":"second error"}`,
+	)
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := &Server{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	RegisterLogsOps(s, LogsConfig{
+		Units:            []string{"apdns-hostagent"},
+		UnitNameOverride: map[string]string{"apdns-hostagent": path},
+		FileUnits:        map[string]bool{"apdns-hostagent": true},
+	})
+
+	result, err := s.handlers["logs.read"](context.Background(), json.RawMessage(`{"unit":"apdns-hostagent","lines":1,"severity":"err"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(result)
+	var decoded struct {
+		Entries []LogEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Entries) != 1 {
+		t.Fatalf("expected exactly 1 entry (severity filter then lines=1 trim), got %d: %+v", len(decoded.Entries), decoded.Entries)
+	}
+	if decoded.Entries[0].Message != `{"time":"2026-08-01T00:00:06Z","level":"ERROR","msg":"second error"}` {
+		t.Fatalf("expected only the most recent real error line to survive, got %+v", decoded.Entries[0])
+	}
+}
+
+// TestLogsReadContainerUnitQueriesByContainerNameField proves a
+// ContainerUnits-registered logical unit is queried via journalctl's
+// CONTAINER_NAME= field match, not -u -- podman/docker's own conmon
+// scope name changes every container recreate, so -u would silently
+// stop matching on every redeploy; CONTAINER_NAME is the stable field
+// the container log driver attaches instead. Verified against the
+// journalctl binary's own argument validation (a real, nonexistent
+// journal directory makes it fail fast) rather than mocking exec.
+func TestLogsReadContainerUnitQueriesByContainerNameField(t *testing.T) {
+	if _, err := exec.LookPath("journalctl"); err != nil {
+		t.Skip("journalctl not available in this environment")
+	}
+	s := &Server{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	RegisterLogsOps(s, LogsConfig{
+		Units:            []string{"apdns-go-web"},
+		UnitNameOverride: map[string]string{"apdns-go-web": "definitely-not-a-real-container-abc123"},
+		ContainerUnits:   map[string]bool{"apdns-go-web": true},
+	})
+	result, err := s.handlers["logs.read"](context.Background(), json.RawMessage(`{"unit":"apdns-go-web","lines":5}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(result)
+	var decoded struct {
+		Entries []LogEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Entries) != 0 {
+		t.Fatalf("expected no entries for a nonexistent container name, got %+v", decoded.Entries)
 	}
 }

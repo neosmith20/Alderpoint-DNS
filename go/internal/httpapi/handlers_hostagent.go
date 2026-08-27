@@ -146,7 +146,11 @@ func (s *Server) handleLogsListUnits(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogsRead(w http.ResponseWriter, r *http.Request) {
-	params := map[string]any{"unit": r.PathValue("unit"), "lines": intQuery(r, "lines", 200, 1, 2000)}
+	params := map[string]any{
+		"unit":     r.PathValue("unit"),
+		"lines":    intQuery(r, "lines", 200, 1, 2000),
+		"severity": r.URL.Query().Get("severity"),
+	}
 	result, ok := callAgent[json.RawMessage](s, w, r, hostagent.OpLogsRead, params)
 	if !ok {
 		return

@@ -329,6 +329,7 @@ export interface NetworkApplyResult {
 }
 
 export interface LogEntry {
+  unit?: string;
   time: string;
   message: string;
 }
@@ -545,9 +546,14 @@ export const api = {
   networkConfirm: (iface: string) => req<{ status: string }>("/api/network/confirm", { method: "POST", body: JSON.stringify({ interface: iface }) }),
   networkRollback: (iface: string) => req<{ status: string }>("/api/network/rollback", { method: "POST", body: JSON.stringify({ interface: iface }) }),
 
-  logsListUnits: (signal?: AbortSignal) => req<{ units: string[] }>("/api/logs/units", undefined, signal),
-  logsRead: (unit: string, lines: number, signal?: AbortSignal) =>
-    req<{ unit: string; entries: LogEntry[] }>(`/api/logs/${encodeURIComponent(unit)}?lines=${lines}`, undefined, signal),
+  logsListUnits: (signal?: AbortSignal) =>
+    req<{ units: string[]; all_units_value: string; severities: string[] }>("/api/logs/units", undefined, signal),
+  logsRead: (unit: string, lines: number, severity: string, signal?: AbortSignal) =>
+    req<{ unit: string; entries: LogEntry[] }>(
+      `/api/logs/${encodeURIComponent(unit)}?lines=${lines}${severity ? `&severity=${encodeURIComponent(severity)}` : ""}`,
+      undefined,
+      signal,
+    ),
 
   updateCheck: (signal?: AbortSignal) => req<UpdateCheckResponse>("/api/updates/status", undefined, signal),
   updateStage: (claimedVersion: string, sha256: string, dataBase64: string) =>

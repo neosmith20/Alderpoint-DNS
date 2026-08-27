@@ -82,6 +82,9 @@ nohup setsid "$HOSTAGENT_DIR/apdns-hostagent" \
   -socket /root/apdns-go-migration-preview-state/hostagent-socket/agent.sock \
   -allowed-uid "$WEB_UID" \
   -audit-log "$HOSTAGENT_DIR/audit/audit.jsonl" \
+  -log-unit-map "apdns-go-web=$CONTAINER,apdns-hostagent=$HOSTAGENT_DIR/hostagent.log" \
+  -log-container-units apdns-go-web \
+  -log-file-units apdns-hostagent \
   -rndc-conf /root/apdns-v2-preview-state/etc/rndc.conf \
   -bind-compiled-dir /root/apdns-v2-preview-state/var-lib/compiled/bind \
   -control-db /root/apdns-v2-preview-state/var-lib/control.db \
