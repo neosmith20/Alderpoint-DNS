@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
 
+	"alderpointdns/go-controlplane/internal/clientid"
 	"alderpointdns/go-controlplane/internal/dbmigrate"
 )
 
@@ -62,7 +64,9 @@ func TestAddIdentifierValidatesFormat(t *testing.T) {
 		{"ipv4_cidr", "192.168.0.0/24", false},
 		{"ipv4_cidr", "2001:db8::/32", true},
 		{"ipv6_cidr", "2001:db8::/32", false},
-		{"clientid", "anything-opaque", false},
+		{"clientid", "anything-opaque", true},                                                                       // no longer opaque -- see TestAddIdentifierValidatesClientIDFormat
+		{"clientid", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false},                                     // real 48-hex
+		{"clientid", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false},                     // real 64-hex
 		{"bogus-kind", "x", true},
 	}
 	for _, c := range cases {
@@ -158,6 +162,272 @@ func TestListMethodsNeverReturnNilOnEmpty(t *testing.T) {
 	}
 	if clientList == nil {
 		t.Fatal("ListClients on an empty table must return a non-nil empty slice, not nil (would marshal to JSON null)")
+	}
+}
+
+func TestAddIdentifierValidatesClientIDFormat(t *testing.T) {
+	s := newTestService(t)
+	ctx := context.Background()
+	id, _ := s.CreateClient(ctx, "X", "")
+
+	bad := []string{
+		"", "short", strings.Repeat("a", 47), strings.Repeat("a", 49),
+		strings.Repeat("a", 65), strings.ToUpper(strings.Repeat("a", 48)),
+		strings.Repeat("g", 48), // 'g' not hex
+	}
+	for _, v := range bad {
+		if err := s.AddIdentifier(ctx, id, "clientid", v); !errors.Is(err, ErrValidation) {
+			t.Errorf("AddIdentifier(clientid, %q): expected ErrValidation, got %v", v, err)
+		}
+	}
+}
+
+func TestGenerateClientIDProducesRealDistinctValuesAndPersists(t *testing.T) {
+	s := newTestService(t)
+	ctx := context.Background()
+	id, _ := s.CreateClient(ctx, "Phone", "")
+
+	a, err := s.GenerateClientID(ctx, id, clientid.Bits192, "primary")
+	if err != nil {
+		t.Fatalf("GenerateClientID(192): %v", err)
+	}
+	if len(a.Value) != 48 {
+		t.Fatalf("expected 48-hex value, got %d chars: %q", len(a.Value), a.Value)
+	}
+	if a.DoHPath == "" || a.SNIHostname == "" {
+		t.Fatalf("expected DoHPath/SNIHostname to be populated, got %+v", a)
+	}
+
+	b, err := s.GenerateClientID(ctx, id, clientid.Bits256, "backup")
+	if err != nil {
+		t.Fatalf("GenerateClientID(256): %v", err)
+	}
+	if len(b.Value) != 64 {
+		t.Fatalf("expected 64-hex value, got %d chars: %q", len(b.Value), b.Value)
+	}
+	if a.Value == b.Value {
+		t.Fatal("two generated ClientIDs must not collide")
+	}
+
+	list, err := s.ListClients(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list[0].Identifiers) != 2 {
+		t.Fatalf("expected 2 persisted identifiers, got %+v", list[0].Identifiers)
+	}
+}
+
+func TestRevokeIdentifierStopsItFromCountingAsActiveButKeepsTheRow(t *testing.T) {
+	s := newTestService(t)
+	ctx := context.Background()
+	id, _ := s.CreateClient(ctx, "X", "")
+	c, err := s.GenerateClientID(ctx, id, clientid.Bits192, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	active, err := s.AllActiveClientIdentities(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 1 {
+		t.Fatalf("expected 1 active identity before revoke, got %d", len(active))
+	}
+
+	if err := s.RevokeIdentifier(ctx, c.ID); err != nil {
+		t.Fatalf("RevokeIdentifier: %v", err)
+	}
+
+	active, err = s.AllActiveClientIdentities(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("expected 0 active identities after revoke, got %+v", active)
+	}
+
+	// The row itself must still exist, with revoked_at set (not deleted).
+	list, err := s.ListClients(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list[0].Identifiers) != 1 {
+		t.Fatalf("expected the revoked row to still be present, got %+v", list[0].Identifiers)
+	}
+	if list[0].Identifiers[0].RevokedAt == "" {
+		t.Fatal("expected revoked_at to be set")
+	}
+
+	if err := s.RevokeIdentifier(ctx, c.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("revoking an already-revoked identifier should be ErrNotFound (no active row matched), got %v", err)
+	}
+}
+
+func TestRegenerateIdentifierIsAtomicOldRevokedNewActive(t *testing.T) {
+	s := newTestService(t)
+	ctx := context.Background()
+	id, _ := s.CreateClient(ctx, "X", "")
+	original, err := s.GenerateClientID(ctx, id, clientid.Bits256, "primary")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fresh, err := s.RegenerateIdentifier(ctx, original.ID)
+	if err != nil {
+		t.Fatalf("RegenerateIdentifier: %v", err)
+	}
+	if fresh.Value == original.Value {
+		t.Fatal("regenerated value must differ from the original")
+	}
+	if len(fresh.Value) != 64 {
+		t.Fatalf("expected regeneration to preserve the original's bit strength (64-hex), got %d chars", len(fresh.Value))
+	}
+	if fresh.Label != "primary" {
+		t.Fatalf("expected the label to carry over, got %q", fresh.Label)
+	}
+
+	active, err := s.AllActiveClientIdentities(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 1 || active[0].Value != fresh.Value {
+		t.Fatalf("expected exactly the new value to be active, got %+v", active)
+	}
+
+	if _, err := s.RegenerateIdentifier(ctx, original.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("regenerating an already-revoked identifier should be ErrNotFound, got %v", err)
+	}
+}
+
+func TestDeleteIdentifierHardDeletesTheRow(t *testing.T) {
+	s := newTestService(t)
+	ctx := context.Background()
+	id, _ := s.CreateClient(ctx, "X", "")
+	c, err := s.GenerateClientID(ctx, id, clientid.Bits192, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteIdentifier(ctx, c.ID); err != nil {
+		t.Fatalf("DeleteIdentifier: %v", err)
+	}
+	list, err := s.ListClients(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list[0].Identifiers) != 0 {
+		t.Fatalf("expected the row to be gone entirely, got %+v", list[0].Identifiers)
+	}
+	if err := s.DeleteIdentifier(ctx, c.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleting a non-existent identifier should be ErrNotFound, got %v", err)
+	}
+}
+
+func TestDomainOverridesCRUDAndCompileInput(t *testing.T) {
+	s := newTestService(t)
+	ctx := context.Background()
+	id, _ := s.CreateClient(ctx, "X", "")
+	if _, err := s.GenerateClientID(ctx, id, clientid.Bits192, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.AddDomainOverride(ctx, id, "block", "Blocked.Example.com"); err != nil {
+		t.Fatalf("AddDomainOverride(block): %v", err)
+	}
+	if _, err := s.AddDomainOverride(ctx, id, "allow", "allowed.example.com"); err != nil {
+		t.Fatalf("AddDomainOverride(allow): %v", err)
+	}
+	if _, err := s.AddDomainOverride(ctx, id, "bogus", "x.example.com"); !errors.Is(err, ErrValidation) {
+		t.Fatalf("expected ErrValidation for a bogus override_type, got %v", err)
+	}
+
+	overrides, err := s.DomainOverridesForClient(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(overrides) != 2 {
+		t.Fatalf("expected 2 overrides, got %+v", overrides)
+	}
+	// Domain stored lowercased -- proven, not assumed.
+	found := false
+	for _, o := range overrides {
+		if o.OverrideType == "block" && o.Pattern == "blocked.example.com" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected the block override to be stored lowercased, got %+v", overrides)
+	}
+
+	active, err := s.AllActiveClientIdentities(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 1 || len(active[0].Overrides) != 2 {
+		t.Fatalf("expected the active identity to carry both overrides, got %+v", active)
+	}
+
+	if err := s.DeleteDomainOverride(ctx, overrides[0].ID); err != nil {
+		t.Fatalf("DeleteDomainOverride: %v", err)
+	}
+	overrides, err = s.DomainOverridesForClient(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(overrides) != 1 {
+		t.Fatalf("expected 1 override after delete, got %+v", overrides)
+	}
+}
+
+// TestClientIDPersistsAcrossAFreshOpen is the "restart-persistence"
+// proof: a brand-new *Service (fresh sql.Open against the same on-disk
+// file, exactly what a real process restart does) must see everything
+// a prior Service instance wrote, unchanged.
+func TestClientIDPersistsAcrossAFreshOpen(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db1, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbmigrate.Up(context.Background(), db1, "../../schema/migrations"); err != nil {
+		t.Fatal(err)
+	}
+	s1 := &Service{DB: db1}
+	ctx := context.Background()
+	clientID, _ := s1.CreateClient(ctx, "X", "")
+	c, err := s1.GenerateClientID(ctx, clientID, clientid.Bits256, "survives-restart")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s1.AddDomainOverride(ctx, clientID, "block", "blocked.example."); err != nil {
+		t.Fatal(err)
+	}
+	db1.Close()
+
+	db2, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db2.Close() })
+	s2 := &Service{DB: db2}
+
+	list, err := s2.ListClients(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || len(list[0].Identifiers) != 1 || list[0].Identifiers[0].Value != c.Value {
+		t.Fatalf("expected the ClientID to survive a fresh Open, got %+v", list)
+	}
+	if list[0].Identifiers[0].Label != "survives-restart" {
+		t.Fatalf("expected the label to survive too, got %+v", list[0].Identifiers[0])
+	}
+	overrides, err := s2.DomainOverridesForClient(ctx, clientID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(overrides) != 1 {
+		t.Fatalf("expected the domain override to survive too, got %+v", overrides)
 	}
 }
 

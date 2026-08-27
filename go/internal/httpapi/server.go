@@ -152,6 +152,12 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/clients", requireAuth(s.handleListClients))
 	mux.HandleFunc("POST /api/clients", requireAuth(s.handleCreateClient))
 	mux.HandleFunc("POST /api/clients/{id}/identifiers", requireAuth(s.handleAddClientIdentifier))
+	mux.HandleFunc("POST /api/clients/{id}/identifiers/generate", requireAuth(s.handleGenerateClientID))
+	mux.HandleFunc("POST /api/clients/{id}/identifiers/{identifierId}/revoke", requireAuth(s.handleRevokeClientIdentifier))
+	mux.HandleFunc("POST /api/clients/{id}/identifiers/{identifierId}/regenerate", requireAuth(s.handleRegenerateClientIdentifier))
+	mux.HandleFunc("DELETE /api/clients/{id}/identifiers/{identifierId}", requireAuth(s.handleDeleteClientIdentifier))
+	mux.HandleFunc("POST /api/clients/{id}/domain-overrides", requireAuth(s.handleAddDomainOverride))
+	mux.HandleFunc("DELETE /api/clients/{id}/domain-overrides/{overrideId}", requireAuth(s.handleDeleteDomainOverride))
 	mux.HandleFunc("POST /api/clients/{id}/groups", requireAuth(s.handleAddClientGroup))
 
 	mux.HandleFunc("GET /api/policy/global", requireAuth(s.handleGetGlobalPolicy))

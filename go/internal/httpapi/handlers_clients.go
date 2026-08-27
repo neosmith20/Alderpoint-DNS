@@ -96,9 +96,15 @@ func (s *Server) handleListClients(w http.ResponseWriter, r *http.Request) {
 			Err(http.StatusInternalServerError, "internal_error", "failed to load client policy").WriteJSON(w)
 			return
 		}
+		overrides, err := s.Clients.DomainOverridesForClient(r.Context(), c.ID)
+		if err != nil {
+			Err(http.StatusInternalServerError, "internal_error", "failed to load domain overrides").WriteJSON(w)
+			return
+		}
 		out = append(out, map[string]any{
 			"id": c.ID, "name": c.Name, "description": c.Description, "enabled": c.Enabled,
 			"identifiers": c.Identifiers, "groups": c.Groups, "policy": layer,
+			"domain_overrides": overrides,
 		})
 	}
 	WriteJSON(w, http.StatusOK, map[string]any{"clients": out})
@@ -146,6 +152,134 @@ func (s *Server) handleAddClientIdentifier(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	WriteJSON(w, http.StatusCreated, map[string]any{"status": "created"})
+}
+
+type generateClientIDRequest struct {
+	Bits  int    `json:"bits"`
+	Label string `json:"label"`
+}
+
+// handleGenerateClientID is the secure generation endpoint: the actual
+// hex value is always produced server-side by internal/clientid's
+// OS-backed CSPRNG, never accepted from the request body -- a caller
+// can only choose the bit strength (192/256) and an operator-facing
+// label.
+func (s *Server) handleGenerateClientID(w http.ResponseWriter, r *http.Request) {
+	clientID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		Err(http.StatusBadRequest, "validation_error", "invalid client id").WriteJSON(w)
+		return
+	}
+	var req generateClientIDRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		Err(http.StatusBadRequest, "validation_error", "invalid request body").WriteJSON(w)
+		return
+	}
+	bits := req.Bits
+	if bits == 0 {
+		bits = 256
+	}
+	if bits != 192 && bits != 256 {
+		Err(http.StatusBadRequest, "validation_error", "bits must be 192 or 256").WriteJSON(w)
+		return
+	}
+	ident, err := s.Clients.GenerateClientID(r.Context(), clientID, bits, req.Label)
+	if err != nil {
+		status, code := clientErrorStatus(err)
+		Err(status, code, err.Error()).WriteJSON(w)
+		return
+	}
+	WriteJSON(w, http.StatusCreated, map[string]any{"status": "created", "identifier": ident, "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
+}
+
+func (s *Server) handleRevokeClientIdentifier(w http.ResponseWriter, r *http.Request) {
+	identifierID, err := strconv.ParseInt(r.PathValue("identifierId"), 10, 64)
+	if err != nil {
+		Err(http.StatusBadRequest, "validation_error", "invalid identifier id").WriteJSON(w)
+		return
+	}
+	if err := s.Clients.RevokeIdentifier(r.Context(), identifierID); err != nil {
+		status, code := clientErrorStatus(err)
+		Err(status, code, err.Error()).WriteJSON(w)
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "revoked", "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
+}
+
+// handleRegenerateClientIdentifier is the compromise-response action:
+// revoke the old identity and mint a fresh one, atomically
+// (internal/clients.RegenerateIdentifier), then reach the live runtime
+// through the same auto-apply path as every other mutation here --
+// this is exactly the "changing a DoH ClientID path requires listener/
+// runtime restart" case, handled by the existing generic stage->
+// validate->promote->reload->health-check->rollback pipeline (see
+// internal/hostagentd/ops_dnsruntime.go), not a new mechanism.
+func (s *Server) handleRegenerateClientIdentifier(w http.ResponseWriter, r *http.Request) {
+	identifierID, err := strconv.ParseInt(r.PathValue("identifierId"), 10, 64)
+	if err != nil {
+		Err(http.StatusBadRequest, "validation_error", "invalid identifier id").WriteJSON(w)
+		return
+	}
+	ident, err := s.Clients.RegenerateIdentifier(r.Context(), identifierID)
+	if err != nil {
+		status, code := clientErrorStatus(err)
+		Err(status, code, err.Error()).WriteJSON(w)
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "regenerated", "identifier": ident, "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
+}
+
+func (s *Server) handleDeleteClientIdentifier(w http.ResponseWriter, r *http.Request) {
+	identifierID, err := strconv.ParseInt(r.PathValue("identifierId"), 10, 64)
+	if err != nil {
+		Err(http.StatusBadRequest, "validation_error", "invalid identifier id").WriteJSON(w)
+		return
+	}
+	if err := s.Clients.DeleteIdentifier(r.Context(), identifierID); err != nil {
+		status, code := clientErrorStatus(err)
+		Err(status, code, err.Error()).WriteJSON(w)
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "deleted", "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
+}
+
+type addDomainOverrideRequest struct {
+	OverrideType string `json:"override_type"`
+	Pattern      string `json:"pattern"`
+}
+
+func (s *Server) handleAddDomainOverride(w http.ResponseWriter, r *http.Request) {
+	clientID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		Err(http.StatusBadRequest, "validation_error", "invalid client id").WriteJSON(w)
+		return
+	}
+	var req addDomainOverrideRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		Err(http.StatusBadRequest, "validation_error", "invalid request body").WriteJSON(w)
+		return
+	}
+	override, err := s.Clients.AddDomainOverride(r.Context(), clientID, req.OverrideType, req.Pattern)
+	if err != nil {
+		status, code := clientErrorStatus(err)
+		Err(status, code, err.Error()).WriteJSON(w)
+		return
+	}
+	WriteJSON(w, http.StatusCreated, map[string]any{"status": "created", "override": override, "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
+}
+
+func (s *Server) handleDeleteDomainOverride(w http.ResponseWriter, r *http.Request) {
+	overrideID, err := strconv.ParseInt(r.PathValue("overrideId"), 10, 64)
+	if err != nil {
+		Err(http.StatusBadRequest, "validation_error", "invalid override id").WriteJSON(w)
+		return
+	}
+	if err := s.Clients.DeleteDomainOverride(r.Context(), overrideID); err != nil {
+		status, code := clientErrorStatus(err)
+		Err(status, code, err.Error()).WriteJSON(w)
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "deleted", "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
 }
 
 type addClientGroupRequest struct {
