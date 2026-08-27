@@ -91,12 +91,30 @@ func (s *Server) handleAnalyticsTimeseries(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	filled := pyanalytics.FillGaps(rows, start, now, granularity)
+	degraded, reason := writerDegraded(s.Analytics.Health(r.Context()))
 	WriteJSON(w, http.StatusOK, map[string]any{
-		"granularity": granularity,
-		"degraded":    false,
-		"window":      map[string]any{"start": start, "end": now, "minutes": minutes},
-		"buckets":     bucketsJSON(filled),
+		"granularity":     granularity,
+		"degraded":        degraded,
+		"degraded_reason": reason,
+		"window":          map[string]any{"start": start, "end": now, "minutes": minutes},
+		"buckets":         bucketsJSON(filled),
 	})
+}
+
+// writerDegraded translates an AnalyticsHealth into the (degraded,
+// degraded_reason) shape every analytics endpoint's response already
+// carries -- the fix for the exact failure class the governing task
+// names: a SQL read against aggregates.db can succeed (real committed
+// rows, no Go error) while the writer that's supposed to be adding new
+// rows is actually dead, which must surface as "Analytics Degraded",
+// not as a query that silently looks like real zero traffic. Only a
+// non-"ok" health ever sets degraded=true here -- an "ok" health never
+// overrides a caller's own success response.
+func writerDegraded(h pyanalytics.AnalyticsHealth) (bool, string) {
+	if h.Status == "ok" {
+		return false, ""
+	}
+	return true, h.Reason
 }
 
 // handleAnalyticsLiveActivity mirrors GET /api/analytics/live-activity.
@@ -139,9 +157,11 @@ func (s *Server) handleAnalyticsLiveActivity(w http.ResponseWriter, r *http.Requ
 	if rollingTotal > 0 {
 		rollingBlockedPercent = round1(float64(rollingBlocked) / float64(rollingTotal) * 100)
 	}
+	degraded, reason := writerDegraded(s.Analytics.Health(r.Context()))
 
 	WriteJSON(w, http.StatusOK, map[string]any{
-		"degraded":                    false,
+		"degraded":                    degraded,
+		"degraded_reason":             reason,
 		"transport":                   "bounded_polling",
 		"poll_seconds":                1,
 		"bucket_seconds":              1,
@@ -189,8 +209,9 @@ func (s *Server) handleAnalyticsTopDomains(w http.ResponseWriter, r *http.Reques
 	for _, d := range rows {
 		out = append(out, [2]any{d.Value, d.Count})
 	}
+	degraded, reason := writerDegraded(s.Analytics.Health(r.Context()))
 	resp := map[string]any{
-		"rows": out, "columns": []string{"domain", "count"}, "degraded": false,
+		"rows": out, "columns": []string{"domain", "count"}, "degraded": degraded, "degraded_reason": reason,
 		"window": map[string]any{"start": start, "end": now, "minutes": minutes},
 	}
 	if granularity == "hour" {

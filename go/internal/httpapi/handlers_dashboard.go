@@ -10,9 +10,18 @@ import "net/http"
 // the pyanalytics compatibility boundary -- see that package's doc
 // comment for its exact, deliberately limited scope.
 func (s *Server) handleDashboardSummary(w http.ResponseWriter, r *http.Request) {
+	// analytics_available is kept for backward compatibility with any
+	// existing caller of this exact field; analytics_health is the real
+	// signal -- "available" (the DB opened) is not the same claim as
+	// "trustworthy" (the writer is actually still alive), which is
+	// exactly the gap a dead writer on SQLITE_BUSY exploited in V1. See
+	// internal/pyanalytics/health.go.
 	analyticsAvailable := false
+	var analyticsHealth any = map[string]any{"status": "unconfigured", "reason": analyticsUnavailable}
 	if s.Analytics != nil {
-		analyticsAvailable = s.Analytics.Ping(r.Context()) == nil
+		h := s.Analytics.Health(r.Context())
+		analyticsAvailable = h.Status == "ok"
+		analyticsHealth = h
 	}
 
 	subs, err := s.Blocklists.List(r.Context())
@@ -48,6 +57,7 @@ func (s *Server) handleDashboardSummary(w http.ResponseWriter, r *http.Request) 
 	WriteJSON(w, http.StatusOK, map[string]any{
 		"appliance_name":      s.ApplianceName,
 		"analytics_available": analyticsAvailable,
+		"analytics_health":    analyticsHealth,
 		"blocklists": map[string]any{
 			"total":              len(subs),
 			"enabled":            enabledBlocklists,

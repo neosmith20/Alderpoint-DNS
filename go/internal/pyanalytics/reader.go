@@ -46,6 +46,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sync/atomic"
 )
 
 // StepSeconds mirrors app/v2/webapp.py's _TIMESERIES_STEP_SECONDS exactly
@@ -81,6 +82,22 @@ type DimensionCount struct {
 
 type Reader struct {
 	db *sql.DB
+
+	// WorkerHeartbeatsDir and InboxDir are optional, set by the caller
+	// after Open (main.go, from its own -analytics-worker-heartbeats-dir
+	// / -analytics-inbox-dir flags) -- empty means that half of Health's
+	// signal is reported as "not configured" rather than degraded, so a
+	// deployment that hasn't wired the extra read-only mount up yet
+	// doesn't get a false "writer dead" report. See health.go.
+	WorkerHeartbeatsDir string
+	InboxDir            string
+
+	// consecutiveFailures counts Ping failures in a row across calls to
+	// Health -- reset to 0 the instant a read succeeds again, so it is
+	// always an accurate "how many of the most recent probes failed
+	// before this one", not a value that requires a restart to recover
+	// (see health.go's Health doc comment).
+	consecutiveFailures atomic.Int64
 }
 
 // Open connects to Python's aggregates.db read-only mount. It does not

@@ -215,6 +215,25 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		components["control_db"] = map[string]any{"status": "ok", "schema_version": schemaVersion}
 	}
 
+	// Analytics writer/receiver liveness (see internal/pyanalytics/
+	// health.go's own doc comment for exactly what this closes: a real
+	// V1.1.1 failure class where DNS and this health check both stayed
+	// "ok" while the analytics writer was actually dead). A degraded or
+	// failed analytics component demotes overall status the same way a
+	// stale background worker does in Python's own /api/health -- never
+	// silently folded into "ok", but also never demoted below
+	// "degraded": DNS itself is reported separately and is what actually
+	// governs whether the appliance is serving.
+	if s.Analytics != nil {
+		h := s.Analytics.Health(r.Context())
+		components["analytics"] = h
+		if h.Status != "ok" && status == "ok" {
+			status = "degraded"
+		}
+	} else {
+		components["analytics"] = map[string]any{"status": "unconfigured", "reason": analyticsUnavailable}
+	}
+
 	WriteJSON(w, http.StatusOK, map[string]any{
 		"status":         status,
 		"components":     components,

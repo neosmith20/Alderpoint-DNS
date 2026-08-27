@@ -433,9 +433,33 @@ async function req<T>(path: string, init?: RequestInit, signal?: AbortSignal): P
 
 export const api = {
   health: () =>
-    req<{ status: string; version: string; uptime_seconds: number; components: Record<string, { status: string; schema_version?: number; detail?: string }> }>(
-      "/api/health",
-    ),
+    req<{
+      status: string;
+      version: string;
+      uptime_seconds: number;
+      components: Record<
+        string,
+        {
+          status: string;
+          schema_version?: number;
+          detail?: string;
+          reason?: string;
+          // Analytics component fields (internal/pyanalytics/health.go's
+          // AnalyticsHealth) -- present only on the "analytics" component.
+          db_reachable?: boolean;
+          consecutive_read_failures?: number;
+          writer_heartbeat_configured?: boolean;
+          writer_status?: string;
+          writer_stale?: boolean;
+          writer_tick_count?: number;
+          writer_last_success_at?: number;
+          writer_last_error?: string;
+          queue_depth?: number;
+          queue_depth_available?: boolean;
+          last_committed_bucket?: number;
+        }
+      >;
+    }>("/api/health"),
   setupStatus: () => req<{ setup_required: boolean }>("/api/setup/status"),
   setup: (body: {
     username: string;

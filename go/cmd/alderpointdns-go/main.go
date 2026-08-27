@@ -217,6 +217,8 @@ func runWeb(args []string) {
 	migrationsDir := fs.String("migrations", "./schema/migrations", "migrations directory")
 	addr := fs.String("addr", "", "listen address override (host:port); defaults to config web.listen_address:listen_port")
 	analyticsDBPath := fs.String("analytics-db", "", "optional read-only path to Python's analytics/aggregates.db (compatibility boundary, see internal/pyanalytics); empty = Dashboard analytics reports degraded")
+	analyticsWorkerHeartbeatsDir := fs.String("analytics-worker-heartbeats-dir", "", "optional read-only path to Python's worker-heartbeats/ directory (see internal/pyanalytics/health.go); empty = Analytics health cannot distinguish a dead writer from genuinely quiet traffic")
+	analyticsInboxDir := fs.String("analytics-inbox-dir", "", "optional read-only path to Python's analytics/inbox/ directory (queue depth for Analytics health); empty = queue depth unavailable")
 	queryLogDir := fs.String("query-log-dir", "", "optional read-only path to Python's analytics/queries/ raw Parquet history (compatibility boundary, see internal/rawquerylog); empty = Query Log reports degraded")
 	backupsDir := fs.String("backups-dir", "./data/backups", "directory for stored/uploaded appliance backups (see internal/backup)")
 	backupRetentionMaxCount := fs.Int("backup-retention-max-count", 0, "keep at most N manual backups, oldest pruned first (0 = unlimited; the pre-restore safety backup is never pruned)")
@@ -276,6 +278,8 @@ func runWeb(args []string) {
 		if err != nil {
 			logger.Warn("analytics reader unavailable at startup; dashboard analytics will report degraded", "path", *analyticsDBPath, "err", err)
 		} else {
+			reader.WorkerHeartbeatsDir = *analyticsWorkerHeartbeatsDir
+			reader.InboxDir = *analyticsInboxDir
 			analyticsReader = reader
 			defer reader.Close()
 		}

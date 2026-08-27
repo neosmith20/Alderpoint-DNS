@@ -110,6 +110,7 @@ podman run -d --name "$CONTAINER" \
   --group-add 103 \
   -p 10443:10443 \
   -v /root/apdns-v2-preview-state/var-lib/analytics:/var/lib/alderpointdns-v2-analytics-ro:ro \
+  -v /root/apdns-v2-preview-state/var-lib/worker-heartbeats:/var/lib/alderpointdns-v2-worker-heartbeats-ro:ro \
   -v /root/apdns-v2-preview-state/var-lib/certs:/var/lib/alderpointdns-v2-certs-ro:ro \
   -v "$RELEASE:/opt/alderpointdns-go:ro" \
   -v /root/apdns-go-migration-preview-state/etc:/etc/alderpointdns-go \
@@ -122,6 +123,8 @@ podman run -d --name "$CONTAINER" \
     -static /opt/alderpointdns-go/frontend-dist \
     -migrations /opt/alderpointdns-go/schema/migrations \
     -analytics-db /var/lib/alderpointdns-v2-analytics-ro/aggregates.db \
+    -analytics-worker-heartbeats-dir /var/lib/alderpointdns-v2-worker-heartbeats-ro \
+    -analytics-inbox-dir /var/lib/alderpointdns-v2-analytics-ro/inbox \
     -query-log-dir /var/lib/alderpointdns-v2-analytics-ro/queries \
     -backups-dir /var/lib/alderpointdns-go/backups \
     -hostagent-socket /run/apdns-hostagent/agent.sock \

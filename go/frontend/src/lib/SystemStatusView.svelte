@@ -97,11 +97,57 @@
             <tr>
               <td>{name}</td>
               <td class="status-{c.status}">{c.status}</td>
-              <td>{c.schema_version !== undefined ? `schema_version=${c.schema_version}` : (c.detail ?? "")}</td>
+              <td>{c.schema_version !== undefined ? `schema_version=${c.schema_version}` : (c.detail ?? c.reason ?? "")}</td>
             </tr>
           {/each}
         </tbody>
       </table>
+    {/if}
+  </div>
+
+  <div class="card">
+    <h3>Analytics Health</h3>
+    <p class="scope-note">
+      Proves the analytics writer/receiver are actually alive, not just that the aggregates file
+      still opens -- a stale or failed writer here must never read as zero traffic.
+    </p>
+    {#if health}
+      {@const a = health.components.analytics}
+      {#if !a}
+        <p>…</p>
+      {:else if a.status === "unconfigured"}
+        <p class="status-unavailable">Not configured on this deployment.</p>
+      {:else}
+        <div class="metric-strip">
+          <div class="metric"><span class="label">Overall</span><span class="value status-{a.status}">{a.status}</span></div>
+          <div class="metric"><span class="label">DB reachable</span><span class="value">{a.db_reachable ? "yes" : "no"}</span></div>
+          <div class="metric"><span class="label">Consecutive read failures</span><span class="value">{a.consecutive_read_failures ?? 0}</span></div>
+          <div class="metric">
+            <span class="label">Writer</span>
+            <span class="value">
+              {a.writer_heartbeat_configured ? (a.writer_status ?? "unknown") : "not configured"}
+              {#if a.writer_heartbeat_configured}({a.writer_stale ? "stale" : "fresh"}){/if}
+            </span>
+          </div>
+          {#if a.writer_heartbeat_configured}
+            <div class="metric"><span class="label">Writer tick count</span><span class="value">{a.writer_tick_count ?? 0}</span></div>
+            <div class="metric">
+              <span class="label">Last successful write</span>
+              <span class="value">{a.writer_last_success_at ? new Date(a.writer_last_success_at * 1000).toLocaleString() : "never"}</span>
+            </div>
+          {/if}
+          <div class="metric">
+            <span class="label">Queue depth</span>
+            <span class="value">{a.queue_depth_available ? a.queue_depth : "unavailable"}</span>
+          </div>
+          <div class="metric">
+            <span class="label">Last committed bucket</span>
+            <span class="value">{a.last_committed_bucket ? new Date(a.last_committed_bucket * 1000).toLocaleString() : "none"}</span>
+          </div>
+        </div>
+        {#if a.writer_last_error}<p class="degraded-note" role="status">Last writer error: {a.writer_last_error}</p>{/if}
+        {#if a.reason}<p class="degraded-note" role="status">{a.reason}</p>{/if}
+      {/if}
     {/if}
   </div>
 
@@ -147,7 +193,8 @@
   table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
   th, td { text-align: left; padding: 0.3rem 0.6rem; border-bottom: 1px solid var(--border); }
   .status-ok { color: #16a34a; }
-  .status-degraded, .status-unavailable { color: var(--badge-danger-fg); }
+  .status-degraded, .status-unavailable, .status-failed { color: var(--badge-danger-fg); }
+  .degraded-note { background: var(--badge-warn-bg); color: var(--badge-warn-fg); padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.85rem; }
   .actions { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
   .hint { font-size: 0.8rem; opacity: 0.7; }
   .error { color: var(--badge-danger-fg); }
