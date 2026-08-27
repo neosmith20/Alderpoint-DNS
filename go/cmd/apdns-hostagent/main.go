@@ -53,6 +53,7 @@ func main() {
 	analyticsSnapshotStagingDir := flag.String("analytics-snapshot-staging-dir", "/var/lib/apdns-hostagent/analytics-snapshot/staging", "scratch directory (same filesystem as -analytics-snapshot-published-dir) this agent uses while building a generation, before the atomic publish")
 	analyticsSnapshotIntervalSeconds := flag.Int("analytics-snapshot-interval-seconds", 15, "how often to refresh the published analytics snapshot")
 	analyticsSnapshotRetain := flag.Int("analytics-snapshot-retain", 3, "how many past snapshot generations to keep (minimum 2)")
+	analyticsRawHistoryRoot := flag.String("analytics-raw-history-root", "", "Python's real raw-Parquet query-history root (analytics/queries/), for Statistics' Clear action's optional raw-history wipe (empty = Clear only touches the aggregate rollups, never the raw history, same as omitting include_raw_history)")
 
 	dnsRuntimeStagingDir := flag.String("dns-runtime-staging-dir", "/var/lib/apdns-hostagent/dns-staging", "staging directory for compiled BIND/dnsdist config (see internal/hostagentd/ops_dnsruntime.go)")
 	dnsRuntimeBindLivePath := flag.String("dns-runtime-bind-conf", "", "live named.conf path this agent manages (empty = DNS Runtime unavailable)")
@@ -117,6 +118,14 @@ func main() {
 		})
 	} else {
 		logger.Info("analytics snapshot publishing not configured -- -analytics-snapshot-source is required; Dashboard analytics will report degraded")
+	}
+
+	hostagentd.RegisterAnalyticsClearOps(s, hostagentd.AnalyticsClearConfig{
+		AggregatesDBPath: *analyticsSnapshotSource,
+		RawHistoryRoot:   *analyticsRawHistoryRoot,
+	})
+	if *analyticsSnapshotSource == "" {
+		logger.Info("analytics clear not configured -- -analytics-snapshot-source is empty; Statistics' Clear action will report unavailable")
 	}
 
 	updateCfg := hostagentd.UpdateConfig{

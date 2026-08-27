@@ -120,6 +120,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/analytics/top-blocked-domains", requireAuth(s.handleAnalyticsTopBlockedDomains))
 	mux.HandleFunc("GET /api/analytics/query-log", requireAuth(s.handleAnalyticsQueryLog))
 	mux.HandleFunc("GET /api/statistics/export", requireAuth(s.handleStatisticsExport))
+	mux.HandleFunc("POST /api/statistics/clear", requireAuth(s.handleStatisticsClear))
 
 	mux.HandleFunc("GET /api/blocklists", requireAuth(s.handleListBlocklists))
 	mux.HandleFunc("POST /api/blocklists", requireAuth(s.handleCreateBlocklist))

@@ -102,6 +102,7 @@ nohup setsid "$HOSTAGENT_DIR/apdns-hostagent" \
   -analytics-snapshot-source /root/apdns-v2-preview-state/var-lib/analytics/aggregates.db \
   -analytics-snapshot-published-dir /root/apdns-go-migration-preview-state/analytics-snapshot/published \
   -analytics-snapshot-staging-dir /root/apdns-go-migration-preview-state/analytics-snapshot/staging \
+  -analytics-raw-history-root /root/apdns-v2-preview-state/var-lib/analytics/queries \
   > "$HOSTAGENT_DIR/hostagent.log" 2>&1 < /dev/null &
 
 echo "+ giving apdns-hostagent a moment to publish its first analytics snapshot generation"

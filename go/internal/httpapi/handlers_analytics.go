@@ -1,11 +1,14 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"alderpointdns/go-controlplane/internal/hostagent"
+	"alderpointdns/go-controlplane/internal/hostagentd"
 	"alderpointdns/go-controlplane/internal/pyanalytics"
 	"alderpointdns/go-controlplane/internal/rawquerylog"
 )
@@ -333,10 +336,6 @@ func (s *Server) handleAnalyticsQueryLog(w http.ResponseWriter, r *http.Request)
 // downloadable JSON dump of the aggregates store's own two tables.
 // Deliberately does not include raw per-query history (same as Python's
 // own export) -- that's already exportable via the Query Log's filters.
-// Deliberately read-only: there is no Go-native "Clear" here (see
-// PARITY_MATRIX.md's Statistics row) -- clearing would mean writing to
-// Python's live, actively-written aggregates.db/Parquet tree through a
-// mount this control plane deliberately only ever holds read-only.
 func (s *Server) handleStatisticsExport(w http.ResponseWriter, r *http.Request) {
 	if s.Analytics == nil {
 		Err(http.StatusServiceUnavailable, "unavailable", analyticsUnavailable).WriteJSON(w)
@@ -352,6 +351,45 @@ func (s *Server) handleStatisticsExport(w http.ResponseWriter, r *http.Request) 
 		"format_version": 1, "generated_at": time.Now().UTC().Format(time.RFC3339),
 		"aggregate_time_buckets": buckets, "aggregate_dimension_counts": dims,
 		"raw_query_history_included": false,
+	})
+}
+
+// handleStatisticsClear mirrors POST /api/statistics/clear: a real
+// write against Python's live aggregates.db (and, if requested, its raw
+// Parquet history), run via apdns-hostagent -- see
+// internal/hostagentd/ops_analyticsclear.go's doc comment for why this
+// is safe and why it needed no new mount. Requires the same server-side
+// "type CLEAR to confirm" check Python's own route enforces (never just
+// a client-side-only confirm dialog); an operator who bypasses the UI
+// and calls this directly still cannot clear anything without it.
+func (s *Server) handleStatisticsClear(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Confirmation      string `json:"confirmation"`
+		IncludeRawHistory *bool  `json:"include_raw_history"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		Err(http.StatusBadRequest, "validation_error", "invalid JSON body").WriteJSON(w)
+		return
+	}
+	if in.Confirmation != "CLEAR" {
+		Err(http.StatusBadRequest, "confirmation_required", "type CLEAR to confirm clearing statistics").WriteJSON(w)
+		return
+	}
+	includeRawHistory := true // matches Python's own default
+	if in.IncludeRawHistory != nil {
+		includeRawHistory = *in.IncludeRawHistory
+	}
+	body, _ := json.Marshal(map[string]any{"include_raw_history": includeRawHistory})
+	result, ok := callAgent[hostagentd.AnalyticsClearResult](s, w, r, hostagent.OpAnalyticsClear, json.RawMessage(body))
+	if !ok {
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{
+		"status":                           "cleared",
+		"aggregate_buckets_cleared":        result.AggregateBucketsCleared,
+		"aggregate_dimension_rows_cleared": result.AggregateDimensionRowsCleared,
+		"raw_history_cleared":              result.RawHistoryCleared,
+		"raw_partition_files_removed":      result.RawPartitionFilesRemoved,
 	})
 }
 

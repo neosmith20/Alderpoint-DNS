@@ -60,6 +60,18 @@ const (
 
 	OpAnalyticsSnapshotStatus  = "analytics_snapshot.status"
 	OpAnalyticsSnapshotRefresh = "analytics_snapshot.refresh"
+
+	// OpAnalyticsClear performs Statistics' real "Clear" action -- a
+	// genuine write against Python's live aggregates.db/raw-Parquet
+	// tree, run from this already-root agent process (which already has
+	// real, unrestricted host-path access to that data for the snapshot
+	// publisher above) rather than by opening a second, write-capable
+	// mount into the unprivileged web container. See
+	// internal/hostagentd/ops_analyticsclear.go's doc comment for why
+	// this is safe (a normal SQLite write connection, not the
+	// immutable=1 read-side hack that caused a real corruption incident
+	// earlier this migration).
+	OpAnalyticsClear = "analytics.clear"
 )
 
 // Request is the single JSON line a client writes. RequestID is

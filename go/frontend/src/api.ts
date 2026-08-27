@@ -528,6 +528,18 @@ export const api = {
       body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
     }),
   revokeOtherSessions: () => req<{ status: string; revoked_count: number }>("/api/session/revoke-others", { method: "POST" }),
+
+  statisticsClear: (includeRawHistory: boolean) =>
+    req<{
+      status: string;
+      aggregate_buckets_cleared: number;
+      aggregate_dimension_rows_cleared: number;
+      raw_history_cleared: boolean;
+      raw_partition_files_removed: number;
+    }>("/api/statistics/clear", {
+      method: "POST",
+      body: JSON.stringify({ confirmation: "CLEAR", include_raw_history: includeRawHistory }),
+    }),
   systemStatus: () =>
     req<{ version: string; uptime_seconds: number; appliance_name: string; appliance_timezone: string }>("/api/system/status"),
   dashboardSummary: (signal?: AbortSignal) =>
