@@ -283,16 +283,34 @@ Two real technical facts constrain how any Go<->Python compatibility boundary ca
    (direct read-only access to Python's existing stores, or a proxy with its own auth), not a
    second copy.
 
-**Analytics boundary: designed and built** (`internal/pyanalytics`, 2026-08-26). Shape: a direct
-read-only SQLite connection to Python's own `analytics/aggregates.db`, mounted read-only into the
-Go container (only the `analytics/` subdirectory -- never `control.db`, admins, or secrets). No new
-auth surface needed at all, because it never goes through Python's HTTP API or session system in
-the first place -- fact 1 above is sidestepped entirely rather than solved. Verified safe (WAL mode
-means concurrent readers never block Python's writer) and verified working against the actually-
-live, actively-written preview database, not just a static copy. This unblocks Dashboard's
-DNS-Activity/Top-Domains data (done, see the Dashboard row) and, going forward, Query Log's
-underlying data (still needs its own page built) and any other page that only needs
-*read-only analytics*.
+**Analytics boundary: designed, built, and real-incident-hardened** (`internal/pyanalytics` +
+`internal/analyticssnapshot`, 2026-08-26/27). No new auth surface needed at all, because it never
+goes through Python's HTTP API or session system in the first place -- fact 1 above is sidestepped
+entirely rather than solved.
+
+Current shape (as of commit `9de8fd4`, superseding an earlier direct-read design after a real live
+P0 -- see `AGENT_PROGRESS.md`'s incident writeup for the full sequence): the Go web process does
+**not** read Python's live `analytics/aggregates.db` directly at all. `apdns-hostagent` (root, real
+unrestricted host-path access) periodically produces a real, consistent, standalone copy via
+SQLite's own `VACUUM INTO`, publishes it atomically (directory rename + symlink flip,
+`internal/analyticssnapshot`), and the web process reads only that published, write-once snapshot
+through its own separate, genuinely-read-only mount. The earlier design (a direct `mode=ro`
+connection to the live file, mounted read-only) turned out to be structurally incompatible with the
+real deployed mount: it is a genuine kernel-enforced read-only bind mount, under which SQLite's own
+rollback-journal read path needs a write-class `open()` (checking for a hot journal) that a real
+read-only mount refuses outright (`SQLITE_CANTOPEN`) regardless of permission bits or journal mode
+-- confirmed live, not assumed, and the reason `immutable=1` existed in an even earlier draft of
+this boundary, which then caused the actual corruption incident (a live database is still mutable,
+WAL or not -- "it reports wal" was never proof `immutable=1` was safe). The snapshot design resolves
+that tension instead of picking a side of it: once published, a generation's files are never written
+again, so `immutable=1` is legitimate for the first time, and the read-only mount stays exactly that
+-- read-only, at the kernel level, the whole time. Verified against the actual live, actively-written
+preview database (not a static copy): a real concurrent regression suite including an in-test real
+kernel bind mount (`internal/analyticssnapshot`'s own tests), and a sustained live probe against the
+real running :10443 deployment (4850 requests, 0 errors, 0 degraded, exercising the exact two
+route/window shapes the incident was filed against). This unblocks Dashboard's DNS-Activity/
+Top-Domains data (done, see the Dashboard row) and, going forward, Query Log's underlying data
+(still needs its own page built) and any other page that only needs *read-only analytics*.
 
 **Policy domains: native Go, not a boundary at all.** Clients & Access, Filters, and every other
 page whose data lives in Python's `control.db` policy tables needs either (a) a native Go schema +
