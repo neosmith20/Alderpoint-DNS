@@ -9,8 +9,9 @@
 // pipeline (see internal/hostagentd/ops_dnsruntime.go).
 //
 // Scope, matching internal/dnscompile's own disclosed narrowing: global
-// policy only, one default upstream profile, no domain routing, no
-// SafeSearch/ECS. Every mutation this orchestrator is wired to run
+// policy only, one default upstream profile, a flat global list of
+// domain-routing rules (not per-network), no SafeSearch/ECS. Every
+// mutation this orchestrator is wired to run
 // after (see its own callers in internal/httpapi) reports its runtime
 // result back to the caller the same way internal/localdns's existing
 // stageAndPromote convention already does -- "saved, but runtime
@@ -28,6 +29,7 @@ import (
 	"alderpointdns/go-controlplane/internal/customrules"
 	"alderpointdns/go-controlplane/internal/dnscompile"
 	"alderpointdns/go-controlplane/internal/dnstransports"
+	"alderpointdns/go-controlplane/internal/domainrouting"
 	"alderpointdns/go-controlplane/internal/hostagent"
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/policy"
@@ -41,6 +43,7 @@ type Orchestrator struct {
 	Upstreams     *upstreams.Service
 	DNSTransports *dnstransports.Service
 	Policy        *policy.Service
+	DomainRouting *domainrouting.Service
 	HostAgent     *hostagent.Client
 
 	// DnsdistListenAddress, BindBackendAddress, and TLSCertPath/
@@ -209,11 +212,13 @@ func (o *Orchestrator) build(ctx context.Context) (dnscompile.Input, []string, s
 
 	var bindForwarders []string
 	var bindTLSHostname string
+	var allProfiles []upstreams.Profile
 	if o.Upstreams != nil {
 		profiles, _, err := o.Upstreams.List(ctx)
 		if err != nil {
 			return in, nil, "", fmt.Errorf("loading upstream profiles: %w", err)
 		}
+		allProfiles = profiles
 		for _, p := range profiles {
 			if !p.Enabled || len(p.Endpoints) == 0 {
 				continue
@@ -241,6 +246,46 @@ func (o *Orchestrator) build(ctx context.Context) (dnscompile.Input, []string, s
 				}
 			}
 			break // first enabled profile only -- see package doc comment
+		}
+	}
+
+	if o.DomainRouting != nil {
+		rules, err := o.DomainRouting.List(ctx)
+		if err != nil {
+			return in, nil, "", fmt.Errorf("loading domain routing rules: %w", err)
+		}
+		if len(rules) > 0 {
+			byID := make(map[string]upstreams.Profile, len(allProfiles))
+			for _, p := range allProfiles {
+				byID[p.UpstreamProfileID] = p
+			}
+			for _, r := range rules {
+				p, ok := byID[r.UpstreamProfileID]
+				if !ok || len(p.Endpoints) == 0 {
+					// The rule's own referenced profile was deleted or
+					// has no endpoints since the rule was created --
+					// same "not a hard error" honesty as an unreadable
+					// blocklist runtime file above: skip this one rule
+					// rather than fail the whole compile over stale
+					// state a later profile edit can still fix.
+					continue
+				}
+				endpoints := make([]dnscompile.UpstreamEndpoint, len(p.Endpoints))
+				for i, ep := range p.Endpoints {
+					var tlsHost, dohPath string
+					if ep.TLSHostname != nil {
+						tlsHost = *ep.TLSHostname
+					}
+					if ep.DohPath != nil {
+						dohPath = *ep.DohPath
+					}
+					endpoints[i] = dnscompile.UpstreamEndpoint{Address: ep.Address, TLSHostname: tlsHost, DohPath: dohPath}
+				}
+				in.DomainRoutes = append(in.DomainRoutes, dnscompile.DomainRoute{
+					MatchKind: r.MatchKind, Domain: r.Domain, ProfileID: r.UpstreamProfileID,
+					Profile: dnscompile.UpstreamProfile{Transport: p.Transport, Strategy: p.Strategy, Endpoints: endpoints},
+				})
+			}
 		}
 	}
 

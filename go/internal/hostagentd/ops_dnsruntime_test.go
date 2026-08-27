@@ -247,6 +247,54 @@ func TestDNSRuntimePromoteUpstreamRouting(t *testing.T) {
 	}
 }
 
+// TestDNSRuntimePromoteDomainRoutingSendsMatchedDomainToItsOwnUpstream
+// is domain routing's own real end-to-end proof, same rigor as upstream
+// routing above: two distinct controlled fake upstreams (no internet
+// egress dependency), one default and one attached only to a suffix
+// route. A query for a domain under the routed suffix must get the
+// ROUTE's answer; a query for anything else must still get the
+// DEFAULT's answer -- proving both that the route is followed and that
+// it doesn't leak into traffic it was never supposed to match.
+func TestDNSRuntimePromoteDomainRoutingSendsMatchedDomainToItsOwnUpstream(t *testing.T) {
+	s, cfg := newDNSRuntimeConfig(t)
+	defaultUpstreamAddr := startFakeUpstream(t, "203.0.113.10")
+	routedUpstreamAddr := startFakeUpstream(t, "203.0.113.20")
+
+	in := dnscompile.Input{
+		ListenAddress:  cfg.DnsdistListenAddress,
+		DefaultProfile: &dnscompile.UpstreamProfile{Transport: "plain", Strategy: "ordered", Endpoints: []dnscompile.UpstreamEndpoint{{Address: defaultUpstreamAddr}}},
+		DomainRoutes: []dnscompile.DomainRoute{{
+			MatchKind: "suffix", Domain: "corp.example.test", ProfileID: "corp",
+			Profile: dnscompile.UpstreamProfile{Transport: "plain", Strategy: "ordered", Endpoints: []dnscompile.UpstreamEndpoint{{Address: routedUpstreamAddr}}},
+		}},
+	}
+	dnsdistConf, err := dnscompile.CompileDnsdist(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := callPromote(t, s, DNSPromoteParams{DnsdistConf: dnsdistConf})
+	if !res.Promoted {
+		t.Fatalf("expected promotion to succeed, got %+v", res)
+	}
+
+	host, port := splitHostPort(cfg.DnsdistListenAddress)
+	routed, err := exec.Command("dig", "+time=2", "+tries=2", "+short", "@"+host, "-p", port, "host.corp.example.test", "A").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := trimNL(string(routed)); got != "203.0.113.20" {
+		t.Fatalf("expected a query under the routed suffix to get the ROUTE's answer (203.0.113.20), got %q", got)
+	}
+
+	unrouted, err := exec.Command("dig", "+time=2", "+tries=2", "+short", "@"+host, "-p", port, "anything.example.test", "A").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := trimNL(string(unrouted)); got != "203.0.113.10" {
+		t.Fatalf("expected a query NOT under the routed suffix to still get the DEFAULT's answer (203.0.113.10), got %q -- the route leaked into unrelated traffic", got)
+	}
+}
+
 // TestDNSRuntimePromoteRollsBackOnHealthCheckFailure proves the
 // automatic-rollback safety path for real: a first promotion succeeds
 // and answers real queries; a second promotion whose health check is

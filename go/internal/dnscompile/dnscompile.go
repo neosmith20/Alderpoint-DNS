@@ -22,9 +22,11 @@
 //     ClientPolicyBinding compiler is. SafeSearch and ECS are not
 //     compiled here (internal/policy stores those fields, but nothing
 //     in Go resolves them into an effective per-client value yet).
-//   - Domain routing (a suffix -> a different upstream pool) is not
-//     compiled -- internal/upstreams doesn't store domain-routing rules
-//     at all yet (see its own doc comment).
+//   - Domain routing IS compiled (added 2026-08-27), but at this same
+//     global-only scope: a single flat list of exact/suffix -> upstream
+//     profile rules applied to every client, not Python's real
+//     per-network ClientPolicyBinding.domain_routes (see
+//     internal/domainrouting's own doc comment for the exact narrowing).
 //   - regex_block/regex_allow custom rules ARE compiled (dnsdist's real
 //     RegexRule), but domains are only ever literal-matched, never
 //     wildcarded beyond what SuffixMatchNodeRule already does.
@@ -66,6 +68,21 @@ type UpstreamProfile struct {
 	Endpoints []UpstreamEndpoint
 }
 
+// DomainRoute is one resolved domain-routing rule: a domain matched
+// exactly or by suffix, routed to a specific upstream profile instead of
+// the default pool. ProfileID is used only for the generated pool's
+// name (so two rules pointing at the same profile share one pool and
+// one set of newServer() calls) -- Profile itself carries the actual
+// endpoints/transport/strategy the caller already resolved (this
+// package never looks anything up by ID itself, matching every other
+// input here being a pure value, not a reference).
+type DomainRoute struct {
+	MatchKind string // "exact" | "suffix"
+	Domain    string
+	ProfileID string
+	Profile   UpstreamProfile
+}
+
 // CustomRule mirrors internal/customrules.Rule's own shape (this
 // package never imports that package directly, to keep dnscompile a
 // pure, dependency-free compiler its own tests can exercise without a
@@ -100,6 +117,15 @@ type Input struct {
 	DefaultProfile *UpstreamProfile
 
 	LocalDNSRecords []LocalDNSRecord
+
+	// DomainRoutes: a flat, global list of exact/suffix domain-routing
+	// rules, each sending matching queries to a different upstream pool
+	// instead of the default one. Terminal and higher precedence than
+	// the default pool, lower than local DNS/rewrites/blocking (matching
+	// Python's own real precedence in dnsdist_policy_runtime.py: local
+	// DNS/rewrites/regex-allow/blocking always win first). Most-specific
+	// match wins regardless of input order -- see writeDomainRoutes.
+	DomainRoutes []DomainRoute
 
 	// BlockedDomains: literal domains to block (from enabled blocklist
 	// subscriptions' compiled domain lists plus rule_type=="block"
@@ -314,9 +340,21 @@ func CompileDnsdist(in Input) (string, error) {
 		}
 	}
 
+	// Domain routing: terminal PoolAction per rule, most-specific match
+	// first -- must be emitted before the default pool's own servers so
+	// a route's pool name can never collide with the unnamed default
+	// pool, but ordering relative to "default upstream pool" below
+	// doesn't affect precedence at runtime (there is no catch-all
+	// addAction for the default pool -- dnsdist sends anything no rule
+	// matched to it automatically).
+	if len(in.DomainRoutes) > 0 {
+		if err := writeDomainRoutes(w, in.DomainRoutes); err != nil {
+			return "", err
+		}
+	}
+
 	// Default pool: the sole managed upstream (or BIND/native-recursion
-	// fallback if none). One pool only -- no domain routing yet (see
-	// package doc comment).
+	// fallback if none).
 	w("-- default upstream pool")
 	if err := writeDefaultPool(w, in); err != nil {
 		return "", err
@@ -371,6 +409,125 @@ func blockingAction(mode, customIPv4, customIPv6 string) (string, error) {
 	}
 }
 
+// endpointServerLine renders one newServer({...}) call for a given
+// endpoint/transport/pool -- shared between the default pool
+// (pool="") and every domain-routing pool, so DoT/DoH kwargs handling
+// (including the "DoH needs tls_hostname" refusal) is defined exactly
+// once.
+func endpointServerLine(ep UpstreamEndpoint, transport, pool string) (string, error) {
+	kwargs := fmt.Sprintf("address=%s, pool=%s", luaString(ep.Address), luaString(pool))
+	switch transport {
+	case "dot":
+		kwargs += `, tls="openssl"`
+		if ep.TLSHostname != "" {
+			kwargs += fmt.Sprintf(", subjectName=%s", luaString(ep.TLSHostname))
+		}
+	case "doh":
+		if ep.TLSHostname == "" {
+			return "", errf("DoH endpoint %q has no tls_hostname -- refusing to generate an unverifiable DoH backend", ep.Address)
+		}
+		path := ep.DohPath
+		if path == "" {
+			path = "/dns-query"
+		}
+		kwargs += fmt.Sprintf(`, tls="openssl", dohPath=%s, subjectName=%s`, luaString(path), luaString(ep.TLSHostname))
+	case "plain":
+		// no extra kwargs
+	default:
+		return "", errf("unsupported upstream transport: %q", transport)
+	}
+	return fmt.Sprintf("newServer({%s})", kwargs), nil
+}
+
+// writeDomainRoutes emits one named pool + terminal routing rule per
+// domain-routing rule, most-specific match first (deterministic
+// regardless of input order): longest normalized domain first, tied-
+// broken by the domain string itself -- matches Python's own real
+// precedence fix in dnsdist_policy_runtime.py/dnsdist_gen.py (a suffix
+// rule for "a.b.example." must win over one for "example." when both
+// match). Two rules resolving to the same profile share one pool name
+// and get their servers declared once each they're referenced (a small,
+// harmless duplication if reused, never a correctness issue -- dnsdist
+// happily accepts repeated identical newServer() calls into the same
+// named pool).
+func writeDomainRoutes(w func(string, ...any), routes []DomainRoute) error {
+	type route struct {
+		matchKind, domain, profileID string
+		profile                      UpstreamProfile
+	}
+	normalized := make(map[string]route, len(routes))
+	for _, r := range routes {
+		if r.MatchKind != "exact" && r.MatchKind != "suffix" {
+			return errf("domain route %q: unsupported match_kind %q (must be exact or suffix)", r.Domain, r.MatchKind)
+		}
+		domain := normalizeDomain(r.Domain)
+		if domain == "" {
+			return errf("domain route has an empty domain")
+		}
+		key := r.MatchKind + ":" + domain
+		if existing, ok := normalized[key]; ok && existing.profileID != r.ProfileID {
+			return errf("conflicting domain routing rule for %s %q: both %q and %q were specified", r.MatchKind, domain, existing.profileID, r.ProfileID)
+		}
+		normalized[key] = route{matchKind: r.MatchKind, domain: domain, profileID: r.ProfileID, profile: r.Profile}
+	}
+
+	ordered := make([]route, 0, len(normalized))
+	for _, r := range normalized {
+		ordered = append(ordered, r)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		if len(ordered[i].domain) != len(ordered[j].domain) {
+			return len(ordered[i].domain) > len(ordered[j].domain) // longer (more specific) first
+		}
+		if ordered[i].domain != ordered[j].domain {
+			return ordered[i].domain < ordered[j].domain
+		}
+		return ordered[i].matchKind < ordered[j].matchKind
+	})
+
+	w("-- domain-specific routing (most-specific match wins, terminal)")
+	for _, r := range ordered {
+		if len(r.profile.Endpoints) == 0 {
+			return errf("domain route %q: upstream profile %q has no endpoints", r.domain, r.profileID)
+		}
+		poolName := "route_" + sanitizePoolName(r.profileID)
+		for _, ep := range r.profile.Endpoints {
+			line, err := endpointServerLine(ep, r.profile.Transport, poolName)
+			if err != nil {
+				return err
+			}
+			w("%s", line)
+		}
+		if policy, ok := map[string]string{"ordered": "firstAvailable", "failover": "firstAvailable", "load_balanced": "wrandom"}[strategyOrDefault(&r.profile)]; ok {
+			w(`setPoolServerPolicy(%s, %s)`, policy, luaString(poolName))
+		}
+		trigger := r.domain + "."
+		matcher := fmt.Sprintf("QNameRule(%s)", luaString(trigger))
+		if r.matchKind == "suffix" {
+			matcher = fmt.Sprintf("SuffixMatchNodeRule({%s})", luaString(trigger))
+		}
+		w("addAction(%s, PoolAction(%s))", matcher, luaString(poolName))
+	}
+	w("")
+	return nil
+}
+
+// sanitizePoolName makes a profile ID safe as a bare Lua-string pool
+// name fragment -- profile IDs are operator-chosen slugs (see
+// internal/upstreams), not free text, but this is defense in depth, not
+// the only validation.
+func sanitizePoolName(id string) string {
+	var b strings.Builder
+	for _, r := range id {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
+}
+
 func writeDefaultPool(w func(string, ...any), in Input) error {
 	profile := in.DefaultProfile
 	hasManaged := profile != nil && len(profile.Endpoints) > 0
@@ -380,28 +537,11 @@ func writeDefaultPool(w func(string, ...any), in Input) error {
 		w(`newServer({address=%s, pool="", useProxyProtocol=true})`, luaString(in.BindBackendAddress))
 	case hasManaged:
 		for _, ep := range profile.Endpoints {
-			kwargs := fmt.Sprintf("address=%s, pool=\"\"", luaString(ep.Address))
-			switch profile.Transport {
-			case "dot":
-				kwargs += `, tls="openssl"`
-				if ep.TLSHostname != "" {
-					kwargs += fmt.Sprintf(", subjectName=%s", luaString(ep.TLSHostname))
-				}
-			case "doh":
-				if ep.TLSHostname == "" {
-					return errf("DoH endpoint %q has no tls_hostname -- refusing to generate an unverifiable DoH backend", ep.Address)
-				}
-				path := ep.DohPath
-				if path == "" {
-					path = "/dns-query"
-				}
-				kwargs += fmt.Sprintf(`, tls="openssl", dohPath=%s, subjectName=%s`, luaString(path), luaString(ep.TLSHostname))
-			case "plain":
-				// no extra kwargs
-			default:
-				return errf("unsupported upstream transport: %q", profile.Transport)
+			line, err := endpointServerLine(ep, profile.Transport, "")
+			if err != nil {
+				return err
 			}
-			w("newServer({%s})", kwargs)
+			w("%s", line)
 		}
 	case in.BindBackendAddress != "":
 		// No managed upstream at all -- still route through BIND, which

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,6 +24,7 @@ import (
 	"alderpointdns/go-controlplane/internal/dbmigrate"
 	"alderpointdns/go-controlplane/internal/dnsruntime"
 	"alderpointdns/go-controlplane/internal/dnstransports"
+	"alderpointdns/go-controlplane/internal/domainrouting"
 	"alderpointdns/go-controlplane/internal/hostagent"
 	"alderpointdns/go-controlplane/internal/hostagentd"
 	"alderpointdns/go-controlplane/internal/localdns"
@@ -93,16 +95,17 @@ func newServerWithRealDNSRuntime(t *testing.T) (*Server, int) {
 	customRulesSvc := &customrules.Service{DB: db}
 	blocklistsSvc := &blocklists.Service{DB: db, StagingDir: t.TempDir(), RuntimeDir: t.TempDir()}
 	upstreamsSvc := &upstreams.Service{DB: db}
+	domainRoutingSvc := &domainrouting.Service{DB: db}
 	dnsTransportsSvc := &dnstransports.Service{DB: db}
 	policySvc := &policy.Service{DB: db}
 	localDNSSvc := &localdns.Service{DB: db, StagingDir: t.TempDir(), RuntimeDir: t.TempDir()}
 
 	orch := &dnsruntime.Orchestrator{
-		LocalDNS: localDNSSvc, CustomRules: customRulesSvc, Blocklists: blocklistsSvc, Upstreams: upstreamsSvc, DNSTransports: dnsTransportsSvc, Policy: policySvc,
+		LocalDNS: localDNSSvc, CustomRules: customRulesSvc, Blocklists: blocklistsSvc, Upstreams: upstreamsSvc, DomainRouting: domainRoutingSvc, DNSTransports: dnsTransportsSvc, Policy: policySvc,
 		HostAgent: hostagent.NewClient(sockPath), DnsdistListenAddress: cfg.DnsdistListenAddress, BindBackendAddress: fmt.Sprintf("127.0.0.1:%d", cfg.BindProxyPort),
 	}
 	s := &Server{
-		DB: db, CustomRules: customRulesSvc, Blocklists: blocklistsSvc, Upstreams: upstreamsSvc, DNSTransports: dnsTransportsSvc, Policy: policySvc, LocalDNS: localDNSSvc,
+		DB: db, CustomRules: customRulesSvc, Blocklists: blocklistsSvc, Upstreams: upstreamsSvc, DomainRouting: domainRoutingSvc, DNSTransports: dnsTransportsSvc, Policy: policySvc, LocalDNS: localDNSSvc,
 		DNSRuntime: orch, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	return s, dnsdistPort
@@ -249,4 +252,120 @@ func TestBlocklistToggleAutoApplies(t *testing.T) {
 	if !res.Attempted || !res.Promoted {
 		t.Fatalf("expected the blocklist toggle to auto-apply and promote, got %+v", res)
 	}
+}
+
+// TestDomainRouteCreateAutoAppliesAndRealAnswerChanges is domain
+// routing's own consistency proof, matching every other row on this
+// page: creating a route through the exact real HTTP handler must both
+// auto-apply (no separate manual step) and actually change what a real
+// dig gets back for a domain under the routed suffix, while leaving
+// unrelated traffic on the default pool.
+func TestDomainRouteCreateAutoAppliesAndRealAnswerChanges(t *testing.T) {
+	s, dnsdistPort := newServerWithRealDNSRuntime(t)
+
+	// Disabled deliberately: domain routing resolves a rule's referenced
+	// profile from the full profile list, not just the enabled default
+	// one (see the orchestrator's own build()) -- staying disabled here
+	// keeps this profile OUT of the default pool, so "before" still goes
+	// through the same no-managed-upstream/native-recursion path every
+	// other consistency test on this page relies on, and the "after"
+	// answer can only have come from the route itself, not from this
+	// profile having become the default.
+	if err := s.Upstreams.Create(context.Background(), "corp-dns", "Corp DNS", "plain", "ordered",
+		[]upstreams.Endpoint{{Address: startFakeUpstreamForHTTPTest(t, "203.0.113.30"), Weight: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Upstreams.SetEnabled(context.Background(), "corp-dns", false); err != nil {
+		t.Fatal(err)
+	}
+	if res := s.DNSRuntime.Apply(context.Background()); !res.Promoted {
+		t.Fatalf("expected the baseline promotion (no routes yet) to succeed, got %+v", res)
+	}
+	before := realDig(t, dnsdistPort, "host.corp-consistency-test.example", "A")
+	if before != "" {
+		t.Fatalf("expected no answer before any route exists, got %q", before)
+	}
+
+	body := strings.NewReader(`{"match_kind":"suffix","domain":"corp-consistency-test.example","upstream_profile_id":"corp-dns"}`)
+	req := httptest.NewRequest("POST", "/api/domain-routing", body)
+	rec := httptest.NewRecorder()
+	s.handleCreateDomainRoute(rec, req)
+	if rec.Code != 201 {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	res := dnsRuntimeFieldFromResponse(t, rec)
+	if !res.Attempted || !res.Promoted {
+		t.Fatalf("expected the domain route create to auto-apply and promote, got %+v", res)
+	}
+
+	after := realDig(t, dnsdistPort, "host.corp-consistency-test.example", "A")
+	if after != "203.0.113.30" {
+		t.Fatalf("expected the routed suffix to now answer from the route's own upstream (203.0.113.30), got %q", after)
+	}
+}
+
+// startFakeUpstreamForHTTPTest is a minimal local copy of
+// internal/hostagentd's own startFakeUpstream (a real, controlled fake
+// DNS server, no internet-egress dependency) -- duplicated rather than
+// exported across packages for a single test fixture.
+func startFakeUpstreamForHTTPTest(t *testing.T, answerIP string) string {
+	t.Helper()
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	ip4 := net.ParseIP(answerIP).To4()
+	go func() {
+		buf := make([]byte, 512)
+		for {
+			n, addr, err := conn.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			if resp := buildFakeDNSAnswer(buf[:n], ip4); resp != nil {
+				conn.WriteToUDP(resp, addr)
+			}
+		}
+	}()
+	return conn.LocalAddr().String()
+}
+
+func buildFakeDNSAnswer(query []byte, ip4 net.IP) []byte {
+	if len(query) < 12 || ip4 == nil {
+		return nil
+	}
+	id := query[0:2]
+	i := 12
+	for i < len(query) {
+		l := int(query[i])
+		if l == 0 {
+			i++
+			break
+		}
+		i += l + 1
+	}
+	i += 4
+	if i > len(query) {
+		return nil
+	}
+	question := query[12:i]
+
+	var resp []byte
+	resp = append(resp, id...)
+	resp = append(resp, 0x81, 0x80)
+	resp = append(resp, 0x00, 0x01)
+	resp = append(resp, 0x00, 0x01)
+	resp = append(resp, 0x00, 0x00)
+	resp = append(resp, 0x00, 0x00)
+	resp = append(resp, question...)
+	resp = append(resp, 0xC0, 0x0C)
+	resp = append(resp, 0x00, 0x01)
+	resp = append(resp, 0x00, 0x01)
+	ttl := make([]byte, 4)
+	binary.BigEndian.PutUint32(ttl, 60)
+	resp = append(resp, ttl...)
+	resp = append(resp, 0x00, 0x04)
+	resp = append(resp, ip4...)
+	return resp
 }

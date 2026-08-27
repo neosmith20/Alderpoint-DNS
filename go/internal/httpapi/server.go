@@ -15,6 +15,7 @@ import (
 	"alderpointdns/go-controlplane/internal/dnstransports"
 	"alderpointdns/go-controlplane/internal/hostagent"
 	"alderpointdns/go-controlplane/internal/importer"
+	"alderpointdns/go-controlplane/internal/domainrouting"
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/notifications"
 	"alderpointdns/go-controlplane/internal/policy"
@@ -36,6 +37,7 @@ type Server struct {
 	Upstreams     *upstreams.Service
 	Clients       *clients.Service
 	Policy        *policy.Service
+	DomainRouting *domainrouting.Service
 	CustomRules   *customrules.Service
 	Backup        *backup.Service
 	DNSTransports *dnstransports.Service
@@ -141,6 +143,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/upstreams/{id}/disable", requireAuth(s.handleDisableUpstream))
 	mux.HandleFunc("DELETE /api/upstreams/{id}", requireAuth(s.handleDeleteUpstream))
 	mux.HandleFunc("POST /api/upstreams/reorder", requireAuth(s.handleReorderUpstreams))
+	mux.HandleFunc("GET /api/domain-routing", requireAuth(s.handleListDomainRoutes))
+	mux.HandleFunc("POST /api/domain-routing", requireAuth(s.handleCreateDomainRoute))
+	mux.HandleFunc("DELETE /api/domain-routing/{id}", requireAuth(s.handleDeleteDomainRoute))
 
 	mux.HandleFunc("GET /api/groups", requireAuth(s.handleListGroups))
 	mux.HandleFunc("POST /api/groups", requireAuth(s.handleCreateGroup))

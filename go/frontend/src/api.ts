@@ -191,6 +191,14 @@ export interface UpstreamMutationResult {
   was_last_enabled?: boolean;
 }
 
+export interface DomainRoute {
+  id: number;
+  match_kind: "exact" | "suffix";
+  domain: string;
+  upstream_profile_id: string;
+  created_at: string;
+}
+
 export interface AnalyticsBucket {
   bucket_start: number;
   bucket_start_iso: string;
@@ -635,6 +643,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ ordered_upstream_profile_ids: orderedIds }),
     }),
+
+  listDomainRoutes: (signal?: AbortSignal) => req<{ rules: DomainRoute[] }>("/api/domain-routing", undefined, signal),
+  createDomainRoute: (body: { match_kind: "exact" | "suffix"; domain: string; upstream_profile_id: string }) =>
+    req<{ status: string; rule: DomainRoute; dns_runtime?: DNSRuntimeApplyResult }>("/api/domain-routing", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  deleteDomainRoute: (id: number) =>
+    req<{ status: string; dns_runtime?: DNSRuntimeApplyResult }>(`/api/domain-routing/${id}`, { method: "DELETE" }),
 
   listGroups: (signal?: AbortSignal) => req<{ groups: ClientGroup[] }>("/api/groups", undefined, signal),
   createGroup: (name: string, priority: number) =>

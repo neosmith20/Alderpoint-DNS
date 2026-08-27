@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, ApiError, type UpstreamProfile, type UpstreamEndpointInput, type DNSRuntimeApplyResult } from "../api";
+  import { api, ApiError, type UpstreamProfile, type UpstreamEndpointInput, type DNSRuntimeApplyResult, type DomainRoute } from "../api";
   import { StaleGuard } from "../staleGuard";
   import { router } from "../router.svelte";
   import DataGrid from "./DataGrid.svelte";
@@ -50,8 +50,63 @@
     }
   }
 
+  // --- domain routing (see internal/domainrouting's own doc comment:
+  // one flat global list of exact/suffix rules, not Python's real
+  // per-network rulesets -- a route is real and auto-applies through
+  // the same DNS runtime every other mutation on this page does) ---
+  let domainRoutes = $state<DomainRoute[]>([]);
+  let routeMatchKind = $state<"exact" | "suffix">("suffix");
+  let routeDomain = $state("");
+  let routeProfileID = $state("");
+  let routeBusy = $state(false);
+  let routeError = $state("");
+  const routeGuard = new StaleGuard();
+
+  async function refreshRoutes(): Promise<void> {
+    const token = routeGuard.start();
+    try {
+      const resp = await api.listDomainRoutes(router.signal());
+      if (!routeGuard.isCurrent(token)) return;
+      domainRoutes = resp.rules;
+    } catch (err) {
+      if (!routeGuard.isCurrent(token)) return;
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      routeError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  async function submitRoute(e: Event) {
+    e.preventDefault();
+    routeError = "";
+    routeBusy = true;
+    try {
+      const resp = await api.createDomainRoute({ match_kind: routeMatchKind, domain: routeDomain.trim(), upstream_profile_id: routeProfileID });
+      dnsRuntimeResult = resp.dns_runtime ?? null;
+      routeDomain = "";
+      await refreshRoutes();
+    } catch (err) {
+      routeError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      routeBusy = false;
+    }
+  }
+
+  async function deleteRoute(r: DomainRoute) {
+    routeBusy = true;
+    try {
+      const resp = await api.deleteDomainRoute(r.id);
+      dnsRuntimeResult = resp.dns_runtime ?? null;
+      await refreshRoutes();
+    } catch (err) {
+      routeError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      routeBusy = false;
+    }
+  }
+
   onMount(() => {
     refresh();
+    refreshRoutes();
   });
 
   function resetForm() {
@@ -288,6 +343,47 @@
       {/if}
     {/snippet}
   </DataGrid>
+
+  <div class="card">
+    <h3>Domain Routing</h3>
+    <p class="scope-note">
+      A flat, global list of exact/suffix domain rules that send matching queries to a different
+      upstream profile instead of the default one -- not yet per-network like Python's own design
+      (see the parity matrix). The most specific match always wins.
+    </p>
+
+    <form class="route-form" onsubmit={submitRoute}>
+      <select bind:value={routeMatchKind} aria-label="Match kind">
+        <option value="suffix">Suffix (matches subdomains too)</option>
+        <option value="exact">Exact (this name only)</option>
+      </select>
+      <input type="text" placeholder="corp.example.com" bind:value={routeDomain} required aria-label="Domain" />
+      <select bind:value={routeProfileID} required aria-label="Upstream profile">
+        <option value="" disabled selected>Upstream profile…</option>
+        {#each profiles as p (p.upstream_profile_id)}
+          <option value={p.upstream_profile_id}>{p.name}</option>
+        {/each}
+      </select>
+      <button type="submit" disabled={routeBusy || !routeProfileID}>{routeBusy ? "Adding…" : "Add Route"}</button>
+    </form>
+    {#if routeError}<p class="error" role="alert">{routeError}</p>{/if}
+
+    <table class="routes-table">
+      <thead><tr><th>Match</th><th>Domain</th><th>Upstream</th><th>Actions</th></tr></thead>
+      <tbody>
+        {#each domainRoutes as r (r.id)}
+          <tr>
+            <td>{r.match_kind}</td>
+            <td>{r.domain}</td>
+            <td>{profiles.find((p) => p.upstream_profile_id === r.upstream_profile_id)?.name ?? r.upstream_profile_id}</td>
+            <td><button onclick={() => deleteRoute(r)} disabled={routeBusy}>Delete</button></td>
+          </tr>
+        {:else}
+          <tr class="empty-row"><td colspan="4">No domain routes configured.</td></tr>
+        {/each}
+      </tbody>
+    </table>
+  </div>
 </section>
 
 <style>
@@ -313,4 +409,12 @@
   .confirm-last { margin-top: 0.5rem; padding: 0.6rem 0.8rem; border-radius: 6px; background: var(--attention-bg); display: flex; flex-direction: column; gap: 0.4rem; max-width: 26rem; }
   .confirm-last p { margin: 0; font-size: 0.85rem; }
   .danger { background: var(--badge-danger-bg); color: var(--badge-danger-fg); }
+  .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); display: flex; flex-direction: column; gap: 0.75rem; }
+  .card h3 { margin: 0; }
+  .scope-note { font-size: 0.85rem; opacity: 0.75; max-width: 50rem; }
+  .route-form { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+  .route-form input { flex: 1 1 12rem; }
+  .routes-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  .routes-table th, .routes-table td { text-align: left; padding: 0.3rem 0.6rem; border-bottom: 1px solid var(--border); }
+  .empty-row td { opacity: 0.6; font-style: italic; }
 </style>

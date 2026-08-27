@@ -440,3 +440,95 @@ func TestCompileNamedConfRndcPortAndKeyMustBeGivenTogether(t *testing.T) {
 		t.Fatal("expected an error when RNDCPort is set without RNDCKey")
 	}
 }
+
+func TestCompileDnsdistDomainRoutingSuffixMatch(t *testing.T) {
+	in := minimalInput()
+	in.DomainRoutes = []DomainRoute{{
+		MatchKind: "suffix", Domain: "corp.example.com", ProfileID: "corp-dns",
+		Profile: UpstreamProfile{Transport: "plain", Strategy: "ordered", Endpoints: []UpstreamEndpoint{{Address: "10.9.9.9:53"}}},
+	}}
+	out, err := CompileDnsdist(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, `SuffixMatchNodeRule({"corp.example.com."})`) {
+		t.Fatalf("expected a suffix-match routing rule, got:\n%s", out)
+	}
+	if !strings.Contains(out, `PoolAction("route_corp-dns")`) {
+		t.Fatalf("expected a PoolAction targeting the route's own pool, got:\n%s", out)
+	}
+	if !strings.Contains(out, `newServer({address="10.9.9.9:53", pool="route_corp-dns"})`) {
+		t.Fatalf("expected the route's own upstream server bound to its own pool, got:\n%s", out)
+	}
+	checkDnsdist(t, out)
+}
+
+func TestCompileDnsdistDomainRoutingExactMatchUsesQNameRule(t *testing.T) {
+	in := minimalInput()
+	in.DomainRoutes = []DomainRoute{{
+		MatchKind: "exact", Domain: "single.example.com", ProfileID: "single-dns",
+		Profile: UpstreamProfile{Transport: "plain", Strategy: "ordered", Endpoints: []UpstreamEndpoint{{Address: "10.9.9.8:53"}}},
+	}}
+	out, err := CompileDnsdist(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, `QNameRule("single.example.com.")`) {
+		t.Fatalf("expected an exact QNameRule match (not a suffix rule that would also match subdomains), got:\n%s", out)
+	}
+	checkDnsdist(t, out)
+}
+
+// TestCompileDnsdistDomainRoutingMostSpecificSuffixWinsRegardlessOfOrder
+// is the direct precedence proof: a deeper/longer suffix rule must be
+// emitted (and therefore win, PoolAction being terminal) before a
+// shorter one that also matches the same query, regardless of the
+// order the rules were supplied in -- matching Python's own real fix
+// for this exact precedence bug in dnsdist_gen.py/dnsdist_policy_runtime.py.
+func TestCompileDnsdistDomainRoutingMostSpecificSuffixWinsRegardlessOfOrder(t *testing.T) {
+	broad := DomainRoute{MatchKind: "suffix", Domain: "example.com", ProfileID: "broad", Profile: UpstreamProfile{Transport: "plain", Endpoints: []UpstreamEndpoint{{Address: "10.0.0.1:53"}}}}
+	narrow := DomainRoute{MatchKind: "suffix", Domain: "deep.corp.example.com", ProfileID: "narrow", Profile: UpstreamProfile{Transport: "plain", Endpoints: []UpstreamEndpoint{{Address: "10.0.0.2:53"}}}}
+
+	inBroadFirst := minimalInput()
+	inBroadFirst.DomainRoutes = []DomainRoute{broad, narrow}
+	outBroadFirst, err := CompileDnsdist(inBroadFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	inNarrowFirst := minimalInput()
+	inNarrowFirst.DomainRoutes = []DomainRoute{narrow, broad}
+	outNarrowFirst, err := CompileDnsdist(inNarrowFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if outBroadFirst != outNarrowFirst {
+		t.Fatalf("expected input order not to matter, got two different outputs:\n---broad-first---\n%s\n---narrow-first---\n%s", outBroadFirst, outNarrowFirst)
+	}
+	narrowIdx := strings.Index(outBroadFirst, `PoolAction("route_narrow")`)
+	broadIdx := strings.Index(outBroadFirst, `PoolAction("route_broad")`)
+	if narrowIdx < 0 || broadIdx < 0 || narrowIdx > broadIdx {
+		t.Fatalf("expected the more specific 'deep.corp.example.com' rule before the broader 'example.com' one, got:\n%s", outBroadFirst)
+	}
+	checkDnsdist(t, outBroadFirst)
+}
+
+func TestCompileDnsdistDomainRoutingRejectsInvalidMatchKind(t *testing.T) {
+	in := minimalInput()
+	in.DomainRoutes = []DomainRoute{{MatchKind: "wildcard", Domain: "example.com", ProfileID: "x", Profile: UpstreamProfile{Transport: "plain", Endpoints: []UpstreamEndpoint{{Address: "10.0.0.1:53"}}}}}
+	if _, err := CompileDnsdist(in); err == nil {
+		t.Fatal("expected an error for an unsupported match_kind")
+	}
+}
+
+func TestCompileDnsdistDomainRoutingRejectsConflictingRulesForTheSameDomain(t *testing.T) {
+	in := minimalInput()
+	in.DomainRoutes = []DomainRoute{
+		{MatchKind: "suffix", Domain: "example.com", ProfileID: "profile-a", Profile: UpstreamProfile{Transport: "plain", Endpoints: []UpstreamEndpoint{{Address: "10.0.0.1:53"}}}},
+		{MatchKind: "suffix", Domain: "example.com.", ProfileID: "profile-b", Profile: UpstreamProfile{Transport: "plain", Endpoints: []UpstreamEndpoint{{Address: "10.0.0.2:53"}}}},
+	}
+	if _, err := CompileDnsdist(in); err == nil {
+		t.Fatal("expected an error for two different profiles claiming the same normalized domain+match_kind")
+	}
+}

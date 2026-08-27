@@ -20,6 +20,7 @@ import (
 	"alderpointdns/go-controlplane/internal/customrules"
 	"alderpointdns/go-controlplane/internal/dbmigrate"
 	"alderpointdns/go-controlplane/internal/dnstransports"
+	"alderpointdns/go-controlplane/internal/domainrouting"
 	"alderpointdns/go-controlplane/internal/hostagent"
 	"alderpointdns/go-controlplane/internal/hostagentd"
 	"alderpointdns/go-controlplane/internal/localdns"
@@ -151,6 +152,56 @@ func TestBuildGathersEveryConfiguredSource(t *testing.T) {
 	}
 	if in.BlockingResponseMode != "refused" {
 		t.Errorf("expected the global policy layer's blocking_response_mode to be gathered, got %q", in.BlockingResponseMode)
+	}
+}
+
+// TestBuildGathersDomainRoutingRules proves the orchestrator resolves a
+// stored domain_routing_rules row into a full dnscompile.DomainRoute
+// (real endpoints/transport/strategy, not just an unresolved profile
+// ID), and skips a rule whose referenced profile no longer exists
+// rather than failing the whole compile over it.
+func TestBuildGathersDomainRoutingRules(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	up := &upstreams.Service{DB: db}
+	if err := up.Create(ctx, "corp-dns", "Corp DNS", "plain", "ordered", []upstreams.Endpoint{{Address: "10.9.9.9:53", Weight: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	dr := &domainrouting.Service{DB: db}
+	if _, err := dr.Create(ctx, "suffix", "corp.example.com", "corp-dns"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dr.Create(ctx, "suffix", "stale.example.com", "never-created"); err == nil {
+		t.Fatal("expected Create itself to reject an unknown upstream_profile_id -- this test relies on that to seed the 'stale reference' case below via direct SQL instead")
+	}
+	// Seed a rule referencing a profile that existed at creation time but
+	// was deleted afterward (Create's own existence check can't produce
+	// this state -- a real delete after the fact can).
+	if err := up.Create(ctx, "temp-dns", "Temp DNS", "plain", "ordered", []upstreams.Endpoint{{Address: "10.9.9.8:53", Weight: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dr.Create(ctx, "exact", "gone.example.com", "temp-dns"); err != nil {
+		t.Fatal(err)
+	}
+	if err := up.Delete(ctx, "temp-dns"); err != nil {
+		t.Fatal(err)
+	}
+
+	o := &Orchestrator{Upstreams: up, DomainRouting: dr, DnsdistListenAddress: "127.0.0.1:15353"}
+	in, _, _, err := o.build(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(in.DomainRoutes) != 1 {
+		t.Fatalf("expected exactly 1 resolvable domain route (the stale-profile one skipped), got %+v", in.DomainRoutes)
+	}
+	got := in.DomainRoutes[0]
+	if got.Domain != "corp.example.com" || got.MatchKind != "suffix" || got.ProfileID != "corp-dns" {
+		t.Fatalf("unexpected resolved route: %+v", got)
+	}
+	if len(got.Profile.Endpoints) != 1 || got.Profile.Endpoints[0].Address != "10.9.9.9:53" {
+		t.Fatalf("expected the route's profile to carry its real endpoint, got %+v", got.Profile)
 	}
 }
 
