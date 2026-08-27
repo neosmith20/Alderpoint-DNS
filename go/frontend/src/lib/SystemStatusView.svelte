@@ -10,23 +10,27 @@
   // (perfLog.svelte.ts, fed by router.svelte.ts + RouteLoader.svelte --
   // real navigate()-to-component-ready latency, not synthetic numbers).
   //
-  // Node Identity, Discovery status, DNS Performance benchmark, and BIND
-  // Cache Counters are not built, disclosed rather than hidden:
-  //   - Node Identity lives inside Python's control.db itself
-  //     (app/v2/node_identity.py's ensure_schema calls
-  //     control_db.initialize) -- the same isolation concern already
-  //     refused for Observed Clients/discovery and Replication (a
-  //     read-only mount would sit alongside admin password hashes).
-  //   - BIND Cache Counters need the same live rndc/stats control-plane
-  //     access documented as currently infeasible on the Cache row.
-  //   - DNS Performance benchmark issues real queries through BIND/
-  //     dnsdist and needs the same live-runtime reach as Cache/BIND
-  //     Cache Counters.
+  // Node Identity is real (2026-08-27): it already lives inside Python's
+  // control.db, but internal/hostagentd's own Replication ops already
+  // read it via a real, root-owned, redacted read (never the secret
+  // columns) for the Replication page -- GET /api/replication/status's
+  // own response already carries node_identity, this page was simply
+  // never wired to fetch it. No new backend needed, matching the same
+  // "the matrix said blocked, the code already isn't" correction this
+  // session already made for Dashboard's Upstreams/Clients mini-panels.
+  //
+  // Discovery status, DNS Performance benchmark, and BIND Cache Counters
+  // are still not built, disclosed rather than hidden:
   //   - Discovery status is a Python-side pipeline this migration hasn't
   //     built a compatibility boundary for.
+  //   - DNS Performance benchmark issues real queries through BIND/
+  //     dnsdist and BIND Cache Counters needs BIND's stats-channels --
+  //     real work beyond this session's scope, not re-attempted here.
 
   let health = $state<Awaited<ReturnType<typeof api.health>> | null>(null);
   let sysStatus = $state<Awaited<ReturnType<typeof api.systemStatus>> | null>(null);
+  let replication = $state<Awaited<ReturnType<typeof api.replicationStatus>> | null>(null);
+  let replicationError = $state("");
   let loadError = $state("");
 
   async function refresh() {
@@ -37,6 +41,14 @@
       sysStatus = s;
     } catch (err) {
       loadError = err instanceof ApiError ? err.message : String(err);
+    }
+    replicationError = "";
+    try {
+      replication = await api.replicationStatus();
+    } catch (err) {
+      // Honest degraded, not fatal to the rest of the page -- matches
+      // every other optional host-agent-backed card's contract.
+      replicationError = err instanceof ApiError ? err.message : String(err);
     }
   }
 
@@ -72,9 +84,8 @@
 <section aria-labelledby="health-heading" class="system-status">
   <h2 id="health-heading">System Status</h2>
   <p class="scope-note">
-    Metric strip, Components, and UI Performance are real. Node Identity, Discovery status, DNS
-    Performance benchmark, and BIND Cache Counters are not built yet -- see the parity matrix for
-    why (control.db isolation and live-runtime-control reach this control plane doesn't have).
+    Metric strip, Components, UI Performance, and Node Identity are real. Discovery status, DNS
+    Performance benchmark, and BIND Cache Counters are not built yet -- see the parity matrix.
   </p>
 
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
@@ -102,6 +113,27 @@
           {/each}
         </tbody>
       </table>
+    {/if}
+  </div>
+
+  <div class="card">
+    <h3>Node Identity</h3>
+    {#if replicationError}
+      <p class="status-unavailable">Unavailable: {replicationError}</p>
+    {:else if !replication}
+      <p class="hint">…</p>
+    {:else if !replication.node_identity}
+      <p class="hint">No node identity recorded yet.</p>
+    {:else}
+      {@const id = replication.node_identity}
+      <div class="metric-strip">
+        <div class="metric"><span class="label">Node ID</span><span class="value mono">{id.node_id}</span></div>
+        <div class="metric"><span class="label">Display name</span><span class="value">{id.display_name || "(unnamed)"}</span></div>
+        <div class="metric"><span class="label">Created</span><span class="value">{timestampPref.format(id.created_at)}</span></div>
+        {#if id.regenerated_at}
+          <div class="metric"><span class="label">Regenerated</span><span class="value">{timestampPref.format(id.regenerated_at)}</span></div>
+        {/if}
+      </div>
     {/if}
   </div>
 
@@ -187,6 +219,7 @@
   .metric { border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem 1rem; background: var(--card-bg); min-width: 8rem; }
   .metric .label { display: block; font-size: 0.75rem; opacity: 0.65; }
   .metric .value { display: block; font-size: 1.1rem; font-weight: 600; }
+  .metric .value.mono { font-family: monospace; font-size: 0.85rem; word-break: break-all; }
   .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); display: flex; flex-direction: column; gap: 0.6rem; }
   .card h3 { margin: 0; }
   .scope { font-size: 0.75rem; font-weight: 400; opacity: 0.6; }

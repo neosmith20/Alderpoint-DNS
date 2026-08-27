@@ -82,6 +82,19 @@ async function main() {
     const nodeIdText = await page.$eval(".replication code", (el) => el.textContent).catch(() => "");
     check("Replication page shows the real node identity from control.db", /^[0-9a-f-]{36}$/.test(nodeIdText.trim()), nodeIdText);
 
+    // --- System Status: Node Identity card (2026-08-27 -- reuses the
+    // same replication.status read, no new backend) ---
+    check("System Status nav item exists and is clickable", await clickNav("System Status"));
+    await page.waitForSelector("#health-heading", { timeout: 3000 }).catch(() => {});
+    check("System Status page content rendered", (await page.$("#health-heading")) !== null);
+    await page.waitForFunction(() => document.querySelector(".system-status .mono") !== null, { timeout: 3000 }).catch(() => {});
+    const sysStatusNodeId = await page.$eval(".system-status .mono", (el) => el.textContent).catch(() => "");
+    check(
+      "System Status's Node Identity card shows the real node identity, matching Replication's",
+      /^[0-9a-f-]{36}$/.test(sysStatusNodeId.trim()) && sysStatusNodeId.trim() === nodeIdText.trim(),
+      `system-status=${sysStatusNodeId} replication=${nodeIdText}`,
+    );
+
     // --- Network Configuration ---
     check("Network Configuration nav item exists and is clickable", await clickNav("Network Configuration"));
     await page.waitForSelector("#network-heading", { timeout: 3000 }).catch(() => {});
