@@ -17,6 +17,7 @@ package httpapi
 // substitution, never a silently-zero result indistinguishable from real
 // quiet traffic.
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -30,6 +31,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"alderpointdns/go-controlplane/internal/analyticssnapshot"
 	"alderpointdns/go-controlplane/internal/pyanalytics"
 )
 
@@ -124,20 +126,53 @@ func liveWriterChurn(t *testing.T, path string, stop <-chan struct{}) {
 	}
 }
 
-func newLiveWriterAnalyticsServer(t *testing.T) (*Server, string, chan struct{}) {
+// liveSnapshotPublisher runs analyticssnapshot.Refresh on a tight loop
+// until stop is closed -- the test-scale stand-in for
+// apdns-hostagent's own ticker (internal/hostagentd/
+// ops_analyticssnapshot.go), so these HTTP-layer tests exercise the
+// real, current architecture end-to-end (source -> published snapshot
+// -> Reader) rather than pointing the reader at a live file directly
+// (see internal/pyanalytics's own doc comment for why that's no longer
+// how this works at all).
+func liveSnapshotPublisher(t *testing.T, source, published, staging string, stop <-chan struct{}) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "aggregates.db")
-	liveWriterSchema(t, path)
+	for {
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		analyticssnapshot.Refresh(context.Background(), source, published, staging, 3)
+	}
+}
 
-	analytics, err := pyanalytics.Open(path)
+func newLiveWriterAnalyticsServer(t *testing.T) (s *Server, sourcePath string, stop chan struct{}) {
+	t.Helper()
+	dir := t.TempDir()
+	sourcePath = filepath.Join(dir, "aggregates.db")
+	published := filepath.Join(dir, "published")
+	staging := filepath.Join(dir, "staging")
+	liveWriterSchema(t, sourcePath)
+
+	// Publish an initial generation synchronously so the very first HTTP
+	// request in a test doesn't race an empty published dir.
+	if _, err := analyticssnapshot.Refresh(context.Background(), sourcePath, published, staging, 3); err != nil {
+		t.Fatal(err)
+	}
+
+	analytics, err := pyanalytics.Open(published)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { analytics.Close() })
 
-	s := newHealthTestServer(t, analytics)
-	stop := make(chan struct{})
-	return s, path, stop
+	stop = make(chan struct{})
+	publisherDone := make(chan struct{})
+	go func() { defer close(publisherDone); liveSnapshotPublisher(t, sourcePath, published, staging, stop) }()
+	t.Cleanup(func() { <-publisherDone })
+
+	s = newHealthTestServer(t, analytics)
+	return s, sourcePath, stop
 }
 
 // TestDNSActivityLastHourAndTopDomainsLast24hStayBoundedUnderALiveWriter
@@ -253,21 +288,35 @@ func TestDNSActivityLastHourAndTopDomainsLast24hStayBoundedUnderALiveWriter(t *t
 // degraded=true with the real reason and an empty result -- never a
 // false "ok", never silently-empty-without-explanation.
 func TestDNSActivityLastHourAndTopDomainsLast24hStayDegradedOnRealCorruption(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "aggregates.db")
-	liveWriterSchema(t, path)
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "aggregates.db")
+	published := filepath.Join(dir, "published")
+	staging := filepath.Join(dir, "staging")
+	liveWriterSchema(t, sourcePath)
 
-	raw, err := os.ReadFile(path)
+	// Publish one real generation, then corrupt ITS published db file
+	// directly -- simulating corruption independent of the source (see
+	// internal/pyanalytics/reader_test.go's identical technique and its
+	// own comment on why this is the right level to inject it at).
+	if _, err := analyticssnapshot.Refresh(context.Background(), sourcePath, published, staging, 3); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := analyticssnapshot.ResolveCurrent(published)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(resolved.DBPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := 150; i < 4096 && i < len(raw); i++ {
 		raw[i] = 0xFF
 	}
-	if err := os.WriteFile(path, raw, 0o644); err != nil {
+	if err := os.WriteFile(resolved.DBPath, raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	analytics, err := pyanalytics.Open(path)
+	analytics, err := pyanalytics.Open(published)
 	if err != nil {
 		t.Fatal(err)
 	}

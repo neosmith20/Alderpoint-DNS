@@ -217,7 +217,7 @@ func runWeb(args []string) {
 	staticDir := fs.String("static", "./frontend/dist", "compiled frontend dist dir")
 	migrationsDir := fs.String("migrations", "./schema/migrations", "migrations directory")
 	addr := fs.String("addr", "", "listen address override (host:port); defaults to config web.listen_address:listen_port")
-	analyticsDBPath := fs.String("analytics-db", "", "optional read-only path to Python's analytics/aggregates.db (compatibility boundary, see internal/pyanalytics); empty = Dashboard analytics reports degraded")
+	analyticsSnapshotDir := fs.String("analytics-snapshot-dir", "", "optional read-only path to apdns-hostagent's published analytics snapshot directory (see internal/analyticssnapshot, internal/pyanalytics) -- NOT a direct path to Python's live aggregates.db, see those packages' doc comments for why; empty = Dashboard analytics reports degraded")
 	analyticsWorkerHeartbeatsDir := fs.String("analytics-worker-heartbeats-dir", "", "optional read-only path to Python's worker-heartbeats/ directory (see internal/pyanalytics/health.go); empty = Analytics health cannot distinguish a dead writer from genuinely quiet traffic")
 	analyticsInboxDir := fs.String("analytics-inbox-dir", "", "optional read-only path to Python's analytics/inbox/ directory (queue depth for Analytics health); empty = queue depth unavailable")
 	queryLogDir := fs.String("query-log-dir", "", "optional read-only path to Python's analytics/queries/ raw Parquet history (compatibility boundary, see internal/rawquerylog); empty = Query Log reports degraded")
@@ -275,10 +275,10 @@ func runWeb(args []string) {
 	// a startup crash -- "DNS works if analytics is dead" applies to this
 	// control plane's own dashboard too.
 	var analyticsReader *pyanalytics.Reader
-	if *analyticsDBPath != "" {
-		reader, err := pyanalytics.Open(*analyticsDBPath)
+	if *analyticsSnapshotDir != "" {
+		reader, err := pyanalytics.Open(*analyticsSnapshotDir)
 		if err != nil {
-			logger.Warn("analytics reader unavailable at startup; dashboard analytics will report degraded", "path", *analyticsDBPath, "err", err)
+			logger.Warn("analytics reader unavailable at startup; dashboard analytics will report degraded", "path", *analyticsSnapshotDir, "err", err)
 		} else {
 			reader.WorkerHeartbeatsDir = *analyticsWorkerHeartbeatsDir
 			reader.InboxDir = *analyticsInboxDir

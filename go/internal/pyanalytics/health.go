@@ -41,6 +41,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"alderpointdns/go-controlplane/internal/analyticssnapshot"
 )
 
 // analyticsWorkerName and analyticsWorkerIntervalSeconds mirror
@@ -171,6 +173,20 @@ type AnalyticsHealth struct {
 	// still be visible, never silently absorbed.
 	CorruptRetryCount int64 `json:"corrupt_retry_count"`
 
+	// SnapshotGeneratedAt/SnapshotAgeSeconds/SnapshotStale/
+	// SnapshotSourceJournalMode describe apdns-hostagent's own published
+	// analytics snapshot (see internal/analyticssnapshot) this reader is
+	// actually reading -- a distinct signal from WriterStale below (that
+	// one is about whether PYTHON's writer is alive; this one is about
+	// whether the SNAPSHOT PIPELINE between Python's data and this
+	// process is keeping up). Zero/empty only when no generation has
+	// ever been published yet, which DBReachable=false/Status=failed
+	// already covers.
+	SnapshotGeneratedAt       *float64 `json:"snapshot_generated_at,omitempty"`
+	SnapshotAgeSeconds        *float64 `json:"snapshot_age_seconds,omitempty"`
+	SnapshotStale             bool     `json:"snapshot_stale"`
+	SnapshotSourceJournalMode string   `json:"snapshot_source_journal_mode,omitempty"`
+
 	WriterConfigured    bool     `json:"writer_heartbeat_configured"`
 	WriterStatus        string   `json:"writer_status,omitempty"`
 	WriterStale         bool     `json:"writer_stale"`
@@ -263,6 +279,20 @@ func (r *Reader) Health(ctx context.Context) AnalyticsHealth {
 		}
 	}
 
+	if v := r.lastManifest.Load(); v != nil {
+		m := v.(analyticssnapshot.Manifest)
+		generatedAt := m.GeneratedAt
+		age := float64(time.Now().Unix()) - generatedAt
+		h.SnapshotGeneratedAt = &generatedAt
+		h.SnapshotAgeSeconds = &age
+		h.SnapshotSourceJournalMode = m.SourceJournalMode
+		staleAfter := r.StaleAfter
+		if staleAfter <= 0 {
+			staleAfter = DefaultStaleAfter
+		}
+		h.SnapshotStale = age > staleAfter.Seconds()
+	}
+
 	if h.Status == "failed" {
 		return h
 	}
@@ -275,6 +305,13 @@ func (r *Reader) Health(ctx context.Context) AnalyticsHealth {
 			reason = fmt.Sprintf("%s (last error: %s)", reason, h.WriterLastError)
 		}
 		h.Reason = reason + " -- DNS is unaffected, but displayed analytics may be stale or incomplete, not confirmed zero traffic"
+	case h.SnapshotStale:
+		h.Status = "degraded"
+		age := 0.0
+		if h.SnapshotAgeSeconds != nil {
+			age = *h.SnapshotAgeSeconds
+		}
+		h.Reason = fmt.Sprintf("analytics snapshot is %.0fs old -- apdns-hostagent's published-snapshot refresh appears stalled -- DNS is unaffected, but displayed analytics may be stale, not confirmed current", age)
 	default:
 		h.Status = "ok"
 	}

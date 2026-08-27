@@ -1,22 +1,29 @@
-// Package deployperm is a real, permanent regression test for a real
-// deployed-UID integration defect found live on the :10443 preview:
+// Package deployperm is a real, permanent regression test for real
+// deployed-UID integration defects found live on the :10443 preview:
 // once the container's web process was switched from running as root
 // to its real unprivileged UID (see PARITY_MATRIX.md's host-control
-// boundary section), it could no longer open Python's read-only
-// aggregates.db/server.crt mounts at all -- both directories are
-// owned `_dnsdist:bind` mode 750 (files 640/644), a real host-side
-// group ACL Python's own packaging already sets up, and the
-// unprivileged web UID was not a member of that group, either on the
-// host or -- more subtly, and the actual root cause -- inside the
-// container process, which podman's `--user UID:GID` does not
-// automatically inherit from the host's own `/etc/group` even when
-// the host user IS a member. The real fix is podman's `--group-add
-// <gid>`, granting exactly that one supplementary GID to the
-// containerized process; this test proves the underlying mechanism
-// with a real, disposable two-real-UID subprocess (never a mock),
-// mirroring internal/hostagentd's own established pattern for this
-// exact class of "looks fine as root, breaks for real once
-// unprivileged" bug.
+// boundary section), it could no longer open some of Python's mounts at
+// all.
+//
+// Two real scenarios covered:
+//
+//   - Certs: server.crt lives under a root-owned, group-restricted
+//     (750/640) directory tree -- the exact shape Python's own
+//     packaging already produces -- unreadable by a real unprivileged
+//     UID with no matching supplementary group, readable once that one
+//     GID is granted (podman `--group-add <gid>`).
+//   - Analytics: as of the 2026-08-27 "database disk image is
+//     malformed" incident's fix (see internal/analyticssnapshot's own
+//     doc comment), the web process no longer reads Python's live
+//     aggregates.db at all -- it reads a published snapshot
+//     apdns-hostagent (root) produces, through its own separate
+//     read-only mount. That snapshot directory is entirely
+//     hostagent-owned and deliberately world-readable (no secrets in
+//     aggregate query stats), so this second scenario proves the
+//     OPPOSITE of the certs one: a completely unprivileged UID with NO
+//     special group at all can read it, through a real kernel-enforced
+//     read-only bind mount -- the group-ACL dance the old direct-read
+//     design needed for analytics is gone entirely, not just patched.
 package deployperm
 
 import (
@@ -26,20 +33,22 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"testing"
 
+	"golang.org/x/sys/unix"
+
 	_ "modernc.org/sqlite"
 
+	"alderpointdns/go-controlplane/internal/analyticssnapshot"
 	"alderpointdns/go-controlplane/internal/pyanalytics"
 	"alderpointdns/go-controlplane/internal/tlscert"
 )
 
 const (
-	reexecEnv   = "APDNS_DEPLOYPERM_REEXEC_PROBE"
-	dbPathEnv   = "APDNS_DEPLOYPERM_DB_PATH"
-	certPathEnv = "APDNS_DEPLOYPERM_CERT_PATH"
+	reexecEnv       = "APDNS_DEPLOYPERM_REEXEC_PROBE"
+	publishedDirEnv = "APDNS_DEPLOYPERM_PUBLISHED_DIR"
+	certPathEnv     = "APDNS_DEPLOYPERM_CERT_PATH"
 )
 
 func TestMain(m *testing.M) {
@@ -50,13 +59,13 @@ func TestMain(m *testing.M) {
 }
 
 // runProbe is what the re-exec'd subprocess actually runs, under
-// whatever real UID/GID/supplementary-groups the parent test set on
-// it -- the exact same pyanalytics.Open+Ping and tlscert.Reader.Status
+// whatever real UID/GID/supplementary-groups the parent test set on it
+// -- the exact same pyanalytics.Open+Ping and tlscert.Reader.Status
 // calls the real deployed web binary makes.
 func runProbe() int {
 	fail := 0
-	if dbPath := os.Getenv(dbPathEnv); dbPath != "" {
-		r, err := pyanalytics.Open(dbPath)
+	if publishedDir := os.Getenv(publishedDirEnv); publishedDir != "" {
+		r, err := pyanalytics.Open(publishedDir)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "pyanalytics.Open:", err)
 			fail = 1
@@ -84,7 +93,7 @@ func runProbe() int {
 // something any single-UID in-process test could ever exercise, the
 // same reasoning internal/hostagentd's own two-real-UID tests already
 // established this session.
-func runAsRealUID(t *testing.T, uid, gid uint32, groups []uint32, dbPath, certPath string) error {
+func runAsRealUID(t *testing.T, uid, gid uint32, groups []uint32, publishedDir, certPath string) error {
 	t.Helper()
 	self, err := os.Executable()
 	if err != nil {
@@ -106,7 +115,7 @@ func runAsRealUID(t *testing.T, uid, gid uint32, groups []uint32, dbPath, certPa
 		t.Fatal(err)
 	}
 	cmd := exec.Command(self) // TestMain intercepts before any test-flag parsing matters
-	cmd.Env = append(os.Environ(), reexecEnv+"=1", dbPathEnv+"="+dbPath, certPathEnv+"="+certPath)
+	cmd.Env = append(os.Environ(), reexecEnv+"=1", publishedDirEnv+"="+publishedDir, certPathEnv+"="+certPath)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uid, Gid: gid, Groups: groups}}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -115,17 +124,18 @@ func runAsRealUID(t *testing.T, uid, gid uint32, groups []uint32, dbPath, certPa
 	return nil
 }
 
-// TestUnprivilegedUIDNeedsTheRealSupplementaryGroupACL is the real
-// regression test: a root-owned, group-restricted (750/640) directory
-// tree -- the exact shape Python's own packaging already produces for
-// aggregates.db/server.crt -- is unreadable by a real unprivileged UID
-// with no matching supplementary group (reproducing the live :10443
-// defect exactly), and becomes readable once that one GID is granted
-// as a supplementary group (reproducing the real fix: podman
-// `--group-add <gid>`, or the equivalent host-side group membership
-// for a non-containerized deployment). Skips if not run as root (this
-// test needs CAP_SETUID/CAP_SETGID to drop into a different real UID).
-func TestUnprivilegedUIDNeedsTheRealSupplementaryGroupACL(t *testing.T) {
+// TestUnprivilegedUIDNeedsTheRealSupplementaryGroupACLForCerts is the
+// real regression test for the certs half: a root-owned,
+// group-restricted (750/644) directory tree -- the exact shape
+// Python's own packaging already produces for server.crt -- is
+// unreadable by a real unprivileged UID with no matching supplementary
+// group (reproducing the live :10443 defect exactly), and becomes
+// readable once that one GID is granted as a supplementary group
+// (reproducing the real fix: podman `--group-add <gid>`, or the
+// equivalent host-side group membership for a non-containerized
+// deployment). Skips if not run as root (this test needs
+// CAP_SETUID/CAP_SETGID to drop into a different real UID).
+func TestUnprivilegedUIDNeedsTheRealSupplementaryGroupACLForCerts(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skip("must run as root to exercise a real UID/GID drop")
 	}
@@ -139,37 +149,7 @@ func TestUnprivilegedUIDNeedsTheRealSupplementaryGroupACL(t *testing.T) {
 	if err := os.Chmod(filepath.Dir(dir), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	dbPath := filepath.Join(dir, "aggregates.db")
 	certPath := filepath.Join(dir, "server.crt")
-
-	// A real, valid minimal aggregates.db -- deliberately in DELETE
-	// (rollback-journal) mode, matching the real, live aggregates.db's
-	// actual on-disk journal_mode confirmed during the 2026-08-27
-	// "database disk image is malformed" incident (PRAGMA readback
-	// against the live file reported "delete", not "wal", despite
-	// Python's own aggregates_db.py requesting WAL on every connect --
-	// see AGENT_PROGRESS.md and internal/pyanalytics/reader.go's Open
-	// doc comment for the full story). This test previously used a
-	// WAL-mode fixture and required "immutable=1" to pass -- that
-	// design is exactly what caused the live corruption bug (see
-	// internal/pyanalytics/repro_walcorrupt_test.go's
-	// TestWALCorruptionRepro_Matrix: immutable=1 produced real
-	// SQLITE_CORRUPT reads under concurrent WAL writes too, WAL mode
-	// does not make immutable=1 safe). The reader no longer uses
-	// immutable=1 at all; a plain rollback-journal-mode reader only
-	// needs "mode=ro" to be readable through a read-only mount by an
-	// unprivileged reader with a matching group (real POSIX advisory
-	// read locks need no directory write access) -- see the WAL-specific
-	// follow-up test below for the disclosed gap that remains for a
-	// genuinely WAL-mode database under this same strict mount.
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT); INSERT INTO schema_meta VALUES('version','1')`); err != nil {
-		t.Fatal(err)
-	}
-	db.Close()
 
 	// A real, valid minimal self-signed cert -- reuse the same openssl
 	// invocation pattern already used elsewhere in this session's own
@@ -181,20 +161,17 @@ func TestUnprivilegedUIDNeedsTheRealSupplementaryGroupACL(t *testing.T) {
 
 	// The real permission shape: root-owned, group-restricted, exactly
 	// matching what "ls -la" on the real /root/apdns-v2-preview-state
-	// analytics/certs directories showed live (750 dirs, 640/644 files,
-	// owner _dnsdist, group bind -- reproduced here with a throwaway
-	// numeric GID nothing else on the host uses, so this test never
-	// depends on a "bind" group actually existing).
+	// certs directory showed live (750 dirs, 640/644 files, owner
+	// _dnsdist, group bind -- reproduced here with a throwaway numeric
+	// GID nothing else on the host uses, so this test never depends on
+	// a "bind" group actually existing).
 	testGID := uint32(1_700_000 + os.Getpid()%9000)
-	for _, p := range []string{dir, dbPath, certPath, keyPath} {
+	for _, p := range []string{dir, certPath, keyPath} {
 		if err := os.Chown(p, 0, int(testGID)); err != nil {
 			t.Skipf("cannot chown in this environment: %v", err)
 		}
 	}
 	if err := os.Chmod(dir, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(dbPath, 0o640); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(certPath, 0o644); err != nil {
@@ -204,90 +181,74 @@ func TestUnprivilegedUIDNeedsTheRealSupplementaryGroupACL(t *testing.T) {
 	const unprivilegedUID = 65534 // "nobody" -- a real, always-present, definitely-not-in-testGID unprivileged UID
 	const unprivilegedGID = 65534
 
-	err = runAsRealUID(t, unprivilegedUID, unprivilegedGID, nil, dbPath, certPath)
+	err := runAsRealUID(t, unprivilegedUID, unprivilegedGID, nil, "", certPath)
 	if err == nil {
 		t.Fatal("expected a real permission failure without the supplementary group -- test does not reproduce the live defect")
 	}
 	t.Logf("confirmed: without the group ACL, the real defect reproduces: %v", err)
 
-	err = runAsRealUID(t, unprivilegedUID, unprivilegedGID, []uint32{testGID}, dbPath, certPath)
+	err = runAsRealUID(t, unprivilegedUID, unprivilegedGID, []uint32{testGID}, "", certPath)
 	if err != nil {
 		t.Fatalf("expected success once the real supplementary group is granted (the actual fix -- podman --group-add / host group membership), got: %v", err)
 	}
 }
 
-// TestReadOnlyMountCannotSupportWALEvenWithGroupAccess documents a real,
-// disclosed residual gap left by removing immutable=1 (see
-// internal/pyanalytics/reader.go's Open doc comment and
-// repro_walcorrupt_test.go): if aggregates.db ever genuinely runs in WAL
-// journal mode while the analytics directory stays a strictly
-// read-only-for-group (0750, no write bit) mount -- the real permission
-// shape Python's own packaging sets up -- this reader cannot open it at
-// all, even with the correct supplementary group, because WAL readers
-// must be able to create/update a "-shm" coordination file in that same
-// directory and mode=ro alone (without immutable=1) does not exempt
-// that. This is intentional and safe, not a bug this package should
-// paper over: failing to open cleanly (a permission error) is the
-// correct behavior per "never silently mask genuine corruption, remain
-// degraded/failed if a real problem persists" -- the alternative
-// (immutable=1) trades this honest failure for the exact live corruption
-// incident this whole test suite exists to prevent. Fixing this gap for
-// real (a group-writable directory, or Python moving off WAL for this
-// file, which the live diagnosis suggests may already effectively be the
-// case) is future work outside this package's own authority -- it would
-// touch the production analytics directory's real permissions or
-// Python's own aggregates_db.py, both explicitly out of scope here.
-func TestReadOnlyMountCannotSupportWALEvenWithGroupAccess(t *testing.T) {
+// TestPublishedAnalyticsSnapshotIsReadableByAnUnprivilegedUIDWithNoSpecialGroup
+// is the analytics half's real regression test for the NEW design: a
+// real apdns-hostagent (root) publishes a snapshot
+// (internal/analyticssnapshot.Refresh) to a directory that is then
+// exposed through a genuine kernel-enforced read-only bind mount (the
+// exact same mechanism -- and the exact real constraint that broke the
+// old direct-read design, see internal/analyticssnapshot's own
+// TestPublishedSnapshotReadThroughARealReadOnlyBindMountIsSafe) -- and
+// a completely unprivileged UID, with NO supplementary groups
+// whatsoever (unlike the certs test above), can still open and read it
+// via pyanalytics.Open. This is the concrete proof that the new
+// snapshot design doesn't just fix the corruption bug, it also removes
+// the whole class of group-ACL coordination the old direct-mount design
+// needed for analytics specifically.
+func TestPublishedAnalyticsSnapshotIsReadableByAnUnprivilegedUIDWithNoSpecialGroup(t *testing.T) {
 	if os.Getuid() != 0 {
-		t.Skip("must run as root to exercise a real UID/GID drop")
+		t.Skip("must run as root to exercise a real UID/GID drop and a real mount")
 	}
 
 	dir := t.TempDir()
 	if err := os.Chmod(filepath.Dir(dir), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	dbPath := filepath.Join(dir, "aggregates.db")
-
-	db, err := sql.Open("sqlite", dbPath)
+	source := filepath.Join(dir, "aggregates.db")
+	db, err := sql.Open("sqlite", source)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
-		t.Fatal(err)
-	}
-	var mode string
-	if err := db.QueryRow(`PRAGMA journal_mode`).Scan(&mode); err != nil {
-		t.Fatal(err)
-	}
-	if mode != "wal" {
-		t.Skipf("could not actually get this fixture into WAL mode (got %q) -- environment can't run this test meaningfully", mode)
 	}
 	if _, err := db.Exec(`CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT); INSERT INTO schema_meta VALUES('version','1')`); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
 
-	testGID := uint32(1_700_000 + os.Getpid()%9000)
-	for _, p := range []string{dir, dbPath} {
-		if err := os.Chown(p, 0, int(testGID)); err != nil {
-			t.Skipf("cannot chown in this environment: %v", err)
-		}
-	}
-	if err := os.Chmod(dir, 0o750); err != nil { // the real, strict Python-packaging shape -- no write bit for group
-		t.Fatal(err)
-	}
-	if err := os.Chmod(dbPath, 0o640); err != nil {
-		t.Fatal(err)
+	publishedReal := filepath.Join(dir, "published-real")
+	staging := filepath.Join(dir, "staging")
+	if _, err := analyticssnapshot.Refresh(context.Background(), source, publishedReal, staging, 3); err != nil {
+		t.Fatalf("Refresh: %v", err)
 	}
 
-	const unprivilegedUID = 65534
+	mountPoint := filepath.Join(dir, "published-ro-mount")
+	if err := os.MkdirAll(mountPoint, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mount(publishedReal, mountPoint, "", unix.MS_BIND, ""); err != nil {
+		t.Skipf("bind mount not permitted in this environment: %v", err)
+	}
+	defer syscall.Unmount(mountPoint, 0)
+	if err := unix.Mount("", mountPoint, "", unix.MS_BIND|unix.MS_REMOUNT|unix.MS_RDONLY, ""); err != nil {
+		t.Fatalf("remount read-only: %v", err)
+	}
+
+	const unprivilegedUID = 65534 // "nobody" -- no supplementary groups given at all below
 	const unprivilegedGID = 65534
-	err = runAsRealUID(t, unprivilegedUID, unprivilegedGID, []uint32{testGID}, dbPath, "")
-	if err == nil {
-		t.Fatal("expected a real open failure for a WAL-mode db under a strictly read-only (no group write) mount even with correct group access -- if this now succeeds, immutable=1 or an equivalent must have been silently reintroduced, which would reopen the corruption bug this package guards against")
+
+	err = runAsRealUID(t, unprivilegedUID, unprivilegedGID, nil, mountPoint, "")
+	if err != nil {
+		t.Fatalf("expected the published analytics snapshot to be readable by a completely unprivileged UID with no special group at all, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "readonly") && !strings.Contains(err.Error(), "unable to open") {
-		t.Fatalf("expected a clean permission/open failure (never a corrupt-looking error, and never a silent success), got: %v", err)
-	}
-	t.Logf("confirmed disclosed gap: WAL-mode db under a strict read-only mount fails cleanly even with group access: %v", err)
 }

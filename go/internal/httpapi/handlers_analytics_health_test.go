@@ -14,20 +14,24 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"alderpointdns/go-controlplane/internal/analyticssnapshot"
 	"alderpointdns/go-controlplane/internal/blocklists"
 	"alderpointdns/go-controlplane/internal/dbmigrate"
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/pyanalytics"
 )
 
-// newAnalyticsFixtureDB creates a throwaway aggregates.db with the exact
-// schema pyanalytics.Reader expects (same shape as
-// internal/pyanalytics/reader_test.go's own fixture) and opens it
-// through the real, read-only Reader constructor.
+// newAnalyticsFixtureReader creates a throwaway source aggregates.db
+// with the exact schema pyanalytics.Reader expects (same shape as
+// internal/pyanalytics/reader_test.go's own fixture), publishes it as a
+// real snapshot generation (internal/analyticssnapshot -- the real
+// mechanism apdns-hostagent uses live, see that package's doc comment),
+// and opens a Reader against the published directory.
 func newAnalyticsFixtureReader(t *testing.T) *pyanalytics.Reader {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "aggregates.db")
-	setup, err := sql.Open("sqlite", path)
+	dir := t.TempDir()
+	source := filepath.Join(dir, "aggregates.db")
+	setup, err := sql.Open("sqlite", source)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +48,13 @@ func newAnalyticsFixtureReader(t *testing.T) *pyanalytics.Reader {
 	}
 	setup.Close()
 
-	r, err := pyanalytics.Open(path)
+	published := filepath.Join(dir, "published")
+	staging := filepath.Join(dir, "staging")
+	if _, err := analyticssnapshot.Refresh(context.Background(), source, published, staging, 3); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := pyanalytics.Open(published)
 	if err != nil {
 		t.Fatal(err)
 	}

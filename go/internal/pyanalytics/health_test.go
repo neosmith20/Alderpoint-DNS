@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"alderpointdns/go-controlplane/internal/analyticssnapshot"
 )
 
 func writeHeartbeat(t *testing.T, dir, worker string, payload map[string]any) {
@@ -105,7 +107,9 @@ func TestHealthDegradesOnATickFailedStatus(t *testing.T) {
 }
 
 func TestHealthReportsFailedWhenTheDBItselfIsUnreachable(t *testing.T) {
-	r, err := Open(filepath.Join(t.TempDir(), "does-not-exist.db"))
+	// No generation has ever been published to this directory --
+	// ResolveCurrent fails honestly, exactly like an unreachable file.
+	r, err := Open(filepath.Join(t.TempDir(), "never-published"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,12 +127,14 @@ func TestHealthReportsFailedWhenTheDBItselfIsUnreachable(t *testing.T) {
 // TestHealthConsecutiveReadFailuresIncrementsAndRecoversWithoutRestart
 // proves the "recovery occurs without rebooting the appliance"
 // requirement directly: the exact same live Reader, no restart, no new
-// process -- just probing a DB that starts unreachable and then
-// becomes reachable again -- must reflect that recovery on its very
-// next Health() call.
+// process -- just probing a snapshot directory that starts with nothing
+// published and then gets a real generation published to it (exactly
+// what apdns-hostagent's first successful Refresh after a rocky start
+// looks like) -- must reflect that recovery on its very next Health()
+// call.
 func TestHealthConsecutiveReadFailuresIncrementsAndRecoversWithoutRestart(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "aggregates.db")
-	r, err := Open(path) // the file does not exist yet -- Ping will fail
+	published := filepath.Join(t.TempDir(), "published") // nothing published yet
+	r, err := Open(published)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,12 +149,15 @@ func TestHealthConsecutiveReadFailuresIncrementsAndRecoversWithoutRestart(t *tes
 		t.Fatalf("expected consecutive failures to keep incrementing across repeated probes, got %+v", h2)
 	}
 
-	// Now create the real schema the live reader expects -- simulating
-	// the underlying store becoming reachable again with no restart of
-	// this Reader at all.
-	real := newTestReader(t)
-	r.db.Close()
-	r.db = real.db
+	// Now publish a real generation to that exact directory -- the real
+	// mechanism, not a white-box field swap -- simulating
+	// apdns-hostagent successfully refreshing with no restart of this
+	// Reader at all.
+	source := newTestSourceDB(t)
+	staging := filepath.Join(t.TempDir(), "staging")
+	if _, err := analyticssnapshot.Refresh(context.Background(), source, published, staging, 3); err != nil {
+		t.Fatal(err)
+	}
 
 	h3 := r.Health(context.Background())
 	if h3.Status != "ok" && h3.Status != "degraded" {

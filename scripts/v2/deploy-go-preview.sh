@@ -99,7 +99,15 @@ nohup setsid "$HOSTAGENT_DIR/apdns-hostagent" \
   -dns-runtime-bind-plain-port 25453 -dns-runtime-bind-proxy-port 25553 \
   -dns-runtime-bind-stats-port 28153 -dns-runtime-bind-rndc-port 29553 \
   -dns-runtime-dnsdist-listen-addr 127.0.0.1:25333 \
+  -analytics-snapshot-source /root/apdns-v2-preview-state/var-lib/analytics/aggregates.db \
+  -analytics-snapshot-published-dir /root/apdns-go-migration-preview-state/analytics-snapshot/published \
+  -analytics-snapshot-staging-dir /root/apdns-go-migration-preview-state/analytics-snapshot/staging \
   > "$HOSTAGENT_DIR/hostagent.log" 2>&1 < /dev/null &
+
+echo "+ giving apdns-hostagent a moment to publish its first analytics snapshot generation"
+echo "  (self-heals within one interval either way -- this just avoids a transient"
+echo "  'failed: no snapshot published yet' on the very first health check below)"
+sleep 2
 
 echo "+ recreating the preview container (podman restart does NOT pick up a"
 echo "  changed command line -- e.g. a flag this deploy's own binary no longer"
@@ -110,6 +118,7 @@ podman run -d --name "$CONTAINER" \
   --group-add 103 \
   -p 10443:10443 \
   -v /root/apdns-v2-preview-state/var-lib/analytics:/var/lib/alderpointdns-v2-analytics-ro:ro \
+  -v /root/apdns-go-migration-preview-state/analytics-snapshot/published:/var/lib/alderpointdns-v2-analytics-snapshot-ro:ro \
   -v /root/apdns-v2-preview-state/var-lib/worker-heartbeats:/var/lib/alderpointdns-v2-worker-heartbeats-ro:ro \
   -v /root/apdns-v2-preview-state/var-lib/certs:/var/lib/alderpointdns-v2-certs-ro:ro \
   -v "$RELEASE:/opt/alderpointdns-go:ro" \
@@ -122,7 +131,7 @@ podman run -d --name "$CONTAINER" \
     -config /etc/alderpointdns-go/appliance.yaml \
     -static /opt/alderpointdns-go/frontend-dist \
     -migrations /opt/alderpointdns-go/schema/migrations \
-    -analytics-db /var/lib/alderpointdns-v2-analytics-ro/aggregates.db \
+    -analytics-snapshot-dir /var/lib/alderpointdns-v2-analytics-snapshot-ro \
     -analytics-worker-heartbeats-dir /var/lib/alderpointdns-v2-worker-heartbeats-ro \
     -analytics-inbox-dir /var/lib/alderpointdns-v2-analytics-ro/inbox \
     -query-log-dir /var/lib/alderpointdns-v2-analytics-ro/queries \

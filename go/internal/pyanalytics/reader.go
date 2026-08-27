@@ -7,24 +7,51 @@
 // Shape of the boundary (deliberately the narrowest one that's both safe
 // and real, not a shortcut):
 //
-//   - Read-only. This package never executes anything but SELECT.
-//   - A direct SQLite read of Python's own aggregates store
-//     (/var/lib/alderpointdns-v2/analytics/aggregates.db), not an HTTP
-//     proxy: the two backends' sessions are not interchangeable (same
-//     cookie name, independent session tables), so a cookie-forwarding
-//     proxy can't authenticate without its own separate design; a direct
-//     read of an already-durable SQLite store needs no new auth surface
-//     at all. Verified safe against the live preview: aggregates.db is
-//     WAL-mode (concurrent readers never block Python's writer), and this
-//     reader was proven against the actual running preview's live,
-//     actively-written database before being wired in.
-//   - Least-privilege: only the analytics/ subdirectory is ever mounted
-//     into the Go container (read-only), never control.db (admins,
-//     secrets, policy) or the secrets/ directory.
+//   - Read-only. This package never executes anything but SELECT, and
+//     never even holds a mount of Python's live aggregates.db at all
+//     (see below).
+//   - NOT a direct read of Python's live aggregates.db. An earlier
+//     version of this reader was, and hit a real, live P0 ("database
+//     disk image is malformed (11)") -- root-caused (see
+//     AGENT_PROGRESS.md's incident writeup) to a genuine, structural
+//     conflict between two real constraints that cannot both be
+//     satisfied by reading the live file directly: (a) the real
+//     deployed mount is a genuine kernel-enforced read-only bind mount,
+//     under which SQLite's own rollback-journal read path needs a
+//     write-class open() (to check for a hot journal) that a real
+//     read-only mount refuses outright regardless of permission bits --
+//     so plain "mode=ro" cannot even open the file there; (b) the only
+//     URI option that CAN open it there, "immutable=1", is unsafe
+//     against a database still being actively written (a live WAL
+//     database is still mutable -- periodic checkpoints rewrite the
+//     main file in place -- so "it reports wal" was never proof
+//     immutable=1 was safe; a real concurrent reproduction,
+//     internal/pyanalytics/repro_walcorrupt_test.go, produced real
+//     SQLITE_CORRUPT reads with immutable=1 in both DELETE and WAL
+//     journal mode). This package resolves that tension instead of
+//     picking a horn of it: see internal/analyticssnapshot's own doc
+//     comment for the real fix -- apdns-hostagent (root, real
+//     unrestricted access to the actual host directory, no read-only
+//     mount involved) periodically publishes a real, consistent,
+//     write-once copy of aggregates.db via SQLite's own "VACUUM INTO",
+//     and this reader only ever reads THAT published snapshot, through
+//     its own still-genuinely-read-only mount. Once published, a
+//     generation's files are never written again, so "immutable=1" is
+//     no longer a lie told to SQLite about a live database -- it is the
+//     literal truth about a file that has already been fully written.
+//   - Least-privilege: this process never mounts Python's live
+//     analytics/ directory at all (a real, structural narrowing versus
+//     the earlier design, not just a policy one) -- only
+//     apdns-hostagent's own published-snapshot directory, and never
+//     control.db (admins, secrets, policy) or the secrets/ directory.
 //   - Not authoritative and not duplicated: this package never writes,
-//     never caches to Go's own control.db, and always re-reads live --
-//     there is exactly one copy of this data, owned by Python, for as
-//     long as this boundary exists.
+//     never caches to Go's own control.db, and always re-resolves the
+//     current published snapshot on every query (see Reader.currentDB)
+//     -- there is exactly one copy of this data, owned by Python, for
+//     as long as this boundary exists; this reader is at most one
+//     publish-interval behind it, and says so explicitly (see
+//     AnalyticsHealth's snapshot-age fields in health.go) rather than
+//     silently presenting a stale read as current.
 //   - Deliberately incomplete: aggregates.db has pre-aggregated
 //     total/blocked/cache counts per time bucket and per-dimension
 //     counts (client/domain/protocol/qtype/rcode/upstream), which covers
@@ -51,9 +78,12 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
+
+	"alderpointdns/go-controlplane/internal/analyticssnapshot"
 )
 
 // StepSeconds mirrors app/v2/webapp.py's _TIMESERIES_STEP_SECONDS exactly
@@ -88,14 +118,28 @@ type DimensionCount struct {
 }
 
 type Reader struct {
-	// mu guards db/path across a reset() -- every query takes a read
-	// lock to snapshot the current *sql.DB pointer; reset() takes a
-	// write lock to swap it out for a freshly reopened one. Ordinary
-	// concurrent queries never contend on this (RLock is shared); it
-	// only serializes against the rare corrupt-retry path.
-	mu   sync.RWMutex
-	db   *sql.DB
-	path string
+	// mu guards db/openGenDir across currentDB's generation swaps --
+	// every query takes a read lock to snapshot the current *sql.DB
+	// pointer; a generation swap takes a write lock. Ordinary concurrent
+	// queries never contend on this (RLock is shared); it only
+	// serializes against a new-generation reopen or a corrupt-retry
+	// reopen.
+	mu           sync.RWMutex
+	db           *sql.DB
+	openGenDir   string // the resolved generation directory `db` currently points at ("" = none open yet)
+	publishedDir string // apdns-hostagent's published-snapshot directory (see internal/analyticssnapshot)
+
+	// lastManifest is the most recently resolved generation's manifest
+	// (analyticssnapshot.Manifest) -- read by Health to report snapshot
+	// freshness. Stored via atomic.Value so Health never has to take mu
+	// just to report age.
+	lastManifest atomic.Value
+
+	// StaleAfter bounds how old a resolved snapshot's generated_at may
+	// be before Health reports "degraded: snapshot stale" -- the
+	// snapshot-pipeline analog of WriterStale below. Zero means use
+	// DefaultStaleAfter.
+	StaleAfter time.Duration
 
 	// WorkerHeartbeatsDir and InboxDir are optional, set by the caller
 	// after Open (main.go, from its own -analytics-worker-heartbeats-dir
@@ -114,86 +158,52 @@ type Reader struct {
 	consecutiveFailures atomic.Int64
 
 	// CorruptRetries counts how many times a query hit a transient
-	// SQLITE_CORRUPT-class read and was retried once after resetting the
+	// SQLITE_CORRUPT-class read and was retried once after reopening the
 	// connection (see run() below) -- exposed by Health as a diagnostic
 	// signal (never hidden), so a real recurrence is visible in
 	// GET /api/health even on the calls where the retry itself
-	// succeeded and the caller never saw an error.
+	// succeeded and the caller never saw an error. Expected to stay at
+	// 0 in normal operation now that every read targets a genuinely
+	// write-once published snapshot (see this package's own doc
+	// comment) -- kept as defense in depth, not because it's expected
+	// to fire.
 	CorruptRetries atomic.Int64
 }
 
-// Open connects to Python's aggregates.db read-only mount. It does not
-// fail if the file is temporarily missing/locked at open time (SQLite
-// lazily opens on first query) -- callers must still treat any query
-// error as "analytics degraded", never as a fatal startup condition, per
-// "DNS works if analytics is dead" applying equally to this dashboard.
-//
-// Real defect found live once this control plane's own container
-// actually ran as its unprivileged UID instead of root (see
-// internal/deployperm's regression test): without an explicit "mode=ro"
-// URI parameter, SQLite's default open mode is read-write -- needed even
-// for a plain SELECT, since the rollback-journal locking protocol may
-// create/delete a "-journal" sidecar file next to the database on every
-// transaction. "mode=ro" (matching internal/hostagentd/
-// ops_replication.go's control.db reader) fixes that.
-//
-// Does NOT use "immutable=1" -- an earlier version of this reader did,
-// on the theory that Python's aggregates.db runs in WAL mode and
-// immutable=1 is WAL-safe. A live P0 ("database disk image is malformed
-// (11)" on Top Domains) proved that theory wrong, and a real concurrent
-// reproduction (internal/pyanalytics/repro_walcorrupt_test.go,
-// TestWALCorruptionRepro_Matrix) proved exactly why: immutable=1 with a
-// short-lived (per-query) connection produced real, repeated
-// SQLITE_CORRUPT reads against an actively, structurally mutating file
-// in BOTH DELETE *and* WAL journal mode (~5.5% of queries under
-// concurrent stress in this harness) -- a WAL database is still mutable
-// (checkpoints rewrite the main file in place), so "it reports wal" was
-// never actually a safety proof, exactly as flagged in the incident's
-// follow-up correction. A long-lived immutable=1 connection didn't
-// reproduce the crash in that same matrix, but a dedicated follow-up
-// (TestImmutableLongLivedConnectionIsStaleNotSafe) proved that's because
-// it goes stale, not because it's safe: it observed zero of 576 real
-// committed writes during the same test window a fresh connection saw
-// immediately. Plain "mode=ro" (no immutable), by contrast, produced
-// zero corrupt reads across all combinations tested (DELETE/WAL journal
-// mode x long/short-lived connections, thousands of queries each,
-// concurrent structural writer churn) -- real SQLite locking is what
-// actually keeps a reader consistent against a live mutable database,
-// not a flag that tells SQLite to stop checking.
-func Open(path string) (*Reader, error) {
-	db, err := openReaderDB(path)
-	if err != nil {
-		return nil, err
-	}
-	return &Reader{db: db, path: path}, nil
-}
+// DefaultStaleAfter is used whenever Reader.StaleAfter is left zero.
+// apdns-hostagent's own default publish interval is 15s (see
+// internal/hostagentd/ops_analyticssnapshot.go); 3x that mirrors the
+// same staleness-grace-multiple convention health.go's writer-heartbeat
+// check already uses.
+const DefaultStaleAfter = 45 * time.Second
 
-func openReaderDB(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(5000)")
-	if err != nil {
-		return nil, fmt.Errorf("open analytics reader: %w", err)
-	}
-	// A handful of real connections, matching the dashboard's real
-	// access pattern of several analytics endpoints firing close
-	// together on page load (see AGENT_PROGRESS.md's timing evidence) --
-	// real SQLite locking (proven safe above) lets these run
-	// concurrently without serializing every query through one
-	// connection the way the old immutable=1 design did.
-	db.SetMaxOpenConns(4)
-	return db, nil
+// Open sets up a reader against apdns-hostagent's published analytics
+// snapshot directory (see internal/analyticssnapshot's doc comment for
+// the full design and why this reader no longer touches Python's live
+// aggregates.db at all). Never fails just because nothing has been
+// published yet -- resolution happens lazily on first query, and a
+// caller must already treat every query error as "analytics degraded",
+// never a fatal startup condition, per "DNS works if analytics is dead"
+// applying equally to this dashboard.
+func Open(publishedDir string) (*Reader, error) {
+	return &Reader{publishedDir: publishedDir}, nil
 }
 
 func (r *Reader) Close() error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	if r.db == nil {
+		return nil
+	}
 	return r.db.Close()
 }
 
 // isTransientCorrupt classifies an error as the specific transient,
-// retryable read hazard proven above (SQLITE_CORRUPT / "database disk
-// image is malformed") as opposed to any other failure (including a
-// genuinely, permanently corrupt file -- see reset()'s doc comment for
-// why that distinction matters and why it's still safe not to make it
+// retryable read hazard the earlier direct-live-file design proved
+// possible (SQLITE_CORRUPT / "database disk image is malformed") as
+// opposed to any other failure (including a genuinely, permanently
+// corrupt snapshot -- see currentDB's doc comment for why that
+// distinction matters and why it's still safe not to make it
 // perfectly).
 func isTransientCorrupt(err error) bool {
 	if err == nil {
@@ -211,60 +221,107 @@ func isTransientCorrupt(err error) bool {
 	return strings.Contains(msg, "malformed") || strings.Contains(msg, "SQLITE_CORRUPT")
 }
 
-// reset closes the current connection pool and opens a fresh one at the
-// same path. This does NOT re-validate that the file is actually fine --
-// a genuinely, permanently corrupt file will simply fail again on the
-// retry after reset (see run() below), which is exactly the intended
-// behavior: reset only ever buys one clean-slate attempt against
-// whatever transient, connection-local state (a cached schema/page read
-// mid-tear) caused the first failure; it never masks a real, persistent
-// SQLITE_CORRUPT by silently retrying forever or substituting empty
-// data.
-func (r *Reader) reset(reason error) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	slog.Warn("pyanalytics: resetting reader connection after a transient corrupt-class read",
-		"path", r.path, "error", reason)
-	r.CorruptRetries.Add(1)
-	_ = r.db.Close()
-	db, err := openReaderDB(r.path)
+// currentDB resolves apdns-hostagent's "current" published generation
+// (analyticssnapshot.ResolveCurrent) and returns a connection open
+// against it, reopening only when the resolved generation has actually
+// changed since the last call -- so a burst of requests between two
+// publishes shares one connection (cheap), while a new publish is
+// picked up within one resolution (near-real-time, bounded by
+// apdns-hostagent's own publish interval). Uses "immutable=1"
+// deliberately and safely here: unlike the earlier direct-live-file
+// design, the file this opens is a genuinely, permanently write-once
+// snapshot the instant it's published (see internal/analyticssnapshot's
+// doc comment) -- immutable=1 is no longer a lie told to SQLite about a
+// live database.
+func (r *Reader) currentDB(ctx context.Context) (*sql.DB, error) {
+	resolved, err := analyticssnapshot.ResolveCurrent(r.publishedDir)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	r.db = db
-	return nil
+
+	r.mu.RLock()
+	if r.db != nil && r.openGenDir == resolved.GenDir {
+		db := r.db
+		r.mu.RUnlock()
+		r.lastManifest.Store(resolved.Manifest)
+		return db, nil
+	}
+	r.mu.RUnlock()
+
+	return r.reopen(resolved)
 }
 
-// run executes op against the current connection; on the specific
-// transient-corrupt class of error (see isTransientCorrupt), it resets
-// the connection and retries exactly once, recording the retry
-// diagnostically (CorruptRetries, a structured slog.Warn) either way --
-// a caller that ultimately still fails sees the real error and the
-// dashboard reports degraded, honestly, never silently substituted with
-// empty/zero data. Any other error (a genuine query error, a real
-// permanently-corrupt file, SQLITE_BUSY that outlasted busy_timeout) is
+// reopen swaps in a connection to the given resolved generation,
+// closing whatever was open before. Always takes the write lock and
+// re-checks under it (another goroutine may have already performed the
+// same swap between currentDB's RUnlock and this call) to avoid two
+// goroutines opening redundant connections for the same generation.
+func (r *Reader) reopen(resolved analyticssnapshot.Resolved) (*sql.DB, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.db != nil && r.openGenDir == resolved.GenDir {
+		r.lastManifest.Store(resolved.Manifest)
+		return r.db, nil
+	}
+	db, err := sql.Open("sqlite", "file:"+resolved.DBPath+"?mode=ro&immutable=1")
+	if err != nil {
+		return nil, fmt.Errorf("opening published analytics snapshot: %w", err)
+	}
+	if r.db != nil {
+		_ = r.db.Close()
+	}
+	r.db = db
+	r.openGenDir = resolved.GenDir
+	r.lastManifest.Store(resolved.Manifest)
+	return db, nil
+}
+
+// forceReopen discards whatever connection/generation is currently
+// cached, forcing the next currentDB call to re-resolve and open fresh
+// -- used only by run()'s corrupt-retry path below.
+func (r *Reader) forceReopen(reason error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	slog.Warn("pyanalytics: forcing a fresh connection after a transient corrupt-class read against the published snapshot",
+		"published_dir", r.publishedDir, "generation", r.openGenDir, "error", reason)
+	r.CorruptRetries.Add(1)
+	if r.db != nil {
+		_ = r.db.Close()
+	}
+	r.db = nil
+	r.openGenDir = ""
+}
+
+// run resolves/opens the current published snapshot and executes op
+// against it; on the specific transient-corrupt class of error (see
+// isTransientCorrupt), it forces a fresh resolve+reopen and retries
+// exactly once, recording the retry diagnostically (CorruptRetries, a
+// structured slog.Warn) either way -- a caller that ultimately still
+// fails sees the real error and the dashboard reports degraded,
+// honestly, never silently substituted with empty/zero data. Any other
+// error (a genuine query error, a real permanently-corrupt snapshot, no
+// snapshot published yet, SQLITE_BUSY that outlasted busy_timeout) is
 // returned as-is on the first attempt, not retried -- this path exists
 // solely for the one proven-transient failure mode, not as a general
 // retry-everything policy.
 func (r *Reader) run(ctx context.Context, op func(db *sql.DB) error) error {
-	r.mu.RLock()
-	db := r.db
-	r.mu.RUnlock()
-
-	err := op(db)
+	db, err := r.currentDB(ctx)
+	if err != nil {
+		return err
+	}
+	err = op(db)
 	if !isTransientCorrupt(err) {
 		return err
 	}
-	if rerr := r.reset(err); rerr != nil {
-		return fmt.Errorf("reader reset after corrupt read failed: %w (original: %v)", rerr, err)
+	r.forceReopen(err)
+	db, rerr := r.currentDB(ctx)
+	if rerr != nil {
+		return fmt.Errorf("reopening after corrupt read failed: %w (original: %v)", rerr, err)
 	}
-	r.mu.RLock()
-	db = r.db
-	r.mu.RUnlock()
 	retryErr := op(db)
 	if retryErr != nil {
-		slog.Warn("pyanalytics: retry after connection reset still failed -- remaining degraded",
-			"path", r.path, "original_error", err, "retry_error", retryErr)
+		slog.Warn("pyanalytics: retry after reopening still failed -- remaining degraded",
+			"published_dir", r.publishedDir, "original_error", err, "retry_error", retryErr)
 	}
 	return retryErr
 }

@@ -11,13 +11,19 @@ import (
 	"testing"
 
 	_ "modernc.org/sqlite"
+
+	"alderpointdns/go-controlplane/internal/analyticssnapshot"
 )
 
-// newTestReader creates a throwaway sqlite db with the exact schema
-// Python's app/v2/aggregates_db.py creates (verified directly against a
-// running preview's real aggregates.db, not guessed from source alone)
-// and seeds it, so this test breaks the moment either schema drifts.
-func newTestReader(t *testing.T) *Reader {
+// newTestSourceDB creates a throwaway source aggregates.db with the
+// exact schema Python's app/v2/aggregates_db.py creates (verified
+// directly against a running preview's real aggregates.db, not guessed
+// from source alone) and seeds it, so this test breaks the moment
+// either schema drifts. Returns the source path -- callers that need a
+// live Reader publish it via newTestReader/publishTestSnapshot below
+// (this package's Reader no longer reads a raw db path directly, see
+// reader.go's own doc comment for why).
+func newTestSourceDB(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "aggregates.db")
 	setup, err := sql.Open("sqlite", path)
@@ -56,8 +62,31 @@ func newTestReader(t *testing.T) *Reader {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return path
+}
 
-	r, err := Open(path)
+// publishTestSnapshot publishes one generation from sourcePath into a
+// fresh published directory (see internal/analyticssnapshot) and
+// returns that directory -- the real mechanism apdns-hostagent uses
+// live, exercised here instead of a mock so these tests actually cover
+// the real Open(publishedDir) contract.
+func publishTestSnapshot(t *testing.T, sourcePath string) string {
+	t.Helper()
+	published := filepath.Join(t.TempDir(), "published")
+	staging := filepath.Join(t.TempDir(), "staging")
+	if _, err := analyticssnapshot.Refresh(context.Background(), sourcePath, published, staging, 3); err != nil {
+		t.Fatalf("publishing test snapshot: %v", err)
+	}
+	return published
+}
+
+// newTestReader is newTestSourceDB + publishTestSnapshot + Open, for
+// the majority of tests that don't care about the source/publish split.
+func newTestReader(t *testing.T) *Reader {
+	t.Helper()
+	source := newTestSourceDB(t)
+	published := publishTestSnapshot(t, source)
+	r, err := Open(published)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,21 +189,19 @@ func TestLiveAndFillLiveGapsZeroFillsEverySecond(t *testing.T) {
 // (not just the first, mid-write one) must still surface as an error
 // after the one retry, not a silently-empty success.
 func TestGenuinelyCorruptFileStaysDegradedNeverMasked(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "aggregates.db")
-	// A real SQLite file (valid header, magic bytes) whose page content
-	// past the header is truncated/garbage -- genuinely, permanently
-	// corrupt, not a timing artifact: every single read of it fails the
-	// same way, no matter how many times or how the connection is
-	// reopened.
-	setup, err := sql.Open("sqlite", path)
+	// Publish one real, valid generation the normal way, then corrupt
+	// ITS db file directly in place -- simulating e.g. real disk-level
+	// bit rot of an already-published, otherwise-immutable generation
+	// (something outside this reader's control either way). Every
+	// single read of it must fail the same way, no matter how many
+	// times or how the connection is reopened.
+	source := newTestSourceDB(t)
+	published := publishTestSnapshot(t, source)
+	resolved, err := analyticssnapshot.ResolveCurrent(published)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := setup.Exec(`CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO schema_meta VALUES ('version','1');`); err != nil {
-		t.Fatal(err)
-	}
-	setup.Close()
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(resolved.DBPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,11 +218,11 @@ func TestGenuinelyCorruptFileStaysDegradedNeverMasked(t *testing.T) {
 	for i := 150; i < 4096 && i < len(raw); i++ {
 		raw[i] = 0xFF
 	}
-	if err := os.WriteFile(path, raw, 0o644); err != nil {
+	if err := os.WriteFile(resolved.DBPath, raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	r, err := Open(path)
+	r, err := Open(published)
 	if err != nil {
 		t.Fatal(err)
 	}

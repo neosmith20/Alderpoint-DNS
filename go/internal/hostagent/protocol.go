@@ -57,6 +57,9 @@ const (
 
 	OpDNSRuntimeStatus  = "dns_runtime.status"
 	OpDNSRuntimePromote = "dns_runtime.promote"
+
+	OpAnalyticsSnapshotStatus  = "analytics_snapshot.status"
+	OpAnalyticsSnapshotRefresh = "analytics_snapshot.refresh"
 )
 
 // Request is the single JSON line a client writes. RequestID is

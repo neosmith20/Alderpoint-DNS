@@ -48,6 +48,12 @@ func main() {
 	webServiceUnit := flag.String("web-service-unit", "", "systemd unit to restart on update apply (empty = Software Updates apply unavailable)")
 	webHealthURL := flag.String("web-health-url", "", "URL to poll after a restart to confirm health (empty = Software Updates apply unavailable)")
 
+	analyticsSnapshotSource := flag.String("analytics-snapshot-source", "", "Python's real, live aggregates.db host path (empty = analytics snapshot publishing disabled -- Dashboard analytics reports degraded, see internal/analyticssnapshot)")
+	analyticsSnapshotPublishedDir := flag.String("analytics-snapshot-published-dir", "/var/lib/apdns-hostagent/analytics-snapshot/published", "directory this agent publishes completed snapshot generations into -- the web container mounts this read-only")
+	analyticsSnapshotStagingDir := flag.String("analytics-snapshot-staging-dir", "/var/lib/apdns-hostagent/analytics-snapshot/staging", "scratch directory (same filesystem as -analytics-snapshot-published-dir) this agent uses while building a generation, before the atomic publish")
+	analyticsSnapshotIntervalSeconds := flag.Int("analytics-snapshot-interval-seconds", 15, "how often to refresh the published analytics snapshot")
+	analyticsSnapshotRetain := flag.Int("analytics-snapshot-retain", 3, "how many past snapshot generations to keep (minimum 2)")
+
 	dnsRuntimeStagingDir := flag.String("dns-runtime-staging-dir", "/var/lib/apdns-hostagent/dns-staging", "staging directory for compiled BIND/dnsdist config (see internal/hostagentd/ops_dnsruntime.go)")
 	dnsRuntimeBindLivePath := flag.String("dns-runtime-bind-conf", "", "live named.conf path this agent manages (empty = DNS Runtime unavailable)")
 	dnsRuntimeDnsdistLivePath := flag.String("dns-runtime-dnsdist-conf", "", "live dnsdist.conf path this agent manages (empty = DNS Runtime unavailable)")
@@ -97,6 +103,21 @@ func main() {
 	hostagentd.RegisterReplicationOps(s, hostagentd.ReplicationConfig{ControlDBPath: *controlDBPath})
 
 	hostagentd.RegisterNetworkOps(s, hostagentd.NetworkConfig{})
+
+	if *analyticsSnapshotSource != "" {
+		// The returned stop func is intentionally discarded here, same
+		// reasoning as DNS Runtime below: this process's job is to keep
+		// publishing for its own lifetime; only tests call it.
+		hostagentd.RegisterAnalyticsSnapshotOps(s, hostagentd.AnalyticsSnapshotConfig{
+			SourcePath:   *analyticsSnapshotSource,
+			PublishedDir: *analyticsSnapshotPublishedDir,
+			StagingDir:   *analyticsSnapshotStagingDir,
+			Interval:     time.Duration(*analyticsSnapshotIntervalSeconds) * time.Second,
+			Retain:       *analyticsSnapshotRetain,
+		})
+	} else {
+		logger.Info("analytics snapshot publishing not configured -- -analytics-snapshot-source is required; Dashboard analytics will report degraded")
+	}
 
 	updateCfg := hostagentd.UpdateConfig{
 		CurrentBinaryPath: *currentBinaryPath,
