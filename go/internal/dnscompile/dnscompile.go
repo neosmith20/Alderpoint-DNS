@@ -30,12 +30,21 @@
 //   - regex_block/regex_allow custom rules ARE compiled (dnsdist's real
 //     RegexRule), but domains are only ever literal-matched, never
 //     wildcarded beyond what SuffixMatchNodeRule already does.
-//   - DoT and DoH transports are compiled (reusing the appliance's own
-//     management TLS cert/key, the same real pattern Python's
-//     DotConfig/DohConfig already use); DoQ/DoH3/DNSCrypt are not --
-//     each needs its own listener wiring this pass didn't have scope
-//     for, and DNSCrypt specifically has no Go-native secrets store yet
+//   - DoT, DoH, and DoQ transports are compiled (reusing the
+//     appliance's own management TLS cert/key, the same real pattern
+//     Python's DotConfig/DohConfig already use; DoQ added 2026-08-27
+//     for Strong ClientID's DoT/DoQ SNI identity). DoH3/DNSCrypt are
+//     not -- DNSCrypt specifically has no Go-native secrets store yet
 //     to hold its provider identity (same disclosed gap as elsewhere).
+//   - Strong ClientID (added 2026-08-27): every active identity of
+//     every enabled managed client is compiled to a real
+//     HTTPPathRule (DoH, full canonical hex path) and SNIRule (DoT/DoQ,
+//     internal/clientid's lossless DNS-label-safe encoding), each
+//     tagging the query; each client's own explicit domain block/allow
+//     overrides are compiled ahead of the global blocklist/regex chain
+//     -- see the Input.ClientIdentities/ClientOverrides field doc
+//     comment and writeClientRules for the exact precedence/isolation
+//     guarantee.
 //   - No multi-context BIND allocation (Python's allocate_bind_contexts
 //     for distinct upstream selections/domain routes) -- one BIND
 //     context only, since there is only ever one default profile here.
@@ -45,6 +54,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"alderpointdns/go-controlplane/internal/clientid"
 )
 
 // --- inputs -----------------------------------------------------------
@@ -99,6 +110,31 @@ type TransportSettings struct {
 	DohEnabled bool
 	DohPort    int
 	DohPath    string // "" = /dns-query
+	DoqEnabled bool
+	DoqPort    int
+}
+
+// ClientIdentity is one active Strong ClientID binding: a stable
+// per-managed-client tag value plus one of that client's canonical
+// hex identities (internal/clientid) -- a client with multiple active
+// ClientIDs (multiple DoH/DoT/DoQ identities) appears as multiple
+// entries sharing the same ClientKey, each compiled to its own
+// HTTPPathRule/SNIRule -> SetTagAction pair, so any of that client's
+// identities tags the query the same way.
+type ClientIdentity struct {
+	ClientKey string
+	Hex       string
+}
+
+// ClientOverride is one explicit per-client domain block/allow entry
+// (internal/clients.DomainOverride), keyed by the same ClientKey a
+// ClientIdentity above sets via SetTagAction -- see writeClientRules
+// for the compiled precedence (explicit deny > explicit allow >
+// default policy).
+type ClientOverride struct {
+	ClientKey string
+	Kind      string // "block" | "allow"
+	Domain    string
 }
 
 // Input is every piece of already-loaded, already-validated Go state
@@ -126,6 +162,20 @@ type Input struct {
 	// DNS/rewrites/regex-allow/blocking always win first). Most-specific
 	// match wins regardless of input order -- see writeDomainRoutes.
 	DomainRoutes []DomainRoute
+
+	// ClientIdentities/ClientOverrides: Strong ClientID identity binding
+	// (DoH path / DoT-DoQ SNI -> per-client tag) and each tagged
+	// client's own explicit domain block/allow list. Compiled
+	// immediately after the health marker -- ahead of every other rule
+	// in this function, including the global blocklist/regex chain --
+	// so a client's explicit deny/allow always outranks the default
+	// (global) policy, and isolation is structural: a rule only ever
+	// matches on one exact identity's own path/SNI or the tag only that
+	// match sets, so an unrelated client's query can never carry
+	// another client's tag or trigger another client's override. See
+	// writeClientRules.
+	ClientIdentities []ClientIdentity
+	ClientOverrides  []ClientOverride
 
 	// BlockedDomains: literal domains to block (from enabled blocklist
 	// subscriptions' compiled domain lists plus rule_type=="block"
@@ -159,7 +209,6 @@ type Input struct {
 	// upstream endpoints instead of through BIND (only used by tests
 	// that don't want to also stand up a BIND instance).
 	BindBackendAddress string
-
 }
 
 // HealthMarkerDomain/IP are a fixed, compile-time-constant marker record
@@ -237,10 +286,45 @@ func CompileDnsdist(in Input) (string, error) {
 		w("})")
 		w("")
 	}
+	if in.Transports.DoqEnabled {
+		if in.TLSCertPath == "" || in.TLSKeyPath == "" {
+			return "", errf("DoQ is enabled but no TLS cert/key path is configured")
+		}
+		host := hostOf(in.ListenAddress)
+		w(`addDOQLocal(%s, {%s}, {%s}, {`, luaString(fmt.Sprintf("%s:%d", host, in.Transports.DoqPort)), luaString(in.TLSCertPath), luaString(in.TLSKeyPath))
+		w("  reusePort=true,")
+		w(`  minTLSVersion="tls1.2"`)
+		w("})")
+		w("")
+	}
 
 	w("-- health-check marker (proves this exact promotion is live, not a stale process)")
 	w("addAction(QNameRule(%s), SpoofAction({%s}))", luaString(HealthMarkerDomain+"."), luaString(HealthMarkerIP))
 	w("")
+
+	// Computed early (not just before the global blocklist section
+	// below, where Python's own shape would put it) because Strong
+	// ClientID's own per-client deny rules, compiled next, use this
+	// exact same configured blocking response -- an operator who sets
+	// blocking_response_mode="refused" gets REFUSED from both the
+	// global blocklist AND a per-client explicit deny, never two
+	// different behaviors for what's conceptually the same "blocked"
+	// outcome.
+	blockAction, err := blockingAction(in.BlockingResponseMode, in.CustomIPv4, in.CustomIPv6)
+	if err != nil {
+		return "", err
+	}
+
+	// Strong ClientID: identity binding + per-client explicit deny/allow,
+	// compiled ahead of every other rule below (including the global
+	// blocklist/regex chain) -- see the Input.ClientIdentities/
+	// ClientOverrides field doc comment for the precedence/isolation
+	// reasoning.
+	if len(in.ClientIdentities) > 0 || len(in.ClientOverrides) > 0 {
+		if err := writeClientRules(w, in.ClientIdentities, in.ClientOverrides, blockAction); err != nil {
+			return "", err
+		}
+	}
 
 	// Local DNS records: appliance-wide, highest precedence, terminal.
 	if len(in.LocalDNSRecords) > 0 {
@@ -299,11 +383,6 @@ func CompileDnsdist(in Input) (string, error) {
 			w("addAction(RegexRule(%s), AllowAction())", luaString(p))
 		}
 		w("")
-	}
-
-	blockAction, err := blockingAction(in.BlockingResponseMode, in.CustomIPv4, in.CustomIPv6)
-	if err != nil {
-		return "", err
 	}
 
 	if len(in.RegexBlock) > 0 {
@@ -437,6 +516,112 @@ func endpointServerLine(ep UpstreamEndpoint, transport, pool string) (string, er
 		return "", errf("unsupported upstream transport: %q", transport)
 	}
 	return fmt.Sprintf("newServer({%s})", kwargs), nil
+}
+
+// clientTag names the dnsdist tag key this package sets/
+// checks for Strong ClientID -- a fixed, compile-time constant, never
+// derived from any operator input, so it can never collide with a tag
+// name some other rule might use.
+const clientTag = "apdns_client"
+
+// writeClientRules compiles Strong ClientID's two real dnsdist
+// enforcement pieces:
+//
+//  1. Identity binding: one addAction(HTTPPathRule(doHPath), ...) per
+//     active ClientID (full canonical hex path, no encoding) and one
+//     addAction(SNIRule(sniHostname), ...) per active ClientID (the
+//     lossless DNS-label-safe encoding, DoT and DoQ both match on TLS
+//     SNI so one rule covers both transports), each SetTagAction'ing
+//     the query with that identity's own ClientKey. Non-terminal (see
+//     dnsdist's own semantics for SetTagAction): processing continues
+//     to the rules below, so an untagged query (no matching path/SNI --
+//     including every plain-UDP/TCP query, which has no ClientID
+//     concept at all) simply never gets a tag and therefore can never
+//     match any client-scoped rule that follows -- this is what makes
+//     isolation structural rather than a property this package has to
+//     separately verify at runtime.
+//  2. Per-client explicit deny (terminal block action) THEN explicit
+//     allow (terminal AllowAction), each guarded by
+//     AndRule({TagRule(clientTag, key), SuffixMatchNodeRule({domain})})
+//     -- deny is emitted first so it wins over an allow for the exact
+//     same domain+client (matches the "explicit deny > explicit allow"
+//     requirement literally), and both are emitted here, before this
+//     function returns to CompileDnsdist's own global block/allow/
+//     regex chain below, so an explicit per-client entry always
+//     outranks the default (global) policy for that one client.
+//
+// Sorted by (ClientKey, then Hex or domain) throughout for the same
+// deterministic-output guarantee every other compiled section in this
+// package already provides.
+func writeClientRules(w func(string, ...any), identities []ClientIdentity, overrides []ClientOverride, blockAction string) error {
+	idents := append([]ClientIdentity(nil), identities...)
+	sort.Slice(idents, func(i, j int) bool {
+		if idents[i].ClientKey != idents[j].ClientKey {
+			return idents[i].ClientKey < idents[j].ClientKey
+		}
+		return idents[i].Hex < idents[j].Hex
+	})
+	if len(idents) > 0 {
+		w("-- Strong ClientID: identity binding (DoH path / DoT+DoQ SNI -> per-client tag)")
+		for _, id := range idents {
+			if err := clientid.ValidateHex(id.Hex); err != nil {
+				return errf("client %q has an invalid Strong ClientID value: %v", id.ClientKey, err)
+			}
+			if id.ClientKey == "" {
+				return errf("Strong ClientID %q has no client key to tag with", id.Hex)
+			}
+			path := clientid.DoHPath(id.Hex)
+			sni := clientid.EncodeSNILabel(id.Hex)
+			w("addAction(HTTPPathRule(%s), SetTagAction(%s, %s))", luaString(path), luaString(clientTag), luaString(id.ClientKey))
+			w("addAction(SNIRule(%s), SetTagAction(%s, %s))", luaString(sni), luaString(clientTag), luaString(id.ClientKey))
+		}
+		w("")
+	}
+
+	type override struct{ key, domain string }
+	normalize := func(list []ClientOverride, kind string) []override {
+		seen := map[override]bool{}
+		var out []override
+		for _, o := range list {
+			if o.Kind != kind {
+				continue
+			}
+			d := normalizeDomain(o.Domain)
+			if d == "" || o.ClientKey == "" {
+				continue
+			}
+			ov := override{o.ClientKey, d}
+			if !seen[ov] {
+				seen[ov] = true
+				out = append(out, ov)
+			}
+		}
+		sort.Slice(out, func(i, j int) bool {
+			if out[i].key != out[j].key {
+				return out[i].key < out[j].key
+			}
+			return out[i].domain < out[j].domain
+		})
+		return out
+	}
+
+	denies := normalize(overrides, "block")
+	allows := normalize(overrides, "allow")
+	if len(denies) > 0 || len(allows) > 0 {
+		w("-- Strong ClientID: per-client explicit deny (wins over allow and over default/global policy)")
+		for _, o := range denies {
+			w("addAction(AndRule({TagRule(%s, %s), SuffixMatchNodeRule({%s})}), %s)",
+				luaString(clientTag), luaString(o.key), luaString(o.domain+"."), blockAction)
+		}
+		w("")
+		w("-- Strong ClientID: per-client explicit allow (wins over default/global policy, loses to that client's own deny above)")
+		for _, o := range allows {
+			w("addAction(AndRule({TagRule(%s, %s), SuffixMatchNodeRule({%s})}), AllowAction())",
+				luaString(clientTag), luaString(o.key), luaString(o.domain+"."))
+		}
+		w("")
+	}
+	return nil
 }
 
 // writeDomainRoutes emits one named pool + terminal routing rule per

@@ -532,3 +532,178 @@ func TestCompileDnsdistDomainRoutingRejectsConflictingRulesForTheSameDomain(t *t
 		t.Fatal("expected an error for two different profiles claiming the same normalized domain+match_kind")
 	}
 }
+
+// --- Strong ClientID -----------------------------------------------------
+
+// testCert generates a real throwaway self-signed cert/key pair (same
+// openssl invocation pattern used elsewhere in this project's own
+// tooling), for the one test below that validates a full DoT+DoH+DoQ+
+// Strong ClientID config against the real dnsdist --check-config, not
+// just "the directives are emitted".
+func testCert(t *testing.T) (certPath, keyPath string) {
+	t.Helper()
+	dir := t.TempDir()
+	certPath = filepath.Join(dir, "server.crt")
+	keyPath = filepath.Join(dir, "server.key")
+	out, err := exec.Command("openssl", "req", "-x509", "-newkey", "rsa:2048",
+		"-keyout", keyPath, "-out", certPath, "-days", "1", "-nodes", "-subj", "/CN=dnscompile-test").CombinedOutput()
+	if err != nil {
+		t.Skipf("openssl not usable in this environment: %v: %s", err, out)
+	}
+	return certPath, keyPath
+}
+
+func TestCompileDnsdistClientIdentityBindingAndOverridePrecedence(t *testing.T) {
+	certPath, keyPath := testCert(t)
+	in := minimalInput()
+	in.TLSCertPath, in.TLSKeyPath = certPath, keyPath
+	in.Transports = TransportSettings{
+		DotEnabled: true, DotPort: 8853,
+		DohEnabled: true, DohPort: 8443, DohPath: "/dns-query",
+		DoqEnabled: true, DoqPort: 8854,
+	}
+	hexA := strings.Repeat("a", 48)
+	hexB := strings.Repeat("b", 64)
+	in.ClientIdentities = []ClientIdentity{
+		{ClientKey: "client-1", Hex: hexA},
+		{ClientKey: "client-2", Hex: hexB},
+	}
+	in.ClientOverrides = []ClientOverride{
+		{ClientKey: "client-1", Kind: "block", Domain: "Blocked.Example.com"},
+		{ClientKey: "client-2", Kind: "allow", Domain: "allowed.example.com"},
+	}
+	in.BlockedDomains = []string{"allowed.example.com"} // globally blocked, but client-2 explicitly allows it
+
+	out, err := CompileDnsdist(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(out, "addDOQLocal(") {
+		t.Fatalf("expected a DoQ listener directive, got:\n%s", out)
+	}
+
+	wantDoHPath := "/dns-query/cid/" + hexA
+	if !strings.Contains(out, `HTTPPathRule("`+wantDoHPath+`")`) {
+		t.Fatalf("expected an HTTPPathRule for the full canonical hex DoH path %q, got:\n%s", wantDoHPath, out)
+	}
+	// Full 64-hex identity must appear verbatim somewhere (never
+	// truncated/downgraded) -- check both the DoH path and the SNI
+	// encoding losslessly carry it.
+	if !strings.Contains(out, hexB) {
+		t.Fatalf("expected the full 64-hex identity to appear verbatim, got:\n%s", out)
+	}
+	if !strings.Contains(out, `SNIRule("`) {
+		t.Fatalf("expected an SNIRule for DoT/DoQ identity, got:\n%s", out)
+	}
+	if !strings.Contains(out, `SetTagAction("apdns_client", "client-1")`) || !strings.Contains(out, `SetTagAction("apdns_client", "client-2")`) {
+		t.Fatalf("expected each client's own tag to be set, got:\n%s", out)
+	}
+
+	// Precedence: client-1's explicit deny line must appear before the
+	// global blocklist section; client-2's explicit allow for a
+	// globally-blocked domain must also appear before the global
+	// blocklist section (so it's evaluated first and wins).
+	denyIdx := strings.Index(out, `TagRule("apdns_client", "client-1")`)
+	allowIdx := strings.Index(out, `TagRule("apdns_client", "client-2")`)
+	globalBlockIdx := strings.Index(out, "SuffixMatchNodeRule({\"allowed.example.com.\"})")
+	if denyIdx == -1 || allowIdx == -1 || globalBlockIdx == -1 {
+		t.Fatalf("expected to find all three markers, got:\n%s", out)
+	}
+	if !(denyIdx < globalBlockIdx && allowIdx < globalBlockIdx) {
+		t.Fatalf("expected per-client deny/allow rules to be compiled BEFORE the global blocklist (explicit > default), got:\ndenyIdx=%d allowIdx=%d globalBlockIdx=%d\n%s", denyIdx, allowIdx, globalBlockIdx, out)
+	}
+
+	checkDnsdist(t, out)
+}
+
+func TestCompileDnsdistClientDenyOrderedBeforeAllowForTheSameClient(t *testing.T) {
+	in := minimalInput()
+	hex := strings.Repeat("c", 48)
+	in.ClientIdentities = []ClientIdentity{{ClientKey: "client-1", Hex: hex}}
+	in.ClientOverrides = []ClientOverride{
+		{ClientKey: "client-1", Kind: "allow", Domain: "same.example.com"},
+		{ClientKey: "client-1", Kind: "block", Domain: "same.example.com"},
+	}
+	out, err := CompileDnsdist(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	denyIdx := strings.Index(out, "RCodeAction(DNSRCode.NXDOMAIN))")
+	allowIdx := strings.Index(out, "AllowAction())")
+	if denyIdx == -1 || allowIdx == -1 || denyIdx > allowIdx {
+		t.Fatalf("expected the deny rule to be compiled before the allow rule for the same client+domain (explicit deny > explicit allow), got:\ndenyIdx=%d allowIdx=%d\n%s", denyIdx, allowIdx, out)
+	}
+}
+
+func TestCompileDnsdistClientRulesAreIsolatedByTag(t *testing.T) {
+	// Two clients, each with their own deny -- neither's rule must ever
+	// reference the other's tag value, structurally proving isolation
+	// at the compile level (the real cross-client runtime proof lives
+	// in internal/hostagentd's end-to-end test).
+	in := minimalInput()
+	hexA := strings.Repeat("1", 48)
+	hexB := strings.Repeat("2", 48)
+	in.ClientIdentities = []ClientIdentity{
+		{ClientKey: "client-a", Hex: hexA},
+		{ClientKey: "client-b", Hex: hexB},
+	}
+	in.ClientOverrides = []ClientOverride{
+		{ClientKey: "client-a", Kind: "block", Domain: "secret-a.example."},
+	}
+	out, err := CompileDnsdist(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(out, "\n")
+	for _, line := range lines {
+		if strings.Contains(line, "secret-a.example.") && strings.Contains(line, "TagRule") {
+			if !strings.Contains(line, `"client-a"`) || strings.Contains(line, `"client-b"`) {
+				t.Fatalf("expected the deny rule for secret-a.example. to reference only client-a's tag, got: %s", line)
+			}
+		}
+	}
+}
+
+func TestCompileDnsdistRejectsAnInvalidClientIDValue(t *testing.T) {
+	in := minimalInput()
+	in.ClientIdentities = []ClientIdentity{{ClientKey: "client-1", Hex: "not-valid-hex"}}
+	if _, err := CompileDnsdist(in); err == nil {
+		t.Fatal("expected an error for a malformed ClientID value reaching the compiler")
+	}
+}
+
+func TestCompileDnsdistClientRulesDeterministic(t *testing.T) {
+	in := minimalInput()
+	hexA := strings.Repeat("1", 48)
+	hexB := strings.Repeat("2", 64)
+	in.ClientIdentities = []ClientIdentity{
+		{ClientKey: "client-b", Hex: hexB},
+		{ClientKey: "client-a", Hex: hexA},
+	}
+	in.ClientOverrides = []ClientOverride{
+		{ClientKey: "client-b", Kind: "allow", Domain: "z.example."},
+		{ClientKey: "client-a", Kind: "block", Domain: "y.example."},
+	}
+	out1, err := CompileDnsdist(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.ClientIdentities[0], in.ClientIdentities[1] = in.ClientIdentities[1], in.ClientIdentities[0]
+	in.ClientOverrides[0], in.ClientOverrides[1] = in.ClientOverrides[1], in.ClientOverrides[0]
+	out2, err := CompileDnsdist(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out1 != out2 {
+		t.Fatalf("expected byte-identical output regardless of input slice order:\n--- out1 ---\n%s\n--- out2 ---\n%s", out1, out2)
+	}
+}
+
+func TestCompileDnsdistDoqRequiresTlsPaths(t *testing.T) {
+	in := minimalInput()
+	in.Transports = TransportSettings{DoqEnabled: true, DoqPort: 8853}
+	if _, err := CompileDnsdist(in); err == nil {
+		t.Fatal("expected an error for DoQ enabled with no TLS cert/key configured")
+	}
+}

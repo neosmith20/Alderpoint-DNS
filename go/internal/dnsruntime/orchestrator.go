@@ -10,8 +10,13 @@
 //
 // Scope, matching internal/dnscompile's own disclosed narrowing: global
 // policy only, one default upstream profile, a flat global list of
-// domain-routing rules (not per-network), no SafeSearch/ECS. Every
-// mutation this orchestrator is wired to run
+// domain-routing rules (not per-network), no SafeSearch/ECS. Strong
+// ClientID identities/overrides ARE compiled (added 2026-08-27) --
+// every active (non-revoked) identity of every enabled managed client,
+// via internal/clients.AllActiveClientIdentities, matching that
+// package's own doc comment for the disclosed scope of per-client
+// enforcement (explicit domain overrides only, not the full per-field
+// policy layer). Every mutation this orchestrator is wired to run
 // after (see its own callers in internal/httpapi) reports its runtime
 // result back to the caller the same way internal/localdns's existing
 // stageAndPromote convention already does -- "saved, but runtime
@@ -26,6 +31,7 @@ import (
 	"strings"
 
 	"alderpointdns/go-controlplane/internal/blocklists"
+	"alderpointdns/go-controlplane/internal/clients"
 	"alderpointdns/go-controlplane/internal/customrules"
 	"alderpointdns/go-controlplane/internal/dnscompile"
 	"alderpointdns/go-controlplane/internal/dnstransports"
@@ -44,6 +50,7 @@ type Orchestrator struct {
 	DNSTransports *dnstransports.Service
 	Policy        *policy.Service
 	DomainRouting *domainrouting.Service
+	Clients       *clients.Service
 	HostAgent     *hostagent.Client
 
 	// DnsdistListenAddress, BindBackendAddress, and TLSCertPath/
@@ -206,6 +213,7 @@ func (o *Orchestrator) build(ctx context.Context) (dnscompile.Input, []string, s
 			in.Transports = dnscompile.TransportSettings{
 				DotEnabled: settings.DotEnabled, DotPort: settings.DotPort,
 				DohEnabled: settings.DohEnabled, DohPort: settings.DohPort, DohPath: settings.DohPath,
+				DoqEnabled: settings.DoqEnabled, DoqPort: settings.DoqPort,
 			}
 		}
 	}
@@ -285,6 +293,31 @@ func (o *Orchestrator) build(ctx context.Context) (dnscompile.Input, []string, s
 					MatchKind: r.MatchKind, Domain: r.Domain, ProfileID: r.UpstreamProfileID,
 					Profile: dnscompile.UpstreamProfile{Transport: p.Transport, Strategy: p.Strategy, Endpoints: endpoints},
 				})
+			}
+		}
+	}
+
+	if o.Clients != nil {
+		active, err := o.Clients.AllActiveClientIdentities(ctx)
+		if err != nil {
+			return in, nil, "", fmt.Errorf("loading active Strong ClientID identities: %w", err)
+		}
+		overridesAdded := map[string]bool{}
+		for _, a := range active {
+			if !a.ClientEnabled {
+				continue // a disabled client's identities are never compiled into the live runtime
+			}
+			key := fmt.Sprintf("client-%d", a.ClientID)
+			in.ClientIdentities = append(in.ClientIdentities, dnscompile.ClientIdentity{ClientKey: key, Hex: a.Value})
+			// A client with multiple active identities appears as
+			// multiple rows here, each carrying the same overrides
+			// (internal/clients.AllActiveClientIdentities' own doc
+			// comment) -- add them once per client, not once per row.
+			if !overridesAdded[key] {
+				overridesAdded[key] = true
+				for _, ov := range a.Overrides {
+					in.ClientOverrides = append(in.ClientOverrides, dnscompile.ClientOverride{ClientKey: key, Kind: ov.OverrideType, Domain: ov.Pattern})
+				}
 			}
 		}
 	}

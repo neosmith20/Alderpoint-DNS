@@ -17,6 +17,8 @@ import (
 	_ "modernc.org/sqlite"
 
 	"alderpointdns/go-controlplane/internal/blocklists"
+	"alderpointdns/go-controlplane/internal/clientid"
+	"alderpointdns/go-controlplane/internal/clients"
 	"alderpointdns/go-controlplane/internal/customrules"
 	"alderpointdns/go-controlplane/internal/dbmigrate"
 	"alderpointdns/go-controlplane/internal/dnstransports"
@@ -291,6 +293,82 @@ func TestApplyEndToEndAgainstARealHostAgent(t *testing.T) {
 	got := strings.TrimSpace(string(out))
 	if got != "10.5.5.5" {
 		t.Fatalf("expected the real end-to-end answer 10.5.5.5 for a record created only in this test's SQLite DB, got %q", got)
+	}
+}
+
+// TestBuildGathersActiveClientIdentitiesExcludingDisabledClientsAndRevokedIdentities
+// proves the orchestrator's Strong ClientID gathering matches its own
+// disclosed contract: every active identity of every enabled client is
+// compiled, a revoked identity never is, and a disabled client's
+// identities never are either (even though the row itself still
+// exists) -- and a client with two identities contributes its
+// overrides exactly once, not once per identity.
+func TestBuildGathersActiveClientIdentitiesExcludingDisabledClientsAndRevokedIdentities(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	cl := &clients.Service{DB: db}
+
+	enabledID, err := cl.CreateClient(ctx, "Phone", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := cl.GenerateClientID(ctx, enabledID, clientid.Bits192, "primary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cl.GenerateClientID(ctx, enabledID, clientid.Bits256, "backup"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cl.AddDomainOverride(ctx, enabledID, "block", "blocked.example."); err != nil {
+		t.Fatal(err)
+	}
+	revoked, err := cl.GenerateClientID(ctx, enabledID, clientid.Bits192, "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.RevokeIdentifier(ctx, revoked.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	disabledID, err := cl.CreateClient(ctx, "Guest Tablet", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cl.GenerateClientID(ctx, disabledID, clientid.Bits192, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE clients SET enabled=0 WHERE id=?`, disabledID); err != nil {
+		t.Fatal(err)
+	}
+
+	o := &Orchestrator{Clients: cl, DnsdistListenAddress: "127.0.0.1:15353", BindBackendAddress: "127.0.0.1:15553"}
+	in, _, _, err := o.build(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(in.ClientIdentities) != 2 {
+		t.Fatalf("expected exactly the 2 active identities of the enabled client (not the revoked one, not the disabled client's), got %+v", in.ClientIdentities)
+	}
+	seenValues := map[string]bool{}
+	for _, id := range in.ClientIdentities {
+		seenValues[id.Hex] = true
+		if id.ClientKey != fmt.Sprintf("client-%d", enabledID) {
+			t.Fatalf("expected every identity to be keyed to the enabled client, got %+v", id)
+		}
+	}
+	if seenValues[revoked.Value] {
+		t.Fatal("a revoked identity must never be compiled")
+	}
+	if !seenValues[first.Value] {
+		t.Fatal("expected the first (still-active) identity to be compiled")
+	}
+
+	if len(in.ClientOverrides) != 1 {
+		t.Fatalf("expected exactly 1 override (added once, not once per identity), got %+v", in.ClientOverrides)
+	}
+	if in.ClientOverrides[0].Domain != "blocked.example." || in.ClientOverrides[0].Kind != "block" {
+		t.Fatalf("unexpected override contents: %+v", in.ClientOverrides[0])
 	}
 }
 
