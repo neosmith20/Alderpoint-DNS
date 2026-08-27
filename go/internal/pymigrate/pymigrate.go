@@ -260,11 +260,11 @@ func localDNSExists(existing []localdns.Record, name, rtype, value string) bool 
 // --- upstream profiles ---------------------------------------------------
 
 type pyUpstreamProfile struct {
-	rowID              int64
-	upstreamProfileID  string
+	rowID                     int64
+	upstreamProfileID         string
 	name, transport, strategy string
-	enabled            bool
-	sortOrder          int
+	enabled                   bool
+	sortOrder                 int
 }
 
 func (im *Importer) migrateUpstreams(ctx context.Context, pydb *sql.DB, dryRun bool, record func(RowResult)) error {

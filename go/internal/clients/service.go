@@ -7,25 +7,32 @@
 // Field shapes and validation match app/v2/control_db.py's
 // clients/client_identifiers/client_groups/client_group_members tables
 // and app/v2/webapp.py's client/group routes (read directly, not
-// guessed). Deliberately NOT included in this package, disclosed rather
-// than hidden:
+// guessed). Full managed-client lifecycle (create/edit/enable-disable/
+// delete, identifier removal, group membership removal) matches V1's
+// real, live `app/clients.py` reference implementation
+// (create_client/update_client/set_client_enabled/delete_client/
+// remove_identifier -- V1 has this, V2's own webapp.py does not; an
+// earlier version of this package's doc comment claimed the opposite
+// after reading only V2, which was wrong -- corrected here after
+// actually reading V1). Deliberately NOT included in this package,
+// disclosed rather than hidden:
 //
 //   - The policy-layer system (global/network/group/client policy
 //     assignment -- filtering profile, safesearch, upstream, ECS mode,
 //     etc.). That's shared infrastructure spanning multiple pages
-//     (Clients & Access, Filters, DNS Settings), not something to bolt
-//     onto Clients alone -- it needs its own dedicated pass.
-//   - Observed clients / discovery. That data comes from Python's
-//     discovery worker, a live-traffic-derived store analogous to
-//     analytics (see PARITY_MATRIX.md's Sequencing note on the
-//     read-only pyanalytics boundary) -- a separate compatibility-
-//     boundary decision, not built here. This package is Managed
-//     Clients only: the operator-created identity a human explicitly
-//     defined, never an auto-populated "observed" row.
-//   - Client enable/disable and edit/delete are not exposed by
-//     Python's own API today either (verified by reading webapp.py --
-//     only create exists) -- so none are invented here. Extending this
-//     package to add them is real future work, not a Python-parity gap.
+//     (Clients & Access, Filters, DNS Settings) -- internal/policy owns
+//     it, this package only stores identities/groups themselves.
+//   - Observed clients / discovery in the V1/V2-Python sense (a
+//     dedicated discovery worker's own store) -- still not built here.
+//     internal/httpapi's own handleListObservedClients is a real but
+//     narrower substitute: it reads recent real DNS traffic's "client"
+//     dimension from internal/pyanalytics's already-safe, already-built
+//     analytics snapshot boundary (never Python's control.db, so none
+//     of the secrets-exposure concern that boundary would carry
+//     applies) -- disclosed narrower than a real discovery worker (no
+//     first-seen/last-seen history, no hostname resolution, no vendor/
+//     OS fingerprinting), but real, live, truthful data, not a
+//     placeholder.
 package clients
 
 import (
@@ -309,6 +316,119 @@ func (s *Service) CreateClient(ctx context.Context, name, description string) (i
 		return 0, err
 	}
 	return res.LastInsertId()
+}
+
+// UpdateClient edits a managed client's own name/description -- matches
+// V1's real update_client (app/clients.py). Enabled state is a separate
+// call (SetClientEnabled) so a caller can flip just one without
+// resending the whole record.
+func (s *Service) UpdateClient(ctx context.Context, clientID int64, name, description string) error {
+	if name == "" {
+		return fmt.Errorf("%w: name required", ErrValidation)
+	}
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE clients SET name=?, description=?, updated_at=? WHERE id=?`,
+		name, description, time.Now().UTC().Format(time.RFC3339), clientID)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrConflict, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetClientEnabled matches V1's real set_client_enabled -- a disabled
+// client is excluded from internal/dnsruntime's orchestrator (which
+// only ever compiles ACTIVE identities of ENABLED clients, see
+// AllActiveClientIdentities), so disabling a client is a real,
+// live-enforcement-affecting action once applied, not just a display
+// flag.
+func (s *Service) SetClientEnabled(ctx context.Context, clientID int64, enabled bool) error {
+	enabledInt := 0
+	if enabled {
+		enabledInt = 1
+	}
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE clients SET enabled=?, updated_at=? WHERE id=?`,
+		enabledInt, time.Now().UTC().Format(time.RFC3339), clientID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DeleteClient permanently removes a managed client and everything
+// scoped to it (identifiers, group memberships, domain overrides) --
+// matches V1's real delete_client (which explicitly deletes the
+// client's own access_rules too; this schema doesn't have a separate
+// access-rules table, so client_domain_overrides covers the equivalent
+// data). Deletes the child rows explicitly in one transaction rather
+// than relying on the schema's ON DELETE CASCADE annotations: SQLite
+// only actually enforces/cascades foreign keys when
+// "PRAGMA foreign_keys=ON" is set on the connection, which nothing in
+// this codebase's real connection setup does (verified by reading
+// cmd/alderpointdns-go/main.go's openDB and internal/dbmigrate) --
+// those CASCADE annotations are therefore currently inert everywhere,
+// and flipping that pragma globally is a real, separate, wider-blast-
+// radius decision this one method isn't the place to make unilaterally.
+// Explicit deletes here are correct regardless of that pragma's state.
+// Does NOT delete the client's own policy_layers row (scope='client',
+// scope_ref=<id>) -- that's internal/policy's own table, a deliberate
+// package boundary matching how this package never touches policy
+// storage anywhere else either; an orphaned client-scope policy row is
+// harmless (it can never be loaded for a client id that no longer
+// resolves to anything in the UI).
+func (s *Service) DeleteClient(ctx context.Context, clientID int64) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx, `DELETE FROM clients WHERE id=?`, clientID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM client_identifiers WHERE client_id=?`, clientID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM client_group_members WHERE client_id=?`, clientID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM client_domain_overrides WHERE client_id=?`, clientID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// RemoveFromGroup removes one client's membership in one group --
+// idempotent (removing a membership that doesn't exist is not an
+// error), matching AddToGroup's own INSERT OR IGNORE symmetry.
+func (s *Service) RemoveFromGroup(ctx context.Context, clientID int64, groupID string) error {
+	_, err := s.DB.ExecContext(ctx, `
+		DELETE FROM client_group_members
+		WHERE client_id=? AND group_id=(SELECT id FROM client_groups WHERE group_id=?)`,
+		clientID, groupID)
+	return err
 }
 
 func (s *Service) AddIdentifier(ctx context.Context, clientID int64, kind, value string) error {

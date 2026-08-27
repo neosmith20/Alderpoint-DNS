@@ -153,7 +153,7 @@ func TestEncodeSNILabelNeverTruncatesA256BitIdentity(t *testing.T) {
 func TestDecodeSNILabelRejectsAnythingNotAGenuineEncodedClientID(t *testing.T) {
 	cases := []string{
 		"not-a-clientid.example.com",
-		"aabbcc.cid.apdns-clientid.internal",           // too short to be real hex-decoded ClientID (6 hex chars)
+		"aabbcc.cid.apdns-clientid.internal",                                         // too short to be real hex-decoded ClientID (6 hex chars)
 		"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz.cid.apdns-clientid.internal", // right length, not hex
 		"",
 		"cid.apdns-clientid.internal", // suffix alone, no identity labels

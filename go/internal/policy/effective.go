@@ -51,8 +51,8 @@ type EffectivePolicy struct {
 // (as any) when this layer doesn't set the field, matching Python's own
 // "None means unset, fall through to the next layer" contract exactly.
 type fieldSpec struct {
-	name    string
-	get     func(Layer) any
+	name     string
+	get      func(Layer) any
 	fallback any
 }
 

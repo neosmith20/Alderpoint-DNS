@@ -13,9 +13,9 @@ import (
 	"alderpointdns/go-controlplane/internal/customrules"
 	"alderpointdns/go-controlplane/internal/dnsruntime"
 	"alderpointdns/go-controlplane/internal/dnstransports"
+	"alderpointdns/go-controlplane/internal/domainrouting"
 	"alderpointdns/go-controlplane/internal/hostagent"
 	"alderpointdns/go-controlplane/internal/importer"
-	"alderpointdns/go-controlplane/internal/domainrouting"
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/notifications"
 	"alderpointdns/go-controlplane/internal/policy"
@@ -25,15 +25,15 @@ import (
 )
 
 type Server struct {
-	DB            *sql.DB
-	Auth          *auth.Store
-	Blocklists    *blocklists.Service
-	LocalDNS      *localdns.Service
+	DB         *sql.DB
+	Auth       *auth.Store
+	Blocklists *blocklists.Service
+	LocalDNS   *localdns.Service
 	// Importer is nil unless wired at startup -- nil means the real
 	// preview/apply/rollback job workflow (POST /api/import/jobs etc.)
 	// reports unavailable; the older one-shot POST /api/import/hosts
 	// endpoint (s.LocalDNS-backed directly) is unaffected either way.
-	Importer *importer.Service
+	Importer      *importer.Service
 	Upstreams     *upstreams.Service
 	Clients       *clients.Service
 	Policy        *policy.Service
@@ -151,6 +151,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/groups", requireAuth(s.handleCreateGroup))
 	mux.HandleFunc("GET /api/clients", requireAuth(s.handleListClients))
 	mux.HandleFunc("POST /api/clients", requireAuth(s.handleCreateClient))
+	mux.HandleFunc("PATCH /api/clients/{id}", requireAuth(s.handleUpdateClient))
+	mux.HandleFunc("DELETE /api/clients/{id}", requireAuth(s.handleDeleteClient))
+	mux.HandleFunc("POST /api/clients/{id}/enabled", requireAuth(s.handleSetClientEnabled))
+	mux.HandleFunc("GET /api/clients/observed", requireAuth(s.handleListObservedClients))
 	mux.HandleFunc("POST /api/clients/{id}/identifiers", requireAuth(s.handleAddClientIdentifier))
 	mux.HandleFunc("POST /api/clients/{id}/identifiers/generate", requireAuth(s.handleGenerateClientID))
 	mux.HandleFunc("POST /api/clients/{id}/identifiers/{identifierId}/revoke", requireAuth(s.handleRevokeClientIdentifier))
@@ -159,6 +163,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/clients/{id}/domain-overrides", requireAuth(s.handleAddDomainOverride))
 	mux.HandleFunc("DELETE /api/clients/{id}/domain-overrides/{overrideId}", requireAuth(s.handleDeleteDomainOverride))
 	mux.HandleFunc("POST /api/clients/{id}/groups", requireAuth(s.handleAddClientGroup))
+	mux.HandleFunc("DELETE /api/clients/{id}/groups/{groupId}", requireAuth(s.handleRemoveClientGroup))
 
 	mux.HandleFunc("GET /api/policy/global", requireAuth(s.handleGetGlobalPolicy))
 	mux.HandleFunc("PUT /api/policy/global", requireAuth(s.handlePutGlobalPolicy))

@@ -152,9 +152,29 @@ export interface ManagedClient {
   domain_overrides: ClientDomainOverride[];
 }
 
+// ObservedClient: real recent-traffic "client" dimension from
+// internal/pyanalytics's snapshot boundary (see
+// GET /api/clients/observed's Go doc comment) -- an address that has
+// actually queried recently, cross-referenced against every already-
+// managed ipv4/ipv6 identifier. Not a persisted record: it disappears
+// once its traffic window rolls off, same honesty contract as
+// Dashboard's Top Domains.
+export interface ObservedClient {
+  address: string;
+  query_count: number;
+  managed: boolean;
+  client_id?: number;
+}
+
 export interface ClientGroupMember {
   id: number;
   name: string;
+}
+
+export interface NetworkWithPolicy {
+  network_id: string;
+  cidr: string;
+  policy: PolicyLayer;
 }
 
 export interface ClientGroup {
@@ -680,10 +700,20 @@ export const api = {
   listClients: (signal?: AbortSignal) => req<{ clients: ManagedClient[] }>("/api/clients", undefined, signal),
   createClient: (name: string, description: string) =>
     req<{ status: string; client_id: number }>("/api/clients", { method: "POST", body: JSON.stringify({ name, description }) }),
+  updateClient: (clientId: number, name: string, description: string) =>
+    req<{ status: string }>(`/api/clients/${clientId}`, { method: "PATCH", body: JSON.stringify({ name, description }) }),
+  setClientEnabled: (clientId: number, enabled: boolean) =>
+    req<{ status: string; dns_runtime?: DNSRuntimeApplyResult }>(`/api/clients/${clientId}/enabled`, { method: "POST", body: JSON.stringify({ enabled }) }),
+  deleteClient: (clientId: number) =>
+    req<{ status: string; dns_runtime?: DNSRuntimeApplyResult }>(`/api/clients/${clientId}`, { method: "DELETE" }),
   addClientIdentifier: (clientId: number, kind: string, value: string) =>
     req<{ status: string }>(`/api/clients/${clientId}/identifiers`, { method: "POST", body: JSON.stringify({ kind, value }) }),
   addClientToGroup: (clientId: number, groupId: string) =>
     req<{ status: string }>(`/api/clients/${clientId}/groups`, { method: "POST", body: JSON.stringify({ group_id: groupId }) }),
+  removeClientFromGroup: (clientId: number, groupId: string) =>
+    req<{ status: string }>(`/api/clients/${clientId}/groups/${encodeURIComponent(groupId)}`, { method: "DELETE" }),
+  listObservedClients: (signal?: AbortSignal) =>
+    req<{ observed: ObservedClient[]; degraded: boolean; degraded_reason?: string }>("/api/clients/observed", undefined, signal),
 
   // Strong ClientID: the actual hex value is always generated
   // server-side (internal/clientid's OS-backed CSPRNG) -- the caller
@@ -742,7 +772,7 @@ export const api = {
   // own doc comment).
   explainPolicy: (clientId: number, clientIp?: string) =>
     req<PolicyExplainResult>(`/api/policy/explain?client_id=${clientId}${clientIp ? `&client_ip=${encodeURIComponent(clientIp)}` : ""}`),
-  listNetworks: (signal?: AbortSignal) => req<{ networks: { network_id: string; cidr: string }[] }>("/api/networks", undefined, signal),
+  listNetworks: (signal?: AbortSignal) => req<{ networks: NetworkWithPolicy[] }>("/api/networks", undefined, signal),
   createNetwork: (cidr: string) =>
     req<{ status: string; network_id: string }>("/api/networks", { method: "POST", body: JSON.stringify({ cidr }) }),
 

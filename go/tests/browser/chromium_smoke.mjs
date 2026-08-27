@@ -546,7 +546,18 @@ async function main() {
     check("creating a managed client adds a real row to the grid", clientRows === 1, `rows=${clientRows}`);
 
     // Add an identifier: invalid first (must be rejected), then valid.
-    await page.click(".data-grid tbody .actions button"); // "Add identifier"
+    // Looked up by its actual label rather than array index -- action
+    // button order isn't a stable contract.
+    async function clickActionButton(label) {
+      for (const btn of await page.$$(".data-grid tbody .actions button")) {
+        if ((await btn.evaluate((el) => el.textContent?.trim())) === label) {
+          await btn.click();
+          return true;
+        }
+      }
+      return false;
+    }
+    check("Add IP identifier button exists", await clickActionButton("Add IP identifier"));
     await page.waitForSelector(".inline-form input", { timeout: 2000 });
     await page.type(".inline-form input", "not-an-ip");
     await page.click(".inline-form button[type=submit]");
@@ -561,6 +572,77 @@ async function main() {
     ]);
     const chipsText = await page.$eval(".data-grid tbody .chips", (el) => el.textContent);
     check("a valid identifier actually appears on the client row after saving", chipsText.includes("10.0.0.5"), chipsText);
+
+    // --- Full managed-client lifecycle: edit, enable/disable, remove
+    // from group, delete identifier, delete client ---
+    check("Assign group button exists", await clickActionButton("Assign group"));
+    await page.waitForSelector(".inline-form select", { timeout: 2000 });
+    await Promise.all([
+      // Waits for a real rendered chip, not just "Kids" appearing anywhere
+      // (the still-open assign-group <select>'s own <option> already
+      // contains the text "Kids" before the mutation completes).
+      page.waitForFunction(() => [...document.querySelectorAll(".data-grid tbody .chips .chip")].some((c) => c.textContent.includes("Kids")), { timeout: 3000 }),
+      page.click(".inline-form button[type=submit]"),
+    ]);
+    const groupsChipText = await page.$eval(".data-grid tbody", (el) => el.textContent);
+    check("assigning a group actually shows it on the client row", groupsChipText.includes("Kids"), groupsChipText);
+
+    check("Edit button exists", await clickActionButton("Edit"));
+    await page.waitForSelector(".edit-name-form input", { timeout: 2000 });
+    const editInputs = await page.$$(".edit-name-form input");
+    await editInputs[0].click({ clickCount: 3 });
+    await editInputs[0].type("Test Client Renamed");
+    await Promise.all([
+      page.waitForFunction(() => /Test Client Renamed/.test(document.querySelector(".data-grid tbody").textContent), { timeout: 3000 }),
+      page.click(".edit-name-form button[type=submit]"),
+    ]);
+    const renamedText = await page.$eval(".data-grid tbody", (el) => el.textContent);
+    check("editing a client's name actually persists and re-renders", renamedText.includes("Test Client Renamed"), renamedText);
+
+    check("Disable button exists on a managed client", await clickActionButton("Disable"));
+    await page.waitForSelector(".disabled-badge", { timeout: 3000 }).catch(() => {});
+    check("disabling a client shows a real disabled badge", (await page.$(".disabled-badge")) !== null);
+    check("Enable button exists after disabling", await clickActionButton("Enable"));
+    await new Promise((r) => setTimeout(r, 200));
+    check("re-enabling removes the disabled badge", (await page.$(".disabled-badge")) === null);
+
+    // Remove the IPv4 identifier added above (its own chip-x, not the
+    // Strong ClientID rows).
+    const removedIdentifier = await page.evaluate(() => {
+      const chip = [...document.querySelectorAll(".data-grid tbody .chips .chip")].find((c) => c.textContent.includes("10.0.0.5"));
+      const btn = chip?.querySelector(".chip-x");
+      if (!btn) return false;
+      window.__confirmOverride = window.confirm;
+      window.confirm = () => true;
+      btn.click();
+      return true;
+    });
+    check("identifier remove control exists and is clickable", removedIdentifier);
+    await new Promise((r) => setTimeout(r, 300));
+    const afterIdentifierRemoveText = await page.$eval(".data-grid tbody", (el) => el.textContent);
+    check("removing an IP identifier actually removes it from the row", !afterIdentifierRemoveText.includes("10.0.0.5"), afterIdentifierRemoveText);
+
+    // Remove from group (chip-x on the group chip).
+    const removedFromGroup = await page.evaluate(() => {
+      const chip = [...document.querySelectorAll(".data-grid tbody .chips .chip")].find((c) => c.textContent.includes("Kids"));
+      const btn = chip?.querySelector(".chip-x");
+      if (!btn) return false;
+      btn.click();
+      return true;
+    });
+    check("group remove control exists and is clickable", removedFromGroup);
+    await new Promise((r) => setTimeout(r, 300));
+    const afterGroupRemoveText = await page.$eval(".data-grid tbody", (el) => el.textContent);
+    check("removing a client from a group actually removes it from the row", !afterGroupRemoveText.includes("Kids"), afterGroupRemoveText);
+
+    // --- Observed Clients (real traffic-derived, honest empty state on
+    // a fresh instance with no query history) ---
+    const observedSectionText = await page.evaluate(() => {
+      const h3s = [...document.querySelectorAll("h3")];
+      const target = h3s.find((h) => h.textContent.trim() === "Observed Clients");
+      return target ? target.nextElementSibling?.parentElement?.textContent ?? "" : null;
+    });
+    check("Observed Clients section renders on the Clients page", observedSectionText !== null, String(observedSectionText));
 
     // --- Per-client policy editor (shared PolicyEditor) ---
     const policyButtons = await page.$$(".data-grid tbody .actions button");
@@ -596,6 +678,31 @@ async function main() {
     await page.waitForSelector(".policy-editor select", { timeout: 2000 });
     const persistedValue = await page.$eval(".policy-editor select", (el) => el.value);
     check("saved policy field actually persisted server-side (survives a full page reload)", persistedValue === "strict", persistedValue);
+
+    // --- Delete client (real destructive action; confirm() overridden above) ---
+    check("Delete button exists", await clickActionButton("Delete"));
+    await new Promise((r) => setTimeout(r, 300));
+    const clientRowsAfterDelete = await page.$$eval(".data-grid tbody tr:not(.empty-row)", (rows) => rows.length);
+    check("deleting a client actually removes its row", clientRowsAfterDelete === 0, `rows=${clientRowsAfterDelete}`);
+
+    // --- Nav: Clients & Access (global policy + networks) ---
+    const clickedPolicies = await clickNavItem(page, (t) => t === "Clients & Access");
+    check("Clients & Access nav item exists and is clickable", clickedPolicies);
+    await page.waitForSelector("#clients-access-heading", { timeout: 3000 }).catch(() => {});
+    check("Clients & Access page content rendered (not a Coming Soon placeholder)", (await page.$("#clients-access-heading")) !== null);
+    check("Global Policy editor renders on Clients & Access", (await page.$(".clients-access .policy-editor")) !== null);
+
+    await page.type(".add-form input[required]", "192.168.50.0/24");
+    await Promise.all([
+      page.waitForFunction(() => document.querySelector(".network-list") !== null, { timeout: 3000 }),
+      page.click(".add-form button[type=submit]"),
+    ]);
+    const networkListText = await page.$eval(".network-list", (el) => el.textContent);
+    check("adding a network adds a real entry to the network list", networkListText.includes("192.168.50.0/24"), networkListText);
+
+    await page.click(".network-row button");
+    await page.waitForSelector(".network-list .policy-editor select", { timeout: 2000 }).catch(() => {});
+    check("a network's own Policy button opens its per-network policy editor", (await page.$(".network-list .policy-editor")) !== null);
 
     // --- Nav: Filters (custom rules + global policy) ---
     const clickedFilters = await clickNavItem(page, (t) => t === "Filters");
@@ -809,6 +916,7 @@ async function main() {
       { path: "/ui/localdns", heading: "#localdns-heading" },
       { path: "/ui/upstreams", heading: "#upstreams-heading" },
       { path: "/ui/clients", heading: "#clients-heading" },
+      { path: "/ui/policies", heading: "#clients-access-heading" },
       { path: "/ui/filtering", heading: "#filtering-heading" },
       { path: "/ui/encryption", heading: "#encryption-heading" },
       { path: "/ui/backup", heading: "#backup-heading" },

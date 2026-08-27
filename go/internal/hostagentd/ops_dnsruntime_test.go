@@ -41,7 +41,7 @@ func newDNSRuntimeConfig(t *testing.T) (*Server, DNSRuntimeConfig) {
 	dnsdistPort := freeTCPPort(t)
 
 	cfg := DNSRuntimeConfig{
-		StagingDir: stagingDir,
+		StagingDir:   stagingDir,
 		BindLivePath: filepath.Join(bindDir, "named.conf"), BindDirectory: bindDir, BindLogPath: filepath.Join(bindDir, "named.log"),
 		DnsdistLivePath: dnsdistLive,
 		BindPlainPort:   freeTCPPort(t), BindProxyPort: freeTCPPort(t), BindStatsPort: freeTCPPort(t), BindRNDCPort: freeTCPPort(t),

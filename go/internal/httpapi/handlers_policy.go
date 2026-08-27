@@ -143,7 +143,20 @@ func (s *Server) handleListNetworks(w http.ResponseWriter, r *http.Request) {
 		Err(http.StatusInternalServerError, "internal_error", "failed to load networks").WriteJSON(w)
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"networks": networks})
+	// Matches GET /api/groups and /api/clients, which each embed their
+	// own policy layer directly rather than requiring a second round
+	// trip per network -- this endpoint used to omit it, an inconsistency
+	// noted while building out the Clients & Access page.
+	out := make([]map[string]any, 0, len(networks))
+	for _, n := range networks {
+		layer, err := s.Policy.Load(r.Context(), "network", n.NetworkID)
+		if err != nil {
+			Err(http.StatusInternalServerError, "internal_error", "failed to load network policy").WriteJSON(w)
+			return
+		}
+		out = append(out, map[string]any{"network_id": n.NetworkID, "cidr": n.CIDR, "policy": layer})
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"networks": out})
 }
 
 type createNetworkRequest struct {

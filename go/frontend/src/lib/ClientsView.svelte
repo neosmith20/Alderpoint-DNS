@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, ApiError, type ManagedClient, type ClientGroup, type ClientIdentifier, type PolicyExplainResult } from "../api";
+  import { api, ApiError, type ManagedClient, type ClientGroup, type ClientIdentifier, type PolicyExplainResult, type ObservedClient } from "../api";
   import { StaleGuard } from "../staleGuard";
   import { router } from "../router.svelte";
   import DataGrid from "./DataGrid.svelte";
@@ -8,24 +8,46 @@
   import PolicyEditor from "./PolicyEditor.svelte";
 
   // Native Go implementation (own schema/CRUD) -- see internal/clients's
-  // and internal/policy's doc comments for exactly what's covered
-  // (managed clients, identifiers, groups, per-client/per-group policy
-  // assignment via the shared PolicyEditor, "effective policy explain"
-  // -- global->network->group->client precedence resolution, GET
-  // /api/policy/explain, see internal/policy/effective.go -- and Strong
-  // ClientID: real generation/validation/revoke/regenerate/delete plus
-  // per-client explicit domain overrides, compiled into real dnsdist
-  // DoH-path/DoT+DoQ-SNI enforcement, see internal/clientid,
-  // internal/dnscompile) and what's deliberately not here yet: Observed
-  // Clients/discovery (Python-owned live data, same shape of problem as
-  // Dashboard's analytics -- needs its own compatibility-boundary
-  // decision, not built here). This page is Managed Clients only,
-  // disclosed in-page below.
+  // and internal/policy's doc comments for exactly what's covered:
+  // full managed-client lifecycle (create/edit/enable-disable/delete),
+  // identifiers (IP/CIDR and Strong ClientID) with real generation/
+  // validation/revoke/regenerate/delete, group membership (assign and
+  // remove), per-client/per-group policy assignment via the shared
+  // PolicyEditor, "effective policy explain" (global->network->group->
+  // client precedence resolution, GET /api/policy/explain, see
+  // internal/policy/effective.go), and per-client explicit domain
+  // overrides compiled into real dnsdist DoH-path/DoT+DoQ-SNI
+  // enforcement (see internal/clientid, internal/dnscompile). Observed
+  // Clients below is a real but disclosed-narrower substitute for a
+  // dedicated discovery worker: it reads recent real traffic straight
+  // from internal/pyanalytics's snapshot boundary (see
+  // GET /api/clients/observed's Go doc comment) -- no first-seen/
+  // last-seen history, no hostname/vendor fingerprinting, no
+  // loopback/unspecified addresses ever presented as a host.
 
   let managedClients = $state<ManagedClient[]>([]);
   let groups = $state<ClientGroup[]>([]);
   let loadError = $state("");
   const guard = new StaleGuard();
+
+  let observed = $state<ObservedClient[]>([]);
+  let observedDegraded = $state(false);
+  let observedDegradedReason = $state("");
+  let observedLoadError = $state("");
+  const observedGuard = new StaleGuard();
+
+  let manageAddress = $state<string | null>(null);
+  let manageMode = $state<"new" | "existing">("new");
+  let manageNewName = $state("");
+  let manageExistingClientId = $state<number | null>(null);
+  let manageError = $state("");
+  let manageBusy = $state(false);
+
+  let editClientId = $state<number | null>(null);
+  let editName = $state("");
+  let editDescription = $state("");
+  let editError = $state("");
+  let editBusy = $state(false);
 
   let newClientName = $state("");
   let newClientDescription = $state("");
@@ -96,9 +118,104 @@
     }
   }
 
+  async function refreshObserved() {
+    const token = observedGuard.start();
+    try {
+      const res = await api.listObservedClients(router.signal());
+      if (!observedGuard.isCurrent(token)) return;
+      observed = res.observed;
+      observedDegraded = res.degraded;
+      observedDegradedReason = res.degraded_reason ?? "";
+      observedLoadError = "";
+    } catch (err) {
+      if (!observedGuard.isCurrent(token)) return;
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      observedLoadError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
   onMount(() => {
     refresh();
+    refreshObserved();
   });
+
+  function startEditClient(c: ManagedClient) {
+    editClientId = c.id;
+    editName = c.name;
+    editDescription = c.description;
+    editError = "";
+  }
+
+  async function submitEditClient(e: Event) {
+    e.preventDefault();
+    if (editClientId === null) return;
+    editError = "";
+    editBusy = true;
+    try {
+      await api.updateClient(editClientId, editName, editDescription);
+      editClientId = null;
+      await refresh();
+    } catch (err) {
+      editError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      editBusy = false;
+    }
+  }
+
+  async function toggleEnabled(c: ManagedClient) {
+    await api.setClientEnabled(c.id, !c.enabled);
+    await refresh();
+  }
+
+  async function deleteClient(c: ManagedClient) {
+    if (!confirm(`Permanently delete client "${c.name}"? This removes all its identifiers, group memberships, and domain overrides. This cannot be undone.`)) return;
+    await api.deleteClient(c.id);
+    await Promise.all([refresh(), refreshObserved()]);
+  }
+
+  async function removeFromGroup(c: ManagedClient, groupId: string) {
+    await api.removeClientFromGroup(c.id, groupId);
+    await refresh();
+  }
+
+  async function deleteIpIdentifier(c: ManagedClient, id: ClientIdentifier) {
+    if (!confirm(`Remove identifier ${id.value} from "${c.name}"?`)) return;
+    await api.deleteClientIdentifier(c.id, id.id);
+    await Promise.all([refresh(), refreshObserved()]);
+  }
+
+  function startManage(address: string) {
+    manageAddress = address;
+    manageMode = "new";
+    manageNewName = address;
+    manageExistingClientId = managedClients[0]?.id ?? null;
+    manageError = "";
+  }
+
+  async function submitManage(e: Event) {
+    e.preventDefault();
+    if (manageAddress === null) return;
+    manageError = "";
+    manageBusy = true;
+    const kind = manageAddress.includes(":") ? "ipv6" : "ipv4";
+    try {
+      let clientId: number;
+      if (manageMode === "new") {
+        const created = await api.createClient(manageNewName || manageAddress, "");
+        clientId = created.client_id;
+      } else {
+        if (manageExistingClientId === null) throw new Error("choose a client");
+        clientId = manageExistingClientId;
+      }
+      await api.addClientIdentifier(clientId, kind, manageAddress);
+      manageAddress = null;
+      await Promise.all([refresh(), refreshObserved()]);
+    } catch (err) {
+      manageError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      manageBusy = false;
+    }
+  }
 
   async function addClient(e: Event) {
     e.preventDefault();
@@ -237,7 +354,7 @@
   }
 
   const columns: Column<ManagedClient>[] = [
-    { key: "name", label: "Name", sortValue: (c) => c.name.toLowerCase(), minWidth: 12 },
+    { key: "name", label: "Name", sortValue: (c) => c.name.toLowerCase(), minWidth: 14 },
     { key: "identifiers", label: "Identifiers", minWidth: 20 },
     { key: "overrides", label: "Strong ClientID Overrides", minWidth: 16 },
     { key: "groups", label: "Groups", minWidth: 12 },
@@ -248,10 +365,11 @@
 <section aria-labelledby="clients-heading" class="clients">
   <h2 id="clients-heading">Clients</h2>
   <p class="scope-note">
-    Managed Clients only (native Go). Observed/discovered clients and per-client policy assignment
-    are not migrated yet -- see the parity matrix. Strong ClientID (DoH path / DoT+DoQ SNI identity)
-    is real: generated values are compiled into live dnsdist enforcement, with per-client explicit
-    domain overrides (deny beats allow beats default policy).
+    Full managed-client lifecycle (native Go): create, edit, enable/disable, delete, group and
+    network association, identifier removal. Strong ClientID (DoH path / DoT+DoQ SNI identity) is
+    real: generated values are compiled into live dnsdist enforcement, with per-client explicit
+    domain overrides (deny beats allow beats default policy). See "Clients &amp; Access" for global
+    and network-level policy, and the parity matrix for exactly what's covered.
   </p>
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
 
@@ -277,7 +395,21 @@
   <DataGrid gridId="managed-clients" {columns} rows={managedClients} rowKey={(c) => c.id} emptyMessage="No managed clients yet.">
     {#snippet cell(c, colKey)}
       {#if colKey === "name"}
-        {c.name}
+        {#if editClientId === c.id}
+          <form onsubmit={submitEditClient} class="inline-form edit-name-form">
+            <input required bind:value={editName} aria-label="Client name" />
+            <input bind:value={editDescription} placeholder="Description" aria-label="Client description" />
+            <button type="submit" disabled={editBusy}>{editBusy ? "Saving…" : "Save"}</button>
+            <button type="button" onclick={() => (editClientId = null)}>Cancel</button>
+            {#if editError}<p class="error" role="alert">{editError}</p>{/if}
+          </form>
+        {:else}
+          <div class="name-cell">
+            <span class:disabled-name={!c.enabled}>{c.name}</span>
+            {#if !c.enabled}<span class="badge disabled-badge">disabled</span>{/if}
+          </div>
+          {#if c.description}<p class="hint client-desc">{c.description}</p>{/if}
+        {/if}
       {:else if colKey === "identifiers"}
         <div class="id-list">
           {#each c.identifiers as id (id.id)}
@@ -306,7 +438,10 @@
                 {/if}
               </div>
             {:else}
-              <span class="chip">{id.kind}: {id.value}</span>
+              <span class="chip">
+                {id.kind}: {id.value}
+                <button type="button" class="chip-x" onclick={() => deleteIpIdentifier(c, id)} aria-label="Remove identifier">×</button>
+              </span>
             {/if}
           {/each}
           {#if lastGenerated && lastGenerated.clientId === c.id}
@@ -328,7 +463,10 @@
       {:else if colKey === "groups"}
         <span class="chips">
           {#each c.groups as g}
-            <span class="chip">{g.name}</span>
+            <span class="chip">
+              {g.name}
+              <button type="button" class="chip-x" onclick={() => removeFromGroup(c, g.group_id)} aria-label="Remove from group">×</button>
+            </span>
           {/each}
         </span>
       {:else if colKey === "actions"}
@@ -339,6 +477,9 @@
           <button onclick={() => startAssignGroup(c)} disabled={groups.length === 0}>Assign group</button>
           <button onclick={() => (policyEditorClientId = policyEditorClientId === c.id ? null : c.id)}>Policy</button>
           <button onclick={() => toggleExplain(c)}>Explain</button>
+          <button onclick={() => startEditClient(c)}>Edit</button>
+          <button onclick={() => toggleEnabled(c)}>{c.enabled ? "Disable" : "Enable"}</button>
+          <button class="danger" onclick={() => deleteClient(c)}>Delete</button>
         </div>
         {#if generateClientId === c.id}
           <form onsubmit={submitGenerateClientID} class="inline-form">
@@ -443,6 +584,51 @@
       {/each}
     </ul>
   {/if}
+
+  <h3>Observed Clients</h3>
+  <p class="scope-note">
+    Addresses that have actually sent DNS queries recently (from real traffic data, not a discovery
+    worker -- no history, no hostname/vendor detection). Loopback and unspecified addresses are never
+    shown as a host. Use "Manage Client" to turn an observed address into a managed client.
+  </p>
+  {#if observedLoadError}<p class="error" role="alert">{observedLoadError}</p>{/if}
+  {#if observedDegraded}<p class="hint">Observed traffic data degraded{observedDegradedReason ? `: ${observedDegradedReason}` : ""}.</p>{/if}
+  {#if observed.length === 0 && !observedLoadError}
+    <p class="hint">No recent traffic observed.</p>
+  {:else}
+    <ul class="observed-list">
+      {#each observed as o (o.address)}
+        <li class="observed-row">
+          <code>{o.address}</code>
+          <span class="hint">{o.query_count} quer{o.query_count === 1 ? "y" : "ies"}</span>
+          {#if o.managed}
+            <span class="chip">already managed</span>
+          {:else}
+            <button type="button" onclick={() => startManage(o.address)}>Manage Client</button>
+          {/if}
+        </li>
+        {#if manageAddress === o.address}
+          <li>
+            <form onsubmit={submitManage} class="inline-form">
+              <label><input type="radio" bind:group={manageMode} value="new" /> New client named <input bind:value={manageNewName} aria-label="New client name" /></label>
+              <label>
+                <input type="radio" bind:group={manageMode} value="existing" disabled={managedClients.length === 0} />
+                Attach to existing
+                <select bind:value={manageExistingClientId} disabled={managedClients.length === 0}>
+                  {#each managedClients as mc}
+                    <option value={mc.id}>{mc.name}</option>
+                  {/each}
+                </select>
+              </label>
+              <button type="submit" disabled={manageBusy}>{manageBusy ? "Saving…" : "Save"}</button>
+              <button type="button" onclick={() => (manageAddress = null)}>Cancel</button>
+              {#if manageError}<p class="error" role="alert">{manageError}</p>{/if}
+            </form>
+          </li>
+        {/if}
+      {/each}
+    </ul>
+  {/if}
 </section>
 
 <style>
@@ -481,4 +667,12 @@
   .clientid-actions { display: flex; gap: 0.3rem; flex-wrap: wrap; }
   .mini { font-size: 0.72rem; padding: 0.05rem 0.4rem; }
   .reveal-once { font-style: italic; }
+  .danger { color: #c33; }
+  .name-cell { display: flex; align-items: center; gap: 0.4rem; }
+  .disabled-name { opacity: 0.55; text-decoration: line-through; }
+  .badge.disabled-badge { background: #888; color: #fff; padding: 0.05rem 0.4rem; border-radius: 999px; font-size: 0.7rem; }
+  .client-desc { margin: 0.15rem 0 0; }
+  .edit-name-form { flex-direction: column; align-items: stretch; }
+  .observed-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
+  .observed-row { display: flex; align-items: center; gap: 0.6rem; }
 </style>

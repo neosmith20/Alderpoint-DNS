@@ -64,9 +64,9 @@ func TestAddIdentifierValidatesFormat(t *testing.T) {
 		{"ipv4_cidr", "192.168.0.0/24", false},
 		{"ipv4_cidr", "2001:db8::/32", true},
 		{"ipv6_cidr", "2001:db8::/32", false},
-		{"clientid", "anything-opaque", true},                                                                       // no longer opaque -- see TestAddIdentifierValidatesClientIDFormat
-		{"clientid", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false},                                     // real 48-hex
-		{"clientid", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false},                     // real 64-hex
+		{"clientid", "anything-opaque", true},                                   // no longer opaque -- see TestAddIdentifierValidatesClientIDFormat
+		{"clientid", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false}, // real 48-hex
+		{"clientid", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false}, // real 64-hex
 		{"bogus-kind", "x", true},
 	}
 	for _, c := range cases {
@@ -439,5 +439,159 @@ func TestCreateGroupRejectsDuplicateName(t *testing.T) {
 	}
 	if err := s.CreateGroup(ctx, "b", "Same", 0); !errors.Is(err, ErrConflict) {
 		t.Fatalf("duplicate group name should be ErrConflict, got %v", err)
+	}
+}
+
+func TestUpdateClientEditsNameAndDescription(t *testing.T) {
+	s := newTestService(t)
+	ctx := context.Background()
+	id, _ := s.CreateClient(ctx, "Old Name", "old desc")
+
+	if err := s.UpdateClient(ctx, id, "New Name", "new desc"); err != nil {
+		t.Fatalf("UpdateClient: %v", err)
+	}
+	list, err := s.ListClients(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list[0].Name != "New Name" || list[0].Description != "new desc" {
+		t.Fatalf("expected edited fields to persist, got %+v", list[0])
+	}
+
+	if err := s.UpdateClient(ctx, id, "", "x"); !errors.Is(err, ErrValidation) {
+		t.Fatalf("expected ErrValidation for an empty name, got %v", err)
+	}
+	if err := s.UpdateClient(ctx, 99999, "X", ""); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for an unknown client, got %v", err)
+	}
+}
+
+func TestSetClientEnabledTogglesRealState(t *testing.T) {
+	s := newTestService(t)
+	ctx := context.Background()
+	id, _ := s.CreateClient(ctx, "X", "")
+
+	if err := s.SetClientEnabled(ctx, id, false); err != nil {
+		t.Fatalf("SetClientEnabled(false): %v", err)
+	}
+	list, err := s.ListClients(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list[0].Enabled {
+		t.Fatal("expected the client to be disabled")
+	}
+
+	if err := s.SetClientEnabled(ctx, id, true); err != nil {
+		t.Fatalf("SetClientEnabled(true): %v", err)
+	}
+	list, _ = s.ListClients(ctx)
+	if !list[0].Enabled {
+		t.Fatal("expected the client to be re-enabled")
+	}
+
+	if err := s.SetClientEnabled(ctx, 99999, true); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for an unknown client, got %v", err)
+	}
+}
+
+// TestDeleteClientRemovesEverythingScopedToIt is also the real
+// regression proof for a latent bug found while writing DeleteClient:
+// the schema's ON DELETE CASCADE annotations are inert (nothing in
+// this codebase's real connection setup enables
+// "PRAGMA foreign_keys=ON") -- a naive `DELETE FROM clients` alone
+// would have left every child row (identifiers, group membership,
+// domain overrides) orphaned. This proves the explicit transactional
+// deletes actually clean up all three.
+func TestDeleteClientRemovesEverythingScopedToIt(t *testing.T) {
+	s := newTestService(t)
+	ctx := context.Background()
+	if err := s.CreateGroup(ctx, "g1", "G1", 0); err != nil {
+		t.Fatal(err)
+	}
+	id, _ := s.CreateClient(ctx, "X", "")
+	if err := s.AddIdentifier(ctx, id, "ipv4", "10.0.0.9"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GenerateClientID(ctx, id, clientid.Bits192, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddToGroup(ctx, id, "g1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddDomainOverride(ctx, id, "block", "x.example."); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.DeleteClient(ctx, id); err != nil {
+		t.Fatalf("DeleteClient: %v", err)
+	}
+
+	list, err := s.ListClients(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("expected the client itself to be gone, got %+v", list)
+	}
+
+	// Direct table checks -- proves the child rows are ACTUALLY gone,
+	// not just unreachable through ListClients's own join.
+	for _, table := range []string{"client_identifiers", "client_group_members", "client_domain_overrides"} {
+		var n int
+		if err := s.DB.QueryRowContext(ctx, `SELECT count(*) FROM `+table+` WHERE client_id=?`, id).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Fatalf("expected 0 orphaned rows in %s after DeleteClient, got %d", table, n)
+		}
+	}
+
+	groups, err := s.ListGroups(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups[0].Members) != 0 {
+		t.Fatalf("expected the group's own member list to reflect the deletion too, got %+v", groups[0])
+	}
+
+	if err := s.DeleteClient(ctx, id); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound deleting an already-deleted client, got %v", err)
+	}
+}
+
+func TestRemoveFromGroupIsIdempotentAndReflectedInMembership(t *testing.T) {
+	s := newTestService(t)
+	ctx := context.Background()
+	if err := s.CreateGroup(ctx, "g1", "G1", 0); err != nil {
+		t.Fatal(err)
+	}
+	id, _ := s.CreateClient(ctx, "X", "")
+	if err := s.AddToGroup(ctx, id, "g1"); err != nil {
+		t.Fatal(err)
+	}
+
+	groups, err := s.GroupsForClient(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 group membership, got %+v", groups)
+	}
+
+	if err := s.RemoveFromGroup(ctx, id, "g1"); err != nil {
+		t.Fatalf("RemoveFromGroup: %v", err)
+	}
+	groups, err = s.GroupsForClient(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 0 {
+		t.Fatalf("expected 0 group memberships after removal, got %+v", groups)
+	}
+
+	// Idempotent: removing an already-removed membership is not an error.
+	if err := s.RemoveFromGroup(ctx, id, "g1"); err != nil {
+		t.Fatalf("expected removing a non-existent membership to be a no-op, got %v", err)
 	}
 }

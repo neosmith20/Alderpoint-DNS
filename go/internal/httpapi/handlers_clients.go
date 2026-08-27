@@ -304,3 +304,91 @@ func (s *Server) handleAddClientGroup(w http.ResponseWriter, r *http.Request) {
 	}
 	WriteJSON(w, http.StatusCreated, map[string]any{"status": "created"})
 }
+
+func (s *Server) handleRemoveClientGroup(w http.ResponseWriter, r *http.Request) {
+	clientID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		Err(http.StatusBadRequest, "validation_error", "invalid client id").WriteJSON(w)
+		return
+	}
+	if err := s.Clients.RemoveFromGroup(r.Context(), clientID, r.PathValue("groupId")); err != nil {
+		status, code := clientErrorStatus(err)
+		Err(status, code, err.Error()).WriteJSON(w)
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "removed"})
+}
+
+type updateClientRequest struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// handleUpdateClient mirrors V1's real update_client (app/clients.py) --
+// name/description edit only; identifiers, groups and policy each have
+// their own dedicated endpoints already.
+func (s *Server) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
+	clientID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		Err(http.StatusBadRequest, "validation_error", "invalid client id").WriteJSON(w)
+		return
+	}
+	var req updateClientRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		Err(http.StatusBadRequest, "validation_error", "invalid request body").WriteJSON(w)
+		return
+	}
+	if err := s.Clients.UpdateClient(r.Context(), clientID, req.Name, req.Description); err != nil {
+		status, code := clientErrorStatus(err)
+		Err(status, code, err.Error()).WriteJSON(w)
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "updated"})
+}
+
+type setClientEnabledRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
+// handleSetClientEnabled mirrors V1's set_client_enabled. A disabled
+// client's Strong ClientID / IP identifiers stay stored, but
+// AllActiveClientIdentities (internal/dnsruntime's compile input) must
+// stop counting them as active -- see the corresponding change in
+// internal/clients.AllActiveClientIdentities.
+func (s *Server) handleSetClientEnabled(w http.ResponseWriter, r *http.Request) {
+	clientID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		Err(http.StatusBadRequest, "validation_error", "invalid client id").WriteJSON(w)
+		return
+	}
+	var req setClientEnabledRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		Err(http.StatusBadRequest, "validation_error", "invalid request body").WriteJSON(w)
+		return
+	}
+	if err := s.Clients.SetClientEnabled(r.Context(), clientID, req.Enabled); err != nil {
+		status, code := clientErrorStatus(err)
+		Err(status, code, err.Error()).WriteJSON(w)
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "updated", "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
+}
+
+// handleDeleteClient mirrors V1's delete_client -- removes the client
+// and everything scoped to it (identifiers, group memberships, domain
+// overrides; see internal/clients.DeleteClient's doc comment for why
+// this is done explicitly rather than relying on the schema's inert
+// ON DELETE CASCADE annotations).
+func (s *Server) handleDeleteClient(w http.ResponseWriter, r *http.Request) {
+	clientID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		Err(http.StatusBadRequest, "validation_error", "invalid client id").WriteJSON(w)
+		return
+	}
+	if err := s.Clients.DeleteClient(r.Context(), clientID); err != nil {
+		status, code := clientErrorStatus(err)
+		Err(status, code, err.Error()).WriteJSON(w)
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "deleted", "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
+}

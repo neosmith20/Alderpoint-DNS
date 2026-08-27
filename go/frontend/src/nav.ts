@@ -48,7 +48,12 @@ export const NAV_GROUPS: NavGroup[] = [
         icon: "dns",
         load: () => import("./lib/ClientsView.svelte") as unknown as Promise<{ default: Component }>,
       },
-      { id: "policies", label: "Clients & Access", icon: "dns" },
+      {
+        id: "policies",
+        label: "Clients & Access",
+        icon: "dns",
+        load: () => import("./lib/ClientsAccessView.svelte") as unknown as Promise<{ default: Component }>,
+      },
       {
         id: "localdns",
         label: "Local DNS",
