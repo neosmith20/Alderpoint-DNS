@@ -3,7 +3,11 @@ package pyanalytics
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -146,6 +150,122 @@ func TestLiveAndFillLiveGapsZeroFillsEverySecond(t *testing.T) {
 	}
 	if filled[1].BucketStart != 1001 || filled[1].TotalQueries != 0 {
 		t.Fatalf("expected second 1001 to be zero-filled, got %+v", filled[1])
+	}
+}
+
+// TestGenuinelyCorruptFileStaysDegradedNeverMasked is the owner-required
+// proof that this reader's transient-corrupt retry (see reader.go's
+// run/isTransientCorrupt/reset) never turns real, permanent corruption
+// into a false "ok" -- a file that is corrupt on every single attempt
+// (not just the first, mid-write one) must still surface as an error
+// after the one retry, not a silently-empty success.
+func TestGenuinelyCorruptFileStaysDegradedNeverMasked(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "aggregates.db")
+	// A real SQLite file (valid header, magic bytes) whose page content
+	// past the header is truncated/garbage -- genuinely, permanently
+	// corrupt, not a timing artifact: every single read of it fails the
+	// same way, no matter how many times or how the connection is
+	// reopened.
+	setup, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := setup.Exec(`CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO schema_meta VALUES ('version','1');`); err != nil {
+		t.Fatal(err)
+	}
+	setup.Close()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) < 4096 {
+		t.Fatalf("fixture too small to meaningfully corrupt: %d bytes", len(raw))
+	}
+	// Smash the rest of page 1 (past the 100-byte file header) --
+	// corrupts sqlite_master's own real b-tree page structure without
+	// touching the leading magic-string bytes SQLite checks first,
+	// matching the real "database disk image is malformed" failure mode
+	// (verified directly with the real sqlite3 CLI + PRAGMA
+	// integrity_check against this exact byte range before writing this
+	// test) rather than an unrelated "not a database" error.
+	for i := 150; i < 4096 && i < len(raw); i++ {
+		raw[i] = 0xFF
+	}
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+
+	err = r.Ping(context.Background())
+	if err == nil {
+		t.Fatal("expected Ping against a genuinely corrupt file to fail even after the one automatic retry -- got nil error (would render as a false 'ok')")
+	}
+	t.Logf("genuinely corrupt file correctly still failed after retry: %v", err)
+
+	h := r.Health(context.Background())
+	if h.Status != "failed" {
+		t.Fatalf("expected Health status %q for an unreachable/corrupt store, got %q (reason=%q) -- corruption must never be masked as ok/degraded-with-data", "failed", h.Status, h.Reason)
+	}
+	if !strings.Contains(h.Reason, "malformed") && !strings.Contains(h.Reason, "corrupt") {
+		t.Fatalf("expected Health.Reason to mention the real underlying error, got %q", h.Reason)
+	}
+}
+
+// TestTransientCorruptReadRecoversAfterOneRetry proves the other half:
+// a query that fails ONCE with the transient SQLITE_CORRUPT-class error
+// (simulated directly, not by racing a real writer, so this test is
+// fast and deterministic) is retried exactly once against a reset
+// connection and succeeds -- CorruptRetries records that it happened.
+func TestTransientCorruptReadRecoversAfterOneRetry(t *testing.T) {
+	r := newTestReader(t)
+	simulated := 0
+	err := r.run(context.Background(), func(db *sql.DB) error {
+		simulated++
+		if simulated == 1 {
+			return fmt.Errorf("query: %s", "database disk image is malformed (11)")
+		}
+		return db.PingContext(context.Background())
+	})
+	if err != nil {
+		t.Fatalf("expected the second attempt (after reset) to succeed, got: %v", err)
+	}
+	if simulated != 2 {
+		t.Fatalf("expected exactly 2 attempts (1 fail + 1 retry), got %d", simulated)
+	}
+	if got := r.CorruptRetries.Load(); got != 1 {
+		t.Fatalf("expected CorruptRetries=1 after one transient-corrupt retry, got %d", got)
+	}
+
+	h := r.Health(context.Background())
+	if h.CorruptRetryCount != 1 {
+		t.Fatalf("expected Health.CorruptRetryCount=1 (diagnostic visibility even when the retry itself succeeded), got %d", h.CorruptRetryCount)
+	}
+}
+
+// TestNonCorruptErrorIsNeverRetried proves run() doesn't quietly become
+// a general retry-everything policy -- an ordinary query error (not the
+// proven transient-corrupt class) must be returned on the first attempt.
+func TestNonCorruptErrorIsNeverRetried(t *testing.T) {
+	r := newTestReader(t)
+	attempts := 0
+	wantErr := errors.New("boom: not a corruption error")
+	err := r.run(context.Background(), func(db *sql.DB) error {
+		attempts++
+		return wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected the original non-corrupt error back unchanged, got %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("expected exactly 1 attempt for a non-corrupt error (no retry), got %d", attempts)
+	}
+	if r.CorruptRetries.Load() != 0 {
+		t.Fatalf("expected CorruptRetries=0 for a non-corrupt error, got %d", r.CorruptRetries.Load())
 	}
 }
 

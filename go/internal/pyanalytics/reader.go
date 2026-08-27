@@ -45,8 +45,15 @@ package pyanalytics
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
+	"sync"
 	"sync/atomic"
+
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // StepSeconds mirrors app/v2/webapp.py's _TIMESERIES_STEP_SECONDS exactly
@@ -81,7 +88,14 @@ type DimensionCount struct {
 }
 
 type Reader struct {
-	db *sql.DB
+	// mu guards db/path across a reset() -- every query takes a read
+	// lock to snapshot the current *sql.DB pointer; reset() takes a
+	// write lock to swap it out for a freshly reopened one. Ordinary
+	// concurrent queries never contend on this (RLock is shared); it
+	// only serializes against the rare corrupt-retry path.
+	mu   sync.RWMutex
+	db   *sql.DB
+	path string
 
 	// WorkerHeartbeatsDir and InboxDir are optional, set by the caller
 	// after Open (main.go, from its own -analytics-worker-heartbeats-dir
@@ -98,6 +112,14 @@ type Reader struct {
 	// before this one", not a value that requires a restart to recover
 	// (see health.go's Health doc comment).
 	consecutiveFailures atomic.Int64
+
+	// CorruptRetries counts how many times a query hit a transient
+	// SQLITE_CORRUPT-class read and was retried once after resetting the
+	// connection (see run() below) -- exposed by Health as a diagnostic
+	// signal (never hidden), so a real recurrence is visible in
+	// GET /api/health even on the calls where the retry itself
+	// succeeded and the caller never saw an error.
+	CorruptRetries atomic.Int64
 }
 
 // Open connects to Python's aggregates.db read-only mount. It does not
@@ -108,71 +130,174 @@ type Reader struct {
 //
 // Real defect found live once this control plane's own container
 // actually ran as its unprivileged UID instead of root (see
-// internal/deployperm's regression test), root-caused in two layers:
+// internal/deployperm's regression test): without an explicit "mode=ro"
+// URI parameter, SQLite's default open mode is read-write -- needed even
+// for a plain SELECT, since the rollback-journal locking protocol may
+// create/delete a "-journal" sidecar file next to the database on every
+// transaction. "mode=ro" (matching internal/hostagentd/
+// ops_replication.go's control.db reader) fixes that.
 //
-//  1. Without an explicit "mode=ro" URI parameter, SQLite's default
-//     open mode is read-write -- needed even for a plain SELECT, since
-//     the rollback-journal locking protocol may create/delete a
-//     "-journal" sidecar file next to the database on every
-//     transaction. "mode=ro" (matching internal/hostagentd/
-//     ops_replication.go's control.db reader) fixes that half.
-//  2. Python's real aggregates.db is left running in WAL journal mode
-//     (confirmed live: "PRAGMA journal_mode" reports "wal"), which
-//     needs to open/create a "-shm" shared-memory index file to
-//     coordinate with the real, actively-writing Python process even
-//     for a read -- and "mode=ro" alone does not exempt WAL databases
-//     from that. On a genuinely read-only mount where those sidecar
-//     files can never be created, that still fails with the exact same
-//     SQLite error 14/SQLITE_CANTOPEN as case 1, which is why this
-//     looked "fixed" against mode=ro alone during isolated review but
-//     still failed against the real live file. "immutable=1" is
-//     SQLite's real, documented answer for exactly this shape of
-//     problem: it tells this connection to skip the WAL/journal
-//     change-detection machinery entirely and just read the main
-//     database file's current contents directly -- correct here
-//     specifically because this reader's whole contract is already
-//     "tolerant of a query returning slightly-stale/degraded data,
-//     never blocking" (the same "DNS works if analytics is dead"
-//     posture as everywhere else in this boundary), not a guarantee of
-//     seeing every write the instant it commits.
-//
-// Root could always silently get full read-write access regardless of
-// either real issue, masking both; a genuinely UID-restricted,
-// genuinely read-only bind mount cannot.
+// Does NOT use "immutable=1" -- an earlier version of this reader did,
+// on the theory that Python's aggregates.db runs in WAL mode and
+// immutable=1 is WAL-safe. A live P0 ("database disk image is malformed
+// (11)" on Top Domains) proved that theory wrong, and a real concurrent
+// reproduction (internal/pyanalytics/repro_walcorrupt_test.go,
+// TestWALCorruptionRepro_Matrix) proved exactly why: immutable=1 with a
+// short-lived (per-query) connection produced real, repeated
+// SQLITE_CORRUPT reads against an actively, structurally mutating file
+// in BOTH DELETE *and* WAL journal mode (~5.5% of queries under
+// concurrent stress in this harness) -- a WAL database is still mutable
+// (checkpoints rewrite the main file in place), so "it reports wal" was
+// never actually a safety proof, exactly as flagged in the incident's
+// follow-up correction. A long-lived immutable=1 connection didn't
+// reproduce the crash in that same matrix, but a dedicated follow-up
+// (TestImmutableLongLivedConnectionIsStaleNotSafe) proved that's because
+// it goes stale, not because it's safe: it observed zero of 576 real
+// committed writes during the same test window a fresh connection saw
+// immediately. Plain "mode=ro" (no immutable), by contrast, produced
+// zero corrupt reads across all combinations tested (DELETE/WAL journal
+// mode x long/short-lived connections, thousands of queries each,
+// concurrent structural writer churn) -- real SQLite locking is what
+// actually keeps a reader consistent against a live mutable database,
+// not a flag that tells SQLite to stop checking.
 func Open(path string) (*Reader, error) {
-	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro&immutable=1&_pragma=busy_timeout(2000)")
+	db, err := openReaderDB(path)
+	if err != nil {
+		return nil, err
+	}
+	return &Reader{db: db, path: path}, nil
+}
+
+func openReaderDB(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("open analytics reader: %w", err)
 	}
-	db.SetMaxOpenConns(1)
-	return &Reader{db: db}, nil
+	// A handful of real connections, matching the dashboard's real
+	// access pattern of several analytics endpoints firing close
+	// together on page load (see AGENT_PROGRESS.md's timing evidence) --
+	// real SQLite locking (proven safe above) lets these run
+	// concurrently without serializing every query through one
+	// connection the way the old immutable=1 design did.
+	db.SetMaxOpenConns(4)
+	return db, nil
 }
 
-func (r *Reader) Close() error { return r.db.Close() }
+func (r *Reader) Close() error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.db.Close()
+}
+
+// isTransientCorrupt classifies an error as the specific transient,
+// retryable read hazard proven above (SQLITE_CORRUPT / "database disk
+// image is malformed") as opposed to any other failure (including a
+// genuinely, permanently corrupt file -- see reset()'s doc comment for
+// why that distinction matters and why it's still safe not to make it
+// perfectly).
+func isTransientCorrupt(err error) bool {
+	if err == nil {
+		return false
+	}
+	var se *sqlite.Error
+	if errors.As(err, &se) && se.Code() == sqlite3.SQLITE_CORRUPT {
+		return true
+	}
+	// Fallback substring match: modernc.org/sqlite wraps some errors
+	// (e.g. surfaced through database/sql's own error path) in ways
+	// errors.As may not unwrap to *sqlite.Error, so the exact reported
+	// text from the live incident is matched directly too.
+	msg := err.Error()
+	return strings.Contains(msg, "malformed") || strings.Contains(msg, "SQLITE_CORRUPT")
+}
+
+// reset closes the current connection pool and opens a fresh one at the
+// same path. This does NOT re-validate that the file is actually fine --
+// a genuinely, permanently corrupt file will simply fail again on the
+// retry after reset (see run() below), which is exactly the intended
+// behavior: reset only ever buys one clean-slate attempt against
+// whatever transient, connection-local state (a cached schema/page read
+// mid-tear) caused the first failure; it never masks a real, persistent
+// SQLITE_CORRUPT by silently retrying forever or substituting empty
+// data.
+func (r *Reader) reset(reason error) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	slog.Warn("pyanalytics: resetting reader connection after a transient corrupt-class read",
+		"path", r.path, "error", reason)
+	r.CorruptRetries.Add(1)
+	_ = r.db.Close()
+	db, err := openReaderDB(r.path)
+	if err != nil {
+		return err
+	}
+	r.db = db
+	return nil
+}
+
+// run executes op against the current connection; on the specific
+// transient-corrupt class of error (see isTransientCorrupt), it resets
+// the connection and retries exactly once, recording the retry
+// diagnostically (CorruptRetries, a structured slog.Warn) either way --
+// a caller that ultimately still fails sees the real error and the
+// dashboard reports degraded, honestly, never silently substituted with
+// empty/zero data. Any other error (a genuine query error, a real
+// permanently-corrupt file, SQLITE_BUSY that outlasted busy_timeout) is
+// returned as-is on the first attempt, not retried -- this path exists
+// solely for the one proven-transient failure mode, not as a general
+// retry-everything policy.
+func (r *Reader) run(ctx context.Context, op func(db *sql.DB) error) error {
+	r.mu.RLock()
+	db := r.db
+	r.mu.RUnlock()
+
+	err := op(db)
+	if !isTransientCorrupt(err) {
+		return err
+	}
+	if rerr := r.reset(err); rerr != nil {
+		return fmt.Errorf("reader reset after corrupt read failed: %w (original: %v)", rerr, err)
+	}
+	r.mu.RLock()
+	db = r.db
+	r.mu.RUnlock()
+	retryErr := op(db)
+	if retryErr != nil {
+		slog.Warn("pyanalytics: retry after connection reset still failed -- remaining degraded",
+			"path", r.path, "original_error", err, "retry_error", retryErr)
+	}
+	return retryErr
+}
 
 // Ping proves the store is actually reachable right now (used for the
 // dashboard's degraded/available status) -- a successful Open() alone
 // doesn't guarantee the file is still there or readable.
 func (r *Reader) Ping(ctx context.Context) error {
-	var v string
-	return r.db.QueryRowContext(ctx, `SELECT value FROM schema_meta LIMIT 1`).Scan(&v)
+	return r.run(ctx, func(db *sql.DB) error {
+		var v string
+		return db.QueryRowContext(ctx, `SELECT value FROM schema_meta LIMIT 1`).Scan(&v)
+	})
 }
 
 func (r *Reader) queryBuckets(ctx context.Context, query string, args ...any) ([]Bucket, error) {
-	rows, err := r.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 	var out []Bucket
-	for rows.Next() {
-		var b Bucket
-		if err := rows.Scan(&b.BucketStart, &b.TotalQueries, &b.Blocked, &b.CacheHits, &b.CacheMisses); err != nil {
-			return nil, err
+	err := r.run(ctx, func(db *sql.DB) error {
+		out = nil // a retried attempt must not append to a partial result from the failed one
+		rows, err := db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return err
 		}
-		out = append(out, b)
-	}
-	return out, rows.Err()
+		defer rows.Close()
+		for rows.Next() {
+			var b Bucket
+			if err := rows.Scan(&b.BucketStart, &b.TotalQueries, &b.Blocked, &b.CacheHits, &b.CacheMisses); err != nil {
+				return err
+			}
+			out = append(out, b)
+		}
+		return rows.Err()
+	})
+	return out, err
 }
 
 // TimeSeries mirrors AnalyticsService.time_series_totals: real buckets
@@ -201,24 +326,28 @@ func (r *Reader) Live(ctx context.Context, start, end float64) ([]Bucket, error)
 // summed dimension_counts for one dimension (e.g. "domain") across every
 // bucket of the given granularity in [start, end), highest count first.
 func (r *Reader) TopDimension(ctx context.Context, dimension string, start, end float64, granularity string, limit int) ([]DimensionCount, error) {
-	rows, err := r.db.QueryContext(ctx,
-		`SELECT value, SUM(count) AS total FROM dimension_counts
-		 WHERE dimension=? AND granularity=? AND bucket_start>=? AND bucket_start<?
-		 GROUP BY value ORDER BY total DESC LIMIT ?`,
-		dimension, granularity, int64(start), int64(end), limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 	var out []DimensionCount
-	for rows.Next() {
-		var d DimensionCount
-		if err := rows.Scan(&d.Value, &d.Count); err != nil {
-			return nil, err
+	err := r.run(ctx, func(db *sql.DB) error {
+		out = nil
+		rows, err := db.QueryContext(ctx,
+			`SELECT value, SUM(count) AS total FROM dimension_counts
+			 WHERE dimension=? AND granularity=? AND bucket_start>=? AND bucket_start<?
+			 GROUP BY value ORDER BY total DESC LIMIT ?`,
+			dimension, granularity, int64(start), int64(end), limit)
+		if err != nil {
+			return err
 		}
-		out = append(out, d)
-	}
-	return out, rows.Err()
+		defer rows.Close()
+		for rows.Next() {
+			var d DimensionCount
+			if err := rows.Scan(&d.Value, &d.Count); err != nil {
+				return err
+			}
+			out = append(out, d)
+		}
+		return rows.Err()
+	})
+	return out, err
 }
 
 // FillGaps mirrors _fill_timeseries_buckets: a real bucket for every
@@ -260,11 +389,15 @@ type ExportRow = map[string]any
 // exportable via the Query Log's own filters (internal/rawquerylog), and
 // including it here would make this export's size unbounded.
 func (r *Reader) ExportAll(ctx context.Context) (buckets []ExportRow, dims []ExportRow, err error) {
-	buckets, err = queryAllRows(ctx, r.db, `SELECT * FROM time_buckets ORDER BY bucket_start`)
-	if err != nil {
-		return nil, nil, err
-	}
-	dims, err = queryAllRows(ctx, r.db, `SELECT * FROM dimension_counts ORDER BY bucket_start`)
+	err = r.run(ctx, func(db *sql.DB) error {
+		var ierr error
+		buckets, ierr = queryAllRows(ctx, db, `SELECT * FROM time_buckets ORDER BY bucket_start`)
+		if ierr != nil {
+			return ierr
+		}
+		dims, ierr = queryAllRows(ctx, db, `SELECT * FROM dimension_counts ORDER BY bucket_start`)
+		return ierr
+	})
 	if err != nil {
 		return nil, nil, err
 	}

@@ -161,6 +161,15 @@ type AnalyticsHealth struct {
 	DBReachable             bool `json:"db_reachable"`
 	ConsecutiveReadFailures int  `json:"consecutive_read_failures"`
 
+	// CorruptRetryCount is a cumulative, process-lifetime diagnostic
+	// counter (see Reader.run's doc comment): how many times a query hit
+	// the proven-transient SQLITE_CORRUPT-class read and was retried
+	// once after a connection reset. Non-zero is worth an operator's
+	// attention even when every individual retry succeeded and no
+	// request ever surfaced an error -- "retried but recovered" must
+	// still be visible, never silently absorbed.
+	CorruptRetryCount int64 `json:"corrupt_retry_count"`
+
 	WriterConfigured    bool     `json:"writer_heartbeat_configured"`
 	WriterStatus        string   `json:"writer_status,omitempty"`
 	WriterStale         bool     `json:"writer_stale"`
@@ -194,7 +203,7 @@ type AnalyticsHealth struct {
 // rendered answer, including when the very thing it's reporting on is
 // broken.
 func (r *Reader) Health(ctx context.Context) AnalyticsHealth {
-	h := AnalyticsHealth{}
+	h := AnalyticsHealth{CorruptRetryCount: r.CorruptRetries.Load()}
 
 	if err := r.Ping(ctx); err != nil {
 		n := r.consecutiveFailures.Add(1)
