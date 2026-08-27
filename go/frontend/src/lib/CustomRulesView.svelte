@@ -150,7 +150,14 @@
 
   <div class="card">
     <h3>Global Answer Policy</h3>
-    <PolicyEditor layer={globalPolicy} onSave={(l) => api.putGlobalPolicy(l).then(refresh)} />
+    <PolicyEditor
+      layer={globalPolicy}
+      onSave={(l) =>
+        api.putGlobalPolicy(l).then((resp) => {
+          dnsRuntimeResult = resp.dns_runtime ?? null;
+          return refresh();
+        })}
+    />
   </div>
 
   <div class="card">

@@ -648,14 +648,20 @@ export const api = {
     req<{ status: string }>(`/api/clients/${clientId}/groups`, { method: "POST", body: JSON.stringify({ group_id: groupId }) }),
 
   getGlobalPolicy: (signal?: AbortSignal) => req<PolicyLayer>("/api/policy/global", undefined, signal),
+  // Only the global scope is ever compiled into the live DNS runtime
+  // today (internal/dnscompile reads the global policy layer only) --
+  // a global save gets the real dns_runtime result every other
+  // auto-applying mutation returns; network/group/client saves get an
+  // honest "not compiled" DNSRuntimeApplyResult (attempted: false),
+  // never a faked promoted: true.
   putGlobalPolicy: (layer: PolicyLayer) =>
-    req<{ status: string; runtime: unknown }>("/api/policy/global", { method: "PUT", body: JSON.stringify(layer) }),
+    req<{ status: string; dns_runtime: DNSRuntimeApplyResult }>("/api/policy/global", { method: "PUT", body: JSON.stringify(layer) }),
   putNetworkPolicy: (id: string, layer: PolicyLayer) =>
-    req<{ status: string; runtime: unknown }>(`/api/policy/network/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(layer) }),
+    req<{ status: string; dns_runtime: DNSRuntimeApplyResult }>(`/api/policy/network/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(layer) }),
   putGroupPolicy: (id: string, layer: PolicyLayer) =>
-    req<{ status: string; runtime: unknown }>(`/api/policy/group/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(layer) }),
+    req<{ status: string; dns_runtime: DNSRuntimeApplyResult }>(`/api/policy/group/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(layer) }),
   putClientPolicy: (id: number, layer: PolicyLayer) =>
-    req<{ status: string; runtime: unknown }>(`/api/policy/client/${id}`, { method: "PUT", body: JSON.stringify(layer) }),
+    req<{ status: string; dns_runtime: DNSRuntimeApplyResult }>(`/api/policy/client/${id}`, { method: "PUT", body: JSON.stringify(layer) }),
   listNetworks: (signal?: AbortSignal) => req<{ networks: { network_id: string; cidr: string }[] }>("/api/networks", undefined, signal),
   createNetwork: (cidr: string) =>
     req<{ status: string; network_id: string }>("/api/networks", { method: "POST", body: JSON.stringify({ cidr }) }),

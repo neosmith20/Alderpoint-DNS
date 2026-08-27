@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"alderpointdns/go-controlplane/internal/dnsruntime"
 	"alderpointdns/go-controlplane/internal/policy"
 )
 
@@ -60,10 +61,30 @@ func (s *Server) putPolicyLayer(w http.ResponseWriter, r *http.Request, scope, s
 		Err(status, code, err.Error()).WriteJSON(w)
 		return
 	}
-	// runtime.promoted is unconditionally true -- no compiled-runtime
-	// step exists for policy layers yet, same disclosed gap as Upstreams
-	// (see internal/policy's doc comment).
-	WriteJSON(w, http.StatusOK, map[string]any{"status": "updated", "runtime": map[string]any{"promoted": true, "binding_count": 0}})
+	// Only the global scope is ever consulted by the compiler today
+	// (internal/dnsruntime.Orchestrator.build reads Policy.Load(ctx,
+	// "global", "global") only -- no per-network/group/client effective-
+	// policy resolution engine exists yet). A global save therefore
+	// really can change the live runtime and gets the same real
+	// dns_runtime field every other auto-applying mutation on this
+	// server returns (see applyDNSRuntimeBestEffort). A network/group/
+	// client save is honestly reported as not compiled -- this used to
+	// unconditionally claim "promoted": true regardless of scope, a
+	// real fake-success bug matching the exact class the old
+	// Upstreams/Custom Rules "runtimeStub()" already got fixed for; see
+	// PARITY_MATRIX.md's "httpapi: consistent DNS-runtime auto-apply UX"
+	// entry.
+	if scope == "global" {
+		WriteJSON(w, http.StatusOK, map[string]any{"status": "updated", "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{
+		"status": "updated",
+		"dns_runtime": &dnsruntime.Result{
+			Attempted: false,
+			Detail:    "network/group/client-scoped policy is not compiled into the DNS runtime yet -- only the global policy layer is (see internal/dnscompile's doc comment)",
+		},
+	})
 }
 
 func (s *Server) handleListNetworks(w http.ResponseWriter, r *http.Request) {
