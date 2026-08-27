@@ -10,7 +10,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os/exec"
 	"strings"
 	"time"
@@ -22,11 +24,25 @@ import (
 // app/v2/webapp.py's _bind_context_ports() shape (one context per
 // distinct plain-upstream selection).
 type BindContext struct {
-	Name       string `json:"name"`
-	StatsPort  int    `json:"stats_port"`
-	RNDCPort   int    `json:"rndc_port"`
-	Reachable  bool   `json:"reachable"`
-	RNDCStatus string `json:"rndc_status,omitempty"` // populated by a real `rndc status` call when reachable
+	Name       string          `json:"name"`
+	StatsPort  int             `json:"stats_port"`
+	RNDCPort   int             `json:"rndc_port"`
+	Reachable  bool            `json:"reachable"`
+	RNDCStatus string          `json:"rndc_status,omitempty"` // populated by a real `rndc status` call when reachable
+	CacheStats *BindCacheStats `json:"cache_stats,omitempty"` // real hit/miss counters, see fetchBindCacheStats
+}
+
+// BindCacheStats mirrors app/v2/cache_control.py's bind_cache_stats
+// exactly (field-for-field, same semantics) -- a real read of BIND's own
+// statistics-channels JSON endpoint (already enabled by internal/dnscompile
+// for health reporting, no new BIND config needed), never synthesized.
+type BindCacheStats struct {
+	Available      bool     `json:"available"`
+	Error          string   `json:"error,omitempty"`
+	Hits           int64    `json:"hits"`
+	Misses         int64    `json:"misses"`
+	HitRatio       *float64 `json:"hit_ratio"`
+	CacheSizeBytes *int64   `json:"cache_size_bytes"`
 }
 
 type CacheConfig struct {
@@ -57,6 +73,10 @@ func RegisterCacheOps(s *Server, cfg CacheConfig) {
 				if status, err := runRNDC(ctx, cfg.RNDCConfPath, c.RNDCPort, "status"); err == nil {
 					c.RNDCStatus = firstLine(status)
 				}
+			}
+			if c.StatsPort > 0 {
+				stats := fetchBindCacheStats(ctx, c.StatsPort, cfg.DialTimeout)
+				c.CacheStats = &stats
 			}
 			out[i] = c
 		}
@@ -144,6 +164,66 @@ func RegisterCacheOps(s *Server, cfg CacheConfig) {
 		}
 		return map[string]any{"results": results}, nil
 	})
+}
+
+// fetchBindCacheStats is a real, read-only HTTP GET of BIND's own
+// statistics-channels JSON endpoint -- the exact same
+// http://127.0.0.1:<stats_port>/json/v1/server URL and
+// views._default.resolver.cachestats.{CacheHits,CacheMisses,TreeMemTotal}
+// fields app/v2/cache_control.py's bind_cache_stats reads (read directly,
+// not guessed). No rndc/auth involved -- the statistics-channels listener
+// is plain HTTP, already bound to 127.0.0.1 only by internal/dnscompile's
+// own generated named.conf, matching Python's identical trust model.
+func fetchBindCacheStats(ctx context.Context, statsPort int, timeout time.Duration) BindCacheStats {
+	url := fmt.Sprintf("http://127.0.0.1:%d/json/v1/server", statsPort)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return BindCacheStats{Available: false, Error: err.Error()}
+	}
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return BindCacheStats{Available: false, Error: err.Error()}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return BindCacheStats{Available: false, Error: fmt.Sprintf("statistics-channel returned HTTP %d", resp.StatusCode)}
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20)) // BIND's own JSON stats payload is small; a generous bound against a misbehaving/malicious responder
+	if err != nil {
+		return BindCacheStats{Available: false, Error: err.Error()}
+	}
+	var raw struct {
+		Views map[string]struct {
+			Resolver struct {
+				CacheStats struct {
+					CacheHits    int64 `json:"CacheHits"`
+					CacheMisses  int64 `json:"CacheMisses"`
+					TreeMemTotal int64 `json:"TreeMemTotal"`
+				} `json:"cachestats"`
+			} `json:"resolver"`
+		} `json:"views"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return BindCacheStats{Available: false, Error: fmt.Sprintf("parsing statistics-channel JSON: %v", err)}
+	}
+	view, ok := raw.Views["_default"]
+	if !ok {
+		return BindCacheStats{Available: false, Error: "no _default view in statistics-channel response"}
+	}
+	hits := view.Resolver.CacheStats.CacheHits
+	misses := view.Resolver.CacheStats.CacheMisses
+	total := hits + misses
+	stats := BindCacheStats{Available: true, Hits: hits, Misses: misses}
+	if total > 0 {
+		ratio := float64(hits) / float64(total)
+		stats.HitRatio = &ratio
+	}
+	if view.Resolver.CacheStats.TreeMemTotal > 0 {
+		size := view.Resolver.CacheStats.TreeMemTotal
+		stats.CacheSizeBytes = &size
+	}
+	return stats
 }
 
 func probeTCP(port int, timeout time.Duration) bool {

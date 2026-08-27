@@ -325,12 +325,22 @@ export interface TlsStatus {
 
 // --- Host-agent-backed types (internal/hostagent / internal/hostagentd) ---
 
+export interface BindCacheStats {
+  available: boolean;
+  error?: string;
+  hits: number;
+  misses: number;
+  hit_ratio: number | null;
+  cache_size_bytes: number | null;
+}
+
 export interface BindContextStatus {
   name: string;
   stats_port: number;
   rndc_port: number;
   reachable: boolean;
   rndc_status?: string;
+  cache_stats?: BindCacheStats;
 }
 
 export interface CacheStatusResponse {

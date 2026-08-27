@@ -73,6 +73,13 @@ async function main() {
     await page.waitForFunction(() => document.querySelector(".cache table tbody tr td") !== null, { timeout: 3000 }).catch(() => {});
     const cacheRowText = await page.$eval(".cache table tbody", (el) => el.textContent).catch(() => "");
     check("Cache page shows the real discovered BIND context", cacheRowText.includes("ctx0"), cacheRowText);
+    // BIND Cache Counters (2026-08-27): real if this fixture's BIND
+    // context has statistics-channels enabled, honestly "unavailable"
+    // otherwise -- either is a real pass, this only checks the column
+    // rendered something, not a specific value (the fixture environment
+    // controls whether stats are actually reachable).
+    const cacheStatsCellText = await page.$eval(".cache table tbody tr td:nth-child(4)", (el) => el.textContent).catch(() => "");
+    check("Cache page's Cache hits/misses column renders (real value or honest unavailable)", cacheStatsCellText.length > 0, cacheStatsCellText);
 
     // --- Replication ---
     check("Replication nav item exists and is clickable", await clickNav("Replication"));
@@ -94,6 +101,9 @@ async function main() {
       /^[0-9a-f-]{36}$/.test(sysStatusNodeId.trim()) && sysStatusNodeId.trim() === nodeIdText.trim(),
       `system-status=${sysStatusNodeId} replication=${nodeIdText}`,
     );
+    await page.waitForFunction(() => [...document.querySelectorAll("h3")].some((h) => h.textContent?.trim() === "BIND Cache Counters"), { timeout: 3000 }).catch(() => {});
+    const bindCacheCountersPresent = await page.$$eval("h3", (els) => els.some((e) => e.textContent?.trim() === "BIND Cache Counters"));
+    check("System Status renders a BIND Cache Counters card (2026-08-27)", bindCacheCountersPresent);
 
     // --- Network Configuration ---
     check("Network Configuration nav item exists and is clickable", await clickNav("Network Configuration"));

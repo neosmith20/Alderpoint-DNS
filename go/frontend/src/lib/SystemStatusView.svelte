@@ -19,18 +19,27 @@
   // "the matrix said blocked, the code already isn't" correction this
   // session already made for Dashboard's Upstreams/Clients mini-panels.
   //
-  // Discovery status, DNS Performance benchmark, and BIND Cache Counters
-  // are still not built, disclosed rather than hidden:
-  //   - Discovery status is a Python-side pipeline this migration hasn't
-  //     built a compatibility boundary for.
-  //   - DNS Performance benchmark issues real queries through BIND/
-  //     dnsdist and BIND Cache Counters needs BIND's stats-channels --
-  //     real work beyond this session's scope, not re-attempted here.
+  // BIND Cache Counters is also real (2026-08-27): a real, read-only GET
+  // of BIND's own statistics-channels JSON endpoint
+  // (internal/hostagentd's fetchBindCacheStats, field-matched against
+  // app/v2/cache_control.py's bind_cache_stats), reusing the exact same
+  // GET /api/cache/status the Cache page already calls -- no new
+  // backend op, just a new field on its existing BindContext response
+  // and a card here to show it.
+  //
+  // Discovery status and DNS Performance benchmark are still not built,
+  // disclosed rather than hidden: Discovery status is a Python-side
+  // pipeline this migration hasn't built a compatibility boundary for;
+  // the DNS Performance benchmark issues real load-test queries (up to
+  // 10,000 per case) through BIND/dnsdist over UDP/DoT/DoH -- real work
+  // genuinely out of this session's remaining scope, not re-attempted.
 
   let health = $state<Awaited<ReturnType<typeof api.health>> | null>(null);
   let sysStatus = $state<Awaited<ReturnType<typeof api.systemStatus>> | null>(null);
   let replication = $state<Awaited<ReturnType<typeof api.replicationStatus>> | null>(null);
   let replicationError = $state("");
+  let cache = $state<Awaited<ReturnType<typeof api.cacheStatus>> | null>(null);
+  let cacheError = $state("");
   let loadError = $state("");
 
   async function refresh() {
@@ -49,6 +58,12 @@
       // Honest degraded, not fatal to the rest of the page -- matches
       // every other optional host-agent-backed card's contract.
       replicationError = err instanceof ApiError ? err.message : String(err);
+    }
+    cacheError = "";
+    try {
+      cache = await api.cacheStatus();
+    } catch (err) {
+      cacheError = err instanceof ApiError ? err.message : String(err);
     }
   }
 
@@ -84,8 +99,8 @@
 <section aria-labelledby="health-heading" class="system-status">
   <h2 id="health-heading">System Status</h2>
   <p class="scope-note">
-    Metric strip, Components, UI Performance, and Node Identity are real. Discovery status, DNS
-    Performance benchmark, and BIND Cache Counters are not built yet -- see the parity matrix.
+    Metric strip, Components, UI Performance, Node Identity, and BIND Cache Counters are real.
+    Discovery status and DNS Performance benchmark are not built yet -- see the parity matrix.
   </p>
 
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
@@ -134,6 +149,35 @@
           <div class="metric"><span class="label">Regenerated</span><span class="value">{timestampPref.format(id.regenerated_at)}</span></div>
         {/if}
       </div>
+    {/if}
+  </div>
+
+  <div class="card">
+    <h3>BIND Cache Counters</h3>
+    {#if cacheError}
+      <p class="status-unavailable">Unavailable: {cacheError}</p>
+    {:else if !cache}
+      <p class="hint">…</p>
+    {:else if cache.bind.length === 0}
+      <p class="hint">No BIND contexts reported (host-control agent not configured for this deployment, or none compiled yet).</p>
+    {:else}
+      <table class="components">
+        <thead><tr><th>Context</th><th>Hits</th><th>Misses</th><th>Hit rate</th></tr></thead>
+        <tbody>
+          {#each cache.bind as ctx (ctx.name)}
+            <tr>
+              <td>{ctx.name}</td>
+              {#if !ctx.cache_stats || !ctx.cache_stats.available}
+                <td colspan="3" class="status-unavailable">unavailable{ctx.cache_stats?.error ? `: ${ctx.cache_stats.error}` : ""}</td>
+              {:else}
+                <td>{ctx.cache_stats.hits.toLocaleString()}</td>
+                <td>{ctx.cache_stats.misses.toLocaleString()}</td>
+                <td>{ctx.cache_stats.hit_ratio !== null ? `${(ctx.cache_stats.hit_ratio * 100).toFixed(1)}%` : "—"}</td>
+              {/if}
+            </tr>
+          {/each}
+        </tbody>
+      </table>
     {/if}
   </div>
 

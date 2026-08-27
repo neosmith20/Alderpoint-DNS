@@ -82,13 +82,23 @@
       <p class="hint">No BIND contexts reported (hostagent not configured for this deployment, or none compiled yet).</p>
     {:else}
       <table>
-        <thead><tr><th>Context</th><th>Reachable</th><th>rndc status</th><th>Actions</th></tr></thead>
+        <thead><tr><th>Context</th><th>Reachable</th><th>rndc status</th><th>Cache hits/misses</th><th>Actions</th></tr></thead>
         <tbody>
           {#each status.bind as ctx (ctx.name)}
             <tr>
               <td>{ctx.name}</td>
               <td class={ctx.reachable ? "status-ok" : "status-unavailable"}>{ctx.reachable ? "Yes" : "No"}</td>
               <td>{ctx.rndc_status ?? "—"}</td>
+              <td>
+                {#if !ctx.cache_stats || !ctx.cache_stats.available}
+                  <span class="hint">unavailable{ctx.cache_stats?.error ? `: ${ctx.cache_stats.error}` : ""}</span>
+                {:else}
+                  {ctx.cache_stats.hits.toLocaleString()} / {ctx.cache_stats.misses.toLocaleString()}
+                  {#if ctx.cache_stats.hit_ratio !== null}
+                    <span class="hint">({(ctx.cache_stats.hit_ratio * 100).toFixed(1)}% hit rate)</span>
+                  {/if}
+                {/if}
+              </td>
               <td>
                 <button onclick={() => flushContext(ctx.name)} disabled={!ctx.reachable || flushBusy === ctx.name}>
                   {flushBusy === ctx.name ? "Flushing…" : "Flush"}
