@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, ApiError, type ManagedClient, type ClientGroup } from "../api";
+  import { api, ApiError, type ManagedClient, type ClientGroup, type PolicyExplainResult } from "../api";
   import { StaleGuard } from "../staleGuard";
   import { router } from "../router.svelte";
   import DataGrid from "./DataGrid.svelte";
@@ -10,13 +10,14 @@
   // Native Go implementation (own schema/CRUD) -- see internal/clients's
   // and internal/policy's doc comments for exactly what's covered
   // (managed clients, identifiers, groups, per-client/per-group policy
-  // assignment via the shared PolicyEditor) and what's deliberately not
-  // here yet: Observed Clients/discovery (Python-owned live data, same
-  // shape of problem as Dashboard's analytics -- needs its own
-  // compatibility-boundary decision, not built here) and "effective
-  // policy explain" (global->network->group->client precedence
-  // resolution -- real separate logic, not built here). This page is
-  // Managed Clients only, disclosed in-page below.
+  // assignment via the shared PolicyEditor, and now "effective policy
+  // explain" -- global->network->group->client precedence resolution,
+  // GET /api/policy/explain, see internal/policy/effective.go) and
+  // what's deliberately not here yet: Observed Clients/discovery
+  // (Python-owned live data, same shape of problem as Dashboard's
+  // analytics -- needs its own compatibility-boundary decision, not
+  // built here). This page is Managed Clients only, disclosed in-page
+  // below.
 
   let managedClients = $state<ManagedClient[]>([]);
   let groups = $state<ClientGroup[]>([]);
@@ -43,6 +44,25 @@
 
   let policyEditorClientId = $state<number | null>(null);
   let policyEditorGroupId = $state<string | null>(null);
+
+  let explainClientId = $state<number | null>(null);
+  let explainResult = $state<PolicyExplainResult | null>(null);
+  let explainError = $state("");
+
+  async function toggleExplain(c: ManagedClient) {
+    if (explainClientId === c.id) {
+      explainClientId = null;
+      return;
+    }
+    explainClientId = c.id;
+    explainResult = null;
+    explainError = "";
+    try {
+      explainResult = await api.explainPolicy(c.id);
+    } catch (err) {
+      explainError = err instanceof ApiError ? err.message : String(err);
+    }
+  }
 
   async function refresh() {
     const token = guard.start();
@@ -182,6 +202,7 @@
           <button onclick={() => startAddIdentifier(c)}>Add identifier</button>
           <button onclick={() => startAssignGroup(c)} disabled={groups.length === 0}>Assign group</button>
           <button onclick={() => (policyEditorClientId = policyEditorClientId === c.id ? null : c.id)}>Policy</button>
+          <button onclick={() => toggleExplain(c)}>Explain</button>
         </div>
         {#if identifierClientId === c.id}
           <form onsubmit={submitIdentifier} class="inline-form">
@@ -212,6 +233,31 @@
         {#if policyEditorClientId === c.id}
           <div class="inline-policy">
             <PolicyEditor layer={c.policy} onSave={(l) => api.putClientPolicy(c.id, l).then(refresh)} />
+          </div>
+        {/if}
+        {#if explainClientId === c.id}
+          <div class="inline-policy explain-panel">
+            {#if explainError}<p class="error" role="alert">{explainError}</p>{/if}
+            {#if explainResult}
+              <p class="explain-summary">
+                Network match: <strong>{explainResult.network_match ?? "none"}</strong>
+                {#if explainResult.group_contributions.length}
+                  &middot; Groups: <strong>{explainResult.group_contributions.join(", ")}</strong>
+                {/if}
+              </p>
+              <table class="explain-table">
+                <thead><tr><th>Field</th><th>Value</th><th>Source</th></tr></thead>
+                <tbody>
+                  {#each Object.entries(explainResult.fields) as [field, entry] (field)}
+                    <tr>
+                      <td>{field}</td>
+                      <td>{String(entry.value)}</td>
+                      <td>{entry.source}</td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            {/if}
           </div>
         {/if}
       {/if}
@@ -255,4 +301,7 @@
   .group-list { margin: 0; padding-left: 1.2rem; font-size: 0.9rem; display: flex; flex-direction: column; gap: 0.5rem; }
   .group-row { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
   .inline-policy { margin: 0.5rem 0 0.5rem -1.2rem; padding: 0.75rem; border: 1px solid var(--border); border-radius: 6px; background: var(--card-bg); }
+  .explain-summary { font-size: 0.85rem; margin: 0 0 0.5rem; }
+  .explain-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+  .explain-table th, .explain-table td { text-align: left; padding: 0.25rem 0.5rem; border-bottom: 1px solid var(--border); }
 </style>

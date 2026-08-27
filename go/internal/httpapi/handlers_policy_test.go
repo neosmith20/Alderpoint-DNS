@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"alderpointdns/go-controlplane/internal/clients"
 	"alderpointdns/go-controlplane/internal/dbmigrate"
 	"alderpointdns/go-controlplane/internal/policy"
 )
@@ -28,9 +30,10 @@ func newPolicyTestServer(t *testing.T) *Server {
 		t.Fatalf("migrate: %v", err)
 	}
 	return &Server{
-		DB:     db,
-		Policy: &policy.Service{DB: db},
-		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		DB:      db,
+		Policy:  &policy.Service{DB: db},
+		Clients: &clients.Service{DB: db},
+		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }
 
@@ -142,3 +145,69 @@ func TestPutGlobalPolicyActuallyPromotesARealDNSRuntime(t *testing.T) {
 		t.Fatalf("expected the real promotion to succeed, got %+v", runtime)
 	}
 }
+
+// TestHandlePolicyExplainResolvesTheRealPrecedenceStack is the HTTP-level
+// proof for the "effective policy explain" feature: global -> network ->
+// group -> client, through the real handler, real storage, real client
+// group membership -- not a fixture double.
+func TestHandlePolicyExplainResolvesTheRealPrecedenceStack(t *testing.T) {
+	s := newPolicyTestServer(t)
+	ctx := context.Background()
+
+	if err := s.Policy.Save(ctx, "global", "global", policy.Layer{SafesearchMode: strPtr("off")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Policy.CreateNetwork(ctx, "corp-lan", "10.1.0.0/16"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Policy.Save(ctx, "network", "corp-lan", policy.Layer{SafesearchMode: strPtr("moderate")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Clients.CreateGroup(ctx, "kids", "Kids", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Policy.Save(ctx, "group", "kids", policy.Layer{SafesearchMode: strPtr("strict")}); err != nil {
+		t.Fatal(err)
+	}
+	clientID, err := s.Clients.CreateClient(ctx, "Kid's Tablet", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Clients.AddToGroup(ctx, clientID, "kids"); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", fmt.Sprintf("/api/policy/explain?client_id=%d&client_ip=10.1.5.5", clientID), nil)
+	s.handlePolicyExplain(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["network_match"] != "network:corp-lan" {
+		t.Fatalf("expected network_match=network:corp-lan, got %+v", body)
+	}
+	contributions, _ := body["group_contributions"].([]any)
+	if len(contributions) != 1 || contributions[0] != "group:kids" {
+		t.Fatalf("expected group_contributions=[group:kids], got %+v", body["group_contributions"])
+	}
+	fields, _ := body["fields"].(map[string]any)
+	safesearch, _ := fields["safesearch_mode"].(map[string]any)
+	if safesearch["value"] != "strict" || safesearch["source"] != "group:kids" {
+		t.Fatalf("expected safesearch_mode=strict from group:kids (higher precedence than the matched network), got %+v", safesearch)
+	}
+}
+
+func TestHandlePolicyExplainRequiresAValidClientID(t *testing.T) {
+	s := newPolicyTestServer(t)
+	rec := httptest.NewRecorder()
+	s.handlePolicyExplain(rec, httptest.NewRequest("GET", "/api/policy/explain", nil))
+	if rec.Code != 400 {
+		t.Fatalf("expected 400 for a missing client_id, got %d", rec.Code)
+	}
+}
+
+func strPtr(s string) *string { return &s }

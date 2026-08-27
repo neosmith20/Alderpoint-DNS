@@ -229,6 +229,14 @@ func (s *Service) identifiers(ctx context.Context, clientID int64) ([]Identifier
 	return ids, rows.Err()
 }
 
+// GroupsForClient is the exported form of groupsForClient, for callers
+// outside this package that need one client's group memberships without
+// loading the full client list (e.g. internal/policy's effective-policy
+// resolver).
+func (s *Service) GroupsForClient(ctx context.Context, clientID int64) ([]GroupRef, error) {
+	return s.groupsForClient(ctx, clientID)
+}
+
 func (s *Service) groupsForClient(ctx context.Context, clientID int64) ([]GroupRef, error) {
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT g.group_id, g.name, g.priority FROM client_groups g

@@ -159,6 +159,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PUT /api/policy/network/{id}", requireAuth(s.handlePutNetworkPolicy))
 	mux.HandleFunc("PUT /api/policy/group/{id}", requireAuth(s.handlePutGroupPolicy))
 	mux.HandleFunc("PUT /api/policy/client/{id}", requireAuth(s.handlePutClientPolicy))
+	mux.HandleFunc("GET /api/policy/explain", requireAuth(s.handlePolicyExplain))
 	mux.HandleFunc("GET /api/networks", requireAuth(s.handleListNetworks))
 	mux.HandleFunc("POST /api/networks", requireAuth(s.handleCreateNetwork))
 

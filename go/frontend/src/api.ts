@@ -191,6 +191,13 @@ export interface UpstreamMutationResult {
   was_last_enabled?: boolean;
 }
 
+export interface PolicyExplainResult {
+  client_id: number;
+  network_match: string | null;
+  group_contributions: string[];
+  fields: Record<string, { value: unknown; source: string }>;
+}
+
 export interface DomainRoute {
   id: number;
   match_kind: "exact" | "suffix";
@@ -679,6 +686,14 @@ export const api = {
     req<{ status: string; dns_runtime: DNSRuntimeApplyResult }>(`/api/policy/group/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(layer) }),
   putClientPolicy: (id: number, layer: PolicyLayer) =>
     req<{ status: string; dns_runtime: DNSRuntimeApplyResult }>(`/api/policy/client/${id}`, { method: "PUT", body: JSON.stringify(layer) }),
+  // explainPolicy: internal/policy/effective.go's real global->network->
+  // group->client precedence resolution -- clientIp is optional (omitted
+  // means no network-scope layer can match, same as Python's own
+  // Optional[str] contract; this page has no known client IP yet since
+  // Observed Clients/discovery isn't built -- see ClientsView.svelte's
+  // own doc comment).
+  explainPolicy: (clientId: number, clientIp?: string) =>
+    req<PolicyExplainResult>(`/api/policy/explain?client_id=${clientId}${clientIp ? `&client_ip=${encodeURIComponent(clientIp)}` : ""}`),
   listNetworks: (signal?: AbortSignal) => req<{ networks: { network_id: string; cidr: string }[] }>("/api/networks", undefined, signal),
   createNetwork: (cidr: string) =>
     req<{ status: string; network_id: string }>("/api/networks", { method: "POST", body: JSON.stringify({ cidr }) }),
