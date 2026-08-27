@@ -17,10 +17,34 @@ import (
 func newTestService(t *testing.T) *Service {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	db, err := sql.Open("sqlite", dbPath)
+	// Root cause of a real, reproduced-under-load flake
+	// (TestAttentionRequiredAfterThreeConsecutiveFailures): this test
+	// fixture used a bare sql.Open with none of the safety settings
+	// cmd/alderpointdns-go's own real openDB() always uses (busy_timeout,
+	// WAL, SetMaxOpenConns(1)). A background job's own goroutine
+	// (Service.runJob, writing state='running'/'succeeded') and the
+	// test's own polling goroutine (waitJob's GetJob reads) genuinely
+	// run concurrently against the SAME sql.DB; with no MaxOpenConns
+	// cap, Go's database/sql pool can and did open a second physical
+	// SQLite connection to serve that concurrent read, and with no
+	// busy_timeout configured, a write that lands on the other
+	// connection's shared lock at that moment fails with SQLITE_BUSY
+	// *immediately* -- an error runJob's own state-transition writes
+	// don't check (matching production's real, safe assumption that a
+	// single-connection, WAL, busy_timeout'd sql.DB never contends with
+	// itself this way -- an assumption this fixture alone violated).
+	// Reproduced directly: instrumenting waitJob to log job state
+	// transitions caught a real failure stuck at state="queued" for the
+	// full wait window -- proof the state='running' write was silently
+	// dropped, not merely slow. Matching production's real connection
+	// settings here (not a larger timeout, not a retry loop) is the
+	// actual fix: it removes the second connection entirely, so there
+	// is no longer anything for the writer to contend with.
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		t.Fatal(err)
 	}
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { db.Close() })
 	_, err = db.Exec(`
 		CREATE TABLE blocklist_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -64,17 +88,21 @@ func newTestService(t *testing.T) *Service {
 func waitJob(t *testing.T, s *Service, jobID int64) *Job {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
+	var lastState string
 	for time.Now().Before(deadline) {
 		j, err := s.GetJob(context.Background(), jobID)
 		if err != nil {
 			t.Fatal(err)
+		}
+		if j != nil {
+			lastState = j.State
 		}
 		if j != nil && j.State == "succeeded" {
 			return j
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("job did not finish in time")
+	t.Fatalf("job did not finish in time (last observed state=%q)", lastState)
 	return nil
 }
 
