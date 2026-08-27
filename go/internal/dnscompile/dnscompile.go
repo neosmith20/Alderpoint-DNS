@@ -279,7 +279,33 @@ func CompileDnsdist(in Input) (string, error) {
 		if path == "" {
 			path = "/dns-query"
 		}
-		w(`addDOHLocal(%s, {%s}, {%s}, {%s}, {`, luaString(fmt.Sprintf("%s:%d", host, in.Transports.DohPort)), luaString(in.TLSCertPath), luaString(in.TLSKeyPath), luaString(path))
+		// dnsdist only ever answers HTTP requests on paths explicitly
+		// registered here (a request on any other path gets a plain 404
+		// before any addAction rule -- including HTTPPathRule -- ever
+		// runs, confirmed directly against the real installed dnsdist).
+		// Every active ClientID's own DoH path (internal/clientid.
+		// DoHPath, full canonical hex) must therefore be registered as
+		// a real endpoint on this SAME listener, not just matched by a
+		// rule -- HTTPPathRule below is what then tells apart WHICH of
+		// these registered paths a request landed on, to tag it
+		// correctly.
+		paths := map[string]bool{path: true}
+		for _, id := range in.ClientIdentities {
+			if err := clientid.ValidateHex(id.Hex); err != nil {
+				return "", errf("client %q has an invalid Strong ClientID value: %v", id.ClientKey, err)
+			}
+			paths[clientid.DoHPath(id.Hex)] = true
+		}
+		orderedPaths := make([]string, 0, len(paths))
+		for p := range paths {
+			orderedPaths = append(orderedPaths, p)
+		}
+		sort.Strings(orderedPaths)
+		quotedPaths := make([]string, len(orderedPaths))
+		for i, p := range orderedPaths {
+			quotedPaths[i] = luaString(p)
+		}
+		w(`addDOHLocal(%s, {%s}, {%s}, {%s}, {`, luaString(fmt.Sprintf("%s:%d", host, in.Transports.DohPort)), luaString(in.TLSCertPath), luaString(in.TLSKeyPath), strings.Join(quotedPaths, ", "))
 		w("  reusePort=true,")
 		w(`  minTLSVersion="tls1.2",`)
 		w(`  ciphers="HIGH:!aNULL:!MD5:!RC4"`)
