@@ -195,6 +195,7 @@ func (s *Server) Routes() http.Handler {
 
 	mux.HandleFunc("GET /api/dns-transports", requireAuth(s.handleGetDNSTransports))
 	mux.HandleFunc("PUT /api/dns-transports", requireAuth(s.handleUpdateDNSTransports))
+	mux.HandleFunc("GET /api/dns-transports/mobileconfig/{protocol}", requireAuth(s.handleDNSTransportMobileconfig))
 	mux.HandleFunc("GET /api/tls/status", requireAuth(s.handleTLSStatus))
 	mux.HandleFunc("POST /api/tls/replace", requireAuth(s.handleTLSReplace))
 

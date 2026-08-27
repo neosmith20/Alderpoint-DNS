@@ -1,12 +1,15 @@
 package httpapi
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 
 	"alderpointdns/go-controlplane/internal/dnstransports"
+	"alderpointdns/go-controlplane/internal/mobileconfig"
 	"alderpointdns/go-controlplane/internal/tlscert"
 )
 
@@ -106,4 +109,51 @@ func (s *Server) handleTLSReplace(w http.ResponseWriter, r *http.Request) {
 		"status": "promoted", "restart_required": true,
 		"subject": info.Subject, "not_valid_after": info.NotAfter,
 	})
+}
+
+// handleDNSTransportMobileconfig mirrors GET
+// /api/dns-transports/mobileconfig/{protocol}: a real Apple
+// com.apple.dnsSettings.managed configuration profile, built entirely
+// from this control plane's own native state (internal/dnstransports +
+// internal/tlscert, both already real Go-owned data -- no new
+// compatibility boundary, no new mount).
+func (s *Server) handleDNSTransportMobileconfig(w http.ResponseWriter, r *http.Request) {
+	protocol := r.PathValue("protocol")
+	transport, err := s.DNSTransports.Get(r.Context())
+	if err != nil {
+		Err(http.StatusInternalServerError, "internal_error", "failed to load transport settings").WriteJSON(w)
+		return
+	}
+	var cert mobileconfig.CertInput
+	if s.TLSCertPath != "" {
+		if status, err := (&tlscert.Reader{CertPath: s.TLSCertPath}).Status(); err == nil {
+			cert = mobileconfig.CertInput{Active: status.Active, SAN: status.SAN}
+		}
+	}
+	profile, err := mobileconfig.Build(protocol, mobileconfig.TransportInput{
+		DotEnabled: transport.DotEnabled, DohEnabled: transport.DohEnabled,
+		DohPort: transport.DohPort, DohPath: transport.DohPath,
+	}, cert, randomUUID)
+	if err != nil {
+		Err(http.StatusBadRequest, "unavailable", err.Error()).WriteJSON(w)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-apple-aspen-config")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="alderpointdns-v2-%s.mobileconfig"`, protocol))
+	w.WriteHeader(http.StatusOK)
+	w.Write(profile)
+}
+
+// randomUUID generates a real RFC 4122 v4 UUID via crypto/rand (never
+// math/rand) -- matches this codebase's existing CSPRNG discipline
+// (internal/clientid's own doc comment states the same rule), no new
+// dependency needed for a one-off UUID string.
+func randomUUID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(err) // crypto/rand failing is a fatal environment problem, not something to silently paper over
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }

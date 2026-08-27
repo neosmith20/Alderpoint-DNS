@@ -95,7 +95,9 @@
   <p class="scope-note">
     TLS Certificate is this control plane's own real, replaceable management certificate (also
     reused by DoT/DoH). DNS Transport settings are stored natively; DoT and DoH compile into and
-    auto-apply to the real DNS runtime (DoQ/DoH3/DNSCrypt not yet) -- see the parity matrix.
+    auto-apply to the real DNS runtime (DoQ/DoH3/DNSCrypt not yet). Apple .mobileconfig enrollment
+    profiles are real downloads once a transport is enabled and a certificate is active -- see the
+    parity matrix.
   </p>
 
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
@@ -141,12 +143,18 @@
       <fieldset>
         <legend><label><input type="checkbox" bind:checked={settings.dot_enabled} /> DNS-over-TLS (DoT)</label></legend>
         <label class="port">Port <input type="number" min="1" max="65535" bind:value={settings.dot_port} /></label>
+        {#if settings.dot_enabled}
+          <a class="mobileconfig-link" href="/api/dns-transports/mobileconfig/dot">Download Apple .mobileconfig (DoT)</a>
+        {/if}
       </fieldset>
 
       <fieldset>
         <legend><label><input type="checkbox" bind:checked={settings.doh_enabled} /> DNS-over-HTTPS (DoH)</label></legend>
         <label class="port">Port <input type="number" min="1" max="65535" bind:value={settings.doh_port} /></label>
         <label class="path">Path <input bind:value={settings.doh_path} placeholder="/dns-query" /></label>
+        {#if settings.doh_enabled}
+          <a class="mobileconfig-link" href="/api/dns-transports/mobileconfig/doh">Download Apple .mobileconfig (DoH)</a>
+        {/if}
       </fieldset>
 
       <fieldset>
@@ -193,6 +201,7 @@
   .transports legend { padding: 0 0.3rem; font-weight: 600; }
   .transports label { display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; }
   .transports input[type="number"] { width: 6rem; }
+  .mobileconfig-link { font-size: 0.82rem; color: var(--accent); text-decoration: underline; }
   .actions { display: flex; align-items: center; gap: 0.6rem; }
   .success { color: #16a34a; }
   .error { color: var(--badge-danger-fg); }
