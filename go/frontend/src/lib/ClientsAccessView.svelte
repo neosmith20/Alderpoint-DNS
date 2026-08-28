@@ -234,7 +234,7 @@
         {#if networks.length === 0 && !networksLoadError}
           <p class="empty">No networks defined yet.</p>
         {:else}
-          <ul class="scope-list">
+          <ul class="scope-list networks-list">
             {#each networks as n (n.network_id)}
               <li>
                 <div class="scope-row">
@@ -275,7 +275,7 @@
         {#if groups.length === 0 && !groupsLoadError}
           <p class="empty">No groups defined yet.</p>
         {:else}
-          <ul class="scope-list">
+          <ul class="scope-list groups-list">
             {#each groups as g (g.group_id)}
               <li>
                 <div class="scope-row">

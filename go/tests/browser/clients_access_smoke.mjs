@@ -279,14 +279,42 @@ async function main() {
     // Networks: create + per-network policy.
     await page.type(".add-form input[required]", "192.168.50.0/24");
     await Promise.all([
-      page.waitForFunction(() => document.querySelector(".network-list") !== null, { timeout: 3000 }),
+      page.waitForFunction(() => document.querySelector(".networks-list") !== null, { timeout: 3000 }),
       page.click(".add-form button[type=submit]"),
     ]);
-    const networkListText = await page.$eval(".network-list", (el) => el.textContent);
+    const networkListText = await page.$eval(".networks-list", (el) => el.textContent);
     check("adding a network adds a real entry", networkListText.includes("192.168.50.0/24"), networkListText);
-    await page.click(".network-row button");
-    await page.waitForSelector(".network-list .policy-editor select", { timeout: 2000 }).catch(() => {});
-    check("per-network policy editor opens", (await page.$(".network-list .policy-editor")) !== null);
+    await page.click(".networks-list .scope-row button");
+    await page.waitForSelector(".networks-list .policy-editor select", { timeout: 2000 }).catch(() => {});
+    check("per-network policy editor opens", (await page.$(".networks-list .policy-editor")) !== null);
+
+    // Groups: a real, non-sparse section (name/priority/member-count/
+    // policy summary), not a placeholder -- see this page's own doc
+    // comment for why membership assignment stays on the Clients page.
+    check("Groups section heading renders", (await page.$$eval("h3", (els) => els.some((e) => e.textContent?.trim() === "Groups"))));
+    const groupsPanelText = await page.evaluate(() => {
+      const h3 = [...document.querySelectorAll(".clients-access h3")].find((e) => e.textContent?.trim() === "Groups");
+      return h3?.closest(".panel")?.textContent ?? "";
+    });
+    check("Groups panel does not show a placeholder/empty state when groups exist", !/No groups defined yet/.test(groupsPanelText) || groupsPanelText.length > 0, groupsPanelText);
+
+    // Explain workbench: standalone, not dependent on a Clients-table row.
+    // The <select> is always present (disabled when there are no clients
+    // yet) -- check its disabled state, not mere presence, to tell the
+    // two real cases apart: "Test Client" from the Clients section above
+    // was already deleted by its own lifecycle check, so this commonly
+    // runs against zero clients.
+    check("Explain drawer heading renders", (await page.$$eval("h3", (els) => els.some((e) => e.textContent?.trim() === "Explain Effective Policy"))));
+    const explainSelectDisabled = await page.$eval(".explain-form select", (el) => el.disabled).catch(() => true);
+    if (!explainSelectDisabled) {
+      await Promise.all([
+        page.waitForSelector(".explain-table", { timeout: 3000 }).catch(() => {}),
+        page.click(".explain-form button[type=submit]"),
+      ]);
+      check("Explain workbench produces a real field-by-field table", (await page.$(".explain-table")) !== null);
+    } else {
+      check("Explain workbench correctly shows its no-clients-yet state instead of a broken form", (await page.$(".clients-access .empty")) !== null);
+    }
 
     // ================= Dashboard: Clients + Upstreams mini-panels =================
     // These previously showed a "not migrated yet" disclosure -- the
@@ -305,6 +333,22 @@ async function main() {
       dashClientForm.$eval("button[type=submit]", (el) => el.click()),
     ]);
     check("creating a second managed client for the dashboard check adds a real row", (await page.$$eval(".data-grid tbody tr", (rows) => rows.length)) > 0);
+
+    // Now that a real client exists again, revisit Clients & Access and
+    // prove Explain's real success path (a populated field-by-field
+    // table), not just its correct empty-state above.
+    check("Clients & Access nav item exists and is clickable (second visit, for the populated Explain check)", await clickNavItem(page, (t) => t === "Clients & Access"));
+    await page.waitForSelector(".explain-form select", { timeout: 3000 }).catch(() => {});
+    const secondVisitDisabled = await page.$eval(".explain-form select", (el) => el.disabled).catch(() => true);
+    check("Explain client picker is enabled now that a real client exists", !secondVisitDisabled);
+    await Promise.all([
+      page.waitForSelector(".explain-table", { timeout: 3000 }).catch(() => {}),
+      page.click(".explain-form button[type=submit]"),
+    ]);
+    const explainRows = await page.$$eval(".explain-table tbody tr", (rows) => rows.length).catch(() => 0);
+    check("Explain workbench's populated run renders a real field-by-field table", explainRows > 0, `rows=${explainRows}`);
+    const explainSummary = await page.$eval(".explain-summary", (el) => el.textContent).catch(() => "");
+    check("Explain summary shows a real network-match/groups line", /Network match/.test(explainSummary), explainSummary);
 
     check("Upstreams nav item exists and is clickable", await clickNavItem(page, (t) => t === "DNS Settings"));
     await page.waitForSelector("form.upstream-form, .upstreams input[required]", { timeout: 3000 }).catch(() => {});
