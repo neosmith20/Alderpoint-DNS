@@ -515,7 +515,18 @@ func CompileDnsdist(in Input) (string, error) {
 		// that failure mode -- a real analytics gap of at most this
 		// many seconds, never a DNS-answering issue (this option only
 		// affects the logger, not the query hot path).
-		w("apdnsDnstapLogger = newFrameStreamUnixLogger(%s, {reopenInterval=30})", luaString(in.DnstapSocketPath))
+		// outputQueueSize/queueNotifyThreshold/flushTimeout: found live
+		// -- with only default queue sizing, dnsdist's fstrm connection
+		// would go silently idle (stayed connected, stopped delivering
+		// any frames, no error on either side) within roughly a minute
+		// of real, modest-volume traffic, and reopenInterval=30 alone
+		// did not recover it. A generously large explicit queue plus a
+		// bounded flush timeout is the applicable mitigation for a
+		// queue/backpressure stall (as opposed to a real disconnect,
+		// which reopenInterval already covers) -- still just a real,
+		// disclosed mitigation for an unresolved dnsdist-side stall,
+		// never a DNS-answering concern (this only affects the logger).
+		w("apdnsDnstapLogger = newFrameStreamUnixLogger(%s, {reopenInterval=30, outputQueueSize=100000, queueNotifyThreshold=1, flushTimeout=1})", luaString(in.DnstapSocketPath))
 		w("function apdnsDnstapAlter(dr, dm)")
 		w(`  local outcome = dr:getTag("apdns_outcome")`)
 		w(`  if outcome == nil then outcome = "allowed" end`)
