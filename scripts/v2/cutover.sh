@@ -500,7 +500,17 @@ cmd_execute() {
     [ -x "$GO_LIVE_HOSTAGENT_DIR/apdns-hostagent" ] || { phase_set "failed_prepare"; fail "apdns-hostagent binary was not produced at $GO_LIVE_HOSTAGENT_DIR/apdns-hostagent"; }
     log "built apdns-hostagent-live binary: $GO_LIVE_HOSTAGENT_DIR/apdns-hostagent"
 
-    ( cd "$repo_root/go" && go build -buildvcs=false -o "$GO_LIVE_RELEASE/dns-promote-cli" ./cmd/alderpointdns-go ) \
+    # Stamp the real git SHA into main.Version via -ldflags -- a real gap
+    # found and fixed this session: nothing in this repo ever set this,
+    # so every alderpointdns-go build (including the actual live "web"
+    # binary Alex staged) reports version "dev" from /api/health and the
+    # `version` subcommand alike. This fixes it for every binary THIS
+    # script builds from here on; the currently-running web container's
+    # own binary predates this fix and will keep reporting "dev" until
+    # its own next normal rebuild/redeploy picks up this same pattern.
+    local git_sha
+    git_sha="$(cd "$repo_root" && git rev-parse HEAD 2>/dev/null || echo unknown)"
+    ( cd "$repo_root/go" && go build -buildvcs=false -ldflags "-X main.Version=$git_sha" -o "$GO_LIVE_RELEASE/dns-promote-cli" ./cmd/alderpointdns-go ) \
         || { phase_set "failed_prepare"; fail "building the dns-promote CLI failed"; }
     log "built dns-promote CLI (same binary as alderpointdns-go, invoked with the dns-promote subcommand): $GO_LIVE_RELEASE/dns-promote-cli"
 

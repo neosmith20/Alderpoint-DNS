@@ -23,8 +23,8 @@ import (
 
 	"alderpointdns/go-controlplane/internal/auth"
 	"alderpointdns/go-controlplane/internal/backup"
-	"alderpointdns/go-controlplane/internal/bootstrap"
 	"alderpointdns/go-controlplane/internal/blocklists"
+	"alderpointdns/go-controlplane/internal/bootstrap"
 	"alderpointdns/go-controlplane/internal/clients"
 	"alderpointdns/go-controlplane/internal/config"
 	"alderpointdns/go-controlplane/internal/customrules"
@@ -63,6 +63,8 @@ func main() {
 		runImportPython(os.Args[2:])
 	case "dns-promote":
 		runDNSPromote(os.Args[2:])
+	case "blocklist-refresh":
+		runBlocklistRefresh(os.Args[2:])
 	case "version":
 		// Plain stdout, nothing else -- Software Updates' staged-package
 		// verification (internal/hostagentd's ops_update.go) execs a
@@ -71,8 +73,162 @@ func main() {
 		// caller claimed before ever trusting it as an update target.
 		fmt.Println(Version)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q (want: web, migrate, import-python, dns-promote, version)\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q (want: web, migrate, import-python, dns-promote, blocklist-refresh, version)\n", os.Args[1])
 		os.Exit(2)
+	}
+}
+
+// runBlocklistRefresh is a one-shot, non-interactive trigger for
+// exactly the same fetch -> validate -> compile -> promote pipeline the
+// owner UI's "Refresh Now" action uses (internal/blocklists.Service.
+// RefreshAll), built directly against the database. No HTTP server, no
+// session, no login, no password, ever -- the same "named internal job"
+// pattern as dns-promote, for the same reason: a scheduled/administrative
+// refresh must never depend on a human's browser session. Waits
+// synchronously for the job to finish (RefreshAll itself only enqueues
+// and returns), then prints the FULL real per-subscription outcome
+// array as JSON -- every success/failure, rule count, and error -- so a
+// caller can never mistake "the job finished" for "every subscription
+// succeeded." Wires OnJobComplete to the real DNS runtime promotion
+// (Orchestrator.Apply, not a dry run) exactly like the "web" process
+// does at startup, so a completed refresh reaches the live runtime
+// atomically without this command ever touching :53 or :8443 itself --
+// apdns-hostagent-live's own stage->validate->promote->reload->
+// health-check->rollback pipeline does that, the same pipeline dns-
+// promote already exercises. Exits non-zero if the job could not even
+// be started, or if ANY subscription failed -- never silently reports a
+// partial refresh as a full success.
+func runBlocklistRefresh(args []string) {
+	fs := flag.NewFlagSet("blocklist-refresh", flag.ExitOnError)
+	dbPath := fs.String("db", "./data/alderpointdns-go.db", "sqlite database path (the exact live database)")
+	cfgPath := fs.String("config", "./config/appliance.yaml", "appliance.yaml path -- read for blocklists.staging_dir/runtime_dir and pull_timeout_seconds/max_concurrent_pulls, the same source of truth the real 'web' process uses")
+	migrationsDir := fs.String("migrations", "./schema/migrations", "migrations directory")
+	hostagentSocket := fs.String("hostagent-socket", "", "unix socket path for apdns-hostagent (required -- used to promote the refreshed policy live)")
+	dnsRuntimeDnsdistAddr := fs.String("dns-runtime-dnsdist-addr", "", "the real dnsdist listen address this deployment's apdns-hostagent was started with (required)")
+	dnsRuntimeBindProxyAddr := fs.String("dns-runtime-bind-proxy-addr", "", "the real BIND PROXYv2 backend address this deployment's apdns-hostagent compiles named.conf to listen on (required)")
+	timeoutSeconds := fs.Int("timeout-seconds", 300, "give up waiting for the refresh job to finish after this many seconds (the job itself keeps running server-side; this only bounds how long this command waits)")
+	fs.Parse(args)
+
+	if *hostagentSocket == "" || *dnsRuntimeDnsdistAddr == "" || *dnsRuntimeBindProxyAddr == "" {
+		fmt.Fprintln(os.Stderr, "-hostagent-socket, -dns-runtime-dnsdist-addr, and -dns-runtime-bind-proxy-addr are all required")
+		os.Exit(2)
+	}
+
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	ctx := context.Background()
+
+	cfg, _, err := config.LoadOrMigrate(*cfgPath)
+	if err != nil {
+		logger.Error("config load failed", "err", err)
+		os.Exit(1)
+	}
+
+	db, err := openDB(ctx, *dbPath, *migrationsDir, logger)
+	if err != nil {
+		logger.Error("db init failed", "err", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	httpClient := &http.Client{Timeout: time.Duration(cfg.Blocklists.PullTimeoutSeconds) * time.Second}
+	blSvc := &blocklists.Service{
+		DB: db, HTTPClient: httpClient,
+		StagingDir: cfg.Blocklists.StagingDir, RuntimeDir: cfg.Blocklists.RuntimeDir,
+		MaxConcurrent: cfg.Blocklists.MaxConcurrentPulls, Log: logger,
+	}
+
+	orch := &dnsruntime.Orchestrator{
+		LocalDNS:             &localdns.Service{DB: db},
+		CustomRules:          &customrules.Service{DB: db},
+		Blocklists:           blSvc,
+		Upstreams:            &upstreams.Service{DB: db},
+		DNSTransports:        &dnstransports.Service{DB: db},
+		Policy:               &policy.Service{DB: db},
+		DomainRouting:        &domainrouting.Service{DB: db},
+		Clients:              &clients.Service{DB: db},
+		HostAgent:            hostagent.NewClient(*hostagentSocket),
+		DnsdistListenAddress: *dnsRuntimeDnsdistAddr, BindBackendAddress: *dnsRuntimeBindProxyAddr,
+		TLSCertPath: cfg.Web.TLSCertPath, TLSKeyPath: cfg.Web.TLSKeyPath,
+	}
+
+	var promoteResult *dnsruntime.Result
+	promoteDone := make(chan struct{})
+	blSvc.OnJobComplete = func() {
+		r := orch.Apply(context.Background())
+		promoteResult = &r
+		close(promoteDone)
+	}
+
+	jobID, count, err := blSvc.RefreshAll(ctx)
+	if err != nil {
+		logger.Error("could not start refresh", "err", err)
+		os.Exit(1)
+	}
+	fmt.Fprintf(os.Stderr, "refresh job %d started for %d enabled subscription(s)\n", jobID, count)
+
+	deadline := time.Now().Add(time.Duration(*timeoutSeconds) * time.Second)
+	var job *blocklists.Job
+	for time.Now().Before(deadline) {
+		job, err = blSvc.GetJob(ctx, jobID)
+		if err != nil {
+			logger.Error("polling job status failed", "err", err)
+			os.Exit(1)
+		}
+		if job != nil && job.FinishedAt != nil {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if job == nil || job.FinishedAt == nil {
+		fmt.Fprintf(os.Stderr, "refresh job %d did not finish within %ds -- it may still be running server-side\n", jobID, *timeoutSeconds)
+		os.Exit(1)
+	}
+
+	// The job finishing fires OnJobComplete synchronously (runJob calls
+	// it directly before returning), so promoteResult is already set by
+	// the time GetJob observes finished_at -- but wait on the channel
+	// too (bounded) rather than assume, in case of a future change to
+	// that ordering.
+	select {
+	case <-promoteDone:
+	case <-time.After(30 * time.Second):
+		fmt.Fprintln(os.Stderr, "WARNING: refresh job finished but the DNS runtime promotion callback did not complete within 30s")
+	}
+
+	var outcomes []struct {
+		SubscriptionID string `json:"subscription_id"`
+		Status         string `json:"status"`
+		RuleCount      int    `json:"rule_count,omitempty"`
+		Error          string `json:"error,omitempty"`
+		DurationMs     int    `json:"duration_ms"`
+	}
+	if err := json.Unmarshal(job.Results, &outcomes); err != nil {
+		logger.Error("could not parse job results", "err", err)
+		os.Exit(1)
+	}
+
+	report := map[string]any{
+		"job_id":            job.ID,
+		"subscriptions":     outcomes,
+		"dns_runtime_apply": promoteResult,
+	}
+	body, _ := json.MarshalIndent(report, "", "  ")
+	fmt.Println(string(body))
+
+	failed := 0
+	totalDomains := 0
+	for _, o := range outcomes {
+		if o.Status != "ok" {
+			failed++
+		} else {
+			totalDomains += o.RuleCount
+		}
+	}
+	fmt.Fprintf(os.Stderr, "\n--- summary: %d/%d subscriptions ok, %d failed, %d total domains ---\n", len(outcomes)-failed, len(outcomes), failed, totalDomains)
+
+	ok := failed == 0 && promoteResult != nil && promoteResult.Attempted && promoteResult.Promoted
+	if !ok {
+		os.Exit(1)
 	}
 }
 
@@ -126,15 +282,15 @@ func runDNSPromote(args []string) {
 	defer db.Close()
 
 	orch := &dnsruntime.Orchestrator{
-		LocalDNS:      &localdns.Service{DB: db},
-		CustomRules:   &customrules.Service{DB: db},
-		Blocklists:    &blocklists.Service{DB: db, RuntimeDir: cfg.Blocklists.RuntimeDir},
-		Upstreams:     &upstreams.Service{DB: db},
-		DNSTransports: &dnstransports.Service{DB: db},
-		Policy:        &policy.Service{DB: db},
-		DomainRouting: &domainrouting.Service{DB: db},
-		Clients:       &clients.Service{DB: db},
-		HostAgent:     hostagent.NewClient(*hostagentSocket),
+		LocalDNS:             &localdns.Service{DB: db},
+		CustomRules:          &customrules.Service{DB: db},
+		Blocklists:           &blocklists.Service{DB: db, RuntimeDir: cfg.Blocklists.RuntimeDir},
+		Upstreams:            &upstreams.Service{DB: db},
+		DNSTransports:        &dnstransports.Service{DB: db},
+		Policy:               &policy.Service{DB: db},
+		DomainRouting:        &domainrouting.Service{DB: db},
+		Clients:              &clients.Service{DB: db},
+		HostAgent:            hostagent.NewClient(*hostagentSocket),
 		DnsdistListenAddress: *dnsRuntimeDnsdistAddr, BindBackendAddress: *dnsRuntimeBindProxyAddr,
 		TLSCertPath: cfg.Web.TLSCertPath, TLSKeyPath: cfg.Web.TLSKeyPath,
 	}
