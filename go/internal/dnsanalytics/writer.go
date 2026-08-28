@@ -275,6 +275,10 @@ func (wtr *Writer) Run(ctx context.Context, socketPath string) error {
 	now := time.Now().Unix()
 	wtr.lastHeartbeat.Store(now)
 	wtr.startedAt.Store(now)
+	// Optimistic default: "not yet checked" must never render as "probe
+	// failed" in Health -- it only flips false on a real failed
+	// TrafficProbe call (see checkIngestionOnce).
+	wtr.lastProbeOK.Store(true)
 
 	go wtr.acceptLoop(ctx, ln, raw)
 	go wtr.watchdog(ctx)
