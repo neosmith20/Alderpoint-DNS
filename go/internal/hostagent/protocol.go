@@ -72,6 +72,15 @@ const (
 	// immutable=1 read-side hack that caused a real corruption incident
 	// earlier this migration).
 	OpAnalyticsClear = "analytics.clear"
+
+	// OpDNSPerfBenchmark runs System Status's real "Safe DNS Benchmark"
+	// -- a bounded, sequential set of DNS/DoT/DoH queries against the
+	// real Go-managed dnsdist/BIND runtime, executed from this agent
+	// because the web container's isolated bridge network cannot reach
+	// 127.0.0.1:<dnsdist/BIND port> on the host at all (the same
+	// network-isolation reasoning as Cache/Replication/Network
+	// Configuration). See internal/hostagentd/ops_dnsperf.go.
+	OpDNSPerfBenchmark = "dns_perf.benchmark"
 )
 
 // Request is the single JSON line a client writes. RequestID is

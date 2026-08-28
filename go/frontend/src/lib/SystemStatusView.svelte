@@ -27,12 +27,17 @@
   // backend op, just a new field on its existing BindContext response
   // and a card here to show it.
   //
-  // Discovery status and DNS Performance benchmark are still not built,
-  // disclosed rather than hidden: Discovery status is a Python-side
-  // pipeline this migration hasn't built a compatibility boundary for;
-  // the DNS Performance benchmark issues real load-test queries (up to
-  // 10,000 per case) through BIND/dnsdist over UDP/DoT/DoH -- real work
-  // genuinely out of this session's remaining scope, not re-attempted.
+  // DNS Performance benchmark is real (2026-08-28): internal/dnsperf
+  // issues real DNS/DoT/DoH queries (up to 10,000 per case) against
+  // this deployment's own Go-managed dnsdist/BIND runtime, executed
+  // from apdns-hostagent (the web container's own network namespace
+  // cannot reach those loopback ports) and summarized with the same
+  // percentile math Python's dns_performance.py uses. Never touches
+  // Python's separate :8443 runtime.
+  //
+  // Discovery status is still not built, disclosed rather than hidden:
+  // a Python-side pipeline this migration hasn't built a compatibility
+  // boundary for.
 
   let health = $state<Awaited<ReturnType<typeof api.health>> | null>(null);
   let sysStatus = $state<Awaited<ReturnType<typeof api.systemStatus>> | null>(null);
@@ -41,6 +46,10 @@
   let cache = $state<Awaited<ReturnType<typeof api.cacheStatus>> | null>(null);
   let cacheError = $state("");
   let loadError = $state("");
+  let dnsPerf = $state<Awaited<ReturnType<typeof api.dnsPerformanceStatus>> | null>(null);
+  let dnsPerfError = $state("");
+  let dnsPerfActionStatus = $state("");
+  let dnsPerfPolling = false;
 
   async function refresh() {
     loadError = "";
@@ -65,6 +74,66 @@
     } catch (err) {
       cacheError = err instanceof ApiError ? err.message : String(err);
     }
+    dnsPerfError = "";
+    try {
+      dnsPerf = await api.dnsPerformanceStatus();
+    } catch (err) {
+      dnsPerfError = err instanceof ApiError ? err.message : String(err);
+    }
+  }
+
+  async function runDnsBenchmark() {
+    dnsPerfActionStatus = "";
+    try {
+      const res = await api.dnsPerformanceRun();
+      dnsPerfActionStatus = res.status === "already_running" ? "A benchmark is already running." : "Benchmark started -- this can take a minute for the full case list.";
+      pollDnsBenchmark();
+    } catch (err) {
+      dnsPerfActionStatus = err instanceof ApiError ? err.message : String(err);
+    }
+  }
+
+  async function pollDnsBenchmark() {
+    if (dnsPerfPolling) return;
+    dnsPerfPolling = true;
+    try {
+      for (let i = 0; i < 120; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        try {
+          dnsPerf = await api.dnsPerformanceStatus();
+        } catch (err) {
+          dnsPerfError = err instanceof ApiError ? err.message : String(err);
+          break;
+        }
+        if (!dnsPerf.benchmark_running) break;
+      }
+    } finally {
+      dnsPerfPolling = false;
+    }
+  }
+
+  async function clearDnsBenchmark() {
+    dnsPerfActionStatus = "";
+    try {
+      await api.dnsPerformanceClear();
+      dnsPerf = await api.dnsPerformanceStatus();
+      dnsPerfActionStatus = "Cleared.";
+    } catch (err) {
+      dnsPerfActionStatus = err instanceof ApiError ? err.message : String(err);
+    }
+  }
+
+  function copyDnsPerfReport() {
+    if (!dnsPerf?.report) return;
+    const lines = dnsPerf.report.cases.map(
+      (c) => `${c.name}\t${c.protocol}\t${c.summary.count}\t${c.summary.success}\t${c.summary.timeouts}\t${c.summary.errors}\t${c.summary.p50_ms ?? ""}\t${c.summary.p95_ms ?? ""}\t${c.summary.p99_ms ?? ""}\t${c.summary.max_ms ?? ""}`,
+    );
+    const text = ["name\tprotocol\tcount\tsuccess\ttimeouts\terrors\tp50_ms\tp95_ms\tp99_ms\tmax_ms", ...lines].join("\n");
+    navigator.clipboard
+      .writeText(text)
+      .then(() => (dnsPerfActionStatus = "Copied."))
+      .catch(() => (dnsPerfActionStatus = "Copy failed (clipboard unavailable)."));
+    setTimeout(() => (dnsPerfActionStatus = ""), 2000);
   }
 
   onMount(() => {
@@ -99,8 +168,8 @@
 <section aria-labelledby="health-heading" class="system-status">
   <h2 id="health-heading">System Status</h2>
   <p class="scope-note">
-    Metric strip, Components, UI Performance, Node Identity, and BIND Cache Counters are real.
-    Discovery status and DNS Performance benchmark are not built yet -- see the parity matrix.
+    Metric strip, Components, UI Performance, Node Identity, BIND Cache Counters, and the DNS
+    Performance benchmark are real. Discovery status is not built yet -- see the parity matrix.
   </p>
 
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
@@ -178,6 +247,78 @@
           {/each}
         </tbody>
       </table>
+    {/if}
+  </div>
+
+  <div class="card">
+    <h3>DNS Performance</h3>
+    <p class="scope-note">
+      A bounded, sequential set of real DNS/DoT/DoH queries against this deployment's own
+      Go-managed dnsdist/BIND runtime -- never Python's separate :8443 runtime, never a load test
+      (one query at a time, matching the reference implementation's own "safe" design).
+    </p>
+    <div class="actions">
+      <button data-run-dns-benchmark onclick={runDnsBenchmark} disabled={dnsPerf?.benchmark_running}>
+        {dnsPerf?.benchmark_running ? "Running…" : "Run Safe DNS Benchmark"}
+      </button>
+      <button data-copy-dns-perf onclick={copyDnsPerfReport} disabled={!dnsPerf?.report}>Copy DNS Performance Report</button>
+      <button data-clear-dns-perf onclick={clearDnsBenchmark} disabled={!dnsPerf?.report}>Clear Benchmark Measurements</button>
+      {#if dnsPerfActionStatus}<span class="hint">{dnsPerfActionStatus}</span>{/if}
+    </div>
+    {#if dnsPerfError}
+      <p class="status-unavailable">Unavailable: {dnsPerfError}</p>
+    {:else if !dnsPerf}
+      <p class="hint">…</p>
+    {:else}
+      {#if dnsPerf.last_error}<p class="degraded-note" role="status">Last benchmark run failed: {dnsPerf.last_error}</p>{/if}
+      {#if dnsPerf.report_error}<p class="degraded-note" role="status">{dnsPerf.report_error}</p>{/if}
+      {#if !dnsPerf.report}
+        <p class="hint">No DNS benchmark report yet.</p>
+      {:else}
+        {@const report = dnsPerf.report}
+        <p class="hint">
+          Generated {timestampPref.format(report.generated_at)}; duration {report.duration_seconds}s.
+        </p>
+        <div class="perf-scroll">
+          <table class="perf-table dns-perf-table" data-dns-performance>
+            <thead>
+              <tr>
+                <th>Case</th>
+                <th>Protocol</th>
+                <th>Count</th>
+                <th>Success</th>
+                <th>Timeouts</th>
+                <th>Errors</th>
+                <th>p50</th>
+                <th>p95</th>
+                <th>p99</th>
+                <th>Max</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each report.cases as c (c.name)}
+                <tr>
+                  <td>{c.name}<br /><span class="scope">{c.scope}</span></td>
+                  <td>{c.protocol}</td>
+                  <td>{c.summary.count}</td>
+                  <td>{c.summary.success}</td>
+                  <td>{c.summary.timeouts}</td>
+                  <td>{c.summary.errors}</td>
+                  <td>{c.summary.p50_ms !== null ? `${c.summary.p50_ms} ms` : "—"}</td>
+                  <td>{c.summary.p95_ms !== null ? `${c.summary.p95_ms} ms` : "—"}</td>
+                  <td>{c.summary.p99_ms !== null ? `${c.summary.p99_ms} ms` : "—"}</td>
+                  <td>{c.summary.max_ms !== null ? `${c.summary.max_ms} ms` : "—"}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+        {#if report.notes.length > 0}
+          <ul class="notes">
+            {#each report.notes as note}<li>{note}</li>{/each}
+          </ul>
+        {/if}
+      {/if}
     {/if}
   </div>
 
@@ -276,4 +417,5 @@
   .hint { font-size: 0.8rem; opacity: 0.7; }
   .error { color: var(--badge-danger-fg); }
   .perf-scroll { max-height: 20rem; overflow-y: auto; overflow-x: auto; }
+  .notes { font-size: 0.75rem; opacity: 0.7; margin: 0; padding-left: 1.2rem; }
 </style>

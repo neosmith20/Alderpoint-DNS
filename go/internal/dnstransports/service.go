@@ -4,21 +4,26 @@
 // tables and load/save_*_settings field-for-field for the parts this
 // package actually stores.
 //
+// Corrected stale disclosure (2026-08-28): this package's settings ARE
+// compiled into the real, live Go-managed dnsdist listener -- see
+// internal/dnscompile.CompileDnsdist's addTLSLocal/addDOHLocal/
+// addDOQLocal calls, driven by internal/dnsruntime.Orchestrator.build()
+// reading this package's Get() output. Enabling DoT/DoH/DoQ here and
+// applying (either explicitly or via any other DNS-runtime-affecting
+// mutation's auto-apply) genuinely starts that transport answering real
+// queries against the appliance's own TLS cert. Proven end-to-end by
+// internal/dnsperf's DoT/DoH benchmark cases (System Status's Safe DNS
+// Benchmark), which exchange real TLS-wrapped DNS packets against
+// exactly these compiled listeners.
+//
 // Deliberately not included here, disclosed rather than hidden:
 //
-//   - This package only stores the *desired* settings -- it does not
-//     compile them into a running dnsdist listener, the same disclosed
-//     "no compiled-runtime effect" gap internal/upstreams and
-//     internal/policy already have. Making a saved setting here actually
-//     answer DNS queries needs the same live-runtime-control path
-//     PARITY_MATRIX.md's Cache row documents as currently infeasible
-//     (BIND/dnsdist run inside the Python preview container, on an
-//     isolated network this migration's own container cannot reach
-//     without modifying that container).
 //   - No port-conflict-with-a-live-listener detection (Python's
 //     _RESERVED_APPLIANCE_PORTS check) -- this package validates the
-//     port range only, since there is no compiled config to conflict
-//     with yet.
+//     port range only. A conflicting port IS now reachable at apply
+//     time (dnsdist itself will simply fail to (re)start), surfaced as
+//     an honest Apply failure/rollback, not caught earlier at Update
+//     time the way Python's check does.
 //   - DNSCrypt identity/certificate provisioning (provider key pair,
 //     signed resolver certificate) is not stored here at all. Python's
 //     dnscrypt_settings keeps the real private key material in its

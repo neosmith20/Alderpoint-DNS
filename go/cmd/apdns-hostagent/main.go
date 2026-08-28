@@ -12,6 +12,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -142,6 +143,24 @@ func main() {
 		updateCfg.HealthCheck = healthCheckFunc(*webHealthURL)
 	}
 	hostagentd.RegisterUpdateOps(s, updateCfg)
+
+	if *dnsRuntimeDnsdistListenAddr != "" {
+		host, portStr, err := net.SplitHostPort(*dnsRuntimeDnsdistListenAddr)
+		if err != nil {
+			logger.Error("invalid -dns-runtime-dnsdist-listen-addr", "err", err)
+			os.Exit(2)
+		}
+		port, err := strconv.Atoi(portStr)
+		if err != nil {
+			logger.Error("invalid port in -dns-runtime-dnsdist-listen-addr", "err", err)
+			os.Exit(2)
+		}
+		hostagentd.RegisterDNSPerfOps(s, hostagentd.DNSPerfConfig{
+			DnsdistHost: host, DnsdistPort: port, BindPlainPort: *dnsRuntimeBindPlainPort,
+		})
+	} else {
+		logger.Info("DNS performance benchmark not configured -- -dns-runtime-dnsdist-listen-addr is empty")
+	}
 
 	if *dnsRuntimeBindLivePath != "" && *dnsRuntimeDnsdistLivePath != "" && *dnsRuntimeBindDir != "" && *dnsRuntimeDnsdistListenAddr != "" {
 		// The returned stop func is intentionally discarded here: this

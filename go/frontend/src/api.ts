@@ -352,6 +352,46 @@ export interface CacheFlushResult {
   results: { context: string; ok: boolean; detail?: string }[];
 }
 
+export interface DNSPerfSummary {
+  count: number;
+  success: number;
+  timeouts: number;
+  errors: number;
+  p50_ms: number | null;
+  p95_ms: number | null;
+  p99_ms: number | null;
+  max_ms: number | null;
+  servfail: number;
+  nxdomain: number;
+}
+
+export interface DNSPerfCaseResult {
+  name: string;
+  scope: string;
+  server: string;
+  port: number;
+  domain: string;
+  qtype: number;
+  protocol: string;
+  latency_scope: string;
+  summary: DNSPerfSummary;
+}
+
+export interface DNSPerfReport {
+  schema: number;
+  generated_at: string;
+  duration_seconds: number;
+  notes: string[];
+  cases: DNSPerfCaseResult[];
+}
+
+export interface DNSPerfStatusResponse {
+  benchmark_running: boolean;
+  last_error: string;
+  report: DNSPerfReport | null;
+  report_error?: string;
+}
+
 export interface ReplicationPeer {
   peer_node_id: string;
   display_name: string;
@@ -629,6 +669,10 @@ export const api = {
   cacheStatus: (signal?: AbortSignal) => req<CacheStatusResponse>("/api/cache/status", undefined, signal),
   cacheFlush: (layer: "bind" | "dnsdist", opts?: { context?: string; scope?: string; target?: string }) =>
     req<CacheFlushResult>("/api/cache/flush", { method: "POST", body: JSON.stringify({ layer, ...opts }) }),
+
+  dnsPerformanceStatus: (signal?: AbortSignal) => req<DNSPerfStatusResponse>("/api/dns/performance", undefined, signal),
+  dnsPerformanceRun: () => req<{ status: string }>("/api/dns/performance/benchmark", { method: "POST" }),
+  dnsPerformanceClear: () => req<{ status: string }>("/api/dns/performance", { method: "DELETE" }),
 
   replicationStatus: (signal?: AbortSignal) => req<ReplicationStatusResponse>("/api/replication/status", undefined, signal),
   replicationSync: (peerNodeId: string) =>

@@ -11,6 +11,7 @@ import (
 	"alderpointdns/go-controlplane/internal/blocklists"
 	"alderpointdns/go-controlplane/internal/clients"
 	"alderpointdns/go-controlplane/internal/customrules"
+	"alderpointdns/go-controlplane/internal/dnsperf"
 	"alderpointdns/go-controlplane/internal/dnsruntime"
 	"alderpointdns/go-controlplane/internal/dnstransports"
 	"alderpointdns/go-controlplane/internal/domainrouting"
@@ -84,6 +85,24 @@ type Server struct {
 	// raw per-query Parquet history (not the aggregates.db buckets
 	// Analytics reads).
 	RawQueryLog *rawquerylog.Reader
+
+	// DNSPerf is nil unless a full DNS-runtime deployment was
+	// configured at startup -- same nil-safe contract as DNSRuntime
+	// above. See internal/dnsperf's doc comment: the real "Safe DNS
+	// Benchmark" (System Status) exchanges real DNS/DoT/DoH packets
+	// against this appliance's own Go-managed dnsdist/BIND listeners
+	// via apdns-hostagent, never synthesized numbers.
+	DNSPerf *dnsperf.Service
+
+	// DNSPerfBindPlainAddr is BIND's own unproxied loopback listener
+	// address for this deployment (matches apdns-hostagent's
+	// -dns-runtime-bind-plain-port) -- purely for the "BIND direct hot
+	// A response" benchmark case's display Server/Port fields (the
+	// safety-relevant actual dialing happens entirely inside
+	// apdns-hostagent, see internal/hostagentd/ops_dnsperf.go). Empty =
+	// that one case is omitted, same "optional, never fatal" contract
+	// as every other compatibility boundary.
+	DNSPerfBindPlainAddr string
 
 	Version    string
 	StartedAt  time.Time
@@ -213,6 +232,10 @@ func (s *Server) Routes() http.Handler {
 
 	mux.HandleFunc("GET /api/cache/status", requireAuth(s.handleCacheStatus))
 	mux.HandleFunc("POST /api/cache/flush", requireAuth(s.handleCacheFlush))
+
+	mux.HandleFunc("GET /api/dns/performance", requireAuth(s.handleDNSPerfStatus))
+	mux.HandleFunc("POST /api/dns/performance/benchmark", requireAuth(s.handleDNSPerfBenchmark))
+	mux.HandleFunc("DELETE /api/dns/performance", requireAuth(s.handleDNSPerfClear))
 
 	mux.HandleFunc("GET /api/replication/status", requireAuth(s.handleReplicationStatus))
 	mux.HandleFunc("POST /api/replication/sync", requireAuth(s.handleReplicationSync))

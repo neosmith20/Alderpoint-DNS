@@ -28,6 +28,7 @@ import (
 	"alderpointdns/go-controlplane/internal/config"
 	"alderpointdns/go-controlplane/internal/customrules"
 	"alderpointdns/go-controlplane/internal/dbmigrate"
+	"alderpointdns/go-controlplane/internal/dnsperf"
 	"alderpointdns/go-controlplane/internal/dnsruntime"
 	"alderpointdns/go-controlplane/internal/dnstransports"
 	"alderpointdns/go-controlplane/internal/domainrouting"
@@ -227,6 +228,8 @@ func runWeb(args []string) {
 	hostagentSocket := fs.String("hostagent-socket", "", "unix socket path for apdns-hostagent (see internal/hostagent, internal/hostagentd); empty = Cache/Replication/Network/Logs/Software-Updates all report unavailable")
 	dnsRuntimeDnsdistAddr := fs.String("dns-runtime-dnsdist-addr", "", "the real dnsdist listen address apdns-hostagent was started with for this deployment (see internal/dnscompile, internal/dnsruntime); empty = DNS Runtime compilation is unavailable, matching -hostagent-socket's own contract")
 	dnsRuntimeBindProxyAddr := fs.String("dns-runtime-bind-proxy-addr", "", "the real BIND PROXYv2 backend address apdns-hostagent compiles named.conf to listen on (127.0.0.1:<bind-proxy-port>); required together with -dns-runtime-dnsdist-addr")
+	dnsPerfBindPlainAddr := fs.String("dns-perf-bind-plain-addr", "", "BIND's own unproxied loopback listener address for this deployment (127.0.0.1:<bind-plain-port>), for System Status's Safe DNS Benchmark's 'BIND direct' case display only -- the real dialing happens entirely inside apdns-hostagent; empty = that one case is omitted")
+	dnsPerfReportPath := fs.String("dns-perf-report-path", "./data/dns-performance/latest-report.json", "path to persist the Safe DNS Benchmark's latest report (see internal/dnsperf)")
 	fs.Parse(args)
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -347,6 +350,21 @@ func runWeb(args []string) {
 		ApplianceName: cfg.Appliance.Name, ApplianceTimezone: cfg.Appliance.Timezone,
 		Analytics: analyticsReader, RawQueryLog: rawQueryLogReader, HostAgent: hostAgentClient,
 		DNSRuntime: dnsRuntimeOrch, TLSCertPath: cfg.Web.TLSCertPath, TLSKeyPath: cfg.Web.TLSKeyPath,
+		DNSPerfBindPlainAddr: *dnsPerfBindPlainAddr,
+	}
+
+	// DNS Performance benchmark: same "optional, never fatal" contract
+	// as DNS Runtime above -- needs both a configured DNS runtime (to
+	// know the real dnsdist address to build cases against) and a
+	// reachable host-control agent (to actually run them).
+	if dnsRuntimeOrch != nil && hostAgentClient != nil {
+		srv.DNSPerf = &dnsperf.Service{
+			ReportPath: *dnsPerfReportPath,
+			Querier:    dnsperf.HostAgentQuerier{Client: hostAgentClient},
+			BuildCases: srv.BuildDNSPerfCases,
+		}
+	} else {
+		logger.Info("DNS performance benchmark not wired: needs both DNS runtime and -hostagent-socket configured")
 	}
 
 	listenAddr := *addr

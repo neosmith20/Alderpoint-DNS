@@ -140,6 +140,8 @@ podman run -d --name "$CONTAINER" \
     -hostagent-socket /run/apdns-hostagent/agent.sock \
     -dns-runtime-dnsdist-addr 127.0.0.1:25333 \
     -dns-runtime-bind-proxy-addr 127.0.0.1:25553 \
+    -dns-perf-bind-plain-addr 127.0.0.1:25453 \
+    -dns-perf-report-path /var/lib/alderpointdns-go/data/dns-performance/latest-report.json \
     -addr 0.0.0.0:10443 >/dev/null
 
 sleep 2
