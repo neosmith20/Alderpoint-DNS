@@ -3,6 +3,7 @@ package dnsanalytics
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"net"
 	"strings"
@@ -44,6 +45,20 @@ type Writer struct {
 	started bool
 }
 
+// dnstapLoggerAdapter routes golang-dnstap's own internal connection
+// accept/close/error log lines (otherwise silent) through this
+// package's slog.Logger -- added live 2026-08-28 while diagnosing a
+// real, unresolved intermittent stall where dnsdist's fstrm connection
+// stays established (confirmed via `ss`) but stops delivering frames
+// with no error on either side; this at least makes golang-dnstap's own
+// side of that story visible in the process's normal logs going
+// forward.
+type dnstapLoggerAdapter struct{ log *slog.Logger }
+
+func (a dnstapLoggerAdapter) Printf(format string, v ...interface{}) {
+	a.log.Info("dnsanalytics: dnstap transport", "msg", fmt.Sprintf(format, v...))
+}
+
 type event struct {
 	ts        int64
 	domain    string
@@ -77,6 +92,9 @@ func (wtr *Writer) Run(ctx context.Context, socketPath string) error {
 		return err
 	}
 	input.SetTimeout(5 * time.Second)
+	if wtr.Log != nil {
+		input.SetLogger(dnstapLoggerAdapter{wtr.Log})
+	}
 
 	raw := make(chan []byte, 256)
 	wtr.started = true
