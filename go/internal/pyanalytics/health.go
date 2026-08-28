@@ -197,6 +197,22 @@ type AnalyticsHealth struct {
 	QueueDepth          int    `json:"queue_depth"`
 	QueueDepthAvailable bool   `json:"queue_depth_available"`
 	LastCommittedBucket *int64 `json:"last_committed_bucket,omitempty"`
+
+	// Ingestion* fields describe internal/dnsanalytics.Writer's own
+	// stall watchdog (see that package's doc comment) -- a distinct,
+	// finer-grained signal from WriterStale above. WriterStale/
+	// WriterStatus answer "is the accept/decode loop alive at all";
+	// these answer "is it actually still receiving real dnstap frames",
+	// which the loop-alive heartbeat cannot detect on its own (a silent
+	// one-sided fstrm stall leaves the loop's heartbeat ticking forever
+	// while zero frames arrive). Populated only when a dnsanalytics
+	// Writer is wired in (Go-native analytics); zero values otherwise.
+	IngestionStalled                bool     `json:"ingestion_stalled"`
+	IngestionFrameAgeSeconds        *float64 `json:"ingestion_frame_age_seconds,omitempty"`
+	IngestionRecoveryCount          int64    `json:"ingestion_recovery_count"`
+	IngestionLastRecoveryAt         *float64 `json:"ingestion_last_recovery_at,omitempty"`
+	IngestionTrafficProbeConfigured bool     `json:"ingestion_traffic_probe_configured"`
+	IngestionTrafficProbeOK         bool     `json:"ingestion_traffic_probe_ok"`
 }
 
 // Health is the single real-liveness probe both the Dashboard and

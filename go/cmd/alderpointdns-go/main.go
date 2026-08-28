@@ -146,7 +146,7 @@ func runBlocklistRefresh(args []string) {
 		Policy:               &policy.Service{DB: db},
 		DomainRouting:        &domainrouting.Service{DB: db},
 		Clients:              &clients.Service{DB: db},
-		HostAgent:            hostagent.NewClient(*hostagentSocket),
+		HostAgent:            newPromoteHostAgentClient(*hostagentSocket),
 		DnsdistListenAddress: *dnsRuntimeDnsdistAddr, BindBackendAddress: *dnsRuntimeBindProxyAddr,
 		TLSCertPath: cfg.Web.TLSCertPath, TLSKeyPath: cfg.Web.TLSKeyPath,
 		DnstapSocketPath: *dnstapSocketPath,
@@ -250,6 +250,22 @@ func runBlocklistRefresh(args []string) {
 // real success (dry-run: Attempted && Error == ""; real: Promoted),
 // non-zero otherwise -- a caller (scripts/v2/cutover.sh) can treat this
 // exit code as the single source of truth without parsing JSON itself.
+// newPromoteHostAgentClient is hostagent.NewClient with a real, observed
+// timeout instead of the library default (10s). A real Apply through
+// apdns-hostagent -- stage, validate, promote, reload, health-check --
+// has been directly measured taking 10-13s, occasionally up to ~13.4s
+// (see hostagent.log's own "operation completed" dur_ms). The default
+// 10s client-side read timeout was shorter than that, so this CLI could
+// print a false "hostagent unavailable: ... i/o timeout" for a call that
+// completed successfully seconds later server-side -- a real bug (the
+// CLI's own result must reflect the actual completed job, not require
+// log archaeology), not a change to any query-hot-path timeout.
+func newPromoteHostAgentClient(socketPath string) *hostagent.Client {
+	c := hostagent.NewClient(socketPath)
+	c.Timeout = 45 * time.Second
+	return c
+}
+
 func runDNSPromote(args []string) {
 	fs := flag.NewFlagSet("dns-promote", flag.ExitOnError)
 	dbPath := fs.String("db", "./data/alderpointdns-go.db", "sqlite database path (the exact staged/live database -- opened read-only in effect, since this command never writes to it)")
@@ -292,7 +308,7 @@ func runDNSPromote(args []string) {
 		Policy:               &policy.Service{DB: db},
 		DomainRouting:        &domainrouting.Service{DB: db},
 		Clients:              &clients.Service{DB: db},
-		HostAgent:            hostagent.NewClient(*hostagentSocket),
+		HostAgent:            newPromoteHostAgentClient(*hostagentSocket),
 		DnsdistListenAddress: *dnsRuntimeDnsdistAddr, BindBackendAddress: *dnsRuntimeBindProxyAddr,
 		TLSCertPath: cfg.Web.TLSCertPath, TLSKeyPath: cfg.Web.TLSKeyPath,
 		DnstapSocketPath: *dnstapSocketPath,
@@ -558,6 +574,19 @@ func runWeb(args []string) {
 	}
 	importerSvc := &importer.Service{DB: db, LocalDNS: ldSvc, Backup: backupSvc}
 
+	// Host-agent client: same "optional, never fatal" contract. No
+	// connection is opened at startup -- hostagent.Client dials fresh
+	// per call, so an agent that isn't running yet (or ever) never
+	// blocks this process from starting; every hostagent-backed handler
+	// already treats a dial failure as "unavailable", not an error.
+	// Created here (rather than immediately before its other uses
+	// below) so the analytics Writer's TrafficProbe -- see immediately
+	// below -- can be wired in before Run starts, not raced against it.
+	var hostAgentClient *hostagent.Client
+	if *hostagentSocket != "" {
+		hostAgentClient = hostagent.NewClient(*hostagentSocket)
+	}
+
 	// Go-native analytics: REQUIRED, unlike every other optional
 	// boundary in this function -- the owner's explicit standing
 	// requirement is that missing required analytics configuration
@@ -578,6 +607,40 @@ func runWeb(args []string) {
 	}
 	defer analyticsDB.Close()
 	analyticsWriter := &dnsanalytics.Writer{DB: analyticsDB, Log: logger}
+	if hostAgentClient != nil {
+		// Real, independent-of-dnstap traffic signal for the stall
+		// watchdog (see dnsanalytics.TrafficProbe's doc comment): reuse
+		// the exact same cache.status RPC handleCacheStatus already
+		// exposes at /api/cache/status (internal/hostagentd's
+		// fetchBindCacheStats reading BIND's own statistics-channel),
+		// summing hits+misses across every BIND context as one
+		// monotonic "real queries reached the backend" counter. This
+		// never touches dnsdist/dnstap, which is exactly why it can
+		// tell a real stall apart from a quiet network.
+		analyticsWriter.TrafficProbe = func(ctx context.Context) (int64, bool) {
+			var out struct {
+				Bind []struct {
+					CacheStats *struct {
+						Available bool  `json:"available"`
+						Hits      int64 `json:"hits"`
+						Misses    int64 `json:"misses"`
+					} `json:"cache_stats"`
+				} `json:"bind"`
+			}
+			if err := hostAgentClient.Call(ctx, hostagent.OpCacheStatus, nil, &out); err != nil {
+				return 0, false
+			}
+			var total int64
+			anyAvailable := false
+			for _, c := range out.Bind {
+				if c.CacheStats != nil && c.CacheStats.Available {
+					anyAvailable = true
+					total += c.CacheStats.Hits + c.CacheStats.Misses
+				}
+			}
+			return total, anyAvailable
+		}
+	}
 	analyticsReader := &dnsanalytics.Reader{DB: analyticsDB, Writer: analyticsWriter}
 	listenPath := *dnstapListenPath
 	if listenPath == "" {
@@ -593,16 +656,6 @@ func runWeb(args []string) {
 		}()
 	} else {
 		logger.Warn("-dns-runtime-dnstap-socket / -dns-runtime-dnstap-listen-socket are empty: analytics db is open but nothing will ever write real query events to it")
-	}
-
-	// Host-agent client: same "optional, never fatal" contract. No
-	// connection is opened at startup -- hostagent.Client dials fresh
-	// per call, so an agent that isn't running yet (or ever) never
-	// blocks this process from starting; every hostagent-backed handler
-	// already treats a dial failure as "unavailable", not an error.
-	var hostAgentClient *hostagent.Client
-	if *hostagentSocket != "" {
-		hostAgentClient = hostagent.NewClient(*hostagentSocket)
 	}
 
 	// Native Go secrets subsystem: same "optional, never fatal"

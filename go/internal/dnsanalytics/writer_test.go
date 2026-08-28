@@ -199,3 +199,178 @@ func TestWriterEndToEndOverRealUnixSocket(t *testing.T) {
 		t.Errorf("decodeErrors = %d, want 0", decodeErrs)
 	}
 }
+
+// newRealConnPair returns a real, OS-buffered unix-socket connection
+// pair (unlike net.Pipe, whose Write blocks until a concurrent Read
+// matches it -- these tests need a Write to succeed/fail the same way a
+// real dnstap connection's would, without a reader on the other end).
+func newRealConnPair(t *testing.T) (server, client net.Conn) {
+	t.Helper()
+	sockPath := filepath.Join(t.TempDir(), "pair.sock")
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, _ := ln.Accept()
+		accepted <- c
+	}()
+	client, err = net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server = <-accepted
+	if server == nil {
+		t.Fatal("accept failed")
+	}
+	return server, client
+}
+
+// TestWatchdogRecoversOnConfirmedStall is the core regression test for
+// the real, live-observed silent-stall failure mode (see this package's
+// TrafficProbe doc comment): frames stop arriving while independent
+// (BIND-derived) traffic keeps advancing. checkIngestionOnce is driven
+// directly (bypassing real timers) to keep this deterministic and fast.
+func TestWatchdogRecoversOnConfirmedStall(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "analytics.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	wtr := &Writer{DB: db, StaleThreshold: 0, WatchdogInterval: time.Hour /* driven manually */}
+	wtr.startedAt.Store(time.Now().Add(-1 * time.Hour).Unix()) // force "stale" immediately regardless of threshold
+	wtr.StaleThreshold = 1 * time.Millisecond
+
+	// Attach a real accepted connection via net.Pipe so we can prove
+	// checkIngestionOnce's recovery path actually closes it.
+	serverSide, clientSide := newRealConnPair(t)
+	defer clientSide.Close()
+	wtr.trackConn(1, serverSide)
+
+	var probeCalls int
+	wtr.TrafficProbe = func(ctx context.Context) (int64, bool) {
+		probeCalls++
+		// First call establishes a baseline; second shows traffic
+		// having advanced well past minTrafficDeltaToFlagStall.
+		if probeCalls == 1 {
+			return 100, true
+		}
+		return 100 + minTrafficDeltaToFlagStall + 1, true
+	}
+
+	ctx := context.Background()
+
+	// Tick 1: establishes the traffic-probe baseline, must NOT yet
+	// declare a stall (nothing to compare against).
+	wtr.checkIngestionOnce(ctx)
+	if wtr.Ingestion().Stalled {
+		t.Fatal("must not report stalled on the very first probe (no baseline yet)")
+	}
+	if _, err := serverSide.Write([]byte("x")); err != nil {
+		t.Error("connection must still be open after tick 1 -- no recovery should have fired yet")
+	}
+
+	// Re-track a fresh connection for tick 2 for an unambiguous
+	// before/after write check independent of tick 1's write above.
+	serverSide2, clientSide2 := newRealConnPair(t)
+	defer clientSide2.Close()
+	wtr.trackConn(2, serverSide2)
+
+	// Tick 2: traffic has now advanced beyond the noise threshold with
+	// zero frames received the whole time -> must recover.
+	wtr.checkIngestionOnce(ctx)
+	ing := wtr.Ingestion()
+	if !ing.Stalled {
+		t.Fatal("expected Stalled=true once traffic advanced with no frames received")
+	}
+	if ing.RecoveryCount != 1 {
+		t.Errorf("RecoveryCount = %d, want 1", ing.RecoveryCount)
+	}
+	if ing.LastRecoveryAt == 0 {
+		t.Error("LastRecoveryAt was never set")
+	}
+	if !ing.TrafficProbeOK {
+		t.Error("TrafficProbeOK should be true -- the stub probe always succeeded")
+	}
+
+	// The real mechanism under test: recovery must have force-closed
+	// the tracked connection so dnsdist's next write gets a real error.
+	if _, err := serverSide2.Write([]byte("x")); err == nil {
+		t.Error("expected the tracked connection to have been closed by recovery, but a write still succeeded")
+	}
+
+	// Durable diagnostic trail: a real row in ingestion_events.
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM ingestion_events WHERE kind = 'recovery_attempted'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("ingestion_events rows for recovery_attempted = %d, want 1", count)
+	}
+}
+
+// TestWatchdogDoesNotRecoverOnQuietNetwork proves the flip side: no
+// frames for a long time, but the independent traffic probe also shows
+// no real growth, must be treated as a genuinely idle network, not a
+// failure -- the whole reason TrafficProbe exists instead of a naive
+// heartbeat-only timeout.
+func TestWatchdogDoesNotRecoverOnQuietNetwork(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "analytics.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	wtr := &Writer{DB: db, StaleThreshold: 1 * time.Millisecond}
+	wtr.startedAt.Store(time.Now().Add(-1 * time.Hour).Unix())
+	wtr.TrafficProbe = func(ctx context.Context) (int64, bool) {
+		return 100, true // never moves
+	}
+
+	ctx := context.Background()
+	wtr.checkIngestionOnce(ctx) // baseline
+	wtr.checkIngestionOnce(ctx) // no movement -> must not recover
+
+	ing := wtr.Ingestion()
+	if ing.Stalled {
+		t.Error("must not report stalled when the independent traffic probe shows a genuinely quiet network")
+	}
+	if ing.RecoveryCount != 0 {
+		t.Errorf("RecoveryCount = %d, want 0 -- no recovery should have been attempted", ing.RecoveryCount)
+	}
+}
+
+// TestWatchdogDegradedWhenProbeUnconfigured proves the conservative
+// fallback: with no TrafficProbe wired at all, a real stale gap is
+// reported as degraded (never silently "ok") but never force-closes a
+// connection, since there's no independent evidence to justify it.
+func TestWatchdogDegradedWhenProbeUnconfigured(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "analytics.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	wtr := &Writer{DB: db, StaleThreshold: 1 * time.Millisecond}
+	wtr.startedAt.Store(time.Now().Add(-1 * time.Hour).Unix())
+
+	serverSide, clientSide := newRealConnPair(t)
+	defer clientSide.Close()
+	wtr.trackConn(1, serverSide)
+
+	wtr.checkIngestionOnce(context.Background())
+
+	ing := wtr.Ingestion()
+	if !ing.Stalled {
+		t.Error("expected Stalled=true (conservative) with no traffic probe configured and a real stale gap")
+	}
+	if ing.RecoveryCount != 0 {
+		t.Error("must never force-close without independent traffic evidence")
+	}
+	if _, err := serverSide.Write([]byte("x")); err != nil {
+		t.Error("connection must not have been closed -- no probe means no basis for forcing a reconnect")
+	}
+}

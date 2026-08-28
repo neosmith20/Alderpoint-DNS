@@ -236,8 +236,19 @@ func (r *Reader) Ping(ctx context.Context) error {
 // that type's own doc comment for what each tier means) but evaluated
 // against this store's actual architecture: there is no separate
 // snapshot/heartbeat/inbox pipeline to go stale independently of the
-// data -- the Writer IS this process, so "is the writer alive" reduces
-// to "has its accept/decode loop ticked recently" (see Writer.Heartbeat).
+// data -- the Writer IS this process. Two independent liveness signals
+// feed this, deliberately not collapsed into one:
+//
+//   - Writer.Heartbeat: "is the accept/decode loop still running at
+//     all" (ticks every second regardless of query volume).
+//   - Writer.Ingestion: "is it still actually receiving real dnstap
+//     frames, cross-checked against independent real DNS traffic" (see
+//     writer.go's watchdog doc comment) -- this is what closes the real
+//     failure class this whole package was hardened against: a silent,
+//     one-sided fstrm stall where the accept/decode loop's own
+//     heartbeat keeps ticking forever while zero frames arrive. Without
+//     this check, Health would report "ok" throughout a known stall --
+//     exactly the false-positive the governing task named.
 func (r *Reader) Health(ctx context.Context) pyanalytics.AnalyticsHealth {
 	h := pyanalytics.AnalyticsHealth{}
 	if err := r.Ping(ctx); err != nil {
@@ -272,6 +283,32 @@ func (r *Reader) Health(ctx context.Context) pyanalytics.AnalyticsHealth {
 		h.Reason = fmt.Sprintf("dnstap listener heartbeat is %.0fs old", age.Seconds())
 		return h
 	}
+
+	ing := r.Writer.Ingestion()
+	frameAge := ing.FrameAgeSeconds
+	h.IngestionStalled = ing.Stalled
+	h.IngestionFrameAgeSeconds = &frameAge
+	h.IngestionRecoveryCount = ing.RecoveryCount
+	h.IngestionTrafficProbeConfigured = ing.TrafficProbeConfigured
+	h.IngestionTrafficProbeOK = ing.TrafficProbeOK
+	if ing.LastRecoveryAt != 0 {
+		lr := float64(ing.LastRecoveryAt)
+		h.IngestionLastRecoveryAt = &lr
+	}
+	if ing.Stalled {
+		h.Status = "degraded"
+		h.WriterStatus = "stalled"
+		h.WriterStale = true
+		if ing.TrafficProbeConfigured && !ing.TrafficProbeOK {
+			h.Reason = fmt.Sprintf("no dnstap frames for %.0fs and the independent BIND traffic probe could not be reached to confirm real traffic -- reporting degraded rather than assuming ok", frameAge)
+		} else if ing.TrafficProbeConfigured {
+			h.Reason = fmt.Sprintf("dnstap ingestion stalled: no frames for %.0fs while real DNS traffic kept flowing (confirmed via BIND's own query counters, independent of dnsdist/dnstap) -- %d automatic recovery attempt(s) made so far", frameAge, ing.RecoveryCount)
+		} else {
+			h.Reason = fmt.Sprintf("no dnstap frames for %.0fs and no traffic probe is configured to confirm whether this is a real stall or a quiet network -- reporting degraded rather than assuming ok", frameAge)
+		}
+		return h
+	}
+
 	h.Status = "ok"
 	h.WriterStatus = "ok"
 	inserted, decodeErrs := r.Writer.Stats()

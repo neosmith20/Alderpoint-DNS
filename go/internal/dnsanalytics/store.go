@@ -57,6 +57,19 @@ CREATE TABLE IF NOT EXISTS query_events (
 CREATE INDEX IF NOT EXISTS idx_query_events_ts ON query_events(ts);
 CREATE INDEX IF NOT EXISTS idx_query_events_domain_ts ON query_events(domain, ts);
 CREATE INDEX IF NOT EXISTS idx_query_events_outcome_ts ON query_events(outcome, ts);
+
+-- ingestion_events is Writer's durable diagnostic trail (see
+-- writer.go's watchdog): every detected ingestion stall and every
+-- forced-reconnect recovery attempt, so a stall's real history survives
+-- this process restarting and is inspectable after the fact, not just
+-- while a Claude/operator session happens to be tailing live logs.
+CREATE TABLE IF NOT EXISTS ingestion_events (
+	id     INTEGER PRIMARY KEY AUTOINCREMENT,
+	ts     INTEGER NOT NULL,
+	kind   TEXT NOT NULL, -- "stall_detected" | "recovery_attempted"
+	detail TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_ingestion_events_ts ON ingestion_events(ts);
 `
 
 // Outcome values. Anything else received is stored verbatim (never
