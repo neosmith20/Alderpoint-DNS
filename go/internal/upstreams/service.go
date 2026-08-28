@@ -29,11 +29,27 @@
 // header on a DoH forward). A Go-native secrets store now exists
 // (internal/secretstore, see the Notifications row's credential
 // storage for a working consumer) -- the remaining real blocker isn't
-// "no secrets store" any more, it's that dnsdist's `newServer()` Lua
-// API has not yet been confirmed to support a custom per-server HTTP
-// header on the installed dnsdist version. Not yet investigated; this
-// is a genuine open question, not assumed infeasible or silently
-// wired as inert metadata.
+// "no secrets store" any more.
+//
+// Investigated (2026-08-28), narrowed rather than left open: the
+// installed dnsdist 2.1.1 binary's structured-settings symbol table
+// (`strings /usr/bin/dnsdist`) was inspected directly for a per-backend
+// custom-HTTP-header field. `OutgoingDohConfiguration` exists (proving
+// DoH-as-a-backend-protocol is real, matching this package's own
+// `dohPath`/`tls` `newServer()` kwargs above) but its only header-
+// related field is `add_x_forwarded_headers` -- there is no generic
+// static-header-per-backend option in either the YAML settings struct
+// or (by the same absence) the older Lua `newServer()` binding it
+// mirrors. A `HeaderModify` action symbol also exists but appears to be
+// a request/response-rule mutation, not backend-connection
+// configuration -- whether it could be repurposed to inject an
+// Authorization header on every outgoing request to one specific named
+// pool is a real, distinct R&D question this session did not pursue
+// further. Bottom line: authenticated-DoH-upstream compiled-runtime
+// support is genuinely blocked on a missing (or at least
+// unconfirmed-and-nontrivial) dnsdist capability, not on this
+// migration's own code -- a fair candidate for upstream dnsdist
+// feature research or a support-ticket, not a quick Go-side fix.
 package upstreams
 
 import (
