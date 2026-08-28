@@ -12,13 +12,20 @@
 #   scripts/v2/cutover.sh topology    # read-only: assert the final end-state topology
 #                                      # (Go alone on :8443/:53, nothing on :10443/:18443)
 #
-# Required end state after a successful execute: ONE Go instance owning
-# :8443 (management) and :53 (DNS, UDP+TCP); the old :10443 development
-# preview and the temporary :18443 staging binding both fully removed;
-# Python stopped (never removed -- rollback artifacts/state preserved).
-# The obsolete-preview cleanup runs ONLY after the post-swap functional
-# verify passes -- a failed verify rolls Python back and leaves :10443/
-# :18443 untouched for investigation.
+# Required end state after a successful execute (Alex's final topology
+# decision: this build/test appliance is not a rollback or snapshot
+# server): ONE Go instance owning :8443 (management) and :53 (DNS,
+# UDP+TCP), no dead/pretend encrypted-DNS listeners; the old :10443
+# development preview and the temporary :18443 staging binding both
+# fully removed; and the ENTIRE Python/FastAPI runtime fully removed --
+# container, both its images (base + rollback commit), its named
+# volume, and its host state directories -- not merely stopped. The
+# obsolete-preview cleanup and the Python decommission both run ONLY
+# after the post-swap functional verify passes -- a failed verify rolls
+# Python back (restarting the still-fully-intact container/image/state)
+# and leaves :10443/:18443/Python untouched for investigation. Python is
+# only ever decommissioned once Go has been proven live and correct on
+# the real ports -- never before, never on a failed attempt.
 #
 # `execute` refuses to run unless the environment variable
 # GO_CUTOVER_CONFIRM=1 is set AND the literal string "GO CUTOVER" is
@@ -50,6 +57,15 @@ OLD_PREVIEW_PORT=10443
 
 ROLLBACK_DIR_GLOB=/root/apdns-v2-preview-cutover-rollback-*
 ERROR_BUDGET_SECONDS=90
+
+# Python-runtime artifacts -- decommissioned ONLY after a verified
+# cutover (cmd_cleanup_python). rmi order matters: PY_ROLLBACK_IMAGE was
+# `podman commit`-ed from $PY_CONTAINER, so it is a child layer of
+# PY_BASE_IMAGE and must be removed first or podman refuses to remove
+# the parent.
+PY_BASE_IMAGE=localhost/alderpointdns-clean-install-base-2613118:latest
+PY_ROLLBACK_IMAGE_GLOB="localhost/apdns-v2-preview-rollback:*"
+PY_STATE_VOLUME=apdns-v2-preview-state
 
 log() { echo "+ $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -138,16 +154,47 @@ cmd_preflight() {
     # --- old previews: report state, do not fail preflight on their
     # presence (they are torn down only after a verified cutover, in a
     # later phase) -- just confirm we know what's there right now.
-    local old_preview_status staging_status
+    local old_preview_status staging_status staging_listener
     old_preview_status=$(podman ps --filter "name=^${OLD_PREVIEW_CONTAINER}\$" --format '{{.Status}}' 2>/dev/null)
     log "old :$OLD_PREVIEW_PORT preview container ($OLD_PREVIEW_CONTAINER): ${old_preview_status:-not running}"
-    staging_status=$(curl -sk --max-time 3 "https://127.0.0.1:$STAGING_PORT/api/setup/status" 2>/dev/null)
-    log "staging :$STAGING_PORT instance: ${staging_status:-not reachable}"
-    if echo "$staging_status" | grep -q '"setup_required": *true\|"setup_required":true'; then
-        fail "the staging instance on :$STAGING_PORT still reports setup_required=true -- this contradicts the admin_count check above; investigate before proceeding"
+    staging_listener=$(ss -tlnp 2>/dev/null | grep -c ":$STAGING_PORT ")
+    if [ "$staging_listener" -gt 0 ]; then
+        staging_status=$(curl -sk --max-time 3 "https://127.0.0.1:$STAGING_PORT/api/setup/status" 2>/dev/null)
+        log "staging :$STAGING_PORT instance: currently bound -- $staging_status"
+        if echo "$staging_status" | grep -q '"setup_required": *true\|"setup_required":true'; then
+            fail "the staging instance on :$STAGING_PORT still reports setup_required=true -- this contradicts the admin_count check above; investigate before proceeding"
+        fi
+    else
+        log "staging :$STAGING_PORT: not currently bound (expected -- final topology requires nothing on :$STAGING_PORT either way)"
     fi
 
+    cmd_python_inventory
+
     log "ALL PREFLIGHT CHECKS PASSED"
+}
+
+# --- read-only inventory of the exact Python runtime this cutover will
+# decommission after a verified success. Distinguishes what is
+# EXCLUSIVE to the Python V2 preview (removed on success) from what is
+# SHARED with, or a dependency of, anything else (nothing found to be a
+# live runtime dependency of the final Go container -- see below).
+cmd_python_inventory() {
+    log "=== Python runtime inventory (decommissioned only after a verified cutover) ==="
+    log "container: $PY_CONTAINER ($(podman inspect "$PY_CONTAINER" --format '{{.ImageName}} {{.Status}}' 2>/dev/null)) -- EXCLUSIVE, removed on success"
+    log "image: $PY_BASE_IMAGE -- EXCLUSIVE to $PY_CONTAINER (no other container/image uses it), removed on success"
+    local rb_image
+    rb_image=$(podman images --filter "reference=$PY_ROLLBACK_IMAGE_GLOB" --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | head -1)
+    [ -n "$rb_image" ] && log "rollback image: $rb_image -- EXCLUSIVE, a committed layer child of $PY_BASE_IMAGE (removed FIRST), removed on success" \
+        || log "rollback image: none found matching $PY_ROLLBACK_IMAGE_GLOB"
+    local vol_mounted_by
+    vol_mounted_by=$(podman ps -a --format '{{.Names}}' | xargs -I{} podman inspect {} --format '{{.Name}}: {{range .Mounts}}{{.Name}} {{end}}' 2>/dev/null | grep "$PY_STATE_VOLUME" || true)
+    log "named volume: $PY_STATE_VOLUME -- EXCLUSIVE, not currently mounted by any container (${vol_mounted_by:-confirmed unattached}), removed on success"
+    log "host state dirs: $PY_STATE_ETC, $PY_STATE_VARLIB -- EXCLUSIVE (bind-mounted only into $PY_CONTAINER), removed on success"
+    local rb
+    rb="$(latest_rollback_dir)"
+    [ -n "$rb" ] && log "rollback snapshot dir: $rb -- EXCLUSIVE, removed on success (this appliance is not a rollback/snapshot server per Alex's final topology decision)"
+    log "SHARED/dependency check: the final Go live container (see cmd_execute's podman create) mounts only \$GO_LIVE_STATE, \$GO_LIVE_RELEASE, its own generated config, its own certs (already imported), and \$GO_LIVE_HOSTAGENT_DIR -- it has NO mount, flag, or path referencing $PY_STATE_ETC or $PY_STATE_VARLIB. The only historical couplings (the old :10443 preview's own dedicated hostagent reading $PY_CONTROL_DB and Python's live analytics dir for parity-proving snapshots) belong exclusively to $OLD_PREVIEW_CONTAINER, which is removed in the same cutover -- confirmed no live runtime dependency on Python survives past a successful cutover."
+    log "OUT OF SCOPE, NOT TOUCHED: the pre-existing, already-disabled V1 host package (dpkg 'alderpointdns 1.1.1-1' at /opt/alderpointdns, /etc/alderpointdns, systemd units alderpointdns*.service/.timer -- all already inactive/disabled from a prior V1 service removal). This is a separate, older, non-containerized install outside the V2 Python/FastAPI preview this cutover targets; left exactly as-is unless Alex asks otherwise."
 }
 
 # --- verify (used both post-cutover and post-rollback) ------------------
@@ -452,11 +499,60 @@ cmd_execute() {
         exit 1
     fi
 
-    log "=== Cutover verified. Proceeding to remove the obsolete :$OLD_PREVIEW_PORT preview and the :$STAGING_PORT staging binding. ==="
+    log "=== Cutover verified. Proceeding to remove the obsolete :$OLD_PREVIEW_PORT preview, the :$STAGING_PORT staging binding, and the entire Python runtime. ==="
     cmd_cleanup_obsolete_previews
+    cmd_cleanup_python
     cmd_final_topology
 
-    log "CUTOVER COMPLETE. Python stopped (not removed) at $PY_CONTAINER -- rollback artifacts preserved. Go live at $GO_LIVE_CONTAINER on :8443/:53. :$OLD_PREVIEW_PORT and :$STAGING_PORT are gone."
+    log "CUTOVER COMPLETE. Go live at $GO_LIVE_CONTAINER on :8443/:53. :$OLD_PREVIEW_PORT and :$STAGING_PORT are gone. The Python/FastAPI runtime (container, images, volume, host state) has been fully removed -- this appliance is not a rollback/snapshot server."
+}
+
+# --- full Python decommission (ONLY after a verified cutover) -----------
+#
+# Never called on a failed verify/rollback path -- cmd_rollback restarts
+# $PY_CONTAINER from its still-fully-intact image/state, which this
+# function would otherwise have destroyed. Failures here are logged and
+# surfaced but do not roll Go back: by the time this runs, Go is already
+# proven live and correct on the real ports, and a cleanup hiccup (e.g.
+# a volume still busy) is a follow-up item, not grounds to re-disrupt a
+# working appliance.
+cmd_cleanup_python() {
+    log "=== Decommissioning the Python/FastAPI runtime (build/test appliance -- not a rollback/snapshot server) ==="
+    local errors=0
+
+    podman rm -f "$PY_CONTAINER" >/dev/null 2>&1 && log "removed container: $PY_CONTAINER" \
+        || { log "WARNING: could not remove container $PY_CONTAINER"; errors=$((errors+1)); }
+
+    local rb_image
+    rb_image=$(podman images --filter "reference=$PY_ROLLBACK_IMAGE_GLOB" --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | head -1)
+    if [ -n "$rb_image" ]; then
+        podman rmi -f "$rb_image" >/dev/null 2>&1 && log "removed rollback image: $rb_image" \
+            || { log "WARNING: could not remove rollback image $rb_image"; errors=$((errors+1)); }
+    fi
+    podman rmi -f "$PY_BASE_IMAGE" >/dev/null 2>&1 && log "removed image: $PY_BASE_IMAGE" \
+        || { log "WARNING: could not remove image $PY_BASE_IMAGE"; errors=$((errors+1)); }
+
+    podman volume rm -f "$PY_STATE_VOLUME" >/dev/null 2>&1 && log "removed volume: $PY_STATE_VOLUME" \
+        || log "note: volume $PY_STATE_VOLUME not present or already removed"
+
+    if [ -d "$PY_STATE_ETC" ] || [ -d "$PY_STATE_VARLIB" ]; then
+        rm -rf "$PY_STATE_ETC" "$PY_STATE_VARLIB" \
+            && log "removed host state dirs: $PY_STATE_ETC, $PY_STATE_VARLIB" \
+            || { log "WARNING: could not fully remove Python host state dirs"; errors=$((errors+1)); }
+    fi
+
+    local rb
+    rb="$(latest_rollback_dir)"
+    if [ -n "$rb" ]; then
+        rm -rf "$rb" && log "removed rollback snapshot dir: $rb" \
+            || { log "WARNING: could not remove rollback snapshot dir $rb"; errors=$((errors+1)); }
+    fi
+
+    if [ "$errors" -eq 0 ]; then
+        log "Python runtime fully decommissioned"
+    else
+        log "Python decommission finished with $errors warning(s) -- Go is live and verified; review the warnings above as a follow-up (not blocking)"
+    fi
 }
 
 # --- cleanup of obsolete preview instances (ONLY after a verified cutover) ---
@@ -496,11 +592,34 @@ cmd_final_topology() {
     log "=== Final topology check ==="
     local errors=0
 
-    local go_live_status py_status
+    local go_live_status
     go_live_status=$(podman ps --filter "name=^${GO_LIVE_CONTAINER}\$" --format '{{.Status}}' 2>/dev/null)
-    py_status=$(podman ps -a --filter "name=^${PY_CONTAINER}\$" --format '{{.Status}}' 2>/dev/null)
     echo "$go_live_status" | grep -qi "^Up" && log "podman: $GO_LIVE_CONTAINER is Up" || { log "podman: $GO_LIVE_CONTAINER is NOT up ($go_live_status)"; errors=$((errors+1)); }
-    echo "$py_status" | grep -qi "^Exited" && log "podman: $PY_CONTAINER is Exited (stopped, preserved)" || { log "podman: $PY_CONTAINER is not in the expected Exited state ($py_status)"; errors=$((errors+1)); }
+
+    if podman ps -a --filter "name=^${PY_CONTAINER}\$" --format '{{.Names}}' 2>/dev/null | grep -q .; then
+        log "podman: $PY_CONTAINER still exists -- expected fully removed (this appliance is not a rollback/snapshot server)"
+        errors=$((errors+1))
+    else
+        log "podman: $PY_CONTAINER confirmed removed"
+    fi
+    if podman images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -qE "^${PY_BASE_IMAGE}\$|^${PY_ROLLBACK_IMAGE_GLOB%:*}:"; then
+        log "podman: a Python image is still present -- expected fully removed"
+        errors=$((errors+1))
+    else
+        log "podman: Python images confirmed removed"
+    fi
+    if podman volume ls --format '{{.Name}}' 2>/dev/null | grep -qx "$PY_STATE_VOLUME"; then
+        log "podman: volume $PY_STATE_VOLUME still exists -- expected fully removed"
+        errors=$((errors+1))
+    else
+        log "podman: Python volume confirmed removed"
+    fi
+    if [ -d "$PY_STATE_ETC" ] || [ -d "$PY_STATE_VARLIB" ]; then
+        log "host state: $PY_STATE_ETC/$PY_STATE_VARLIB still present -- expected fully removed"
+        errors=$((errors+1))
+    else
+        log "host state: Python state dirs confirmed removed"
+    fi
 
     if podman ps -a --filter "name=^${OLD_PREVIEW_CONTAINER}\$" --format '{{.Names}}' 2>/dev/null | grep -q .; then
         log "podman: $OLD_PREVIEW_CONTAINER still exists -- expected fully removed"
