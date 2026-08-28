@@ -61,6 +61,8 @@ func main() {
 		runMigrate(os.Args[2:])
 	case "import-python":
 		runImportPython(os.Args[2:])
+	case "dns-promote":
+		runDNSPromote(os.Args[2:])
 	case "version":
 		// Plain stdout, nothing else -- Software Updates' staged-package
 		// verification (internal/hostagentd's ops_update.go) execs a
@@ -69,8 +71,87 @@ func main() {
 		// caller claimed before ever trusting it as an update target.
 		fmt.Println(Version)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q (want: web, migrate, import-python, version)\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q (want: web, migrate, import-python, dns-promote, version)\n", os.Args[1])
 		os.Exit(2)
+	}
+}
+
+// runDNSPromote is a one-shot, non-interactive trigger for exactly the
+// same compile -> validate -> promote pipeline the web UI's "Apply
+// Runtime Changes" button uses (internal/dnsruntime.Orchestrator) --
+// built directly against the database, with no HTTP server, no
+// session, no login, no password, ever. This exists specifically so a
+// live cutover can bring the DNS runtime up automatically: -dry-run
+// (the default) only compiles and validates (named-checkconf, dnsdist
+// --check-config) -- nothing live is touched, no socket is bound, safe
+// to run while another process still owns the real DNS port. Passing
+// -dry-run=false performs the real promotion (stages, validates, backs
+// up, writes live, reloads, health-checks, and auto-rolls-back on any
+// failure -- see internal/hostagentd/ops_dnsruntime.go) and must only
+// be run once whatever currently owns the real DNS port has released
+// it. Always prints the full Result as JSON to stdout; exits 0 only on
+// real success (dry-run: Attempted && Error == ""; real: Promoted),
+// non-zero otherwise -- a caller (scripts/v2/cutover.sh) can treat this
+// exit code as the single source of truth without parsing JSON itself.
+func runDNSPromote(args []string) {
+	fs := flag.NewFlagSet("dns-promote", flag.ExitOnError)
+	dbPath := fs.String("db", "./data/alderpointdns-go.db", "sqlite database path (the exact staged/live database -- opened read-only in effect, since this command never writes to it)")
+	cfgPath := fs.String("config", "./config/appliance.yaml", "appliance.yaml path -- read for blocklists.runtime_dir and web.tls_cert_path/tls_key_path, the same source of truth the real 'web' process uses, so this one-shot command can never disagree with it")
+	migrationsDir := fs.String("migrations", "./schema/migrations", "migrations directory")
+	hostagentSocket := fs.String("hostagent-socket", "", "unix socket path for apdns-hostagent (required)")
+	dnsRuntimeDnsdistAddr := fs.String("dns-runtime-dnsdist-addr", "", "the real dnsdist listen address this deployment's apdns-hostagent was started with (required)")
+	dnsRuntimeBindProxyAddr := fs.String("dns-runtime-bind-proxy-addr", "", "the real BIND PROXYv2 backend address this deployment's apdns-hostagent compiles named.conf to listen on (required)")
+	dryRun := fs.Bool("dry-run", true, "compile and validate only, no live change (default true -- pass -dry-run=false to actually promote for real)")
+	fs.Parse(args)
+
+	if *hostagentSocket == "" || *dnsRuntimeDnsdistAddr == "" || *dnsRuntimeBindProxyAddr == "" {
+		fmt.Fprintln(os.Stderr, "-hostagent-socket, -dns-runtime-dnsdist-addr, and -dns-runtime-bind-proxy-addr are all required")
+		os.Exit(2)
+	}
+
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	ctx := context.Background()
+
+	cfg, _, err := config.LoadOrMigrate(*cfgPath)
+	if err != nil {
+		logger.Error("config load failed", "err", err)
+		os.Exit(1)
+	}
+
+	db, err := openDB(ctx, *dbPath, *migrationsDir, logger)
+	if err != nil {
+		logger.Error("db init failed", "err", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	orch := &dnsruntime.Orchestrator{
+		LocalDNS:      &localdns.Service{DB: db},
+		CustomRules:   &customrules.Service{DB: db},
+		Blocklists:    &blocklists.Service{DB: db, RuntimeDir: cfg.Blocklists.RuntimeDir},
+		Upstreams:     &upstreams.Service{DB: db},
+		DNSTransports: &dnstransports.Service{DB: db},
+		Policy:        &policy.Service{DB: db},
+		DomainRouting: &domainrouting.Service{DB: db},
+		Clients:       &clients.Service{DB: db},
+		HostAgent:     hostagent.NewClient(*hostagentSocket),
+		DnsdistListenAddress: *dnsRuntimeDnsdistAddr, BindBackendAddress: *dnsRuntimeBindProxyAddr,
+		TLSCertPath: cfg.Web.TLSCertPath, TLSKeyPath: cfg.Web.TLSKeyPath,
+	}
+
+	var result dnsruntime.Result
+	if *dryRun {
+		result = orch.Validate(ctx)
+	} else {
+		result = orch.Apply(ctx)
+	}
+
+	body, _ := json.MarshalIndent(result, "", "  ")
+	fmt.Println(string(body))
+
+	ok := result.Attempted && result.Error == "" && (*dryRun || result.Promoted)
+	if !ok {
+		os.Exit(1)
 	}
 }
 

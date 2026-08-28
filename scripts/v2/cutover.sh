@@ -9,6 +9,8 @@
 #   scripts/v2/cutover.sh verify      # re-run the functional checks against whichever
 #                                      # side is currently live (Go or Python)
 #   scripts/v2/cutover.sh rollback    # force the rollback path directly
+#   scripts/v2/cutover.sh status      # read-only: current phase + whether a
+#                                      # transaction/watchdog is still running
 #   scripts/v2/cutover.sh topology    # read-only: assert the final end-state topology
 #                                      # (Go alone on :8443/:53, nothing on :10443/:18443)
 #
@@ -32,6 +34,33 @@
 # passed as the second argument -- this is the one place Alex's
 # explicit confirmation gate is enforced mechanically, not just by
 # instruction.
+#
+# NO INTERACTIVE APPLY. Alex's explicit correction: a browser "Apply
+# Runtime Changes" click is an owner UI workflow, not an acceptable
+# dependency for booting the live DNS appliance. Before Python is ever
+# stopped, `dns-promote -dry-run=true` compiles and validates the exact
+# staged DNS runtime (named-checkconf + dnsdist --check-config) through
+# apdns-hostagent's own promotion boundary -- no login, password,
+# cookie, or browser session, ever. If that fails, preflight-style: this
+# function fails and Python is never touched. Immediately after Python
+# is stopped, `dns-promote -dry-run=false` performs the real promotion
+# automatically -- no pause, no human action.
+#
+# AUTONOMOUS, SUPERVISED TRANSACTION. `execute` re-launches itself fully
+# detached (setsid, its own session, stdio redirected to a log file) so
+# that whatever invoked it -- an interactive shell, a tool-call harness,
+# anything -- can exit without affecting the transaction's own
+# lifecycle (a prior real attempt was silently truncated by exactly this
+# coupling -- see AGENT_PROGRESS.md's incident writeup). The detached
+# transaction persists its phase to $PHASE_FILE at every step and traps
+# EXIT/INT/TERM/HUP to roll back automatically if it is ever interrupted
+# before reaching the "committed" phase. A second, independently
+# detached watchdog process (started just before Python is touched)
+# force-rolls-back if the main transaction process dies (including
+# SIGKILL, which traps cannot catch) without reaching a terminal phase,
+# or if a hard deadline elapses first. A `mkdir`-based lock
+# ($ROLLBACK_LOCK_DIR) makes sure only one of {the trap, the watchdog, a
+# normal failure branch} ever actually runs the rollback.
 set -uo pipefail
 
 REAL_HOST="${CUTOVER_REAL_HOST:-127.0.0.1}"
@@ -48,6 +77,19 @@ GO_LIVE_HOSTAGENT_DIR=/root/apdns-go-live-hostagent
 GO_LIVE_WEB_UID=996   # same real unprivileged UID the :10443 preview already proved
 STAGING_PORT=18443   # temporary -- torn down after a verified cutover, never part of the final topology
 
+# The real deployment addresses apdns-hostagent-live and the web
+# container/dns-promote CLI must agree on EXACTLY -- a real, previously
+# latent bug found while hardening this script for full automation:
+# GO_LIVE_DNSDIST_ADDR must be the same value the compiled dnsdist
+# config's own setLocal() uses (internal/dnscompile), so it must be
+# 0.0.0.0:53 (LAN-reachable), matching apdns-hostagent-live's own
+# -dns-runtime-dnsdist-listen-addr below -- NOT 127.0.0.1:53, which
+# would have compiled a real dnsdist that only ever listened on
+# loopback, unreachable from the LAN, and would have gone undetected by
+# every check in this script (verify_dns dials 127.0.0.1 too).
+GO_LIVE_DNSDIST_ADDR=0.0.0.0:53
+GO_LIVE_BIND_PROXY_ADDR=127.0.0.1:26553
+
 # The OLD :10443 development preview -- torn down (container removed,
 # its dedicated hostagent process stopped) ONLY after the real cutover
 # is fully verified. Never touched on a failed cutover/rollback.
@@ -56,7 +98,8 @@ OLD_PREVIEW_HOSTAGENT_DIR=/root/apdns-go-migration-hostagent
 OLD_PREVIEW_PORT=10443
 
 ROLLBACK_DIR_GLOB=/root/apdns-v2-preview-cutover-rollback-*
-ERROR_BUDGET_SECONDS=90
+VERIFY_DEADLINE_SECONDS=30   # real poll-until-ready deadline, replacing what used to be a fixed 3s guess after podman start
+WATCHDOG_DEADLINE_SECONDS=300
 
 # Python-runtime artifacts -- decommissioned ONLY after a verified
 # cutover (cmd_cleanup_python). rmi order matters: PY_ROLLBACK_IMAGE was
@@ -67,8 +110,32 @@ PY_BASE_IMAGE=localhost/alderpointdns-clean-install-base-2613118:latest
 PY_ROLLBACK_IMAGE_GLOB="localhost/apdns-v2-preview-rollback:*"
 PY_STATE_VOLUME=apdns-v2-preview-state
 
+# Durable transaction state -- survives across the process boundary
+# between "the shell that launched execute" and "the detached
+# transaction itself", and across the watchdog's own separate process.
+PHASE_FILE=/var/tmp/apdns-cutover-phase
+MAIN_PID_FILE=/var/tmp/apdns-cutover-main.pid
+WATCHDOG_PID_FILE=/var/tmp/apdns-cutover-watchdog.pid
+ROLLBACK_LOCK_DIR=/var/tmp/apdns-cutover-rollback.lock
+
 log() { echo "+ $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
+
+phase_set() {
+    echo "$1" > "$PHASE_FILE"
+    log "PHASE: $1"
+}
+
+phase_get() {
+    cat "$PHASE_FILE" 2>/dev/null || echo "unknown"
+}
+
+phase_is_terminal() {
+    case "$1" in
+        committed|rolled_back|rolled_back_by_trap|rolled_back_by_watchdog|idle|failed_preflight|failed_dns_validate) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
 latest_rollback_dir() {
     # shellcheck disable=SC2012
@@ -290,6 +357,24 @@ cmd_verify() {
     [ "$errors" -eq 0 ] && log "VERIFY: all checks passed" || fail "VERIFY: $errors check(s) failed"
 }
 
+# wait_verify_with_deadline polls cmd_verify for real until it passes or
+# a real deadline elapses -- replaces what used to be a fixed sleep
+# (e.g. "sleep 3") before a single verify attempt, which is a guess, not
+# proof: a real appliance's services (named, dnsdist, uvicorn/Go boot,
+# worker warm-up) do not all become ready in a fixed number of seconds.
+wait_verify_with_deadline() {
+    local deadline_s="$1" host="${2:-127.0.0.1}"
+    local waited=0
+    while [ "$waited" -lt "$deadline_s" ]; do
+        if cmd_verify _ "$host" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 2
+        waited=$((waited+2))
+    done
+    return 1
+}
+
 # --- execute -------------------------------------------------------------
 
 cmd_execute() {
@@ -297,7 +382,35 @@ cmd_execute() {
     [ "${GO_CUTOVER_CONFIRM:-0}" = "1" ] && [ "$confirm_word" = "GO CUTOVER" ] \
         || fail "refusing to execute: set GO_CUTOVER_CONFIRM=1 and pass the literal argument 'GO CUTOVER' (this is Alex's explicit confirmation gate, enforced here, not just documented)"
 
-    cmd_preflight || fail "preflight failed -- not proceeding"
+    if [ "${CUTOVER_DETACHED:-0}" != "1" ]; then
+        # Re-launch fully detached: its own session (setsid), stdio
+        # redirected to a real log file, disowned from this shell's job
+        # table. Whatever invoked this (an interactive shell, a tool-call
+        # harness) can now exit without affecting the transaction's own
+        # lifecycle -- a real prior attempt was silently truncated by
+        # exactly that coupling (see AGENT_PROGRESS.md's incident
+        # writeup: the transaction stopped mid-flight, after Python was
+        # already stopped, without ever reaching its own rollback path).
+        local xlog
+        xlog="/var/tmp/apdns-cutover-transaction-$(date -u +%Y%m%dT%H%M%SZ).log"
+        rm -rf "$ROLLBACK_LOCK_DIR"
+        phase_set "idle"
+        CUTOVER_DETACHED=1 GO_CUTOVER_CONFIRM=1 setsid "$0" execute "GO CUTOVER" >"$xlog" 2>&1 < /dev/null &
+        disown
+        local launched_pid=$!
+        log "cutover transaction launched fully detached (setsid, own session) -- pid=$launched_pid"
+        log "log: $xlog"
+        log "phase file: $PHASE_FILE (poll with: scripts/v2/cutover.sh status)"
+        log "this outer invocation exits now; it is not part of the transaction's process tree"
+        return 0
+    fi
+
+    # --- everything from here on runs INSIDE the detached transaction ---
+    echo $$ > "$MAIN_PID_FILE"
+    phase_set "starting"
+    trap 'trap_rollback_if_needed' EXIT INT TERM HUP
+
+    cmd_preflight || { phase_set "failed_preflight"; fail "preflight failed -- not proceeding"; }
 
     log "=== Phase 1: prepare (Python keeps serving throughout) ==="
 
@@ -306,7 +419,7 @@ cmd_execute() {
     else
         local snap
         snap="/var/tmp/cutover-execute-controldb-$(date -u +%Y%m%dT%H%M%SZ)"
-        sqlite3 "$PY_CONTROL_DB" ".backup $snap" || fail "control.db snapshot failed"
+        sqlite3 "$PY_CONTROL_DB" ".backup $snap" || { phase_set "failed_prepare"; fail "control.db snapshot failed"; }
         log "fresh control.db snapshot: $snap"
 
         mkdir -p "$GO_LIVE_STATE/data"
@@ -315,7 +428,7 @@ cmd_execute() {
             -migrations "$GO_LIVE_RELEASE/schema/migrations" \
             -python-control-db "$snap" \
             -audit-log "$GO_LIVE_STATE/import-audit.jsonl" \
-            -dry-run=false || fail "real migration into $GO_LIVE_STATE/data/app.db failed"
+            -dry-run=false || { phase_set "failed_prepare"; fail "real migration into $GO_LIVE_STATE/data/app.db failed"; }
         log "real migration complete: $GO_LIVE_STATE/data/app.db"
 
         mkdir -p "$GO_LIVE_STATE/certs"
@@ -323,11 +436,11 @@ cmd_execute() {
         repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
         cert_tool="/var/tmp/cutover-cert-import-$(date +%s)"
         ( cd "$repo_root/go" && go build -buildvcs=false -o "$cert_tool" ./cmd/cutover-cert-import ) \
-            || fail "building cmd/cutover-cert-import failed"
+            || { phase_set "failed_prepare"; fail "building cmd/cutover-cert-import failed"; }
         "$cert_tool" \
             "$PY_CERT_DIR/server.crt" "$PY_CERT_DIR/server.key" \
             "$GO_LIVE_STATE/certs/server.crt" "$GO_LIVE_STATE/certs/server.key" \
-            || { rm -f "$cert_tool"; fail "cert import failed"; }
+            || { rm -f "$cert_tool"; phase_set "failed_prepare"; fail "cert import failed"; }
         rm -f "$cert_tool"
     fi
     log "real cert imported and validated"
@@ -351,6 +464,7 @@ cmd_execute() {
         pkill -f "alderpointdns-go web .*-db $GO_LIVE_STATE/data/app.db" 2>/dev/null || true
         sleep 1
     else
+        phase_set "failed_prepare"
         fail "no real owner account exists yet on $GO_LIVE_STATE/data/app.db -- Alex must complete real browser setup at the staged instance's URL (using its own one-time bootstrap token, see its startup log) before running execute. This script will not create one on Alex's behalf."
     fi
 
@@ -370,9 +484,13 @@ cmd_execute() {
     local repo_root
     repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
     ( cd "$repo_root/go" && go build -buildvcs=false -o "$GO_LIVE_HOSTAGENT_DIR/apdns-hostagent" ./cmd/apdns-hostagent ) \
-        || fail "building apdns-hostagent for the live instance failed"
-    [ -x "$GO_LIVE_HOSTAGENT_DIR/apdns-hostagent" ] || fail "apdns-hostagent binary was not produced at $GO_LIVE_HOSTAGENT_DIR/apdns-hostagent"
+        || { phase_set "failed_prepare"; fail "building apdns-hostagent for the live instance failed"; }
+    [ -x "$GO_LIVE_HOSTAGENT_DIR/apdns-hostagent" ] || { phase_set "failed_prepare"; fail "apdns-hostagent binary was not produced at $GO_LIVE_HOSTAGENT_DIR/apdns-hostagent"; }
     log "built apdns-hostagent-live binary: $GO_LIVE_HOSTAGENT_DIR/apdns-hostagent"
+
+    ( cd "$repo_root/go" && go build -buildvcs=false -o "$GO_LIVE_RELEASE/dns-promote-cli" ./cmd/alderpointdns-go ) \
+        || { phase_set "failed_prepare"; fail "building the dns-promote CLI failed"; }
+    log "built dns-promote CLI (same binary as alderpointdns-go, invoked with the dns-promote subcommand): $GO_LIVE_RELEASE/dns-promote-cli"
 
     rm -f "$GO_LIVE_HOSTAGENT_DIR/agent.sock"
     "$GO_LIVE_HOSTAGENT_DIR/apdns-hostagent" \
@@ -386,7 +504,7 @@ cmd_execute() {
         -dns-runtime-bind-dir /var/lib/bind/apdns-go-live \
         -dns-runtime-bind-plain-port 26453 -dns-runtime-bind-proxy-port 26553 \
         -dns-runtime-bind-stats-port 26153 -dns-runtime-bind-rndc-port 26653 \
-        -dns-runtime-dnsdist-listen-addr "0.0.0.0:53" \
+        -dns-runtime-dnsdist-listen-addr "$GO_LIVE_DNSDIST_ADDR" \
         -current-binary "$GO_LIVE_RELEASE/alderpointdns-go" \
         -update-staging-dir "$GO_LIVE_HOSTAGENT_DIR/update-staging" \
         -update-backup "$GO_LIVE_HOSTAGENT_DIR/previous-binary" \
@@ -395,12 +513,13 @@ cmd_execute() {
     disown
     # Wait for REAL evidence it started -- the socket file existing --
     # rather than a fixed sleep plus an unconditional log line (the
-    # exact pattern that hid the previous failure).
+    # exact pattern that hid a previous failure).
     local waited=0
     while [ ! -S "$GO_LIVE_HOSTAGENT_DIR/agent.sock" ]; do
         sleep 1
         waited=$((waited+1))
         if [ "$waited" -ge 10 ]; then
+            phase_set "failed_prepare"
             fail "apdns-hostagent-live did not create its socket within 10s -- see $GO_LIVE_HOSTAGENT_DIR/hostagent.log"
         fi
     done
@@ -425,9 +544,9 @@ cmd_execute() {
     sed -e 's#tls_cert_path: .*#tls_cert_path: "/etc/alderpointdns-go/certs/server.crt"#' \
         -e 's#tls_key_path: .*#tls_key_path: "/etc/alderpointdns-go/certs/server.key"#' \
         "$GO_LIVE_STATE/config/appliance.yaml" > "$container_config" \
-        || fail "generating the container-specific appliance.yaml failed"
+        || { phase_set "failed_prepare"; fail "generating the container-specific appliance.yaml failed"; }
     grep -q "/etc/alderpointdns-go/certs/server.crt" "$container_config" \
-        || fail "container-specific appliance.yaml does not contain the expected container cert path -- refusing to proceed with a config that would fail the same way again"
+        || { phase_set "failed_prepare"; fail "container-specific appliance.yaml does not contain the expected container cert path -- refusing to proceed with a config that would fail the same way again"; }
     log "generated container-specific config: $container_config"
 
     podman rm -f "$GO_LIVE_CONTAINER" >/dev/null 2>&1 || true
@@ -446,65 +565,188 @@ cmd_execute() {
         -static /opt/alderpointdns-go/frontend-dist \
         -migrations /opt/alderpointdns-go/schema/migrations \
         -hostagent-socket /run/apdns-hostagent/agent.sock \
-        -dns-runtime-dnsdist-addr 127.0.0.1:53 \
-        -dns-runtime-bind-proxy-addr 127.0.0.1:26553 \
+        -dns-runtime-dnsdist-addr "$GO_LIVE_DNSDIST_ADDR" \
+        -dns-runtime-bind-proxy-addr "$GO_LIVE_BIND_PROXY_ADDR" \
         -addr 0.0.0.0:8443 \
-        || fail "creating $GO_LIVE_CONTAINER failed"
+        || { phase_set "failed_prepare"; fail "creating $GO_LIVE_CONTAINER failed"; }
     log "$GO_LIVE_CONTAINER created (not started yet)"
+    phase_set "prepared"
 
-    log "=== Phase 2: the real interruption starts now ==="
+    # --- NO INTERACTIVE APPLY: compile+validate the staged DNS runtime
+    # now, while Python still owns the real DNS port. Nothing here binds
+    # a socket (named-checkconf/dnsdist --check-config only parse), so
+    # this is safe to run concurrently with Python still serving. If
+    # this fails, Python is never touched -- exactly Alex's requirement
+    # that a failure here behaves like a preflight failure, not a live
+    # disruption.
+    log "=== Validating the staged DNS runtime BEFORE Python is touched (no browser, no login, no password -- see internal/dnsruntime.Orchestrator.Validate) ==="
+    "$GO_LIVE_RELEASE/dns-promote-cli" dns-promote \
+        -db "$GO_LIVE_STATE/data/app.db" \
+        -config "$GO_LIVE_STATE/config/appliance.yaml" \
+        -migrations "$GO_LIVE_RELEASE/schema/migrations" \
+        -hostagent-socket "$GO_LIVE_HOSTAGENT_DIR/agent.sock" \
+        -dns-runtime-dnsdist-addr "$GO_LIVE_DNSDIST_ADDR" \
+        -dns-runtime-bind-proxy-addr "$GO_LIVE_BIND_PROXY_ADDR" \
+        -dry-run=true || { phase_set "failed_dns_validate"; fail "staged DNS runtime failed validation (named-checkconf/dnsdist --check-config) -- Python remains live, nothing was touched"; }
+    phase_set "dns_validated"
+    log "staged DNS runtime validated -- proven ready to promote automatically the instant Python releases the port"
+
+    # --- from here on, this is the real, autonomous, supervised
+    # transaction: a detached watchdog is started first so it is
+    # watching before anything disruptive happens.
+    start_watchdog
+
+    log "=== Phase 2: the real interruption starts now (fully automatic -- no human action) ==="
     local t0 t1
     t0=$(date +%s)
-    podman stop "$PY_CONTAINER" || fail "stopping $PY_CONTAINER failed -- ABORT, do not proceed to start Go, investigate why Python would not stop"
+    phase_set "python_stopping"
+    podman stop "$PY_CONTAINER" || { phase_set "failed_python_stop"; fail "stopping $PY_CONTAINER failed -- ABORT, do not proceed to start Go, investigate why Python would not stop"; }
+    phase_set "python_stopped"
     log "python stopped at $(date -u +%H:%M:%S)"
 
-    podman start "$GO_LIVE_CONTAINER" || { log "starting $GO_LIVE_CONTAINER failed"; cmd_rollback; exit 1; }
-    sleep 3
-
-    # Promote the real DNS runtime now that :53 is free. This script
-    # NEVER accepts or handles the owner password, in any form (Alex's
-    # explicit requirement) -- so it cannot log in and trigger Apply
-    # itself. Two ways this legitimately happens instead:
-    #   (a) Alex keeps his own already-authenticated browser tab open
-    #       through the swap (pointed at the real :8443 URL) and clicks
-    #       Apply himself the moment it responds -- his real session
-    #       cookie (stored in app.db, unaffected by this swap) is still
-    #       valid; or
-    #   (b) Alex logs in fresh post-swap through the real UI and clicks
-    #       Apply.
-    # Either way, this script only polls for the real effect (DNS
-    # actually answering) within the error budget below -- it never
-    # needs to be the one that triggered the promotion.
-    echo ""
-    echo "ACTION REQUIRED NOW: click Apply in the real UI (Encryption or DNS Runtime page) at https://<real-host>:8443/ -- this script will not do it for you and does not handle your password. You have $ERROR_BUDGET_SECONDS seconds."
-
-    while true; do
-        t1=$(date +%s)
-        if [ $((t1 - t0)) -gt "$ERROR_BUDGET_SECONDS" ]; then
-            log "ERROR BUDGET EXCEEDED ($ERROR_BUDGET_SECONDS s) -- rolling back"
-            cmd_rollback
-            exit 1
-        fi
-        if cmd_verify _ 127.0.0.1 >/dev/null 2>&1; then
-            break
-        fi
-        sleep 2
-    done
-    t1=$(date +%s)
-    log "=== Interruption window: $((t1 - t0)) seconds ==="
-
-    if ! cmd_verify _ 127.0.0.1; then
-        log "post-swap verification failed -- rolling back (obsolete-preview cleanup will NOT run)"
-        cmd_rollback
+    # Promote the real DNS runtime immediately and automatically -- the
+    # exact config already proven valid above, now actually written
+    # live, reloaded, and health-checked by apdns-hostagent-live's own
+    # stage->validate->promote->reload->health-check->rollback pipeline.
+    # No browser, no login, no password, no pause: Alex's explicit
+    # requirement that the live DNS appliance must never depend on a
+    # human clicking Apply.
+    phase_set "promoting"
+    if ! "$GO_LIVE_RELEASE/dns-promote-cli" dns-promote \
+        -db "$GO_LIVE_STATE/data/app.db" \
+        -config "$GO_LIVE_STATE/config/appliance.yaml" \
+        -migrations "$GO_LIVE_RELEASE/schema/migrations" \
+        -hostagent-socket "$GO_LIVE_HOSTAGENT_DIR/agent.sock" \
+        -dns-runtime-dnsdist-addr "$GO_LIVE_DNSDIST_ADDR" \
+        -dns-runtime-bind-proxy-addr "$GO_LIVE_BIND_PROXY_ADDR" \
+        -dry-run=false; then
+        phase_set "failed_promote"
+        log "real DNS promotion failed -- rolling back automatically now, no human action needed"
+        safe_rollback
         exit 1
     fi
+    phase_set "promoted"
+    log "DNS runtime promoted automatically: real named/dnsdist now serving $GO_LIVE_DNSDIST_ADDR"
 
+    phase_set "go_starting"
+    podman start "$GO_LIVE_CONTAINER" || { phase_set "failed_go_start"; log "starting $GO_LIVE_CONTAINER failed"; safe_rollback; exit 1; }
+    phase_set "go_started"
+
+    phase_set "verifying"
+    if ! wait_verify_with_deadline "$VERIFY_DEADLINE_SECONDS" 127.0.0.1; then
+        phase_set "failed_verify"
+        log "post-swap verification did not pass within ${VERIFY_DEADLINE_SECONDS}s -- rolling back automatically (obsolete-preview cleanup will NOT run)"
+        safe_rollback
+        exit 1
+    fi
+    t1=$(date +%s)
+    log "=== Interruption window: $((t1 - t0)) seconds ==="
+    cmd_verify _ 127.0.0.1   # print the full real check results for the record, now that we know they pass
+
+    phase_set "committed"
     log "=== Cutover verified. Proceeding to remove the obsolete :$OLD_PREVIEW_PORT preview, the :$STAGING_PORT staging binding, and the entire Python runtime. ==="
     cmd_cleanup_obsolete_previews
     cmd_cleanup_python
     cmd_final_topology
 
     log "CUTOVER COMPLETE. Go live at $GO_LIVE_CONTAINER on :8443/:53. :$OLD_PREVIEW_PORT and :$STAGING_PORT are gone. The Python/FastAPI runtime (container, images, volume, host state) has been fully removed -- this appliance is not a rollback/snapshot server."
+}
+
+# trap_rollback_if_needed fires on this process's own EXIT (which also
+# covers INT/TERM/HUP, since those are trapped too and bash runs EXIT
+# after any other trap unless the process is killed outright). If the
+# phase file shows the transaction was interrupted mid-flight -- neither
+# committed nor already rolled back by some other path -- roll back
+# automatically. This is the belt to start_watchdog's suspenders: it
+# catches everything except SIGKILL (untrappable by design; the
+# watchdog covers that case instead).
+trap_rollback_if_needed() {
+    local phase
+    phase="$(phase_get)"
+    if phase_is_terminal "$phase"; then
+        return
+    fi
+    log "TRAP: process exiting mid-transaction at phase '$phase' -- triggering automatic rollback"
+    safe_rollback
+}
+
+# safe_rollback ensures only one of {this process's own trap, the
+# watchdog, a normal failure branch} ever actually performs the
+# rollback, via a simple mkdir-based lock (atomic on any POSIX
+# filesystem). Whichever loses the race logs that fact and returns
+# without double-acting.
+safe_rollback() {
+    if mkdir "$ROLLBACK_LOCK_DIR" 2>/dev/null; then
+        cmd_rollback
+    else
+        log "rollback already claimed by another guard (trap/watchdog/failure branch) -- not double-acting"
+    fi
+}
+
+# start_watchdog launches a second, independently detached process
+# (its own setsid session, like the main transaction) that force-rolls-
+# back if the main transaction process disappears -- including via
+# SIGKILL, which no trap can catch -- without ever reaching a terminal
+# phase, or if a hard deadline elapses first (covers a hang, not just a
+# death). Verifies the watchdog is actually alive before proceeding,
+# rather than assuming a backgrounded `&` job started successfully.
+start_watchdog() {
+    local main_pid
+    main_pid="$(cat "$MAIN_PID_FILE" 2>/dev/null)"
+    [ -n "$main_pid" ] || { phase_set "failed_prepare"; fail "start_watchdog: no main PID recorded at $MAIN_PID_FILE"; }
+
+    local wlog="/var/tmp/apdns-cutover-watchdog-$(date -u +%Y%m%dT%H%M%SZ).log"
+    setsid "$0" watchdog "$main_pid" "$WATCHDOG_DEADLINE_SECONDS" >"$wlog" 2>&1 < /dev/null &
+    disown
+    echo $! > "$WATCHDOG_PID_FILE"
+    sleep 1
+    if ! kill -0 "$(cat "$WATCHDOG_PID_FILE")" 2>/dev/null; then
+        phase_set "failed_prepare"
+        fail "start_watchdog: watchdog process did not stay alive -- see $wlog"
+    fi
+    log "watchdog started and confirmed alive: pid=$(cat "$WATCHDOG_PID_FILE") log=$wlog deadline=${WATCHDOG_DEADLINE_SECONDS}s"
+}
+
+cmd_watchdog() {
+    local main_pid="$2" deadline_s="${3:-$WATCHDOG_DEADLINE_SECONDS}"
+    local waited=0
+    log "WATCHDOG watching main pid=$main_pid deadline=${deadline_s}s"
+    while [ "$waited" -lt "$deadline_s" ]; do
+        local phase
+        phase="$(phase_get)"
+        if phase_is_terminal "$phase"; then
+            log "WATCHDOG: phase='$phase' -- transaction reached a terminal state, exiting cleanly"
+            return 0
+        fi
+        if ! kill -0 "$main_pid" 2>/dev/null; then
+            log "WATCHDOG: main transaction process (pid $main_pid) is gone but phase is still '$phase' -- it died without committing or rolling back. Forcing rollback now."
+            safe_rollback
+            return 0
+        fi
+        sleep 2
+        waited=$((waited+2))
+    done
+    local phase
+    phase="$(phase_get)"
+    if phase_is_terminal "$phase"; then
+        return 0
+    fi
+    log "WATCHDOG: deadline (${deadline_s}s) exceeded without reaching a committed/rolled-back state (still '$phase') -- treating as hung, forcing rollback"
+    safe_rollback
+}
+
+cmd_status() {
+    log "phase: $(phase_get)"
+    local main_pid watchdog_pid
+    main_pid="$(cat "$MAIN_PID_FILE" 2>/dev/null || true)"
+    watchdog_pid="$(cat "$WATCHDOG_PID_FILE" 2>/dev/null || true)"
+    if [ -n "$main_pid" ]; then
+        kill -0 "$main_pid" 2>/dev/null && log "main transaction process: alive (pid $main_pid)" || log "main transaction process: not running (last known pid $main_pid)"
+    fi
+    if [ -n "$watchdog_pid" ]; then
+        kill -0 "$watchdog_pid" 2>/dev/null && log "watchdog process: alive (pid $watchdog_pid)" || log "watchdog process: not running (last known pid $watchdog_pid)"
+    fi
+    [ -d "$ROLLBACK_LOCK_DIR" ] && log "rollback lock: held (a rollback ran or is running)" || log "rollback lock: not held"
 }
 
 # --- full Python decommission (ONLY after a verified cutover) -----------
@@ -649,15 +891,56 @@ cmd_final_topology() {
 cmd_rollback() {
     log "=== ROLLBACK ==="
     podman stop "$GO_LIVE_CONTAINER" >/dev/null 2>&1 || true
-    pkill -f "$GO_LIVE_HOSTAGENT_DIR/apdns-hostagent" 2>/dev/null || true
+
+    # Gracefully SIGTERM apdns-hostagent-live (pkill's default signal)
+    # and WAIT for it to actually exit, rather than firing and moving
+    # on: a real fix landed this session (cmd/apdns-hostagent/main.go)
+    # makes a graceful shutdown actually stop the named/dnsdist child
+    # processes a real promote may have started and bound to :53 --
+    # previously they were plain child exec.Cmds with no
+    # PR_SET_PDEATHSIG, so killing only the parent would have silently
+    # left them running, reparented to init, still holding :53, and
+    # Python's own restart below would then fail to bind it. Poll for
+    # the pid actually being gone (bounded), THEN confirm :53 is
+    # genuinely free before ever trying to start Python.
+    local hostagent_pid
+    hostagent_pid=$(pgrep -f "$GO_LIVE_HOSTAGENT_DIR/apdns-hostagent" | head -1)
+    if [ -n "$hostagent_pid" ]; then
+        kill -TERM "$hostagent_pid" 2>/dev/null || true
+        local waited=0
+        while kill -0 "$hostagent_pid" 2>/dev/null; do
+            sleep 1
+            waited=$((waited+1))
+            if [ "$waited" -ge 15 ]; then
+                log "apdns-hostagent-live (pid $hostagent_pid) did not exit within 15s of SIGTERM -- forcing SIGKILL (its DNS runtime children may leak; port-free check below will catch it)"
+                kill -KILL "$hostagent_pid" 2>/dev/null || true
+                break
+            fi
+        done
+        log "apdns-hostagent-live stopped (graceful shutdown ran its DNS runtime cleanup)"
+    fi
+
+    local port_waited=0
+    while ss -tlnp 2>/dev/null | grep -q ":53 " || ss -ulnp 2>/dev/null | grep -q ":53 "; do
+        sleep 1
+        port_waited=$((port_waited+1))
+        if [ "$port_waited" -ge 15 ]; then
+            log "WARNING: :53 still appears bound ${port_waited}s after stopping apdns-hostagent-live -- attempting to identify and stop the real leftover process directly"
+            pkill -f "named -g -c /var/lib/bind/apdns-go-live/named.conf" 2>/dev/null || true
+            pkill -f "dnsdist -C $GO_LIVE_HOSTAGENT_DIR/dns-staging/dnsdist.conf" 2>/dev/null || true
+            sleep 2
+            break
+        fi
+    done
+    log "confirmed :53 is free (or best-effort cleared) -- safe to restart Python"
 
     podman start "$PY_CONTAINER" || fail "CRITICAL: rollback could not restart $PY_CONTAINER -- see ROLLBACK.md for manual recovery, do not retry blindly"
-    sleep 3
 
-    if cmd_verify _ 127.0.0.1; then
+    if wait_verify_with_deadline "$VERIFY_DEADLINE_SECONDS" 127.0.0.1; then
         log "ROLLBACK VERIFIED: python live and healthy again"
+        cmd_verify _ 127.0.0.1   # print the full real check results for the record
     else
-        fail "CRITICAL: rollback restarted $PY_CONTAINER but verification still failing -- follow ROLLBACK.md's manual steps now, this script will not retry blindly"
+        fail "CRITICAL: rollback restarted $PY_CONTAINER but verification still failing after ${VERIFY_DEADLINE_SECONDS}s -- follow ROLLBACK.md's manual steps now, this script will not retry blindly"
     fi
 }
 
@@ -666,6 +949,8 @@ case "${1:-}" in
     execute) cmd_execute "$@" ;;
     verify) cmd_verify "$@" ;;
     rollback) cmd_rollback ;;
+    watchdog) cmd_watchdog "$@" ;;
+    status) cmd_status ;;
     topology) cmd_final_topology ;;
-    *) echo "usage: $0 {preflight|execute|verify|rollback|topology}"; exit 2 ;;
+    *) echo "usage: $0 {preflight|execute|verify|rollback|status|topology}"; exit 2 ;;
 esac

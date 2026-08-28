@@ -101,6 +101,17 @@ type DNSPromoteParams struct {
 	DnsdistConf     string   `json:"dnsdist_conf"`
 	BindForwarders  []string `json:"bind_forwarders"`
 	BindTLSHostname string   `json:"bind_tls_hostname"`
+	// DryRun compiles and validates (named-checkconf, dnsdist
+	// --check-config) without ever touching BindLivePath/DnsdistLivePath
+	// or starting/reloading anything -- proof the exact config that WILL
+	// be promoted is valid, safely callable while another process (e.g.
+	// Python, during a cutover) still owns the real DNS port, since
+	// nothing here binds a socket. See cmd/alderpointdns-go's
+	// "dns-promote -dry-run" subcommand, used by scripts/v2/cutover.sh
+	// to prove the staged runtime BEFORE Python is stopped -- Alex's
+	// explicit requirement that live cutover never depend on a human
+	// clicking Apply in an authenticated browser session.
+	DryRun bool `json:"dry_run"`
 }
 
 type DNSPromoteResult struct {
@@ -197,6 +208,13 @@ func (st *dnsRuntimeState) promote(ctx context.Context, p DNSPromoteParams) (*DN
 	}
 	if out, err := exec.CommandContext(ctx, st.cfg.DnsdistBinary, "-C", dnsdistStagePath, "--check-config").CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("dnsdist --check-config rejected the compiled config, nothing promoted: %s", strings.TrimSpace(string(out)))
+	}
+
+	if p.DryRun {
+		// Proof the exact config is valid -- nothing live touched, no
+		// socket bound, safe to call while another process still owns
+		// the real DNS port.
+		return &DNSPromoteResult{Promoted: false, Stage: "validated"}, nil
 	}
 
 	// --- back up whatever is currently live, then promote atomically ---

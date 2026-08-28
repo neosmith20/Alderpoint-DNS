@@ -169,17 +169,16 @@ func main() {
 		logger.Info("DNS performance benchmark not configured -- -dns-runtime-dnsdist-listen-addr is empty")
 	}
 
+	var dnsRuntimeStop func()
 	if *dnsRuntimeBindLivePath != "" && *dnsRuntimeDnsdistLivePath != "" && *dnsRuntimeBindDir != "" && *dnsRuntimeDnsdistListenAddr != "" {
-		// The returned stop func is intentionally discarded here: this
-		// process's whole job is to keep the real named/dnsdist runtime
-		// alive across its own restarts and updates (see
-		// RegisterDNSRuntimeOps's doc comment). Only tests call it.
-		if _, err := hostagentd.RegisterDNSRuntimeOps(s, hostagentd.DNSRuntimeConfig{
+		var err error
+		dnsRuntimeStop, err = hostagentd.RegisterDNSRuntimeOps(s, hostagentd.DNSRuntimeConfig{
 			StagingDir: *dnsRuntimeStagingDir, BindLivePath: *dnsRuntimeBindLivePath, DnsdistLivePath: *dnsRuntimeDnsdistLivePath,
 			BindDirectory: *dnsRuntimeBindDir, BindLogPath: filepath.Join(*dnsRuntimeBindDir, "named.log"),
 			BindPlainPort: *dnsRuntimeBindPlainPort, BindProxyPort: *dnsRuntimeBindProxyPort, BindStatsPort: *dnsRuntimeBindStatsPort, BindRNDCPort: *dnsRuntimeBindRNDCPort,
 			DnsdistListenAddress: *dnsRuntimeDnsdistListenAddr,
-		}); err != nil {
+		})
+		if err != nil {
 			logger.Error("DNS runtime ops not registered", "err", err)
 			os.Exit(1)
 		}
@@ -195,8 +194,29 @@ func main() {
 		cancel()
 	}()
 
-	if err := s.Serve(ctx); err != nil {
-		logger.Error("serve failed", "err", err)
+	serveErr := s.Serve(ctx)
+
+	// A graceful shutdown (SIGTERM/SIGINT) must actually stop whatever
+	// real named/dnsdist processes this agent started -- they are plain
+	// child exec.Cmds with no PR_SET_PDEATHSIG, so left uncalled they
+	// simply get reparented to init and keep holding their bound ports
+	// (real :53, in the live cutover case) even after this process
+	// exits. A cutover rollback that sends this process SIGTERM and
+	// then tries to hand :53 back to Python depends on this actually
+	// running -- previously this stop func was intentionally discarded
+	// with the (still generally true) reasoning that this process's own
+	// restarts/updates should never interrupt a live DNS runtime, but
+	// process EXIT is a different case: nothing will ever reload this
+	// runtime again once this process is gone, so leaking its children
+	// serves no purpose and only creates a stuck port. Never called on
+	// a hostagent binary update/restart mid-runtime -- only right here,
+	// after Serve has already returned.
+	if dnsRuntimeStop != nil {
+		dnsRuntimeStop()
+	}
+
+	if serveErr != nil {
+		logger.Error("serve failed", "err", serveErr)
 		os.Exit(1)
 	}
 }

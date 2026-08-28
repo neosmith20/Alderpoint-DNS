@@ -82,6 +82,26 @@ type Result struct {
 // promotion) is reported in the returned Result so a caller can always
 // surface it without a type switch.
 func (o *Orchestrator) Apply(ctx context.Context) Result {
+	return o.run(ctx, false)
+}
+
+// Validate gathers current state, compiles it, and asks the host-agent
+// to compile+validate (named-checkconf, dnsdist --check-config) WITHOUT
+// promoting -- nothing live is touched, no socket is bound. This is
+// what proves a staged Go database's DNS runtime is ready to go live
+// while another process (e.g. Python, during a cutover) still owns the
+// real DNS port: a passing Validate is real proof the exact config
+// Apply would promote is syntactically and semantically valid, with no
+// interactive "Apply" action and no dependency on a human's browser
+// session. See cmd/alderpointdns-go's "dns-promote -dry-run" subcommand
+// and scripts/v2/cutover.sh, which calls it before ever stopping
+// Python -- Alex's explicit correction that live cutover must never
+// require him to be at an authenticated browser tab.
+func (o *Orchestrator) Validate(ctx context.Context) Result {
+	return o.run(ctx, true)
+}
+
+func (o *Orchestrator) run(ctx context.Context, dryRun bool) Result {
 	if o.HostAgent == nil {
 		return Result{Attempted: false, Error: "no host-agent configured for this deployment -- DNS runtime compilation is unavailable"}
 	}
@@ -99,6 +119,7 @@ func (o *Orchestrator) Apply(ctx context.Context) Result {
 		"dnsdist_conf":      dnsdistConf,
 		"bind_forwarders":   bindForwarders,
 		"bind_tls_hostname": bindTLSHostname,
+		"dry_run":           dryRun,
 	}
 	var promResult struct {
 		Promoted   bool   `json:"promoted"`
