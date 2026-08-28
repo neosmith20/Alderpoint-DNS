@@ -507,11 +507,24 @@ func CompileDnsdist(in Input) (string, error) {
 	if in.DnstapSocketPath != "" {
 		w("-- dnstap query-event logging (see internal/dnsanalytics.Writer, the receiver)")
 		w("apdnsDnstapLogger = newFrameStreamUnixLogger(%s)", luaString(in.DnstapSocketPath))
-		w("addResponseAction(AllRule(), DnstapLogResponseAction(%s, apdnsDnstapLogger, function(dr, dm)", luaString("apdns"))
+		w("function apdnsDnstapAlter(dr, dm)")
 		w(`  local outcome = dr:getTag("apdns_outcome")`)
 		w(`  if outcome == nil then outcome = "allowed" end`)
 		w("  dm:setExtra(outcome)")
-		w("end))")
+		w("end")
+		// Two separate registrations, deliberately: addResponseAction only
+		// fires for a response that actually came back from a backend
+		// server. Every blocked query (RCodeAction/SpoofAction) and every
+		// Local DNS record (SpoofAction/SpoofCNAMEAction) is a "self-
+		// answered" response dnsdist generates itself without ever
+		// contacting a backend -- addSelfAnsweredResponseAction is the
+		// separate hook dnsdist requires for those (confirmed live: a
+		// real blocked query was silently absent from analytics until
+		// this second registration was added). Missing this would mean
+		// every single blocked query -- the entire point of Top Blocked
+		// Domains -- never appears in analytics at all.
+		w("addResponseAction(AllRule(), DnstapLogResponseAction(%s, apdnsDnstapLogger, apdnsDnstapAlter))", luaString("apdns"))
+		w("addSelfAnsweredResponseAction(AllRule(), DnstapLogResponseAction(%s, apdnsDnstapLogger, apdnsDnstapAlter))", luaString("apdns"))
 		w("")
 	}
 

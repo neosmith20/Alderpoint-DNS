@@ -110,8 +110,11 @@ func TestCompileDnsdistDnstapLogging(t *testing.T) {
 	if !strings.Contains(out, `newFrameStreamUnixLogger("`+in.DnstapSocketPath+`")`) {
 		t.Fatalf("expected a dnstap unix logger for %q, got:\n%s", in.DnstapSocketPath, out)
 	}
-	if !strings.Contains(out, "DnstapLogResponseAction(") {
-		t.Fatalf("expected DnstapLogResponseAction, got:\n%s", out)
+	if !strings.Contains(out, "addResponseAction(AllRule(), DnstapLogResponseAction(") {
+		t.Fatalf("expected addResponseAction with DnstapLogResponseAction (real backend responses), got:\n%s", out)
+	}
+	if !strings.Contains(out, "addSelfAnsweredResponseAction(AllRule(), DnstapLogResponseAction(") {
+		t.Fatalf("expected addSelfAnsweredResponseAction with DnstapLogResponseAction -- required for blocked/local-DNS queries, which dnsdist answers itself without ever hitting addResponseAction; got:\n%s", out)
 	}
 	if !strings.Contains(out, `SetTagAction("apdns_outcome", "allowed")`) {
 		t.Fatalf("expected a default apdns_outcome=allowed tag rule, got:\n%s", out)
