@@ -105,6 +105,7 @@ func runBlocklistRefresh(args []string) {
 	hostagentSocket := fs.String("hostagent-socket", "", "unix socket path for apdns-hostagent (required -- used to promote the refreshed policy live)")
 	dnsRuntimeDnsdistAddr := fs.String("dns-runtime-dnsdist-addr", "", "the real dnsdist listen address this deployment's apdns-hostagent was started with (required)")
 	dnsRuntimeBindProxyAddr := fs.String("dns-runtime-bind-proxy-addr", "", "the real BIND PROXYv2 backend address this deployment's apdns-hostagent compiles named.conf to listen on (required)")
+	dnstapSocketPath := fs.String("dns-runtime-dnstap-socket", "", "the path dnsdist itself will dial for real query-event logging (see internal/dnscompile's DnstapSocketPath); empty compiles no dnstap logging, matching this command's prior behavior exactly")
 	timeoutSeconds := fs.Int("timeout-seconds", 300, "give up waiting for the refresh job to finish after this many seconds (the job itself keeps running server-side; this only bounds how long this command waits)")
 	fs.Parse(args)
 
@@ -148,6 +149,7 @@ func runBlocklistRefresh(args []string) {
 		HostAgent:            hostagent.NewClient(*hostagentSocket),
 		DnsdistListenAddress: *dnsRuntimeDnsdistAddr, BindBackendAddress: *dnsRuntimeBindProxyAddr,
 		TLSCertPath: cfg.Web.TLSCertPath, TLSKeyPath: cfg.Web.TLSKeyPath,
+		DnstapSocketPath: *dnstapSocketPath,
 	}
 
 	var promoteResult *dnsruntime.Result
@@ -256,6 +258,7 @@ func runDNSPromote(args []string) {
 	hostagentSocket := fs.String("hostagent-socket", "", "unix socket path for apdns-hostagent (required)")
 	dnsRuntimeDnsdistAddr := fs.String("dns-runtime-dnsdist-addr", "", "the real dnsdist listen address this deployment's apdns-hostagent was started with (required)")
 	dnsRuntimeBindProxyAddr := fs.String("dns-runtime-bind-proxy-addr", "", "the real BIND PROXYv2 backend address this deployment's apdns-hostagent compiles named.conf to listen on (required)")
+	dnstapSocketPath := fs.String("dns-runtime-dnstap-socket", "", "the path dnsdist itself will dial for real query-event logging (see internal/dnscompile's DnstapSocketPath, and the 'web' subcommand's own two-flag doc comment for why this is a HOST path, distinct from wherever the 'web' process itself listens); empty compiles no dnstap logging at all, matching this command's prior behavior exactly")
 	dryRun := fs.Bool("dry-run", true, "compile and validate only, no live change (default true -- pass -dry-run=false to actually promote for real)")
 	fs.Parse(args)
 
@@ -292,6 +295,7 @@ func runDNSPromote(args []string) {
 		HostAgent:            hostagent.NewClient(*hostagentSocket),
 		DnsdistListenAddress: *dnsRuntimeDnsdistAddr, BindBackendAddress: *dnsRuntimeBindProxyAddr,
 		TLSCertPath: cfg.Web.TLSCertPath, TLSKeyPath: cfg.Web.TLSKeyPath,
+		DnstapSocketPath: *dnstapSocketPath,
 	}
 
 	var result dnsruntime.Result
