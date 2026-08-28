@@ -73,6 +73,21 @@ const (
 	// earlier this migration).
 	OpAnalyticsClear = "analytics.clear"
 
+	// OpSecretsSeal encrypts a plaintext secret value with this agent's
+	// own master key (never exposed to the caller) and returns only the
+	// resulting ciphertext/nonce/key_version -- the one and only place
+	// a secret's plaintext ever crosses this socket, and it flows in
+	// exactly one direction (in, never back out). See
+	// internal/hostagentd/ops_secrets.go and internal/secretstore.
+	OpSecretsSeal = "secrets.seal"
+
+	// OpSecretsNotifyTest decrypts a stored notification-provider
+	// secret internally and immediately sends one real test
+	// notification with it -- the plaintext value is never returned to
+	// the caller, only the send outcome. A narrow, named operation, not
+	// a generic decrypt endpoint.
+	OpSecretsNotifyTest = "secrets.notify_test"
+
 	// OpDNSPerfBenchmark runs System Status's real "Safe DNS Benchmark"
 	// -- a bounded, sequential set of DNS/DoT/DoH queries against the
 	// real Go-managed dnsdist/BIND runtime, executed from this agent

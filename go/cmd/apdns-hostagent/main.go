@@ -37,6 +37,8 @@ func main() {
 
 	controlDBPath := flag.String("control-db", "", "path to Python's control.db, read-only (empty = Replication reports unavailable)")
 
+	secretsKeyDir := flag.String("secrets-key-dir", "/var/lib/apdns-hostagent/secrets", "root-only directory holding this appliance's native secrets master key (see internal/hostagentd/ops_secrets.go); never exposed to the web container")
+
 	journalDir := flag.String("journal-dir", "", "explicit journal directory for logs.read (empty = the host's own default journal)")
 	logUnits := flag.String("log-units", strings.Join(hostagentd.LogUnits, ","), "comma-separated allowlist of logical unit names")
 	logUnitMap := flag.String("log-unit-map", "", "comma-separated logical=real name overrides -- a systemd unit name by default, or a container name / file path for names listed in -log-container-units / -log-file-units")
@@ -103,6 +105,11 @@ func main() {
 	})
 
 	hostagentd.RegisterReplicationOps(s, hostagentd.ReplicationConfig{ControlDBPath: *controlDBPath})
+
+	if err := hostagentd.RegisterSecretsOps(s, hostagentd.SecretsConfig{KeyDir: *secretsKeyDir}); err != nil {
+		logger.Error("secrets subsystem setup failed", "err", err)
+		os.Exit(1)
+	}
 
 	hostagentd.RegisterNetworkOps(s, hostagentd.NetworkConfig{})
 

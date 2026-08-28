@@ -88,6 +88,7 @@ nohup setsid "$HOSTAGENT_DIR/apdns-hostagent" \
   -rndc-conf /root/apdns-v2-preview-state/etc/rndc.conf \
   -bind-compiled-dir /root/apdns-v2-preview-state/var-lib/compiled/bind \
   -control-db /root/apdns-v2-preview-state/var-lib/control.db \
+  -secrets-key-dir "$HOSTAGENT_DIR/secrets" \
   -current-binary "$RELEASE/alderpointdns-go" \
   -update-staging-dir "$HOSTAGENT_DIR/update-staging" \
   -update-backup "$HOSTAGENT_DIR/previous-binary" \

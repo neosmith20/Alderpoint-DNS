@@ -11,25 +11,29 @@
 // Field shapes and validation rules are matched field-for-field against
 // app/v2/policy_store.py's upstream_profiles/upstream_endpoints tables
 // (read directly, not guessed) so this is real parity, not a similarly-
-// named reinvention. Two things are deliberately NOT carried over yet,
-// disclosed rather than hidden:
+// named reinvention.
 //
-//   - No compiled dnsdist-config generation/validation. Blocklists and
-//     Local DNS each stage+promote a real runtime artifact file (even
-//     though nothing in this isolated preview consumes it yet); an
-//     Upstream profile's real runtime effect is a dnsdist forwarding
-//     policy, which needs its own dnsdist_gen.py-equivalent Go package
-//     validated against the real installed dnsdist binary -- a
-//     substantial, separate piece of work, not a rushed stub. Every
-//     mutation here still returns the same `runtime: {promoted,
-//     binding_count}` shape the Python API returns, but `promoted` is
-//     unconditionally true (there is no compile step to fail yet) --
-//     this is disclosed in PARITY_MATRIX.md, not silently implied to be
-//     equivalent to Python's real compiled-runtime proof.
-//   - secret_ref (endpoint auth secrets) is not implemented -- no
-//     Go secret store exists yet (see docs/v2/management-plane.md's
-//     secret-store section for what Python's version does). Every
-//     endpoint's secret_ref is always nil.
+// Corrected stale disclosure (2026-08-28): this package's profiles ARE
+// compiled into the real, live Go-managed dnsdist runtime -- see
+// internal/dnscompile.CompileDnsdist's newServer() calls (including
+// real DoH forwarding via dohPath/tls kwargs), driven by
+// internal/dnsruntime.Orchestrator.build() reading this package's
+// List() output. The first enabled profile really is dnsdist's live
+// forwarding policy (plain/DoT forwarders also feed BIND's own
+// `forwarders {}` clause) -- `runtime.promoted` reflects a real
+// promotion outcome via the same apply/rollback path every other
+// DNS-runtime-affecting mutation uses, not an unconditional `true`.
+//
+// Still not implemented, disclosed rather than hidden: `secret_ref`
+// (per-endpoint auth for an authenticated upstream, e.g. a bearer token
+// header on a DoH forward). A Go-native secrets store now exists
+// (internal/secretstore, see the Notifications row's credential
+// storage for a working consumer) -- the remaining real blocker isn't
+// "no secrets store" any more, it's that dnsdist's `newServer()` Lua
+// API has not yet been confirmed to support a custom per-server HTTP
+// header on the installed dnsdist version. Not yet investigated; this
+// is a genuine open question, not assumed infeasible or silently
+// wired as inert metadata.
 package upstreams
 
 import (

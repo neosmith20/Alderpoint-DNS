@@ -41,6 +41,7 @@ import (
 	"alderpointdns/go-controlplane/internal/pyanalytics"
 	"alderpointdns/go-controlplane/internal/pymigrate"
 	"alderpointdns/go-controlplane/internal/rawquerylog"
+	"alderpointdns/go-controlplane/internal/secretstore"
 	"alderpointdns/go-controlplane/internal/upstreams"
 )
 
@@ -149,9 +150,30 @@ func runImportPython(args []string) {
 	}
 }
 
+// dbFileMode/dbDirMode are the least-privilege permissions app.db (and
+// its containing directory) actually need for the real deployed
+// posture: only this process's own UID ever opens this file (no other
+// service on the appliance shares its group), so even group-read is
+// tighter than strictly required -- but 0640/0750 is the same
+// convention internal/backup already uses for backup archives, and
+// removes the world-readable bit the database previously had (0644),
+// which was wider than needed even though today's actual exposure was
+// moot (the parent directory was already 0700-equivalent via the
+// container bind mount). See PARITY_MATRIX.md's database-at-rest audit.
+const (
+	dbFileMode = 0o640
+	dbDirMode  = 0o750
+)
+
 func openDB(ctx context.Context, dbPath, migrationsDir string, logger *slog.Logger) (*sql.DB, error) {
-	if dir := parentDir(dbPath); dir != "" {
-		os.MkdirAll(dir, 0o755)
+	dir := parentDir(dbPath)
+	if dir != "" {
+		if err := os.MkdirAll(dir, dbDirMode); err != nil {
+			return nil, err
+		}
+		if err := os.Chmod(dir, dbDirMode); err != nil {
+			logger.Warn("could not tighten database directory permissions", "dir", dir, "err", err)
+		}
 	}
 	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
@@ -160,6 +182,18 @@ func openDB(ctx context.Context, dbPath, migrationsDir string, logger *slog.Logg
 	db.SetMaxOpenConns(1) // single-writer SQLite; simplest correct answer for this scale
 	if _, err := dbmigrate.Up(ctx, db, migrationsDir); err != nil {
 		return nil, fmt.Errorf("startup migration failed: %w", err)
+	}
+	// Tighten the real database file (and its WAL/SHM siblings, which
+	// carry real row data in WAL mode) AFTER open+migrate actually
+	// created it -- sql.Open's file creation follows the process umask,
+	// which on a real deployed container is not guaranteed to already
+	// be this strict. Best-effort: a chmod failure here is logged, not
+	// fatal -- a running appliance must never refuse to start over a
+	// permission-tightening step that isn't itself a security hole.
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.Chmod(dbPath+suffix, dbFileMode); err != nil && !os.IsNotExist(err) {
+			logger.Warn("could not tighten database file permissions", "path", dbPath+suffix, "err", err)
+		}
 	}
 	return db, nil
 }
@@ -310,6 +344,16 @@ func runWeb(args []string) {
 		hostAgentClient = hostagent.NewClient(*hostagentSocket)
 	}
 
+	// Native Go secrets subsystem: same "optional, never fatal"
+	// contract as every other host-agent-backed boundary. See
+	// internal/secretstore's doc comment -- this process only ever
+	// holds ciphertext; the master key lives solely in apdns-hostagent.
+	secretsSvc := &secretstore.Service{DB: db, HostAgent: hostAgentClient}
+	notificationsSvc.Secrets = secretsSvc
+	if hostAgentClient == nil {
+		logger.Info("secrets subsystem not wired: -hostagent-socket is empty; provider secrets (Notifications) will report unavailable")
+	}
+
 	// DNS runtime compiler: same "optional, never fatal" contract as
 	// every other boundary above. Requires both a host-agent AND the
 	// dnsdist/BIND deployment addresses that agent was configured with
@@ -351,6 +395,7 @@ func runWeb(args []string) {
 		Analytics: analyticsReader, RawQueryLog: rawQueryLogReader, HostAgent: hostAgentClient,
 		DNSRuntime: dnsRuntimeOrch, TLSCertPath: cfg.Web.TLSCertPath, TLSKeyPath: cfg.Web.TLSKeyPath,
 		DNSPerfBindPlainAddr: *dnsPerfBindPlainAddr,
+		Secrets:              secretsSvc,
 	}
 
 	// DNS Performance benchmark: same "optional, never fatal" contract

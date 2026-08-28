@@ -473,11 +473,20 @@ export interface ImportJob {
   applied_at?: string;
 }
 
+export interface SMTPConfig {
+  host: string;
+  port: number;
+  from_addr: string;
+  to_addr: string;
+  username: string;
+}
+
 export interface NotificationProvider {
   provider_id: string;
   kind: "webhook" | "email_smtp" | "pushover" | "slack";
   display_name: string;
-  endpoint: string;
+  config?: SMTPConfig | Record<string, never>;
+  has_secret: boolean;
   enabled: boolean;
   created_at: string;
   updated_at: string;
@@ -640,14 +649,19 @@ export const api = {
     }),
 
   listNotificationProviders: (signal?: AbortSignal) => req<{ providers: NotificationProvider[] }>("/api/notifications", undefined, signal),
-  createNotificationProvider: (kind: string, displayName: string, endpoint: string) =>
+  createNotificationProvider: (kind: string, displayName: string, config?: Record<string, unknown>) =>
     req<NotificationProvider>("/api/notifications", {
       method: "POST",
-      body: JSON.stringify({ kind, display_name: displayName, endpoint }),
+      body: JSON.stringify({ kind, display_name: displayName, config: config ?? {} }),
     }),
   toggleNotificationProvider: (id: string, enabled: boolean) =>
     req<{ status: string }>(`/api/notifications/${encodeURIComponent(id)}/toggle`, { method: "POST", body: JSON.stringify({ enabled }) }),
   deleteNotificationProvider: (id: string) => req<{ status: string }>(`/api/notifications/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  setNotificationSecret: (id: string, value: string) =>
+    req<{ status: string }>(`/api/notifications/${encodeURIComponent(id)}/secret`, { method: "PUT", body: JSON.stringify({ value }) }),
+  revokeNotificationSecret: (id: string) => req<{ status: string }>(`/api/notifications/${encodeURIComponent(id)}/secret`, { method: "DELETE" }),
+  testNotificationProvider: (id: string) =>
+    req<{ ok: boolean; detail: string; status_code?: number }>(`/api/notifications/${encodeURIComponent(id)}/test`, { method: "POST" }),
 
   importHosts: (text: string) => req<ImportHostsResult>("/api/import/hosts", { method: "POST", body: text }),
 

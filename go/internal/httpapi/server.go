@@ -19,6 +19,7 @@ import (
 	"alderpointdns/go-controlplane/internal/importer"
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/notifications"
+	"alderpointdns/go-controlplane/internal/secretstore"
 	"alderpointdns/go-controlplane/internal/policy"
 	"alderpointdns/go-controlplane/internal/pyanalytics"
 	"alderpointdns/go-controlplane/internal/rawquerylog"
@@ -93,6 +94,12 @@ type Server struct {
 	// against this appliance's own Go-managed dnsdist/BIND listeners
 	// via apdns-hostagent, never synthesized numbers.
 	DNSPerf *dnsperf.Service
+
+	// Secrets is nil unless a host-control agent is configured -- same
+	// nil-safe contract as HostAgent above. See internal/secretstore's
+	// doc comment: this is the native Go secrets subsystem's web-side
+	// half (ciphertext storage + metadata only, never plaintext).
+	Secrets *secretstore.Service
 
 	// DNSPerfBindPlainAddr is BIND's own unproxied loopback listener
 	// address for this deployment (matches apdns-hostagent's
@@ -222,6 +229,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/notifications", requireAuth(s.handleCreateNotificationProvider))
 	mux.HandleFunc("POST /api/notifications/{id}/toggle", requireAuth(s.handleToggleNotificationProvider))
 	mux.HandleFunc("DELETE /api/notifications/{id}", requireAuth(s.handleDeleteNotificationProvider))
+	mux.HandleFunc("PUT /api/notifications/{id}/secret", requireAuth(s.handleSetNotificationSecret))
+	mux.HandleFunc("DELETE /api/notifications/{id}/secret", requireAuth(s.handleRevokeNotificationSecret))
+	mux.HandleFunc("POST /api/notifications/{id}/test", requireAuth(s.handleTestNotificationProvider))
 
 	mux.HandleFunc("POST /api/import/hosts", requireAuth(s.handleImportHosts))
 	mux.HandleFunc("POST /api/import/jobs", requireAuth(s.handleCreateImportJob))
