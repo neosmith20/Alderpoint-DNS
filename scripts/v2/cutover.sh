@@ -6,9 +6,19 @@
 # Usage:
 #   scripts/v2/cutover.sh preflight   # read-only checks, safe to run any time
 #   scripts/v2/cutover.sh execute     # THE REAL CUTOVER -- requires GO_CUTOVER_CONFIRM=1
-#   scripts/v2/cutover.sh verify      # re-run the post-swap checks against whichever
+#   scripts/v2/cutover.sh verify      # re-run the functional checks against whichever
 #                                      # side is currently live (Go or Python)
 #   scripts/v2/cutover.sh rollback    # force the rollback path directly
+#   scripts/v2/cutover.sh topology    # read-only: assert the final end-state topology
+#                                      # (Go alone on :8443/:53, nothing on :10443/:18443)
+#
+# Required end state after a successful execute: ONE Go instance owning
+# :8443 (management) and :53 (DNS, UDP+TCP); the old :10443 development
+# preview and the temporary :18443 staging binding both fully removed;
+# Python stopped (never removed -- rollback artifacts/state preserved).
+# The obsolete-preview cleanup runs ONLY after the post-swap functional
+# verify passes -- a failed verify rolls Python back and leaves :10443/
+# :18443 untouched for investigation.
 #
 # `execute` refuses to run unless the environment variable
 # GO_CUTOVER_CONFIRM=1 is set AND the literal string "GO CUTOVER" is
@@ -25,10 +35,18 @@ PY_CONTROL_DB="$PY_STATE_VARLIB/control.db"
 PY_CERT_DIR="$PY_STATE_VARLIB/certs"
 
 GO_LIVE_CONTAINER=apdns-go-live
-GO_LIVE_STATE=/var/lib/apdns-go-live-staging   # staged ahead of cutover -- see AGENT_PROGRESS.md's "Real migrated database now staged and running" checkpoint; owner setup already completed here through the real browser flow, never recreated
+GO_LIVE_STATE=/var/lib/apdns-go-live-staging   # staged ahead of cutover -- see AGENT_PROGRESS.md's "Real migrated database now staged and running" checkpoint; owner setup already completed here through the real browser flow. THE EXACT database used at cutover -- never recreated, never a second database.
 GO_LIVE_RELEASE=/root/apdns-go-migration-preview-release   # same release artifact :10443 already validated
 GO_LIVE_HOSTAGENT_DIR=/root/apdns-go-live-hostagent
 GO_LIVE_WEB_UID=996   # same real unprivileged UID the :10443 preview already proved
+STAGING_PORT=18443   # temporary -- torn down after a verified cutover, never part of the final topology
+
+# The OLD :10443 development preview -- torn down (container removed,
+# its dedicated hostagent process stopped) ONLY after the real cutover
+# is fully verified. Never touched on a failed cutover/rollback.
+OLD_PREVIEW_CONTAINER=apdns-go-migration-preview
+OLD_PREVIEW_HOSTAGENT_DIR=/root/apdns-go-migration-hostagent
+OLD_PREVIEW_PORT=10443
 
 ROLLBACK_DIR_GLOB=/root/apdns-v2-preview-cutover-rollback-*
 ERROR_BUDGET_SECONDS=90
@@ -94,6 +112,41 @@ cmd_preflight() {
     rm -f "$health_out"
     log "python live health ok"
 
+    # --- the exact staged Go database: must exist, must already have a
+    # real owner account (created by Alex through the real browser
+    # bootstrap flow) -- this script refuses to fabricate one, and
+    # refuses to invent a second database.
+    [ -f "$GO_LIVE_STATE/data/app.db" ] || fail "no staged database at $GO_LIVE_STATE/data/app.db -- nothing to cut over to"
+    local admin_count
+    admin_count=$(sqlite3 "$GO_LIVE_STATE/data/app.db" "SELECT COUNT(*) FROM admins" 2>/dev/null || echo 0)
+    [ "${admin_count:-0}" -ge 1 ] || fail "staged database at $GO_LIVE_STATE/data/app.db has no owner account yet -- complete real browser setup first"
+    log "staged database ok: $GO_LIVE_STATE/data/app.db has a real owner account (count=$admin_count)"
+
+    local staged_ldns staged_up staged_bl
+    staged_ldns=$(sqlite3 "$GO_LIVE_STATE/data/app.db" "SELECT COUNT(*) FROM local_dns_records" 2>/dev/null)
+    staged_up=$(sqlite3 "$GO_LIVE_STATE/data/app.db" "SELECT COUNT(*) FROM upstream_profiles" 2>/dev/null)
+    staged_bl=$(sqlite3 "$GO_LIVE_STATE/data/app.db" "SELECT COUNT(*) FROM blocklist_subscriptions" 2>/dev/null)
+    log "staged database content: local_dns_records=$staged_ldns upstream_profiles=$staged_up blocklist_subscriptions=$staged_bl"
+    [ "${staged_ldns:-0}" -gt 0 ] || fail "staged database has 0 local_dns_records -- does not look like the real migrated state"
+
+    [ -f "$GO_LIVE_STATE/certs/server.crt" ] && [ -f "$GO_LIVE_STATE/certs/server.key" ] || fail "staged database has no imported cert at $GO_LIVE_STATE/certs"
+    local staged_fp
+    staged_fp=$(openssl x509 -in "$GO_LIVE_STATE/certs/server.crt" -noout -fingerprint -sha256 2>/dev/null)
+    [ "$staged_fp" = "$fp" ] || fail "staged cert fingerprint ($staged_fp) does not match the live python cert ($fp) -- re-import before proceeding"
+    log "staged cert matches the live python cert fingerprint"
+
+    # --- old previews: report state, do not fail preflight on their
+    # presence (they are torn down only after a verified cutover, in a
+    # later phase) -- just confirm we know what's there right now.
+    local old_preview_status staging_status
+    old_preview_status=$(podman ps --filter "name=^${OLD_PREVIEW_CONTAINER}\$" --format '{{.Status}}' 2>/dev/null)
+    log "old :$OLD_PREVIEW_PORT preview container ($OLD_PREVIEW_CONTAINER): ${old_preview_status:-not running}"
+    staging_status=$(curl -sk --max-time 3 "https://127.0.0.1:$STAGING_PORT/api/setup/status" 2>/dev/null)
+    log "staging :$STAGING_PORT instance: ${staging_status:-not reachable}"
+    if echo "$staging_status" | grep -q '"setup_required": *true\|"setup_required":true'; then
+        fail "the staging instance on :$STAGING_PORT still reports setup_required=true -- this contradicts the admin_count check above; investigate before proceeding"
+    fi
+
     log "ALL PREFLIGHT CHECKS PASSED"
 }
 
@@ -117,10 +170,49 @@ verify_dns() {
     echo "$out" | grep -q "$expect_pattern" && log "dig $proto $name: matched '$expect_pattern' (ok)" || { log "dig $proto $name: did NOT match '$expect_pattern' -- output: $out"; return 1; }
 }
 
+verify_auth_enforced() {
+    # This script never holds Alex's password (his own explicit
+    # requirement), so it cannot prove a real authenticated session --
+    # what it CAN prove automatically is that the real auth logic is
+    # actually running: a login attempt with wrong credentials must be
+    # rejected with 401, not silently accepted or errored past.
+    local host="$1"
+    local code
+    code=$(curl -sk --max-time 5 -o /dev/null -w "%{http_code}" -X POST "https://$host:8443/api/login" \
+        -H 'content-type: application/json' -d '{"username":"__cutover_verify_probe__","password":"definitely-wrong"}')
+    [ "$code" = "401" ] && log "auth enforcement check: wrong credentials correctly rejected (401)" \
+        || { log "auth enforcement check: expected 401 for wrong credentials, got $code"; return 1; }
+}
+
+verify_blocklist() {
+    local host="$1" domain="$2"
+    local out
+    out=$(dig +time=3 +tries=2 "@$host" -p 53 "$domain" A 2>&1)
+    if echo "$out" | grep -qE "status: (NXDOMAIN|REFUSED)"; then
+        log "blocklist enforcement: $domain correctly blocked"
+    else
+        log "blocklist enforcement: $domain was NOT blocked -- output: $out"
+        return 1
+    fi
+}
+
+verify_upstream() {
+    local host="$1" domain="$2"
+    local out
+    out=$(dig +short +time=3 +tries=2 "@$host" -p 53 "$domain" A 2>&1)
+    if [ -n "$out" ] && ! echo "$out" | grep -qi "error\|timed out"; then
+        log "upstream resolution: $domain -> $out"
+    else
+        log "upstream resolution FAILED for $domain: $out"
+        return 1
+    fi
+}
+
 cmd_verify() {
     local host="${2:-$REAL_HOST}"
     local errors=0
     verify_endpoint "management :8443" "$host" 8443 200 || errors=$((errors+1))
+    verify_auth_enforced "$host" || errors=$((errors+1))
     verify_dns "$host" 53 "example.com" udp "ANSWER SECTION\|NXDOMAIN\|REFUSED" || errors=$((errors+1))
     # Stronger checks when a specific real migrated Local DNS name/IP
     # is supplied (recommended for the real execute run -- pick any one
@@ -133,6 +225,21 @@ cmd_verify() {
     else
         log "CUTOVER_TEST_LOCAL_DNS_NAME/IP not set -- skipping the migrated-record-specific check (recommended for a real execute run)"
     fi
+    # Blocklist enforcement / upstream resolution / cache-policy repeat
+    # check, when a real known-blocked domain is supplied (a real
+    # subscription must have been refreshed at least once for this to
+    # have compiled content -- see AGENT_PROGRESS.md's rehearsal notes).
+    if [ -n "${CUTOVER_TEST_BLOCKED_DOMAIN:-}" ]; then
+        verify_blocklist "$host" "$CUTOVER_TEST_BLOCKED_DOMAIN" || errors=$((errors+1))
+        # Repeat query -- the real cache/policy-isolation proof this
+        # session's Go test suite already established at the code level
+        # (74467d8): a blocked domain must never intermittently leak a
+        # different (cached/allowed) answer.
+        verify_blocklist "$host" "$CUTOVER_TEST_BLOCKED_DOMAIN" || errors=$((errors+1))
+    else
+        log "CUTOVER_TEST_BLOCKED_DOMAIN not set -- skipping the live blocklist-enforcement check (recommended for a real execute run)"
+    fi
+    verify_upstream "$host" "${CUTOVER_TEST_UPSTREAM_DOMAIN:-cloudflare.com}" || errors=$((errors+1))
     [ "$errors" -eq 0 ] && log "VERIFY: all checks passed" || fail "VERIFY: $errors check(s) failed"
 }
 
@@ -287,12 +394,82 @@ cmd_execute() {
     log "=== Interruption window: $((t1 - t0)) seconds ==="
 
     if ! cmd_verify _ 127.0.0.1; then
-        log "post-swap verification failed -- rolling back"
+        log "post-swap verification failed -- rolling back (obsolete-preview cleanup will NOT run)"
         cmd_rollback
         exit 1
     fi
 
-    log "CUTOVER COMPLETE. Python stopped (not removed) at $PY_CONTAINER. Go live at $GO_LIVE_CONTAINER."
+    log "=== Cutover verified. Proceeding to remove the obsolete :$OLD_PREVIEW_PORT preview and the :$STAGING_PORT staging binding. ==="
+    cmd_cleanup_obsolete_previews
+    cmd_final_topology
+
+    log "CUTOVER COMPLETE. Python stopped (not removed) at $PY_CONTAINER -- rollback artifacts preserved. Go live at $GO_LIVE_CONTAINER on :8443/:53. :$OLD_PREVIEW_PORT and :$STAGING_PORT are gone."
+}
+
+# --- cleanup of obsolete preview instances (ONLY after a verified cutover) ---
+#
+# Never called on a failed verify/rollback path. Removes RUNNING
+# instances only -- never touches Python's real state/rollback
+# artifacts, never touches the staged database's own data (it is now
+# the live database, still in place under GO_LIVE_STATE).
+
+cmd_cleanup_obsolete_previews() {
+    log "=== Cleanup: removing the obsolete :$OLD_PREVIEW_PORT preview and the temporary :$STAGING_PORT staging binding ==="
+
+    podman stop "$OLD_PREVIEW_CONTAINER" >/dev/null 2>&1 || true
+    podman rm "$OLD_PREVIEW_CONTAINER" >/dev/null 2>&1 || true
+    log "removed container: $OLD_PREVIEW_CONTAINER"
+
+    pkill -f "$OLD_PREVIEW_HOSTAGENT_DIR/apdns-hostagent" 2>/dev/null || true
+    sleep 1
+    log "stopped the :$OLD_PREVIEW_PORT preview's own dedicated hostagent process"
+
+    # The staging instance's own process was already stopped in Phase 1
+    # (it had to release its lock on app.db/cert before the real
+    # container could start) -- this is a defensive re-check, not the
+    # primary stop point.
+    pkill -f "alderpointdns-go web .*-addr 0.0.0.0:$STAGING_PORT" 2>/dev/null || true
+    sleep 1
+
+    local leftover
+    leftover=$(ss -tlnp 2>/dev/null | grep -E ":$OLD_PREVIEW_PORT |:$STAGING_PORT ")
+    if [ -n "$leftover" ]; then
+        fail "cleanup incomplete -- something is still listening on :$OLD_PREVIEW_PORT or :$STAGING_PORT: $leftover"
+    fi
+    log "confirmed: nothing listening on :$OLD_PREVIEW_PORT or :$STAGING_PORT"
+}
+
+cmd_final_topology() {
+    log "=== Final topology check ==="
+    local errors=0
+
+    local go_live_status py_status
+    go_live_status=$(podman ps --filter "name=^${GO_LIVE_CONTAINER}\$" --format '{{.Status}}' 2>/dev/null)
+    py_status=$(podman ps -a --filter "name=^${PY_CONTAINER}\$" --format '{{.Status}}' 2>/dev/null)
+    echo "$go_live_status" | grep -qi "^Up" && log "podman: $GO_LIVE_CONTAINER is Up" || { log "podman: $GO_LIVE_CONTAINER is NOT up ($go_live_status)"; errors=$((errors+1)); }
+    echo "$py_status" | grep -qi "^Exited" && log "podman: $PY_CONTAINER is Exited (stopped, preserved)" || { log "podman: $PY_CONTAINER is not in the expected Exited state ($py_status)"; errors=$((errors+1)); }
+
+    if podman ps -a --filter "name=^${OLD_PREVIEW_CONTAINER}\$" --format '{{.Names}}' 2>/dev/null | grep -q .; then
+        log "podman: $OLD_PREVIEW_CONTAINER still exists -- expected fully removed"
+        errors=$((errors+1))
+    else
+        log "podman: $OLD_PREVIEW_CONTAINER confirmed removed"
+    fi
+
+    local p8443 p53tcp p53udp p10443 p18443
+    p8443=$(ss -tlnp 2>/dev/null | grep -c ":8443 ")
+    p53tcp=$(ss -tlnp 2>/dev/null | grep -c ":53 ")
+    p53udp=$(ss -ulnp 2>/dev/null | grep -c ":53 ")
+    p10443=$(ss -tlnp 2>/dev/null | grep -c ":$OLD_PREVIEW_PORT ")
+    p18443=$(ss -tlnp 2>/dev/null | grep -c ":$STAGING_PORT ")
+
+    [ "$p8443" -ge 1 ] && log "listener check: :8443 tcp present" || { log "listener check: :8443 tcp MISSING"; errors=$((errors+1)); }
+    [ "$p53tcp" -ge 1 ] && log "listener check: :53 tcp present" || { log "listener check: :53 tcp MISSING"; errors=$((errors+1)); }
+    [ "$p53udp" -ge 1 ] && log "listener check: :53 udp present" || { log "listener check: :53 udp MISSING"; errors=$((errors+1)); }
+    [ "$p10443" -eq 0 ] && log "listener check: :$OLD_PREVIEW_PORT confirmed absent" || { log "listener check: :$OLD_PREVIEW_PORT still has a listener"; errors=$((errors+1)); }
+    [ "$p18443" -eq 0 ] && log "listener check: :$STAGING_PORT confirmed absent" || { log "listener check: :$STAGING_PORT still has a listener"; errors=$((errors+1)); }
+
+    [ "$errors" -eq 0 ] && log "FINAL TOPOLOGY: matches the required end state" || fail "FINAL TOPOLOGY: $errors check(s) failed"
 }
 
 # --- rollback -------------------------------------------------------------
@@ -317,5 +494,6 @@ case "${1:-}" in
     execute) cmd_execute "$@" ;;
     verify) cmd_verify "$@" ;;
     rollback) cmd_rollback ;;
-    *) echo "usage: $0 {preflight|execute|verify|rollback}"; exit 2 ;;
+    topology) cmd_final_topology ;;
+    *) echo "usage: $0 {preflight|execute|verify|rollback|topology}"; exit 2 ;;
 esac
