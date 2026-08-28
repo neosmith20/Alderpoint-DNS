@@ -61,6 +61,12 @@ type Orchestrator struct {
 	BindBackendAddress   string
 	TLSCertPath          string
 	TLSKeyPath           string
+
+	// DnstapSocketPath: forwarded verbatim into dnscompile.Input -- see
+	// that field's own doc comment. Empty means no dnstap logging is
+	// compiled, same as this deployment simply not passing
+	// -dns-runtime-dnstap-socket at startup.
+	DnstapSocketPath string
 }
 
 // Result mirrors hostagentd.DNSPromoteResult, plus whether the
@@ -143,6 +149,7 @@ func (o *Orchestrator) build(ctx context.Context) (dnscompile.Input, []string, s
 		TLSCertPath:        o.TLSCertPath,
 		TLSKeyPath:         o.TLSKeyPath,
 		CacheMaxEntries:    10000,
+		DnstapSocketPath:   o.DnstapSocketPath,
 	}
 
 	if o.LocalDNS != nil {

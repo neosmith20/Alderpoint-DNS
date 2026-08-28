@@ -22,8 +22,6 @@ import (
 	"alderpointdns/go-controlplane/internal/notifications"
 	"alderpointdns/go-controlplane/internal/secretstore"
 	"alderpointdns/go-controlplane/internal/policy"
-	"alderpointdns/go-controlplane/internal/pyanalytics"
-	"alderpointdns/go-controlplane/internal/rawquerylog"
 	"alderpointdns/go-controlplane/internal/upstreams"
 )
 
@@ -82,17 +80,20 @@ type Server struct {
 
 	// Analytics is nil unless -analytics-db was given a real path at
 	// startup -- every analytics handler must treat nil as "degraded",
-	// never as a programming error. See internal/pyanalytics's doc
-	// comment for exactly what this compatibility boundary is.
-	Analytics *pyanalytics.Reader
+	// never as a programming error. Backed by internal/dnsanalytics.Reader
+	// in production (see cmd/alderpointdns-go's "web" wiring) -- an
+	// interface here (see analytics_iface.go) rather than a concrete
+	// type only so tests can substitute a fake.
+	Analytics AnalyticsReader
 
-	// RawQueryLog is nil unless -query-log-dir was given a real path at
+	// RawQueryLog is nil unless -analytics-db was given a real path at
 	// startup -- same "nil means degraded, never a programming error"
-	// contract as Analytics above. See internal/rawquerylog's doc
-	// comment: a second, narrower compatibility boundary over Python's
-	// raw per-query Parquet history (not the aggregates.db buckets
-	// Analytics reads).
-	RawQueryLog *rawquerylog.Reader
+	// contract as Analytics above (the two are backed by the same
+	// internal/dnsanalytics.Reader in production; this is a second,
+	// narrower interface only because the raw per-query log and the
+	// aggregate/time-series views used to be two entirely separate
+	// Python-era compatibility boundaries -- see analytics_iface.go).
+	RawQueryLog RawQueryLogReader
 
 	// DNSPerf is nil unless a full DNS-runtime deployment was
 	// configured at startup -- same nil-safe contract as DNSRuntime

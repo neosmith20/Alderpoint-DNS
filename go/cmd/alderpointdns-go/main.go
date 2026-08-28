@@ -38,10 +38,9 @@ import (
 	"alderpointdns/go-controlplane/internal/importer"
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/notifications"
+	"alderpointdns/go-controlplane/internal/dnsanalytics"
 	"alderpointdns/go-controlplane/internal/policy"
-	"alderpointdns/go-controlplane/internal/pyanalytics"
 	"alderpointdns/go-controlplane/internal/pymigrate"
-	"alderpointdns/go-controlplane/internal/rawquerylog"
 	"alderpointdns/go-controlplane/internal/secretstore"
 	"alderpointdns/go-controlplane/internal/upstreams"
 )
@@ -490,10 +489,19 @@ func runWeb(args []string) {
 	staticDir := fs.String("static", "./frontend/dist", "compiled frontend dist dir")
 	migrationsDir := fs.String("migrations", "./schema/migrations", "migrations directory")
 	addr := fs.String("addr", "", "listen address override (host:port); defaults to config web.listen_address:listen_port")
-	analyticsSnapshotDir := fs.String("analytics-snapshot-dir", "", "optional read-only path to apdns-hostagent's published analytics snapshot directory (see internal/analyticssnapshot, internal/pyanalytics) -- NOT a direct path to Python's live aggregates.db, see those packages' doc comments for why; empty = Dashboard analytics reports degraded")
-	analyticsWorkerHeartbeatsDir := fs.String("analytics-worker-heartbeats-dir", "", "optional read-only path to Python's worker-heartbeats/ directory (see internal/pyanalytics/health.go); empty = Analytics health cannot distinguish a dead writer from genuinely quiet traffic")
-	analyticsInboxDir := fs.String("analytics-inbox-dir", "", "optional read-only path to Python's analytics/inbox/ directory (queue depth for Analytics health); empty = queue depth unavailable")
-	queryLogDir := fs.String("query-log-dir", "", "optional read-only path to Python's analytics/queries/ raw Parquet history (compatibility boundary, see internal/rawquerylog); empty = Query Log reports degraded")
+	analyticsDBPath := fs.String("analytics-db", "", "REQUIRED: path to the Go-native analytics database (see internal/dnsanalytics) -- this process both writes and reads it; there is no longer a separate Python writer to bridge to (see CUTOVER.md). Startup fails clearly if this is empty; DNS answering itself is unaffected either way, since named/dnsdist/apdns-hostagent are separate OS processes.")
+	// Two distinct flags, deliberately not one, because dnsdist (a real
+	// dnsdist Lua config value, dialed by dnsdist itself -- a separate
+	// host process, possibly in a separate mount namespace from this
+	// "web" process, e.g. the live container) and this process (which
+	// must bind/listen on that same underlying file from its OWN
+	// filesystem view) can each need a different path to the same
+	// bind-mounted socket file -- exactly the same reason -hostagent-
+	// socket's container path and apdns-hostagent's own -socket host
+	// path are already two separately-configured values elsewhere in
+	// this deployment, not one shared flag.
+	dnstapDialPath := fs.String("dns-runtime-dnstap-socket", "", "the path dnsdist itself will dial to reach this process's dnstap listener -- compiled verbatim into dnsdist.conf (see internal/dnscompile's DnstapSocketPath). On a real container deployment this is the HOST-side path of the bind mount; see -dns-runtime-dnstap-listen-socket for this process's own (possibly container-internal) bind path to the same file.")
+	dnstapListenPath := fs.String("dns-runtime-dnstap-listen-socket", "", "the path THIS process binds/listens on for dnsdist's real dnstap stream (see internal/dnsanalytics.Writer). Defaults to -dns-runtime-dnstap-socket's value when empty -- the common case where this process and dnsdist share one filesystem namespace (no container boundary between them). Required together with -analytics-db whenever a DNS runtime (-hostagent-socket + -dns-runtime-dnsdist-addr + -dns-runtime-bind-proxy-addr) is also configured -- otherwise there would be a durable analytics store with nothing ever feeding it real traffic.")
 	backupsDir := fs.String("backups-dir", "./data/backups", "directory for stored/uploaded appliance backups (see internal/backup)")
 	bootstrapTokenPath := fs.String("bootstrap-token-path", "./data/bootstrap-token", "where the one-time first-run setup token is written (0600); also logged once at startup when setup is required -- see internal/bootstrap")
 	backupRetentionMaxCount := fs.Int("backup-retention-max-count", 0, "keep at most N manual backups, oldest pruned first (0 = unlimited; the pre-restore safety backup is never pruned)")
@@ -546,31 +554,41 @@ func runWeb(args []string) {
 	}
 	importerSvc := &importer.Service{DB: db, LocalDNS: ldSvc, Backup: backupSvc}
 
-	// Analytics compatibility boundary: optional, never fatal. A missing
-	// or unreadable path means Dashboard analytics reports degraded, not
-	// a startup crash -- "DNS works if analytics is dead" applies to this
-	// control plane's own dashboard too.
-	var analyticsReader *pyanalytics.Reader
-	if *analyticsSnapshotDir != "" {
-		reader, err := pyanalytics.Open(*analyticsSnapshotDir)
-		if err != nil {
-			logger.Warn("analytics reader unavailable at startup; dashboard analytics will report degraded", "path", *analyticsSnapshotDir, "err", err)
-		} else {
-			reader.WorkerHeartbeatsDir = *analyticsWorkerHeartbeatsDir
-			reader.InboxDir = *analyticsInboxDir
-			analyticsReader = reader
-			defer reader.Close()
-		}
+	// Go-native analytics: REQUIRED, unlike every other optional
+	// boundary in this function -- the owner's explicit standing
+	// requirement is that missing required analytics configuration
+	// fails startup clearly rather than run degraded indefinitely.
+	// Strict here is safe precisely because it's scoped to this one
+	// process: named/dnsdist/apdns-hostagent are separate OS processes
+	// this exiting never touches, so "DNS must never depend on
+	// analytics" and "analytics config must fail loudly if broken" are
+	// both true at once, not in tension.
+	if *analyticsDBPath == "" {
+		logger.Error("-analytics-db is required (see internal/dnsanalytics; Python's analytics bridge was removed at cutover, see CUTOVER.md)")
+		os.Exit(1)
 	}
-
-	// Raw query-log compatibility boundary: same "optional, never fatal"
-	// contract as Analytics above. No Open()/connection step needed --
-	// internal/rawquerylog.Reader is a stateless directory-path wrapper
-	// that tolerates a not-yet-existing root (nothing ingested there yet)
-	// the same way it tolerates one that exists.
-	var rawQueryLogReader *rawquerylog.Reader
-	if *queryLogDir != "" {
-		rawQueryLogReader = &rawquerylog.Reader{Root: *queryLogDir}
+	analyticsDB, err := dnsanalytics.Open(*analyticsDBPath)
+	if err != nil {
+		logger.Error("analytics db preflight failed", "path", *analyticsDBPath, "err", err)
+		os.Exit(1)
+	}
+	defer analyticsDB.Close()
+	analyticsWriter := &dnsanalytics.Writer{DB: analyticsDB, Log: logger}
+	analyticsReader := &dnsanalytics.Reader{DB: analyticsDB, Writer: analyticsWriter}
+	listenPath := *dnstapListenPath
+	if listenPath == "" {
+		listenPath = *dnstapDialPath
+	}
+	if listenPath != "" {
+		dnstapCtx, cancelDnstap := context.WithCancel(context.Background())
+		defer cancelDnstap()
+		go func() {
+			if err := analyticsWriter.Run(dnstapCtx, listenPath); err != nil {
+				logger.Error("dnstap listener exited (analytics will report degraded; DNS answering is unaffected)", "socket", listenPath, "err", err)
+			}
+		}()
+	} else {
+		logger.Warn("-dns-runtime-dnstap-socket / -dns-runtime-dnstap-listen-socket are empty: analytics db is open but nothing will ever write real query events to it")
 	}
 
 	// Host-agent client: same "optional, never fatal" contract. No
@@ -605,6 +623,10 @@ func runWeb(args []string) {
 			DomainRouting: domainRoutingSvc, Clients: clientsSvc,
 			HostAgent: hostAgentClient, DnsdistListenAddress: *dnsRuntimeDnsdistAddr, BindBackendAddress: *dnsRuntimeBindProxyAddr,
 			TLSCertPath: cfg.Web.TLSCertPath, TLSKeyPath: cfg.Web.TLSKeyPath,
+			DnstapSocketPath: *dnstapDialPath,
+		}
+		if *dnstapDialPath == "" {
+			logger.Warn("DNS runtime is configured but -dns-runtime-dnstap-socket is empty: the compiled dnsdist config will not log any real query events")
 		}
 	} else if *dnsRuntimeDnsdistAddr != "" || *dnsRuntimeBindProxyAddr != "" {
 		logger.Warn("DNS runtime compiler not wired: -dns-runtime-dnsdist-addr, -dns-runtime-bind-proxy-addr, and -hostagent-socket must all be set together")
@@ -643,7 +665,7 @@ func runWeb(args []string) {
 		StaticDir: *staticDir, Log: logger, Version: Version, StartedAt: startedAt,
 		SessionTTL: cfg.SessionTTL(), LastSeen: cfg.LastSeenUpdateInterval(),
 		ApplianceName: cfg.Appliance.Name, ApplianceTimezone: cfg.Appliance.Timezone,
-		Analytics: analyticsReader, RawQueryLog: rawQueryLogReader, HostAgent: hostAgentClient,
+		Analytics: analyticsReader, RawQueryLog: analyticsReader, HostAgent: hostAgentClient,
 		DNSRuntime: dnsRuntimeOrch, TLSCertPath: cfg.Web.TLSCertPath, TLSKeyPath: cfg.Web.TLSKeyPath,
 		DNSPerfBindPlainAddr: *dnsPerfBindPlainAddr,
 		Secrets:              secretsSvc,

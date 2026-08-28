@@ -209,6 +209,25 @@ type Input struct {
 	// upstream endpoints instead of through BIND (only used by tests
 	// that don't want to also stand up a BIND instance).
 	BindBackendAddress string
+
+	// DnstapSocketPath: when non-empty, every real client response is
+	// logged as a dnstap message to a FrameStreamUnixLogger at this
+	// path (see internal/dnsanalytics.Writer, the real receiver on the
+	// other end). Fully asynchronous and best-effort on dnsdist's side
+	// -- a missing/unreachable/slow receiver never delays or drops a
+	// DNS answer, only analytics completeness. Empty (the default in
+	// every existing test) compiles no logging at all, matching prior
+	// behavior exactly.
+	//
+	// Each query is tagged "apdns_outcome" = "blocked" by the exact
+	// same rule that decided to block it (see blockingAction call
+	// sites below), defaulting to "allowed" otherwise; the response
+	// logger reads that tag and carries it as the dnstap message's
+	// Extra field, so the receiver learns dnsdist's own real
+	// disposition rather than inferring "blocked" from rcode alone
+	// (a genuine NXDOMAIN for a non-blocked domain must never be
+	// miscounted as a block).
+	DnstapSocketPath string
 }
 
 // HealthMarkerDomain/IP are a fixed, compile-time-constant marker record
@@ -328,6 +347,17 @@ func CompileDnsdist(in Input) (string, error) {
 	w("addAction(QNameRule(%s), SpoofAction({%s}))", luaString(HealthMarkerDomain+"."), luaString(HealthMarkerIP))
 	w("")
 
+	// Default every query to "allowed" for dnstap analytics tagging
+	// before any rule below can mark it "blocked" -- SetTagAction is
+	// non-terminal (dnsdist keeps evaluating rules after it), so this
+	// is always overwritten by the matching addAction just ahead of
+	// each real blocking action below. A no-op when DnstapSocketPath
+	// is unset (still compiled either way -- cheap, and keeps this
+	// function's output independent of whether logging is wired up,
+	// same as every other unconditionally-emitted marker rule here).
+	w(`addAction(AllRule(), SetTagAction("apdns_outcome", "allowed"))`)
+	w("")
+
 	// Computed early (not just before the global blocklist section
 	// below, where Python's own shape would put it) because Strong
 	// ClientID's own per-client deny rules, compiled next, use this
@@ -416,6 +446,7 @@ func CompileDnsdist(in Input) (string, error) {
 		patterns := append([]string(nil), in.RegexBlock...)
 		sort.Strings(patterns)
 		for _, p := range patterns {
+			w(`addAction(RegexRule(%s), SetTagAction("apdns_outcome", "blocked"))`, luaString(p))
 			w("addAction(RegexRule(%s), %s)", luaString(p), blockAction)
 		}
 		w("")
@@ -440,6 +471,7 @@ func CompileDnsdist(in Input) (string, error) {
 			for i, d := range domains {
 				quoted[i] = luaString(d)
 			}
+			w(`addAction(SuffixMatchNodeRule({%s}), SetTagAction("apdns_outcome", "blocked"))`, strings.Join(quoted, ", "))
 			w("addAction(SuffixMatchNodeRule({%s}), %s)", strings.Join(quoted, ", "), blockAction)
 			w("")
 		}
@@ -469,6 +501,17 @@ func CompileDnsdist(in Input) (string, error) {
 		w("-- packet cache (dnsdist RAM hot-path tier)")
 		w("pc_default = newPacketCache(%d, {maxTTL=%d})", in.CacheMaxEntries, cacheTTLOrDefault(in.CacheMaxTTLSeconds))
 		w(`getPool(""):setCache(pc_default)`)
+		w("")
+	}
+
+	if in.DnstapSocketPath != "" {
+		w("-- dnstap query-event logging (see internal/dnsanalytics.Writer, the receiver)")
+		w("apdnsDnstapLogger = newFrameStreamUnixLogger(%s)", luaString(in.DnstapSocketPath))
+		w("addResponseAction(AllRule(), DnstapLogResponseAction(%s, apdnsDnstapLogger, function(dr, dm)", luaString("apdns"))
+		w(`  local outcome = dr:getTag("apdns_outcome")`)
+		w(`  if outcome == nil then outcome = "allowed" end`)
+		w("  dm:setExtra(outcome)")
+		w("end))")
 		w("")
 	}
 
@@ -636,6 +679,8 @@ func writeClientRules(w func(string, ...any), identities []ClientIdentity, overr
 	if len(denies) > 0 || len(allows) > 0 {
 		w("-- Strong ClientID: per-client explicit deny (wins over allow and over default/global policy)")
 		for _, o := range denies {
+			w(`addAction(AndRule({TagRule(%s, %s), SuffixMatchNodeRule({%s})}), SetTagAction("apdns_outcome", "blocked"))`,
+				luaString(clientTag), luaString(o.key), luaString(o.domain+"."))
 			w("addAction(AndRule({TagRule(%s, %s), SuffixMatchNodeRule({%s})}), %s)",
 				luaString(clientTag), luaString(o.key), luaString(o.domain+"."), blockAction)
 		}

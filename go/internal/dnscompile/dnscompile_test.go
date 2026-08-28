@@ -96,6 +96,53 @@ func TestCompileDnsdistIsDeterministic(t *testing.T) {
 	checkDnsdist(t, out1)
 }
 
+func TestCompileDnsdistDnstapLogging(t *testing.T) {
+	in := minimalInput()
+	in.BlockedDomains = []string{"ads.example.com"}
+	in.RegexBlock = []string{"^track\\."}
+	in.ClientIdentities = []ClientIdentity{{ClientKey: "laptop", Hex: strings.Repeat("a", 48)}}
+	in.ClientOverrides = []ClientOverride{{ClientKey: "laptop", Kind: "block", Domain: "denied.example.com"}}
+	in.DnstapSocketPath = filepath.Join(t.TempDir(), "dnstap.sock")
+	out, err := CompileDnsdist(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, `newFrameStreamUnixLogger("`+in.DnstapSocketPath+`")`) {
+		t.Fatalf("expected a dnstap unix logger for %q, got:\n%s", in.DnstapSocketPath, out)
+	}
+	if !strings.Contains(out, "DnstapLogResponseAction(") {
+		t.Fatalf("expected DnstapLogResponseAction, got:\n%s", out)
+	}
+	if !strings.Contains(out, `SetTagAction("apdns_outcome", "allowed")`) {
+		t.Fatalf("expected a default apdns_outcome=allowed tag rule, got:\n%s", out)
+	}
+	// Every real blocking site (global blocklist, regex block, and the
+	// per-client explicit deny) must tag "blocked" ahead of its actual
+	// blocking action, not just one of them.
+	for _, want := range []string{
+		`SuffixMatchNodeRule({"ads.example.com."}), SetTagAction("apdns_outcome", "blocked")`,
+		`RegexRule("^track\\."), SetTagAction("apdns_outcome", "blocked")`,
+		`SetTagAction("apdns_outcome", "blocked"))
+addAction(AndRule({TagRule("apdns_client", "laptop"), SuffixMatchNodeRule({"denied.example.com."})}), RCodeAction`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected to find %q in:\n%s", want, out)
+		}
+	}
+	checkDnsdist(t, out)
+}
+
+func TestCompileDnsdistNoDnstapSocketMeansNoLogging(t *testing.T) {
+	out, err := CompileDnsdist(minimalInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "Dnstap") || strings.Contains(out, "FrameStream") {
+		t.Fatalf("expected no dnstap logging when DnstapSocketPath is unset, got:\n%s", out)
+	}
+	checkDnsdist(t, out)
+}
+
 func TestCompileDnsdistRejectsEmptyListenAddress(t *testing.T) {
 	_, err := CompileDnsdist(Input{})
 	if err == nil {
