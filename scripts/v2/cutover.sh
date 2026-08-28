@@ -580,7 +580,15 @@ cmd_execute() {
     # that a failure here behaves like a preflight failure, not a live
     # disruption.
     log "=== Validating the staged DNS runtime BEFORE Python is touched (no browser, no login, no password -- see internal/dnsruntime.Orchestrator.Validate) ==="
-    "$GO_LIVE_RELEASE/dns-promote-cli" dns-promote \
+    # Must run as the exact UID apdns-hostagent-live's -allowed-uid
+    # expects (SO_PEERCRED checks the REAL connecting UID, not
+    # filesystem ownership) -- the same UID the real web container runs
+    # as. Caught for real on the first hardened execute attempt this
+    # session: running as root (this script's own UID) was rejected as
+    # "unauthorized peer" before Python was ever touched -- exactly the
+    # dry-run gate working as designed, but it needed this fix to ever
+    # get past validation.
+    runuser -u apdns-go-web -- "$GO_LIVE_RELEASE/dns-promote-cli" dns-promote \
         -db "$GO_LIVE_STATE/data/app.db" \
         -config "$GO_LIVE_STATE/config/appliance.yaml" \
         -migrations "$GO_LIVE_RELEASE/schema/migrations" \
@@ -612,7 +620,7 @@ cmd_execute() {
     # requirement that the live DNS appliance must never depend on a
     # human clicking Apply.
     phase_set "promoting"
-    if ! "$GO_LIVE_RELEASE/dns-promote-cli" dns-promote \
+    if ! runuser -u apdns-go-web -- "$GO_LIVE_RELEASE/dns-promote-cli" dns-promote \
         -db "$GO_LIVE_STATE/data/app.db" \
         -config "$GO_LIVE_STATE/config/appliance.yaml" \
         -migrations "$GO_LIVE_RELEASE/schema/migrations" \
