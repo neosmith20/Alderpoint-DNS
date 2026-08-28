@@ -506,7 +506,16 @@ func CompileDnsdist(in Input) (string, error) {
 
 	if in.DnstapSocketPath != "" {
 		w("-- dnstap query-event logging (see internal/dnsanalytics.Writer, the receiver)")
-		w("apdnsDnstapLogger = newFrameStreamUnixLogger(%s)", luaString(in.DnstapSocketPath))
+		// reopenInterval: found live -- the fstrm connection can go
+		// silently idle (stays "connected" at the socket level, but
+		// stops delivering frames, with no error logged on either
+		// side) after some volume/time, and dnsdist only ever
+		// reconnects on a real write error, never spontaneously. A
+		// periodic forced reconnect is real, bounded self-healing for
+		// that failure mode -- a real analytics gap of at most this
+		// many seconds, never a DNS-answering issue (this option only
+		// affects the logger, not the query hot path).
+		w("apdnsDnstapLogger = newFrameStreamUnixLogger(%s, {reopenInterval=30})", luaString(in.DnstapSocketPath))
 		w("function apdnsDnstapAlter(dr, dm)")
 		w(`  local outcome = dr:getTag("apdns_outcome")`)
 		w(`  if outcome == nil then outcome = "allowed" end`)

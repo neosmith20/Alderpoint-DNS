@@ -107,7 +107,7 @@ func TestCompileDnsdistDnstapLogging(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, `newFrameStreamUnixLogger("`+in.DnstapSocketPath+`")`) {
+	if !strings.Contains(out, `newFrameStreamUnixLogger("`+in.DnstapSocketPath+`"`) {
 		t.Fatalf("expected a dnstap unix logger for %q, got:\n%s", in.DnstapSocketPath, out)
 	}
 	if !strings.Contains(out, "addResponseAction(AllRule(), DnstapLogResponseAction(") {
