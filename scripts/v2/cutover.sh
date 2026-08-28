@@ -25,7 +25,7 @@ PY_CONTROL_DB="$PY_STATE_VARLIB/control.db"
 PY_CERT_DIR="$PY_STATE_VARLIB/certs"
 
 GO_LIVE_CONTAINER=apdns-go-live
-GO_LIVE_STATE=/root/apdns-go-live-state
+GO_LIVE_STATE=/var/lib/apdns-go-live-staging   # staged ahead of cutover -- see AGENT_PROGRESS.md's "Real migrated database now staged and running" checkpoint; owner setup already completed here through the real browser flow, never recreated
 GO_LIVE_RELEASE=/root/apdns-go-migration-preview-release   # same release artifact :10443 already validated
 GO_LIVE_HOSTAGENT_DIR=/root/apdns-go-live-hostagent
 GO_LIVE_WEB_UID=996   # same real unprivileged UID the :10443 preview already proved
@@ -146,79 +146,59 @@ cmd_execute() {
     cmd_preflight || fail "preflight failed -- not proceeding"
 
     log "=== Phase 1: prepare (Python keeps serving throughout) ==="
-    local snap
-    snap="/var/tmp/cutover-execute-controldb-$(date -u +%Y%m%dT%H%M%SZ)"
-    sqlite3 "$PY_CONTROL_DB" ".backup $snap" || fail "control.db snapshot failed"
-    log "fresh control.db snapshot: $snap"
 
-    mkdir -p "$GO_LIVE_STATE/data"
-    "$GO_LIVE_RELEASE/alderpointdns-go" import-python \
-        -db "$GO_LIVE_STATE/data/app.db" \
-        -migrations "$GO_LIVE_RELEASE/schema/migrations" \
-        -python-control-db "$snap" \
-        -audit-log "$GO_LIVE_STATE/import-audit.jsonl" \
-        -dry-run=false || fail "real migration into $GO_LIVE_STATE/data/app.db failed"
-    log "real migration complete: $GO_LIVE_STATE/data/app.db"
+    if [ -f "$GO_LIVE_STATE/data/app.db" ]; then
+        log "staged state already exists at $GO_LIVE_STATE/data/app.db (owner setup already completed there through the real browser flow) -- skipping migration/cert-import, using it as-is"
+    else
+        local snap
+        snap="/var/tmp/cutover-execute-controldb-$(date -u +%Y%m%dT%H%M%SZ)"
+        sqlite3 "$PY_CONTROL_DB" ".backup $snap" || fail "control.db snapshot failed"
+        log "fresh control.db snapshot: $snap"
 
-    mkdir -p "$GO_LIVE_STATE/certs"
-    local repo_root cert_tool
-    repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-    cert_tool="/var/tmp/cutover-cert-import-$(date +%s)"
-    ( cd "$repo_root/go" && go build -buildvcs=false -o "$cert_tool" ./cmd/cutover-cert-import ) \
-        || fail "building cmd/cutover-cert-import failed"
-    "$cert_tool" \
-        "$PY_CERT_DIR/server.crt" "$PY_CERT_DIR/server.key" \
-        "$GO_LIVE_STATE/certs/server.crt" "$GO_LIVE_STATE/certs/server.key" \
-        || { rm -f "$cert_tool"; fail "cert import failed"; }
-    rm -f "$cert_tool"
+        mkdir -p "$GO_LIVE_STATE/data"
+        "$GO_LIVE_RELEASE/alderpointdns-go" import-python \
+            -db "$GO_LIVE_STATE/data/app.db" \
+            -migrations "$GO_LIVE_RELEASE/schema/migrations" \
+            -python-control-db "$snap" \
+            -audit-log "$GO_LIVE_STATE/import-audit.jsonl" \
+            -dry-run=false || fail "real migration into $GO_LIVE_STATE/data/app.db failed"
+        log "real migration complete: $GO_LIVE_STATE/data/app.db"
+
+        mkdir -p "$GO_LIVE_STATE/certs"
+        local repo_root cert_tool
+        repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+        cert_tool="/var/tmp/cutover-cert-import-$(date +%s)"
+        ( cd "$repo_root/go" && go build -buildvcs=false -o "$cert_tool" ./cmd/cutover-cert-import ) \
+            || fail "building cmd/cutover-cert-import failed"
+        "$cert_tool" \
+            "$PY_CERT_DIR/server.crt" "$PY_CERT_DIR/server.key" \
+            "$GO_LIVE_STATE/certs/server.crt" "$GO_LIVE_STATE/certs/server.key" \
+            || { rm -f "$cert_tool"; fail "cert import failed"; }
+        rm -f "$cert_tool"
+    fi
     log "real cert imported and validated"
 
-    # The migrated app.db has NO owner account -- Python's admins table
-    # is deliberately never migrated (a different auth model entirely,
-    # see internal/pymigrate's own doc comment). Complete real owner
-    # setup now, on a TEMPORARY local-only port, while Python still
-    # holds :8443 -- never fabricate a password on Alex's behalf.
-    podman rm -f "${GO_LIVE_CONTAINER}-setup" >/dev/null 2>&1 || true
-    podman run -d --name "${GO_LIVE_CONTAINER}-setup" \
-        --user "$GO_LIVE_WEB_UID:$GO_LIVE_WEB_UID" \
-        -p 127.0.0.1:18443:8443 \
-        -v "$GO_LIVE_RELEASE:/opt/alderpointdns-go:ro" \
-        -v "$GO_LIVE_STATE:/var/lib/alderpointdns-go" \
-        -v "$GO_LIVE_STATE/certs:/etc/alderpointdns-go/certs:ro" \
-        debian:trixie-slim \
-        /opt/alderpointdns-go/alderpointdns-go web \
-        -db /var/lib/alderpointdns-go/data/app.db \
-        -config /etc/alderpointdns-go/appliance.yaml \
-        -static /opt/alderpointdns-go/frontend-dist \
-        -migrations /opt/alderpointdns-go/schema/migrations \
-        -addr 0.0.0.0:8443 \
-        || fail "starting the temporary setup container failed"
-    sleep 3
-    local setup_status
-    setup_status=$(curl -sk --max-time 5 https://127.0.0.1:18443/api/setup/status)
-    if echo "$setup_status" | grep -q '"setup_required": *true\|"setup_required":true'; then
-        if [ -n "${CUTOVER_OWNER_USER:-}" ] && [ -n "${CUTOVER_OWNER_PASS:-}" ]; then
-            curl -sk --max-time 5 -X POST https://127.0.0.1:18443/api/setup -H 'content-type: application/json' \
-                -d "{\"username\":\"${CUTOVER_OWNER_USER}\",\"password\":\"${CUTOVER_OWNER_PASS}\",\"confirm_password\":\"${CUTOVER_OWNER_PASS}\"}" \
-                | grep -q '"status": *"created"\|"status":"created"' \
-                || fail "owner setup via CUTOVER_OWNER_USER/CUTOVER_OWNER_PASS failed"
-            log "owner account created non-interactively (credentials never logged)"
-        else
-            echo ""
-            echo "ACTION REQUIRED: complete owner setup now at https://<this-host>:18443/"
-            echo "(reachable from localhost only -- SSH tunnel or console access needed)"
-            echo "Press Enter once setup is complete to continue..."
-            read -r _
-            setup_status=$(curl -sk --max-time 5 https://127.0.0.1:18443/api/setup/status)
-            echo "$setup_status" | grep -q '"setup_required": *false\|"setup_required":false' \
-                || fail "setup still not complete -- aborting rather than proceeding without an owner account"
-        fi
+    # The migrated app.db needs a real owner account -- Python's admins
+    # table is deliberately never migrated (a different auth model
+    # entirely, see internal/pymigrate's own doc comment), and the
+    # account must be created through the real browser bootstrap flow
+    # (internal/bootstrap), never fabricated via CLI/env-var input --
+    # Alex's own explicit correction to this script's earlier design.
+    local admin_count
+    admin_count=$(sqlite3 "$GO_LIVE_STATE/data/app.db" "SELECT COUNT(*) FROM admins" 2>/dev/null || echo 0)
+    if [ "$admin_count" -ge 1 ]; then
+        log "real owner account already exists on the staged database (created via the real browser bootstrap flow) -- nothing to do here"
+        # The staged instance (if still running as its own standalone
+        # process on an alternate port for Alex's browser setup) must
+        # release its lock on app.db and port before the real container
+        # below can start -- stop it by matching its known state path,
+        # never a blind pkill of every alderpointdns-go process on the
+        # host.
+        pkill -f "alderpointdns-go web .*-db $GO_LIVE_STATE/data/app.db" 2>/dev/null || true
+        sleep 1
     else
-        log "owner account already exists on this app.db (re-run of a prior attempt) -- skipping setup"
+        fail "no real owner account exists yet on $GO_LIVE_STATE/data/app.db -- Alex must complete real browser setup at the staged instance's URL (using its own one-time bootstrap token, see its startup log) before running execute. This script will not create one on Alex's behalf."
     fi
-    podman stop "${GO_LIVE_CONTAINER}-setup" >/dev/null 2>&1
-    podman rm "${GO_LIVE_CONTAINER}-setup" >/dev/null 2>&1
-    log "temporary setup container stopped; real owner account now persisted in $GO_LIVE_STATE/data/app.db"
 
     mkdir -p "$GO_LIVE_HOSTAGENT_DIR" /var/lib/bind/apdns-go-live
     pkill -f "$GO_LIVE_HOSTAGENT_DIR/apdns-hostagent" 2>/dev/null || true
@@ -274,31 +254,22 @@ cmd_execute() {
     podman start "$GO_LIVE_CONTAINER" || { log "starting $GO_LIVE_CONTAINER failed"; cmd_rollback; exit 1; }
     sleep 3
 
-    # Promote the real DNS runtime now that :53 is free. The owner
-    # account already exists (Phase 1's setup step) -- log in with it
-    # to get a real authenticated session, then call the same real
-    # POST /api/dns-runtime/apply the Encryption/DNS-Runtime page's own
-    # Apply button uses. If CUTOVER_OWNER_USER/PASS were not provided,
-    # this step is skipped and Alex must click Apply in the UI himself
-    # within the error budget below -- the verify loop keeps polling
-    # either way, it does not require this script to be the one that
-    # triggered the promotion.
-    if [ -n "${CUTOVER_OWNER_USER:-}" ] && [ -n "${CUTOVER_OWNER_PASS:-}" ]; then
-        local cookie_jar login_resp csrf
-        cookie_jar=$(mktemp /var/tmp/cutover-execute-cookies.XXXXXX)
-        login_resp=$(curl -sk -c "$cookie_jar" -X POST "https://127.0.0.1:8443/api/login" -H 'content-type: application/json' \
-            -d "{\"username\":\"${CUTOVER_OWNER_USER}\",\"password\":\"${CUTOVER_OWNER_PASS}\"}")
-        csrf=$(echo "$login_resp" | grep -o '"csrf": *"[^"]*"' | sed 's/.*"csrf": *"//;s/"$//')
-        if [ -n "$csrf" ]; then
-            curl -sk -b "$cookie_jar" -H "X-CSRF-Token: $csrf" -X POST "https://127.0.0.1:8443/api/dns-runtime/apply" || true
-            log "dns-runtime/apply triggered"
-        else
-            log "WARNING: login after cutover did not return a CSRF token -- Alex must trigger Apply manually within the error budget"
-        fi
-        rm -f "$cookie_jar"
-    else
-        log "no CUTOVER_OWNER_USER/PASS provided -- Alex must click Apply in the real UI now, within the error budget below"
-    fi
+    # Promote the real DNS runtime now that :53 is free. This script
+    # NEVER accepts or handles the owner password, in any form (Alex's
+    # explicit requirement) -- so it cannot log in and trigger Apply
+    # itself. Two ways this legitimately happens instead:
+    #   (a) Alex keeps his own already-authenticated browser tab open
+    #       through the swap (pointed at the real :8443 URL) and clicks
+    #       Apply himself the moment it responds -- his real session
+    #       cookie (stored in app.db, unaffected by this swap) is still
+    #       valid; or
+    #   (b) Alex logs in fresh post-swap through the real UI and clicks
+    #       Apply.
+    # Either way, this script only polls for the real effect (DNS
+    # actually answering) within the error budget below -- it never
+    # needs to be the one that triggered the promotion.
+    echo ""
+    echo "ACTION REQUIRED NOW: click Apply in the real UI (Encryption or DNS Runtime page) at https://<real-host>:8443/ -- this script will not do it for you and does not handle your password. You have $ERROR_BUDGET_SECONDS seconds."
 
     while true; do
         t1=$(date +%s)

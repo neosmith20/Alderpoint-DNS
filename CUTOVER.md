@@ -136,17 +136,30 @@ coming up healthy -- rehearsed at well under 30 seconds on this hardware for the
 DNS/BIND/dnsdist startup path alone; management HTTPS comes up in low single-digit
 seconds.
 
+0. **Real owner setup, done ahead of time, through the real browser** (not part of
+   `execute` at all): the migrated `app.db` and imported cert are staged at
+   `/var/lib/apdns-go-live-staging/` (owned by the real `apdns-go-web` UID) and served
+   on `0.0.0.0:18443` while Python keeps serving. Alex reaches it at
+   `https://<real-host-ip>:18443/`, presents the real one-time bootstrap token (see
+   `internal/bootstrap`) at the setup screen, and creates the real owner account
+   himself. This script never sees or handles that password in any form. `execute`
+   checks for a real admin row in this exact database before proceeding (see step 3)
+   and refuses to fabricate one if none exists yet.
 1. Fresh `.backup` snapshot of the live `control.db` (safe, non-blocking, Python keeps
-   serving).
+   serving) -- only taken if step 0's staged database doesn't already exist.
 2. Fresh rollback snapshot per Gate 1's procedure if the existing one is stale.
-3. Real `import-python -dry-run=false` into a **new** `app.db` at
-   `/root/apdns-go-live-state/data/app.db` (Python keeps serving throughout).
+3. If the staged database from step 0 already exists, reuse it as-is (real migrated
+   data AND the real owner account Alex already created -- never regenerated). Only if
+   it doesn't exist yet does `execute` fall back to running
+   `import-python -dry-run=false` into `$GO_LIVE_STATE/data/app.db` itself, in which
+   case Alex must still complete real browser setup before `execute` can continue past
+   this point (it will fail loudly rather than proceed without a real admin account).
 4. Import the real live TLS cert/key into the new instance's own cert path via
    `go/cmd/cutover-cert-import` (a small, version-controlled tool wrapping the exact
    same `internal/tlscert.StageValidatePromote` code path the real Encryption page's
    upload/replace handler uses -- built fresh from source at cutover time, not a
    standing binary, never prints key material). Root-owned, same mechanism rehearsed;
-   Python's own cert files are never modified.
+   Python's own cert files are never modified. Skipped if step 0 already did this.
 5. Start a **new**, independent `apdns-hostagent-live` process (own socket, own audit
    log, own `/var/lib/bind/apdns-go-live` directory, own DNS-runtime staging dir) --
    configured with `-dns-runtime-dnsdist-listen-addr 0.0.0.0:53` (the real interface,
