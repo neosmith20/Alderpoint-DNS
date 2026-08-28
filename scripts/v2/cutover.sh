@@ -36,7 +36,7 @@ PY_CERT_DIR="$PY_STATE_VARLIB/certs"
 
 GO_LIVE_CONTAINER=apdns-go-live
 GO_LIVE_STATE=/var/lib/apdns-go-live-staging   # staged ahead of cutover -- see AGENT_PROGRESS.md's "Real migrated database now staged and running" checkpoint; owner setup already completed here through the real browser flow. THE EXACT database used at cutover -- never recreated, never a second database.
-GO_LIVE_RELEASE=/root/apdns-go-migration-preview-release   # same release artifact :10443 already validated
+GO_LIVE_RELEASE="$GO_LIVE_STATE"   # the EXACT binary/frontend/schema Alex already did real browser setup against -- staged there alongside its own data. Deliberately NOT /root/apdns-go-migration-preview-release: that directory is the OLD :10443 preview's own build (a real, different, older commit was found running there during this session's own incident -- see AGENT_PROGRESS.md), and it is scheduled for removal by this same cutover anyway.
 GO_LIVE_HOSTAGENT_DIR=/root/apdns-go-live-hostagent
 GO_LIVE_WEB_UID=996   # same real unprivileged UID the :10443 preview already proved
 STAGING_PORT=18443   # temporary -- torn down after a verified cutover, never part of the final topology
@@ -310,6 +310,24 @@ cmd_execute() {
     mkdir -p "$GO_LIVE_HOSTAGENT_DIR" /var/lib/bind/apdns-go-live
     pkill -f "$GO_LIVE_HOSTAGENT_DIR/apdns-hostagent" 2>/dev/null || true
     sleep 1
+
+    # Build the hostagent binary fresh from HEAD into place -- a prior
+    # run of this script assumed a binary already existed here and
+    # never put one there; the launch silently failed in the
+    # background (bash reported "No such file or directory" to
+    # hostagent.log, but the backgrounded `&` job's exit status was
+    # never checked), so apdns-hostagent-live never actually started.
+    # The web container would then have had no working hostagent
+    # socket even if it had booted -- see AGENT_PROGRESS.md's incident
+    # writeup for the full chain.
+    local repo_root
+    repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+    ( cd "$repo_root/go" && go build -buildvcs=false -o "$GO_LIVE_HOSTAGENT_DIR/apdns-hostagent" ./cmd/apdns-hostagent ) \
+        || fail "building apdns-hostagent for the live instance failed"
+    [ -x "$GO_LIVE_HOSTAGENT_DIR/apdns-hostagent" ] || fail "apdns-hostagent binary was not produced at $GO_LIVE_HOSTAGENT_DIR/apdns-hostagent"
+    log "built apdns-hostagent-live binary: $GO_LIVE_HOSTAGENT_DIR/apdns-hostagent"
+
+    rm -f "$GO_LIVE_HOSTAGENT_DIR/agent.sock"
     "$GO_LIVE_HOSTAGENT_DIR/apdns-hostagent" \
         -socket "$GO_LIVE_HOSTAGENT_DIR/agent.sock" \
         -allowed-uid "$GO_LIVE_WEB_UID" \
@@ -328,8 +346,42 @@ cmd_execute() {
         -web-health-url "https://127.0.0.1:8443/api/health" \
         > "$GO_LIVE_HOSTAGENT_DIR/hostagent.log" 2>&1 &
     disown
-    sleep 2
-    log "apdns-hostagent-live started, socket at $GO_LIVE_HOSTAGENT_DIR/agent.sock"
+    # Wait for REAL evidence it started -- the socket file existing --
+    # rather than a fixed sleep plus an unconditional log line (the
+    # exact pattern that hid the previous failure).
+    local waited=0
+    while [ ! -S "$GO_LIVE_HOSTAGENT_DIR/agent.sock" ]; do
+        sleep 1
+        waited=$((waited+1))
+        if [ "$waited" -ge 10 ]; then
+            fail "apdns-hostagent-live did not create its socket within 10s -- see $GO_LIVE_HOSTAGENT_DIR/hostagent.log"
+        fi
+    done
+    log "apdns-hostagent-live confirmed running, real socket at $GO_LIVE_HOSTAGENT_DIR/agent.sock"
+
+    # Generate a CONTAINER-SPECIFIC appliance.yaml -- the staged
+    # instance's own config (used while it ran as a standalone host
+    # process for Alex's browser setup) has tls_cert_path/tls_key_path
+    # pointing at the real HOST path
+    # ($GO_LIVE_STATE/certs/server.crt), which does not exist inside
+    # this container's own filesystem namespace (only
+    # /etc/alderpointdns-go/certs/... does, via the mount below).
+    # There is no CLI flag to override tls_cert_path/tls_key_path --
+    # they are config-file-only -- so reusing the staged config
+    # unmodified here would fail to find the certificate and crash the
+    # container immediately (a REAL failure mode hit and root-caused
+    # during this session's own first live attempt, alongside a second,
+    # compounding bug: this container's own /etc/alderpointdns-go
+    # directory was never mounted at all, only its certs/ subdirectory
+    # -- see AGENT_PROGRESS.md's incident writeup for both).
+    local container_config="$GO_LIVE_STATE/container-appliance.yaml"
+    sed -e 's#tls_cert_path: .*#tls_cert_path: "/etc/alderpointdns-go/certs/server.crt"#' \
+        -e 's#tls_key_path: .*#tls_key_path: "/etc/alderpointdns-go/certs/server.key"#' \
+        "$GO_LIVE_STATE/config/appliance.yaml" > "$container_config" \
+        || fail "generating the container-specific appliance.yaml failed"
+    grep -q "/etc/alderpointdns-go/certs/server.crt" "$container_config" \
+        || fail "container-specific appliance.yaml does not contain the expected container cert path -- refusing to proceed with a config that would fail the same way again"
+    log "generated container-specific config: $container_config"
 
     podman rm -f "$GO_LIVE_CONTAINER" >/dev/null 2>&1 || true
     podman create --name "$GO_LIVE_CONTAINER" \
@@ -337,6 +389,7 @@ cmd_execute() {
         -p 8443:8443 \
         -v "$GO_LIVE_RELEASE:/opt/alderpointdns-go:ro" \
         -v "$GO_LIVE_STATE:/var/lib/alderpointdns-go" \
+        -v "$container_config:/etc/alderpointdns-go/appliance.yaml:ro" \
         -v "$GO_LIVE_STATE/certs:/etc/alderpointdns-go/certs:ro" \
         -v "$GO_LIVE_HOSTAGENT_DIR:/run/apdns-hostagent" \
         debian:trixie-slim \
