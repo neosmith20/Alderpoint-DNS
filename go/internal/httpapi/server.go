@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"alderpointdns/go-controlplane/internal/auth"
+	"alderpointdns/go-controlplane/internal/bootstrap"
 	"alderpointdns/go-controlplane/internal/backup"
 	"alderpointdns/go-controlplane/internal/blocklists"
 	"alderpointdns/go-controlplane/internal/clients"
@@ -29,6 +30,12 @@ import (
 type Server struct {
 	DB         *sql.DB
 	Auth       *auth.Store
+	// Bootstrap gates first-run owner setup with a real one-time
+	// capability -- see internal/bootstrap's doc comment. Required
+	// (never nil in practice; cmd/alderpointdns-go always wires it) --
+	// a nil Bootstrap would mean setup has no gate at all, which
+	// handleSetup treats as a hard failure, never a silent bypass.
+	Bootstrap *bootstrap.Manager
 	Blocklists *blocklists.Service
 	LocalDNS   *localdns.Service
 	// Importer is nil unless wired at startup -- nil means the real
@@ -132,6 +139,7 @@ func (s *Server) Routes() http.Handler {
 
 	mux.HandleFunc("GET /api/health", s.handleHealth)
 	mux.HandleFunc("GET /api/setup/status", s.handleSetupStatus)
+	mux.HandleFunc("POST /api/setup/bootstrap", s.handleSetupBootstrap)
 	mux.HandleFunc("POST /api/setup", s.handleSetup)
 	mux.HandleFunc("POST /api/login", s.handleLogin)
 	mux.HandleFunc("POST /api/logout", requireAuth(s.handleLogout))

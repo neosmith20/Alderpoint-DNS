@@ -8,9 +8,12 @@
   import RouteLoader from "./lib/RouteLoader.svelte";
   import Icon from "./lib/Icon.svelte";
 
-  type Phase = "loading" | "setup" | "login" | "app";
+  type Phase = "loading" | "bootstrap" | "setup" | "login" | "app";
   let phase = $state<Phase>("loading");
   let phaseError = $state("");
+
+  let bootstrapToken = $state("");
+  let bootstrapBusy = $state(false);
 
   let username = $state("");
   let password = $state("");
@@ -32,7 +35,7 @@
     try {
       const status = await api.setupStatus();
       if (status.setup_required) {
-        phase = "setup";
+        phase = "bootstrap";
         return;
       }
       const sess = await api.session();
@@ -73,6 +76,22 @@
     applyTheme(theme);
   }
 
+  async function doBootstrap(e: Event) {
+    e.preventDefault();
+    phaseError = "";
+    bootstrapBusy = true;
+    try {
+      const resp = await api.setupBootstrap(bootstrapToken.trim());
+      setCsrfToken(resp.csrf);
+      bootstrapToken = "";
+      phase = "setup";
+    } catch (err) {
+      phaseError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      bootstrapBusy = false;
+    }
+  }
+
   async function doSetup(e: Event) {
     e.preventDefault();
     phaseError = "";
@@ -87,6 +106,13 @@
       phase = "login";
     } catch (err) {
       phaseError = err instanceof ApiError ? err.message : String(err);
+      // The bootstrap-issued setup session expires after 15 minutes --
+      // if it lapsed while this form was open, send the operator back
+      // to re-enter a token rather than leaving them stuck resubmitting
+      // a form that can never succeed again.
+      if (err instanceof ApiError && err.code === "setup_session_required") {
+        phase = "bootstrap";
+      }
     } finally {
       busy = false;
     }
@@ -132,6 +158,20 @@
 
   {#if phase === "loading"}
     <main class="centered"><p>Loading…</p></main>
+  {:else if phase === "bootstrap"}
+    <main class="centered">
+      <form onsubmit={doBootstrap} class="auth-form" aria-labelledby="bootstrap-heading">
+        <h2 id="bootstrap-heading">First-run setup</h2>
+        <p>
+          This appliance has not been claimed yet. Enter the one-time setup code printed to this
+          appliance's own startup log (e.g. <code>podman logs</code> or the systemd journal) to
+          begin creating the first administrator account.
+        </p>
+        <label>Setup code <input required bind:value={bootstrapToken} autocomplete="off" spellcheck="false" /></label>
+        <button type="submit" disabled={bootstrapBusy}>{bootstrapBusy ? "Checking…" : "Continue"}</button>
+        {#if phaseError}<p class="error" role="alert">{phaseError}</p>{/if}
+      </form>
+    </main>
   {:else if phase === "setup"}
     <main class="centered">
       <form onsubmit={doSetup} class="auth-form" aria-labelledby="setup-heading">

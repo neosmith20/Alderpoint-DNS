@@ -2,12 +2,74 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 
 	"alderpointdns/go-controlplane/internal/auth"
+	"alderpointdns/go-controlplane/internal/bootstrap"
 	"alderpointdns/go-controlplane/internal/localdns"
 )
+
+// setupSessionCookieName is deliberately distinct from
+// auth.SessionCookieName -- this cookie only ever proves "this browser
+// presented the real one-time bootstrap token", nothing more, and is
+// never valid for any authenticated route.
+const setupSessionCookieName = "alderpointdns_v2_setup_session"
+
+func setSetupSessionCookie(w http.ResponseWriter, r *http.Request, sessionID string) {
+	http.SetCookie(w, &http.Cookie{
+		Name: setupSessionCookieName, Value: sessionID, Path: "/",
+		HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteStrictMode,
+		MaxAge: 15 * 60,
+	})
+}
+
+func clearSetupSessionCookie(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name: setupSessionCookieName, Value: "", Path: "/",
+		HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteStrictMode,
+		MaxAge: -1,
+	})
+}
+
+// handleSetupBootstrap exchanges a real one-time bootstrap token (see
+// internal/bootstrap's doc comment -- delivered only via this
+// process's own log/console, never over the network) for a short-
+// lived setup session. This is the ONLY new thing an unauthenticated
+// LAN client can do before presenting a valid token: everything else
+// about first-run setup now requires it.
+func (s *Server) handleSetupBootstrap(w http.ResponseWriter, r *http.Request) {
+	if s.Bootstrap == nil {
+		Err(http.StatusInternalServerError, "internal_error", "bootstrap gate not configured").WriteJSON(w)
+		return
+	}
+	var body struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		Err(http.StatusBadRequest, "validation_error", "invalid request body").WriteJSON(w)
+		return
+	}
+	sessionID, csrf, err := s.Bootstrap.VerifyToken(body.Token, clientIP(r))
+	if err != nil {
+		switch {
+		case errors.Is(err, bootstrap.ErrLockedOut):
+			Err(http.StatusTooManyRequests, "locked_out", "too many failed attempts; try again later").WriteJSON(w)
+		case errors.Is(err, bootstrap.ErrNoActiveToken):
+			Err(http.StatusConflict, "already_configured", "setup is not open (an owner account may already exist)").WriteJSON(w)
+		default:
+			// Deliberately the same generic message/status for "wrong
+			// token" as any other failure -- never lets a caller
+			// distinguish "close" from "not close" or fingerprint
+			// remaining attempts.
+			Err(http.StatusUnauthorized, "invalid_token", "invalid or expired bootstrap token").WriteJSON(w)
+		}
+		return
+	}
+	setSetupSessionCookie(w, r, sessionID)
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "csrf": csrf})
+}
 
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -36,6 +98,28 @@ type setupRequest struct {
 }
 
 func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
+	if s.Bootstrap == nil {
+		Err(http.StatusInternalServerError, "internal_error", "bootstrap gate not configured").WriteJSON(w)
+		return
+	}
+	// Real gate, checked before touching the database at all: the
+	// caller must hold a session this process itself issued in
+	// response to a real, correct bootstrap token (see
+	// handleSetupBootstrap). The DB's own "zero admins" check below
+	// stays too, as defense in depth -- but this is what actually stops
+	// an unauthenticated LAN client from racing to claim the appliance,
+	// not just "whoever's request the database transaction happened to
+	// commit first".
+	setupCookie, _ := r.Cookie(setupSessionCookieName)
+	setupSessionID := ""
+	if setupCookie != nil {
+		setupSessionID = setupCookie.Value
+	}
+	if err := s.Bootstrap.CheckSession(setupSessionID, r.Header.Get("X-CSRF-Token")); err != nil {
+		Err(http.StatusUnauthorized, "setup_session_required", "present a valid bootstrap token at /api/setup/bootstrap first").WriteJSON(w)
+		return
+	}
+
 	var req setupRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		Err(http.StatusBadRequest, "validation_error", "invalid request body").WriteJSON(w)
@@ -62,6 +146,14 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		Err(http.StatusInternalServerError, "internal_error", "setup failed").WriteJSON(w)
 		return
 	}
+	// The real admin account now exists -- permanently disable the
+	// bootstrap mechanism (deletes the token file, clears every
+	// in-memory setup session, including any second browser tab that
+	// raced in with the same token) and this browser's own setup
+	// cookie. Nothing about first-run setup can ever be reached again
+	// in this process's lifetime.
+	s.Bootstrap.Consume()
+	clearSetupSessionCookie(w, r)
 
 	var localDNSResult any
 	if req.CreateLocalDNS {

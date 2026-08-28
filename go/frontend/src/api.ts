@@ -569,6 +569,7 @@ export const api = {
       >;
     }>("/api/health"),
   setupStatus: () => req<{ setup_required: boolean }>("/api/setup/status"),
+  setupBootstrap: (token: string) => req<{ status: string; csrf: string }>("/api/setup/bootstrap", { method: "POST", body: JSON.stringify({ token }) }),
   setup: (body: {
     username: string;
     password: string;

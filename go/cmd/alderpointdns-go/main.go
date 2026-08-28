@@ -23,6 +23,7 @@ import (
 
 	"alderpointdns/go-controlplane/internal/auth"
 	"alderpointdns/go-controlplane/internal/backup"
+	"alderpointdns/go-controlplane/internal/bootstrap"
 	"alderpointdns/go-controlplane/internal/blocklists"
 	"alderpointdns/go-controlplane/internal/clients"
 	"alderpointdns/go-controlplane/internal/config"
@@ -257,6 +258,7 @@ func runWeb(args []string) {
 	analyticsInboxDir := fs.String("analytics-inbox-dir", "", "optional read-only path to Python's analytics/inbox/ directory (queue depth for Analytics health); empty = queue depth unavailable")
 	queryLogDir := fs.String("query-log-dir", "", "optional read-only path to Python's analytics/queries/ raw Parquet history (compatibility boundary, see internal/rawquerylog); empty = Query Log reports degraded")
 	backupsDir := fs.String("backups-dir", "./data/backups", "directory for stored/uploaded appliance backups (see internal/backup)")
+	bootstrapTokenPath := fs.String("bootstrap-token-path", "./data/bootstrap-token", "where the one-time first-run setup token is written (0600); also logged once at startup when setup is required -- see internal/bootstrap")
 	backupRetentionMaxCount := fs.Int("backup-retention-max-count", 0, "keep at most N manual backups, oldest pruned first (0 = unlimited; the pre-restore safety backup is never pruned)")
 	backupRetentionMaxAgeDays := fs.Int("backup-retention-max-age-days", 0, "prune manual backups older than N days (0 = unlimited)")
 	hostagentSocket := fs.String("hostagent-socket", "", "unix socket path for apdns-hostagent (see internal/hostagent, internal/hostagentd); empty = Cache/Replication/Network/Logs/Software-Updates all report unavailable")
@@ -386,8 +388,20 @@ func runWeb(args []string) {
 		}
 	}
 
+	authStore := &auth.Store{DB: db}
+	setupRequired, err := authStore.SetupRequired(ctx)
+	if err != nil {
+		logger.Error("checking setup status for bootstrap init", "err", err)
+		os.Exit(1)
+	}
+	bootstrapMgr := &bootstrap.Manager{TokenPath: *bootstrapTokenPath, Log: logger}
+	if err := bootstrapMgr.Init(setupRequired); err != nil {
+		logger.Error("bootstrap init failed", "err", err)
+		os.Exit(1)
+	}
+
 	srv := &httpapi.Server{
-		DB: db, Auth: &auth.Store{DB: db}, Blocklists: blSvc, LocalDNS: ldSvc, Upstreams: upSvc, DomainRouting: domainRoutingSvc, Clients: clientsSvc, Policy: policySvc, CustomRules: customRulesSvc, Backup: backupSvc,
+		DB: db, Auth: authStore, Bootstrap: bootstrapMgr, Blocklists: blSvc, LocalDNS: ldSvc, Upstreams: upSvc, DomainRouting: domainRoutingSvc, Clients: clientsSvc, Policy: policySvc, CustomRules: customRulesSvc, Backup: backupSvc,
 		DNSTransports: dnsTransportsSvc, Notifications: notificationsSvc, Importer: importerSvc,
 		StaticDir: *staticDir, Log: logger, Version: Version, StartedAt: startedAt,
 		SessionTTL: cfg.SessionTTL(), LastSeen: cfg.LastSeenUpdateInterval(),
