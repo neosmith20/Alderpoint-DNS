@@ -74,6 +74,17 @@ GO_LIVE_CONTAINER=apdns-go-live
 GO_LIVE_STATE=/var/lib/apdns-go-live-staging   # staged ahead of cutover -- see AGENT_PROGRESS.md's "Real migrated database now staged and running" checkpoint; owner setup already completed here through the real browser flow. THE EXACT database used at cutover -- never recreated, never a second database.
 GO_LIVE_RELEASE="$GO_LIVE_STATE"   # the EXACT binary/frontend/schema Alex already did real browser setup against -- staged there alongside its own data. Deliberately NOT /root/apdns-go-migration-preview-release: that directory is the OLD :10443 preview's own build (a real, different, older commit was found running there during this session's own incident -- see AGENT_PROGRESS.md), and it is scheduled for removal by this same cutover anyway.
 GO_LIVE_HOSTAGENT_DIR=/root/apdns-go-live-hostagent
+# The socket itself lives under /run, not $GO_LIVE_HOSTAGENT_DIR -- /root
+# is 0700, so apdns-go-web (996) cannot traverse into it to reach a
+# socket there at all, regardless of the socket file's own permissions
+# (0666, set by hostagentd.Server.Serve). A real failure this session's
+# first hardened attempt hit directly: "connect: permission denied"
+# before Python was ever touched (the dry-run gate correctly caught it).
+# The web CONTAINER is unaffected either way (it reaches the socket via
+# its own bind mount, which doesn't care about host traversal
+# permissions) -- only the native (non-container) dns-promote-cli calls
+# needed this.
+GO_LIVE_HOSTAGENT_SOCKET_DIR=/run/apdns-go-live-hostagent
 GO_LIVE_WEB_UID=996   # same real unprivileged UID the :10443 preview already proved
 STAGING_PORT=18443   # temporary -- torn down after a verified cutover, never part of the final topology
 
@@ -469,6 +480,7 @@ cmd_execute() {
     fi
 
     mkdir -p "$GO_LIVE_HOSTAGENT_DIR" /var/lib/bind/apdns-go-live
+    mkdir -p "$GO_LIVE_HOSTAGENT_SOCKET_DIR" && chmod 755 "$GO_LIVE_HOSTAGENT_SOCKET_DIR"
     pkill -f "$GO_LIVE_HOSTAGENT_DIR/apdns-hostagent" 2>/dev/null || true
     sleep 1
 
@@ -492,9 +504,9 @@ cmd_execute() {
         || { phase_set "failed_prepare"; fail "building the dns-promote CLI failed"; }
     log "built dns-promote CLI (same binary as alderpointdns-go, invoked with the dns-promote subcommand): $GO_LIVE_RELEASE/dns-promote-cli"
 
-    rm -f "$GO_LIVE_HOSTAGENT_DIR/agent.sock"
+    rm -f "$GO_LIVE_HOSTAGENT_SOCKET_DIR/agent.sock"
     "$GO_LIVE_HOSTAGENT_DIR/apdns-hostagent" \
-        -socket "$GO_LIVE_HOSTAGENT_DIR/agent.sock" \
+        -socket "$GO_LIVE_HOSTAGENT_SOCKET_DIR/agent.sock" \
         -allowed-uid "$GO_LIVE_WEB_UID" \
         -audit-log "$GO_LIVE_HOSTAGENT_DIR/audit/audit.jsonl" \
         -bind-compiled-dir /nonexistent \
@@ -515,7 +527,7 @@ cmd_execute() {
     # rather than a fixed sleep plus an unconditional log line (the
     # exact pattern that hid a previous failure).
     local waited=0
-    while [ ! -S "$GO_LIVE_HOSTAGENT_DIR/agent.sock" ]; do
+    while [ ! -S "$GO_LIVE_HOSTAGENT_SOCKET_DIR/agent.sock" ]; do
         sleep 1
         waited=$((waited+1))
         if [ "$waited" -ge 10 ]; then
@@ -523,7 +535,7 @@ cmd_execute() {
             fail "apdns-hostagent-live did not create its socket within 10s -- see $GO_LIVE_HOSTAGENT_DIR/hostagent.log"
         fi
     done
-    log "apdns-hostagent-live confirmed running, real socket at $GO_LIVE_HOSTAGENT_DIR/agent.sock"
+    log "apdns-hostagent-live confirmed running, real socket at $GO_LIVE_HOSTAGENT_SOCKET_DIR/agent.sock"
 
     # Generate a CONTAINER-SPECIFIC appliance.yaml -- the staged
     # instance's own config (used while it ran as a standalone host
@@ -557,7 +569,7 @@ cmd_execute() {
         -v "$GO_LIVE_STATE:/var/lib/alderpointdns-go" \
         -v "$container_config:/etc/alderpointdns-go/appliance.yaml:ro" \
         -v "$GO_LIVE_STATE/certs:/etc/alderpointdns-go/certs:ro" \
-        -v "$GO_LIVE_HOSTAGENT_DIR:/run/apdns-hostagent" \
+        -v "$GO_LIVE_HOSTAGENT_SOCKET_DIR:/run/apdns-hostagent" \
         debian:trixie-slim \
         /opt/alderpointdns-go/alderpointdns-go web \
         -db /var/lib/alderpointdns-go/data/app.db \
@@ -592,7 +604,7 @@ cmd_execute() {
         -db "$GO_LIVE_STATE/data/app.db" \
         -config "$GO_LIVE_STATE/config/appliance.yaml" \
         -migrations "$GO_LIVE_RELEASE/schema/migrations" \
-        -hostagent-socket "$GO_LIVE_HOSTAGENT_DIR/agent.sock" \
+        -hostagent-socket "$GO_LIVE_HOSTAGENT_SOCKET_DIR/agent.sock" \
         -dns-runtime-dnsdist-addr "$GO_LIVE_DNSDIST_ADDR" \
         -dns-runtime-bind-proxy-addr "$GO_LIVE_BIND_PROXY_ADDR" \
         -dry-run=true || { phase_set "failed_dns_validate"; fail "staged DNS runtime failed validation (named-checkconf/dnsdist --check-config) -- Python remains live, nothing was touched"; }
@@ -624,7 +636,7 @@ cmd_execute() {
         -db "$GO_LIVE_STATE/data/app.db" \
         -config "$GO_LIVE_STATE/config/appliance.yaml" \
         -migrations "$GO_LIVE_RELEASE/schema/migrations" \
-        -hostagent-socket "$GO_LIVE_HOSTAGENT_DIR/agent.sock" \
+        -hostagent-socket "$GO_LIVE_HOSTAGENT_SOCKET_DIR/agent.sock" \
         -dns-runtime-dnsdist-addr "$GO_LIVE_DNSDIST_ADDR" \
         -dns-runtime-bind-proxy-addr "$GO_LIVE_BIND_PROXY_ADDR" \
         -dry-run=false; then
