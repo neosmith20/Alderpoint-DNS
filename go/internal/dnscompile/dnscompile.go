@@ -527,10 +527,25 @@ func CompileDnsdist(in Input) (string, error) {
 		// disclosed mitigation for an unresolved dnsdist-side stall,
 		// never a DNS-answering concern (this only affects the logger).
 		w("apdnsDnstapLogger = newFrameStreamUnixLogger(%s, {reopenInterval=30, outputQueueSize=100000, queueNotifyThreshold=1, flushTimeout=1})", luaString(in.DnstapSocketPath))
+		// Wrapped in pcall: found live and still unexplained -- the
+		// fstrm connection to the receiver goes silently idle (stays
+		// connected, stops delivering frames, no error logged on
+		// either side) after roughly a minute of real traffic, not
+		// fixed by a larger logger queue or reopenInterval. One
+		// remaining real hypothesis is an uncaught Lua error in THIS
+		// alter function for some response shape this rule chain
+		// doesn't guarantee always has the tag set (e.g. a protocol-
+		// level self-answered response generated before any addAction
+		// rule ever runs) silently disabling the logger for the rest
+		// of the process's life. pcall makes this function unable to
+		// ever throw, at the cost of a response going unlogged (not
+		// mistagged) on the rare path where dr:getTag itself errors,
+		// which is strictly better than a whole-process-lifetime
+		// analytics outage from one bad response.
 		w("function apdnsDnstapAlter(dr, dm)")
-		w(`  local outcome = dr:getTag("apdns_outcome")`)
-		w(`  if outcome == nil then outcome = "allowed" end`)
-		w("  dm:setExtra(outcome)")
+		w(`  local ok, outcome = pcall(function() return dr:getTag("apdns_outcome") end)`)
+		w("  if not ok or outcome == nil then outcome = \"allowed\" end")
+		w("  pcall(function() dm:setExtra(outcome) end)")
 		w("end")
 		// Two separate registrations, deliberately: addResponseAction only
 		// fires for a response that actually came back from a backend
