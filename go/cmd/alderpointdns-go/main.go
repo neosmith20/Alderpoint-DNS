@@ -43,6 +43,7 @@ import (
 	"alderpointdns/go-controlplane/internal/dnsanalytics"
 	"alderpointdns/go-controlplane/internal/policy"
 	"alderpointdns/go-controlplane/internal/pymigrate"
+	"alderpointdns/go-controlplane/internal/secretbackup"
 	"alderpointdns/go-controlplane/internal/secretstore"
 	"alderpointdns/go-controlplane/internal/upstreams"
 )
@@ -534,6 +535,7 @@ func runWeb(args []string) {
 	dnsPerfBindPlainAddr := fs.String("dns-perf-bind-plain-addr", "", "BIND's own unproxied loopback listener address for this deployment (127.0.0.1:<bind-plain-port>), for System Status's Safe DNS Benchmark's 'BIND direct' case display only -- the real dialing happens entirely inside apdns-hostagent; empty = that one case is omitted")
 	dnsPerfReportPath := fs.String("dns-perf-report-path", "./data/dns-performance/latest-report.json", "path to persist the Safe DNS Benchmark's latest report (see internal/dnsperf)")
 	replicationCertDir := fs.String("replication-cert-dir", "./data/replication/certs", "directory for this node's own real replication mTLS certificate material (server cert/key as primary, or client cert/key/CA cert as an enrolled replica) -- see internal/replication; only CA generation/signing needs -hostagent-socket, the listener/poller themselves need no privilege")
+	secretBackupsDir := fs.String("secret-backups-dir", "./data/secret-backups", "directory for real Secret Backup archive files (see internal/secretbackup); requires -hostagent-socket")
 	fs.Parse(args)
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -578,6 +580,7 @@ func runWeb(args []string) {
 		RetentionMaxCount: *backupRetentionMaxCount, RetentionMaxAgeDays: *backupRetentionMaxAgeDays,
 	}
 	importerSvc := &importer.Service{DB: db, LocalDNS: ldSvc, Backup: backupSvc}
+	secretBackupSvc := &secretbackup.Service{DB: db, Dir: *secretBackupsDir}
 
 	// Host-agent client: same "optional, never fatal" contract. No
 	// connection is opened at startup -- hostagent.Client dials fresh
@@ -670,9 +673,11 @@ func runWeb(args []string) {
 	secretsSvc := &secretstore.Service{DB: db, HostAgent: hostAgentClient}
 	notificationsSvc.Secrets = secretsSvc
 	replicationSvc.HostAgent = hostAgentClient
+	secretBackupSvc.HostAgent = hostAgentClient
 	if hostAgentClient == nil {
 		logger.Info("secrets subsystem not wired: -hostagent-socket is empty; provider secrets (Notifications) will report unavailable")
 		logger.Info("replication CA generation/signing not wired: -hostagent-socket is empty; Replication will report unavailable as soon as a CA operation is attempted")
+		logger.Info("secret backups not wired: -hostagent-socket is empty; Secret Backups will report unavailable")
 	}
 
 	// Real dispatch call site #1: a blocklist subscription crossing the
@@ -743,6 +748,7 @@ func runWeb(args []string) {
 		DNSPerfBindPlainAddr: *dnsPerfBindPlainAddr,
 		Secrets:              secretsSvc,
 		Replication:          replicationSvc,
+		SecretBackup:         secretBackupSvc,
 	}
 
 	// DNS Performance benchmark: same "optional, never fatal" contract

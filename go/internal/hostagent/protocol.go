@@ -102,6 +102,29 @@ const (
 	// the "Send Test" button).
 	OpSecretsNotifySend = "secrets.notify_send"
 
+	// OpSecretsBackupCreate is the one deliberate, disclosed exception
+	// to "a secret's plaintext never crosses this socket outbound": a
+	// real disaster-recovery Secret Backup needs every current secret's
+	// plaintext at least transiently, exactly like Python's own
+	// SecretStore.export_all(). Unlike Python, that transient plaintext
+	// never leaves apdns-hostagent at all -- this op decrypts every
+	// sealed record the caller identifies internally, bulk-encrypts the
+	// whole resulting payload with a second, dedicated backup key (also
+	// sealed under the master key, generated once and reused), and
+	// returns only that outer ciphertext. The web process holds real
+	// secret plaintext at NO point in this flow, stricter than Python's
+	// own design.
+	OpSecretsBackupCreate = "secrets.backup_create"
+
+	// OpSecretsBackupRestore is OpSecretsBackupCreate's inverse: given a
+	// previously-created backup's ciphertext, decrypts it internally
+	// with the backup key and RE-SEALS each recovered secret under the
+	// current master key version, returning only the new sealed
+	// (ciphertext/nonce/key_version) tuples -- never the recovered
+	// plaintext itself. The caller writes those sealed tuples into its
+	// own `secrets` table rows; it never sees what was inside.
+	OpSecretsBackupRestore = "secrets.backup_restore"
+
 	// OpDNSPerfBenchmark runs System Status's real "Safe DNS Benchmark"
 	// -- a bounded, sequential set of DNS/DoT/DoH queries against the
 	// real Go-managed dnsdist/BIND runtime, executed from this agent

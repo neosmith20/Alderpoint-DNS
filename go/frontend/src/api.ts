@@ -91,6 +91,24 @@ export interface BackupCategory {
   tables: string[];
 }
 
+export interface SecretBackupInfo {
+  name: string;
+  created_at: string;
+  secret_count: number;
+  size_bytes: number;
+}
+
+export interface SecretBackupJob {
+  id: number;
+  kind: "create" | "restore";
+  started_at: string;
+  finished_at?: string;
+  status: "succeeded" | "failed";
+  filename?: string;
+  secret_count: number;
+  detail?: string;
+}
+
 export interface CustomRule {
   id: number;
   rule_type: "block" | "allow" | "regex_block" | "regex_allow" | "rewrite";
@@ -1091,6 +1109,20 @@ export const api = {
       body: JSON.stringify({ categories: categories ?? [] }),
     }),
   deleteBackup: (name: string) => req<{ status: string }>(`/api/backup/appliance/${encodeURIComponent(name)}`, { method: "DELETE" }),
+
+  listSecretBackups: (signal?: AbortSignal) =>
+    req<{ backups: SecretBackupInfo[]; jobs: SecretBackupJob[] }>("/api/backup/secrets", undefined, signal),
+  createSecretBackup: () =>
+    req<{ status: string; backup: SecretBackupInfo }>("/api/backup/secrets", { method: "POST" }),
+  validateSecretBackup: (name: string) =>
+    req<{ status: string; secret_count: number }>(`/api/backup/secrets/${encodeURIComponent(name)}/validate`, { method: "POST" }),
+  restoreSecretBackup: (name: string, overwrite: boolean) =>
+    req<{ status: string; restored_count: number }>(`/api/backup/secrets/${encodeURIComponent(name)}/restore`, {
+      method: "POST",
+      body: JSON.stringify({ overwrite }),
+    }),
+  deleteSecretBackup: (name: string) =>
+    req<{ status: string }>(`/api/backup/secrets/${encodeURIComponent(name)}`, { method: "DELETE" }),
 
   dnsRuntimeStatus: (signal?: AbortSignal) => req<DNSRuntimeStatus>("/api/dns-runtime/status", undefined, signal),
   applyDNSRuntime: () => req<DNSRuntimeApplyResult>("/api/dns-runtime/apply", { method: "POST" }),

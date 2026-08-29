@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, ApiError, type BackupInfo, type BackupCategory } from "../api";
+  import { api, ApiError, type BackupInfo, type BackupCategory, type SecretBackupInfo } from "../api";
   import { StaleGuard } from "../staleGuard";
   import { router } from "../router.svelte";
   import { timestampPref } from "../timestamp.svelte";
@@ -39,6 +39,85 @@
   let restoreError = $state("");
   let restoreResult = $state("");
 
+  // Secret Backups: a separate, smaller archive of just the sealed
+  // provider/notification secrets (see internal/secretbackup) -- kept
+  // entirely apart from the appliance-config backups above because they
+  // have a different unit (individual secrets, not config tables),
+  // different security handling (re-encrypted with a dedicated key
+  // entirely inside apdns-hostagent, never seen as plaintext here), and
+  // no selective-category restore.
+  let secretBackups = $state<SecretBackupInfo[]>([]);
+  let secretBackupsLoadError = $state("");
+  let secretBackupsUnavailable = $state(false);
+  const secretGuard = new StaleGuard();
+
+  let secretCreateBusy = $state(false);
+  let secretCreateError = $state("");
+
+  let secretRestoreTarget = $state<string | null>(null);
+  let secretRestoreOverwrite = $state(false);
+  let secretRestoreBusy = $state(false);
+  let secretRestoreError = $state("");
+  let secretRestoreResult = $state("");
+
+  async function refreshSecretBackups() {
+    const token = secretGuard.start();
+    try {
+      const resp = await api.listSecretBackups(router.signal());
+      if (!secretGuard.isCurrent(token)) return;
+      secretBackups = resp.backups;
+      secretBackupsLoadError = "";
+      secretBackupsUnavailable = false;
+    } catch (err) {
+      if (!secretGuard.isCurrent(token)) return;
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      if (err instanceof ApiError && err.status === 503) {
+        secretBackupsUnavailable = true;
+        return;
+      }
+      secretBackupsLoadError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  async function createSecretBackup() {
+    secretCreateError = "";
+    secretCreateBusy = true;
+    try {
+      await api.createSecretBackup();
+      await refreshSecretBackups();
+    } catch (err) {
+      secretCreateError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      secretCreateBusy = false;
+    }
+  }
+
+  function startSecretRestore(b: SecretBackupInfo) {
+    secretRestoreTarget = b.name;
+    secretRestoreOverwrite = false;
+    secretRestoreError = "";
+    secretRestoreResult = "";
+  }
+
+  async function confirmSecretRestore(b: SecretBackupInfo) {
+    secretRestoreBusy = true;
+    secretRestoreError = "";
+    try {
+      const resp = await api.restoreSecretBackup(b.name, secretRestoreOverwrite);
+      secretRestoreResult = `Restored ${resp.restored_count} secret(s) from "${b.name}".`;
+      secretRestoreTarget = null;
+    } catch (err) {
+      secretRestoreError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      secretRestoreBusy = false;
+    }
+  }
+
+  async function deleteSecretBackup(b: SecretBackupInfo) {
+    await api.deleteSecretBackup(b.name);
+    await refreshSecretBackups();
+  }
+
   async function refresh() {
     const token = guard.start();
     try {
@@ -55,6 +134,7 @@
 
   onMount(() => {
     refresh();
+    refreshSecretBackups();
     api
       .listBackupCategories(router.signal())
       .then((resp) => (categories = resp.categories))
@@ -168,6 +248,14 @@
     { key: "size", label: "Size", sortValue: (b) => b.size_bytes, minWidth: 8 },
     { key: "actions", label: "Actions", minWidth: 18 },
   ];
+
+  const secretColumns: Column<SecretBackupInfo>[] = [
+    { key: "name", label: "Filename", sortValue: (b) => b.name, minWidth: 20 },
+    { key: "created_at", label: "Created", sortValue: (b) => b.created_at, minWidth: 14 },
+    { key: "secret_count", label: "Secrets", sortValue: (b) => b.secret_count, minWidth: 8 },
+    { key: "size", label: "Size", sortValue: (b) => b.size_bytes, minWidth: 8 },
+    { key: "actions", label: "Actions", minWidth: 18 },
+  ];
 </script>
 
 <section aria-labelledby="backup-heading" class="backup">
@@ -254,6 +342,70 @@
       {/if}
     {/snippet}
   </DataGrid>
+
+  <h2 id="secret-backups-heading">Secret Backups</h2>
+  <p class="scope-note">
+    A separate archive of just the sealed provider/notification secrets (API tokens, webhook URLs,
+    etc.) -- not appliance config. Re-encrypted with a dedicated backup key held entirely inside the
+    hostagent; this web process never sees the plaintext.
+  </p>
+
+  {#if secretBackupsUnavailable}
+    <p class="error" role="alert">
+      Secret backups are not configured for this deployment (the hostagent socket is not set up).
+    </p>
+  {:else}
+    {#if secretBackupsLoadError}<p class="error" role="alert">{secretBackupsLoadError}</p>{/if}
+    {#if secretRestoreResult}<p class="success" role="status">{secretRestoreResult}</p>{/if}
+
+    <div class="card" style="max-width: 20rem;">
+      <h3>Create a secret backup</h3>
+      <button onclick={createSecretBackup} disabled={secretCreateBusy}>
+        {secretCreateBusy ? "Creating…" : "Create secret backup now"}
+      </button>
+      {#if secretCreateError}<p class="error" role="alert">{secretCreateError}</p>{/if}
+    </div>
+
+    <DataGrid
+      gridId="secret-backups"
+      columns={secretColumns}
+      rows={secretBackups}
+      rowKey={(b) => b.name}
+      emptyMessage="No secret backups yet."
+    >
+      {#snippet cell(b, colKey)}
+        {#if colKey === "name"}
+          {b.name}
+        {:else if colKey === "created_at"}
+          {timestampPref.format(b.created_at)}
+        {:else if colKey === "secret_count"}
+          {b.secret_count}
+        {:else if colKey === "size"}
+          {formatSize(b.size_bytes)}
+        {:else if colKey === "actions"}
+          <div class="actions">
+            <button onclick={() => startSecretRestore(b)}>Restore…</button>
+            <button onclick={() => deleteSecretBackup(b)}>Delete</button>
+          </div>
+          {#if secretRestoreTarget === b.name}
+            <div class="restore-confirm">
+              <label>
+                <input type="checkbox" bind:checked={secretRestoreOverwrite} />
+                Overwrite secrets that already exist (otherwise existing secrets are left untouched)
+              </label>
+              <div class="actions">
+                <button class="danger" disabled={secretRestoreBusy} onclick={() => confirmSecretRestore(b)}>
+                  {secretRestoreBusy ? "Restoring…" : "Confirm restore"}
+                </button>
+                <button onclick={() => (secretRestoreTarget = null)}>Cancel</button>
+              </div>
+              {#if secretRestoreError}<p class="error" role="alert">{secretRestoreError}</p>{/if}
+            </div>
+          {/if}
+        {/if}
+      {/snippet}
+    </DataGrid>
+  {/if}
 </section>
 
 <style>

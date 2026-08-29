@@ -8,6 +8,7 @@ import (
 
 	"alderpointdns/go-controlplane/internal/auth"
 	"alderpointdns/go-controlplane/internal/backup"
+	"alderpointdns/go-controlplane/internal/secretbackup"
 	"alderpointdns/go-controlplane/internal/blocklists"
 	"alderpointdns/go-controlplane/internal/bootstrap"
 	"alderpointdns/go-controlplane/internal/clientalias"
@@ -54,6 +55,7 @@ type Server struct {
 	DomainRouting *domainrouting.Service
 	CustomRules   *customrules.Service
 	Backup        *backup.Service
+	SecretBackup  *secretbackup.Service
 	DNSTransports *dnstransports.Service
 	Notifications *notifications.Service
 	Replication   *replication.Service
@@ -251,6 +253,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/backup/appliance/{name}/validate", requireAuth(s.handlePreviewBackup))
 	mux.HandleFunc("POST /api/backup/appliance/{name}/restore", requireAuth(s.handleRestoreBackup))
 	mux.HandleFunc("DELETE /api/backup/appliance/{name}", requireAuth(s.handleDeleteBackup))
+	mux.HandleFunc("GET /api/backup/secrets", requireAuth(s.handleListSecretBackups))
+	mux.HandleFunc("POST /api/backup/secrets", requireAuth(s.handleCreateSecretBackup))
+	mux.HandleFunc("POST /api/backup/secrets/{name}/validate", requireAuth(s.handleValidateSecretBackup))
+	mux.HandleFunc("POST /api/backup/secrets/{name}/restore", requireAuth(s.handleRestoreSecretBackup))
+	mux.HandleFunc("DELETE /api/backup/secrets/{name}", requireAuth(s.handleDeleteSecretBackup))
 
 	mux.HandleFunc("GET /api/dns-transports", requireAuth(s.handleGetDNSTransports))
 	mux.HandleFunc("PUT /api/dns-transports", requireAuth(s.handleUpdateDNSTransports))

@@ -429,7 +429,219 @@ func RegisterSecretsOps(s *Server, cfg SecretsConfig) error {
 		}, nil
 	})
 
+	// Secret Backups: the one deliberate exception to "plaintext never
+	// leaves this process outbound" -- see OpSecretsBackupCreate/
+	// OpSecretsBackupRestore's own doc comments in internal/hostagent/
+	// protocol.go for why even this exception never actually exposes
+	// plaintext to the caller (a second, dedicated backup key does the
+	// outer encryption, entirely inside this process).
+	s.Register(hostagent.OpSecretsBackupCreate, func(ctx context.Context, params json.RawMessage) (any, error) {
+		var in struct {
+			Secrets []struct {
+				ID            string `json:"id"`
+				Kind          string `json:"kind"`
+				OwnerRef      string `json:"owner_ref"`
+				CiphertextB64 string `json:"ciphertext_b64"`
+				NonceB64      string `json:"nonce_b64"`
+				KeyVersion    int    `json:"key_version"`
+			} `json:"secrets"`
+			BackupKey *sealedIn `json:"backup_key"`
+		}
+		if err := json.Unmarshal(params, &in); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+
+		backupKey, backupKeyOut, err := ensureBackupKey(engine, in.BackupKey)
+		if err != nil {
+			return nil, err
+		}
+
+		type exportedSecret struct {
+			ID       string `json:"id"`
+			Kind     string `json:"kind"`
+			OwnerRef string `json:"owner_ref"`
+			Value    string `json:"value"`
+		}
+		exported := make([]exportedSecret, 0, len(in.Secrets))
+		for _, rec := range in.Secrets {
+			ciphertext, err := base64.StdEncoding.DecodeString(rec.CiphertextB64)
+			if err != nil {
+				return nil, fmt.Errorf("secret %s: invalid ciphertext encoding", rec.ID)
+			}
+			nonce, err := base64.StdEncoding.DecodeString(rec.NonceB64)
+			if err != nil {
+				return nil, fmt.Errorf("secret %s: invalid nonce encoding", rec.ID)
+			}
+			plaintext, err := engine.open(rec.Kind, rec.OwnerRef, rec.KeyVersion, nonce, ciphertext)
+			if err != nil {
+				return nil, fmt.Errorf("secret %s could not be opened", rec.ID)
+			}
+			exported = append(exported, exportedSecret{ID: rec.ID, Kind: rec.Kind, OwnerRef: rec.OwnerRef, Value: plaintext})
+		}
+
+		createdAt := time.Now().UTC().Format(time.RFC3339)
+		payload, err := json.Marshal(map[string]any{
+			"format_version": 1, "created_at": createdAt, "secrets": exported,
+		})
+		if err != nil {
+			return nil, err
+		}
+		backupCiphertext, err := aesGCMEncrypt(backupKey, payload)
+		if err != nil {
+			return nil, fmt.Errorf("encrypting backup: %w", err)
+		}
+		return map[string]any{
+			"backup_b64": base64.StdEncoding.EncodeToString(backupCiphertext),
+			"secret_count": len(exported), "created_at": createdAt,
+			"backup_key": backupKeyOut,
+		}, nil
+	})
+
+	s.Register(hostagent.OpSecretsBackupRestore, func(ctx context.Context, params json.RawMessage) (any, error) {
+		var in struct {
+			BackupB64 string    `json:"backup_b64"`
+			BackupKey *sealedIn `json:"backup_key"`
+		}
+		if err := json.Unmarshal(params, &in); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		if in.BackupKey == nil {
+			return nil, fmt.Errorf("backup_key is required")
+		}
+		backupKeyB64, err := in.BackupKey.open(engine)
+		if err != nil {
+			return nil, fmt.Errorf("backup key could not be opened")
+		}
+		backupKey, err := base64.StdEncoding.DecodeString(backupKeyB64)
+		if err != nil {
+			return nil, fmt.Errorf("backup key is corrupted")
+		}
+		backupCiphertext, err := base64.StdEncoding.DecodeString(in.BackupB64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid backup encoding")
+		}
+		plaintext, err := aesGCMDecrypt(backupKey, backupCiphertext)
+		if err != nil {
+			return nil, fmt.Errorf("cannot decrypt backup -- wrong key, or the backup is corrupted/tampered with")
+		}
+		var payload struct {
+			FormatVersion int    `json:"format_version"`
+			CreatedAt     string `json:"created_at"`
+			Secrets       []struct {
+				ID       string `json:"id"`
+				Kind     string `json:"kind"`
+				OwnerRef string `json:"owner_ref"`
+				Value    string `json:"value"`
+			} `json:"secrets"`
+		}
+		if err := json.Unmarshal(plaintext, &payload); err != nil {
+			return nil, fmt.Errorf("backup payload is not valid after decryption")
+		}
+		if payload.FormatVersion != 1 {
+			return nil, fmt.Errorf("unsupported backup format version %d", payload.FormatVersion)
+		}
+
+		type resealedSecret struct {
+			ID            string `json:"id"`
+			Kind          string `json:"kind"`
+			OwnerRef      string `json:"owner_ref"`
+			CiphertextB64 string `json:"ciphertext_b64"`
+			NonceB64      string `json:"nonce_b64"`
+			KeyVersion    int    `json:"key_version"`
+		}
+		resealed := make([]resealedSecret, 0, len(payload.Secrets))
+		for _, rec := range payload.Secrets {
+			ciphertext, nonce, version, err := engine.seal(rec.Kind, rec.OwnerRef, rec.Value)
+			if err != nil {
+				return nil, fmt.Errorf("resealing secret %s failed", rec.ID)
+			}
+			resealed = append(resealed, resealedSecret{
+				ID: rec.ID, Kind: rec.Kind, OwnerRef: rec.OwnerRef,
+				CiphertextB64: base64.StdEncoding.EncodeToString(ciphertext),
+				NonceB64:      base64.StdEncoding.EncodeToString(nonce),
+				KeyVersion:    version,
+			})
+		}
+		return map[string]any{
+			"secrets": resealed, "secret_count": len(resealed), "created_at": payload.CreatedAt,
+		}, nil
+	})
+
 	return nil
+}
+
+// ensureBackupKey opens the caller-supplied sealed backup key if given,
+// or generates and seals a fresh 32-byte (AES-256) key if not -- always
+// returns the sealed reference too, so a first-ever backup's caller can
+// persist it for reuse on every subsequent backup/restore.
+func ensureBackupKey(engine *secretsEngine, existing *sealedIn) (rawKey []byte, sealedOut map[string]any, err error) {
+	if existing != nil && existing.CiphertextB64 != "" {
+		keyB64, err := existing.open(engine)
+		if err != nil {
+			return nil, nil, fmt.Errorf("backup key could not be opened")
+		}
+		key, err := base64.StdEncoding.DecodeString(keyB64)
+		if err != nil {
+			return nil, nil, fmt.Errorf("backup key is corrupted")
+		}
+		return key, map[string]any{
+			"kind": existing.Kind, "owner_ref": existing.OwnerRef,
+			"ciphertext_b64": existing.CiphertextB64, "nonce_b64": existing.NonceB64, "key_version": existing.KeyVersion,
+		}, nil
+	}
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return nil, nil, fmt.Errorf("generating backup key: %w", err)
+	}
+	const kind, ownerRef = "internal_backup_key", "secrets_backup"
+	ciphertext, nonce, version, err := engine.seal(kind, ownerRef, base64.StdEncoding.EncodeToString(raw))
+	if err != nil {
+		return nil, nil, fmt.Errorf("sealing backup key failed")
+	}
+	return raw, map[string]any{
+		"kind": kind, "owner_ref": ownerRef,
+		"ciphertext_b64": base64.StdEncoding.EncodeToString(ciphertext),
+		"nonce_b64":      base64.StdEncoding.EncodeToString(nonce),
+		"key_version":    version,
+	}, nil
+}
+
+// aesGCMEncrypt/aesGCMDecrypt: a real, independent AES-256-GCM
+// encrypt/decrypt pair for the OUTER backup envelope -- deliberately
+// separate from secretsEngine.seal/open (which is keyed by this
+// process's own versioned master key and AAD-bound to a specific kind/
+// owner_ref pair); a backup's own key is caller-scoped and long-lived
+// across master-key rotations, so it needs its own, simpler primitive.
+func aesGCMEncrypt(key, plaintext []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	return gcm.Seal(nonce, nonce, plaintext, nil), nil
+}
+
+func aesGCMDecrypt(key, sealed []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	if len(sealed) < gcm.NonceSize() {
+		return nil, fmt.Errorf("ciphertext too short")
+	}
+	nonce, ciphertext := sealed[:gcm.NonceSize()], sealed[gcm.NonceSize():]
+	return gcm.Open(nil, nonce, ciphertext, nil)
 }
 
 func randomSerial() (*big.Int, error) {
