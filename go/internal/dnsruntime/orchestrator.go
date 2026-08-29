@@ -82,6 +82,23 @@ type Result struct {
 	Error      string `json:"error,omitempty"`
 }
 
+// EvaluateDomain backs Filters' "Test a Domain": builds the same real
+// global blocked/regex-allow/regex-block sets Apply/Validate would
+// compile from current live state, then answers "would a query for
+// this domain be blocked?" via the pure, dependency-free
+// dnscompile.EvaluateDomain -- no dnsdist process is touched, safe to
+// call on every keystroke. Deliberately global-only (see
+// EvaluationResult's own doc comment) -- matches this evaluator's
+// disclosed scope, not a claim that per-network/per-client overrides
+// were considered.
+func (o *Orchestrator) EvaluateDomain(ctx context.Context, domain string) (dnscompile.EvaluationResult, error) {
+	in, _, _, err := o.build(ctx)
+	if err != nil {
+		return dnscompile.EvaluationResult{}, err
+	}
+	return dnscompile.EvaluateDomain(domain, in.BlockedDomains, in.RegexAllow, in.RegexBlock), nil
+}
+
 // Apply gathers current state, compiles it, and promotes it through
 // the host-agent. Never returns a Go error itself -- every failure
 // mode (no host-agent configured, compile error, denied/rejected

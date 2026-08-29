@@ -845,3 +845,48 @@ func TestCompileDnsdistNetworkOverrideAppliesToRegexBlockToo(t *testing.T) {
 	}
 	checkDnsdist(t, out)
 }
+
+func TestEvaluateDomainNoMatch(t *testing.T) {
+	res := EvaluateDomain("safe.example.com", nil, nil, nil)
+	if res.Blocked || res.Reason != "no_match" {
+		t.Fatalf("got %+v, want an unblocked no_match result", res)
+	}
+}
+
+func TestEvaluateDomainBlocklistSuffixMatch(t *testing.T) {
+	res := EvaluateDomain("ads.example.com", []string{"example.com"}, nil, nil)
+	if !res.Blocked || res.Reason != "blocklist" || res.Matched != "example.com" {
+		t.Fatalf("got %+v, want blocked by the real suffix entry", res)
+	}
+}
+
+func TestEvaluateDomainSuffixDoesNotFalsePositiveOnSimilarString(t *testing.T) {
+	// "evilexample.com" ends with "example.com" as a raw string but is
+	// NOT a subdomain of it -- must not match, same as dnsdist's real
+	// SuffixMatchNodeRule.
+	res := EvaluateDomain("evilexample.com", []string{"example.com"}, nil, nil)
+	if res.Blocked {
+		t.Fatalf("got %+v, want unblocked (not a real subdomain)", res)
+	}
+}
+
+func TestEvaluateDomainRegexBlock(t *testing.T) {
+	res := EvaluateDomain("ad1.example.com", nil, nil, []string{"^ad[0-9]+\\.example\\.com$"})
+	if !res.Blocked || res.Reason != "regex_block" {
+		t.Fatalf("got %+v, want blocked by the regex", res)
+	}
+}
+
+func TestEvaluateDomainRegexAllowWinsOverBlocklist(t *testing.T) {
+	res := EvaluateDomain("safe.example.com", []string{"example.com"}, []string{"^safe\\."}, nil)
+	if res.Blocked || res.Reason != "regex_allow" {
+		t.Fatalf("got %+v, want the regex-allow to win over the blocklist suffix match", res)
+	}
+}
+
+func TestEvaluateDomainMostSpecificBlocklistEntryReported(t *testing.T) {
+	res := EvaluateDomain("deep.corp.example.com", []string{"example.com", "corp.example.com"}, nil, nil)
+	if !res.Blocked || res.Matched != "corp.example.com" {
+		t.Fatalf("got %+v, want the more specific entry reported as the match", res)
+	}
+}

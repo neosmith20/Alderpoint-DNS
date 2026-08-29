@@ -53,6 +53,7 @@ package dnscompile
 import (
 	"fmt"
 	"net"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -294,6 +295,83 @@ func luaString(s string) string {
 
 func normalizeDomain(d string) string {
 	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(d), "."))
+}
+
+// matchesSuffix mirrors dnsdist's own SuffixMatchNodeRule semantics: a
+// query matches a suffix entry when it IS that suffix exactly, or ends
+// with "." + suffix (a genuine subdomain, not just a same-ending
+// string -- "evilexample.com" must never match suffix "example.com").
+func matchesSuffix(query, suffix string) bool {
+	return query == suffix || strings.HasSuffix(query, "."+suffix)
+}
+
+// EvaluationResult is Test a Domain's answer: whether a hypothetical
+// query for Domain would be blocked by the given real compiled state,
+// and which real rule/source decided it -- the exact same precedence
+// CompileDnsdist itself uses (RegexAllow > RegexBlock > BlockedDomains
+// suffix match > default allow), so this can never report an outcome
+// the real compiled runtime wouldn't actually produce. Deliberately
+// global-only, matching this evaluator's callers (no per-network/
+// per-client override is evaluated here -- see NetworkOverride's own
+// doc comment for that disclosed scope).
+type EvaluationResult struct {
+	Domain  string `json:"domain"`
+	Blocked bool   `json:"blocked"`
+	Reason  string `json:"reason"`           // "regex_allow" | "regex_block" | "blocklist" | "no_match"
+	Matched string `json:"matched,omitempty"` // the exact pattern/domain entry that decided it
+}
+
+// EvaluateDomain answers "would a real query for this domain be
+// blocked?" against the same three real input sets CompileDnsdist
+// itself compiles from (BlockedDomains, RegexAllow, RegexBlock) --
+// a pure function, no dnsdist process involved, safe to call on every
+// keystroke of a "Test a Domain" UI.
+func EvaluateDomain(domain string, blockedDomains, regexAllow, regexBlock []string) EvaluationResult {
+	q := normalizeDomain(domain)
+	res := EvaluationResult{Domain: q}
+	for _, p := range regexAllow {
+		re, err := regexp.Compile(p)
+		if err != nil {
+			continue // an invalid stored pattern was already rejected at save time; never fail the whole evaluation for it
+		}
+		if re.MatchString(q) {
+			res.Reason = "regex_allow"
+			res.Matched = p
+			return res
+		}
+	}
+	for _, p := range regexBlock {
+		re, err := regexp.Compile(p)
+		if err != nil {
+			continue
+		}
+		if re.MatchString(q) {
+			res.Blocked = true
+			res.Reason = "regex_block"
+			res.Matched = p
+			return res
+		}
+	}
+	// Most-specific (longest) suffix match wins, same tie-break the
+	// compiler's own domain-routing precedence uses elsewhere in this
+	// package -- irrelevant for a single boolean outcome here (any
+	// match blocks), but Matched should report the most specific real
+	// entry, not an arbitrary one, when more than one suffix matches.
+	best := ""
+	for _, d := range blockedDomains {
+		n := normalizeDomain(d)
+		if n != "" && matchesSuffix(q, n) && len(n) > len(best) {
+			best = n
+		}
+	}
+	if best != "" {
+		res.Blocked = true
+		res.Reason = "blocklist"
+		res.Matched = best
+		return res
+	}
+	res.Reason = "no_match"
+	return res
 }
 
 // --- dnsdist ------------------------------------------------------------

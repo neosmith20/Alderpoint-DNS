@@ -34,6 +34,30 @@
   let selected = $state<Set<number>>(new Set());
   let dnsRuntimeResult = $state<DNSRuntimeApplyResult | null>(null);
 
+  // Test a Domain: real evaluation against the same global custom-rules/
+  // blocklist state the compiler itself uses (GET /api/custom-rules/test-domain,
+  // internal/dnsruntime.Orchestrator.EvaluateDomain) -- no dnsdist
+  // process involved, safe on every submit.
+  let testDomainInput = $state("");
+  let testDomainBusy = $state(false);
+  let testDomainError = $state("");
+  let testDomainResult = $state<Awaited<ReturnType<typeof api.testDomain>> | null>(null);
+
+  async function runTestDomain(e: Event) {
+    e.preventDefault();
+    if (!testDomainInput.trim()) return;
+    testDomainError = "";
+    testDomainBusy = true;
+    testDomainResult = null;
+    try {
+      testDomainResult = await api.testDomain(testDomainInput.trim());
+    } catch (err) {
+      testDomainError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      testDomainBusy = false;
+    }
+  }
+
   async function refresh() {
     const token = guard.start();
     try {
@@ -161,6 +185,30 @@
   </div>
 
   <div class="card">
+    <h3>Test a Domain</h3>
+    <p class="hint">
+      Checks whether a query for this domain would be blocked, against the real compiled global
+      custom-rules and blocklist state (not per-network/per-client overrides yet).
+    </p>
+    <form onsubmit={runTestDomain} class="test-domain-form">
+      <input required bind:value={testDomainInput} placeholder="ads.example.com" aria-label="Domain to test" />
+      <button type="submit" disabled={testDomainBusy}>{testDomainBusy ? "Testing…" : "Test"}</button>
+    </form>
+    {#if testDomainError}<p class="error" role="alert">{testDomainError}</p>{/if}
+    {#if testDomainResult}
+      <p class="test-domain-result" class:blocked={testDomainResult.blocked} class:allowed={!testDomainResult.blocked} role="status">
+        <strong>{testDomainResult.domain}</strong> would be
+        <strong>{testDomainResult.blocked ? "BLOCKED" : "ALLOWED"}</strong>
+        {#if testDomainResult.reason === "no_match"}
+          (no rule matches -- default allow)
+        {:else if testDomainResult.matched}
+          by {testDomainResult.reason.replace("_", " ")}: <code>{testDomainResult.matched}</code>
+        {/if}
+      </p>
+    {/if}
+  </div>
+
+  <div class="card">
     <h3>Custom Filtering Rules</h3>
     <p class="hint">
       A structured rule builder (block / allow / regex block / regex allow / rewrite). Does not yet
@@ -239,6 +287,11 @@
   .filtering { display: flex; flex-direction: column; gap: 1rem; }
   .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); }
   .card h3 { margin-top: 0; }
+  .test-domain-form { display: flex; gap: 0.5rem; align-items: center; max-width: 28rem; }
+  .test-domain-form input { flex: 1; }
+  .test-domain-result { margin-top: 0.6rem; padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.9rem; }
+  .test-domain-result.blocked { background: color-mix(in srgb, red 12%, transparent); }
+  .test-domain-result.allowed { background: color-mix(in srgb, green 12%, transparent); }
   .hint { font-size: 0.85rem; opacity: 0.75; }
   .add-form { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: end; margin: 0.75rem 0; }
   .add-form label { display: flex; flex-direction: column; font-size: 0.85rem; gap: 0.25rem; }

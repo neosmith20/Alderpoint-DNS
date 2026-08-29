@@ -165,3 +165,29 @@ func (s *Server) handleReorderCustomRules(w http.ResponseWriter, r *http.Request
 	}
 	WriteJSON(w, http.StatusOK, map[string]any{"status": "reordered", "rules": rules})
 }
+
+// handleTestDomain backs Filters' "Test a Domain": would a real query
+// for the given domain be blocked, and by which real rule -- see
+// internal/dnsruntime.Orchestrator.EvaluateDomain's own doc comment for
+// exactly what's evaluated (global custom rules + blocklists, not yet
+// per-network/per-client overrides). Reuses the same Orchestrator every
+// other resolver-affecting page already depends on, so "unavailable"
+// here means the same thing it does everywhere else on this server: no
+// DNS runtime configured at all, not a real query failure.
+func (s *Server) handleTestDomain(w http.ResponseWriter, r *http.Request) {
+	domain := r.URL.Query().Get("domain")
+	if domain == "" {
+		Err(http.StatusBadRequest, "validation_error", "domain is required").WriteJSON(w)
+		return
+	}
+	if s.DNSRuntime == nil {
+		Err(http.StatusServiceUnavailable, "unavailable", "DNS runtime not configured on this deployment").WriteJSON(w)
+		return
+	}
+	result, err := s.DNSRuntime.EvaluateDomain(r.Context(), domain)
+	if err != nil {
+		Err(http.StatusInternalServerError, "internal_error", err.Error()).WriteJSON(w)
+		return
+	}
+	WriteJSON(w, http.StatusOK, result)
+}

@@ -924,6 +924,12 @@ export const api = {
     req<{ status: string; count: number; dns_runtime?: DNSRuntimeApplyResult }>("/api/custom-rules/bulk-delete", { method: "POST", body: JSON.stringify({ ids }) }),
   reorderCustomRules: (orderedIds: number[]) =>
     req<{ status: string; rules: CustomRule[] }>("/api/custom-rules/reorder", { method: "POST", body: JSON.stringify({ ordered_ids: orderedIds }) }),
+  testDomain: (domain: string, signal?: AbortSignal) =>
+    req<{ domain: string; blocked: boolean; reason: string; matched?: string }>(
+      `/api/custom-rules/test-domain?domain=${encodeURIComponent(domain)}`,
+      undefined,
+      signal,
+    ),
 
   listBackups: (signal?: AbortSignal) => req<{ backups: BackupInfo[] }>("/api/backup/appliance", undefined, signal),
   createBackup: () => req<{ status: string; backup: BackupInfo }>("/api/backup/appliance", { method: "POST" }),
