@@ -1,23 +1,17 @@
 package httpapi
 
 import (
-	"context"
-	"database/sql"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite"
-
-	"alderpointdns/go-controlplane/internal/hostagent"
-	"alderpointdns/go-controlplane/internal/hostagentd"
+	"alderpointdns/go-controlplane/internal/dnsanalytics"
 )
 
 func TestHandleStatisticsClearRequiresConfirmation(t *testing.T) {
@@ -35,7 +29,7 @@ func TestHandleStatisticsClearRequiresConfirmation(t *testing.T) {
 	}
 }
 
-func TestHandleStatisticsClearReportsUnavailableWithNoHostAgent(t *testing.T) {
+func TestHandleStatisticsClearReportsUnavailableWithNoAnalyticsReader(t *testing.T) {
 	s := &Server{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	req := httptest.NewRequest(http.MethodPost, "/api/statistics/clear", strings.NewReader(`{"confirmation":"CLEAR"}`))
 	w := httptest.NewRecorder()
@@ -45,42 +39,28 @@ func TestHandleStatisticsClearReportsUnavailableWithNoHostAgent(t *testing.T) {
 	}
 }
 
-// TestHandleStatisticsClearRealEndToEnd proves the full real path: HTTP
-// request -> httpapi handler -> real unix-socket hostagent client ->
-// real hostagentd.Server -> a real SQLite DELETE against a real
-// aggregates.db file -- not a mock at any layer.
+// TestHandleStatisticsClearRealEndToEnd proves the full real path (as of
+// 2026-08-28: HTTP request -> httpapi handler -> a real SQLite DELETE
+// against this process's own analytics.db, no hostagent round-trip
+// needed any more -- see internal/dnsanalytics.Reader.ClearAll's own
+// doc comment for why the old Python-era privilege boundary this used
+// to route through no longer applies).
 func TestHandleStatisticsClearRealEndToEnd(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "aggregates.db")
-	db, err := sql.Open("sqlite", dbPath)
+	dbPath := filepath.Join(t.TempDir(), "analytics.db")
+	db, err := dnsanalytics.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`
-		CREATE TABLE time_buckets (bucket_start INTEGER PRIMARY KEY, total_queries INTEGER NOT NULL, blocked_queries INTEGER NOT NULL);
-		CREATE TABLE dimension_counts (bucket_start INTEGER NOT NULL, dimension TEXT NOT NULL, value TEXT NOT NULL, count INTEGER NOT NULL);
-		INSERT INTO time_buckets VALUES (0, 5, 1), (60, 3, 0);
-		INSERT INTO dimension_counts VALUES (0, 'domain', 'example.com', 5);
-	`); err != nil {
+	t.Cleanup(func() { db.Close() })
+	now := time.Now().Unix()
+	if _, err := db.Exec(`INSERT INTO query_events (ts, domain, qtype, rcode, protocol, client, latency_ms, outcome) VALUES
+		(?, 'example.com', 'A', 'NOERROR', 'udp', '192.0.2.1', 1.2, 'allowed'),
+		(?, 'ads.example.com', 'A', 'NOERROR', 'udp', '192.0.2.1', 1.2, 'blocked')`, now, now); err != nil {
 		t.Fatal(err)
 	}
-	db.Close()
 
-	sockPath := filepath.Join(t.TempDir(), "agent.sock")
-	agent := &hostagentd.Server{SocketPath: sockPath, AllowedUID: uint32(os.Getuid()), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	hostagentd.RegisterAnalyticsClearOps(agent, hostagentd.AnalyticsClearConfig{AggregatesDBPath: dbPath})
-	agentCtx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go agent.Serve(agentCtx)
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(sockPath); err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	s := &Server{HostAgent: hostagent.NewClient(sockPath), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	req := httptest.NewRequest(http.MethodPost, "/api/statistics/clear", strings.NewReader(`{"confirmation":"CLEAR","include_raw_history":false}`))
+	s := &Server{Analytics: &dnsanalytics.Reader{DB: db}, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	req := httptest.NewRequest(http.MethodPost, "/api/statistics/clear", strings.NewReader(`{"confirmation":"CLEAR"}`))
 	w := httptest.NewRecorder()
 	s.handleStatisticsClear(w, req)
 	if w.Code != http.StatusOK {
@@ -93,23 +73,16 @@ func TestHandleStatisticsClearRealEndToEnd(t *testing.T) {
 	if body["status"] != "cleared" {
 		t.Errorf("status field = %v, want cleared", body["status"])
 	}
-	if body["aggregate_buckets_cleared"] != float64(2) {
-		t.Errorf("aggregate_buckets_cleared = %v, want 2", body["aggregate_buckets_cleared"])
-	}
-	if body["aggregate_dimension_rows_cleared"] != float64(1) {
-		t.Errorf("aggregate_dimension_rows_cleared = %v, want 1", body["aggregate_dimension_rows_cleared"])
+	if body["query_events_cleared"] != float64(2) {
+		t.Errorf("query_events_cleared = %v, want 2", body["query_events_cleared"])
 	}
 
-	// Real proof the rows are actually gone in the underlying file, not
-	// just in the reported counts.
-	db2, err := sql.Open("sqlite", dbPath)
-	if err != nil {
+	// Real proof the rows are actually gone, not just in the reported count.
+	var remaining int
+	if err := db.QueryRow("SELECT COUNT(*) FROM query_events").Scan(&remaining); err != nil {
 		t.Fatal(err)
 	}
-	defer db2.Close()
-	var remaining int
-	db2.QueryRow("SELECT COUNT(*) FROM time_buckets").Scan(&remaining)
 	if remaining != 0 {
-		t.Errorf("time_buckets still has %d rows after clear", remaining)
+		t.Errorf("query_events still has %d rows after clear", remaining)
 	}
 }

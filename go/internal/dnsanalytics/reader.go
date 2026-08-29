@@ -143,6 +143,25 @@ func (r *Reader) ClientAnalytics(ctx context.Context, minutes float64, limit int
 	return out, rows.Err()
 }
 
+// ClearAll backs POST /api/statistics/clear (2026-08-28: replaces the
+// old hostagent-routed internal/hostagentd.OpAnalyticsClear, which
+// operated on Python's now-decommissioned aggregates.db + Parquet
+// history -- permanently inert on any current Go-only deployment, see
+// CUTOVER.md). Unlike Python's two-tier store (pre-aggregated
+// time_buckets/dimension_counts vs. separate raw Parquet history), this
+// schema has exactly one table -- query_events -- so there is no
+// separate "raw history" to optionally spare; a real DELETE, not a
+// hostagent round-trip, since this process already owns read-write
+// access to its own analytics.db directly (the Python-era privilege
+// boundary this used to need no longer exists).
+func (r *Reader) ClearAll(ctx context.Context) (int64, error) {
+	res, err := r.DB.ExecContext(ctx, `DELETE FROM query_events`)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // TopDomains backs handleAnalyticsTopBlockedDomains's s.RawQueryLog
 // interface (blockedOnly=true is its only real caller; supported for
 // both values for interface parity with rawquerylog.Reader.TopDomains).

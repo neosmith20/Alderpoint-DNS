@@ -420,11 +420,11 @@
   </div>
 
   <p class="hint scope-note">
-    Blocklists, Local DNS, Clients, and Upstreams are natively Go-owned. DNS Activity, Top Domains,
-    and Top Blocked Domains are read through temporary read-only compatibility boundaries to
-    Python's analytics store (see <code>internal/pyanalytics</code> and
-    <code>internal/rawquerylog</code>). The Clients mini-panel's "observed" rows come from that same
-    read-only analytics boundary, cross-referenced against managed identifiers -- see
+    Every panel on this page is natively Go-owned: Blocklists, Local DNS, Clients, and Upstreams
+    directly; DNS Activity, Top Domains, and Top Blocked Domains via this appliance's own
+    dnstap-fed query history (<code>internal/dnsanalytics</code> -- Python's analytics store is
+    fully decommissioned, see CUTOVER.md). The Clients mini-panel's "observed" rows come from that
+    same real traffic data, cross-referenced against managed identifiers -- see
     <code>GET /api/clients/observed</code>'s own doc comment for what it discloses as narrower than
     a real discovery worker.
   </p>

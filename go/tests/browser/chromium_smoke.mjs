@@ -123,10 +123,17 @@ async function main() {
     await page.waitForSelector(".card .big", { timeout: 3000 }).catch(() => {});
     const cardCount = (await page.$$(".card")).length;
     check("Dashboard renders summary cards", cardCount >= 2, `found ${cardCount}`);
+    // 2026-08-28: Dashboard's analytics panels are no longer a Python
+    // compatibility boundary at all -- internal/dnsanalytics is this
+    // appliance's own real, Go-native query history (see CUTOVER.md) --
+    // so the honest disclosure this scope-note now carries is the
+    // Observed Clients narrowing (no discovery-worker history/
+    // fingerprinting), not a "compatibility boundary" claim that would
+    // itself now be stale.
     const scopeNote = await page.$eval(".scope-note", (el) => el.textContent).catch(() => "");
     check(
-      "Dashboard discloses its own incomplete scope rather than implying full parity",
-      scopeNote.replace(/\s+/g, " ").includes("compatibility boundaries"),
+      "Dashboard discloses its own real remaining scope narrowing (Observed Clients), not a stale compatibility-boundary claim",
+      scopeNote.replace(/\s+/g, " ").includes("narrower than") && !scopeNote.includes("compatibility boundar"),
       scopeNote,
     );
 

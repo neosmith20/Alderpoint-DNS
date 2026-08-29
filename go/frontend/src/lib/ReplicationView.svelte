@@ -4,18 +4,24 @@
   import { router } from "../router.svelte";
   import { timestampPref } from "../timestamp.svelte";
 
-  // Replication. Real, via apdns-hostagent's narrow, read-only,
-  // redacted read of Python's own control.db (never a raw mount into
-  // this web process -- see internal/hostagentd/ops_replication.go's
-  // doc comment). Peer credentials (ca_pem/client_cert_pem/
-  // client_key_pem) are never selected by that reader at all, so they
-  // can never reach this page even by accident.
+  // Replication. apdns-hostagent's node-identity/peer read (see
+  // internal/hostagentd/ops_replication.go) was built as a narrow,
+  // read-only, redacted bridge into Python's own control.db -- but
+  // Python is now fully decommissioned appliance-wide (see CUTOVER.md),
+  // so that control.db no longer exists on any current deployment and
+  // this bridge is permanently inert (`-control-db` is never passed to
+  // the live apdns-hostagent), not merely "not configured yet". A real
+  // native replacement -- native Go node identity, peer storage, real
+  // enrollment/cert issuance (now unblocked by internal/secretstore,
+  // not yet built), and a real mTLS push/pull sync protocol -- is a
+  // separate, substantial project not attempted in this pass; see
+  // PARITY_MATRIX.md's Replication row for exactly what's disclosed as
+  // still missing.
   //
   // Sync is a real, bounded HTTPS connectivity check against the peer's
-  // configured URL (validated against its configured CA) -- not
-  // Python's own bespoke mTLS push/pull state-sync protocol, which is
-  // out of scope for this pass and disclosed as such rather than
-  // half-implemented.
+  // configured URL (validated against its configured CA) -- not a full
+  // state push/pull protocol, which is out of scope for this pass and
+  // disclosed as such rather than half-implemented.
 
   let status = $state<ReplicationStatusResponse | null>(null);
   let loadError = $state("");
@@ -54,9 +60,12 @@
 <section aria-labelledby="replication-heading" class="replication">
   <h2 id="replication-heading">Replication</h2>
   <p class="scope-note">
-    Peer metadata is a real, redacted read of Python's own control.db (no credentials ever leave that
-    read). Sync is a real connectivity check against each peer's configured URL, not a full state
-    push/pull -- see the parity matrix.
+    Node identity/peer metadata was built as a redacted read of Python's own control.db -- Python is
+    now fully decommissioned appliance-wide, so that bridge is currently inert, not just
+    unconfigured, and this section is honestly unavailable below rather than showing stale or fake
+    data. Sync is a real connectivity check against each peer's configured URL, not a full state
+    push/pull -- native Go peer storage, enrollment, and a real sync protocol are a separate,
+    larger project -- see the parity matrix.
   </p>
 
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}

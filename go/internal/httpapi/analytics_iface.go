@@ -31,6 +31,12 @@ type AnalyticsReader interface {
 	// plain data types now that Python is decommissioned (see CUTOVER.md),
 	// so it is never asked to satisfy this interface in production.
 	ClientAnalytics(ctx context.Context, minutes float64, limit int) ([]pyanalytics.ClientRow, error)
+	// ClearAll backs POST /api/statistics/clear -- see
+	// dnsanalytics.Reader.ClearAll's own doc comment. Only
+	// *dnsanalytics.Reader implements this for real in production;
+	// pyanalytics.Reader's stub exists solely so it keeps satisfying
+	// this interface for pre-existing tests that construct one.
+	ClearAll(ctx context.Context) (int64, error)
 }
 
 type RawQueryLogReader interface {

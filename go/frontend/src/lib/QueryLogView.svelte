@@ -105,8 +105,9 @@
 <section aria-labelledby="analytics-heading" class="query-log">
   <h2 id="analytics-heading">Query Log</h2>
   <p class="scope-note">
-    Reads Python's raw per-query history directly (own pure-Go Parquet reader, no DuckDB/cgo) -- see
-    the parity matrix. A wide window over a very large history is scanned with a bounded safety cap,
+    Reads this appliance's own Go-native query history directly (<code>internal/dnsanalytics</code>,
+    fed by dnsdist's real dnstap query-event stream -- Python is fully decommissioned, see
+    CUTOVER.md). A wide window over a very large history is scanned with a bounded safety cap,
     disclosed via <code>files_considered</code>, rather than an unbounded read.
   </p>
 

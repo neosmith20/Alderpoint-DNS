@@ -7,8 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"alderpointdns/go-controlplane/internal/hostagent"
-	"alderpointdns/go-controlplane/internal/hostagentd"
 	"alderpointdns/go-controlplane/internal/pyanalytics"
 	"alderpointdns/go-controlplane/internal/rawquerylog"
 )
@@ -418,13 +416,18 @@ func (s *Server) handleStatisticsExport(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleStatisticsClear mirrors POST /api/statistics/clear: a real
-// write against Python's live aggregates.db (and, if requested, its raw
-// Parquet history), run via apdns-hostagent -- see
-// internal/hostagentd/ops_analyticsclear.go's doc comment for why this
-// is safe and why it needed no new mount. Requires the same server-side
-// "type CLEAR to confirm" check Python's own route enforces (never just
-// a client-side-only confirm dialog); an operator who bypasses the UI
-// and calls this directly still cannot clear anything without it.
+// DELETE against this process's own Go-native query_events table
+// (internal/dnsanalytics.Reader.ClearAll) -- see that method's own doc
+// comment for why this no longer routes through apdns-hostagent the way
+// it did against Python's aggregates.db (that bridge is now permanently
+// inert; see CUTOVER.md). Requires the same server-side "type CLEAR to
+// confirm" check the original Python route enforced (never just a
+// client-side-only confirm dialog); an operator who bypasses the UI and
+// calls this directly still cannot clear anything without it.
+// include_raw_history is still accepted (and ignored) for backward
+// request-shape compatibility with the existing frontend -- this
+// schema has exactly one table, so there is no longer a separate "raw
+// history" to optionally spare.
 func (s *Server) handleStatisticsClear(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Confirmation      string `json:"confirmation"`
@@ -438,21 +441,18 @@ func (s *Server) handleStatisticsClear(w http.ResponseWriter, r *http.Request) {
 		Err(http.StatusBadRequest, "confirmation_required", "type CLEAR to confirm clearing statistics").WriteJSON(w)
 		return
 	}
-	includeRawHistory := true // matches Python's own default
-	if in.IncludeRawHistory != nil {
-		includeRawHistory = *in.IncludeRawHistory
+	if s.Analytics == nil {
+		Err(http.StatusServiceUnavailable, "unavailable", analyticsUnavailable).WriteJSON(w)
+		return
 	}
-	body, _ := json.Marshal(map[string]any{"include_raw_history": includeRawHistory})
-	result, ok := callAgent[hostagentd.AnalyticsClearResult](s, w, r, hostagent.OpAnalyticsClear, json.RawMessage(body))
-	if !ok {
+	rowsCleared, err := s.Analytics.ClearAll(r.Context())
+	if err != nil {
+		Err(http.StatusInternalServerError, "internal_error", err.Error()).WriteJSON(w)
 		return
 	}
 	WriteJSON(w, http.StatusOK, map[string]any{
-		"status":                           "cleared",
-		"aggregate_buckets_cleared":        result.AggregateBucketsCleared,
-		"aggregate_dimension_rows_cleared": result.AggregateDimensionRowsCleared,
-		"raw_history_cleared":              result.RawHistoryCleared,
-		"raw_partition_files_removed":      result.RawPartitionFilesRemoved,
+		"status":               "cleared",
+		"query_events_cleared": rowsCleared,
 	})
 }
 

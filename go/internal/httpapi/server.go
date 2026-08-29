@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"alderpointdns/go-controlplane/internal/auth"
-	"alderpointdns/go-controlplane/internal/bootstrap"
 	"alderpointdns/go-controlplane/internal/backup"
 	"alderpointdns/go-controlplane/internal/blocklists"
+	"alderpointdns/go-controlplane/internal/bootstrap"
 	"alderpointdns/go-controlplane/internal/clients"
 	"alderpointdns/go-controlplane/internal/customrules"
 	"alderpointdns/go-controlplane/internal/dnsperf"
@@ -20,20 +20,20 @@ import (
 	"alderpointdns/go-controlplane/internal/importer"
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/notifications"
-	"alderpointdns/go-controlplane/internal/secretstore"
 	"alderpointdns/go-controlplane/internal/policy"
+	"alderpointdns/go-controlplane/internal/secretstore"
 	"alderpointdns/go-controlplane/internal/upstreams"
 )
 
 type Server struct {
-	DB         *sql.DB
-	Auth       *auth.Store
+	DB   *sql.DB
+	Auth *auth.Store
 	// Bootstrap gates first-run owner setup with a real one-time
 	// capability -- see internal/bootstrap's doc comment. Required
 	// (never nil in practice; cmd/alderpointdns-go always wires it) --
 	// a nil Bootstrap would mean setup has no gate at all, which
 	// handleSetup treats as a hard failure, never a silent bypass.
-	Bootstrap *bootstrap.Manager
+	Bootstrap  *bootstrap.Manager
 	Blocklists *blocklists.Service
 	LocalDNS   *localdns.Service
 	// Importer is nil unless wired at startup -- nil means the real

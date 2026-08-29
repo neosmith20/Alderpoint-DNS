@@ -603,16 +603,15 @@ export const api = {
     }),
   revokeOtherSessions: () => req<{ status: string; revoked_count: number }>("/api/session/revoke-others", { method: "POST" }),
 
-  statisticsClear: (includeRawHistory: boolean) =>
-    req<{
-      status: string;
-      aggregate_buckets_cleared: number;
-      aggregate_dimension_rows_cleared: number;
-      raw_history_cleared: boolean;
-      raw_partition_files_removed: number;
-    }>("/api/statistics/clear", {
+  // 2026-08-28: real DELETE against this appliance's own Go-native
+  // query_events table (internal/dnsanalytics.Reader.ClearAll) --
+  // there is exactly one table now, so there is no longer a separate
+  // "raw history" to optionally spare (the old two-tier Python
+  // aggregates.db/Parquet split this used to mirror is gone).
+  statisticsClear: () =>
+    req<{ status: string; query_events_cleared: number }>("/api/statistics/clear", {
       method: "POST",
-      body: JSON.stringify({ confirmation: "CLEAR", include_raw_history: includeRawHistory }),
+      body: JSON.stringify({ confirmation: "CLEAR" }),
     }),
   systemStatus: () =>
     req<{ version: string; uptime_seconds: number; appliance_name: string; appliance_timezone: string }>("/api/system/status"),

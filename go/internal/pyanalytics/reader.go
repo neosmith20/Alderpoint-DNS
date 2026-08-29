@@ -467,6 +467,13 @@ func (r *Reader) ClientAnalytics(ctx context.Context, minutes float64, limit int
 	return nil, fmt.Errorf("client analytics not supported by the legacy pyanalytics reader (never wired into production; see internal/dnsanalytics.Reader)")
 }
 
+// ClearAll exists only so *Reader still satisfies
+// internal/httpapi.AnalyticsReader (see ClientAnalytics's own doc
+// comment for why -- same reasoning applies here).
+func (r *Reader) ClearAll(ctx context.Context) (int64, error) {
+	return 0, fmt.Errorf("clear not supported by the legacy pyanalytics reader (never wired into production; see internal/dnsanalytics.Reader)")
+}
+
 // ExportAll dumps every row of time_buckets and dimension_counts,
 // unfiltered -- the Go-native equivalent of Python's statistics export
 // (GET /api/statistics/export). Raw per-query history is deliberately
