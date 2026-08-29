@@ -14,6 +14,13 @@
 import fs from "node:fs";
 import puppeteer from "puppeteer-core";
 
+// Every disposable fixture this suite runs against uses a self-signed
+// cert (see the caller); Node's own fetch() (undici) rejects that by
+// default, unlike Chromium above which is explicitly launched with
+// --ignore-certificate-errors. This script's own plain-fetch API checks
+// below (setup lockout, direct DB read) need the same tolerance.
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+
 const [, , baseUrl, password, tokenPath, dbPath] = process.argv;
 if (!baseUrl || !password || !tokenPath || !dbPath) {
   console.error("usage: node setup_bootstrap_smoke.mjs <base-url> <owner-password> <bootstrap-token-path> <db-path>");
@@ -41,7 +48,7 @@ async function main() {
     executablePath: process.env.CHROMIUM_PATH || "/usr/bin/chromium",
     headless: true,
     ignoreHTTPSErrors: true,
-    args: ["--no-sandbox", "--disable-dev-shm-usage"],
+    args: ["--no-sandbox", "--disable-dev-shm-usage", "--ignore-certificate-errors"],
   });
 
   try {

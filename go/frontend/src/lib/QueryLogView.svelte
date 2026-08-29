@@ -5,6 +5,7 @@
   import { router } from "../router.svelte";
   import { timestampPref } from "../timestamp.svelte";
   import { queryLogPrefill } from "../queryLogPrefill.svelte";
+  import { customRulePrefill } from "../customRulePrefill.svelte";
   import DataGrid from "./DataGrid.svelte";
   import type { Column } from "./datagrid";
 
@@ -88,6 +89,17 @@
     return ms < 1 ? `${(ms * 1000).toFixed(0)} µs` : `${ms.toFixed(1)} ms`;
   }
 
+  // Query Log -> rule creation (the one disclosed Custom Rules gap this
+  // session closes): a real deep link, not just a suggestion -- Filters'
+  // own "Add rule" form is actually pre-filled with this row's domain.
+  // Defaults to "block" (the common case a query-log-driven rule is
+  // created for); "allow" is offered for the equally real case of
+  // un-blocking something the log shows getting refused.
+  function createRuleFor(r: QueryLogRow, ruleType: "block" | "allow") {
+    customRulePrefill.set({ ruleType, pattern: r.domain });
+    router.navigate("filtering");
+  }
+
   const columns: Column<QueryLogRow>[] = [
     { key: "ts", label: "Time", sortValue: (r) => r.ts, minWidth: 14 },
     { key: "domain", label: "Domain", sortValue: (r) => r.domain, minWidth: 20 },
@@ -99,6 +111,7 @@
     { key: "latency_ms", label: "Latency", sortValue: (r) => r.latency_ms, minWidth: 8 },
     { key: "cache_status", label: "Cache", sortValue: (r) => r.cache_status, minWidth: 8 },
     { key: "upstream", label: "Upstream", sortValue: (r) => r.upstream, minWidth: 10 },
+    { key: "rule", label: "Rule", minWidth: 14 },
   ];
 </script>
 
@@ -182,6 +195,11 @@
         {r.cache_status}
       {:else if colKey === "upstream"}
         {r.upstream}
+      {:else if colKey === "rule"}
+        <div class="rule-actions">
+          <button type="button" class="rule-action" onclick={() => createRuleFor(r, "block")}>Block</button>
+          <button type="button" class="rule-action" onclick={() => createRuleFor(r, "allow")}>Allow</button>
+        </div>
       {/if}
     {/snippet}
   </DataGrid>
@@ -205,4 +223,7 @@
   .degraded-note { background: var(--badge-warn-bg); color: var(--badge-warn-fg); padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.85rem; }
   .hint { font-size: 0.8rem; opacity: 0.7; }
   .error { color: var(--badge-danger-fg); }
+  .rule-actions { display: flex; gap: 0.3rem; }
+  .rule-action { font-size: 0.75rem; padding: 0.15rem 0.5rem; background: transparent; color: var(--fg); border: 1px solid var(--border); }
+  .rule-action:hover { background: var(--card-bg); }
 </style>

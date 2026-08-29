@@ -3,6 +3,7 @@
   import { api, ApiError, EMPTY_POLICY_LAYER, type CustomRule, type DNSRuntimeApplyResult } from "../api";
   import { StaleGuard } from "../staleGuard";
   import { router } from "../router.svelte";
+  import { customRulePrefill } from "../customRulePrefill.svelte";
   import DataGrid from "./DataGrid.svelte";
   import DnsRuntimeBadge from "./DnsRuntimeBadge.svelte";
   import type { Column } from "./datagrid";
@@ -73,8 +74,20 @@
     }
   }
 
+  let prefillAnnounced = $state(false);
+  let patternInputEl = $state<HTMLInputElement | undefined>(undefined);
+
   onMount(() => {
     refresh();
+    // Query Log -> rule creation: a real deep link, not just a bare
+    // navigate -- see queryLogPrefill's own rule-creation buttons.
+    const prefill = customRulePrefill.take();
+    if (prefill) {
+      ruleType = prefill.ruleType;
+      pattern = prefill.pattern;
+      prefillAnnounced = true;
+      queueMicrotask(() => patternInputEl?.focus());
+    }
   });
 
   async function addRule(e: Event) {
@@ -86,6 +99,7 @@
       dnsRuntimeResult = resp.dns_runtime ?? null;
       pattern = "";
       rewriteTarget = "";
+      prefillAnnounced = false;
       await refresh();
     } catch (err) {
       addError = err instanceof ApiError ? err.message : String(err);
@@ -216,6 +230,9 @@
     </p>
     {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
     <DnsRuntimeBadge result={dnsRuntimeResult} />
+    {#if prefillAnnounced}
+      <p class="prefill-note" role="status">Pre-filled from Query Log.</p>
+    {/if}
 
     <form onsubmit={addRule} class="add-form">
       <label>
@@ -228,7 +245,7 @@
           <option value="rewrite">Rewrite</option>
         </select>
       </label>
-      <label>Pattern <input required bind:value={pattern} placeholder="example.com or a regex" /></label>
+      <label>Pattern <input required bind:value={pattern} bind:this={patternInputEl} placeholder="example.com or a regex" /></label>
       {#if ruleType === "rewrite"}
         <label>Rewrite target <input required bind:value={rewriteTarget} placeholder="10.0.0.5" /></label>
       {/if}
@@ -293,6 +310,7 @@
   .test-domain-result.blocked { background: color-mix(in srgb, red 12%, transparent); }
   .test-domain-result.allowed { background: color-mix(in srgb, green 12%, transparent); }
   .hint { font-size: 0.85rem; opacity: 0.75; }
+  .prefill-note { font-size: 0.85rem; background: var(--badge-ok-bg, transparent); border: 1px solid var(--border); border-radius: 6px; padding: 0.35rem 0.6rem; display: inline-block; }
   .add-form { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: end; margin: 0.75rem 0; }
   .add-form label { display: flex; flex-direction: column; font-size: 0.85rem; gap: 0.25rem; }
   .bulk-bar { display: flex; align-items: center; gap: 0.6rem; padding: 0.5rem 0.75rem; background: var(--nav-hover-bg); border-radius: 6px; margin-bottom: 0.75rem; font-size: 0.85rem; }
