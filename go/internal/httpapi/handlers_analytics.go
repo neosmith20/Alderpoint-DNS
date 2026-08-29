@@ -224,13 +224,13 @@ func (s *Server) handleAnalyticsTopDomains(w http.ResponseWriter, r *http.Reques
 // handleAnalyticsTopClients backs the Clients page's Client analytics
 // table (V1.1.1's app/analytics.py `clients_data()`, read directly):
 // every client seen in the window ranked by query volume, each with its
-// own blocked count/percent and last-seen timestamp. "label" is the
-// owning managed client's name when the raw address matches one of its
-// exact ipv4/ipv6 identifiers (see managedAddressLookup), else the raw
-// address itself -- the same "resolve to a friendly name, fall back to
-// the raw value" contract Python's own resolve_client_name() has,
-// narrowed (disclosed, not hidden) to exact-address matching only, no
-// CIDR expansion and no Local DNS alias lookup.
+// own blocked count/percent and last-seen timestamp. "label" resolution
+// mirrors Python's own resolve_client_name() fallback chain: the owning
+// managed client's name when the raw address matches one of its exact
+// ipv4/ipv6 identifiers (see managedAddressLookup), else the most
+// specific matching Client Alias CIDR (internal/clientalias, added
+// 2026-08-28 -- V1.1.1's local_dns.py alias_for_client, read directly),
+// else the raw address itself.
 func (s *Server) handleAnalyticsTopClients(w http.ResponseWriter, r *http.Request) {
 	minutes := floatQuery(r, "minutes", 1440, 1, 31*24*60)
 	limit := intQuery(r, "limit", 200, 1, 2000)
@@ -249,6 +249,7 @@ func (s *Server) handleAnalyticsTopClients(w http.ResponseWriter, r *http.Reques
 		Err(http.StatusInternalServerError, "internal_error", "failed to load clients").WriteJSON(w)
 		return
 	}
+	aliases := s.aliasResolver(r.Context())
 	var total int64
 	for _, row := range rows {
 		total += row.Total
@@ -258,6 +259,8 @@ func (s *Server) handleAnalyticsTopClients(w http.ResponseWriter, r *http.Reques
 		label := row.Client
 		if m, ok := managed[row.Client]; ok && m.Name != "" {
 			label = m.Name
+		} else if alias := aliases.ResolveLabel(row.Client); alias != "" {
+			label = alias
 		}
 		var share, blockedPercent float64
 		if total > 0 {

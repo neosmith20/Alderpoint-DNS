@@ -5,6 +5,8 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"alderpointdns/go-controlplane/internal/clientalias"
 )
 
 // handleListObservedClients is a real, narrower substitute for V1/V2
@@ -111,4 +113,20 @@ func (s *Server) managedAddressLookup(ctx context.Context) (map[string]managedAd
 		}
 	}
 	return out, nil
+}
+
+// aliasResolver returns a real clientalias.Resolver built from this
+// deployment's current Client Aliases, or an empty one (ResolveLabel
+// always "") when aliases aren't configured or fail to load -- label
+// resolution degrading to "no alias match" must never become a hard
+// error for an unrelated page like Client analytics.
+func (s *Server) aliasResolver(ctx context.Context) *clientalias.Resolver {
+	if s.ClientAliases == nil {
+		return clientalias.NewResolver(nil)
+	}
+	list, err := s.ClientAliases.List(ctx)
+	if err != nil {
+		return clientalias.NewResolver(nil)
+	}
+	return clientalias.NewResolver(list)
 }

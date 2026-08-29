@@ -1,11 +1,13 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, type LocalDnsRecord, type DNSRuntimeApplyResult } from "../api";
+  import { api, type LocalDnsRecord, type DNSRuntimeApplyResult, type ClientAlias, ApiError } from "../api";
   import { StaleGuard } from "../staleGuard";
   import { router } from "../router.svelte";
   import DataGrid from "./DataGrid.svelte";
   import DnsRuntimeBadge from "./DnsRuntimeBadge.svelte";
   import type { Column } from "./datagrid";
+  import PageHeader from "./ui/PageHeader.svelte";
+  import Panel from "./ui/Panel.svelte";
 
   let records = $state<LocalDnsRecord[]>([]);
   let loadError = $state("");
@@ -14,6 +16,7 @@
   let editValue = $state("");
   let editTTL = $state(300);
   let dnsRuntimeResult = $state<DNSRuntimeApplyResult | null>(null);
+  let search = $state("");
 
   let newName = $state("");
   let newType = $state<LocalDnsRecord["record_type"]>("A");
@@ -38,11 +41,79 @@
     }
   }
 
+  let filteredRecords = $derived(
+    search.trim() === ""
+      ? records
+      : records.filter((r) => {
+          const q = search.trim().toLowerCase();
+          return r.name.toLowerCase().includes(q) || r.value.toLowerCase().includes(q) || r.record_type.toLowerCase().includes(q);
+        }),
+  );
+
+  // Client Aliases (V1.1.1's local_dns.py upsert_alias/alias_for_client,
+  // read directly): a CIDR->display-name mapping used to label a client
+  // address (Dashboard, Query Log, Client analytics) that isn't already
+  // a managed client's own identifier. Display-only, no DNS-answering
+  // effect -- see internal/clientalias's own doc comment.
+  let aliases = $state<ClientAlias[]>([]);
+  let aliasLoadError = $state("");
+  let aliasUnavailable = $state(false);
+  const aliasGuard = new StaleGuard();
+
+  let newAliasCidr = $state("");
+  let newAliasName = $state("");
+  let newAliasDescription = $state("");
+  let addAliasBusy = $state(false);
+  let addAliasError = $state("");
+
+  async function refreshAliases() {
+    const token = aliasGuard.start();
+    try {
+      const resp = await api.listClientAliases(router.signal());
+      if (!aliasGuard.isCurrent(token)) return;
+      aliases = resp.aliases;
+      aliasLoadError = "";
+      aliasUnavailable = false;
+    } catch (err) {
+      if (!aliasGuard.isCurrent(token)) return;
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      if (err instanceof ApiError && err.status === 503) {
+        aliasUnavailable = true;
+        return;
+      }
+      aliasLoadError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  async function addAlias(e: Event) {
+    e.preventDefault();
+    addAliasError = "";
+    addAliasBusy = true;
+    try {
+      await api.createClientAlias(newAliasCidr, newAliasName, newAliasDescription);
+      newAliasCidr = "";
+      newAliasName = "";
+      newAliasDescription = "";
+      await refreshAliases();
+    } catch (err) {
+      addAliasError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      addAliasBusy = false;
+    }
+  }
+
+  async function deleteAlias(a: ClientAlias) {
+    if (!confirm(`Remove the alias "${a.display_name}" for ${a.cidr}?`)) return;
+    await api.deleteClientAlias(a.id);
+    await refreshAliases();
+  }
+
   // Loaded on demand by RouteLoader when this page is routed to -- own our
   // own initial data fetch rather than relying on the shell to know we
   // need one (RouteLoader is generic across every future page).
   onMount(() => {
     refresh();
+    refreshAliases();
   });
 
   async function addRecord(e: Event) {
@@ -110,65 +181,123 @@
   }
 </script>
 
-<section aria-labelledby="localdns-heading">
-  <h2 id="localdns-heading">Local DNS</h2>
+<section aria-labelledby="localdns-heading" class="localdns">
+  <PageHeader
+    title="Local DNS"
+    headingId="localdns-heading"
+    description="Appliance-wide A/AAAA/CNAME/PTR records, answered directly by the compiled dnsdist runtime, plus Client Aliases for labeling addresses elsewhere in the UI."
+  />
 
-  <form onsubmit={addRecord} class="add-form">
-    <label>Name <input required bind:value={newName} placeholder="host.lan" /></label>
-    <label>
-      Type
-      <select bind:value={newType}>
-        <option>A</option><option>AAAA</option><option>CNAME</option><option>PTR</option>
-      </select>
-    </label>
-    <label>Value <input required bind:value={newValue} placeholder="10.0.0.5" /></label>
-    <label>TTL <input type="number" min="1" bind:value={newTTL} /></label>
-    <button type="submit" disabled={addBusy}>{addBusy ? "Adding…" : "Add record"}</button>
-    {#if addError}<p class="error" role="alert">{addError}</p>{/if}
-  </form>
-
-  <DnsRuntimeBadge result={dnsRuntimeResult} />
-
-  {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
-
-  <DataGrid gridId="local-dns-records" {columns} rows={records} rowKey={(r) => r.id} {rowClass} emptyMessage="No Local DNS records yet.">
-    {#snippet cell(r, colKey)}
-      {#if colKey === "name"}
-        {r.name}
-      {:else if colKey === "type"}
-        {r.record_type}
-      {:else if colKey === "value"}
-        {#if editingId === r.id}
-          <input bind:value={editValue} aria-label={`Edit value for ${r.name}`} />
-        {:else}
-          {r.value}
-        {/if}
-      {:else if colKey === "ttl"}
-        {#if editingId === r.id}
-          <input type="number" min="1" bind:value={editTTL} style="width:5rem" aria-label={`Edit TTL for ${r.name}`} />
-        {:else}
-          {r.ttl}
-        {/if}
-      {:else if colKey === "enabled"}
-        {r.enabled ? "yes" : "no"}
-      {:else if colKey === "actions"}
-        <div class="actions">
-          {#if editingId === r.id}
-            <button onclick={() => saveEdit(r)}>Save</button>
-            <button onclick={() => (editingId = null)}>Cancel</button>
-          {:else}
-            <button onclick={() => startEdit(r)}>Edit</button>
-            <button onclick={() => toggleEnabled(r)}>{r.enabled ? "Disable" : "Enable"}</button>
-            <button onclick={() => deleteRecord(r)} disabled={pendingDelete.has(r.id)} aria-busy={pendingDelete.has(r.id)}>
-              {pendingDelete.has(r.id) ? "Deleting…" : "Delete"}
-            </button>
-          {/if}
-        </div>
-      {/if}
+  <Panel heading="Records">
+    {#snippet actions()}
+      <input class="search-input" placeholder="Search name, value, type…" bind:value={search} aria-label="Search Local DNS records" />
     {/snippet}
-  </DataGrid>
+    <form onsubmit={addRecord} class="add-form">
+      <label>Name <input required bind:value={newName} placeholder="host.lan" /></label>
+      <label>
+        Type
+        <select bind:value={newType}>
+          <option>A</option><option>AAAA</option><option>CNAME</option><option>PTR</option>
+        </select>
+      </label>
+      <label>Value <input required bind:value={newValue} placeholder="10.0.0.5" /></label>
+      <label>TTL <input type="number" min="1" bind:value={newTTL} /></label>
+      <button type="submit" disabled={addBusy}>{addBusy ? "Adding…" : "Add record"}</button>
+      {#if addError}<p class="error" role="alert">{addError}</p>{/if}
+    </form>
+
+    <DnsRuntimeBadge result={dnsRuntimeResult} />
+
+    {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
+
+    <DataGrid
+      gridId="local-dns-records"
+      {columns}
+      rows={filteredRecords}
+      rowKey={(r) => r.id}
+      {rowClass}
+      emptyMessage={records.length === 0 ? "No Local DNS records yet." : "No records match this search."}
+    >
+      {#snippet cell(r, colKey)}
+        {#if colKey === "name"}
+          {r.name}
+        {:else if colKey === "type"}
+          {r.record_type}
+        {:else if colKey === "value"}
+          {#if editingId === r.id}
+            <input bind:value={editValue} aria-label={`Edit value for ${r.name}`} />
+          {:else}
+            {r.value}
+          {/if}
+        {:else if colKey === "ttl"}
+          {#if editingId === r.id}
+            <input type="number" min="1" bind:value={editTTL} style="width:5rem" aria-label={`Edit TTL for ${r.name}`} />
+          {:else}
+            {r.ttl}
+          {/if}
+        {:else if colKey === "enabled"}
+          {r.enabled ? "yes" : "no"}
+        {:else if colKey === "actions"}
+          <div class="actions">
+            {#if editingId === r.id}
+              <button onclick={() => saveEdit(r)}>Save</button>
+              <button onclick={() => (editingId = null)}>Cancel</button>
+            {:else}
+              <button onclick={() => startEdit(r)}>Edit</button>
+              <button onclick={() => toggleEnabled(r)}>{r.enabled ? "Disable" : "Enable"}</button>
+              <button onclick={() => deleteRecord(r)} disabled={pendingDelete.has(r.id)} aria-busy={pendingDelete.has(r.id)}>
+                {pendingDelete.has(r.id) ? "Deleting…" : "Delete"}
+              </button>
+            {/if}
+          </div>
+        {/if}
+      {/snippet}
+    </DataGrid>
+  </Panel>
+
+  <Panel heading="Client Aliases">
+    <p class="hint">
+      Labels an address range wherever a client is shown (Dashboard, Query Log, Client analytics) --
+      display only, no DNS-answering effect. A managed client's own identifier always wins over an
+      alias for the same address.
+    </p>
+    {#if aliasUnavailable}
+      <p class="hint">Client Aliases are not configured on this deployment.</p>
+    {:else}
+      {#if aliasLoadError}<p class="error" role="alert">{aliasLoadError}</p>{/if}
+      {#if aliases.length === 0 && !aliasLoadError}
+        <p class="hint">No client aliases yet.</p>
+      {:else}
+        <ul class="alias-list">
+          {#each aliases as a (a.id)}
+            <li class="alias-row">
+              <code>{a.cidr}</code>
+              <strong>{a.display_name}</strong>
+              {#if a.description}<span class="hint">{a.description}</span>{/if}
+              <button type="button" class="secondary small" onclick={() => deleteAlias(a)}>Remove</button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+      <form onsubmit={addAlias} class="add-form">
+        <label>CIDR or IP <input required bind:value={newAliasCidr} placeholder="192.168.1.0/24" /></label>
+        <label>Display name <input required bind:value={newAliasName} placeholder="Kids devices" /></label>
+        <label>Description <input bind:value={newAliasDescription} placeholder="optional" /></label>
+        <button type="submit" disabled={addAliasBusy}>{addAliasBusy ? "Adding…" : "Add alias"}</button>
+        {#if addAliasError}<p class="error" role="alert">{addAliasError}</p>{/if}
+      </form>
+    {/if}
+  </Panel>
 </section>
 
 <style>
+  .localdns { display: flex; flex-direction: column; gap: 1rem; }
   .actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+  .add-form { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: end; margin: 0.75rem 0; }
+  .add-form label { display: flex; flex-direction: column; font-size: 0.85rem; gap: 0.25rem; }
+  .search-input { min-width: 14rem; }
+  .hint { font-size: 0.85rem; opacity: 0.75; }
+  .alias-list { list-style: none; margin: 0 0 0.75rem; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
+  .alias-row { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+  button.secondary.small { min-height: auto; padding: 0.3rem 0.6rem; font-size: 0.8rem; }
 </style>

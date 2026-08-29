@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"alderpointdns/go-controlplane/internal/clientalias"
 	"alderpointdns/go-controlplane/internal/clients"
 	"alderpointdns/go-controlplane/internal/dbmigrate"
 	"alderpointdns/go-controlplane/internal/dnsanalytics"
@@ -92,6 +93,59 @@ func TestHandleAnalyticsTopClients(t *testing.T) {
 	other, _ := rows[1].(map[string]any)
 	if other["label"] != "192.168.1.99" {
 		t.Errorf("unmanaged address should fall back to its raw value as the label, got %v", other["label"])
+	}
+}
+
+// TestHandleAnalyticsTopClientsFallsBackToClientAlias proves the full
+// V1.1.1 resolve_client_name fallback chain: a managed client's exact
+// identifier wins first (tested above); absent that, the most specific
+// matching Client Alias CIDR wins over the raw address.
+func TestHandleAnalyticsTopClientsFallsBackToClientAlias(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(3000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := dbmigrate.Up(context.Background(), db, "../../schema/migrations"); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	aliasSvc := &clientalias.Service{DB: db}
+	if _, err := aliasSvc.Create(context.Background(), "192.168.2.0/24", "Guest network", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	analyticsDB, err := dnsanalytics.Open(filepath.Join(t.TempDir(), "analytics.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { analyticsDB.Close() })
+	now := time.Now().Unix()
+	insertTopClientsEvent(t, analyticsDB, now, "192.168.2.77", "a.example.com", "allowed")
+
+	s := &Server{
+		DB:            db,
+		Policy:        &policy.Service{DB: db},
+		Clients:       &clients.Service{DB: db},
+		ClientAliases: aliasSvc,
+		Analytics:     &dnsanalytics.Reader{DB: analyticsDB},
+		Log:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	code, body := doHandler(t, s.handleAnalyticsTopClients, "GET", "", nil)
+	if code != 200 {
+		t.Fatalf("code = %d, body = %+v", code, body)
+	}
+	rows, _ := body["clients"].([]any)
+	if len(rows) != 1 {
+		t.Fatalf("clients = %+v, want 1 row", rows)
+	}
+	row, _ := rows[0].(map[string]any)
+	if row["label"] != "Guest network" {
+		t.Errorf("label = %v, want the matching Client Alias display name", row["label"])
+	}
+	if row["raw_client"] != "192.168.2.77" {
+		t.Errorf("raw_client = %v, want the real address preserved alongside the label", row["raw_client"])
 	}
 }
 

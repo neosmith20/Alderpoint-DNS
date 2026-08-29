@@ -10,6 +10,7 @@ import (
 	"alderpointdns/go-controlplane/internal/backup"
 	"alderpointdns/go-controlplane/internal/blocklists"
 	"alderpointdns/go-controlplane/internal/bootstrap"
+	"alderpointdns/go-controlplane/internal/clientalias"
 	"alderpointdns/go-controlplane/internal/clients"
 	"alderpointdns/go-controlplane/internal/customrules"
 	"alderpointdns/go-controlplane/internal/dnsperf"
@@ -36,6 +37,11 @@ type Server struct {
 	Bootstrap  *bootstrap.Manager
 	Blocklists *blocklists.Service
 	LocalDNS   *localdns.Service
+	// ClientAliases is nil unless wired at startup (cmd/alderpointdns-go
+	// always wires it in practice, matching every other native-Go
+	// service). See internal/clientalias's own doc comment: display-only
+	// CIDR->name mapping, never a DNS-answering record.
+	ClientAliases *clientalias.Service
 	// Importer is nil unless wired at startup -- nil means the real
 	// preview/apply/rollback job workflow (POST /api/import/jobs etc.)
 	// reports unavailable; the older one-shot POST /api/import/hosts
@@ -172,6 +178,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/local-dns", requireAuth(s.handleCreateLocalDNS))
 	mux.HandleFunc("PATCH /api/local-dns/{id}", requireAuth(s.handleUpdateLocalDNS))
 	mux.HandleFunc("DELETE /api/local-dns/{id}", requireAuth(s.handleDeleteLocalDNS))
+	mux.HandleFunc("GET /api/local-dns/aliases", requireAuth(s.handleListClientAliases))
+	mux.HandleFunc("POST /api/local-dns/aliases", requireAuth(s.handleCreateClientAlias))
+	mux.HandleFunc("PATCH /api/local-dns/aliases/{id}", requireAuth(s.handleUpdateClientAlias))
+	mux.HandleFunc("DELETE /api/local-dns/aliases/{id}", requireAuth(s.handleDeleteClientAlias))
 
 	mux.HandleFunc("GET /api/upstreams", requireAuth(s.handleListUpstreams))
 	mux.HandleFunc("POST /api/upstreams", requireAuth(s.handleCreateUpstream))

@@ -254,8 +254,9 @@
     <h3>DNS Performance</h3>
     <p class="scope-note">
       A bounded, sequential set of real DNS/DoT/DoH queries against this deployment's own
-      Go-managed dnsdist/BIND runtime -- never Python's separate :8443 runtime, never a load test
-      (one query at a time, matching the reference implementation's own "safe" design).
+      Go-managed dnsdist/BIND runtime (the only runtime this appliance has -- Python is fully
+      decommissioned), never a load test (one query at a time, matching the reference
+      implementation's own "safe" design).
     </p>
     <div class="actions">
       <button data-run-dns-benchmark onclick={runDnsBenchmark} disabled={dnsPerf?.benchmark_running}>

@@ -53,6 +53,19 @@ export interface LocalDnsRecord {
   enabled: boolean;
 }
 
+// ClientAlias: V1.1.1's Client Aliases (local_dns.py upsert_alias/
+// alias_for_client) -- a CIDR-to-display-name mapping used to label a
+// client address wherever one's shown (Dashboard, Query Log, Client
+// analytics), when it isn't already a managed client's own identifier.
+export interface ClientAlias {
+  id: number;
+  cidr: string;
+  display_name: string;
+  description: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface BackupInfo {
   filename: string;
   size_bytes: number;
@@ -755,6 +768,19 @@ export const api = {
   updateLocalDNS: (id: number, patch: Partial<Pick<LocalDnsRecord, "value" | "ttl" | "enabled">>) =>
     req<{ record: LocalDnsRecord; dns_runtime?: DNSRuntimeApplyResult }>(`/api/local-dns/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteLocalDNS: (id: number) => req<{ status: string; dns_runtime?: DNSRuntimeApplyResult }>(`/api/local-dns/${id}`, { method: "DELETE" }),
+
+  listClientAliases: (signal?: AbortSignal) => req<{ aliases: ClientAlias[] }>("/api/local-dns/aliases", undefined, signal),
+  createClientAlias: (cidr: string, displayName: string, description: string) =>
+    req<{ status: string; alias: ClientAlias }>("/api/local-dns/aliases", {
+      method: "POST",
+      body: JSON.stringify({ cidr, display_name: displayName, description }),
+    }),
+  updateClientAlias: (id: number, displayName: string, description: string) =>
+    req<{ status: string }>(`/api/local-dns/aliases/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ display_name: displayName, description }),
+    }),
+  deleteClientAlias: (id: number) => req<{ status: string }>(`/api/local-dns/aliases/${id}`, { method: "DELETE" }),
 
   listUpstreams: (signal?: AbortSignal) =>
     req<{ upstreams: UpstreamProfile[]; native_recursion_active: boolean }>("/api/upstreams", undefined, signal),
