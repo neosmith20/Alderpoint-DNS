@@ -1,23 +1,48 @@
 <script lang="ts">
-  import { api, ApiError, type ImportJob, type DNSRuntimeApplyResult, type LegacyImportReport, type LegacyImportManifest } from "../api";
+  import {
+    api,
+    ApiError,
+    type ImportJob,
+    type DNSRuntimeApplyResult,
+    type LegacyImportReport,
+    type LegacyImportManifest,
+    type FilterImportReport,
+  } from "../api";
   import DnsRuntimeBadge from "./DnsRuntimeBadge.svelte";
 
   // Import. Real staged preview -> selection -> apply -> rollback/report
   // workflow (internal/importer's job model), field-matched against
   // Python's own real POST /api/import/jobs -> GET .../jobs/{id} ->
   // POST .../jobs/{id}/apply shape -- not a one-shot blind apply.
-  // Three source types are real: hosts-file, a simple Alderpoint-native
-  // CSV (name,record_type,value,ttl), and a real BIND zone-file parser
-  // (a practical subset -- A/AAAA/CNAME/PTR, $ORIGIN honored; no $TTL,
-  // SOA/NS/MX, or multi-line records). AdGuard YAML/live API, Pi-hole
-  // paste, and XLSX are not built -- disclosed, not silently assumed
-  // equivalent.
+  // Four source types are real: hosts-file, a simple Alderpoint-native
+  // CSV (name,record_type,value,ttl), a real BIND zone-file parser (a
+  // practical subset -- A/AAAA/CNAME/PTR, $ORIGIN honored; no $TTL,
+  // SOA/NS/MX, or multi-line records), and a real .xlsx spreadsheet
+  // reader (same name,record_type,value,ttl tabular shape as the CSV
+  // source). AdGuard Home YAML/live API and Pi-hole are their own
+  // separate feature further down this page (a different translation
+  // target -- blocklists + local DNS + custom rules together, not just
+  // local DNS records).
 
-  let sourceType = $state<"hosts" | "csv" | "zone">("hosts");
+  let sourceType = $state<"hosts" | "csv" | "zone" | "xlsx">("hosts");
   let sourceText = $state("");
+  let xlsxFile: File | null = $state(null);
+  let xlsxFileInput: HTMLInputElement | undefined = $state();
   let defaultDomain = $state("");
   let previewBusy = $state(false);
   let previewError = $state("");
+
+  function fileToBase64(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result as string;
+        resolve(result.slice(result.indexOf(",") + 1));
+      };
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+  }
 
   let job = $state<ImportJob | null>(null);
   let skipped = $state<Set<number>>(new Set());
@@ -35,8 +60,10 @@
     job = null;
     skipped = new Set();
     try {
-      const sourceName = sourceType === "hosts" ? "hosts import" : sourceType === "csv" ? "csv import" : "zone import";
-      const created = await api.createImportJob(sourceType, sourceName, sourceText, sourceType === "zone" ? defaultDomain : undefined);
+      const sourceName =
+        sourceType === "hosts" ? "hosts import" : sourceType === "csv" ? "csv import" : sourceType === "zone" ? "zone import" : "xlsx import";
+      const text = sourceType === "xlsx" ? (xlsxFile ? await fileToBase64(xlsxFile) : "") : sourceText;
+      const created = await api.createImportJob(sourceType, sourceName, text, sourceType === "zone" ? defaultDomain : undefined);
       job = await api.getImportJob(created.job_id);
     } catch (err) {
       previewError = err instanceof ApiError ? err.message : String(err);
@@ -132,6 +159,35 @@
     );
   }
 
+  // Pi-hole / AdGuard Home import -- a different translation target from
+  // everything above (blocklists + Local DNS + custom rules together,
+  // not just local_dns_records), so it gets its own dry-run/apply
+  // Report card (internal/filterimport) rather than the Plan/Job
+  // selection workflow.
+  let filterSourceType = $state<"pihole" | "adguard_yaml">("pihole");
+  let filterText = $state("");
+  let filterDefaultDomain = $state("");
+  let filterBusy = $state(false);
+  let filterError = $state("");
+  let filterReport = $state<FilterImportReport | null>(null);
+
+  async function runFilterImport(dryRun: boolean) {
+    if (!filterText.trim()) return;
+    filterBusy = true;
+    filterError = "";
+    try {
+      const resp =
+        filterSourceType === "pihole"
+          ? await api.importPihole(filterText, filterDefaultDomain, dryRun)
+          : await api.importAdGuardYAML(filterText, dryRun);
+      filterReport = resp.report;
+    } catch (err) {
+      filterError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      filterBusy = false;
+    }
+  }
+
   // A previewed-but-not-yet-applied job is a real, server-persisted row
   // (import_jobs) -- not component-local state. Without this, navigating
   // away (e.g. to Local DNS to sanity-check the preview) and back would
@@ -177,6 +233,7 @@
           <option value="hosts">Hosts file</option>
           <option value="csv">CSV (name,record_type,value,ttl)</option>
           <option value="zone">BIND zone file</option>
+          <option value="xlsx">Spreadsheet (.xlsx)</option>
         </select>
       </label>
       {#if sourceType === "zone"}
@@ -185,18 +242,30 @@
           <input bind:value={defaultDomain} placeholder="example.com" required />
         </label>
       {/if}
-      <textarea
-        bind:value={sourceText}
-        placeholder={sourceType === "hosts"
-          ? "127.0.0.1 localhost\n10.0.0.5 nas nas.lan"
-          : sourceType === "csv"
-            ? "name,record_type,value,ttl\nprinter.lan,A,10.0.0.50,300"
-            : "www\tIN\tA\t10.0.0.50\nmail\t600\tIN\tA\t10.0.0.51"}
-        aria-label={sourceType === "hosts" ? "Hosts file contents" : sourceType === "csv" ? "CSV contents" : "Zone file contents"}
-        rows="8"
-      ></textarea>
+      {#if sourceType === "xlsx"}
+        <label>
+          Spreadsheet file (first sheet: name, record_type, value, ttl columns)
+          <input type="file" accept=".xlsx" bind:this={xlsxFileInput} onchange={() => (xlsxFile = xlsxFileInput?.files?.[0] ?? null)} aria-label="Spreadsheet file" />
+        </label>
+      {:else}
+        <textarea
+          bind:value={sourceText}
+          placeholder={sourceType === "hosts"
+            ? "127.0.0.1 localhost\n10.0.0.5 nas nas.lan"
+            : sourceType === "csv"
+              ? "name,record_type,value,ttl\nprinter.lan,A,10.0.0.50,300"
+              : "www\tIN\tA\t10.0.0.50\nmail\t600\tIN\tA\t10.0.0.51"}
+          aria-label={sourceType === "hosts" ? "Hosts file contents" : sourceType === "csv" ? "CSV contents" : "Zone file contents"}
+          rows="8"
+        ></textarea>
+      {/if}
       <div class="actions">
-        <button type="submit" disabled={previewBusy || !sourceText.trim() || (sourceType === "zone" && !defaultDomain.trim())}>
+        <button
+          type="submit"
+          disabled={previewBusy ||
+            (sourceType === "xlsx" ? !xlsxFile : !sourceText.trim()) ||
+            (sourceType === "zone" && !defaultDomain.trim())}
+        >
           {previewBusy ? "Parsing…" : "Preview"}
         </button>
       </div>
@@ -315,6 +384,79 @@
         <summary>Not migrated (disclosed, not silently skipped)</summary>
         <p class="scope-note">{legacyReport.not_migrated.join(", ")}</p>
       </details>
+    {/if}
+  </div>
+
+  <h3 id="filter-import-heading">Import from Pi-hole or AdGuard Home</h3>
+  <p class="scope-note">
+    Pastes a real Pi-hole export (adlists.list URLs, whitelist/blacklist domains, regex lists,
+    dnsmasq <code>cname=</code> lines, custom.list hosts entries) or uploads a real AdGuard Home
+    <code>AdGuardHome.yaml</code> (filters, <code>user_rules</code> in common AdBlock syntax, DNS
+    rewrites) and translates it across Blocklists, Local DNS, and Custom Rules together. Not built:
+    allowlist-subscription filters (no Alderpoint DNS equivalent), client/group settings, and the
+    live AdGuard Home API source (a real third-party device this environment cannot reach) --
+    reported as explicit findings, never silently dropped.
+  </p>
+  <div class="card">
+    <label>
+      Source
+      <select bind:value={filterSourceType}>
+        <option value="pihole">Pi-hole export (paste)</option>
+        <option value="adguard_yaml">AdGuard Home YAML</option>
+      </select>
+    </label>
+    {#if filterSourceType === "pihole"}
+      <label>
+        Default domain (for bare hostnames in custom.list / cname= entries)
+        <input bind:value={filterDefaultDomain} placeholder="lan" />
+      </label>
+    {/if}
+    <textarea
+      bind:value={filterText}
+      placeholder={filterSourceType === "pihole"
+        ? "https://example.com/hosts.txt\nblacklist ads.example.com\ncname=alias,target.lan,600"
+        : "filters:\n  - name: AdGuard filter\n    url: https://example.com/filter.txt\nuser_rules:\n  - ||ads.example.com^"}
+      aria-label={filterSourceType === "pihole" ? "Pi-hole export contents" : "AdGuard Home YAML contents"}
+      rows="8"
+    ></textarea>
+    <div class="actions">
+      <button onclick={() => runFilterImport(true)} disabled={!filterText.trim() || filterBusy}>
+        {filterBusy ? "Working…" : "Preview (dry run)"}
+      </button>
+      <button onclick={() => runFilterImport(false)} disabled={!filterText.trim() || filterBusy}>
+        {filterBusy ? "Working…" : "Import for real"}
+      </button>
+    </div>
+    {#if filterError}<p class="error" role="alert">{filterError}</p>{/if}
+    {#if filterReport}
+      <p class={filterReport.dry_run ? "" : "success"} role="status">
+        {filterReport.dry_run ? "Dry run -- nothing written." : "Imported for real."}
+        <strong>{filterReport.counts.imported ?? filterReport.counts.would_import ?? 0}</strong>
+        {filterReport.dry_run ? "would import" : "imported"},
+        <strong>{filterReport.counts.skipped_duplicate ?? 0}</strong> skipped as duplicates,
+        <strong>{filterReport.counts.failed ?? 0}</strong> failed.
+      </p>
+      <table class="plan-table">
+        <thead><tr><th>Kind</th><th>Item</th><th>Status</th><th>Detail</th></tr></thead>
+        <tbody>
+          {#each filterReport.items as item, i (i)}
+            <tr>
+              <td>{item.kind}</td>
+              <td>{item.text}</td>
+              <td>{item.status}</td>
+              <td>{item.detail ?? ""}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+      {#if filterReport.unsupported.length > 0}
+        <details>
+          <summary>Unsupported findings ({filterReport.unsupported.length})</summary>
+          <ul class="parse-errors">
+            {#each filterReport.unsupported as u (u)}<li>{u}</li>{/each}
+          </ul>
+        </details>
+      {/if}
     {/if}
   </div>
 </section>

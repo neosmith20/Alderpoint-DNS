@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http/httptest"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -68,5 +69,38 @@ func TestCreateImportJobZoneWithDefaultDomainSucceeds(t *testing.T) {
 	row := rows[0].(map[string]any)
 	if row["name"] != "www.example.com" {
 		t.Fatalf("expected the name to be qualified against default_domain, got %+v", row)
+	}
+}
+
+func TestCreateImportJobXLSXDecodesBase64AndImportsReal(t *testing.T) {
+	s := newImportTestServer(t)
+	// A real .xlsx built with the real openpyxl library.
+	pyScript := `
+import sys, openpyxl, base64
+wb = openpyxl.Workbook()
+ws = wb.active
+ws.append(["name", "record_type", "value", "ttl"])
+ws.append(["printer.lan", "A", "10.0.0.50", "300"])
+import io
+buf = io.BytesIO()
+wb.save(buf)
+sys.stdout.write(base64.b64encode(buf.getvalue()).decode())
+`
+	out, err := exec.Command("python3", "-c", pyScript).Output()
+	if err != nil {
+		t.Skipf("python3/openpyxl not available: %v", err)
+	}
+	body, _ := json.Marshal(map[string]string{"source_type": "xlsx", "text": string(out)})
+	rec := httptest.NewRecorder()
+	s.handleCreateImportJob(rec, httptest.NewRequest("POST", "/api/import/jobs", bytes.NewReader(body)))
+	if rec.Code != 201 {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var result map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &result)
+	plan, _ := result["plan"].(map[string]any)
+	rows, _ := plan["rows"].([]any)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 real row from the real xlsx file, got %+v", plan)
 	}
 }

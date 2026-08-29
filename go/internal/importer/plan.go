@@ -9,18 +9,30 @@
 // same way Backup & Restore already does (internal/backup, real,
 // tested, transactional).
 //
-// Three source types are implemented, disclosed rather than hidden:
-// hosts-file, a simple Alderpoint-native CSV (name,record_type,value,
-// ttl), and a real BIND zone-file parser (a practical subset -- see
-// ImportZone's own doc comment). Python's other three source types
-// (AdGuard Home YAML/live API, Pi-hole paste, XLSX) are real,
-// substantial format-specific parsers each -- not attempted in this
-// pass; SourceTypes lists only what's real here.
+// Source types implemented, disclosed rather than hidden: hosts-file, a
+// simple Alderpoint-native CSV (name,record_type,value,ttl), a real
+// BIND zone-file parser (a practical subset -- see ImportZone's own doc
+// comment), and (2026-08-29) a real .xlsx spreadsheet reader
+// (xlsx.go -- no external dependency, reads the same
+// name,record_type,value,ttl tabular shape as the native CSV source,
+// matching V1.1.1's own parse_xlsx_bytes() exactly: same headers+rows
+// shape feeding the same downstream logic). AdGuard Home YAML and
+// Pi-hole are real too (2026-08-29), but NOT part of this package --
+// their translation targets three different subsystems at once
+// (blocklists, local DNS, custom rules), not just local_dns_records, so
+// they get their own package (internal/filterimport, its own dry-run/
+// apply Report shape and its own "Import from Pi-hole or AdGuard Home"
+// card on this same page) rather than being forced into this
+// local-DNS-only Plan/Job shape; SourceTypes here lists only what fits
+// that shape. The live AdGuard Home API source is not built -- it
+// requires reaching a real third-party device on the operator's own
+// network, which this environment cannot exercise or prove against.
 package importer
 
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -36,7 +48,7 @@ import (
 // SourceTypes is the real, current allowlist -- an unsupported value is
 // rejected before any parsing is attempted, matching Python's own
 // "source_type not in SOURCE_TYPES" check.
-var SourceTypes = map[string]bool{"hosts": true, "csv": true, "zone": true}
+var SourceTypes = map[string]bool{"hosts": true, "csv": true, "zone": true, "xlsx": true}
 
 type PlanRow struct {
 	Index          int    `json:"index"`
@@ -91,6 +103,16 @@ func ParseToPlan(sourceType, text string, defaultDomain string) (Plan, error) {
 			return Plan{}, fmt.Errorf("default_domain is required for a zone-file import (used as $ORIGIN and to qualify relative names)")
 		}
 		return parseZonePlan(text, defaultDomain), nil
+	case "xlsx":
+		// The real file is binary -- text carries it base64-encoded so
+		// this source type can reuse the same single JSON job-creation
+		// endpoint as every other source type, rather than a bespoke
+		// raw-body upload route just for this one format.
+		data, err := base64.StdEncoding.DecodeString(text)
+		if err != nil {
+			return Plan{}, fmt.Errorf("xlsx source expects base64-encoded file bytes in text: %w", err)
+		}
+		return parseXLSXPlan(data), nil
 	default:
 		return Plan{}, fmt.Errorf("unsupported source_type: %q", sourceType)
 	}
@@ -192,6 +214,30 @@ func parseCSVPlan(text string) Plan {
 		plan.ParseErrors = append(plan.ParseErrors, fmt.Sprintf("CSV parse error: %v", err))
 		return plan
 	}
+	return buildTabularPlan("csv", rows)
+}
+
+// parseXLSXPlan reads a real .xlsx workbook's first sheet as the same
+// name,record_type,value,ttl tabular shape as the native CSV source --
+// matching V1.1.1's own parse_xlsx_bytes(), which returns the identical
+// headers+rows shape as its own CSV reader and feeds both through the
+// same downstream column-mapped import path.
+func parseXLSXPlan(data []byte) Plan {
+	plan := Plan{SourceType: "xlsx", ParseErrors: []string{}}
+	rows, err := ParseXLSXRows(data)
+	if err != nil {
+		plan.ParseErrors = append(plan.ParseErrors, err.Error())
+		return plan
+	}
+	return buildTabularPlan("xlsx", rows)
+}
+
+// buildTabularPlan is the shared name,record_type,value[,ttl] row logic
+// used by both parseCSVPlan and parseXLSXPlan -- same source shape
+// (string cell grid), same validation, same conflict-annotation-ready
+// PlanRow output.
+func buildTabularPlan(sourceType string, rows [][]string) Plan {
+	plan := Plan{SourceType: sourceType, ParseErrors: []string{}}
 	idx := 0
 	for lineNo, row := range rows {
 		if len(row) == 0 || strings.TrimSpace(row[0]) == "" {

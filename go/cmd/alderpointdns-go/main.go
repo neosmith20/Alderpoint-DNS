@@ -34,6 +34,7 @@ import (
 	"alderpointdns/go-controlplane/internal/dnsruntime"
 	"alderpointdns/go-controlplane/internal/dnstransports"
 	"alderpointdns/go-controlplane/internal/domainrouting"
+	"alderpointdns/go-controlplane/internal/filterimport"
 	"alderpointdns/go-controlplane/internal/hostagent"
 	"alderpointdns/go-controlplane/internal/httpapi"
 	"alderpointdns/go-controlplane/internal/importer"
@@ -580,6 +581,7 @@ func runWeb(args []string) {
 		RetentionMaxCount: *backupRetentionMaxCount, RetentionMaxAgeDays: *backupRetentionMaxAgeDays,
 	}
 	importerSvc := &importer.Service{DB: db, LocalDNS: ldSvc, Backup: backupSvc}
+	filterImportSvc := &filterimport.Service{Blocklists: blSvc, CustomRules: customRulesSvc, LocalDNS: ldSvc}
 	secretBackupSvc := &secretbackup.Service{DB: db, Dir: *secretBackupsDir}
 
 	// Host-agent client: same "optional, never fatal" contract. No
@@ -749,6 +751,7 @@ func runWeb(args []string) {
 		Secrets:              secretsSvc,
 		Replication:          replicationSvc,
 		SecretBackup:         secretBackupSvc,
+		FilterImport:         filterImportSvc,
 	}
 
 	// DNS Performance benchmark: same "optional, never fatal" contract

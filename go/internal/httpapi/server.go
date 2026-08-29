@@ -8,6 +8,7 @@ import (
 
 	"alderpointdns/go-controlplane/internal/auth"
 	"alderpointdns/go-controlplane/internal/backup"
+	"alderpointdns/go-controlplane/internal/filterimport"
 	"alderpointdns/go-controlplane/internal/secretbackup"
 	"alderpointdns/go-controlplane/internal/blocklists"
 	"alderpointdns/go-controlplane/internal/bootstrap"
@@ -56,6 +57,7 @@ type Server struct {
 	CustomRules   *customrules.Service
 	Backup        *backup.Service
 	SecretBackup  *secretbackup.Service
+	FilterImport  *filterimport.Service
 	DNSTransports *dnstransports.Service
 	Notifications *notifications.Service
 	Replication   *replication.Service
@@ -294,6 +296,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/import/jobs/{id}/apply", requireAuth(s.handleApplyImportJob))
 	mux.HandleFunc("POST /api/import/jobs/{id}/rollback", requireAuth(s.handleRollbackImportJob))
 	mux.HandleFunc("POST /api/import/legacy-appliance", requireAuth(s.handleImportLegacyAppliance))
+	mux.HandleFunc("POST /api/import/pihole", requireAuth(s.handleImportPihole))
+	mux.HandleFunc("POST /api/import/adguard-yaml", requireAuth(s.handleImportAdGuardYAML))
 
 	mux.HandleFunc("GET /api/cache/status", requireAuth(s.handleCacheStatus))
 	mux.HandleFunc("POST /api/cache/flush", requireAuth(s.handleCacheFlush))

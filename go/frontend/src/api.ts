@@ -601,6 +601,21 @@ export interface LegacyImportReport {
   not_migrated: string[];
 }
 
+export interface FilterImportItemOutcome {
+  kind: "blocklist" | "rule" | "local_dns";
+  text: string;
+  status: "would_import" | "imported" | "skipped_duplicate" | "failed";
+  detail?: string;
+}
+
+export interface FilterImportReport {
+  dry_run: boolean;
+  source_type: string;
+  items: FilterImportItemOutcome[];
+  unsupported: string[];
+  counts: Record<string, number>;
+}
+
 export interface LegacyImportManifest {
   alderpointdns_app_version: string;
   database_schema_version: string;
@@ -1173,6 +1188,17 @@ export const api = {
     }),
   deleteSecretBackup: (name: string) =>
     req<{ status: string }>(`/api/backup/secrets/${encodeURIComponent(name)}`, { method: "DELETE" }),
+
+  importPihole: (text: string, defaultDomain: string, dryRun: boolean) =>
+    req<{ report: FilterImportReport }>("/api/import/pihole", {
+      method: "POST",
+      body: JSON.stringify({ text, default_domain: defaultDomain, dry_run: dryRun }),
+    }),
+  importAdGuardYAML: (text: string, dryRun: boolean) =>
+    req<{ report: FilterImportReport }>("/api/import/adguard-yaml", {
+      method: "POST",
+      body: JSON.stringify({ text, dry_run: dryRun }),
+    }),
 
   dnsRuntimeStatus: (signal?: AbortSignal) => req<DNSRuntimeStatus>("/api/dns-runtime/status", undefined, signal),
   applyDNSRuntime: () => req<DNSRuntimeApplyResult>("/api/dns-runtime/apply", { method: "POST" }),
