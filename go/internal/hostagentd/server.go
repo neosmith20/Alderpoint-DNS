@@ -21,8 +21,17 @@ import (
 // connDeadline bounds one whole request (dial to response written),
 // generic across every op this agent handles. Must comfortably exceed
 // the slowest real operation's worst-case duration -- see its own use
-// below for the real live defect that got it raised from 30s to this.
-const connDeadline = 90 * time.Second
+// below for the real live defect that got it raised from 30s to 90s.
+// Raised again to 150s once DNSRuntimeConfig.HealthCheckTimeout's own
+// default was raised from 30s to 60s (direct instrumentation of a real
+// promote showed dnsdist itself finishing startup only ~4s after a
+// 30s health-check budget had already given up) -- this must stay
+// clear of both the new 60s health-check budget plus real compile/
+// stage/reload overhead, and of the callers' own 120s client timeouts
+// (main.go's newPromoteHostAgentClient / hostAgentClient), or a client
+// can still give up while a genuinely-still-running promote holds this
+// connection open.
+const connDeadline = 150 * time.Second
 
 // Handler is the shape every allowlisted operation implements. params is
 // the raw JSON body (already known to come from an authorized peer);
@@ -125,15 +134,16 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		return
 	}
 
-	// 90s, not the originally-shipped 30s: a real live defect found
-	// during a durability pass, directly caused by raising
-	// DNSRuntimeConfig's own health-check timeout to 30s (see
-	// ops_dnsruntime.go's own comment on that change) -- a real promote
-	// of a blocklist-heavy config can now legitimately need close to
-	// 30s for its health check alone, on top of real compile/stage/
-	// reload time before that, so this connection-wide deadline (which
-	// bounds the ENTIRE request, not just the health check) started
-	// closing the connection out from under a promote that was still
+	// connDeadline (see its own doc comment, currently 150s), not the
+	// originally-shipped 30s: a real live defect found during a
+	// durability pass, directly caused by raising DNSRuntimeConfig's
+	// own health-check timeout (see ops_dnsruntime.go's own comment on
+	// that change, now 60s) -- a real promote of a blocklist-heavy
+	// config can now legitimately need close to that budget for its
+	// health check alone, on top of real compile/stage/reload time
+	// before that, so this connection-wide deadline (which bounds the
+	// ENTIRE request, not just the health check) started closing the
+	// connection out from under a promote that was still
 	// genuinely in progress -- observed live as "hostagent unavailable:
 	// no response" after ~38s, followed by DNS answering correctly
 	// again once the (still-running, now-orphaned-from-the-caller's-

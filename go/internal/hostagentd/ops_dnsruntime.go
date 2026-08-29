@@ -74,16 +74,23 @@ func (c *DNSRuntimeConfig) applyDefaults() {
 		c.DigBinary = "dig"
 	}
 	if c.HealthCheckTimeout <= 0 {
-		// 30s, not the originally-shipped 5s: a real live defect found
-		// during a durability pass -- a realistic, blocklist-heavy
+		// 60s, not the originally-shipped 5s (nor the first-attempt fix
+		// of 30s -- see the durability-pass diagnostic trail below for
+		// why 30s still wasn't enough). A realistic, blocklist-heavy
 		// compiled dnsdist config (~855k domains, a single large inline
-		// Lua table) measured 5.8s just to parse and start listening,
-		// so the 5s default falsely reported every promote as a
-		// rolled-back failure the moment Blocklists' own CA-certificate
-		// fix let real blocklist data flow for the first time. See
-		// cmd/apdns-hostagent's own -dns-runtime-health-check-timeout-
-		// seconds flag, which this default matches.
-		c.HealthCheckTimeout = 30 * time.Second
+		// Lua table) measured 5.8s to parse and start listening in
+		// isolation, but a REAL promote's own reload (which stops the
+		// prior live dnsdist first) was measured, with temporary timing
+		// instrumentation, taking dnsdist's own process a further ~30s+
+		// past a first 30s health-check budget before it logged its own
+		// "Listening on Do53 frontend" -- confirmed to complete only
+		// ~4s after a 30s-budget health check had already given up and
+		// triggered a real (safe, auto-rolled-back, but unnecessary)
+		// rollback. 60s leaves real margin above that measured worst
+		// case. See cmd/apdns-hostagent's own
+		// -dns-runtime-health-check-timeout-seconds flag, which this
+		// default matches.
+		c.HealthCheckTimeout = 60 * time.Second
 	}
 	if c.HealthCheckRetryDelay <= 0 {
 		c.HealthCheckRetryDelay = 200 * time.Millisecond

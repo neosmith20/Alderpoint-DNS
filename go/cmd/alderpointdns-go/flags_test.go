@@ -97,16 +97,19 @@ func TestResolveDNSRuntimeTLSPath(t *testing.T) {
 // TestHostAgentClientTimeoutsHaveRealMarginForARealPromote is a static
 // regression test for a live defect found during a durability pass: a
 // real DNS Runtime promote against a production-scale blocklist-heavy
-// config can legitimately need close to 30s for its own health check
-// (see internal/hostagentd's own HealthCheckTimeout default) on top of
-// real compile/stage/reload overhead before that. Both hostagent.Client
-// timeouts this binary constructs (the CLI's newPromoteHostAgentClient,
-// and the live "web" subcommand's own hostAgentClient used by every
-// hostagent-backed HTTP handler, including POST /api/dns-runtime/apply
-// and POST /api/cache/dnsdist-restart) must leave real margin above
-// that, not just barely exceed the health check alone -- a real promote
-// was measured failing with "hostagent unavailable: no response" at a
-// 45s client timeout.
+// config can legitimately need close to its own health-check budget
+// (see internal/hostagentd's own HealthCheckTimeout default, 60s) on
+// top of real compile/stage/reload overhead before that. Both
+// hostagent.Client timeouts this binary constructs (the CLI's
+// newPromoteHostAgentClient, and the live "web" subcommand's own
+// hostAgentClient used by every hostagent-backed HTTP handler,
+// including POST /api/dns-runtime/apply and POST /api/cache/dnsdist-
+// restart) must leave real margin above that, not just barely exceed
+// the health check alone -- a real promote was measured failing with
+// "hostagent unavailable: no response" at a 45s client timeout when
+// the health-check budget alone was already 30s, so a client timeout
+// merely equal to (or only slightly above) the health-check budget is
+// not safe.
 func TestHostAgentClientTimeoutsHaveRealMarginForARealPromote(t *testing.T) {
 	self, err := os.Getwd()
 	if err != nil {
@@ -118,7 +121,7 @@ func TestHostAgentClientTimeoutsHaveRealMarginForARealPromote(t *testing.T) {
 	}
 	timeoutRE := regexp.MustCompile(`c\.Timeout\s*=\s*(\d+)\s*\*\s*time\.Second`)
 	matches := timeoutRE.FindAllStringSubmatch(string(src), -1)
-	const minSeconds = 45
+	const minSeconds = 90 // real margin above the 60s HealthCheckTimeout default
 	if len(matches) == 0 {
 		t.Fatal("found no `c.Timeout = N * time.Second` assignments in main.go -- has this pattern changed?")
 	}
@@ -126,7 +129,7 @@ func TestHostAgentClientTimeoutsHaveRealMarginForARealPromote(t *testing.T) {
 		var seconds int
 		fmt.Sscanf(m[1], "%d", &seconds)
 		if seconds < minSeconds {
-			t.Errorf("found a hostagent.Client timeout of only %ds -- must be at least %ds to leave real margin above a real promote's own ~30s health-check budget plus compile/reload overhead", seconds, minSeconds)
+			t.Errorf("found a hostagent.Client timeout of only %ds -- must be at least %ds to leave real margin above a real promote's own 60s health-check budget plus compile/reload overhead", seconds, minSeconds)
 		}
 	}
 }
