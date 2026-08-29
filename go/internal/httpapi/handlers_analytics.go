@@ -291,13 +291,24 @@ func (s *Server) handleAnalyticsTopClients(w http.ResponseWriter, r *http.Reques
 // narrower compatibility boundary (see internal/rawquerylog).
 const rawQueryLogUnavailable = "raw query-log reader not configured (no -query-log-dir path given at startup)"
 
-// handleAnalyticsTopBlockedDomains used to be honestly, permanently
-// unavailable through the pyanalytics boundary alone (it only has
-// pre-aggregated bucket counts, not per-query domain detail) -- now real
-// when -query-log-dir is configured, via internal/rawquerylog's
-// TopDomains(blockedOnly=true) reading actual per-query rows. Still
-// honestly degraded (not silently hidden) when that reader isn't wired
-// up, same as every other analytics handler's nil-reader contract.
+// handleAnalyticsTopBlockedDomains reads real per-query domain detail
+// from internal/dnsanalytics's own query_events table (s.RawQueryLog is
+// wired to the exact same *dnsanalytics.Reader as s.Analytics -- see
+// main.go's "RawQueryLog: analyticsReader" -- this is no longer a
+// separate Python-Parquet compatibility boundary, that architecture is
+// fully gone, see CUTOVER.md). Honestly degraded (not silently hidden)
+// when that reader isn't wired up, same as every other analytics
+// handler's nil-reader contract.
+//
+// A real, previously-undisclosed inconsistency fixed here: unlike
+// handleAnalyticsTopDomains (its sibling Dashboard card, reading the
+// exact same underlying data), this handler used to report
+// degraded:false unconditionally on any successful query, never
+// consulting the analytics writer/dnstap-ingestion health check at
+// all -- the precise "DNS kept running while the analytics writer
+// died and the page kept showing a convincing chart" failure class
+// internal/pyanalytics/health.go was built to close everywhere else.
+// Now checked the same way, via the same s.Analytics.Health.
 func (s *Server) handleAnalyticsTopBlockedDomains(w http.ResponseWriter, r *http.Request) {
 	minutes := floatQuery(r, "minutes", 60, 1, 31*24*60)
 	limit := intQuery(r, "limit", 20, 1, 500)
@@ -318,21 +329,35 @@ func (s *Server) handleAnalyticsTopBlockedDomains(w http.ResponseWriter, r *http
 	for _, c := range counts {
 		out = append(out, [2]any{c.Domain, c.Count})
 	}
+	degraded, reason := false, ""
+	if s.Analytics != nil {
+		degraded, reason = writerDegraded(s.Analytics.Health(r.Context()))
+	}
 	now := float64(time.Now().Unix())
 	WriteJSON(w, http.StatusOK, map[string]any{
-		"rows": out, "columns": []string{"domain", "count"}, "degraded": false,
+		"rows": out, "columns": []string{"domain", "count"}, "degraded": degraded, "degraded_reason": reason,
 		"window":           map[string]any{"start": now - minutes*60, "end": now, "minutes": minutes},
 		"files_considered": filesConsidered,
 	})
 }
 
 // handleAnalyticsQueryLog mirrors GET /api/analytics/query-log's contract
-// (filters/limit/offset/degraded shape), reading from internal/rawquerylog
-// -- the raw-Parquet compatibility boundary, not pyanalytics's
-// pre-aggregated buckets. search is an optional post-scan substring match
-// across every returned row's string fields, matching Python's own
-// "intentionally post-query and bounded" design (the allowlisted
-// equality filters narrow the actual scan; search never widens it).
+// (filters/limit/offset/degraded shape). s.RawQueryLog reads real
+// per-query rows from internal/dnsanalytics's own query_events table --
+// the same reader as s.Analytics (see main.go's "RawQueryLog:
+// analyticsReader"), not a separate Python-Parquet compatibility
+// boundary; that architecture is fully gone, see CUTOVER.md. search is
+// an optional post-scan substring match across every returned row's
+// string fields, matching Python's own "intentionally post-query and
+// bounded" design (the allowlisted equality filters narrow the actual
+// scan; search never widens it).
+//
+// Same real writer-health consistency fix as handleAnalyticsTopBlocked
+// Domains: this used to report degraded:false on any successful query,
+// never checking the analytics writer/dnstap-ingestion health -- of
+// every page on this appliance, Query Log is the one an owner is most
+// likely to check first during an actual writer outage, so silently
+// looking "healthy" here was the worst place for that gap to exist.
 func (s *Server) handleAnalyticsQueryLog(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	minutes := floatQuery(r, "minutes", 1440, 1, 31*24*60)
@@ -390,8 +415,12 @@ func (s *Server) handleAnalyticsQueryLog(w http.ResponseWriter, r *http.Request)
 		}
 		rows = filtered
 	}
+	degraded, reason := false, ""
+	if s.Analytics != nil {
+		degraded, reason = writerDegraded(s.Analytics.Health(r.Context()))
+	}
 	WriteJSON(w, http.StatusOK, map[string]any{
-		"rows": rows, "degraded": false, "files_considered": result.FilesConsidered,
+		"rows": rows, "degraded": degraded, "degraded_reason": reason, "files_considered": result.FilesConsidered,
 		"limit": limit, "offset": offset, "filters": filtersJSON,
 	})
 }

@@ -159,14 +159,34 @@
       const config =
         kind === "email_smtp" ? { host: smtpHost, port: Number(smtpPort), from_addr: smtpFrom, to_addr: smtpTo, username: smtpUsername } : {};
       const p = await api.createNotificationProvider(kind, displayName, config);
-      if (secretValue.trim()) {
-        await api.setNotificationSecret(p.provider_id, secretValue);
-      }
+      // A real, previously-undisclosed "UI Truth" gap: this is two
+      // separate API calls (the provider row itself, then a follow-up
+      // credential seal that runs entirely inside apdns-hostagent, see
+      // this file's own doc comment) inside one try/catch. If the
+      // credential call failed for ANY reason -- hostagent transiently
+      // unreachable, a bad secret value -- the provider row that
+      // genuinely, already exists server-side never reached refresh(),
+      // so the grid kept showing the pre-creation list while the error
+      // banner implied nothing happened at all. Refresh unconditionally
+      // once the provider itself is confirmed created, then surface the
+      // secret failure (if any) separately -- the real row is real
+      // regardless of whether its credential attempt also succeeded.
       displayName = "";
-      secretValue = "";
       smtpHost = smtpFrom = smtpTo = smtpUsername = "";
       smtpPort = 587;
+      let secretErr: unknown = null;
+      if (secretValue.trim()) {
+        try {
+          await api.setNotificationSecret(p.provider_id, secretValue);
+        } catch (err) {
+          secretErr = err;
+        }
+      }
+      secretValue = "";
       await refresh();
+      if (secretErr) {
+        createError = `Provider "${p.display_name}" was created, but setting its credential failed: ${secretErr instanceof ApiError ? secretErr.message : String(secretErr)}`;
+      }
     } catch (err) {
       createError = err instanceof ApiError ? err.message : String(err);
     } finally {
