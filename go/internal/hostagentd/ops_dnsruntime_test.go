@@ -688,3 +688,24 @@ func TestDNSRuntimeConfigDefaultHealthCheckTimeoutIsGenerous(t *testing.T) {
 		t.Fatalf("default HealthCheckTimeout %v is not comfortably above the measured real-world load time of a large blocklist-heavy config (%v) -- this would falsely roll back a genuinely successful promote", cfg.HealthCheckTimeout, measuredRealWorldLoadTime)
 	}
 }
+
+// TestConnDeadlineExceedsDefaultHealthCheckTimeoutWithMargin is a real
+// regression test for a live defect found while fixing the health-
+// check-timeout defect above: raising DNSRuntimeConfig's default
+// HealthCheckTimeout to 30s (see that test) without also raising the
+// server's own per-connection deadline meant a real promote's health
+// check could still be running when the CONNECTION ITSELF got closed
+// out from under it -- observed live as "hostagent unavailable: no
+// response" after ~38s, worse than the original bug (a fast, honest
+// rollback) because the caller lost visibility into the real outcome
+// entirely. connDeadline must leave real margin above the health-check
+// budget alone, since real compile/stage/reload work happens on top of
+// it, not instead of it.
+func TestConnDeadlineExceedsDefaultHealthCheckTimeoutWithMargin(t *testing.T) {
+	var cfg DNSRuntimeConfig
+	cfg.applyDefaults()
+	const minMargin = 15 * time.Second
+	if connDeadline < cfg.HealthCheckTimeout+minMargin {
+		t.Fatalf("connDeadline (%v) leaves less than %v margin above the default HealthCheckTimeout (%v) -- a real promote's own health check could still be running when the connection is force-closed out from under it", connDeadline, minMargin, cfg.HealthCheckTimeout)
+	}
+}

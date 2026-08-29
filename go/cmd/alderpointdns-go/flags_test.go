@@ -15,6 +15,7 @@ package main
 // regress to a relative path again.
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -90,5 +91,42 @@ func TestResolveDNSRuntimeTLSPath(t *testing.T) {
 	}
 	if got := resolveDNSRuntimeTLSPath("/var/lib/apdns-go-live-staging/certs/server.crt", "/etc/alderpointdns-go/certs/server.crt"); got != "/var/lib/apdns-go-live-staging/certs/server.crt" {
 		t.Fatalf("expected the explicit HOST-side flag to win over the web config fallback, got %q", got)
+	}
+}
+
+// TestHostAgentClientTimeoutsHaveRealMarginForARealPromote is a static
+// regression test for a live defect found during a durability pass: a
+// real DNS Runtime promote against a production-scale blocklist-heavy
+// config can legitimately need close to 30s for its own health check
+// (see internal/hostagentd's own HealthCheckTimeout default) on top of
+// real compile/stage/reload overhead before that. Both hostagent.Client
+// timeouts this binary constructs (the CLI's newPromoteHostAgentClient,
+// and the live "web" subcommand's own hostAgentClient used by every
+// hostagent-backed HTTP handler, including POST /api/dns-runtime/apply
+// and POST /api/cache/dnsdist-restart) must leave real margin above
+// that, not just barely exceed the health check alone -- a real promote
+// was measured failing with "hostagent unavailable: no response" at a
+// 45s client timeout.
+func TestHostAgentClientTimeoutsHaveRealMarginForARealPromote(t *testing.T) {
+	self, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, err := os.ReadFile(filepath.Join(self, "main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	timeoutRE := regexp.MustCompile(`c\.Timeout\s*=\s*(\d+)\s*\*\s*time\.Second`)
+	matches := timeoutRE.FindAllStringSubmatch(string(src), -1)
+	const minSeconds = 45
+	if len(matches) == 0 {
+		t.Fatal("found no `c.Timeout = N * time.Second` assignments in main.go -- has this pattern changed?")
+	}
+	for _, m := range matches {
+		var seconds int
+		fmt.Sscanf(m[1], "%d", &seconds)
+		if seconds < minSeconds {
+			t.Errorf("found a hostagent.Client timeout of only %ds -- must be at least %ds to leave real margin above a real promote's own ~30s health-check budget plus compile/reload overhead", seconds, minSeconds)
+		}
 	}
 }

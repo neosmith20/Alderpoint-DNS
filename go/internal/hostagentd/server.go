@@ -18,6 +18,12 @@ import (
 	"alderpointdns/go-controlplane/internal/hostagent"
 )
 
+// connDeadline bounds one whole request (dial to response written),
+// generic across every op this agent handles. Must comfortably exceed
+// the slowest real operation's worst-case duration -- see its own use
+// below for the real live defect that got it raised from 30s to this.
+const connDeadline = 90 * time.Second
+
 // Handler is the shape every allowlisted operation implements. params is
 // the raw JSON body (already known to come from an authorized peer);
 // the handler decodes it itself into whatever typed struct it needs --
@@ -119,7 +125,23 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		return
 	}
 
-	conn.SetDeadline(time.Now().Add(30 * time.Second))
+	// 90s, not the originally-shipped 30s: a real live defect found
+	// during a durability pass, directly caused by raising
+	// DNSRuntimeConfig's own health-check timeout to 30s (see
+	// ops_dnsruntime.go's own comment on that change) -- a real promote
+	// of a blocklist-heavy config can now legitimately need close to
+	// 30s for its health check alone, on top of real compile/stage/
+	// reload time before that, so this connection-wide deadline (which
+	// bounds the ENTIRE request, not just the health check) started
+	// closing the connection out from under a promote that was still
+	// genuinely in progress -- observed live as "hostagent unavailable:
+	// no response" after ~38s, followed by DNS answering correctly
+	// again once the (still-running, now-orphaned-from-the-caller's-
+	// perspective) promote finished on its own. 90s leaves real margin
+	// above the ~30s health check plus realistic compile/reload
+	// overhead for every operation this agent handles, not just
+	// promote -- a fast op still returns in milliseconds either way.
+	conn.SetDeadline(time.Now().Add(connDeadline))
 	var req hostagent.Request
 	dec := json.NewDecoder(conn)
 	if err := dec.Decode(&req); err != nil {

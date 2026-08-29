@@ -258,15 +258,20 @@ func runBlocklistRefresh(args []string) {
 // timeout instead of the library default (10s). A real Apply through
 // apdns-hostagent -- stage, validate, promote, reload, health-check --
 // has been directly measured taking 10-13s, occasionally up to ~13.4s
-// (see hostagent.log's own "operation completed" dur_ms). The default
-// 10s client-side read timeout was shorter than that, so this CLI could
-// print a false "hostagent unavailable: ... i/o timeout" for a call that
-// completed successfully seconds later server-side -- a real bug (the
-// CLI's own result must reflect the actual completed job, not require
-// log archaeology), not a change to any query-hot-path timeout.
+// with a small compiled config (see hostagent.log's own "operation
+// completed" dur_ms). With a real, production-scale blocklist-heavy
+// config (~855k domains), the health check alone can now legitimately
+// take up to its own configured budget (30s default, see
+// DNSRuntimeConfig.HealthCheckTimeout's own comment) on top of that
+// same compile/stage/reload overhead -- 45s was itself found too tight
+// during a later durability pass (a real promote measured ~38s total,
+// triggering this exact client-side timeout mid-operation) and raised
+// to 60s, matching hostAgentClient's own timeout in runWeb so both the
+// CLI and the live web process give a real promote the same real
+// headroom.
 func newPromoteHostAgentClient(socketPath string) *hostagent.Client {
 	c := hostagent.NewClient(socketPath)
-	c.Timeout = 45 * time.Second
+	c.Timeout = 60 * time.Second
 	return c
 }
 
@@ -610,6 +615,15 @@ func runWeb(args []string) {
 	var hostAgentClient *hostagent.Client
 	if *hostagentSocket != "" {
 		hostAgentClient = hostagent.NewClient(*hostagentSocket)
+		// hostagent.NewClient's own 10s default is real-time-critical-op
+		// safe (Cache status, Network status, etc.) but too short for a
+		// real DNS Runtime promote -- see newPromoteHostAgentClient's own
+		// comment for the measured numbers. This is the client every
+		// owner-facing hostagent-backed HTTP handler uses, including
+		// POST /api/dns-runtime/apply and POST /api/cache/dnsdist-
+		// restart, so it needs the same real headroom, not just the
+		// separate CLI tools' own client.
+		hostAgentClient.Timeout = 60 * time.Second
 	}
 
 	// Go-native analytics: REQUIRED, unlike every other optional
