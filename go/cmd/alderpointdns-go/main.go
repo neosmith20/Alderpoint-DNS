@@ -776,6 +776,16 @@ func runWeb(args []string) {
 	notificationsSvc.Log = logger
 	go notificationsSvc.RunTLSExpiryScheduler(schedulerCtx, cfg.Web.TLSCertPath, notifications.DefaultTLSExpiryWarnDays, 24*time.Hour)
 
+	// Real dispatch call sites #4/#5: service_unavailable (BIND/dnsdist
+	// liveness, via the same dns_runtime.status hostagent op the DNS
+	// Runtime page's own status card calls) and replication_delayed
+	// (this node's own real replication.Service settings) -- closing
+	// two more of the five previously-disclosed unwired categories. A
+	// 2-minute tick is short enough to catch a real outage quickly
+	// without adding meaningful load; Dispatch's own per-subscription
+	// cooldown still applies on top.
+	go notificationsSvc.RunHealthChecksScheduler(schedulerCtx, hostAgentClient, replicationSvc, 2*time.Minute)
+
 	// Real DNS-runtime recompilation after a successful replica apply --
 	// see internal/replication.SyncOnce's own doc comment for why this
 	// hook is injected here rather than internal/replication importing

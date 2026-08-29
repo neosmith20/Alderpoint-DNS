@@ -33,9 +33,9 @@ var EventCategories = []EventCategory{
 	{"blocklist_update_failure", "Blocklist update failure", true, "warning"},
 	{"deploy_failure", "Configuration compilation or deployment failure", true, "critical"},
 	{"backup_failure", "Backup failure", false, "warning"},
-	{"service_unavailable", "named, dnsdist, or the Go web/analytics service unavailable", false, "critical"},
+	{"service_unavailable", "named, dnsdist, or the Go web/analytics service unavailable", true, "critical"},
 	{"resolver_all_unavailable", "All upstream resolvers unavailable", false, "critical"},
-	{"replication_delayed", "Replication delayed or failed", false, "warning"},
+	{"replication_delayed", "Replication delayed or failed", true, "warning"},
 	{"tls_cert_expiring", "TLS certificate approaching expiration", true, "warning"},
 }
 
