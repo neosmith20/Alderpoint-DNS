@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, type Subscription, type IntervalPreset, type DNSRuntimeApplyResult } from "../api";
+  import { api, ApiError, type Subscription, type IntervalPreset, type DNSRuntimeApplyResult, type BlocklistCategory } from "../api";
   import { StaleGuard } from "../staleGuard";
   import { router } from "../router.svelte";
   import DataGrid from "./DataGrid.svelte";
@@ -17,9 +17,81 @@
 
   let newName = $state("");
   let newUrl = $state("");
-  let newCategory = $state("standard");
+  let newCategory = $state("");
   let addBusy = $state(false);
   let addError = $state("");
+
+  // Custom Category create/rename/delete -- previously `category` on
+  // blocklist_subscriptions was just a free-text column with three
+  // hardcoded UI options, no real category entity an owner could
+  // create, rename, or delete. See internal/blocklists/categories.go.
+  let categories = $state<BlocklistCategory[]>([]);
+  let categoriesOpen = $state(false);
+  let newCategoryName = $state("");
+  let categoryBusy = $state(false);
+  let categoryError = $state("");
+  let renamingCategoryId = $state<number | null>(null);
+  let renameCategoryName = $state("");
+
+  async function refreshCategories() {
+    try {
+      const resp = await api.listBlocklistCategories(router.signal());
+      categories = resp.categories;
+      if (!newCategory && categories.length > 0) newCategory = categories[0].name;
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      categoryError = err instanceof ApiError ? err.message : String(err);
+    }
+  }
+
+  async function addCategory(e: Event) {
+    e.preventDefault();
+    categoryError = "";
+    categoryBusy = true;
+    try {
+      await api.createBlocklistCategory(newCategoryName);
+      newCategoryName = "";
+      await refreshCategories();
+    } catch (err) {
+      categoryError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      categoryBusy = false;
+    }
+  }
+
+  function startRenameCategory(cat: BlocklistCategory) {
+    renamingCategoryId = cat.id;
+    renameCategoryName = cat.name;
+  }
+
+  async function commitRenameCategory() {
+    if (renamingCategoryId === null) return;
+    categoryError = "";
+    categoryBusy = true;
+    try {
+      await api.renameBlocklistCategory(renamingCategoryId, renameCategoryName);
+      renamingCategoryId = null;
+      await refreshCategories();
+      await refresh();
+    } catch (err) {
+      categoryError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      categoryBusy = false;
+    }
+  }
+
+  async function deleteCategory(cat: BlocklistCategory) {
+    categoryError = "";
+    categoryBusy = true;
+    try {
+      await api.deleteBlocklistCategory(cat.id);
+      await refreshCategories();
+    } catch (err) {
+      categoryError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      categoryBusy = false;
+    }
+  }
 
   const guard = new StaleGuard();
   let dnsRuntimeResult = $state<DNSRuntimeApplyResult | null>(null);
@@ -49,6 +121,7 @@
   // need one (RouteLoader is generic across every future page).
   onMount(() => {
     refresh();
+    refreshCategories();
   });
 
   async function pollJob(subscriptionId: string, jobId: number) {
@@ -164,15 +237,44 @@
     <label>URL <input required bind:value={newUrl} type="url" /></label>
     <label>
       Category
-      <select bind:value={newCategory}>
-        <option>standard</option>
-        <option>privacy</option>
-        <option>aggressive</option>
+      <select bind:value={newCategory} required>
+        {#each categories as cat (cat.id)}
+          <option value={cat.name}>{cat.name}</option>
+        {/each}
       </select>
     </label>
-    <button type="submit" disabled={addBusy}>{addBusy ? "Adding…" : "Add subscription"}</button>
+    <button type="submit" disabled={addBusy || categories.length === 0}>{addBusy ? "Adding…" : "Add subscription"}</button>
+    <button type="button" class="link-button" onclick={() => (categoriesOpen = !categoriesOpen)}>
+      {categoriesOpen ? "Hide categories" : "Manage categories"}
+    </button>
     {#if addError}<p class="error" role="alert">{addError}</p>{/if}
   </form>
+
+  {#if categoriesOpen}
+    <div class="card categories-card">
+      <h3>Categories</h3>
+      {#if categoryError}<p class="error" role="alert">{categoryError}</p>{/if}
+      <ul class="category-list">
+        {#each categories as cat (cat.id)}
+          <li>
+            {#if renamingCategoryId === cat.id}
+              <input bind:value={renameCategoryName} aria-label={`Rename category ${cat.name}`} />
+              <button onclick={commitRenameCategory} disabled={categoryBusy}>Save</button>
+              <button onclick={() => (renamingCategoryId = null)} disabled={categoryBusy}>Cancel</button>
+            {:else}
+              <span>{cat.name}</span>
+              <button onclick={() => startRenameCategory(cat)} disabled={categoryBusy}>Rename</button>
+              <button onclick={() => deleteCategory(cat)} disabled={categoryBusy}>Delete</button>
+            {/if}
+          </li>
+        {/each}
+      </ul>
+      <form onsubmit={addCategory} class="add-category-form">
+        <input required bind:value={newCategoryName} placeholder="New category name" aria-label="New category name" />
+        <button type="submit" disabled={categoryBusy}>{categoryBusy ? "Adding…" : "Add category"}</button>
+      </form>
+    </div>
+  {/if}
 
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
   <DnsRuntimeBadge result={dnsRuntimeResult} />
@@ -224,4 +326,10 @@
   .badge-ok { background: var(--badge-ok-bg); color: var(--badge-ok-fg); }
   .badge-warn { background: var(--badge-warn-bg); color: var(--badge-warn-fg); }
   .badge-attention { background: var(--badge-danger-bg); color: var(--badge-danger-fg); font-weight: 600; }
+  .link-button { background: none; border: none; color: var(--link, #2563eb); cursor: pointer; padding: 0; text-decoration: underline; align-self: flex-end; }
+  .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); display: flex; flex-direction: column; gap: 0.6rem; }
+  .categories-card h3 { margin: 0; }
+  .category-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
+  .category-list li { display: flex; align-items: center; gap: 0.5rem; }
+  .add-category-form { display: flex; gap: 0.5rem; }
 </style>

@@ -34,6 +34,13 @@ export interface BlocklistsResponse {
   settings: { default_interval_seconds: number; interval_presets: IntervalPreset[] };
 }
 
+export interface BlocklistCategory {
+  id: number;
+  name: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Job {
   id: number;
   kind: string;
@@ -810,6 +817,14 @@ export const api = {
   refreshOne: (id: string) => req<{ status: string; job_id: number }>(`/api/blocklists/${encodeURIComponent(id)}/refresh`, { method: "POST" }),
   refreshAll: () => req<{ status: string; job_id: number | null; count?: number }>("/api/blocklists/refresh-all", { method: "POST" }),
   getJob: (id: number) => req<Job>(`/api/blocklists/jobs/${id}`),
+  listBlocklistCategories: (signal?: AbortSignal) =>
+    req<{ categories: BlocklistCategory[] }>("/api/blocklists/categories", undefined, signal),
+  createBlocklistCategory: (name: string) =>
+    req<BlocklistCategory>("/api/blocklists/categories", { method: "POST", body: JSON.stringify({ name }) }),
+  renameBlocklistCategory: (id: number, name: string) =>
+    req<{ status: string }>(`/api/blocklists/categories/${id}/rename`, { method: "POST", body: JSON.stringify({ name }) }),
+  deleteBlocklistCategory: (id: number) =>
+    req<{ status: string }>(`/api/blocklists/categories/${id}`, { method: "DELETE" }),
 
   listLocalDNS: (signal?: AbortSignal) => req<{ records: LocalDnsRecord[] }>("/api/local-dns", undefined, signal),
   createLocalDNS: (rec: Omit<LocalDnsRecord, "id">) =>

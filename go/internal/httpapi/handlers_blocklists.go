@@ -164,3 +164,82 @@ func (s *Server) handleBlocklistJob(w http.ResponseWriter, r *http.Request) {
 	}
 	WriteJSON(w, http.StatusOK, job)
 }
+
+// Custom Category create/rename/delete -- previously `category` on
+// blocklist_subscriptions was just a free-text column with three
+// hardcoded UI options, no real category entity an owner could
+// create, rename, or delete. See internal/blocklists/categories.go.
+
+func (s *Server) handleListBlocklistCategories(w http.ResponseWriter, r *http.Request) {
+	cats, err := s.Blocklists.ListCategories(r.Context())
+	if err != nil {
+		Err(http.StatusInternalServerError, "internal_error", "list categories failed").WriteJSON(w)
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"categories": cats})
+}
+
+type createBlocklistCategoryRequest struct {
+	Name string `json:"name"`
+}
+
+func (s *Server) handleCreateBlocklistCategory(w http.ResponseWriter, r *http.Request) {
+	var req createBlocklistCategoryRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Name) == "" {
+		Err(http.StatusBadRequest, "validation_error", "name required").WriteJSON(w)
+		return
+	}
+	cat, err := s.Blocklists.CreateCategory(r.Context(), req.Name)
+	if err != nil {
+		Err(http.StatusBadRequest, "validation_error", err.Error()).WriteJSON(w)
+		return
+	}
+	WriteJSON(w, http.StatusCreated, cat)
+}
+
+type renameBlocklistCategoryRequest struct {
+	Name string `json:"name"`
+}
+
+func (s *Server) handleRenameBlocklistCategory(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		Err(http.StatusBadRequest, "validation_error", "invalid category id").WriteJSON(w)
+		return
+	}
+	var req renameBlocklistCategoryRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Name) == "" {
+		Err(http.StatusBadRequest, "validation_error", "name required").WriteJSON(w)
+		return
+	}
+	if err := s.Blocklists.RenameCategory(r.Context(), id, req.Name); err != nil {
+		if err == blocklists.ErrCategoryNotFound {
+			Err(http.StatusNotFound, "not_found", "category not found").WriteJSON(w)
+			return
+		}
+		Err(http.StatusBadRequest, "validation_error", err.Error()).WriteJSON(w)
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "renamed"})
+}
+
+func (s *Server) handleDeleteBlocklistCategory(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		Err(http.StatusBadRequest, "validation_error", "invalid category id").WriteJSON(w)
+		return
+	}
+	if err := s.Blocklists.DeleteCategory(r.Context(), id); err != nil {
+		if err == blocklists.ErrCategoryNotFound {
+			Err(http.StatusNotFound, "not_found", "category not found").WriteJSON(w)
+			return
+		}
+		if err == blocklists.ErrCategoryInUse {
+			Err(http.StatusConflict, "conflict", "category is still used by at least one subscription").WriteJSON(w)
+			return
+		}
+		Err(http.StatusInternalServerError, "internal_error", "delete failed").WriteJSON(w)
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "deleted"})
+}

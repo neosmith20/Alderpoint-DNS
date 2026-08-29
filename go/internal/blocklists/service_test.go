@@ -62,6 +62,10 @@ func newTestService(t *testing.T) *Service {
 			id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, subscription_ids TEXT NOT NULL,
 			state TEXT NOT NULL, results TEXT, started_at TEXT NOT NULL, finished_at TEXT
 		);
+		CREATE TABLE blocklist_categories (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
+			created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+		);
 	`)
 	if err != nil {
 		t.Fatal(err)
