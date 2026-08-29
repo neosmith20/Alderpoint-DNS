@@ -196,24 +196,28 @@ func main() {
 
 	serveErr := s.Serve(ctx)
 
-	// A graceful shutdown (SIGTERM/SIGINT) must actually stop whatever
-	// real named/dnsdist processes this agent started -- they are plain
-	// child exec.Cmds with no PR_SET_PDEATHSIG, so left uncalled they
-	// simply get reparented to init and keep holding their bound ports
-	// (real :53, in the live cutover case) even after this process
-	// exits. A cutover rollback that sends this process SIGTERM and
-	// then tries to hand :53 back to Python depends on this actually
-	// running -- previously this stop func was intentionally discarded
-	// with the (still generally true) reasoning that this process's own
-	// restarts/updates should never interrupt a live DNS runtime, but
-	// process EXIT is a different case: nothing will ever reload this
-	// runtime again once this process is gone, so leaking its children
-	// serves no purpose and only creates a stuck port. Never called on
-	// a hostagent binary update/restart mid-runtime -- only right here,
-	// after Serve has already returned.
-	if dnsRuntimeStop != nil {
-		dnsRuntimeStop()
-	}
+	// 2026-08-28 incident fix (see AGENT_PROGRESS.md): this used to call
+	// dnsRuntimeStop() unconditionally right here, on the theory that
+	// SIGTERM/SIGINT only ever means "this process is exiting forever,
+	// and a cutover rollback needs :53 handed back to Python" -- that
+	// premise is false and caused a real ~3-minute live DNS outage: a
+	// routine apdns-hostagent binary restart (needed for an unrelated
+	// new op) sends this exact same SIGTERM, and a signal alone can
+	// never distinguish "exiting forever" from "restarting immediately
+	// with a new binary". Python is fully decommissioned now anyway
+	// (see CUTOVER.md) -- the cutover-rollback scenario this existed
+	// for no longer applies to any current deployment. named/dnsdist
+	// are plain child exec.Cmds with no PR_SET_PDEATHSIG, so simply NOT
+	// calling dnsRuntimeStop() here means they are deliberately left
+	// running (reparented to init, holding real :53) across every
+	// restart of this process -- exactly the already-correct behavior
+	// this same code's own history documents for hostagent's own
+	// binary updates, now applied consistently to every exit path
+	// instead of being special-cased. Deliberately decoupled: freeing
+	// :53 for a genuine full decommission must be its own explicit,
+	// named host-agent operation in the future, never an automatic
+	// side effect of this process merely stopping.
+	_ = dnsRuntimeStop
 
 	if serveErr != nil {
 		logger.Error("serve failed", "err", serveErr)

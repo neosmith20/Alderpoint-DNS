@@ -357,6 +357,24 @@ func stopCmd(cmd *exec.Cmd) {
 func (st *dnsRuntimeState) waitHealthy(ctx context.Context) error {
 	deadline := time.Now().Add(st.cfg.HealthCheckTimeout)
 	host, port := splitHostPort(st.cfg.DnsdistListenAddress)
+	// A real, previously-undisclosed bug (found live, 2026-08-28: a
+	// genuine ~3-minute DNS outage during a routine apdns-hostagent
+	// restart, recovered via dns-promote -- see AGENT_PROGRESS.md):
+	// dnsdist's configured listen address is "0.0.0.0:53" on every real
+	// deployment (it must bind every interface for real LAN clients),
+	// but dialing "0.0.0.0" as a DESTINATION is not a valid loopback
+	// alias on this host and was silently getting "connection refused"
+	// -- so this health check reported a false rolled_back on real,
+	// genuinely healthy promotions, invisible to every existing test
+	// (they all use a real 127.0.0.1:<port> listen address, since a
+	// test fixture has no LAN clients to serve). "0.0.0.0" and "::"
+	// both mean "every interface, including loopback" when BINDING;
+	// dial the real loopback address instead of the bind wildcard.
+	if host == "0.0.0.0" || host == "" {
+		host = "127.0.0.1"
+	} else if host == "::" {
+		host = "::1"
+	}
 	var lastErr error
 	for time.Now().Before(deadline) {
 		out, err := exec.CommandContext(ctx, st.cfg.DigBinary,

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -123,6 +124,63 @@ func TestDNSRuntimePromoteBringsUpRealBindAndDnsdist(t *testing.T) {
 	answer := realHealthMarkerDig(t, cfg.DnsdistListenAddress)
 	if answer != dnscompile.HealthMarkerIP {
 		t.Fatalf("expected the health marker's real answer %q, got %q", dnscompile.HealthMarkerIP, answer)
+	}
+}
+
+// TestDNSRuntimePromoteHealthCheckDialsLoopbackNotWildcard is the
+// direct regression proof for the 2026-08-28 incident's disclosed
+// health-check bug (see AGENT_PROGRESS.md): every real live deployment
+// configures DnsdistListenAddress as "0.0.0.0:53" (it must bind every
+// interface to serve real LAN clients), but the health check used to
+// dial "0.0.0.0" itself as the query DESTINATION, which is not a valid
+// loopback alias and returned "connection refused" -- so a genuinely
+// healthy promotion falsely reported rolled_back:true. Every other test
+// in this file uses a "127.0.0.1:<port>" listen address (a test fixture
+// has no real LAN clients to serve), so this exact bug was invisible
+// everywhere except a live "0.0.0.0" deployment until now.
+func TestDNSRuntimePromoteHealthCheckDialsLoopbackNotWildcard(t *testing.T) {
+	s, cfg := newDNSRuntimeConfig(t)
+	wildcardAddr := strings.Replace(cfg.DnsdistListenAddress, "127.0.0.1", "0.0.0.0", 1)
+	in := dnscompile.Input{ListenAddress: wildcardAddr, BindBackendAddress: fmt.Sprintf("127.0.0.1:%d", cfg.BindProxyPort), CacheMaxEntries: 1000}
+	dnsdistConf, err := dnscompile.CompileDnsdist(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := callPromote(t, s, DNSPromoteParams{DnsdistConf: dnsdistConf})
+	if !res.Promoted || res.RolledBack {
+		t.Fatalf("expected a real, genuinely healthy promotion on a wildcard listen address, got %+v (this is the exact false-rollback bug from the 2026-08-28 incident if it regresses)", res)
+	}
+	// Confirm the real dnsdist is actually reachable over the real
+	// loopback address too (not just that the health check itself
+	// passed) -- both UDP and TCP.
+	_, port := splitHostPort(cfg.DnsdistListenAddress)
+	answer := realHealthMarkerDig(t, "127.0.0.1:"+port)
+	if answer != dnscompile.HealthMarkerIP {
+		t.Fatalf("expected the health marker's real answer over UDP, got %q", answer)
+	}
+	tcpOut, err := exec.Command("dig", "+tcp", "+time=2", "+tries=2", "+short", "@127.0.0.1", "-p", port, dnscompile.HealthMarkerDomain, "A").Output()
+	if err != nil || strings.TrimSpace(string(tcpOut)) != dnscompile.HealthMarkerIP {
+		t.Fatalf("expected the health marker's real answer over TCP, got %q err=%v", tcpOut, err)
+	}
+}
+
+// TestSplitHostPortHealthCheckMapping is a narrow unit proof of the
+// wildcard-to-loopback mapping itself, independent of a real promotion.
+func TestSplitHostPortHealthCheckMapping(t *testing.T) {
+	cases := map[string]string{
+		"0.0.0.0:53":  "127.0.0.1",
+		"10.0.0.5:53": "10.0.0.5", // a real, specific bind address must be dialed as-is, never rewritten
+	}
+	for addr, wantHost := range cases {
+		host, _ := splitHostPort(addr)
+		if host == "0.0.0.0" {
+			host = "127.0.0.1"
+		} else if host == "::" {
+			host = "::1"
+		}
+		if host != wantHost {
+			t.Errorf("health-check dial host for %q = %q, want %q", addr, host, wantHost)
+		}
 	}
 }
 
