@@ -5,13 +5,17 @@
 
   // DNS Runtime: the real Go-native BIND + dnsdist compiler/promotion
   // pipeline (internal/dnscompile, internal/dnsruntime,
-  // internal/hostagentd/ops_dnsruntime.go). Local DNS changes apply
-  // automatically on save; Custom Rules, Blocklists, DNS Settings, and
-  // DNS Transports changes are compiled the next time this page's
-  // "Apply Runtime Changes" is used (or the next time a Local DNS
-  // change triggers it) -- not yet auto-triggered from those pages
-  // individually. Scope: global policy only (not yet per-network), one
-  // default upstream profile, no domain routing yet -- see
+  // internal/hostagentd/ops_dnsruntime.go). Every resolver-affecting
+  // save already auto-applies through the same real compiler (Local
+  // DNS, Upstreams/Domain Routing, Custom Rules, Blocklists, DNS
+  // Transports, Clients & Access global/network policy, Strong
+  // ClientID -- see every applyDNSRuntimeBestEffort call site). "Apply
+  // Runtime Changes" below is a manual re-compile-and-promote-now
+  // action (useful after fixing an underlying config issue, or to
+  // force a fresh promotion), not the only way a change takes effect.
+  // Scope: one default upstream profile, a flat global domain-routing
+  // list, global + per-network response-mode policy (2026-08-28) -- no
+  // per-group/per-client general-policy compilation yet -- see
   // internal/dnscompile's own doc comment for the complete list.
 
   let status = $state<DNSRuntimeStatus | null>(null);
@@ -54,10 +58,12 @@
   <p class="scope-note">
     Real BIND + dnsdist compilation, validation (against the actual installed binaries), atomic
     promotion, and automatic rollback on any failure -- see internal/dnscompile and
-    internal/hostagentd/ops_dnsruntime.go. Global policy scope only (not per-network yet); one
-    default upstream profile; no domain routing yet. Local DNS changes apply automatically;
-    Custom Rules, Blocklists, DNS Settings, and DNS Transports changes need "Apply Runtime
-    Changes" below until each is individually wired to auto-trigger.
+    internal/hostagentd/ops_dnsruntime.go. Every resolver-affecting save already auto-applies
+    through this same pipeline (Local DNS, Upstreams/Domain Routing, Custom Rules, Blocklists, DNS
+    Transports, Clients &amp; Access global/network policy, Strong ClientID). "Apply Runtime
+    Changes" below is a manual re-compile-and-promote action, not the only path to a live effect.
+    One default upstream profile; a flat global domain-routing list; global and per-network
+    response-mode policy compile, per-group/per-client general policy does not yet.
   </p>
 
   {#if statusError}<p class="error" role="alert">{statusError}</p>{/if}

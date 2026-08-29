@@ -126,7 +126,7 @@
 <svelte:window onpointermove={onResizeMove} onpointerup={endResize} />
 
 <div class="grid-scroll">
-  <table class="data-grid">
+  <table class="data-grid" data-grid-id={gridId}>
     <thead>
       <tr>
         {#each columns as col (col.key)}

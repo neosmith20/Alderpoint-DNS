@@ -4,6 +4,14 @@
 // headless Chromium via CDP (puppeteer-core, pointed at the system
 // /usr/bin/chromium -- no bundled download).
 //
+// Before running: seed 3 real rows into the fixture's -analytics-db via
+// `sh go/tests/fixtures/seed_query_events.sh <path-to-analytics.db>` --
+// this replaces the old make_query_log_fixture.py/-query-log-dir setup
+// (internal/rawquerylog's Python-Parquet compatibility boundary is gone
+// as of the 2026-08-28 cutover; -query-log-dir is not even a flag on
+// cmd/alderpointdns-go any more -- RawQueryLog and Analytics are the
+// same internal/dnsanalytics.Reader over the same -analytics-db now).
+//
 // Usage: node chromium_smoke.mjs <base-url> <username> <password>
 import puppeteer from "puppeteer-core";
 
@@ -223,11 +231,14 @@ async function main() {
       check("DataGrid resize handle present to test drag-resize", false, "th or handle not found");
     }
 
-    // --- Dashboard: Top Blocked Domains is real when -query-log-dir is
-    // configured (this harness always starts the server that way -- see
-    // main()). The honest-degraded path for when it's NOT configured is
-    // exercised by acceptance.py instead (no browser needed for that
-    // shape), so this isn't duplicated here.
+    // --- Dashboard: Top Blocked Domains is real once real query_events
+    // rows exist (see go/tests/fixtures/seed_query_events.sh, run
+    // before this script starts) -- both this and the aggregate
+    // dashboard panels read the same internal/dnsanalytics.Reader over
+    // the same -analytics-db now, no separate flag needed. The
+    // honest-degraded path for when no -analytics-db is configured at
+    // all is exercised by acceptance.py instead (no browser needed for
+    // that shape), so this isn't duplicated here.
     const blockedDomainRowsFn = () => {
       const h3 = [...document.querySelectorAll("h3")].find((e) => e.textContent?.includes("Top Blocked Domains"));
       const card = h3?.closest(".card");
@@ -286,14 +297,14 @@ async function main() {
     if (reshowIdx >= 0) await checkboxesAfter[reshowIdx].click();
     await page.click(".customize-btn");
 
-    // --- Nav: Query Log (internal/rawquerylog -- raw Parquet compatibility boundary) ---
+    // --- Nav: Query Log (internal/dnsanalytics -- real Go-native query_events, since the 2026-08-28 cutover) ---
     const clickedQueryLog = await clickNavItem(page, (t) => t === "Query Log");
     check("Query Log nav item exists and is clickable", clickedQueryLog);
     await page.waitForSelector("#analytics-heading", { timeout: 3000 }).catch(() => {});
     check("Query Log page content rendered", (await page.$("#analytics-heading")) !== null);
 
-    // Real rows from the seeded fixture (started with -query-log-dir
-    // pointed at go/tests/fixtures/make_query_log_fixture.py's output),
+    // Real rows from the seeded fixture (go/tests/fixtures/seed_query_events.sh,
+    // run against this instance's -analytics-db before this script starts),
     // not a mocked/empty grid. `:not(.empty-row)` excludes the DataGrid's
     // own pre-existing placeholder row -- the same race-condition class
     // already found and fixed for Upstreams/Backup/Filters elsewhere in
@@ -301,7 +312,7 @@ async function main() {
     // no per-row .actions cell to key off of instead.
     await page.waitForFunction(() => document.querySelectorAll(".data-grid tbody tr:not(.empty-row)").length > 0, { timeout: 5000 }).catch(() => {});
     let queryLogRows = await page.$$eval(".data-grid tbody tr:not(.empty-row)", (rows) => rows.length);
-    check("Query Log grid renders real rows from the raw Parquet fixture", queryLogRows === 3, `rows=${queryLogRows}`);
+    check("Query Log grid renders real seeded rows", queryLogRows === 3, `rows=${queryLogRows}`);
 
     // Domain filter narrows the grid to a real, server-side-filtered result.
     await page.type('input[aria-label="Filter by domain"]', "acceptance-blocked.example.com.");
@@ -554,33 +565,56 @@ async function main() {
     await page.waitForSelector("#clients-heading", { timeout: 3000 }).catch(() => {});
     check("Clients page content rendered", (await page.$("#clients-heading")) !== null);
 
-    // Create a group first (needed for the "assign group" workflow below).
-    const groupForms = await page.$$(".add-form");
-    await (await groupForms[1].$("input[required]")).type("Kids");
+    // Add client/Add group now open a real modal (see ClientsView.svelte's
+    // Modal-based rebuild) -- click the toolbar button by its exact text,
+    // fill and submit the form inside `.modal-form`, same pattern
+    // clients_access_smoke.mjs already established. The Managed Clients
+    // grid is scoped via [data-grid-id="managed-clients"] rather than
+    // the bare .data-grid class, since the page also now has a separate
+    // Client analytics grid (real seeded rows from
+    // seed_query_events.sh would otherwise be double-counted).
+    async function openModalByButtonText(label) {
+      for (const btn of await page.$$("button")) {
+        if ((await btn.evaluate((el) => el.textContent?.trim())) === label) {
+          await btn.click();
+          await page.waitForSelector(".modal-form", { timeout: 2000 });
+          return true;
+        }
+      }
+      return false;
+    }
+
+    // Create a managed client first (Add group is disabled until at
+    // least one client or group exists).
+    check("Add client button opens a real modal", await openModalByButtonText("Add client"));
+    await page.type(".modal-form input[required]", "Test Client");
+    await Promise.all([
+      page.waitForFunction(
+        () => document.querySelectorAll('[data-grid-id="managed-clients"] tbody tr').length > 0 && document.querySelector('[data-grid-id="managed-clients"] tbody .actions'),
+        { timeout: 3000 },
+      ),
+      page.click(".modal-form button[type=submit]"),
+    ]);
+    await new Promise((r) => setTimeout(r, 200));
+    const clientRows = await page.$$eval('[data-grid-id="managed-clients"] tbody tr', (rows) => rows.length);
+    check("creating a managed client adds a real row to the grid", clientRows === 1, `rows=${clientRows}`);
+
+    // Create a group (needed for the "assign group" workflow below).
+    check("Add group button opens a real modal", await openModalByButtonText("Add group"));
+    await page.type(".modal-form input[required]", "Kids");
     await Promise.all([
       page.waitForFunction(() => document.querySelector(".group-list") !== null || /No groups/.test(document.body.textContent), { timeout: 3000 }),
-      groupForms[1].$eval("button[type=submit]", (el) => el.click()),
+      page.click(".modal-form button[type=submit]"),
     ]);
     await new Promise((r) => setTimeout(r, 300));
     const groupListText = await page.$eval(".group-list", (el) => el.textContent).catch(() => "");
     check("creating a group adds a real entry to the group list", groupListText.includes("Kids"), groupListText);
 
-    // Create a managed client.
-    const clientForm = (await page.$$(".add-form"))[0];
-    await (await clientForm.$("input[required]")).type("Test Client");
-    await Promise.all([
-      page.waitForFunction(() => document.querySelectorAll(".data-grid tbody tr").length > 0 && document.querySelector(".data-grid tbody .actions"), { timeout: 3000 }),
-      clientForm.$eval("button[type=submit]", (el) => el.click()),
-    ]);
-    await new Promise((r) => setTimeout(r, 200));
-    const clientRows = await page.$$eval(".data-grid tbody tr", (rows) => rows.length);
-    check("creating a managed client adds a real row to the grid", clientRows === 1, `rows=${clientRows}`);
-
     // Add an identifier: invalid first (must be rejected), then valid.
     // Looked up by its actual label rather than array index -- action
     // button order isn't a stable contract.
     async function clickActionButton(label) {
-      for (const btn of await page.$$(".data-grid tbody .actions button")) {
+      for (const btn of await page.$$("[data-grid-id='managed-clients'] tbody .actions button")) {
         if ((await btn.evaluate((el) => el.textContent?.trim())) === label) {
           await btn.click();
           return true;
@@ -598,10 +632,16 @@ async function main() {
     await page.$eval(".inline-form input", (el) => (el.value = ""));
     await page.type(".inline-form input", "10.0.0.5");
     await Promise.all([
-      page.waitForFunction(() => document.querySelector(".chips") && /10\.0\.0\.5/.test(document.querySelector(".data-grid tbody").textContent), { timeout: 3000 }),
+      page.waitForFunction(() => /10\.0\.0\.5/.test(document.querySelector("[data-grid-id='managed-clients'] tbody")?.textContent ?? ""), { timeout: 3000 }),
       page.click(".inline-form button[type=submit]"),
     ]);
-    const chipsText = await page.$eval(".data-grid tbody .chips", (el) => el.textContent);
+    // IP/CIDR identifiers render in the "identifiers" column's own
+    // `.id-list` (a plain `.chip` per identifier, no wrapping `.chips`
+    // container -- that class is used by the separate overrides/groups
+    // columns instead), so scope the read there specifically rather
+    // than the first `.chips` element in the row, which would grab an
+    // unrelated column.
+    const chipsText = await page.$eval("[data-grid-id='managed-clients'] tbody .id-list", (el) => el.textContent);
     check("a valid identifier actually appears on the client row after saving", chipsText.includes("10.0.0.5"), chipsText);
 
     // --- Full managed-client lifecycle: edit, enable/disable, remove
@@ -612,10 +652,10 @@ async function main() {
       // Waits for a real rendered chip, not just "Kids" appearing anywhere
       // (the still-open assign-group <select>'s own <option> already
       // contains the text "Kids" before the mutation completes).
-      page.waitForFunction(() => [...document.querySelectorAll(".data-grid tbody .chips .chip")].some((c) => c.textContent.includes("Kids")), { timeout: 3000 }),
+      page.waitForFunction(() => [...document.querySelectorAll("[data-grid-id='managed-clients'] tbody .chips .chip")].some((c) => c.textContent.includes("Kids")), { timeout: 3000 }),
       page.click(".inline-form button[type=submit]"),
     ]);
-    const groupsChipText = await page.$eval(".data-grid tbody", (el) => el.textContent);
+    const groupsChipText = await page.$eval("[data-grid-id='managed-clients'] tbody", (el) => el.textContent);
     check("assigning a group actually shows it on the client row", groupsChipText.includes("Kids"), groupsChipText);
 
     check("Edit button exists", await clickActionButton("Edit"));
@@ -624,10 +664,10 @@ async function main() {
     await editInputs[0].click({ clickCount: 3 });
     await editInputs[0].type("Test Client Renamed");
     await Promise.all([
-      page.waitForFunction(() => /Test Client Renamed/.test(document.querySelector(".data-grid tbody").textContent), { timeout: 3000 }),
+      page.waitForFunction(() => /Test Client Renamed/.test(document.querySelector("[data-grid-id='managed-clients'] tbody").textContent), { timeout: 3000 }),
       page.click(".edit-name-form button[type=submit]"),
     ]);
-    const renamedText = await page.$eval(".data-grid tbody", (el) => el.textContent);
+    const renamedText = await page.$eval("[data-grid-id='managed-clients'] tbody", (el) => el.textContent);
     check("editing a client's name actually persists and re-renders", renamedText.includes("Test Client Renamed"), renamedText);
 
     check("Disable button exists on a managed client", await clickActionButton("Disable"));
@@ -640,7 +680,7 @@ async function main() {
     // Remove the IPv4 identifier added above (its own chip-x, not the
     // Strong ClientID rows).
     const removedIdentifier = await page.evaluate(() => {
-      const chip = [...document.querySelectorAll(".data-grid tbody .chips .chip")].find((c) => c.textContent.includes("10.0.0.5"));
+      const chip = [...document.querySelectorAll("[data-grid-id='managed-clients'] tbody .id-list .chip")].find((c) => c.textContent.includes("10.0.0.5"));
       const btn = chip?.querySelector(".chip-x");
       if (!btn) return false;
       window.__confirmOverride = window.confirm;
@@ -650,12 +690,12 @@ async function main() {
     });
     check("identifier remove control exists and is clickable", removedIdentifier);
     await new Promise((r) => setTimeout(r, 300));
-    const afterIdentifierRemoveText = await page.$eval(".data-grid tbody", (el) => el.textContent);
+    const afterIdentifierRemoveText = await page.$eval("[data-grid-id='managed-clients'] tbody", (el) => el.textContent);
     check("removing an IP identifier actually removes it from the row", !afterIdentifierRemoveText.includes("10.0.0.5"), afterIdentifierRemoveText);
 
     // Remove from group (chip-x on the group chip).
     const removedFromGroup = await page.evaluate(() => {
-      const chip = [...document.querySelectorAll(".data-grid tbody .chips .chip")].find((c) => c.textContent.includes("Kids"));
+      const chip = [...document.querySelectorAll("[data-grid-id='managed-clients'] tbody .chips .chip")].find((c) => c.textContent.includes("Kids"));
       const btn = chip?.querySelector(".chip-x");
       if (!btn) return false;
       btn.click();
@@ -663,20 +703,23 @@ async function main() {
     });
     check("group remove control exists and is clickable", removedFromGroup);
     await new Promise((r) => setTimeout(r, 300));
-    const afterGroupRemoveText = await page.$eval(".data-grid tbody", (el) => el.textContent);
+    const afterGroupRemoveText = await page.$eval("[data-grid-id='managed-clients'] tbody", (el) => el.textContent);
     check("removing a client from a group actually removes it from the row", !afterGroupRemoveText.includes("Kids"), afterGroupRemoveText);
 
     // --- Observed Clients (real traffic-derived, honest empty state on
     // a fresh instance with no query history) ---
     const observedSectionText = await page.evaluate(() => {
-      const h3s = [...document.querySelectorAll("h3")];
-      const target = h3s.find((h) => h.textContent.trim() === "Observed Clients");
-      return target ? target.nextElementSibling?.parentElement?.textContent ?? "" : null;
+      // Observed Clients is now the shared Panel component (ClientsView's
+      // design-system rebuild), whose heading renders as <h2>, not the
+      // page's old bespoke <h3>.
+      const headings = [...document.querySelectorAll("h2, h3")];
+      const target = headings.find((h) => h.textContent.trim() === "Observed Clients");
+      return target ? (target.closest(".panel") ?? target.parentElement)?.textContent ?? "" : null;
     });
     check("Observed Clients section renders on the Clients page", observedSectionText !== null, String(observedSectionText));
 
     // --- Per-client policy editor (shared PolicyEditor) ---
-    const policyButtons = await page.$$(".data-grid tbody .actions button");
+    const policyButtons = await page.$$("[data-grid-id='managed-clients'] tbody .actions button");
     let policyClicked = false;
     for (const btn of policyButtons) {
       if ((await btn.evaluate((el) => el.textContent?.trim())) === "Policy") {
@@ -699,7 +742,7 @@ async function main() {
     // server round trip, not just be a local echo.
     await page.reload({ waitUntil: "networkidle0" });
     await page.waitForSelector("#clients-heading", { timeout: 5000 });
-    const reopenButtons = await page.$$(".data-grid tbody .actions button");
+    const reopenButtons = await page.$$("[data-grid-id='managed-clients'] tbody .actions button");
     for (const btn of reopenButtons) {
       if ((await btn.evaluate((el) => el.textContent?.trim())) === "Policy") {
         await btn.click();
@@ -713,7 +756,7 @@ async function main() {
     // --- Delete client (real destructive action; confirm() overridden above) ---
     check("Delete button exists", await clickActionButton("Delete"));
     await new Promise((r) => setTimeout(r, 300));
-    const clientRowsAfterDelete = await page.$$eval(".data-grid tbody tr:not(.empty-row)", (rows) => rows.length);
+    const clientRowsAfterDelete = await page.$$eval("[data-grid-id='managed-clients'] tbody tr:not(.empty-row)", (rows) => rows.length);
     check("deleting a client actually removes its row", clientRowsAfterDelete === 0, `rows=${clientRowsAfterDelete}`);
 
     // --- Nav: Clients & Access (global policy + networks) ---
