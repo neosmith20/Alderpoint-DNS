@@ -60,31 +60,6 @@ func (s *Server) handleCacheFlush(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, result)
 }
 
-// --- Replication ---------------------------------------------------------
-
-func (s *Server) handleReplicationStatus(w http.ResponseWriter, r *http.Request) {
-	result, ok := callAgent[json.RawMessage](s, w, r, hostagent.OpReplicationStatus, nil)
-	if !ok {
-		return
-	}
-	WriteJSON(w, http.StatusOK, result)
-}
-
-func (s *Server) handleReplicationSync(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		PeerNodeID string `json:"peer_node_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		Err(http.StatusBadRequest, "validation_error", "invalid JSON body").WriteJSON(w)
-		return
-	}
-	result, ok := callAgent[json.RawMessage](s, w, r, hostagent.OpReplicationSync, body)
-	if !ok {
-		return
-	}
-	WriteJSON(w, http.StatusOK, result)
-}
-
 // --- Network Configuration -----------------------------------------------
 
 func (s *Server) handleNetworkStatus(w http.ResponseWriter, r *http.Request) {

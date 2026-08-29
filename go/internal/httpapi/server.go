@@ -21,6 +21,7 @@ import (
 	"alderpointdns/go-controlplane/internal/importer"
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/notifications"
+	"alderpointdns/go-controlplane/internal/replication"
 	"alderpointdns/go-controlplane/internal/policy"
 	"alderpointdns/go-controlplane/internal/secretstore"
 	"alderpointdns/go-controlplane/internal/upstreams"
@@ -55,6 +56,7 @@ type Server struct {
 	Backup        *backup.Service
 	DNSTransports *dnstransports.Service
 	Notifications *notifications.Service
+	Replication   *replication.Service
 	StaticDir     string
 	Log           *slog.Logger
 
@@ -292,8 +294,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/dns/performance/benchmark", requireAuth(s.handleDNSPerfBenchmark))
 	mux.HandleFunc("DELETE /api/dns/performance", requireAuth(s.handleDNSPerfClear))
 
-	mux.HandleFunc("GET /api/replication/status", requireAuth(s.handleReplicationStatus))
-	mux.HandleFunc("POST /api/replication/sync", requireAuth(s.handleReplicationSync))
+	s.registerReplicationRoutes(mux)
 
 	mux.HandleFunc("GET /api/network/status", requireAuth(s.handleNetworkStatus))
 	mux.HandleFunc("POST /api/network/apply", requireAuth(s.handleNetworkApply))

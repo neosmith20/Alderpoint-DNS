@@ -39,6 +39,7 @@ import (
 	"alderpointdns/go-controlplane/internal/importer"
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/notifications"
+	"alderpointdns/go-controlplane/internal/replication"
 	"alderpointdns/go-controlplane/internal/dnsanalytics"
 	"alderpointdns/go-controlplane/internal/policy"
 	"alderpointdns/go-controlplane/internal/pymigrate"
@@ -532,6 +533,7 @@ func runWeb(args []string) {
 	dnsRuntimeBindProxyAddr := fs.String("dns-runtime-bind-proxy-addr", "", "the real BIND PROXYv2 backend address apdns-hostagent compiles named.conf to listen on (127.0.0.1:<bind-proxy-port>); required together with -dns-runtime-dnsdist-addr")
 	dnsPerfBindPlainAddr := fs.String("dns-perf-bind-plain-addr", "", "BIND's own unproxied loopback listener address for this deployment (127.0.0.1:<bind-plain-port>), for System Status's Safe DNS Benchmark's 'BIND direct' case display only -- the real dialing happens entirely inside apdns-hostagent; empty = that one case is omitted")
 	dnsPerfReportPath := fs.String("dns-perf-report-path", "./data/dns-performance/latest-report.json", "path to persist the Safe DNS Benchmark's latest report (see internal/dnsperf)")
+	replicationCertDir := fs.String("replication-cert-dir", "./data/replication/certs", "directory for this node's own real replication mTLS certificate material (server cert/key as primary, or client cert/key/CA cert as an enrolled replica) -- see internal/replication; only CA generation/signing needs -hostagent-socket, the listener/poller themselves need no privilege")
 	fs.Parse(args)
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -570,6 +572,7 @@ func runWeb(args []string) {
 	customRulesSvc := &customrules.Service{DB: db}
 	dnsTransportsSvc := &dnstransports.Service{DB: db}
 	notificationsSvc := &notifications.Service{DB: db}
+	replicationSvc := &replication.Service{DB: db, CertDir: *replicationCertDir, Log: logger}
 	backupSvc := &backup.Service{
 		DB: db, Dir: *backupsDir, Version: Version,
 		RetentionMaxCount: *backupRetentionMaxCount, RetentionMaxAgeDays: *backupRetentionMaxAgeDays,
@@ -666,8 +669,10 @@ func runWeb(args []string) {
 	// holds ciphertext; the master key lives solely in apdns-hostagent.
 	secretsSvc := &secretstore.Service{DB: db, HostAgent: hostAgentClient}
 	notificationsSvc.Secrets = secretsSvc
+	replicationSvc.HostAgent = hostAgentClient
 	if hostAgentClient == nil {
 		logger.Info("secrets subsystem not wired: -hostagent-socket is empty; provider secrets (Notifications) will report unavailable")
+		logger.Info("replication CA generation/signing not wired: -hostagent-socket is empty; Replication will report unavailable as soon as a CA operation is attempted")
 	}
 
 	// Real dispatch call site #1: a blocklist subscription crossing the
@@ -737,6 +742,7 @@ func runWeb(args []string) {
 		DNSRuntime: dnsRuntimeOrch, TLSCertPath: cfg.Web.TLSCertPath, TLSKeyPath: cfg.Web.TLSKeyPath,
 		DNSPerfBindPlainAddr: *dnsPerfBindPlainAddr,
 		Secrets:              secretsSvc,
+		Replication:          replicationSvc,
 	}
 
 	// DNS Performance benchmark: same "optional, never fatal" contract
@@ -770,6 +776,42 @@ func runWeb(args []string) {
 	notificationsSvc.Log = logger
 	go notificationsSvc.RunTLSExpiryScheduler(schedulerCtx, cfg.Web.TLSCertPath, notifications.DefaultTLSExpiryWarnDays, 24*time.Hour)
 
+	// Real DNS-runtime recompilation after a successful replica apply --
+	// see internal/replication.SyncOnce's own doc comment for why this
+	// hook is injected here rather than internal/replication importing
+	// internal/dnsruntime directly. Nil-safe: if this deployment has no
+	// DNS runtime configured (dnsRuntimeOrch nil), a replica sync still
+	// applies at the database level, just without a live reload attempt.
+	if dnsRuntimeOrch != nil {
+		replicationSvc.DeployFn = func(ctx context.Context) (bool, string) {
+			result := dnsRuntimeOrch.Apply(ctx)
+			if !result.Attempted {
+				return true, "no DNS runtime configured for this deployment"
+			}
+			if result.RolledBack || result.Error != "" {
+				return false, fmt.Sprintf("stage=%s detail=%s error=%s", result.Stage, result.Detail, result.Error)
+			}
+			return true, "promoted"
+		}
+	}
+	// Re-establish whichever role was previously configured on every
+	// process restart, without any admin action -- matches Python's own
+	// autostart() exactly. Never fatal: a role that can't actually start
+	// (e.g. a primary whose CA/cert issuance needs -hostagent-socket,
+	// which isn't configured in this deployment) is surfaced the next
+	// time an owner takes an explicit action on the Replication page,
+	// not at boot.
+	if replicationSettings, err := replicationSvc.GetSettings(context.Background()); err == nil {
+		switch replicationSettings.Role {
+		case "primary":
+			if err := replicationSvc.EnsurePrimaryListenerRunning(context.Background()); err != nil {
+				logger.Warn("replication: primary listener did not start at boot", "err", err)
+			}
+		case "replica":
+			replicationSvc.StartPoller(schedulerCtx)
+		}
+	}
+
 	httpSrv := &http.Server{Addr: listenAddr, Handler: srv.Routes()}
 
 	if cfg.Web.TLSCertPath != "" && cfg.Web.TLSKeyPath != "" {
@@ -796,6 +838,7 @@ func runWeb(args []string) {
 
 	shutdownStart := time.Now()
 	cancelScheduler()
+	replicationSvc.StopPrimaryListener()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	httpSrv.Shutdown(shutdownCtx)

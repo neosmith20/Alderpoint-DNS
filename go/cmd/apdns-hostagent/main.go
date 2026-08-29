@@ -35,8 +35,6 @@ func main() {
 	bindNamedConfDir := flag.String("bind-compiled-dir", "", "directory containing one <context>/named.conf per compiled BIND context (empty = Cache reports no BIND contexts)")
 	rndcConfPath := flag.String("rndc-conf", "", "path to rndc.conf (empty = Cache/rndc operations unavailable)")
 
-	controlDBPath := flag.String("control-db", "", "path to Python's control.db, read-only (empty = Replication reports unavailable)")
-
 	secretsKeyDir := flag.String("secrets-key-dir", "/var/lib/apdns-hostagent/secrets", "root-only directory holding this appliance's native secrets master key (see internal/hostagentd/ops_secrets.go); never exposed to the web container")
 
 	journalDir := flag.String("journal-dir", "", "explicit journal directory for logs.read (empty = the host's own default journal)")
@@ -103,8 +101,6 @@ func main() {
 		RNDCConfPath: *rndcConfPath,
 		Contexts:     discoverBindContexts(*bindNamedConfDir, logger),
 	})
-
-	hostagentd.RegisterReplicationOps(s, hostagentd.ReplicationConfig{ControlDBPath: *controlDBPath})
 
 	if err := hostagentd.RegisterSecretsOps(s, hostagentd.SecretsConfig{KeyDir: *secretsKeyDir}); err != nil {
 		logger.Error("secrets subsystem setup failed", "err", err)

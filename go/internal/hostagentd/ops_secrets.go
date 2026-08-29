@@ -36,10 +36,19 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"math/big"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -290,7 +299,142 @@ func RegisterSecretsOps(s *Server, cfg SecretsConfig) error {
 		})
 	})
 
+	// Replication CA: the ONLY two operations that ever touch the
+	// Replication CA private key -- see internal/replication's own doc
+	// comment. Both live here (not a separate file) because they need
+	// this same closure's `engine`, exactly like every other
+	// seal/open-backed op above.
+	s.Register(hostagent.OpReplicationEnsureCA, func(ctx context.Context, params json.RawMessage) (any, error) {
+		caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			return nil, fmt.Errorf("generating CA key: %w", err)
+		}
+		serial, err := randomSerial()
+		if err != nil {
+			return nil, err
+		}
+		tmpl := &x509.Certificate{
+			SerialNumber:          serial,
+			Subject:               pkix.Name{CommonName: "Alderpoint DNS Replication CA"},
+			NotBefore:             time.Now().Add(-time.Hour),
+			NotAfter:              time.Now().AddDate(20, 0, 0),
+			KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
+			BasicConstraintsValid: true,
+			IsCA:                  true,
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &caKey.PublicKey, caKey)
+		if err != nil {
+			return nil, fmt.Errorf("creating CA certificate: %w", err)
+		}
+		keyDER, err := x509.MarshalECPrivateKey(caKey)
+		if err != nil {
+			return nil, fmt.Errorf("marshaling CA key: %w", err)
+		}
+		keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}))
+		ciphertext, nonce, version, err := engine.seal("replication_ca_key", "replication", keyPEM)
+		if err != nil {
+			return nil, fmt.Errorf("sealing CA key failed")
+		}
+		return map[string]any{
+			"ca_cert_pem":    string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})),
+			"ciphertext_b64": base64.StdEncoding.EncodeToString(ciphertext),
+			"nonce_b64":      base64.StdEncoding.EncodeToString(nonce),
+			"key_version":    version,
+		}, nil
+	})
+
+	s.Register(hostagent.OpReplicationIssueCert, func(ctx context.Context, params json.RawMessage) (any, error) {
+		var in struct {
+			CA       sealedIn `json:"ca"`
+			CACertPEM string  `json:"ca_cert_pem"`
+			CN        string  `json:"cn"`
+			SANs      []string `json:"sans"`
+			KeyUsage  string  `json:"key_usage"` // "server" | "client"
+			Days      int     `json:"days"`
+		}
+		if err := json.Unmarshal(params, &in); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		if in.CN == "" {
+			return nil, fmt.Errorf("cn is required")
+		}
+		if in.KeyUsage != "server" && in.KeyUsage != "client" {
+			return nil, fmt.Errorf("key_usage must be \"server\" or \"client\"")
+		}
+		if in.Days <= 0 {
+			in.Days = 825
+		}
+		caKeyPEM, err := in.CA.open(engine)
+		if err != nil {
+			return nil, err
+		}
+		caKeyBlock, _ := pem.Decode([]byte(caKeyPEM))
+		if caKeyBlock == nil {
+			return nil, fmt.Errorf("CA key could not be decoded")
+		}
+		caKey, err := x509.ParseECPrivateKey(caKeyBlock.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("CA key could not be parsed")
+		}
+		caCertBlock, _ := pem.Decode([]byte(in.CACertPEM))
+		if caCertBlock == nil {
+			return nil, fmt.Errorf("ca_cert_pem could not be decoded")
+		}
+		caCert, err := x509.ParseCertificate(caCertBlock.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("ca_cert_pem could not be parsed")
+		}
+
+		leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			return nil, fmt.Errorf("generating leaf key: %w", err)
+		}
+		serial, err := randomSerial()
+		if err != nil {
+			return nil, err
+		}
+		tmpl := &x509.Certificate{
+			SerialNumber: serial,
+			Subject:      pkix.Name{CommonName: in.CN},
+			NotBefore:    time.Now().Add(-time.Hour),
+			NotAfter:     time.Now().AddDate(0, 0, in.Days),
+			KeyUsage:     x509.KeyUsageDigitalSignature,
+		}
+		if in.KeyUsage == "server" {
+			tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+			for _, san := range in.SANs {
+				if ip := net.ParseIP(san); ip != nil {
+					tmpl.IPAddresses = append(tmpl.IPAddresses, ip)
+				} else {
+					tmpl.DNSNames = append(tmpl.DNSNames, san)
+				}
+			}
+		} else {
+			tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &leafKey.PublicKey, caKey)
+		if err != nil {
+			return nil, fmt.Errorf("creating leaf certificate: %w", err)
+		}
+		keyDER, err := x509.MarshalECPrivateKey(leafKey)
+		if err != nil {
+			return nil, fmt.Errorf("marshaling leaf key: %w", err)
+		}
+		fingerprint := sha256.Sum256(der)
+		return map[string]any{
+			"cert_pem":    string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})),
+			"key_pem":     string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})),
+			"fingerprint": hex.EncodeToString(fingerprint[:]),
+			"serial":      serial.String(),
+		}, nil
+	})
+
 	return nil
+}
+
+func randomSerial() (*big.Int, error) {
+	limit := new(big.Int).Lsh(big.NewInt(1), 128)
+	return rand.Int(rand.Reader, limit)
 }
 
 const testMessageText = "Alderpoint DNS test notification -- if you can see this, this provider is configured correctly."

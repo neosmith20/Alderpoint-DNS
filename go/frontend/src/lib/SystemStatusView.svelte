@@ -10,14 +10,10 @@
   // (perfLog.svelte.ts, fed by router.svelte.ts + RouteLoader.svelte --
   // real navigate()-to-component-ready latency, not synthetic numbers).
   //
-  // Node Identity is real (2026-08-27): it already lives inside Python's
-  // control.db, but internal/hostagentd's own Replication ops already
-  // read it via a real, root-owned, redacted read (never the secret
-  // columns) for the Replication page -- GET /api/replication/status's
-  // own response already carries node_identity, this page was simply
-  // never wired to fetch it. No new backend needed, matching the same
-  // "the matrix said blocked, the code already isn't" correction this
-  // session already made for Dashboard's Upstreams/Clients mini-panels.
+  // Node Identity (2026-08-29 rebuild): real Go-native replication
+  // settings (internal/replication) -- node_id, current role, and (for
+  // an enrolled replica) last sync status/drift, reusing the same
+  // GET /api/replication/status the Replication page itself calls.
   //
   // BIND Cache Counters is also real (2026-08-27): a real, read-only GET
   // of BIND's own statistics-channels JSON endpoint
@@ -206,16 +202,14 @@
       <p class="status-unavailable">Unavailable: {replicationError}</p>
     {:else if !replication}
       <p class="hint">…</p>
-    {:else if !replication.node_identity}
-      <p class="hint">No node identity recorded yet.</p>
     {:else}
-      {@const id = replication.node_identity}
+      {@const s = replication.settings}
       <div class="metric-strip">
-        <div class="metric"><span class="label">Node ID</span><span class="value mono">{id.node_id}</span></div>
-        <div class="metric"><span class="label">Display name</span><span class="value">{id.display_name || "(unnamed)"}</span></div>
-        <div class="metric"><span class="label">Created</span><span class="value">{timestampPref.format(id.created_at)}</span></div>
-        {#if id.regenerated_at}
-          <div class="metric"><span class="label">Regenerated</span><span class="value">{timestampPref.format(id.regenerated_at)}</span></div>
+        <div class="metric"><span class="label">Node ID</span><span class="value mono">{s.node_id}</span></div>
+        <div class="metric"><span class="label">Replication role</span><span class="value">{s.role}</span></div>
+        {#if s.role === "replica"}
+          <div class="metric"><span class="label">Last sync</span><span class="value">{s.last_sync_status || "never"}</span></div>
+          <div class="metric"><span class="label">Drift</span><span class="value">{s.drift_detected ? "detected" : "in sync"}</span></div>
         {/if}
       </div>
     {/if}

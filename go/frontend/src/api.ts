@@ -430,33 +430,81 @@ export interface DNSPerfStatusResponse {
   report_error?: string;
 }
 
-export interface ReplicationPeer {
-  peer_node_id: string;
-  display_name: string;
-  url: string;
-  expected_cert_sha256: string;
-  expected_incoming_cert_sha256: string;
-  authorized: boolean;
-  direction: string;
-  last_attempt_at: string;
-  last_success_at: string;
-  last_error: string;
-  local_generation: number;
-  remote_known_generation: number;
-  lag: number;
+// Real Go-native Replication -- rebuilt against V1.1.1's actual
+// owner-facing workflow (internal/replication, see its own doc
+// comment): node identity, token-based enrollment, numbered
+// content-hashed generations, mutual-TLS sync, drift detection.
+export interface ReplicationSettings {
+  node_id: string;
+  role: "standalone" | "primary" | "replica";
+  listen_host: string;
+  listen_port: number;
+  poll_interval_seconds: number;
+  primary_address: string;
+  paused: boolean;
+  include_encryption_settings: boolean;
+  last_applied_generation: number;
+  last_applied_hash: string;
+  last_sync_status: string;
+  last_sync_at: string;
+  drift_detected: boolean;
+  drift_checked_at: string;
 }
 
-export interface ReplicationStatusResponse {
-  node_identity: { node_id: string; display_name: string; created_at: string; regenerated_at?: string } | null;
-  peers: ReplicationPeer[];
+export interface ReplicationEnrollment {
+  id: number;
+  node_id: string;
+  node_name: string;
+  created_at: string;
+  expires_at: string;
+  status: "pending" | "consumed" | "revoked" | "expired";
+  consumed_at?: string;
+}
+
+export interface ReplicationReplica {
+  id: number;
+  node_id: string;
+  display_name: string;
+  cert_fingerprint: string;
+  cert_serial: string;
+  enrolled_at: string;
+  status: "active" | "paused" | "revoked";
+  last_generation_acked: number;
+  last_ack_hash: string;
+  last_seen_at?: string;
+  last_result: string;
+}
+
+export interface ReplicationGeneration {
+  generation_number: number;
+  created_at: string;
+  source_node_id: string;
+  schema_version: number;
+  content_hash: string;
+  section_keys: string[];
 }
 
 export interface ReplicationSyncResult {
-  peer_node_id: string;
-  ok: boolean;
-  detail: string;
-  status_code?: number;
-  elapsed_ms: number;
+  attempted_at: string;
+  generation_number?: number;
+  result: "success" | "up_to_date" | "no_generation" | "unreachable" | "skipped" | "failed" | "error";
+  message: string;
+}
+
+export interface ReplicationIssuedToken {
+  token: string;
+  node_id: string;
+  node_name: string;
+  expires_at: string;
+}
+
+export interface ReplicationStatusResponse {
+  settings: ReplicationSettings;
+  enrollments?: ReplicationEnrollment[];
+  replicas?: ReplicationReplica[];
+  latest_generation?: ReplicationGeneration | null;
+  listener_running?: boolean;
+  sync_history?: ReplicationSyncResult[];
 }
 
 export interface NetworkApplyResult {
@@ -781,8 +829,24 @@ export const api = {
   dnsPerformanceClear: () => req<{ status: string }>("/api/dns/performance", { method: "DELETE" }),
 
   replicationStatus: (signal?: AbortSignal) => req<ReplicationStatusResponse>("/api/replication/status", undefined, signal),
-  replicationSync: (peerNodeId: string) =>
-    req<ReplicationSyncResult>("/api/replication/sync", { method: "POST", body: JSON.stringify({ peer_node_id: peerNodeId }) }),
+  replicationSetRole: (role: string) => req<{ status: string }>("/api/replication/role", { method: "POST", body: JSON.stringify({ role }) }),
+  replicationGenerateToken: (nodeName: string) =>
+    req<ReplicationIssuedToken>("/api/replication/token", { method: "POST", body: JSON.stringify({ node_name: nodeName }) }),
+  replicationRevokeEnrollment: (id: number) => req<{ status: string }>(`/api/replication/enrollments/${id}/revoke`, { method: "POST" }),
+  replicationSetReplicaStatus: (id: number, status: string) =>
+    req<{ status: string }>(`/api/replication/replicas/${id}/status`, { method: "POST", body: JSON.stringify({ status }) }),
+  replicationConnect: (primaryHost: string, primaryPort: number, token: string) =>
+    req<{ status: string; node_id: string }>("/api/replication/connect", {
+      method: "POST",
+      body: JSON.stringify({ primary_host: primaryHost, primary_port: primaryPort, token }),
+    }),
+  replicationSyncNow: () => req<ReplicationSyncResult>("/api/replication/sync-now", { method: "POST" }),
+  replicationDriftCheck: () =>
+    req<{ drifted: boolean; local_hash: string; expected_hash: string }>("/api/replication/drift-check", { method: "POST" }),
+  replicationPause: (paused: boolean) => req<{ status: string }>("/api/replication/pause", { method: "POST", body: JSON.stringify({ paused }) }),
+  replicationSettings: (settings: { listen_host: string; listen_port: number; poll_interval_seconds: number; include_encryption_settings: boolean }) =>
+    req<{ status: string }>("/api/replication/settings", { method: "POST", body: JSON.stringify(settings) }),
+  replicationPublishGeneration: () => req<ReplicationGeneration>("/api/replication/generations", { method: "POST" }),
 
   networkStatus: (iface: string, signal?: AbortSignal) =>
     req<{ raw_addr_json: string }>(`/api/network/status?interface=${encodeURIComponent(iface)}`, undefined, signal),
