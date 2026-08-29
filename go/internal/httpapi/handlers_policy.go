@@ -61,20 +61,25 @@ func (s *Server) putPolicyLayer(w http.ResponseWriter, r *http.Request, scope, s
 		Err(status, code, err.Error()).WriteJSON(w)
 		return
 	}
-	// Only the global scope is ever consulted by the compiler today
-	// (internal/dnsruntime.Orchestrator.build reads Policy.Load(ctx,
-	// "global", "global") only -- no per-network/group/client effective-
-	// policy resolution engine exists yet). A global save therefore
-	// really can change the live runtime and gets the same real
-	// dns_runtime field every other auto-applying mutation on this
-	// server returns (see applyDNSRuntimeBestEffort). A network/group/
-	// client save is honestly reported as not compiled -- this used to
-	// unconditionally claim "promoted": true regardless of scope, a
-	// real fake-success bug matching the exact class the old
-	// Upstreams/Custom Rules "runtimeStub()" already got fixed for; see
-	// PARITY_MATRIX.md's "httpapi: consistent DNS-runtime auto-apply UX"
-	// entry.
-	if scope == "global" {
+	// global and network scopes are both real, compiled runtime effects
+	// as of 2026-08-28 (internal/dnsruntime.Orchestrator.build computes
+	// each network's own effective blocking_response_mode/custom_ip*
+	// fields via internal/policy.MergeLayers and hands any that differ
+	// from global to internal/dnscompile.NetworkOverride -- see that
+	// type's own doc comment for exactly which fields, and why the
+	// block/allow domain LIST itself stays global-only). group/client
+	// scope saves are still honestly reported as not compiled -- no
+	// per-group/per-client compiled effect exists for the general
+	// policy Layer fields (blocking_response_mode etc.) at those two
+	// scopes yet; Strong ClientID's own explicit domain block/allow
+	// overrides are a separate, already-compiled mechanism (see
+	// internal/clients, internal/dnscompile's ClientOverride), not this
+	// Layer-based policy at all. This used to unconditionally claim
+	// "promoted": true regardless of scope, a real fake-success bug
+	// matching the exact class the old Upstreams/Custom Rules
+	// "runtimeStub()" already got fixed for; see PARITY_MATRIX.md's
+	// "httpapi: consistent DNS-runtime auto-apply UX" entry.
+	if scope == "global" || scope == "network" {
 		WriteJSON(w, http.StatusOK, map[string]any{"status": "updated", "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
 		return
 	}
@@ -82,7 +87,7 @@ func (s *Server) putPolicyLayer(w http.ResponseWriter, r *http.Request, scope, s
 		"status": "updated",
 		"dns_runtime": &dnsruntime.Result{
 			Attempted: false,
-			Detail:    "network/group/client-scoped policy is not compiled into the DNS runtime yet -- only the global policy layer is (see internal/dnscompile's doc comment)",
+			Detail:    "group/client-scoped policy is not compiled into the DNS runtime yet (Strong ClientID's own explicit domain overrides are a separate, already-compiled mechanism -- see the Clients page) -- only global and network-scoped policy are (see internal/dnscompile's doc comment)",
 		},
 	})
 }

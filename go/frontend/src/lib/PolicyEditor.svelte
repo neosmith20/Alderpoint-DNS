@@ -5,14 +5,15 @@
   // "(Inherit)" (null) vs an explicit value, matching the backend's own
   // "unset means inherit from the next layer up" semantics -- never
   // silently defaults a field to some value the operator didn't choose.
-  import { ApiError, EMPTY_POLICY_LAYER, type PolicyLayer } from "../api";
+  import { ApiError, EMPTY_POLICY_LAYER, type PolicyLayer, type DNSRuntimeApplyResult } from "../api";
+  import DnsRuntimeBadge from "./DnsRuntimeBadge.svelte";
 
   let {
     layer,
     onSave,
   }: {
     layer: PolicyLayer;
-    onSave: (l: PolicyLayer) => Promise<unknown>;
+    onSave: (l: PolicyLayer) => Promise<{ dns_runtime?: DNSRuntimeApplyResult | null } | unknown>;
   } = $props();
 
   // Starts empty and is synced from the `layer` prop by the $effect below
@@ -22,6 +23,13 @@
   let busy = $state(false);
   let error = $state("");
   let success = $state(false);
+  // Every scope's PUT now returns a real dns_runtime result (global and
+  // network are real compiled effects; group/client honestly report
+  // attempted:false -- see internal/httpapi/handlers_policy.go) --
+  // surfaced through the same shared DnsRuntimeBadge every other
+  // resolver-affecting save on this appliance already uses, so "Saved."
+  // never implies a live effect this scope didn't actually have.
+  let runtimeResult = $state<DNSRuntimeApplyResult | null>(null);
 
   $effect(() => {
     draft = { ...layer };
@@ -35,9 +43,11 @@
     e.preventDefault();
     error = "";
     success = false;
+    runtimeResult = null;
     busy = true;
     try {
-      await onSave(draft);
+      const res = (await onSave(draft)) as { dns_runtime?: DNSRuntimeApplyResult | null } | undefined;
+      runtimeResult = res?.dns_runtime ?? null;
       success = true;
     } catch (err) {
       error = err instanceof ApiError ? err.message : String(err);
@@ -121,6 +131,11 @@
     {#if success}<span class="ok" role="status">Saved.</span>{/if}
   </div>
   {#if error}<p class="error" role="alert">{error}</p>{/if}
+  {#if success && runtimeResult?.attempted === false}
+    <p class="hint">Saved, but not compiled into the live DNS runtime at this scope. {runtimeResult.detail ?? ""}</p>
+  {:else}
+    <DnsRuntimeBadge result={runtimeResult} />
+  {/if}
 </form>
 
 <style>
@@ -129,4 +144,5 @@
   .grid label { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.8rem; }
   .editor-actions { display: flex; align-items: center; gap: 0.6rem; }
   .ok { color: #16a34a; font-size: 0.85rem; }
+  .hint { font-size: 0.8rem; opacity: 0.75; margin: 0; }
 </style>

@@ -52,6 +52,7 @@ package dnscompile
 
 import (
 	"fmt"
+	"net"
 	"sort"
 	"strings"
 
@@ -137,6 +138,37 @@ type ClientOverride struct {
 	Domain    string
 }
 
+// NetworkOverride is one network (internal/policy.Network) whose own
+// effective policy (global merged with that network's own layer, via
+// internal/policy.MergeLayers) actually differs from the plain global
+// values above for at least one field this compiler knows how to act
+// on. The caller (internal/dnsruntime's orchestrator) is responsible
+// for computing that effective value and for only including a network
+// here when it genuinely differs -- this package trusts CIDR and the
+// three response-mode fields as given and does no policy merging
+// itself, matching every other Input field's "pure value, not a
+// reference" contract.
+//
+// Deliberately narrower than a full per-network compiled policy
+// (disclosed, not hidden, matching internal/policy's own doc comment):
+// only the response-mode fields this compiler already knows how to
+// render (blockingAction) are compiled per network. SafeSearch,
+// per-network upstream/fallback routing, ECS, and service-catalog
+// blocking are NOT compiled per network here -- Go has no compiled
+// implementation for any of those at any scope yet (see PARITY_MATRIX.md's
+// Clients & Access and Filters rows), so there is nothing yet to
+// differentiate by network. The block/allow domain LIST itself also
+// stays global-only in this pass -- what a per-network override can
+// change is only how a query that's already going to be blocked gets
+// answered for clients inside that network (nxdomain/refused/null_ip/
+// custom_ip), not which domains are blocked.
+type NetworkOverride struct {
+	CIDR                 string
+	BlockingResponseMode string
+	CustomIPv4           string
+	CustomIPv6           string
+}
+
 // Input is every piece of already-loaded, already-validated Go state
 // this compiler needs. Building it (querying SQLite, applying defaults)
 // is the caller's job -- this package does no I/O and no DB access, so
@@ -195,6 +227,12 @@ type Input struct {
 	BlockingResponseMode string
 	CustomIPv4           string
 	CustomIPv6           string
+
+	// NetworkOverrides: see the type's own doc comment. Order does not
+	// matter to this package -- writeNetworkOverrides sorts by CIDR
+	// prefix length (most specific first) itself, matching
+	// internal/policy.MatchNetwork's own most-specific-wins contract.
+	NetworkOverrides []NetworkOverride
 
 	Transports  TransportSettings
 	TLSCertPath string // the appliance's own management TLS cert -- reused for DoT/DoH, never Python's
@@ -441,6 +479,23 @@ func CompileDnsdist(in Input) (string, error) {
 		w("")
 	}
 
+	// Per-network blocking-response overrides: a network whose own
+	// effective policy differs from global for the response-mode fields
+	// gets its own copy of the regex-block/blocked-domains rules below,
+	// scoped to its CIDR via NetmaskGroupRule and placed ahead of the
+	// global (unscoped) copies -- dnsdist evaluates addAction rules in
+	// order and a matched terminal action stops further processing, so
+	// "more specific network, more specific response" only works if
+	// these come first. Real domains/patterns to block are still the
+	// one global list (see NetworkOverride's own doc comment) -- only
+	// the ANSWER a client in this network gets for an already-blocked
+	// query differs.
+	if len(in.NetworkOverrides) > 0 {
+		if err := writeNetworkOverrides(w, in.NetworkOverrides, in.RegexBlock, in.BlockedDomains); err != nil {
+			return "", err
+		}
+	}
+
 	if len(in.RegexBlock) > 0 {
 		w("-- regex block rules")
 		patterns := append([]string(nil), in.RegexBlock...)
@@ -670,6 +725,70 @@ const clientTag = "apdns_client"
 // Sorted by (ClientKey, then Hex or domain) throughout for the same
 // deterministic-output guarantee every other compiled section in this
 // package already provides.
+// writeNetworkOverrides emits, for each network in in.NetworkOverrides
+// (most-specific CIDR first, matching internal/policy.MatchNetwork's own
+// precedence), a scoped copy of the regex-block/blocked-domains rules
+// using that network's own blockingAction instead of the global one --
+// see NetworkOverride's doc comment for exactly what this does and does
+// not compile.
+func writeNetworkOverrides(w func(string, ...any), overrides []NetworkOverride, regexBlock, blockedDomains []string) error {
+	nets := append([]NetworkOverride(nil), overrides...)
+	sort.Slice(nets, func(i, j int) bool {
+		_, ni, erri := net.ParseCIDR(nets[i].CIDR)
+		_, nj, errj := net.ParseCIDR(nets[j].CIDR)
+		if erri != nil || errj != nil {
+			return nets[i].CIDR < nets[j].CIDR // stable, deterministic fallback; caught as a real error below
+		}
+		si, _ := ni.Mask.Size()
+		sj, _ := nj.Mask.Size()
+		if si != sj {
+			return si > sj // more specific (longer prefix) first
+		}
+		return nets[i].CIDR < nets[j].CIDR
+	})
+
+	patterns := append([]string(nil), regexBlock...)
+	sort.Strings(patterns)
+
+	normalized := map[string]bool{}
+	for _, d := range blockedDomains {
+		if n := normalizeDomain(d); n != "" {
+			normalized[n] = true
+		}
+	}
+	domains := make([]string, 0, len(normalized))
+	for d := range normalized {
+		domains = append(domains, d+".")
+	}
+	sort.Strings(domains)
+
+	for _, n := range nets {
+		if _, _, err := net.ParseCIDR(n.CIDR); err != nil {
+			return errf("network override has an invalid CIDR %q: %v", n.CIDR, err)
+		}
+		action, err := blockingAction(n.BlockingResponseMode, n.CustomIPv4, n.CustomIPv6)
+		if err != nil {
+			return errf("network override %q: %v", n.CIDR, err)
+		}
+		netmask := fmt.Sprintf("NetmaskGroupRule({%s})", luaString(n.CIDR))
+		w("-- per-network blocking-response override: %s", n.CIDR)
+		for _, p := range patterns {
+			w(`addAction(AndRule({%s, RegexRule(%s)}), SetTagAction("apdns_outcome", "blocked"))`, netmask, luaString(p))
+			w("addAction(AndRule({%s, RegexRule(%s)}), %s)", netmask, luaString(p), action)
+		}
+		if len(domains) > 0 {
+			quoted := make([]string, len(domains))
+			for i, d := range domains {
+				quoted[i] = luaString(d)
+			}
+			w(`addAction(AndRule({%s, SuffixMatchNodeRule({%s})}), SetTagAction("apdns_outcome", "blocked"))`, netmask, strings.Join(quoted, ", "))
+			w("addAction(AndRule({%s, SuffixMatchNodeRule({%s})}), %s)", netmask, strings.Join(quoted, ", "), action)
+		}
+		w("")
+	}
+	return nil
+}
+
 func writeClientRules(w func(string, ...any), identities []ClientIdentity, overrides []ClientOverride, blockAction string) error {
 	idents := append([]ClientIdentity(nil), identities...)
 	sort.Slice(idents, func(i, j int) bool {

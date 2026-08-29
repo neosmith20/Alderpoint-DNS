@@ -89,16 +89,18 @@ func TestPutGlobalPolicyReportsARealDNSRuntimeAttemptNotAFakeSuccess(t *testing.
 	}
 }
 
-// TestPutNetworkGroupClientPolicyNeverClaimsCompiledRuntimeEffect proves
-// the other half: internal/dnscompile only ever reads the *global*
-// policy layer today (Orchestrator.build calls Policy.Load(ctx,
-// "global", "global") only) -- a network/group/client-scoped save must
-// never claim a compiled-runtime effect it cannot possibly have had,
-// regardless of whether a DNS runtime is even configured on this
-// deployment.
-func TestPutNetworkGroupClientPolicyNeverClaimsCompiledRuntimeEffect(t *testing.T) {
+// TestPutGroupClientPolicyNeverClaimsCompiledRuntimeEffect proves the
+// other half: internal/dnscompile has no per-group/per-client compiled
+// effect for the general policy Layer fields (blocking_response_mode
+// etc.) -- a group/client-scoped save must never claim a compiled-
+// runtime effect it cannot possibly have had, regardless of whether a
+// DNS runtime is even configured on this deployment. (Network scope is
+// a real, compiled effect as of 2026-08-28 -- see
+// TestPutNetworkPolicyReportsARealDNSRuntimeAttempt below, not this
+// test.)
+func TestPutGroupClientPolicyNeverClaimsCompiledRuntimeEffect(t *testing.T) {
 	s := newPolicyTestServer(t)
-	for _, path := range []string{"/api/policy/network/net-1", "/api/policy/group/grp-1", "/api/policy/client/1"} {
+	for _, path := range []string{"/api/policy/group/grp-1", "/api/policy/client/1"} {
 		body := putPolicy(t, s, path)
 		runtime, ok := body["dns_runtime"].(map[string]any)
 		if !ok {
@@ -113,6 +115,24 @@ func TestPutNetworkGroupClientPolicyNeverClaimsCompiledRuntimeEffect(t *testing.
 		if detail, _ := runtime["detail"].(string); detail == "" {
 			t.Fatalf("%s: expected an explicit, non-empty detail explaining why this scope isn't compiled, got %+v", path, runtime)
 		}
+	}
+}
+
+// TestPutNetworkPolicyReportsARealDNSRuntimeAttempt proves network scope
+// now goes through the SAME real applyDNSRuntimeBestEffort path global
+// scope does (2026-08-28: internal/dnsruntime.Orchestrator.build now
+// computes each network's own effective blocking_response_mode/
+// custom_ip* fields and hands any that differ from global to
+// internal/dnscompile.NetworkOverride) -- with no s.DNSRuntime
+// configured (as in this fixture), the honest answer is dns_runtime:
+// null, the same nil-safe contract TestPutGlobalPolicyReportsA...
+// above already establishes for global, not the group/client "never
+// compiled" object shape.
+func TestPutNetworkPolicyReportsARealDNSRuntimeAttempt(t *testing.T) {
+	s := newPolicyTestServer(t)
+	body := putPolicy(t, s, "/api/policy/network/net-1")
+	if v, present := body["dns_runtime"]; !present || v != nil {
+		t.Fatalf("expected dns_runtime: null with no DNS runtime configured (same contract as global scope), got %+v", body)
 	}
 }
 

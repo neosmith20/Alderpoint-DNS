@@ -311,7 +311,7 @@ async function main() {
     // Groups: a real, non-sparse section (name/priority/member-count/
     // policy summary), not a placeholder -- see this page's own doc
     // comment for why membership assignment stays on the Clients page.
-    check("Groups section heading renders", (await page.$$eval("h3", (els) => els.some((e) => e.textContent?.trim() === "Groups"))));
+    check("Groups section heading renders", (await page.$$eval("h2, h3", (els) => els.some((e) => e.textContent?.trim() === "Groups"))));
     const groupsPanelText = await page.evaluate(() => {
       const h3 = [...document.querySelectorAll(".clients-access h3")].find((e) => e.textContent?.trim() === "Groups");
       return h3?.closest(".panel")?.textContent ?? "";
@@ -324,7 +324,9 @@ async function main() {
     // two real cases apart: "Test Client" from the Clients section above
     // was already deleted by its own lifecycle check, so this commonly
     // runs against zero clients.
-    check("Explain drawer heading renders", (await page.$$eval("h3", (els) => els.some((e) => e.textContent?.trim() === "Explain Effective Policy"))));
+    // Explain's heading is now the shared Panel component's <h2> (design-
+    // system rebuild), not the page's old bespoke <h3> -- check both.
+    check("Explain drawer heading renders", (await page.$$eval("h2, h3", (els) => els.some((e) => e.textContent?.trim() === "Explain Effective Policy"))));
     const explainSelectDisabled = await page.$eval(".explain-form select", (el) => el.disabled).catch(() => true);
     if (!explainSelectDisabled) {
       await Promise.all([

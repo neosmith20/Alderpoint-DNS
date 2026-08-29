@@ -663,7 +663,7 @@
         {/if}
         {#if policyEditorClientId === c.id}
           <div class="inline-policy">
-            <PolicyEditor layer={c.policy} onSave={(l) => api.putClientPolicy(c.id, l).then(refresh)} />
+            <PolicyEditor layer={c.policy} onSave={(l) => api.putClientPolicy(c.id, l).then((res) => { refresh(); return res; })} />
           </div>
         {/if}
         {#if explainClientId === c.id}
@@ -709,7 +709,7 @@
             </div>
             {#if policyEditorGroupId === g.group_id}
               <div class="inline-policy">
-                <PolicyEditor layer={g.policy} onSave={(l) => api.putGroupPolicy(g.group_id, l).then(refresh)} />
+                <PolicyEditor layer={g.policy} onSave={(l) => api.putGroupPolicy(g.group_id, l).then((res) => { refresh(); return res; })} />
               </div>
             {/if}
           </li>

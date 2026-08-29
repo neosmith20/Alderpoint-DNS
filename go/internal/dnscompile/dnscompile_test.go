@@ -757,3 +757,91 @@ func TestCompileDnsdistDoqRequiresTlsPaths(t *testing.T) {
 		t.Fatal("expected an error for DoQ enabled with no TLS cert/key configured")
 	}
 }
+
+// TestCompileDnsdistNetworkOverrideScopesResponseModeToCIDR proves the
+// per-network response-mode override is genuinely scoped to its own
+// CIDR (via NetmaskGroupRule) and is emitted before the global (unscoped)
+// copy of the same blocked-domain rule -- the ordering that makes "more
+// specific network wins" actually true for dnsdist's own first-match-
+// terminal-action evaluation.
+func TestCompileDnsdistNetworkOverrideScopesResponseModeToCIDR(t *testing.T) {
+	in := minimalInput()
+	in.BlockedDomains = []string{"ads.example.com"}
+	in.BlockingResponseMode = "nxdomain"
+	in.NetworkOverrides = []NetworkOverride{
+		{CIDR: "192.168.50.0/24", BlockingResponseMode: "refused"},
+	}
+	out, err := CompileDnsdist(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, `NetmaskGroupRule({"192.168.50.0/24"})`) {
+		t.Fatalf("expected a NetmaskGroupRule scoping the override to its own CIDR, got:\n%s", out)
+	}
+	scopedIdx := strings.Index(out, `AndRule({NetmaskGroupRule({"192.168.50.0/24"}), SuffixMatchNodeRule({"ads.example.com."})}), RCodeAction(DNSRCode.REFUSED)`)
+	globalIdx := strings.Index(out, `addAction(SuffixMatchNodeRule({"ads.example.com."}), RCodeAction(DNSRCode.NXDOMAIN))`)
+	if scopedIdx < 0 {
+		t.Fatalf("expected the network-scoped REFUSED rule, got:\n%s", out)
+	}
+	if globalIdx < 0 {
+		t.Fatalf("expected the global NXDOMAIN rule to still be present unscoped, got:\n%s", out)
+	}
+	if scopedIdx > globalIdx {
+		t.Fatalf("expected the network-scoped rule BEFORE the global rule (dnsdist evaluates in order, first terminal match wins), got:\n%s", out)
+	}
+	checkDnsdist(t, out)
+}
+
+// TestCompileDnsdistNetworkOverrideMostSpecificFirstRegardlessOfOrder is
+// the same precedence proof TestCompileDnsdistDomainRoutingMostSpecific...
+// already established for domain routing, applied here: a longer-prefix
+// (more specific) network's override must be emitted first regardless of
+// input order.
+func TestCompileDnsdistNetworkOverrideMostSpecificFirstRegardlessOfOrder(t *testing.T) {
+	broad := NetworkOverride{CIDR: "10.0.0.0/8", BlockingResponseMode: "refused"}
+	narrow := NetworkOverride{CIDR: "10.1.2.0/24", BlockingResponseMode: "null_ip"}
+
+	in := minimalInput()
+	in.BlockedDomains = []string{"ads.example.com"}
+	in.NetworkOverrides = []NetworkOverride{broad, narrow}
+	out1, err := CompileDnsdist(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.NetworkOverrides = []NetworkOverride{narrow, broad}
+	out2, err := CompileDnsdist(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out1 != out2 {
+		t.Fatalf("expected byte-identical output regardless of NetworkOverrides input order:\n--- out1 ---\n%s\n--- out2 ---\n%s", out1, out2)
+	}
+	narrowIdx := strings.Index(out1, `10.1.2.0/24`)
+	broadIdx := strings.Index(out1, `10.0.0.0/8`)
+	if narrowIdx < 0 || broadIdx < 0 || narrowIdx > broadIdx {
+		t.Fatalf("expected the more specific /24 network emitted before the broader /8, got:\n%s", out1)
+	}
+	checkDnsdist(t, out1)
+}
+
+func TestCompileDnsdistNetworkOverrideRejectsInvalidCIDR(t *testing.T) {
+	in := minimalInput()
+	in.NetworkOverrides = []NetworkOverride{{CIDR: "not-a-cidr", BlockingResponseMode: "refused"}}
+	if _, err := CompileDnsdist(in); err == nil {
+		t.Fatal("expected an error for an invalid network override CIDR")
+	}
+}
+
+func TestCompileDnsdistNetworkOverrideAppliesToRegexBlockToo(t *testing.T) {
+	in := minimalInput()
+	in.RegexBlock = []string{"^ad[0-9]+\\.example\\.com$"}
+	in.NetworkOverrides = []NetworkOverride{{CIDR: "192.168.60.0/24", BlockingResponseMode: "custom_ip", CustomIPv4: "10.10.10.10"}}
+	out, err := CompileDnsdist(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, `AndRule({NetmaskGroupRule({"192.168.60.0/24"}), RegexRule("^ad[0-9]+\\.example\\.com$")}), SpoofAction({"10.10.10.10"})`) {
+		t.Fatalf("expected the network-scoped custom_ip response for the regex-block rule, got:\n%s", out)
+	}
+	checkDnsdist(t, out)
+}

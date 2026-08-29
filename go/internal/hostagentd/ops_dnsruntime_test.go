@@ -302,6 +302,73 @@ func TestDNSRuntimePromoteDomainRoutingSendsMatchedDomainToItsOwnUpstream(t *tes
 // could produce) must restore the FIRST config, not leave the runtime
 // on the broken one -- proven by dig still getting the first
 // promotion's real answer afterward.
+// TestDNSRuntimePromoteNetworkOverrideAppliesWhenSourceMatches and
+// TestDNSRuntimePromoteNetworkOverrideDoesNotApplyOutsideItsCIDR
+// together are per-network policy compilation's own real end-to-end
+// proof, the same rigor as domain routing's/upstream routing's own
+// tests above: a real dig query's actual source is always 127.0.0.1 in
+// this test environment (no privilege to spoof a source address), so
+// "genuinely scoped, not just globally applied" is proven by two
+// promotions with a network override on OPPOSITE sides of that real
+// source address -- one whose CIDR includes 127.0.0.1 (must apply) and
+// one whose CIDR does not (must NOT apply, global still wins) -- rather
+// than by one query alone, which could never distinguish "the override
+// works" from "the override is accidentally unconditional".
+func TestDNSRuntimePromoteNetworkOverrideAppliesWhenSourceMatches(t *testing.T) {
+	s, cfg := newDNSRuntimeConfig(t)
+	in := dnscompile.Input{
+		ListenAddress: cfg.DnsdistListenAddress, BindBackendAddress: fmt.Sprintf("127.0.0.1:%d", cfg.BindProxyPort),
+		BlockedDomains: []string{"ads.example.test"}, BlockingResponseMode: "nxdomain",
+		NetworkOverrides: []dnscompile.NetworkOverride{{CIDR: "127.0.0.1/32", BlockingResponseMode: "refused"}},
+		CacheMaxEntries:  1000,
+	}
+	dnsdistConf, err := dnscompile.CompileDnsdist(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := callPromote(t, s, DNSPromoteParams{DnsdistConf: dnsdistConf})
+	if !res.Promoted {
+		t.Fatalf("expected promotion to succeed, got %+v", res)
+	}
+	host, port := splitHostPort(cfg.DnsdistListenAddress)
+	out, err := exec.Command("dig", "+time=2", "+tries=2", "@"+host, "-p", port, "ads.example.test", "A").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(string(out), "status: REFUSED") {
+		t.Fatalf("query genuinely originates from 127.0.0.1 (inside the override's /32) -- expected the network-overridden REFUSED response, got:\n%s", out)
+	}
+}
+
+func TestDNSRuntimePromoteNetworkOverrideDoesNotApplyOutsideItsCIDR(t *testing.T) {
+	s, cfg := newDNSRuntimeConfig(t)
+	in := dnscompile.Input{
+		ListenAddress: cfg.DnsdistListenAddress, BindBackendAddress: fmt.Sprintf("127.0.0.1:%d", cfg.BindProxyPort),
+		BlockedDomains: []string{"ads.example.test"}, BlockingResponseMode: "nxdomain",
+		// This override's CIDR deliberately does NOT include 127.0.0.1
+		// (the real, unspoofable source of the dig query below) --
+		// global nxdomain must still win.
+		NetworkOverrides: []dnscompile.NetworkOverride{{CIDR: "10.0.0.0/8", BlockingResponseMode: "refused"}},
+		CacheMaxEntries:  1000,
+	}
+	dnsdistConf, err := dnscompile.CompileDnsdist(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := callPromote(t, s, DNSPromoteParams{DnsdistConf: dnsdistConf})
+	if !res.Promoted {
+		t.Fatalf("expected promotion to succeed, got %+v", res)
+	}
+	host, port := splitHostPort(cfg.DnsdistListenAddress)
+	out, err := exec.Command("dig", "+time=2", "+tries=2", "@"+host, "-p", port, "ads.example.test", "A").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(string(out), "status: NXDOMAIN") {
+		t.Fatalf("query genuinely originates from 127.0.0.1 (OUTSIDE the override's 10.0.0.0/8) -- expected the real global NXDOMAIN response, not the network override, got:\n%s", out)
+	}
+}
+
 func TestDNSRuntimePromoteRollsBackOnHealthCheckFailure(t *testing.T) {
 	s, cfg := newDNSRuntimeConfig(t)
 	good := dnscompile.Input{

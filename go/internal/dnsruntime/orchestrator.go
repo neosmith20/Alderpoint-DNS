@@ -220,9 +220,11 @@ func (o *Orchestrator) build(ctx context.Context) (dnscompile.Input, []string, s
 		}
 	}
 
+	var globalLayer policy.Layer
 	if o.Policy != nil {
 		layer, err := o.Policy.Load(ctx, "global", "global")
 		if err == nil {
+			globalLayer = layer
 			if layer.BlockingResponseMode != nil {
 				in.BlockingResponseMode = *layer.BlockingResponseMode
 			}
@@ -231,6 +233,35 @@ func (o *Orchestrator) build(ctx context.Context) (dnscompile.Input, []string, s
 			}
 			if layer.CustomIPv6 != nil {
 				in.CustomIPv6 = *layer.CustomIPv6
+			}
+		}
+
+		// Per-network blocking-response overrides (see
+		// dnscompile.NetworkOverride's own doc comment for exactly what
+		// this does and does not compile): a network only gets a
+		// compiled entry when its own effective (global merged with its
+		// own layer) response-mode fields genuinely differ from plain
+		// global -- an unset network layer must never differ from
+		// global's own already-compiled behavior above.
+		if networks, err := o.Policy.ListNetworks(ctx); err == nil {
+			for _, netw := range networks {
+				netLayer, err := o.Policy.Load(ctx, "network", netw.NetworkID)
+				if err != nil {
+					continue
+				}
+				effective := policy.MergeLayers([]policy.NamedLayer{
+					{Source: "global", Layer: globalLayer},
+					{Source: "network:" + netw.NetworkID, Layer: netLayer},
+				})
+				mode, _ := effective.Values["blocking_response_mode"].(string)
+				ipv4, _ := effective.Values["custom_ipv4"].(string)
+				ipv6, _ := effective.Values["custom_ipv6"].(string)
+				if mode == in.BlockingResponseMode && ipv4 == in.CustomIPv4 && ipv6 == in.CustomIPv6 {
+					continue // identical to global -- nothing for this network to override
+				}
+				in.NetworkOverrides = append(in.NetworkOverrides, dnscompile.NetworkOverride{
+					CIDR: netw.CIDR, BlockingResponseMode: mode, CustomIPv4: ipv4, CustomIPv6: ipv6,
+				})
 			}
 		}
 	}

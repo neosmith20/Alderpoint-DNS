@@ -12,6 +12,9 @@
   import { StaleGuard } from "../staleGuard";
   import { router } from "../router.svelte";
   import PolicyEditor from "./PolicyEditor.svelte";
+  import PageHeader from "./ui/PageHeader.svelte";
+  import Panel from "./ui/Panel.svelte";
+  import StatusBadge from "./ui/StatusBadge.svelte";
 
   // Clients & Access: the global/network/group layers of internal/
   // policy's global->network->group->client precedence system (see
@@ -181,47 +184,52 @@
 </script>
 
 <section aria-labelledby="clients-access-heading" class="clients-access">
-  <h2 id="clients-access-heading">Clients &amp; Access</h2>
+  <PageHeader
+    title="Clients & Access"
+    headingId="clients-access-heading"
+    description="Global default policy, network-scoped policy, group-scoped policy, and the explicit-deny > explicit-allow > default precedence that governs every client."
+  />
   <p class="scope-note">
-    Global default policy, network-scoped policy, group-scoped policy, and the explicit-deny &gt;
-    explicit-allow &gt; default precedence that governs every client. Strong ClientID lifecycle
-    (generate, add, display, copy, regenerate, revoke, DoH path, DoT/DoQ SNI), group membership, and
-    per-client domain overrides live on the
+    Strong ClientID lifecycle (generate, add, display, copy, regenerate, revoke, DoH path, DoT/DoQ
+    SNI), group membership, and per-client domain overrides live on the
     <button type="button" class="link-btn" onclick={() => router.navigate("clients")}>Clients</button> page,
     next to each identity they apply to.
   </p>
 
   <div class="layout">
     <div class="scopes">
-      <section class="panel">
-        <div class="panel-head">
-          <h3>Global Policy</h3>
-          <span class="badge">applies to every client by default</span>
-        </div>
+      <Panel heading="Global Policy">
+        {#snippet actions()}
+          <StatusBadge label="Applies to every client by default" tone="accent" />
+        {/snippet}
         <p class="hint">
           The default policy every client falls back to unless a network, group, or client layer
-          overrides a field. This is the only scope compiled into the live DNS runtime today (see
-          internal/dnscompile's doc comment) -- network/group/client layers are stored and used by
-          Explain resolution below, but not compiled yet.
+          overrides a field. Compiled into the live DNS runtime (see internal/dnscompile's doc
+          comment).
         </p>
         {#if globalLoadError}<p class="error" role="alert">{globalLoadError}</p>{/if}
         {#if globalPolicy}
           <div class="policy-card">
-            <PolicyEditor layer={globalPolicy} onSave={(l) => api.putGlobalPolicy(l).then(refreshGlobal)} />
+            <PolicyEditor layer={globalPolicy} onSave={(l) => api.putGlobalPolicy(l).then((res) => { refreshGlobal(); return res; })} />
           </div>
         {:else if !globalLoadError}
           <p class="hint">Loading…</p>
         {/if}
-      </section>
+      </Panel>
 
-      <section class="panel">
-        <div class="panel-head">
-          <h3>Networks</h3>
-          <span class="badge">{networks.length} configured</span>
-        </div>
+      <Panel heading="Networks">
+        {#snippet actions()}
+          <StatusBadge label="{networks.length} configured" tone="neutral" />
+        {/snippet}
         <p class="hint">
           A network is a CIDR range (e.g. a VLAN or subnet). Its policy layer applies to any client
           whose IP falls inside it, above global but below group/client layers.
+          <strong>Compiled (2026-08-28):</strong> a network's own effective blocking-response fields
+          (nxdomain/refused/null_ip/custom_ip) now really change how a blocked query is answered for
+          clients inside its CIDR, whenever they differ from the global default -- see
+          internal/dnscompile.NetworkOverride's doc comment for exactly which fields (not yet
+          SafeSearch, per-network upstream routing, or service-catalog blocking, which have no Go
+          compiler at any scope today).
         </p>
         {#if networksLoadError}<p class="error" role="alert">{networksLoadError}</p>{/if}
 
@@ -250,7 +258,7 @@
                   <div class="policy-card">
                     <PolicyEditor
                       layer={n.policy}
-                      onSave={(l) => api.putNetworkPolicy(n.network_id, l).then(refreshNetworks)}
+                      onSave={(l) => api.putNetworkPolicy(n.network_id, l).then((res) => { refreshNetworks(); return res; })}
                     />
                   </div>
                 {/if}
@@ -258,18 +266,19 @@
             {/each}
           </ul>
         {/if}
-      </section>
+      </Panel>
 
-      <section class="panel">
-        <div class="panel-head">
-          <h3>Groups</h3>
-          <span class="badge">{groups.length} configured</span>
-        </div>
+      <Panel heading="Groups">
+        {#snippet actions()}
+          <StatusBadge label="{groups.length} configured" tone="neutral" />
+        {/snippet}
         <p class="hint">
           A group's policy layer applies to every client assigned to it, above network but below a
           client's own overrides. Create groups and assign clients to them on the
           <button type="button" class="link-btn" onclick={() => router.navigate("clients")}>Clients</button> page;
-          this section edits the policy each group carries.
+          this section edits the policy each group carries. Not yet compiled into the DNS runtime
+          for its general policy fields (Strong ClientID's own per-client domain overrides are a
+          separate, already-compiled mechanism -- see the Clients page).
         </p>
         {#if groupsLoadError}<p class="error" role="alert">{groupsLoadError}</p>{/if}
         {#if groups.length === 0 && !groupsLoadError}
@@ -288,20 +297,18 @@
                 </div>
                 {#if expandedGroupId === g.group_id}
                   <div class="policy-card">
-                    <PolicyEditor layer={g.policy} onSave={(l) => api.putGroupPolicy(g.group_id, l).then(refreshGroups)} />
+                    <PolicyEditor layer={g.policy} onSave={(l) => api.putGroupPolicy(g.group_id, l).then((res) => { refreshGroups(); return res; })} />
                   </div>
                 {/if}
               </li>
             {/each}
           </ul>
         {/if}
-      </section>
+      </Panel>
     </div>
 
-    <aside class="panel drawer">
-      <div class="panel-head">
-        <h3>Explain Effective Policy</h3>
-      </div>
+    <aside class="drawer">
+    <Panel heading="Explain Effective Policy">
       <p class="hint">
         Resolves the real global -&gt; network -&gt; group -&gt; client precedence
         (internal/policy/effective.go) for one client, field by field, showing exactly which scope
@@ -348,6 +355,7 @@
       {:else if !explainError}
         <p class="hint">Select a client and run Explain to see how its effective policy resolves.</p>
       {/if}
+    </Panel>
     </aside>
   </div>
 </section>
@@ -361,9 +369,6 @@
   .layout { display: flex; gap: 1.25rem; align-items: flex-start; flex-wrap: wrap; }
   .scopes { display: flex; flex-direction: column; gap: 1rem; flex: 2 1 34rem; min-width: 26rem; }
 
-  .panel { border: 1px solid var(--border); border-radius: 10px; padding: 1rem 1.25rem; background: var(--card-bg); display: flex; flex-direction: column; gap: 0.6rem; }
-  .panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.75rem; }
-  .panel-head h3 { margin: 0; }
   .badge { background: var(--nav-hover-bg); padding: 0.1rem 0.55rem; border-radius: 999px; font-size: 0.72rem; opacity: 0.85; white-space: nowrap; }
 
   .policy-card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--bg, transparent); }
