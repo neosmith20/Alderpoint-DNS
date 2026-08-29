@@ -86,6 +86,15 @@ GO_LIVE_HOSTAGENT_DIR=/root/apdns-go-live-hostagent
 # needed this.
 GO_LIVE_HOSTAGENT_SOCKET_DIR=/run/apdns-go-live-hostagent
 GO_LIVE_WEB_UID=996   # same real unprivileged UID the :10443 preview already proved
+GO_LIVE_WEB_GID=986   # NOT the same number as the UID -- apdns-go-web's real primary group
+                       # (confirmed via `id apdns-go-web` on the host). This script's own
+                       # container-create line below previously used the UID twice
+                       # ("$GO_LIVE_WEB_UID:$GO_LIVE_WEB_UID"), a real bug caught by
+                       # scripts/v2/redeploy-go-live.sh's first live run: it started the
+                       # container as gid 996 instead of the real 986, which could no longer
+                       # write into the apdns-go-web/986-group-owned hostagent runtime
+                       # directory, breaking the dnstap analytics socket bind (DNS answering
+                       # itself was unaffected, but analytics degraded).
 STAGING_PORT=18443   # temporary -- torn down after a verified cutover, never part of the final topology
 
 # The real deployment addresses apdns-hostagent-live and the web
@@ -584,11 +593,19 @@ cmd_execute() {
     local go_live_base_image="apdns-go-live-base:ca-certs"
     if ! podman image exists "$go_live_base_image"; then
         log "building $go_live_base_image (debian:trixie-slim + ca-certificates)"
-        podman run --rm --name apdns-go-live-base-build debian:trixie-slim \
+        # Deliberately NOT --rm: podman commit below needs the exited
+        # container to still exist -- a real bug caught while first
+        # exercising this same logic for real in
+        # scripts/v2/redeploy-go-live.sh (--rm auto-removes the
+        # container the instant it exits, so commit always failed with
+        # "no such container"). Fixed here too, kept in sync.
+        podman rm -f apdns-go-live-base-build >/dev/null 2>&1 || true
+        podman run --name apdns-go-live-base-build debian:trixie-slim \
             sh -c "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ca-certificates && apt-get clean" \
             || { phase_set "failed_prepare"; fail "building the ca-certificates base image failed"; }
         podman commit apdns-go-live-base-build "$go_live_base_image" >/dev/null \
             || { phase_set "failed_prepare"; fail "committing the ca-certificates base image failed"; }
+        podman rm -f apdns-go-live-base-build >/dev/null 2>&1 || true
         log "built and tagged $go_live_base_image"
     else
         log "$go_live_base_image already built, reusing"
@@ -596,7 +613,7 @@ cmd_execute() {
 
     podman rm -f "$GO_LIVE_CONTAINER" >/dev/null 2>&1 || true
     podman create --name "$GO_LIVE_CONTAINER" \
-        --user "$GO_LIVE_WEB_UID:$GO_LIVE_WEB_UID" \
+        --user "$GO_LIVE_WEB_UID:$GO_LIVE_WEB_GID" \
         -p 8443:8443 \
         -v "$GO_LIVE_RELEASE:/opt/alderpointdns-go:ro" \
         -v "$GO_LIVE_STATE:/var/lib/alderpointdns-go" \

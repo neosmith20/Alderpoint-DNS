@@ -65,6 +65,7 @@ func main() {
 	dnsRuntimeBindStatsPort := flag.Int("dns-runtime-bind-stats-port", 18153, "BIND's statistics-channels port")
 	dnsRuntimeBindRNDCPort := flag.Int("dns-runtime-bind-rndc-port", 19553, "BIND's rndc control-channel port")
 	dnsRuntimeDnsdistListenAddr := flag.String("dns-runtime-dnsdist-listen-addr", "", "the real address dnsdist listens on for this deployment (empty = DNS Runtime unavailable)")
+	dnsRuntimeHealthCheckTimeoutSeconds := flag.Int("dns-runtime-health-check-timeout-seconds", 30, "how long a post-promote health check retries the real marker query before giving up and rolling back. A real live defect found during a durability pass: the previous hardcoded 5s default was too short for a realistic blocklist-heavy deployment -- a compiled dnsdist config carrying ~855k blocked domains (a single large inline Lua table) measured 5.8s just to parse and start listening, so every promote attempt after Blocklists' own CA-certificate fix started genuinely succeeding but was reported as a false rollback by a health check that gave up before dnsdist ever came back up. 30s leaves real margin above that measured figure.")
 
 	flag.Parse()
 
@@ -173,6 +174,7 @@ func main() {
 			BindDirectory: *dnsRuntimeBindDir, BindLogPath: filepath.Join(*dnsRuntimeBindDir, "named.log"),
 			BindPlainPort: *dnsRuntimeBindPlainPort, BindProxyPort: *dnsRuntimeBindProxyPort, BindStatsPort: *dnsRuntimeBindStatsPort, BindRNDCPort: *dnsRuntimeBindRNDCPort,
 			DnsdistListenAddress: *dnsRuntimeDnsdistListenAddr,
+			HealthCheckTimeout:   time.Duration(*dnsRuntimeHealthCheckTimeoutSeconds) * time.Second,
 		})
 		if err != nil {
 			logger.Error("DNS runtime ops not registered", "err", err)

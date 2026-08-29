@@ -668,3 +668,23 @@ func buildDNSAnswer(query []byte, ip4 net.IP) []byte {
 	resp = append(resp, ip4...)
 	return resp
 }
+
+// TestDNSRuntimeConfigDefaultHealthCheckTimeoutIsGenerous is a real
+// regression test for a live defect found during a durability pass: a
+// realistic, blocklist-heavy compiled dnsdist config (~855k domains, a
+// single large inline Lua table) measured 5.8s just to parse and start
+// listening -- the original 5s default health-check timeout falsely
+// reported every promote as rolled-back the moment real blocklist data
+// started flowing (right after Blocklists' own CA-certificate fix).
+// This asserts the default is comfortably above that measured figure,
+// not the exact value, so a reasonable future tuning doesn't break this
+// test for no reason -- the point is "generous enough for a real
+// production-scale blocklist," not a specific number.
+func TestDNSRuntimeConfigDefaultHealthCheckTimeoutIsGenerous(t *testing.T) {
+	var cfg DNSRuntimeConfig
+	cfg.applyDefaults()
+	const measuredRealWorldLoadTime = 6 * time.Second // the actual measured 5.8s, rounded up
+	if cfg.HealthCheckTimeout <= measuredRealWorldLoadTime {
+		t.Fatalf("default HealthCheckTimeout %v is not comfortably above the measured real-world load time of a large blocklist-heavy config (%v) -- this would falsely roll back a genuinely successful promote", cfg.HealthCheckTimeout, measuredRealWorldLoadTime)
+	}
+}

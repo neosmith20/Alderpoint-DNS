@@ -74,7 +74,16 @@ func (c *DNSRuntimeConfig) applyDefaults() {
 		c.DigBinary = "dig"
 	}
 	if c.HealthCheckTimeout <= 0 {
-		c.HealthCheckTimeout = 5 * time.Second
+		// 30s, not the originally-shipped 5s: a real live defect found
+		// during a durability pass -- a realistic, blocklist-heavy
+		// compiled dnsdist config (~855k domains, a single large inline
+		// Lua table) measured 5.8s just to parse and start listening,
+		// so the 5s default falsely reported every promote as a
+		// rolled-back failure the moment Blocklists' own CA-certificate
+		// fix let real blocklist data flow for the first time. See
+		// cmd/apdns-hostagent's own -dns-runtime-health-check-timeout-
+		// seconds flag, which this default matches.
+		c.HealthCheckTimeout = 30 * time.Second
 	}
 	if c.HealthCheckRetryDelay <= 0 {
 		c.HealthCheckRetryDelay = 200 * time.Millisecond
