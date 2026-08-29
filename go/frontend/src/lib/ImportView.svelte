@@ -6,6 +6,7 @@
     type DNSRuntimeApplyResult,
     type LegacyImportReport,
     type LegacyImportManifest,
+    type ApdnsbakManifest,
     type FilterImportReport,
   } from "../api";
   import DnsRuntimeBadge from "./DnsRuntimeBadge.svelte";
@@ -154,6 +155,47 @@
   function legacyTotals(): { imported: number; skipped: number; rejected: number } {
     if (!legacyReport) return { imported: 0, skipped: 0, rejected: 0 };
     return Object.values(legacyReport.tables).reduce(
+      (acc, t) => ({ imported: acc.imported + t.imported, skipped: acc.skipped + t.skipped, rejected: acc.rejected + t.rejected }),
+      { imported: 0, skipped: 0, rejected: 0 },
+    );
+  }
+
+  // V2 Python .apdnsbak import -- same pymigrate.Report shape and same
+  // "legacy" card pattern as the V1.1.1 archive above, just a different
+  // source format (Fernet-encrypted, passphrase-protected) and a
+  // different backend package (internal/apdnsbak).
+  let apdnsbakFile: File | null = $state(null);
+  let apdnsbakFileInput: HTMLInputElement | undefined = $state();
+  let apdnsbakPassphrase = $state("");
+  let apdnsbakBusy = $state(false);
+  let apdnsbakError = $state("");
+  let apdnsbakReport = $state<LegacyImportReport | null>(null);
+  let apdnsbakManifest = $state<ApdnsbakManifest | null>(null);
+
+  function onApdnsbakFileChange() {
+    apdnsbakFile = apdnsbakFileInput?.files?.[0] ?? null;
+    apdnsbakReport = null;
+    apdnsbakError = "";
+  }
+
+  async function runApdnsbakImport(dryRun: boolean) {
+    if (!apdnsbakFile) return;
+    apdnsbakBusy = true;
+    apdnsbakError = "";
+    try {
+      const resp = await api.importApdnsbak(apdnsbakFile, apdnsbakPassphrase, dryRun);
+      apdnsbakReport = resp.report;
+      apdnsbakManifest = resp.manifest;
+    } catch (err) {
+      apdnsbakError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      apdnsbakBusy = false;
+    }
+  }
+
+  function apdnsbakTotals(): { imported: number; skipped: number; rejected: number } {
+    if (!apdnsbakReport) return { imported: 0, skipped: 0, rejected: 0 };
+    return Object.values(apdnsbakReport.tables).reduce(
       (acc, t) => ({ imported: acc.imported + t.imported, skipped: acc.skipped + t.skipped, rejected: acc.rejected + t.rejected }),
       { imported: 0, skipped: 0, rejected: 0 },
     );
@@ -383,6 +425,71 @@
       <details>
         <summary>Not migrated (disclosed, not silently skipped)</summary>
         <p class="scope-note">{legacyReport.not_migrated.join(", ")}</p>
+      </details>
+    {/if}
+  </div>
+
+  <h3 id="apdnsbak-import-heading">Import a V2 (.apdnsbak) appliance backup</h3>
+  <p class="scope-note">
+    Upload a real, portable V2 Python backup (<code>*.apdnsbak</code>, passphrase-protected) to
+    import its configuration database through the same audited table set as the V1.1.1 import
+    above. Only a <strong>portable (passphrase)</strong> backup can be imported here -- a "local
+    mode" backup is keyed from a secret that only exists on the original appliance and cannot be
+    decrypted anywhere else. <code>secrets.json</code> and TLS/DNSCrypt certificate files inside the
+    archive are not imported (Go's own secrets store and certificate management are not compatible
+    containers for that material).
+  </p>
+  <div class="card">
+    <label>
+      Backup file
+      <input type="file" bind:this={apdnsbakFileInput} onchange={onApdnsbakFileChange} aria-label="V2 appliance backup file" accept=".apdnsbak" />
+    </label>
+    <label>
+      Restore passphrase
+      <input type="password" bind:value={apdnsbakPassphrase} autocomplete="off" />
+    </label>
+    <div class="actions">
+      <button onclick={() => runApdnsbakImport(true)} disabled={!apdnsbakFile || apdnsbakBusy}>
+        {apdnsbakBusy ? "Working…" : "Preview (dry run)"}
+      </button>
+      <button onclick={() => runApdnsbakImport(false)} disabled={!apdnsbakFile || apdnsbakBusy}>
+        {apdnsbakBusy ? "Working…" : "Import for real"}
+      </button>
+    </div>
+    {#if apdnsbakError}<p class="error" role="alert">{apdnsbakError}</p>{/if}
+    {#if apdnsbakReport}
+      {@const totals = apdnsbakTotals()}
+      <p class={apdnsbakReport.dry_run ? "" : "success"} role="status">
+        {apdnsbakReport.dry_run ? "Dry run -- nothing written." : "Imported for real."}
+        <strong>{totals.imported}</strong> {apdnsbakReport.dry_run ? "would import" : "imported"},
+        <strong>{totals.skipped}</strong> skipped, <strong>{totals.rejected}</strong> rejected.
+        {#if apdnsbakReport.snapshot_filename}
+          A pre-migration safety backup was saved as "{apdnsbakReport.snapshot_filename}".
+        {/if}
+      </p>
+      {#if apdnsbakManifest}
+        <p class="scope-note">
+          Source: appliance {apdnsbakManifest.source_node_id || "(unknown)"}, app version
+          {apdnsbakManifest.source_version || "unknown"}, created {apdnsbakManifest.created_at || "unknown"}.
+        </p>
+      {/if}
+      <table class="plan-table">
+        <thead><tr><th>Table</th><th>Source rows</th><th>Imported</th><th>Skipped</th><th>Rejected</th></tr></thead>
+        <tbody>
+          {#each Object.entries(apdnsbakReport.tables) as [table, summary] (table)}
+            <tr>
+              <td>{table}</td>
+              <td>{summary.source_count}</td>
+              <td>{summary.imported}</td>
+              <td>{summary.skipped}</td>
+              <td>{summary.rejected}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+      <details>
+        <summary>Not migrated (disclosed, not silently skipped)</summary>
+        <p class="scope-note">{apdnsbakReport.not_migrated.join(", ")}</p>
       </details>
     {/if}
   </div>

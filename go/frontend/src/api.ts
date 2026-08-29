@@ -616,6 +616,14 @@ export interface FilterImportReport {
   counts: Record<string, number>;
 }
 
+export interface ApdnsbakManifest {
+  source_version: string;
+  control_db_schema_version: number;
+  created_at: string;
+  source_node_id: string;
+  contents: string[];
+}
+
 export interface LegacyImportManifest {
   alderpointdns_app_version: string;
   database_schema_version: string;
@@ -884,6 +892,24 @@ export const api = {
     }),
   rollbackImportJob: (id: number) =>
     req<{ status: string; safety_backup: string; dns_runtime?: DNSRuntimeApplyResult }>(`/api/import/jobs/${id}/rollback`, { method: "POST" }),
+
+  importApdnsbak: async (
+    file: File,
+    passphrase: string,
+    dryRun: boolean,
+  ): Promise<{ report: LegacyImportReport; manifest: ApdnsbakManifest }> => {
+    const headers: Record<string, string> = { "X-CSRF-Token": csrfToken };
+    if (passphrase) headers["X-Apdnsbak-Passphrase"] = passphrase;
+    const res = await fetch(
+      `/api/import/apdnsbak?filename=${encodeURIComponent(file.name)}&dry_run=${dryRun}`,
+      { method: "POST", headers, credentials: "include", body: file },
+    );
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new ApiError(res.status, body.error ?? "unknown_error", body.detail ?? res.statusText);
+    }
+    return res.json();
+  },
 
   importLegacyAppliance: async (
     file: File,

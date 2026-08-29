@@ -296,6 +296,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/import/jobs/{id}/apply", requireAuth(s.handleApplyImportJob))
 	mux.HandleFunc("POST /api/import/jobs/{id}/rollback", requireAuth(s.handleRollbackImportJob))
 	mux.HandleFunc("POST /api/import/legacy-appliance", requireAuth(s.handleImportLegacyAppliance))
+	mux.HandleFunc("POST /api/import/apdnsbak", requireAuth(s.handleImportApdnsbak))
 	mux.HandleFunc("POST /api/import/pihole", requireAuth(s.handleImportPihole))
 	mux.HandleFunc("POST /api/import/adguard-yaml", requireAuth(s.handleImportAdGuardYAML))
 
