@@ -595,7 +595,20 @@ func (st *dnsRuntimeState) waitHealthy(ctx context.Context) error {
 	// genuinely, permanently broken still fails and rolls back instead
 	// of looping forever) is what actually recovers from the race this
 	// process's own restart triggers -- not a bigger timeout.
-	const maxMidCheckRestarts = 3
+	// A fixed backoff BEFORE each restart attempt, not just the small
+	// HealthCheckRetryDelay after one -- live reproduction showed the
+	// dnstap-reconnect race (see startDnsdistOnce's own comment) is not
+	// reliably won by anything shorter: 3 back-to-back restart attempts
+	// with only ~1s between them (the original, unmodified value here)
+	// crashed every single time on a real promote; restarting by hand
+	// with a genuine multi-second gap always succeeded. 5s leaves real
+	// margin above that, and 4 restarts (5s backoff + ~5s observed
+	// crash-point parse time each, well inside the 60s default
+	// HealthCheckTimeout) is enough headroom for the race to clear
+	// without turning a permanently-broken config into an unbounded
+	// retry loop.
+	const maxMidCheckRestarts = 4
+	const midCheckRestartBackoff = 5 * time.Second
 	restarts := 0
 	var lastErr error
 	for time.Now().Before(deadline) {
@@ -604,6 +617,7 @@ func (st *dnsRuntimeState) waitHealthy(ctx context.Context) error {
 				return fmt.Errorf("dnsdist crashed %d times during the health check window and was not retried further: %w", restarts, lastErr)
 			}
 			restarts++
+			time.Sleep(midCheckRestartBackoff)
 			if err := st.startDnsdistOnce(); err != nil {
 				lastErr = err
 				time.Sleep(st.cfg.HealthCheckRetryDelay)
