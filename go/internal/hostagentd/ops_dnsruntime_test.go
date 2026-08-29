@@ -771,3 +771,64 @@ while true; do sleep 0.1; done
 		t.Fatal("expected the second (successful) attempt's process to be tracked and alive")
 	}
 }
+
+// TestWaitHealthyRestartsDnsdistThatCrashesMidPoll is the regression
+// test for the actual mechanism that recovers from the real live
+// crash this whole investigation root-caused: a real, large compiled
+// config can crash dnsdist several seconds INTO its own parse -- well
+// past reloadDnsdist's 200ms post-start aliveness check, which always
+// reports "alive" in that case since the crash hasn't happened yet.
+// waitHealthy must itself notice the tracked process actually died and
+// restart it, not just keep dialing a dead port until its own budget
+// runs out. This test uses a fake "dnsdist" that dies instantly every
+// time (a permanent, not transient, failure) to prove the restart
+// budget is bounded -- waitHealthy must give up with a clear "crashed
+// N times" error rather than looping for its entire HealthCheckTimeout
+// polling a port nothing will ever answer on.
+func TestWaitHealthyRestartsDnsdistThatCrashesMidPoll(t *testing.T) {
+	if _, err := exec.LookPath("dig"); err != nil {
+		t.Skip("dig not available in this environment")
+	}
+	dir := t.TempDir()
+	fakeDnsdist := filepath.Join(dir, "fake-dnsdist-always-crashes.sh")
+	script := "#!/bin/sh\nexit 1\n"
+	if err := os.WriteFile(fakeDnsdist, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dnsdistPort := freeTCPPort(t)
+	cfg := DNSRuntimeConfig{
+		StagingDir:            dir,
+		DnsdistBinary:         fakeDnsdist,
+		DnsdistLivePath:       filepath.Join(dir, "dnsdist.conf"),
+		DnsdistListenAddress:  fmt.Sprintf("127.0.0.1:%d", dnsdistPort),
+		HealthCheckTimeout:    30 * time.Second, // deliberately generous -- must NOT be what bounds this
+		HealthCheckRetryDelay: 20 * time.Millisecond,
+	}
+	cfg.applyDefaults()
+	if err := os.WriteFile(cfg.DnsdistLivePath, []byte("-- test config\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st := &dnsRuntimeState{cfg: cfg}
+	t.Cleanup(func() { st.stopDnsdist() })
+
+	// Seed one already-started (but already-dead) process, mirroring
+	// the real sequence: reloadDnsdist's own start succeeded per its
+	// early check, then the process died before waitHealthy's first
+	// poll.
+	if err := st.startDnsdistOnce(); err == nil {
+		t.Fatal("expected the fake binary's very first start to be caught as an immediate exit")
+	}
+
+	start := time.Now()
+	err := st.waitHealthy(context.Background())
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected waitHealthy to fail against a binary that can never stay alive")
+	}
+	if !strings.Contains(err.Error(), "crashed") {
+		t.Fatalf("expected a clear 'crashed N times' error, got: %v", err)
+	}
+	if elapsed >= cfg.HealthCheckTimeout {
+		t.Fatalf("waitHealthy took %v -- expected it to give up on the bounded restart budget well before the %v HealthCheckTimeout, not by exhausting it", elapsed, cfg.HealthCheckTimeout)
+	}
+}

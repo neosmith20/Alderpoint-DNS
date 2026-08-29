@@ -453,6 +453,34 @@ func (st *dnsRuntimeState) reloadBind(ctx context.Context) error {
 	return nil
 }
 
+// startDnsdistOnce starts exactly one dnsdist process attempt and
+// reports whether it was still alive 200ms later. Extracted from
+// reloadDnsdist so waitHealthy (below) can also use it to recover from
+// a crash that happens LATER than that 200ms check ever sees -- see
+// waitHealthy's own comment for why a single early aliveness check is
+// not enough on its own for a real, large compiled config.
+func (st *dnsRuntimeState) startDnsdistOnce() error {
+	cmd := exec.CommandContext(context.Background(), st.cfg.DnsdistBinary, "-C", st.cfg.DnsdistLivePath, "--supervised")
+	logPath := filepath.Join(st.cfg.StagingDir, "dnsdist.startup.log")
+	logFile, err := os.Create(logPath)
+	if err == nil {
+		cmd.Stdout, cmd.Stderr = logFile, logFile
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("starting dnsdist: %w", err)
+	}
+	st.dnsdist = &trackedProcess{cmd: cmd, pid: cmd.Process.Pid}
+	writePIDFile(dnsdistPIDFile(st.cfg), cmd.Process.Pid)
+	go cmd.Wait()
+	time.Sleep(200 * time.Millisecond)
+	if processAlive(cmd.Process.Pid) {
+		return nil
+	}
+	removePIDFile(dnsdistPIDFile(st.cfg))
+	st.dnsdist = nil
+	return fmt.Errorf("dnsdist exited immediately after start (see %s)", logPath)
+}
+
 func (st *dnsRuntimeState) reloadDnsdist(ctx context.Context) error {
 	st.stopDnsdist()
 
@@ -474,28 +502,25 @@ func (st *dnsRuntimeState) reloadDnsdist(ctx context.Context) error {
 	// (receiver already settled) fast and self-heals the race when it
 	// does occur instead of guessing a magic number that could still be
 	// too short under different load.
+	//
+	// This 200ms check alone is NOT sufficient against a real,
+	// production-scale compiled config, though: the actual observed
+	// live crash happens ~4-5s INTO dnsdist's own config parse (right
+	// after it logs "Added downstream server"), well past this
+	// function's 200ms window -- so this check reliably reported
+	// "alive" every time during live reproduction, then the process
+	// crashed invisibly moments later. waitHealthy (below) is what
+	// actually catches and recovers from that later crash; this
+	// function's own retry only covers the (rarer, but real) case of
+	// an even earlier, near-instant failure.
 	const maxAttempts = 2
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		cmd := exec.CommandContext(context.Background(), st.cfg.DnsdistBinary, "-C", st.cfg.DnsdistLivePath, "--supervised")
-		logPath := filepath.Join(st.cfg.StagingDir, "dnsdist.startup.log")
-		logFile, err := os.Create(logPath)
-		if err == nil {
-			cmd.Stdout, cmd.Stderr = logFile, logFile
-		}
-		if err := cmd.Start(); err != nil {
-			return fmt.Errorf("starting dnsdist: %w", err)
-		}
-		st.dnsdist = &trackedProcess{cmd: cmd, pid: cmd.Process.Pid}
-		writePIDFile(dnsdistPIDFile(st.cfg), cmd.Process.Pid)
-		go cmd.Wait()
-		time.Sleep(200 * time.Millisecond)
-		if processAlive(cmd.Process.Pid) {
+		if err := st.startDnsdistOnce(); err == nil {
 			return nil
+		} else {
+			lastErr = err
 		}
-		lastErr = fmt.Errorf("dnsdist exited immediately after start (see %s)", logPath)
-		removePIDFile(dnsdistPIDFile(st.cfg))
-		st.dnsdist = nil
 		if attempt < maxAttempts {
 			time.Sleep(2 * time.Second)
 		}
@@ -555,8 +580,36 @@ func (st *dnsRuntimeState) waitHealthy(ctx context.Context) error {
 	} else if host == "::" {
 		host = "::1"
 	}
+	// A real live defect found during a durability pass: dnsdist can
+	// crash SEVERAL SECONDS into its own config parse (observed: a
+	// fatal dnstap FrameStreamLogger error ~4-5s in, right after it
+	// logs "Added downstream server") -- well past reloadDnsdist's own
+	// 200ms post-start aliveness check, which reliably saw the process
+	// still alive and reported success every time this was reproduced
+	// live. Once that later crash happens, nothing is listening on the
+	// DNS port at all, so this loop would otherwise just poll a dead
+	// port for its ENTIRE remaining budget and report a generic
+	// "connection refused" -- true, but not the real story, and not
+	// recoverable no matter how long the budget is. Detecting the dead
+	// process here and restarting it (capped, so a config that's
+	// genuinely, permanently broken still fails and rolls back instead
+	// of looping forever) is what actually recovers from the race this
+	// process's own restart triggers -- not a bigger timeout.
+	const maxMidCheckRestarts = 3
+	restarts := 0
 	var lastErr error
 	for time.Now().Before(deadline) {
+		if st.dnsdist == nil || !st.dnsdist.alive() {
+			if restarts >= maxMidCheckRestarts {
+				return fmt.Errorf("dnsdist crashed %d times during the health check window and was not retried further: %w", restarts, lastErr)
+			}
+			restarts++
+			if err := st.startDnsdistOnce(); err != nil {
+				lastErr = err
+				time.Sleep(st.cfg.HealthCheckRetryDelay)
+				continue
+			}
+		}
 		out, err := exec.CommandContext(ctx, st.cfg.DigBinary,
 			"+time=1", "+tries=1", "+short",
 			"@"+host, "-p", port, dnscompile.HealthMarkerDomain, "A",
