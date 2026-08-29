@@ -185,6 +185,51 @@ func TestCacheFlushPerformsARealFlushAgainstTheTestBindInstance(t *testing.T) {
 	}
 }
 
+// TestCacheFlushByExactNameAndTreeAgainstTheTestBindInstance proves the
+// two non-"all" scopes (rndc flushname/flushtree) actually work against
+// a real running named, not just that the request shape validates --
+// this is the feature the owner-facing UI never exposed until this
+// session even though the backend already supported it.
+func TestCacheFlushByExactNameAndTreeAgainstTheTestBindInstance(t *testing.T) {
+	rndcConfPath, rndcPort := startTestBind(t)
+	s := &Server{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	RegisterCacheOps(s, CacheConfig{
+		RNDCConfPath: rndcConfPath,
+		Contexts:     []BindContext{{Name: "ctx0", RNDCPort: rndcPort}},
+	})
+
+	for _, scope := range []string{"name", "tree"} {
+		result, err := s.handlers["cache.flush"](context.Background(), json.RawMessage(`{"layer":"bind","scope":"`+scope+`","target":"example.com"}`))
+		if err != nil {
+			t.Fatalf("scope=%s: expected a real successful flush against the test instance, got: %v", scope, err)
+		}
+		encoded, _ := json.Marshal(result)
+		var decoded struct {
+			Results []struct {
+				Context string `json:"context"`
+				OK      bool   `json:"ok"`
+				Detail  string `json:"detail"`
+			} `json:"results"`
+		}
+		json.Unmarshal(encoded, &decoded)
+		if len(decoded.Results) != 1 || !decoded.Results[0].OK {
+			t.Fatalf("scope=%s: expected a real successful flush result, got %+v", scope, decoded.Results)
+		}
+	}
+}
+
+func TestCacheFlushByNameOrTreeRequiresATarget(t *testing.T) {
+	rndcConfPath, rndcPort := startTestBind(t)
+	s := &Server{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	RegisterCacheOps(s, CacheConfig{RNDCConfPath: rndcConfPath, Contexts: []BindContext{{Name: "ctx0", RNDCPort: rndcPort}}})
+	for _, scope := range []string{"name", "tree"} {
+		_, err := s.handlers["cache.flush"](context.Background(), json.RawMessage(`{"layer":"bind","scope":"`+scope+`"}`))
+		if err == nil {
+			t.Fatalf("scope=%s: expected an error when target is missing", scope)
+		}
+	}
+}
+
 func TestCacheFlushRejectsAnUnknownContext(t *testing.T) {
 	rndcConfPath, rndcPort := startTestBind(t)
 	s := &Server{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}

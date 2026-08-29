@@ -6,10 +6,13 @@
   // Cache. Real, via internal/hostagent -> apdns-hostagent (a separate,
   // root-owned process this web service talks to over a Unix socket --
   // never direct root access from here). BIND flush uses the real rndc
-  // binary against the appliance's real rndc.conf; dnsdist has no live
-  // administrative channel by design (Python's own architecture), so
-  // its "flush" honestly reports that a restart is required instead of
-  // faking a live flush.
+  // binary against the appliance's real rndc.conf, with real flush-all/
+  // flush-by-exact-name/flush-tree scopes (rndc flush/flushname/
+  // flushtree) -- not just "all". dnsdist's own packet cache has no
+  // live administrative flush channel wired up in this control plane
+  // yet, so its "flush" honestly reports that a restart is required
+  // instead of faking a live flush -- see
+  // internal/hostagentd/ops_cache.go's own doc comment.
 
   let status = $state<CacheStatusResponse | null>(null);
   let loadError = $state("");
@@ -31,14 +34,28 @@
     refresh();
   });
 
+  // Per-context flush target/scope (name/tree need a real domain name to
+  // act on -- internal/hostagentd/ops_cache.go already supports scope
+  // all/name/tree with real rndc flushname/flushtree, this UI previously
+  // only ever exposed "all").
+  let flushScope = $state<Record<string, "all" | "name" | "tree">>({});
+  let flushTarget = $state<Record<string, string>>({});
+
   async function flushContext(contextName: string) {
+    const scope = flushScope[contextName] ?? "all";
+    const target = flushTarget[contextName]?.trim();
+    if (scope !== "all" && !target) {
+      flushError = `A domain name is required to flush by ${scope}`;
+      return;
+    }
     flushBusy = contextName;
     flushError = "";
     flushResult = "";
     try {
-      const result = await api.cacheFlush("bind", { context: contextName, scope: "all" });
+      const result = await api.cacheFlush("bind", { context: contextName, scope, ...(scope !== "all" ? { target } : {}) });
       const r = result.results[0];
-      flushResult = r?.ok ? `Flushed ${contextName}: ${r.detail ?? "ok"}` : `Failed: ${r?.detail ?? "unknown error"}`;
+      const scopeLabel = scope === "all" ? "" : ` (${scope}: ${target})`;
+      flushResult = r?.ok ? `Flushed ${contextName}${scopeLabel}: ${r.detail ?? "ok"}` : `Failed: ${r?.detail ?? "unknown error"}`;
       await refresh();
     } catch (err) {
       flushError = err instanceof ApiError ? err.message : String(err);
@@ -67,7 +84,8 @@
   <h2 id="cache-heading">Cache</h2>
   <p class="scope-note">
     Real status and flush, via the root-owned apdns-hostagent process (never direct root access from
-    this web service). dnsdist has no live flush channel by design -- see the note below.
+    this web service). Each BIND context can be flushed entirely, by an exact domain name, or by a
+    whole subtree. dnsdist has no live flush channel by design -- see the note below.
   </p>
 
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
@@ -99,7 +117,20 @@
                   {/if}
                 {/if}
               </td>
-              <td>
+              <td class="flush-cell">
+                <select bind:value={flushScope[ctx.name]} aria-label={`Flush scope for ${ctx.name}`} disabled={!ctx.reachable}>
+                  <option value="all">All</option>
+                  <option value="name">Exact name</option>
+                  <option value="tree">Tree/subtree</option>
+                </select>
+                {#if (flushScope[ctx.name] ?? "all") !== "all"}
+                  <input
+                    bind:value={flushTarget[ctx.name]}
+                    placeholder="example.com"
+                    aria-label={`Flush target domain for ${ctx.name}`}
+                    disabled={!ctx.reachable}
+                  />
+                {/if}
                 <button onclick={() => flushContext(ctx.name)} disabled={!ctx.reachable || flushBusy === ctx.name}>
                   {flushBusy === ctx.name ? "Flushing…" : "Flush"}
                 </button>
@@ -130,4 +161,6 @@
   .hint { font-size: 0.85rem; opacity: 0.75; margin: 0; }
   .success { color: #16a34a; }
   .error { color: var(--badge-danger-fg); }
+  .flush-cell { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
+  .flush-cell input { width: 10rem; }
 </style>
