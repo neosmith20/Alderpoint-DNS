@@ -419,15 +419,6 @@
     {/each}
   </div>
 
-  <p class="hint scope-note">
-    Every panel on this page is natively Go-owned: Blocklists, Local DNS, Clients, and Upstreams
-    directly; DNS Activity, Top Domains, and Top Blocked Domains via this appliance's own
-    dnstap-fed query history (<code>internal/dnsanalytics</code> -- Python's analytics store is
-    fully decommissioned, see CUTOVER.md). The Clients mini-panel's "observed" rows come from that
-    same real traffic data, cross-referenced against managed identifiers -- see
-    <code>GET /api/clients/observed</code>'s own doc comment for what it discloses as narrower than
-    a real discovery worker.
-  </p>
 </section>
 
 <style>

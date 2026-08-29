@@ -30,6 +30,7 @@ import (
 	"alderpointdns/go-controlplane/internal/config"
 	"alderpointdns/go-controlplane/internal/customrules"
 	"alderpointdns/go-controlplane/internal/dbmigrate"
+	"alderpointdns/go-controlplane/internal/dnsanalytics"
 	"alderpointdns/go-controlplane/internal/dnsperf"
 	"alderpointdns/go-controlplane/internal/dnsruntime"
 	"alderpointdns/go-controlplane/internal/dnstransports"
@@ -40,10 +41,9 @@ import (
 	"alderpointdns/go-controlplane/internal/importer"
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/notifications"
-	"alderpointdns/go-controlplane/internal/replication"
-	"alderpointdns/go-controlplane/internal/dnsanalytics"
 	"alderpointdns/go-controlplane/internal/policy"
 	"alderpointdns/go-controlplane/internal/pymigrate"
+	"alderpointdns/go-controlplane/internal/replication"
 	"alderpointdns/go-controlplane/internal/secretbackup"
 	"alderpointdns/go-controlplane/internal/secretstore"
 	"alderpointdns/go-controlplane/internal/upstreams"
@@ -506,6 +506,19 @@ func runMigrate(args []string) {
 	}
 }
 
+// resolveDNSRuntimeTLSPath picks the HOST-side (dnsdist's own
+// filesystem view) path dnscompile should compile into dnsdist.conf --
+// the explicit -dns-runtime-tls-cert-path/-key-path flag when set, else
+// this process's own web.tls_cert_path/tls_key_path as a fallback for
+// the common no-container-boundary case. See those flags' own doc
+// comments for the live defect this exists to fix.
+func resolveDNSRuntimeTLSPath(explicit, webConfigFallback string) string {
+	if explicit != "" {
+		return explicit
+	}
+	return webConfigFallback
+}
+
 func runWeb(args []string) {
 	fs := flag.NewFlagSet("web", flag.ExitOnError)
 	dbPath := fs.String("db", "./data/alderpointdns-go.db", "sqlite database path")
@@ -525,18 +538,20 @@ func runWeb(args []string) {
 	// path are already two separately-configured values elsewhere in
 	// this deployment, not one shared flag.
 	dnstapDialPath := fs.String("dns-runtime-dnstap-socket", "", "the path dnsdist itself will dial to reach this process's dnstap listener -- compiled verbatim into dnsdist.conf (see internal/dnscompile's DnstapSocketPath). On a real container deployment this is the HOST-side path of the bind mount; see -dns-runtime-dnstap-listen-socket for this process's own (possibly container-internal) bind path to the same file.")
+	dnsRuntimeTLSCertPath := fs.String("dns-runtime-tls-cert-path", "", "the HOST-side (dnsdist's own filesystem view) path to the TLS certificate PEM used for DoT/DoH/DoQ/DoH3 -- compiled verbatim into dnsdist.conf. Empty defaults to -config's web.tls_cert_path, the common case where this process and dnsdist share one filesystem namespace; MUST be set explicitly whenever dnsdist runs outside this process's own container (see -dns-runtime-tls-key-path's own comment for the live defect this fixes: dnsdist silently exiting on startup because it could not open a cert path that only exists inside the web container).")
+	dnsRuntimeTLSKeyPath := fs.String("dns-runtime-tls-key-path", "", "the HOST-side counterpart to -dns-runtime-tls-cert-path for the private key. A real live defect this fixes: dnscompile previously always compiled cfg.Web.TLSCertPath/TLSKeyPath (this process's OWN, possibly container-internal, HTTPS listener paths) verbatim into dnsdist.conf, so on a split-container deployment (dnsdist running on the host, this process's cert mounted only inside its own container) dnsdist could not open either file at all and exited immediately after start the moment any TLS-based transport (DoT/DoH/DoQ/DoH3) was enabled -- exactly the live 'DNS runtime change rejected at stage dnsdist_reload -- dnsdist exited immediately after start' symptom.")
 	dnstapListenPath := fs.String("dns-runtime-dnstap-listen-socket", "", "the path THIS process binds/listens on for dnsdist's real dnstap stream (see internal/dnsanalytics.Writer). Defaults to -dns-runtime-dnstap-socket's value when empty -- the common case where this process and dnsdist share one filesystem namespace (no container boundary between them). Required together with -analytics-db whenever a DNS runtime (-hostagent-socket + -dns-runtime-dnsdist-addr + -dns-runtime-bind-proxy-addr) is also configured -- otherwise there would be a durable analytics store with nothing ever feeding it real traffic.")
-	backupsDir := fs.String("backups-dir", "./data/backups", "directory for stored/uploaded appliance backups (see internal/backup)")
-	bootstrapTokenPath := fs.String("bootstrap-token-path", "./data/bootstrap-token", "where the one-time first-run setup token is written (0600); also logged once at startup when setup is required -- see internal/bootstrap")
+	backupsDir := fs.String("backups-dir", "/var/lib/alderpointdns-go/data/backups", "directory for stored/uploaded appliance backups (see internal/backup) -- an appliance-owned absolute path; see -dns-perf-report-path's own comment for why a relative default is unsafe on this deployment")
+	bootstrapTokenPath := fs.String("bootstrap-token-path", "/var/lib/alderpointdns-go/data/bootstrap-token", "where the one-time first-run setup token is written (0600); also logged once at startup when setup is required -- see internal/bootstrap")
 	backupRetentionMaxCount := fs.Int("backup-retention-max-count", 0, "keep at most N manual backups, oldest pruned first (0 = unlimited; the pre-restore safety backup is never pruned)")
 	backupRetentionMaxAgeDays := fs.Int("backup-retention-max-age-days", 0, "prune manual backups older than N days (0 = unlimited)")
 	hostagentSocket := fs.String("hostagent-socket", "", "unix socket path for apdns-hostagent (see internal/hostagent, internal/hostagentd); empty = Cache/Replication/Network/Logs/Software-Updates all report unavailable")
 	dnsRuntimeDnsdistAddr := fs.String("dns-runtime-dnsdist-addr", "", "the real dnsdist listen address apdns-hostagent was started with for this deployment (see internal/dnscompile, internal/dnsruntime); empty = DNS Runtime compilation is unavailable, matching -hostagent-socket's own contract")
 	dnsRuntimeBindProxyAddr := fs.String("dns-runtime-bind-proxy-addr", "", "the real BIND PROXYv2 backend address apdns-hostagent compiles named.conf to listen on (127.0.0.1:<bind-proxy-port>); required together with -dns-runtime-dnsdist-addr")
 	dnsPerfBindPlainAddr := fs.String("dns-perf-bind-plain-addr", "", "BIND's own unproxied loopback listener address for this deployment (127.0.0.1:<bind-plain-port>), for System Status's Safe DNS Benchmark's 'BIND direct' case display only -- the real dialing happens entirely inside apdns-hostagent; empty = that one case is omitted")
-	dnsPerfReportPath := fs.String("dns-perf-report-path", "./data/dns-performance/latest-report.json", "path to persist the Safe DNS Benchmark's latest report (see internal/dnsperf)")
-	replicationCertDir := fs.String("replication-cert-dir", "./data/replication/certs", "directory for this node's own real replication mTLS certificate material (server cert/key as primary, or client cert/key/CA cert as an enrolled replica) -- see internal/replication; only CA generation/signing needs -hostagent-socket, the listener/poller themselves need no privilege")
-	secretBackupsDir := fs.String("secret-backups-dir", "./data/secret-backups", "directory for real Secret Backup archive files (see internal/secretbackup); requires -hostagent-socket")
+	dnsPerfReportPath := fs.String("dns-perf-report-path", "/var/lib/alderpointdns-go/data/dns-performance/latest-report.json", "path to persist the Safe DNS Benchmark's latest report (see internal/dnsperf) -- an appliance-owned absolute path, matching -db/-analytics-db's own convention; a relative default previously resolved against whatever directory the process happened to be started from (podman's /, not writable), causing a live 'mkdir data: permission denied' failure")
+	replicationCertDir := fs.String("replication-cert-dir", "/var/lib/alderpointdns-go/data/replication/certs", "directory for this node's own real replication mTLS certificate material (server cert/key as primary, or client cert/key/CA cert as an enrolled replica) -- see internal/replication; only CA generation/signing needs -hostagent-socket, the listener/poller themselves need no privilege")
+	secretBackupsDir := fs.String("secret-backups-dir", "/var/lib/alderpointdns-go/data/secret-backups", "directory for real Secret Backup archive files (see internal/secretbackup); requires -hostagent-socket")
 	fs.Parse(args)
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -696,13 +711,20 @@ func runWeb(args []string) {
 	// dnsdist/BIND deployment addresses that agent was configured with
 	// -- see internal/dnsruntime's doc comment for why the two sides
 	// must agree on these fixed values.
+	// See -dns-runtime-tls-cert-path/-dns-runtime-tls-key-path's own doc
+	// comments: dnsdist needs the HOST-side path to the cert/key, which
+	// on a split-container deployment differs from this process's own
+	// (container-internal) web.tls_cert_path/tls_key_path -- defaulting
+	// to those only covers the no-container-boundary case.
+	dnsRuntimeTLSCert := resolveDNSRuntimeTLSPath(*dnsRuntimeTLSCertPath, cfg.Web.TLSCertPath)
+	dnsRuntimeTLSKey := resolveDNSRuntimeTLSPath(*dnsRuntimeTLSKeyPath, cfg.Web.TLSKeyPath)
 	var dnsRuntimeOrch *dnsruntime.Orchestrator
 	if hostAgentClient != nil && *dnsRuntimeDnsdistAddr != "" && *dnsRuntimeBindProxyAddr != "" {
 		dnsRuntimeOrch = &dnsruntime.Orchestrator{
 			LocalDNS: ldSvc, CustomRules: customRulesSvc, Blocklists: blSvc, Upstreams: upSvc, DNSTransports: dnsTransportsSvc, Policy: policySvc,
 			DomainRouting: domainRoutingSvc, Clients: clientsSvc,
 			HostAgent: hostAgentClient, DnsdistListenAddress: *dnsRuntimeDnsdistAddr, BindBackendAddress: *dnsRuntimeBindProxyAddr,
-			TLSCertPath: cfg.Web.TLSCertPath, TLSKeyPath: cfg.Web.TLSKeyPath,
+			TLSCertPath: dnsRuntimeTLSCert, TLSKeyPath: dnsRuntimeTLSKey,
 			DnstapSocketPath: *dnstapDialPath,
 		}
 		if *dnstapDialPath == "" {

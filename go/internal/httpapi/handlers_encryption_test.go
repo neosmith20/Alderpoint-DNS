@@ -197,3 +197,69 @@ func TestDNSCryptEnableWithoutProvisioningReturnsClearError(t *testing.T) {
 		t.Fatalf("expected 409 for enabling DNSCrypt before provisioning, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestGetDNSTransportsIncludesServerHostnameFromActiveCert is the real
+// regression test for the live Encryption/DNS Transports UX defect: an
+// owner had no way to see manual (non-Apple) connection details for
+// DoT/DoH/DoQ/DoH3/DNSCrypt -- this proves the API now surfaces the
+// same real hostname source (the active management cert's own SAN) the
+// .mobileconfig endpoint already uses, so the frontend can build a real
+// "tls://<host>:<port>" etc. string for every enabled transport.
+func TestGetDNSTransportsIncludesServerHostnameFromActiveCert(t *testing.T) {
+	certDir := t.TempDir()
+	certPath := filepath.Join(certDir, "server.crt")
+	keyPath := filepath.Join(certDir, "server.key")
+	certPEM, keyPEM := genTestCertKeyPair(t, time.Now().Add(-time.Hour), time.Now().Add(365*24*time.Hour))
+	os.WriteFile(certPath, certPEM, 0o600)
+	os.WriteFile(keyPath, keyPEM, 0o600)
+
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(3000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := dbmigrate.Up(context.Background(), db, "../../schema/migrations"); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	s := &Server{
+		DNSTransports: &dnstransports.Service{DB: db},
+		TLSCertPath:   certPath, TLSKeyPath: keyPath,
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	rec := httptest.NewRecorder()
+	s.handleGetDNSTransports(rec, httptest.NewRequest("GET", "/api/dns-transports", nil))
+	if rec.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var out map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	if out["server_hostname"] != "localhost" {
+		t.Fatalf("expected server_hostname=%q (the test cert's own SAN), got %+v", "localhost", out)
+	}
+}
+
+func TestGetDNSTransportsOmitsServerHostnameWithoutACert(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(3000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := dbmigrate.Up(context.Background(), db, "../../schema/migrations"); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	s := &Server{DNSTransports: &dnstransports.Service{DB: db}, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	rec := httptest.NewRecorder()
+	s.handleGetDNSTransports(rec, httptest.NewRequest("GET", "/api/dns-transports", nil))
+	if rec.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var out map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	if _, present := out["server_hostname"]; present {
+		t.Fatalf("expected no server_hostname field when no TLS cert is configured, got %+v", out)
+	}
+}

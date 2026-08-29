@@ -33,7 +33,18 @@ func (s *Server) handleGetDNSTransports(w http.ResponseWriter, r *http.Request) 
 		Err(http.StatusInternalServerError, "internal_error", "failed to load transport settings").WriteJSON(w)
 		return
 	}
-	WriteJSON(w, http.StatusOK, transportsJSON(settings))
+	out := transportsJSON(settings)
+	// The same hostname source the Apple .mobileconfig profile already
+	// uses (the active HTTPS cert's own first SAN entry) -- surfaced
+	// here too so the UI can show real manual connection details
+	// (server address:port) for every transport, not just an
+	// Apple-specific downloadable profile for DoT/DoH.
+	if s.TLSCertPath != "" {
+		if status, err := (&tlscert.Reader{CertPath: s.TLSCertPath}).Status(); err == nil && status.Active && len(status.SAN) > 0 {
+			out["server_hostname"] = status.SAN[0]
+		}
+	}
+	WriteJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleUpdateDNSTransports(w http.ResponseWriter, r *http.Request) {

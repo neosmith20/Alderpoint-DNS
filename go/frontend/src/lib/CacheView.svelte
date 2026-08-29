@@ -1,24 +1,28 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, ApiError, type CacheStatusResponse } from "../api";
+  import { api, ApiError, type CacheStatusResponse, type DNSRuntimeApplyResult } from "../api";
   import { router } from "../router.svelte";
+  import DnsRuntimeBadge from "./DnsRuntimeBadge.svelte";
 
   // Cache. Real, via internal/hostagent -> apdns-hostagent (a separate,
   // root-owned process this web service talks to over a Unix socket --
   // never direct root access from here). BIND flush uses the real rndc
   // binary against the appliance's real rndc.conf, with real flush-all/
   // flush-by-exact-name/flush-tree scopes (rndc flush/flushname/
-  // flushtree) -- not just "all". dnsdist's own packet cache has no
-  // live administrative flush channel wired up in this control plane
-  // yet, so its "flush" honestly reports that a restart is required
-  // instead of faking a live flush -- see
-  // internal/hostagentd/ops_cache.go's own doc comment.
+  // flushtree) -- not just "all". dnsdist has no live administrative
+  // flush channel by design (see internal/hostagentd/ops_cache.go's own
+  // doc comment), so instead of a button that always fails, "Restart
+  // dnsdist" re-runs the same stage->validate->promote->health-check->
+  // auto-rollback pipeline every other DNS Runtime change already goes
+  // through (internal/dnsruntime.Orchestrator.Apply) -- a real, safe way
+  // to clear its packet cache, with the same continuity guarantees.
 
   let status = $state<CacheStatusResponse | null>(null);
   let loadError = $state("");
   let flushBusy = $state<string | null>(null);
   let flushResult = $state("");
   let flushError = $state("");
+  let dnsdistRuntimeResult = $state<DNSRuntimeApplyResult | null>(null);
 
   async function refresh() {
     loadError = "";
@@ -64,15 +68,19 @@
     }
   }
 
-  async function flushDnsdist() {
+  async function restartDnsdist() {
     flushBusy = "dnsdist";
     flushError = "";
     flushResult = "";
+    dnsdistRuntimeResult = null;
     try {
-      await api.cacheFlush("dnsdist");
+      const { dns_runtime } = await api.cacheDnsdistRestart();
+      dnsdistRuntimeResult = dns_runtime;
+      flushResult = dns_runtime.promoted
+        ? "dnsdist restarted and its cache cleared."
+        : `Restart did not complete: ${dns_runtime.detail ?? dns_runtime.stage}`;
+      await refresh();
     } catch (err) {
-      // Expected: dnsdist flush is honestly denied, not faked -- see
-      // internal/hostagentd/ops_cache.go's own doc comment.
       flushError = err instanceof ApiError ? err.message : String(err);
     } finally {
       flushBusy = null;
@@ -144,8 +152,17 @@
 
   <div class="card">
     <h3>dnsdist</h3>
-    <p class="hint">{status?.dnsdist.note ?? "…"}</p>
-    <button onclick={flushDnsdist} disabled={flushBusy === "dnsdist"}>{flushBusy === "dnsdist" ? "…" : "Attempt flush"}</button>
+    <p class="hint">
+      dnsdist's packet cache has no live flush channel -- clearing it requires a real restart.
+      This safely re-promotes the current, already-validated configuration (the same
+      stage/validate/promote/health-check pipeline every other DNS Runtime change uses), which
+      restarts dnsdist and clears its cache as a result. A failed health check rolls back
+      automatically; real DNS answering is never left down.
+    </p>
+    <button onclick={restartDnsdist} disabled={flushBusy === "dnsdist"}>
+      {flushBusy === "dnsdist" ? "Restarting…" : "Restart dnsdist (clears cache)"}
+    </button>
+    <DnsRuntimeBadge result={dnsdistRuntimeResult} />
   </div>
 </section>
 

@@ -50,6 +50,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -345,12 +346,12 @@ func RegisterSecretsOps(s *Server, cfg SecretsConfig) error {
 
 	s.Register(hostagent.OpReplicationIssueCert, func(ctx context.Context, params json.RawMessage) (any, error) {
 		var in struct {
-			CA       sealedIn `json:"ca"`
-			CACertPEM string  `json:"ca_cert_pem"`
-			CN        string  `json:"cn"`
+			CA        sealedIn `json:"ca"`
+			CACertPEM string   `json:"ca_cert_pem"`
+			CN        string   `json:"cn"`
 			SANs      []string `json:"sans"`
-			KeyUsage  string  `json:"key_usage"` // "server" | "client"
-			Days      int     `json:"days"`
+			KeyUsage  string   `json:"key_usage"` // "server" | "client"
+			Days      int      `json:"days"`
 		}
 		if err := json.Unmarshal(params, &in); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
@@ -491,7 +492,7 @@ func RegisterSecretsOps(s *Server, cfg SecretsConfig) error {
 			return nil, fmt.Errorf("encrypting backup: %w", err)
 		}
 		return map[string]any{
-			"backup_b64": base64.StdEncoding.EncodeToString(backupCiphertext),
+			"backup_b64":   base64.StdEncoding.EncodeToString(backupCiphertext),
 			"secret_count": len(exported), "created_at": createdAt,
 			"backup_key": backupKeyOut,
 		}, nil
@@ -698,7 +699,18 @@ func sendNotification(ctx context.Context, notifyKind, secret, message string, s
 		if !strings.HasPrefix(secret, "https://") && !strings.HasPrefix(secret, "http://") {
 			return nil, fmt.Errorf("stored webhook secret is not a valid URL")
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, secret, strings.NewReader(fmt.Sprintf(`{"text":%q}`, message)))
+		// A real live defect: the generic "webhook" kind always sent
+		// {"text": message} -- Slack's own field name, which Slack's
+		// webhook endpoint accepts (see the "slack" case below, same
+		// body). Discord's webhook API does NOT recognize "text" at
+		// all; it requires "content" (or "embeds"/"file"), and rejects
+		// a body with none of those as HTTP 400 -- exactly the live
+		// "Test failed: HTTP 400" symptom against a real, correctly
+		// configured Discord webhook secret. Detected by host, not by a
+		// separate provider kind, so an operator can keep using the one
+		// generic "webhook" provider type for Discord without knowing
+		// this distinction exists.
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, secret, strings.NewReader(webhookBody(secret, message)))
 		if err != nil {
 			return nil, fmt.Errorf("building request: %w", err)
 		}
@@ -741,6 +753,33 @@ func sendNotification(ctx context.Context, notifyKind, secret, message string, s
 	default:
 		return nil, fmt.Errorf("unknown notification kind %q", notifyKind)
 	}
+}
+
+// webhookBody builds the generic "webhook" kind's real JSON POST body --
+// {"text": message} for a plain/Slack-style webhook, or {"content":
+// message} for a real Discord webhook URL (Discord's own required
+// field name; it rejects a body with neither "content", "embeds", nor
+// "file" as HTTP 400, which is the real live symptom this fixes -- see
+// the call site's own comment for the full story).
+func webhookBody(secretURL, message string) string {
+	if isDiscordWebhookURL(secretURL) {
+		return fmt.Sprintf(`{"content":%q}`, message)
+	}
+	return fmt.Sprintf(`{"text":%q}`, message)
+}
+
+// isDiscordWebhookURL recognizes Discord's own real webhook host names
+// (both the current discord.com and the legacy discordapp.com, which
+// Discord still accepts) by parsed host, not a naive string prefix --
+// so a URL with Discord's hostname embedded in a query string or path
+// elsewhere doesn't false-positive.
+func isDiscordWebhookURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return host == "discord.com" || host == "discordapp.com" || strings.HasSuffix(host, ".discord.com")
 }
 
 func doTestRequest(client *http.Client, req *http.Request) (any, error) {

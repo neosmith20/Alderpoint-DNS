@@ -571,6 +571,29 @@ cmd_execute() {
         || { phase_set "failed_prepare"; fail "container-specific appliance.yaml does not contain the expected container cert path -- refusing to proceed with a config that would fail the same way again"; }
     log "generated container-specific config: $container_config"
 
+    # A real live defect (found and fixed live, not caught here first):
+    # stock debian:trixie-slim ships with NO CA certificates at all
+    # (/etc/ssl/certs is empty) -- every outbound HTTPS request the web
+    # process makes (every blocklist subscription's download, all of
+    # them, without exception) failed with "x509: certificate signed by
+    # unknown authority". Bake a real ca-certificates install into a
+    # local, tagged base image ONCE per cutover run, reused for the
+    # actual container, rather than installing into a running
+    # container's own writable layer (which a future `podman rm` +
+    # recreate would silently lose).
+    local go_live_base_image="apdns-go-live-base:ca-certs"
+    if ! podman image exists "$go_live_base_image"; then
+        log "building $go_live_base_image (debian:trixie-slim + ca-certificates)"
+        podman run --rm --name apdns-go-live-base-build debian:trixie-slim \
+            sh -c "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ca-certificates && apt-get clean" \
+            || { phase_set "failed_prepare"; fail "building the ca-certificates base image failed"; }
+        podman commit apdns-go-live-base-build "$go_live_base_image" >/dev/null \
+            || { phase_set "failed_prepare"; fail "committing the ca-certificates base image failed"; }
+        log "built and tagged $go_live_base_image"
+    else
+        log "$go_live_base_image already built, reusing"
+    fi
+
     podman rm -f "$GO_LIVE_CONTAINER" >/dev/null 2>&1 || true
     podman create --name "$GO_LIVE_CONTAINER" \
         --user "$GO_LIVE_WEB_UID:$GO_LIVE_WEB_UID" \
@@ -580,7 +603,7 @@ cmd_execute() {
         -v "$container_config:/etc/alderpointdns-go/appliance.yaml:ro" \
         -v "$GO_LIVE_STATE/certs:/etc/alderpointdns-go/certs:ro" \
         -v "$GO_LIVE_HOSTAGENT_SOCKET_DIR:/run/apdns-hostagent" \
-        debian:trixie-slim \
+        "$go_live_base_image" \
         /opt/alderpointdns-go/alderpointdns-go web \
         -db /var/lib/alderpointdns-go/data/app.db \
         -config /etc/alderpointdns-go/appliance.yaml \
@@ -589,6 +612,8 @@ cmd_execute() {
         -hostagent-socket /run/apdns-hostagent/agent.sock \
         -dns-runtime-dnsdist-addr "$GO_LIVE_DNSDIST_ADDR" \
         -dns-runtime-bind-proxy-addr "$GO_LIVE_BIND_PROXY_ADDR" \
+        -dns-runtime-tls-cert-path "$GO_LIVE_STATE/certs/server.crt" \
+        -dns-runtime-tls-key-path "$GO_LIVE_STATE/certs/server.key" \
         -addr 0.0.0.0:8443 \
         || { phase_set "failed_prepare"; fail "creating $GO_LIVE_CONTAINER failed"; }
     log "$GO_LIVE_CONTAINER created (not started yet)"

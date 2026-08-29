@@ -302,6 +302,7 @@ func (s *Server) Routes() http.Handler {
 
 	mux.HandleFunc("GET /api/cache/status", requireAuth(s.handleCacheStatus))
 	mux.HandleFunc("POST /api/cache/flush", requireAuth(s.handleCacheFlush))
+	mux.HandleFunc("POST /api/cache/dnsdist-restart", requireAuth(s.handleCacheDnsdistRestart))
 
 	mux.HandleFunc("GET /api/dns/performance", requireAuth(s.handleDNSPerfStatus))
 	mux.HandleFunc("POST /api/dns/performance/benchmark", requireAuth(s.handleDNSPerfBenchmark))

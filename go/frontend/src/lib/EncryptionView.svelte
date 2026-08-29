@@ -172,35 +172,82 @@
 
       <fieldset>
         <legend><label><input type="checkbox" bind:checked={settings.dot_enabled} /> DNS-over-TLS (DoT)</label></legend>
+        <p class="transport-desc">
+          Encrypts DNS lookups over a dedicated TLS connection (port 853 by default). Supported
+          natively by most modern operating systems and routers.
+        </p>
         <label class="port">Port <input type="number" min="1" max="65535" bind:value={settings.dot_port} /></label>
         {#if settings.dot_enabled}
-          <a class="mobileconfig-link" href="/api/dns-transports/mobileconfig/dot">Download Apple .mobileconfig (DoT)</a>
+          <div class="manual-setup">
+            <p class="manual-setup-label">Manual setup (Android, most routers, dnsmasq, etc.):</p>
+            <code>tls://{settings.server_hostname ?? "(configure a management TLS certificate first)"}:{settings.dot_port}</code>
+          </div>
+          <a class="mobileconfig-link" href="/api/dns-transports/mobileconfig/dot">
+            Apple devices only: download a .mobileconfig profile
+          </a>
         {/if}
       </fieldset>
 
       <fieldset>
         <legend><label><input type="checkbox" bind:checked={settings.doh_enabled} /> DNS-over-HTTPS (DoH)</label></legend>
+        <p class="transport-desc">
+          Encrypts DNS lookups inside an HTTPS request. Supported by most modern browsers and
+          operating systems, and the most broadly compatible encrypted option for clients that
+          don't support DoT.
+        </p>
         <label class="port">Port <input type="number" min="1" max="65535" bind:value={settings.doh_port} /></label>
         <label class="path">Path <input bind:value={settings.doh_path} placeholder="/dns-query" /></label>
         {#if settings.doh_enabled}
-          <a class="mobileconfig-link" href="/api/dns-transports/mobileconfig/doh">Download Apple .mobileconfig (DoH)</a>
+          <div class="manual-setup">
+            <p class="manual-setup-label">Manual setup (browsers, Android, most routers, etc.):</p>
+            <code>https://{settings.server_hostname ?? "(configure a management TLS certificate first)"}:{settings.doh_port}{settings.doh_path}</code>
+          </div>
+          <a class="mobileconfig-link" href="/api/dns-transports/mobileconfig/doh">
+            Apple devices only: download a .mobileconfig profile
+          </a>
         {/if}
       </fieldset>
 
       <fieldset>
         <legend><label><input type="checkbox" bind:checked={settings.doq_enabled} /> DNS-over-QUIC (DoQ)</label></legend>
+        <p class="transport-desc">
+          Encrypts DNS lookups over QUIC (UDP). Faster reconnection than DoT on unreliable
+          networks; supported by a smaller set of clients (no Apple configuration profile format
+          exists for DoQ yet).
+        </p>
         <label class="port">Port <input type="number" min="1" max="65535" bind:value={settings.doq_port} /></label>
+        {#if settings.doq_enabled}
+          <div class="manual-setup">
+            <p class="manual-setup-label">Manual setup:</p>
+            <code>quic://{settings.server_hostname ?? "(configure a management TLS certificate first)"}:{settings.doq_port}</code>
+          </div>
+        {/if}
       </fieldset>
 
       <fieldset>
         <legend><label><input type="checkbox" bind:checked={settings.doh3_enabled} /> DNS-over-HTTP/3 (DoH3)</label></legend>
+        <p class="transport-desc">
+          DNS-over-HTTPS carried over HTTP/3 (QUIC) instead of HTTP/2 -- same DoH semantics, faster
+          on lossy networks, supported by a smaller set of clients.
+        </p>
         <label class="port">Port <input type="number" min="1" max="65535" bind:value={settings.doh3_port} /></label>
+        {#if settings.doh3_enabled}
+          <div class="manual-setup">
+            <p class="manual-setup-label">Manual setup:</p>
+            <code>h3://{settings.server_hostname ?? "(configure a management TLS certificate first)"}:{settings.doh3_port}{settings.doh_path}</code>
+          </div>
+        {/if}
       </fieldset>
 
       <fieldset>
         <legend>
           <label><input type="checkbox" bind:checked={settings.dnscrypt_enabled} disabled={!settings.dnscrypt_identity_provisioned} /> DNSCrypt</label>
         </legend>
+        <p class="transport-desc">
+          An older encrypted DNS protocol with its own resolver-identity format (a provider name +
+          public-key fingerprint, not a TLS certificate) -- supported by DNSCrypt-specific clients
+          such as dnscrypt-proxy.
+        </p>
         <label class="port">Port <input type="number" min="1" max="65535" bind:value={settings.dnscrypt_port} /></label>
         <label class="path">Provider name <input bind:value={settings.dnscrypt_provider_name} /></label>
         {#if !settings.dnscrypt_identity_provisioned}
@@ -209,6 +256,14 @@
             {rotateBusy ? "Generating…" : "Generate identity"}
           </button>
         {:else}
+          {#if settings.dnscrypt_enabled}
+            <div class="manual-setup">
+              <p class="manual-setup-label">Manual setup (e.g. dnscrypt-proxy's static resolver config):</p>
+              <code>server_address = '{settings.server_hostname ?? "(this appliance's address)"}:{settings.dnscrypt_port}'</code>
+              <code>provider_name = '{settings.dnscrypt_provider_name}'</code>
+              <code>provider_key = '{settings.dnscrypt_fingerprint}'</code>
+            </div>
+          {/if}
           <dl class="cert-info">
             <dt>Fingerprint</dt>
             <dd class="fingerprint">{settings.dnscrypt_fingerprint}</dd>
@@ -263,6 +318,10 @@
   .transports label { display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; }
   .transports input[type="number"] { width: 6rem; }
   .mobileconfig-link { font-size: 0.82rem; color: var(--accent); text-decoration: underline; }
+  .transport-desc { font-size: 0.82rem; opacity: 0.75; margin: 0; flex-basis: 100%; }
+  .manual-setup { flex-basis: 100%; display: flex; flex-direction: column; gap: 0.2rem; background: var(--attention-bg); border-radius: 6px; padding: 0.5rem 0.75rem; }
+  .manual-setup-label { font-size: 0.78rem; opacity: 0.8; margin: 0; }
+  .manual-setup code { font-size: 0.82rem; font-family: monospace; user-select: all; }
   .actions { display: flex; align-items: center; gap: 0.6rem; }
   .fingerprint { font-family: monospace; font-size: 0.82rem; word-break: break-all; }
   button.danger { color: var(--badge-danger-fg); border-color: var(--badge-danger-fg); }

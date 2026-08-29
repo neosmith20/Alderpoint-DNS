@@ -367,6 +367,7 @@ export interface DnsTransportSettings {
   dnscrypt_cert_valid_from?: number;
   dnscrypt_cert_valid_until?: number;
   dns_runtime?: DNSRuntimeApplyResult;
+  server_hostname?: string;
 }
 
 export interface TlsStatus {
@@ -930,8 +931,10 @@ export const api = {
   },
 
   cacheStatus: (signal?: AbortSignal) => req<CacheStatusResponse>("/api/cache/status", undefined, signal),
-  cacheFlush: (layer: "bind" | "dnsdist", opts?: { context?: string; scope?: string; target?: string }) =>
+  cacheFlush: (layer: "bind", opts?: { context?: string; scope?: string; target?: string }) =>
     req<CacheFlushResult>("/api/cache/flush", { method: "POST", body: JSON.stringify({ layer, ...opts }) }),
+  cacheDnsdistRestart: () =>
+    req<{ dns_runtime: DNSRuntimeApplyResult }>("/api/cache/dnsdist-restart", { method: "POST" }),
 
   dnsPerformanceStatus: (signal?: AbortSignal) => req<DNSPerfStatusResponse>("/api/dns/performance", undefined, signal),
   dnsPerformanceRun: () => req<{ status: string }>("/api/dns/performance/benchmark", { method: "POST" }),

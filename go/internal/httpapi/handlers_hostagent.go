@@ -60,6 +60,32 @@ func (s *Server) handleCacheFlush(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, result)
 }
 
+// handleCacheDnsdistRestart is the real, safe alternative to a raw
+// dnsdist cache "flush" (which OpCacheFlush honestly refuses -- dnsdist
+// has no live administrative flush channel by design). A live UI defect
+// this fixes: the Cache page exposed an "Attempt flush" button for
+// dnsdist that could never succeed, since the backend always denies
+// that request -- a broken button, not a degraded one. This action
+// instead does the one thing that actually clears dnsdist's packet
+// cache safely: re-runs the SAME stage -> validate -> promote -> reload
+// -> health-check -> auto-rollback pipeline every other DNS-runtime-
+// affecting change already goes through (internal/dnsruntime.
+// Orchestrator.Apply -- see handleDNSRuntimeApply's own doc comment),
+// which restarts dnsdist with its current, already-live-validated
+// config. The result is a real internal/dnsruntime.Result (promoted/
+// rolled_back/stage/detail), never a bare "ok" -- a failed health check
+// here rolls back automatically and is reported honestly, exactly like
+// every other DNS Runtime apply.
+func (s *Server) handleCacheDnsdistRestart(w http.ResponseWriter, r *http.Request) {
+	if s.DNSRuntime == nil {
+		WriteJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "unavailable", "detail": dnsRuntimeUnavailable})
+		return
+	}
+	result := s.DNSRuntime.Apply(r.Context())
+	s.notifyOnRollback(r, &result)
+	WriteJSON(w, http.StatusOK, map[string]any{"dns_runtime": result})
+}
+
 // --- Network Configuration -----------------------------------------------
 
 func (s *Server) handleNetworkStatus(w http.ResponseWriter, r *http.Request) {

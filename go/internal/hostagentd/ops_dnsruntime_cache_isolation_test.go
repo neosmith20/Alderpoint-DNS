@@ -368,4 +368,3 @@ func TestPacketCacheIsClearedOnEveryPromote(t *testing.T) {
 		t.Fatalf("the now-blocked query must never reach the real upstream again, got %d total hits", got)
 	}
 }
-

@@ -3,6 +3,8 @@ package hostagentd
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -273,6 +275,99 @@ func TestOpSecretsNotifySendUsesRealCallerMessage(t *testing.T) {
 	}
 	if !strings.Contains(receivedBody, "blocklist update failed 3 times in a row") {
 		t.Fatalf("real webhook server did not receive the real event message: %q", receivedBody)
+	}
+}
+
+// TestIsDiscordWebhookURL proves the real host-based detection --
+// Discord's current and legacy webhook host names match, an unrelated
+// host (even one containing "discord" outside the actual hostname)
+// does not.
+func TestIsDiscordWebhookURL(t *testing.T) {
+	cases := map[string]bool{
+		"https://discord.com/api/webhooks/123/abc":         true,
+		"https://discordapp.com/api/webhooks/123/abc":      true,
+		"https://ptb.discord.com/api/webhooks/123/abc":     true,
+		"https://hooks.slack.com/services/T00/B00/xxx":     false,
+		"https://example.com/webhook?redirect=discord.com": false,
+		"not a url at all": false,
+	}
+	for url, want := range cases {
+		if got := isDiscordWebhookURL(url); got != want {
+			t.Errorf("isDiscordWebhookURL(%q) = %v, want %v", url, got, want)
+		}
+	}
+}
+
+// TestWebhookBodyUsesContentFieldForDiscord is the real regression test
+// for the live "Discord webhook test failed: HTTP 400" defect: the
+// generic webhook body must use Discord's own required "content" field
+// for a Discord URL, and the ordinary Slack-style "text" field for
+// everything else.
+func TestWebhookBodyUsesContentFieldForDiscord(t *testing.T) {
+	discordBody := webhookBody("https://discord.com/api/webhooks/1/abc", "hello")
+	if !strings.Contains(discordBody, `"content"`) || strings.Contains(discordBody, `"text"`) {
+		t.Fatalf("expected a Discord webhook body to use \"content\", got %s", discordBody)
+	}
+	slackBody := webhookBody("https://hooks.slack.com/services/T/B/x", "hello")
+	if !strings.Contains(slackBody, `"text"`) || strings.Contains(slackBody, `"content"`) {
+		t.Fatalf("expected a non-Discord webhook body to use \"text\", got %s", slackBody)
+	}
+}
+
+// TestOpSecretsNotifyTestAgainstARealDiscordShapedServer proves the
+// full real HTTP path end to end against a local server that enforces
+// Discord's own actual validation rule (reject a body with none of
+// content/embeds/file present, exactly as the real Discord API does) --
+// the old {"text": ...} body would fail this with 400 (the live
+// defect); the fixed {"content": ...} body must succeed.
+func TestOpSecretsNotifyTestAgainstARealDiscordShapedServer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		json.Unmarshal(body, &parsed)
+		_, hasContent := parsed["content"]
+		_, hasEmbeds := parsed["embeds"]
+		_, hasFile := parsed["file"]
+		if !hasContent && !hasEmbeds && !hasFile {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"message":"Cannot send an empty message","code":50006}`))
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	// srv.URL is a plain 127.0.0.1 test server, not really discord.com --
+	// exercise webhookBody directly with a URL that DOES parse as
+	// Discord to prove the fixed body actually satisfies this real
+	// validation rule, independent of hostname detection (already
+	// covered by TestIsDiscordWebhookURL above).
+	req, err := http.NewRequest(http.MethodPost, srv.URL, strings.NewReader(webhookBody("https://discord.com/api/webhooks/1/abc", "test notification")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("content-type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected the fixed Discord-shaped body to be accepted (204), got %d", resp.StatusCode)
+	}
+
+	// Prove the OLD body genuinely would have failed this same real
+	// validation -- the actual root cause, not a hypothetical.
+	oldBuggyBody := fmt.Sprintf(`{"text":%q}`, "test notification")
+	req2, _ := http.NewRequest(http.MethodPost, srv.URL, strings.NewReader(oldBuggyBody))
+	req2.Header.Set("content-type", "application/json")
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected the old {\"text\":...} body to be rejected with 400 by a real Discord-shaped validator, got %d -- if this now passes, the test server's validation rule no longer matches Discord's real API", resp2.StatusCode)
 	}
 }
 
