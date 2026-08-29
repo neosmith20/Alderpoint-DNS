@@ -519,6 +519,43 @@ export interface NotificationProvider {
   updated_at: string;
 }
 
+// Event Subscriptions / Delivery History (2026-08-28): the real
+// event-driven dispatch engine, field-matched against V1.1.1's
+// app/notifications.py EVENT_CATEGORIES/subscriptions/dispatch/history.
+export interface NotificationEventCategory {
+  key: string;
+  label: string;
+  wired: boolean; // true = a real Go call site actually fires this today
+  default_severity: "info" | "warning" | "critical";
+}
+
+export interface NotificationSubscription {
+  id: number;
+  provider_id: string;
+  provider_name: string;
+  event_category: string;
+  min_severity: "info" | "warning" | "critical";
+  enabled: boolean;
+  cooldown_minutes: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NotificationHistoryEntry {
+  id: number;
+  at: string;
+  event_category: string;
+  severity: string;
+  component: string;
+  message: string;
+  began_at: string;
+  recovered: boolean;
+  provider_id: string;
+  provider_name: string;
+  status: "sent" | "suppressed" | "failed";
+  error: string;
+}
+
 export interface QueryLogResponse {
   rows: QueryLogRow[];
   degraded: boolean;
@@ -689,6 +726,18 @@ export const api = {
   revokeNotificationSecret: (id: string) => req<{ status: string }>(`/api/notifications/${encodeURIComponent(id)}/secret`, { method: "DELETE" }),
   testNotificationProvider: (id: string) =>
     req<{ ok: boolean; detail: string; status_code?: number }>(`/api/notifications/${encodeURIComponent(id)}/test`, { method: "POST" }),
+  listEventCategories: (signal?: AbortSignal) =>
+    req<{ categories: NotificationEventCategory[] }>("/api/notification-event-categories", undefined, signal),
+  listNotificationSubscriptions: (signal?: AbortSignal) =>
+    req<{ subscriptions: NotificationSubscription[] }>("/api/notification-subscriptions", undefined, signal),
+  createNotificationSubscription: (providerId: string, eventCategory: string, minSeverity: string, enabled: boolean, cooldownMinutes: number | null) =>
+    req<{ status: string }>("/api/notification-subscriptions", {
+      method: "POST",
+      body: JSON.stringify({ provider_id: providerId, event_category: eventCategory, min_severity: minSeverity, enabled, cooldown_minutes: cooldownMinutes }),
+    }),
+  deleteNotificationSubscription: (id: number) => req<{ status: string }>(`/api/notification-subscriptions/${id}`, { method: "DELETE" }),
+  listNotificationHistory: (limit = 100, signal?: AbortSignal) =>
+    req<{ history: NotificationHistoryEntry[] }>(`/api/notification-history?limit=${limit}`, undefined, signal),
 
   importHosts: (text: string) => req<ImportHostsResult>("/api/import/hosts", { method: "POST", body: text }),
 

@@ -199,6 +199,13 @@ func (s *Service) Delete(ctx context.Context, providerID string) error {
 		// behind under its old provider_id.
 		_ = s.Secrets.Revoke(ctx, SecretKind, providerID)
 	}
+	// This schema's ON DELETE CASCADE on notification_subscriptions is
+	// inert (this codebase never sets PRAGMA foreign_keys=ON -- see
+	// SetSubscription's own comment) -- clean up explicitly, or a
+	// deleted provider leaves orphaned subscription rows that Dispatch
+	// would still try to join against a provider that no longer exists.
+	_, _ = s.DB.ExecContext(ctx, `DELETE FROM notification_subscriptions WHERE provider_id=?`, providerID)
+	_, _ = s.DB.ExecContext(ctx, `DELETE FROM notification_rate_state WHERE provider_id=?`, providerID)
 	return nil
 }
 

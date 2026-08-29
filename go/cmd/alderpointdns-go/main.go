@@ -670,6 +670,15 @@ func runWeb(args []string) {
 		logger.Info("secrets subsystem not wired: -hostagent-socket is empty; provider secrets (Notifications) will report unavailable")
 	}
 
+	// Real dispatch call site #1: a blocklist subscription crossing the
+	// AttentionThreshold is a real, owner-actionable incident -- see
+	// blocklists.Service.OnAttentionRequired's own doc comment for why
+	// this fires exactly once per incident, not once per failed pull.
+	blSvc.OnAttentionRequired = func(ctx context.Context, subscriptionID string, failureCount int, lastError string) {
+		summary := fmt.Sprintf("blocklist subscription %q failed %d consecutive times: %s", subscriptionID, failureCount, lastError)
+		notificationsSvc.Dispatch(ctx, "blocklist_update_failure", "warning", "blocklists", summary, false)
+	}
+
 	// DNS runtime compiler: same "optional, never fatal" contract as
 	// every other boundary above. Requires both a host-agent AND the
 	// dnsdist/BIND deployment addresses that agent was configured with

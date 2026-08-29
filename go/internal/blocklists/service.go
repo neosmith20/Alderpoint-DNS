@@ -103,6 +103,13 @@ type Service struct {
 	// goroutine, so this never blocks a request.
 	OnJobComplete func()
 
+	// OnAttentionRequired, if set, is called exactly once per real
+	// incident -- the failure that pushes a subscription's failure_count
+	// to AttentionThreshold, not every failure before or after. Wired to
+	// internal/notifications.Service.Dispatch's "blocklist_update_failure"
+	// event category (see cmd/alderpointdns-go/main.go).
+	OnAttentionRequired func(ctx context.Context, subscriptionID string, failureCount int, lastError string)
+
 	sem      chan struct{}
 	initOnce sync.Once
 
@@ -479,4 +486,14 @@ func (s *Service) recordFailure(ctx context.Context, subID, errMsg string, durat
 		failure_count=failure_count+1, first_failure_at=?, update_in_progress=0
 		WHERE subscription_id=?`,
 		nowStr, errMsg, next, durationMs, *firstFailureAt, subID)
+	newFailureCount := failureCount + 1
+	// Fire exactly on the transition into "needs attention" (not every
+	// failure after), matching the page's own AttentionRequired badge
+	// logic -- an owner subscribed to blocklist_update_failure gets one
+	// notification per real incident, not a repeat per pull attempt
+	// (Dispatch's own cooldown/dedup would suppress the repeats anyway,
+	// but this avoids even attempting them).
+	if newFailureCount == AttentionThreshold && s.OnAttentionRequired != nil {
+		s.OnAttentionRequired(ctx, subID, newFailureCount, errMsg)
+	}
 }

@@ -88,6 +88,13 @@ const (
 	// a generic decrypt endpoint.
 	OpSecretsNotifyTest = "secrets.notify_test"
 
+	// OpSecretsNotifySend is OpSecretsNotifyTest's real-dispatch sibling
+	// -- same decrypt-and-send-immediately contract, but with a caller-
+	// supplied message instead of the fixed test string, used by
+	// internal/notifications' Dispatch (event-driven notifications, not
+	// the "Send Test" button).
+	OpSecretsNotifySend = "secrets.notify_send"
+
 	// OpDNSPerfBenchmark runs System Status's real "Safe DNS Benchmark"
 	// -- a bounded, sequential set of DNS/DoT/DoH queries against the
 	// real Go-managed dnsdist/BIND runtime, executed from this agent

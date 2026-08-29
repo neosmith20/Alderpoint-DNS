@@ -232,6 +232,73 @@ func TestOpSecretsNotifyTestWebhookRealHTTP(t *testing.T) {
 	_ = receivedAuth
 }
 
+// TestOpSecretsNotifySendUsesRealCallerMessage proves the real-dispatch
+// sibling op sends the CALLER's message (an event's real summary), not
+// the fixed test string -- the one behavioral difference from
+// OpSecretsNotifyTest, over a real HTTP server.
+func TestOpSecretsNotifySendUsesRealCallerMessage(t *testing.T) {
+	var receivedBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 1024)
+		n, _ := r.Body.Read(buf)
+		receivedBody = string(buf[:n])
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	s, sockPath := newTestServer(t, uint32(0))
+	if err := RegisterSecretsOps(s, SecretsConfig{KeyDir: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	c := hostagent.NewClient(sockPath)
+
+	var sealed map[string]any
+	if err := c.Call(context.Background(), hostagent.OpSecretsSeal, map[string]any{
+		"kind": "notification_secret", "owner_ref": "provider-1", "value": srv.URL,
+	}, &sealed); err != nil {
+		t.Fatal(err)
+	}
+
+	var out map[string]any
+	err := c.Call(context.Background(), hostagent.OpSecretsNotifySend, map[string]any{
+		"kind": "notification_secret", "owner_ref": "provider-1",
+		"ciphertext_b64": sealed["ciphertext_b64"], "nonce_b64": sealed["nonce_b64"], "key_version": sealed["key_version"],
+		"notify_kind": "webhook", "message": "blocklist update failed 3 times in a row",
+	}, &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["ok"] != true {
+		t.Fatalf("expected ok=true, got %+v", out)
+	}
+	if !strings.Contains(receivedBody, "blocklist update failed 3 times in a row") {
+		t.Fatalf("real webhook server did not receive the real event message: %q", receivedBody)
+	}
+}
+
+func TestOpSecretsNotifySendRejectsEmptyMessage(t *testing.T) {
+	s, sockPath := newTestServer(t, uint32(0))
+	if err := RegisterSecretsOps(s, SecretsConfig{KeyDir: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	c := hostagent.NewClient(sockPath)
+	var sealed map[string]any
+	if err := c.Call(context.Background(), hostagent.OpSecretsSeal, map[string]any{
+		"kind": "notification_secret", "owner_ref": "provider-1", "value": "https://example.test/webhook",
+	}, &sealed); err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	err := c.Call(context.Background(), hostagent.OpSecretsNotifySend, map[string]any{
+		"kind": "notification_secret", "owner_ref": "provider-1",
+		"ciphertext_b64": sealed["ciphertext_b64"], "nonce_b64": sealed["nonce_b64"], "key_version": sealed["key_version"],
+		"notify_kind": "webhook", "message": "",
+	}, &out)
+	if err == nil {
+		t.Fatal("expected an error for an empty message")
+	}
+}
+
 func TestOpSecretsNotifyTestRejectsWrongContext(t *testing.T) {
 	s, sockPath := newTestServer(t, uint32(0))
 	if err := RegisterSecretsOps(s, SecretsConfig{KeyDir: t.TempDir()}); err != nil {

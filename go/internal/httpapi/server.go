@@ -253,6 +253,19 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PUT /api/notifications/{id}/secret", requireAuth(s.handleSetNotificationSecret))
 	mux.HandleFunc("DELETE /api/notifications/{id}/secret", requireAuth(s.handleRevokeNotificationSecret))
 	mux.HandleFunc("POST /api/notifications/{id}/test", requireAuth(s.handleTestNotificationProvider))
+	// Deliberately NOT nested under /api/notifications/{id}/... -- that
+	// wildcard already exists for provider sub-resources (.../secret,
+	// .../test), and net/http's own ServeMux refuses to register two
+	// patterns where neither is more specific ("/api/notifications/
+	// subscriptions/{id}" vs "/api/notifications/{id}/secret" both
+	// match "/api/notifications/subscriptions/secret") -- a real
+	// startup panic this exact collision produced, caught immediately
+	// by trying to launch a disposable fixture, not by inspection.
+	mux.HandleFunc("GET /api/notification-event-categories", requireAuth(s.handleListEventCategories))
+	mux.HandleFunc("GET /api/notification-subscriptions", requireAuth(s.handleListNotificationSubscriptions))
+	mux.HandleFunc("POST /api/notification-subscriptions", requireAuth(s.handleCreateNotificationSubscription))
+	mux.HandleFunc("DELETE /api/notification-subscriptions/{id}", requireAuth(s.handleDeleteNotificationSubscription))
+	mux.HandleFunc("GET /api/notification-history", requireAuth(s.handleListNotificationHistory))
 
 	mux.HandleFunc("POST /api/import/hosts", requireAuth(s.handleImportHosts))
 	mux.HandleFunc("POST /api/import/jobs", requireAuth(s.handleCreateImportJob))

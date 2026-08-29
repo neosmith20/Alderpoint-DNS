@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"alderpointdns/go-controlplane/internal/notifications"
 	"alderpointdns/go-controlplane/internal/secretstore"
@@ -127,4 +128,67 @@ func writeNotificationSecretError(w http.ResponseWriter, err error) bool {
 	}
 	Err(http.StatusInternalServerError, "internal_error", err.Error()).WriteJSON(w)
 	return true
+}
+
+// handleListEventCategories exposes the fixed, real event vocabulary
+// (internal/notifications.EventCategories) so the UI can offer a
+// subscription form without hand-coding the category list twice.
+func (s *Server) handleListEventCategories(w http.ResponseWriter, r *http.Request) {
+	WriteJSON(w, http.StatusOK, map[string]any{"categories": notifications.EventCategories})
+}
+
+func (s *Server) handleListNotificationSubscriptions(w http.ResponseWriter, r *http.Request) {
+	list, err := s.Notifications.ListSubscriptions(r.Context())
+	if err != nil {
+		Err(http.StatusInternalServerError, "internal_error", "failed to list subscriptions").WriteJSON(w)
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"subscriptions": list})
+}
+
+func (s *Server) handleCreateNotificationSubscription(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ProviderID      string `json:"provider_id"`
+		EventCategory   string `json:"event_category"`
+		MinSeverity     string `json:"min_severity"`
+		Enabled         bool   `json:"enabled"`
+		CooldownMinutes *int   `json:"cooldown_minutes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		Err(http.StatusBadRequest, "validation_error", "invalid JSON body").WriteJSON(w)
+		return
+	}
+	if body.MinSeverity == "" {
+		body.MinSeverity = "warning"
+	}
+	if err := s.Notifications.SetSubscription(r.Context(), body.ProviderID, body.EventCategory, body.MinSeverity, body.Enabled, body.CooldownMinutes); err != nil {
+		if writeNotificationSecretError(w, err) {
+			return
+		}
+	}
+	WriteJSON(w, http.StatusCreated, map[string]any{"status": "created"})
+}
+
+func (s *Server) handleDeleteNotificationSubscription(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		Err(http.StatusBadRequest, "validation_error", "invalid id").WriteJSON(w)
+		return
+	}
+	if err := s.Notifications.DeleteSubscription(r.Context(), id); err != nil {
+		if writeNotificationSecretError(w, err) {
+			return
+		}
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "deleted"})
+}
+
+func (s *Server) handleListNotificationHistory(w http.ResponseWriter, r *http.Request) {
+	limit := intQuery(r, "limit", 100, 1, 500)
+	list, err := s.Notifications.ListHistory(r.Context(), limit)
+	if err != nil {
+		Err(http.StatusInternalServerError, "internal_error", "failed to list delivery history").WriteJSON(w)
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"history": list})
 }

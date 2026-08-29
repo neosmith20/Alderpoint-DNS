@@ -224,6 +224,15 @@ func (s *Service) CallNotifyTest(ctx context.Context, params map[string]any, out
 	return s.HostAgent.Call(ctx, hostagent.OpSecretsNotifyTest, params, out)
 }
 
+// CallNotifySend is CallNotifyTest's real-dispatch sibling -- see
+// hostagent.OpSecretsNotifySend's own doc comment.
+func (s *Service) CallNotifySend(ctx context.Context, params map[string]any, out any) error {
+	if s.HostAgent == nil {
+		return ErrUnavailable
+	}
+	return s.HostAgent.Call(ctx, hostagent.OpSecretsNotifySend, params, out)
+}
+
 func newID() (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {

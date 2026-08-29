@@ -37,7 +37,23 @@ func (s *Server) handleDNSRuntimeApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result := s.DNSRuntime.Apply(r.Context())
+	s.notifyOnRollback(r, &result)
 	WriteJSON(w, http.StatusOK, result)
+}
+
+// notifyOnRollback dispatches a real "deploy_failure" event the moment
+// a promotion actually rolls back -- the one DNS Runtime outcome an
+// owner unambiguously needs to know about without watching the UI.
+// Never fails the caller's own request for a notification-delivery
+// problem; Dispatch's own errors (misconfigured provider, secrets
+// unavailable) are swallowed here on purpose, matching every other
+// best-effort side effect in this file.
+func (s *Server) notifyOnRollback(r *http.Request, res *dnsruntime.Result) {
+	if res == nil || !res.RolledBack || s.Notifications == nil {
+		return
+	}
+	summary := "DNS runtime promotion rolled back at stage \"" + res.Stage + "\": " + res.Detail
+	s.Notifications.Dispatch(r.Context(), "deploy_failure", "critical", "dns_runtime", summary, false)
 }
 
 // applyDNSRuntimeBestEffort is called after a mutation to one of the
@@ -54,5 +70,6 @@ func (s *Server) applyDNSRuntimeBestEffort(r *http.Request) *dnsruntime.Result {
 		return nil
 	}
 	res := s.DNSRuntime.Apply(r.Context())
+	s.notifyOnRollback(r, &res)
 	return &res
 }

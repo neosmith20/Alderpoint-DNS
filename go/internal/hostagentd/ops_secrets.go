@@ -251,13 +251,49 @@ func RegisterSecretsOps(s *Server, cfg SecretsConfig) error {
 		if err != nil {
 			return nil, err
 		}
-		return sendTestNotification(ctx, extra.NotifyKind, plaintext, testNotifySMTP{
+		return sendNotification(ctx, extra.NotifyKind, plaintext, testMessageText, testNotifySMTP{
+			Host: extra.SMTPHost, Port: extra.SMTPPort, From: extra.FromAddr, To: extra.ToAddr, Username: extra.Username,
+		})
+	})
+
+	// OpSecretsNotifySend is OpSecretsNotifyTest's real-dispatch sibling
+	// (see hostagent.OpSecretsNotifySend's own doc comment): identical
+	// decrypt-and-send-immediately contract, but the message comes from
+	// the caller (internal/notifications' Dispatch) instead of the
+	// fixed test string.
+	s.Register(hostagent.OpSecretsNotifySend, func(ctx context.Context, params json.RawMessage) (any, error) {
+		var in sealedIn
+		if err := json.Unmarshal(params, &in); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		var extra struct {
+			NotifyKind string `json:"notify_kind"`
+			Message    string `json:"message"`
+			SMTPHost   string `json:"smtp_host"`
+			SMTPPort   int    `json:"smtp_port"`
+			FromAddr   string `json:"from_addr"`
+			ToAddr     string `json:"to_addr"`
+			Username   string `json:"username"`
+		}
+		if err := json.Unmarshal(params, &extra); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		if extra.Message == "" {
+			return nil, fmt.Errorf("message must not be empty")
+		}
+		plaintext, err := in.open(engine)
+		if err != nil {
+			return nil, err
+		}
+		return sendNotification(ctx, extra.NotifyKind, plaintext, extra.Message, testNotifySMTP{
 			Host: extra.SMTPHost, Port: extra.SMTPPort, From: extra.FromAddr, To: extra.ToAddr, Username: extra.Username,
 		})
 	})
 
 	return nil
 }
+
+const testMessageText = "Alderpoint DNS test notification -- if you can see this, this provider is configured correctly."
 
 // sealedIn is the common ciphertext-bearing input shape every "use" op
 // shares.
@@ -294,8 +330,11 @@ type testNotifySMTP struct {
 // using the decrypted secret, and returns only the outcome. This is
 // intentionally the single place plaintext secret material is used for
 // something, and it never leaves this function as a return value.
-func sendTestNotification(ctx context.Context, notifyKind, secret string, smtp testNotifySMTP) (any, error) {
-	const testMessage = "Alderpoint DNS test notification -- if you can see this, this provider is configured correctly."
+// sendNotification is the real, shared send implementation --
+// sendTestNotification (fixed message) and Dispatch's real event sends
+// (a caller-supplied message) both go through this one function so
+// there is exactly one place that ever holds the plaintext secret.
+func sendNotification(ctx context.Context, notifyKind, secret, message string, smtp testNotifySMTP) (any, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 
 	switch notifyKind {
@@ -303,7 +342,7 @@ func sendTestNotification(ctx context.Context, notifyKind, secret string, smtp t
 		if !strings.HasPrefix(secret, "https://") && !strings.HasPrefix(secret, "http://") {
 			return nil, fmt.Errorf("stored webhook secret is not a valid URL")
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, secret, strings.NewReader(fmt.Sprintf(`{"text":%q}`, testMessage)))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, secret, strings.NewReader(fmt.Sprintf(`{"text":%q}`, message)))
 		if err != nil {
 			return nil, fmt.Errorf("building request: %w", err)
 		}
@@ -314,7 +353,7 @@ func sendTestNotification(ctx context.Context, notifyKind, secret string, smtp t
 		if !strings.HasPrefix(secret, "https://") {
 			return nil, fmt.Errorf("stored Slack webhook secret is not a valid URL")
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, secret, strings.NewReader(fmt.Sprintf(`{"text":%q}`, testMessage)))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, secret, strings.NewReader(fmt.Sprintf(`{"text":%q}`, message)))
 		if err != nil {
 			return nil, fmt.Errorf("building request: %w", err)
 		}
@@ -326,7 +365,7 @@ func sendTestNotification(ctx context.Context, notifyKind, secret string, smtp t
 		if !ok || userKey == "" || appToken == "" {
 			return nil, fmt.Errorf("stored Pushover secret must be 'user_key:app_token'")
 		}
-		form := strings.NewReader(fmt.Sprintf("token=%s&user=%s&message=%s", appToken, userKey, testMessage))
+		form := strings.NewReader(fmt.Sprintf("token=%s&user=%s&message=%s", appToken, userKey, message))
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.pushover.net/1/messages.json", form)
 		if err != nil {
 			return nil, fmt.Errorf("building request: %w", err)
@@ -338,7 +377,7 @@ func sendTestNotification(ctx context.Context, notifyKind, secret string, smtp t
 		if smtp.Host == "" || smtp.Port == 0 || smtp.From == "" || smtp.To == "" {
 			return nil, fmt.Errorf("SMTP host, port, from_addr, and to_addr are all required")
 		}
-		if err := sendTestSMTP(smtp, secret, testMessage); err != nil {
+		if err := sendTestSMTP(smtp, secret, message); err != nil {
 			return map[string]any{"ok": false, "detail": err.Error()}, nil
 		}
 		return map[string]any{"ok": true, "detail": "test message sent"}, nil
