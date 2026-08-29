@@ -1,5 +1,22 @@
 # Alderpoint DNS V2 — Go/Svelte Route-by-Route Parity Matrix
 
+**2026-08-29 P0/P1 live-defect fixes** (owner priority interruption, commit `39e455f`; full account
+in `AGENT_PROGRESS.md`'s own entry for this date): seven live defects found by using the appliance
+were fixed and deployed, superseding stale claims elsewhere in this file for the affected rows --
+**System Status** (Safe DNS Benchmark's report path was relative, resolving against the live
+container's unwritable root cwd), **Notifications** (the generic `webhook` kind sent Slack's own
+`{"text":...}` field to Discord, which requires `{"content":...}` and rejected the old body as
+HTTP 400), **Encryption** (DoT/DoH/DoQ/DoH3/DNSCrypt now show real manual connection details for
+non-Apple clients, not just an ambiguously-labeled Apple `.mobileconfig` link), **Encryption/DNS
+Runtime** (dnscompile compiled the web process's own container-internal TLS cert path into
+dnsdist.conf; dnsdist runs on the host and could never open it, exiting immediately whenever a
+TLS-based transport was enabled -- fixed with a real host-side path flag), **Blocklists** (the live
+container's base image had zero CA certificates installed at all, failing every outbound HTTPS
+fetch; fixed live and at the deploy-script source), **Cache** (the dnsdist "flush" button always
+failed by design -- replaced with a real, safe restart-via-re-promote action), and **Dashboard**
+(removed an internal-implementation disclosure paragraph from owner-facing UI). None of these were
+roadmap gaps -- each was a real regression/defect in already-"done" rows below.
+
 **2026-08-28 correction, read this before trusting any `pyanalytics`/`analyticssnapshot`/
 `rawquerylog` prose below**: Python has been fully decommissioned (see `CUTOVER.md`; the sole live
 appliance is `apdns-go-live`, Go alone on `:8443`/`:53`). Every mention below of a Go->Python
