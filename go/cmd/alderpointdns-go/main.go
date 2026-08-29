@@ -110,6 +110,8 @@ func runBlocklistRefresh(args []string) {
 	dnsRuntimeDnsdistAddr := fs.String("dns-runtime-dnsdist-addr", "", "the real dnsdist listen address this deployment's apdns-hostagent was started with (required)")
 	dnsRuntimeBindProxyAddr := fs.String("dns-runtime-bind-proxy-addr", "", "the real BIND PROXYv2 backend address this deployment's apdns-hostagent compiles named.conf to listen on (required)")
 	dnstapSocketPath := fs.String("dns-runtime-dnstap-socket", "", "the path dnsdist itself will dial for real query-event logging (see internal/dnscompile's DnstapSocketPath); empty compiles no dnstap logging, matching this command's prior behavior exactly")
+	dnsRuntimeTLSCertPath := fs.String("dns-runtime-tls-cert-path", "", "the HOST-side (dnsdist's own filesystem view) path to the TLS certificate PEM used for DoT/DoH/DoQ/DoH3 -- compiled verbatim into dnsdist.conf. Empty defaults to -config's web.tls_cert_path. Same real gap and fix as dns-promote's own flag of the same name -- see its comment.")
+	dnsRuntimeTLSKeyPath := fs.String("dns-runtime-tls-key-path", "", "the HOST-side counterpart to -dns-runtime-tls-cert-path for the private key. See that flag's own comment.")
 	timeoutSeconds := fs.Int("timeout-seconds", 300, "give up waiting for the refresh job to finish after this many seconds (the job itself keeps running server-side; this only bounds how long this command waits)")
 	fs.Parse(args)
 
@@ -152,7 +154,8 @@ func runBlocklistRefresh(args []string) {
 		Clients:              &clients.Service{DB: db},
 		HostAgent:            newPromoteHostAgentClient(*hostagentSocket),
 		DnsdistListenAddress: *dnsRuntimeDnsdistAddr, BindBackendAddress: *dnsRuntimeBindProxyAddr,
-		TLSCertPath: cfg.Web.TLSCertPath, TLSKeyPath: cfg.Web.TLSKeyPath,
+		TLSCertPath: resolveDNSRuntimeTLSPath(*dnsRuntimeTLSCertPath, cfg.Web.TLSCertPath),
+		TLSKeyPath:  resolveDNSRuntimeTLSPath(*dnsRuntimeTLSKeyPath, cfg.Web.TLSKeyPath),
 		DnstapSocketPath: *dnstapSocketPath,
 	}
 
@@ -292,6 +295,8 @@ func runDNSPromote(args []string) {
 	dnsRuntimeDnsdistAddr := fs.String("dns-runtime-dnsdist-addr", "", "the real dnsdist listen address this deployment's apdns-hostagent was started with (required)")
 	dnsRuntimeBindProxyAddr := fs.String("dns-runtime-bind-proxy-addr", "", "the real BIND PROXYv2 backend address this deployment's apdns-hostagent compiles named.conf to listen on (required)")
 	dnstapSocketPath := fs.String("dns-runtime-dnstap-socket", "", "the path dnsdist itself will dial for real query-event logging (see internal/dnscompile's DnstapSocketPath, and the 'web' subcommand's own two-flag doc comment for why this is a HOST path, distinct from wherever the 'web' process itself listens); empty compiles no dnstap logging at all, matching this command's prior behavior exactly")
+	dnsRuntimeTLSCertPath := fs.String("dns-runtime-tls-cert-path", "", "the HOST-side (dnsdist's own filesystem view) path to the TLS certificate PEM used for DoT/DoH/DoQ/DoH3 -- compiled verbatim into dnsdist.conf. Empty defaults to -config's web.tls_cert_path. A real gap found during a durability pass: this command always compiled cfg.Web.TLSCertPath/TLSKeyPath verbatim, the same defect the 'web' subcommand's own -dns-runtime-tls-cert-path/-key-path flags (see resolveDNSRuntimeTLSPath) were added to fix there -- on a split-container deployment where -config is the container-internal appliance.yaml, this command run against the HOST-side dnsdist would compile an unreachable cert path and dnsdist would exit immediately after start, exactly like the original live defect.")
+	dnsRuntimeTLSKeyPath := fs.String("dns-runtime-tls-key-path", "", "the HOST-side counterpart to -dns-runtime-tls-cert-path for the private key. See that flag's own comment.")
 	dryRun := fs.Bool("dry-run", true, "compile and validate only, no live change (default true -- pass -dry-run=false to actually promote for real)")
 	fs.Parse(args)
 
@@ -327,7 +332,8 @@ func runDNSPromote(args []string) {
 		Clients:              &clients.Service{DB: db},
 		HostAgent:            newPromoteHostAgentClient(*hostagentSocket),
 		DnsdistListenAddress: *dnsRuntimeDnsdistAddr, BindBackendAddress: *dnsRuntimeBindProxyAddr,
-		TLSCertPath: cfg.Web.TLSCertPath, TLSKeyPath: cfg.Web.TLSKeyPath,
+		TLSCertPath: resolveDNSRuntimeTLSPath(*dnsRuntimeTLSCertPath, cfg.Web.TLSCertPath),
+		TLSKeyPath:  resolveDNSRuntimeTLSPath(*dnsRuntimeTLSKeyPath, cfg.Web.TLSKeyPath),
 		DnstapSocketPath: *dnstapSocketPath,
 	}
 

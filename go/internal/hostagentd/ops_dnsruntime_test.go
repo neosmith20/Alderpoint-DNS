@@ -709,3 +709,65 @@ func TestConnDeadlineExceedsDefaultHealthCheckTimeoutWithMargin(t *testing.T) {
 		t.Fatalf("connDeadline (%v) leaves less than %v margin above the default HealthCheckTimeout (%v) -- a real promote's own health check could still be running when the connection is force-closed out from under it", connDeadline, minMargin, cfg.HealthCheckTimeout)
 	}
 }
+
+// TestReloadDnsdistRetriesOnceIfNewProcessExitsImmediately is the
+// regression test for the REAL root cause behind the whole
+// health-check-timeout investigation above: it was never a slow
+// parse. Direct live reproduction during a durability pass showed
+// dnsdist reliably crashing with "Fatal Lua error: FrameStreamLogger:
+// setting outputQueueSize failed: 1" the instant it was restarted
+// immediately after the previous instance stopped (dnstap enabled),
+// while restarting it by hand a few seconds later always succeeded --
+// a real race in the dnstap unix-socket reconnect, not a timeout
+// problem at all; no timeout, however large, can fix a process that
+// crashes on startup every single time. reloadDnsdist now retries once
+// with a short backoff instead of failing (and rolling back) on the
+// very first crash. This test uses a fake "dnsdist" binary (a real
+// script, not a mock) that exits immediately on its first invocation
+// and stays running on its second, exactly reproducing the observed
+// live failure shape.
+func TestReloadDnsdistRetriesOnceIfNewProcessExitsImmediately(t *testing.T) {
+	dir := t.TempDir()
+	counterFile := filepath.Join(dir, "attempts")
+	fakeDnsdist := filepath.Join(dir, "fake-dnsdist.sh")
+	script := `#!/bin/sh
+n=0
+[ -f "` + counterFile + `" ] && n=$(cat "` + counterFile + `")
+n=$((n+1))
+echo "$n" > "` + counterFile + `"
+if [ "$n" -eq 1 ]; then
+    echo "simulated crash: FrameStreamLogger: setting outputQueueSize failed: 1"
+    exit 1
+fi
+trap 'exit 0' TERM
+while true; do sleep 0.1; done
+`
+	if err := os.WriteFile(fakeDnsdist, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DNSRuntimeConfig{
+		StagingDir:      dir,
+		DnsdistBinary:   fakeDnsdist,
+		DnsdistLivePath: filepath.Join(dir, "dnsdist.conf"),
+	}
+	if err := os.WriteFile(cfg.DnsdistLivePath, []byte("-- test config\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st := &dnsRuntimeState{cfg: cfg}
+	t.Cleanup(func() { st.stopDnsdist() })
+
+	if err := st.reloadDnsdist(context.Background()); err != nil {
+		t.Fatalf("expected reloadDnsdist to retry past the first simulated crash and succeed, got: %v", err)
+	}
+	attempts, err := os.ReadFile(counterFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(attempts)) != "2" {
+		t.Fatalf("expected exactly 2 start attempts (1 simulated crash + 1 real retry), got %q", strings.TrimSpace(string(attempts)))
+	}
+	if st.dnsdist == nil || !st.dnsdist.alive() {
+		t.Fatal("expected the second (successful) attempt's process to be tracked and alive")
+	}
+}

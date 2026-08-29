@@ -455,23 +455,52 @@ func (st *dnsRuntimeState) reloadBind(ctx context.Context) error {
 
 func (st *dnsRuntimeState) reloadDnsdist(ctx context.Context) error {
 	st.stopDnsdist()
-	cmd := exec.CommandContext(context.Background(), st.cfg.DnsdistBinary, "-C", st.cfg.DnsdistLivePath, "--supervised")
-	logPath := filepath.Join(st.cfg.StagingDir, "dnsdist.startup.log")
-	logFile, err := os.Create(logPath)
-	if err == nil {
-		cmd.Stdout, cmd.Stderr = logFile, logFile
+
+	// A real live defect found during a durability pass: restarting
+	// dnsdist immediately after stopping the previous instance --
+	// exactly what this function used to do, with no gap at all --
+	// reliably crashed the new process with a "Fatal Lua error:
+	// FrameStreamLogger: setting outputQueueSize failed: 1" the instant
+	// dnstap logging is enabled (dnscompile always compiles it in when
+	// -dns-runtime-dnstap-socket is set). Root-caused by direct
+	// reproduction: killing dnsdist and restarting it seconds later
+	// (by hand, well outside this function) always succeeded; the ONLY
+	// difference from this function's own behavior was elapsed time
+	// between stop and start -- the dnstap receiver's just-closed
+	// accept-loop connection evidently needs a moment to fully settle
+	// before a brand new connection to the same unix socket path can
+	// succeed. A single retry after a short backoff, rather than an
+	// unconditional fixed delay on every reload, keeps the common case
+	// (receiver already settled) fast and self-heals the race when it
+	// does occur instead of guessing a magic number that could still be
+	// too short under different load.
+	const maxAttempts = 2
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		cmd := exec.CommandContext(context.Background(), st.cfg.DnsdistBinary, "-C", st.cfg.DnsdistLivePath, "--supervised")
+		logPath := filepath.Join(st.cfg.StagingDir, "dnsdist.startup.log")
+		logFile, err := os.Create(logPath)
+		if err == nil {
+			cmd.Stdout, cmd.Stderr = logFile, logFile
+		}
+		if err := cmd.Start(); err != nil {
+			return fmt.Errorf("starting dnsdist: %w", err)
+		}
+		st.dnsdist = &trackedProcess{cmd: cmd, pid: cmd.Process.Pid}
+		writePIDFile(dnsdistPIDFile(st.cfg), cmd.Process.Pid)
+		go cmd.Wait()
+		time.Sleep(200 * time.Millisecond)
+		if processAlive(cmd.Process.Pid) {
+			return nil
+		}
+		lastErr = fmt.Errorf("dnsdist exited immediately after start (see %s)", logPath)
+		removePIDFile(dnsdistPIDFile(st.cfg))
+		st.dnsdist = nil
+		if attempt < maxAttempts {
+			time.Sleep(2 * time.Second)
+		}
 	}
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("starting dnsdist: %w", err)
-	}
-	st.dnsdist = &trackedProcess{cmd: cmd, pid: cmd.Process.Pid}
-	writePIDFile(dnsdistPIDFile(st.cfg), cmd.Process.Pid)
-	go cmd.Wait()
-	time.Sleep(200 * time.Millisecond)
-	if !processAlive(cmd.Process.Pid) {
-		return fmt.Errorf("dnsdist exited immediately after start (see %s)", logPath)
-	}
-	return nil
+	return lastErr
 }
 
 func (st *dnsRuntimeState) stopBind() {
