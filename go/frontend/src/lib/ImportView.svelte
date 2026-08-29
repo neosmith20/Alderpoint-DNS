@@ -6,13 +6,16 @@
   // workflow (internal/importer's job model), field-matched against
   // Python's own real POST /api/import/jobs -> GET .../jobs/{id} ->
   // POST .../jobs/{id}/apply shape -- not a one-shot blind apply.
-  // Two source types are real: hosts-file and a simple Alderpoint-
-  // native CSV (name,record_type,value,ttl). AdGuard YAML/live API,
-  // Pi-hole paste, BIND zone, and XLSX are not built -- disclosed, not
-  // silently assumed equivalent.
+  // Three source types are real: hosts-file, a simple Alderpoint-native
+  // CSV (name,record_type,value,ttl), and a real BIND zone-file parser
+  // (a practical subset -- A/AAAA/CNAME/PTR, $ORIGIN honored; no $TTL,
+  // SOA/NS/MX, or multi-line records). AdGuard YAML/live API, Pi-hole
+  // paste, and XLSX are not built -- disclosed, not silently assumed
+  // equivalent.
 
-  let sourceType = $state<"hosts" | "csv">("hosts");
+  let sourceType = $state<"hosts" | "csv" | "zone">("hosts");
   let sourceText = $state("");
+  let defaultDomain = $state("");
   let previewBusy = $state(false);
   let previewError = $state("");
 
@@ -32,7 +35,8 @@
     job = null;
     skipped = new Set();
     try {
-      const created = await api.createImportJob(sourceType, sourceType === "hosts" ? "hosts import" : "csv import", sourceText);
+      const sourceName = sourceType === "hosts" ? "hosts import" : sourceType === "csv" ? "csv import" : "zone import";
+      const created = await api.createImportJob(sourceType, sourceName, sourceText, sourceType === "zone" ? defaultDomain : undefined);
       job = await api.getImportJob(created.job_id);
     } catch (err) {
       previewError = err instanceof ApiError ? err.message : String(err);
@@ -115,9 +119,10 @@
 <section aria-labelledby="importexport-heading" class="import-view">
   <h2 id="importexport-heading">Import</h2>
   <p class="scope-note">
-    Real staged preview -> selection -> apply -> rollback (internal/importer). hosts-file and a
-    simple Alderpoint CSV (name,record_type,value,ttl) are built; AdGuard YAML/live API, Pi-hole
-    paste, BIND zone, and XLSX are not -- see the parity matrix.
+    Real staged preview -> selection -> apply -> rollback (internal/importer). hosts-file, a
+    simple Alderpoint CSV (name,record_type,value,ttl), and a BIND zone-file parser (a practical
+    subset -- A/AAAA/CNAME/PTR, $ORIGIN honored) are built; AdGuard YAML/live API, Pi-hole paste,
+    and XLSX are not -- see the parity matrix.
   </p>
 
   {#if !job}
@@ -128,16 +133,29 @@
         <select bind:value={sourceType}>
           <option value="hosts">Hosts file</option>
           <option value="csv">CSV (name,record_type,value,ttl)</option>
+          <option value="zone">BIND zone file</option>
         </select>
       </label>
+      {#if sourceType === "zone"}
+        <label>
+          Default domain (used as $ORIGIN, and to qualify relative names)
+          <input bind:value={defaultDomain} placeholder="example.com" required />
+        </label>
+      {/if}
       <textarea
         bind:value={sourceText}
-        placeholder={sourceType === "hosts" ? "127.0.0.1 localhost\n10.0.0.5 nas nas.lan" : "name,record_type,value,ttl\nprinter.lan,A,10.0.0.50,300"}
-        aria-label={sourceType === "hosts" ? "Hosts file contents" : "CSV contents"}
+        placeholder={sourceType === "hosts"
+          ? "127.0.0.1 localhost\n10.0.0.5 nas nas.lan"
+          : sourceType === "csv"
+            ? "name,record_type,value,ttl\nprinter.lan,A,10.0.0.50,300"
+            : "www\tIN\tA\t10.0.0.50\nmail\t600\tIN\tA\t10.0.0.51"}
+        aria-label={sourceType === "hosts" ? "Hosts file contents" : sourceType === "csv" ? "CSV contents" : "Zone file contents"}
         rows="8"
       ></textarea>
       <div class="actions">
-        <button type="submit" disabled={previewBusy || !sourceText.trim()}>{previewBusy ? "Parsing…" : "Preview"}</button>
+        <button type="submit" disabled={previewBusy || !sourceText.trim() || (sourceType === "zone" && !defaultDomain.trim())}>
+          {previewBusy ? "Parsing…" : "Preview"}
+        </button>
       </div>
       {#if previewError}<p class="error" role="alert">{previewError}</p>{/if}
     </form>

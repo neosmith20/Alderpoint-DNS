@@ -39,9 +39,10 @@ func (s *Server) handleImportHosts(w http.ResponseWriter, r *http.Request) {
 // shape, see internal/importer/plan.go's own doc comment. ---
 
 type createImportJobRequest struct {
-	SourceType string `json:"source_type"`
-	SourceName string `json:"source_name"`
-	Text       string `json:"text"`
+	SourceType    string `json:"source_type"`
+	SourceName    string `json:"source_name"`
+	Text          string `json:"text"`
+	DefaultDomain string `json:"default_domain,omitempty"` // required for source_type=zone only
 }
 
 func (s *Server) handleCreateImportJob(w http.ResponseWriter, r *http.Request) {
@@ -58,7 +59,7 @@ func (s *Server) handleCreateImportJob(w http.ResponseWriter, r *http.Request) {
 	if req.SourceName == "" {
 		req.SourceName = "import"
 	}
-	job, err := s.Importer.CreateJob(r.Context(), req.SourceType, req.SourceName, req.Text)
+	job, err := s.Importer.CreateJob(r.Context(), req.SourceType, req.SourceName, req.Text, req.DefaultDomain)
 	if err != nil {
 		Err(http.StatusBadRequest, "validation_error", err.Error()).WriteJSON(w)
 		return

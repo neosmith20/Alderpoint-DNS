@@ -757,10 +757,10 @@ export const api = {
 
   importHosts: (text: string) => req<ImportHostsResult>("/api/import/hosts", { method: "POST", body: text }),
 
-  createImportJob: (sourceType: string, sourceName: string, text: string) =>
+  createImportJob: (sourceType: string, sourceName: string, text: string, defaultDomain?: string) =>
     req<{ job_id: number; plan: ImportPlan }>("/api/import/jobs", {
       method: "POST",
-      body: JSON.stringify({ source_type: sourceType, source_name: sourceName, text }),
+      body: JSON.stringify({ source_type: sourceType, source_name: sourceName, text, default_domain: defaultDomain }),
     }),
   listImportJobs: (signal?: AbortSignal) => req<{ jobs: ImportJob[] }>("/api/import/jobs", undefined, signal),
   getImportJob: (id: number) => req<ImportJob>(`/api/import/jobs/${id}`),

@@ -9,12 +9,13 @@
 // same way Backup & Restore already does (internal/backup, real,
 // tested, transactional).
 //
-// Two source types are implemented, disclosed rather than hidden:
-// hosts-file (already existed) and a simple Alderpoint-native CSV
-// (name,record_type,value,ttl). Python's other four source types
-// (AdGuard Home YAML/live API, Pi-hole paste, BIND zone, XLSX) are
-// real, substantial format-specific parsers each -- not attempted in
-// this pass; SourceTypes lists only what's real here.
+// Three source types are implemented, disclosed rather than hidden:
+// hosts-file, a simple Alderpoint-native CSV (name,record_type,value,
+// ttl), and a real BIND zone-file parser (a practical subset -- see
+// ImportZone's own doc comment). Python's other three source types
+// (AdGuard Home YAML/live API, Pi-hole paste, XLSX) are real,
+// substantial format-specific parsers each -- not attempted in this
+// pass; SourceTypes lists only what's real here.
 package importer
 
 import (
@@ -35,7 +36,7 @@ import (
 // SourceTypes is the real, current allowlist -- an unsupported value is
 // rejected before any parsing is attempted, matching Python's own
 // "source_type not in SOURCE_TYPES" check.
-var SourceTypes = map[string]bool{"hosts": true, "csv": true}
+var SourceTypes = map[string]bool{"hosts": true, "csv": true, "zone": true}
 
 type PlanRow struct {
 	Index          int    `json:"index"`
@@ -76,7 +77,7 @@ type Service struct {
 // returns an unconflicted plan (every row Index-ordered, real
 // parse-time errors collected rather than aborting the whole import on
 // one bad line, matching hosts.go's own already-proven policy).
-func ParseToPlan(sourceType, text string) (Plan, error) {
+func ParseToPlan(sourceType, text string, defaultDomain string) (Plan, error) {
 	if !SourceTypes[sourceType] {
 		return Plan{}, fmt.Errorf("unsupported source_type: %q", sourceType)
 	}
@@ -85,9 +86,65 @@ func ParseToPlan(sourceType, text string) (Plan, error) {
 		return parseHostsPlan(text), nil
 	case "csv":
 		return parseCSVPlan(text), nil
+	case "zone":
+		if strings.TrimSpace(defaultDomain) == "" {
+			return Plan{}, fmt.Errorf("default_domain is required for a zone-file import (used as $ORIGIN and to qualify relative names)")
+		}
+		return parseZonePlan(text, defaultDomain), nil
 	default:
 		return Plan{}, fmt.Errorf("unsupported source_type: %q", sourceType)
 	}
+}
+
+// parseZonePlan reuses ImportZone's own line parser to build plan rows
+// instead of writing directly to internal/localdns -- see ImportZone's
+// doc comment for the exact supported subset ($ORIGIN honored, SOA/NS/
+// MX/multi-line records skipped not fatal).
+func parseZonePlan(text, defaultDomain string) Plan {
+	plan := Plan{SourceType: "zone", ParseErrors: []string{}}
+	origin := normalizeZoneDomain(defaultDomain)
+	idx := 0
+	for _, raw := range strings.Split(text, "\n") {
+		line := raw
+		if i := strings.IndexByte(line, ';'); i >= 0 {
+			line = line[:i]
+		}
+		line = strings.TrimRight(line, " \t\r")
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if strings.HasPrefix(strings.ToUpper(trimmed), "$ORIGIN") {
+			fields := strings.Fields(trimmed)
+			if len(fields) >= 2 {
+				origin = normalizeZoneDomain(strings.TrimSuffix(fields[1], "."))
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "$") {
+			continue
+		}
+		m := zoneLineRE.FindStringSubmatch(trimmed)
+		if m == nil {
+			continue
+		}
+		name, ttlStr, recordType, data := m[1], m[2], strings.ToUpper(m[3]), strings.TrimSuffix(m[4], ".")
+		var fqdn string
+		if name == "@" || name == "" {
+			fqdn = origin
+		} else {
+			fqdn = normalizeFQDN(name, origin)
+		}
+		ttl := zoneImportDefaultTTL
+		if ttlStr != "" {
+			if v, err := strconv.Atoi(ttlStr); err == nil {
+				ttl = v
+			}
+		}
+		plan.Rows = append(plan.Rows, PlanRow{Index: idx, Name: fqdn, RecordType: recordType, Value: data, TTL: ttl})
+		idx++
+	}
+	return plan
 }
 
 func parseHostsPlan(text string) Plan {
@@ -196,8 +253,8 @@ func (s *Service) annotateConflicts(ctx context.Context, plan *Plan) error {
 // CreateJob parses (or accepts an already-parsed) plan, annotates
 // conflicts against the CURRENT local_dns_records, and stores it --
 // nothing is written to local_dns_records itself yet.
-func (s *Service) CreateJob(ctx context.Context, sourceType, sourceName, text string) (*Job, error) {
-	plan, err := ParseToPlan(sourceType, text)
+func (s *Service) CreateJob(ctx context.Context, sourceType, sourceName, text, defaultDomain string) (*Job, error) {
+	plan, err := ParseToPlan(sourceType, text, defaultDomain)
 	if err != nil {
 		return nil, err
 	}
