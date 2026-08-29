@@ -8,11 +8,8 @@
 // is a second, independent layer of protection on top of this, exactly
 // matching Python's own two-layer design.
 //
-// Still not attempted, disclosed rather than hidden: resolver_all_
-// unavailable (needs a new per-transport (UDP/TCP/DoT/DoH) resolver
-// prober -- internal/dnsperf has the real query primitives this would
-// reuse, but wiring "probe every configured upstream endpoint on its
-// own transport" is a real, separate piece of work) and backup_failure
+// resolver_all_unavailable is wired too now (see resolvercheck.go) --
+// still not attempted, disclosed rather than hidden: backup_failure
 // (this control plane has no scheduled/automatic backups yet -- see
 // the Backup & Restore row in PARITY_MATRIX.md -- so there is no
 // periodic background action for this category to observe failing;
@@ -27,6 +24,7 @@ import (
 
 	"alderpointdns/go-controlplane/internal/hostagent"
 	"alderpointdns/go-controlplane/internal/replication"
+	"alderpointdns/go-controlplane/internal/upstreams"
 )
 
 func (s *Service) getCheckState(ctx context.Context, eventCategory, component string) string {
@@ -133,7 +131,7 @@ func (s *Service) CheckReplicationDelayed(ctx context.Context, repl *replication
 // RunHealthChecksScheduler is a single, bounded goroutine polling both
 // real checkers on a fixed tick -- same discipline as RunTLSExpiryScheduler
 // and internal/blocklists.Service.RunScheduler.
-func (s *Service) RunHealthChecksScheduler(ctx context.Context, hostAgent *hostagent.Client, repl *replication.Service, tick time.Duration) {
+func (s *Service) RunHealthChecksScheduler(ctx context.Context, hostAgent *hostagent.Client, repl *replication.Service, upstreamsSvc *upstreams.Service, tick time.Duration) {
 	ticker := time.NewTicker(tick)
 	defer ticker.Stop()
 	for {
@@ -146,6 +144,9 @@ func (s *Service) RunHealthChecksScheduler(ctx context.Context, hostAgent *hosta
 			}
 			if err := s.CheckReplicationDelayed(ctx, repl); err != nil && s.Log != nil {
 				s.Log.Error("replication delayed check failed", "err", err)
+			}
+			if err := s.CheckResolverAvailability(ctx, upstreamsSvc); err != nil && s.Log != nil {
+				s.Log.Error("resolver availability check failed", "err", err)
 			}
 		}
 	}

@@ -843,7 +843,7 @@ func runWeb(args []string) {
 	// 2-minute tick is short enough to catch a real outage quickly
 	// without adding meaningful load; Dispatch's own per-subscription
 	// cooldown still applies on top.
-	go notificationsSvc.RunHealthChecksScheduler(schedulerCtx, hostAgentClient, replicationSvc, 2*time.Minute)
+	go notificationsSvc.RunHealthChecksScheduler(schedulerCtx, hostAgentClient, replicationSvc, upSvc, 2*time.Minute)
 
 	// Real DNS-runtime recompilation after a successful replica apply --
 	// see internal/replication.SyncOnce's own doc comment for why this
