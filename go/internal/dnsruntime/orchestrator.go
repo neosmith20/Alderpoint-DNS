@@ -290,6 +290,10 @@ func (o *Orchestrator) build(ctx context.Context) (dnscompile.Input, []string, s
 				DotEnabled: settings.DotEnabled, DotPort: settings.DotPort,
 				DohEnabled: settings.DohEnabled, DohPort: settings.DohPort, DohPath: settings.DohPath,
 				DoqEnabled: settings.DoqEnabled, DoqPort: settings.DoqPort,
+				Doh3Enabled: settings.Doh3Enabled, Doh3Port: settings.Doh3Port,
+				DNSCryptEnabled: settings.DNSCryptEnabled, DNSCryptPort: settings.DNSCryptPort,
+				DNSCryptProviderName: settings.DNSCryptProviderName,
+				DNSCryptCertPath:     settings.DNSCryptCertPath, DNSCryptKeyPath: settings.DNSCryptKeyPath,
 			}
 		}
 	}

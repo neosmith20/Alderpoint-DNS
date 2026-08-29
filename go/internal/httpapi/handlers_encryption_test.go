@@ -2,19 +2,27 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"database/sql"
 	"encoding/json"
 	"encoding/pem"
+	"io"
+	"log/slog"
 	"math/big"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"alderpointdns/go-controlplane/internal/dbmigrate"
+	"alderpointdns/go-controlplane/internal/dnstransports"
 )
 
 func genTestCertKeyPair(t *testing.T, notBefore, notAfter time.Time) (certPEM, keyPEM []byte) {
@@ -110,5 +118,82 @@ func TestTLSReplaceRejectsAMismatchedPairWithoutTouchingLiveFiles(t *testing.T) 
 	}
 	if !bytes.Equal(stillThere, goodCert) {
 		t.Fatal("the previously-working certificate must be untouched after a rejected replacement")
+	}
+}
+
+func newDNSCryptTestServer(t *testing.T) *Server {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(3000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := dbmigrate.Up(context.Background(), db, "../../schema/migrations"); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	// Real management TLS cert path (never actually needs a cert on disk
+	// for this handler -- it only reuses the directory), matching the
+	// real deployment convention (internal/tlscert lives alongside it).
+	certDir := t.TempDir()
+	return &Server{
+		DNSTransports: &dnstransports.Service{DB: db},
+		TLSCertPath:   filepath.Join(certDir, "server.crt"),
+		Log:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+}
+
+func TestDNSCryptRotateThenEnableHTTP(t *testing.T) {
+	if _, err := exec.LookPath("dnsdist"); err != nil {
+		t.Skip("dnsdist not installed, skipping real DNSCrypt provisioning test")
+	}
+	s := newDNSCryptTestServer(t)
+
+	rec := httptest.NewRecorder()
+	s.handleDNSCryptRotate(rec, httptest.NewRequest("POST", "/api/dns-transports/dnscrypt/rotate", nil))
+	if rec.Code != 200 {
+		t.Fatalf("rotate: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var result map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &result)
+	if result["status"] != "rotated" || result["rotated_provider"] != true {
+		t.Fatalf("expected a fresh provider on first rotation, got %+v", result)
+	}
+	if result["fingerprint"] == "" || result["fingerprint"] == nil {
+		t.Fatalf("expected a real fingerprint, got %+v", result)
+	}
+
+	// GET should now show it provisioned.
+	rec2 := httptest.NewRecorder()
+	s.handleGetDNSTransports(rec2, httptest.NewRequest("GET", "/api/dns-transports", nil))
+	var got map[string]any
+	json.Unmarshal(rec2.Body.Bytes(), &got)
+	if got["dnscrypt_identity_provisioned"] != true {
+		t.Fatalf("expected dnscrypt_identity_provisioned=true after rotation, got %+v", got)
+	}
+
+	// A routine cert-only rotation should keep the same fingerprint.
+	rec3 := httptest.NewRecorder()
+	s.handleDNSCryptRotate(rec3, httptest.NewRequest("POST", "/api/dns-transports/dnscrypt/rotate", bytes.NewReader([]byte(`{"rotate_provider":false}`))))
+	var result3 map[string]any
+	json.Unmarshal(rec3.Body.Bytes(), &result3)
+	if result3["rotated_provider"] != false {
+		t.Fatalf("expected rotated_provider=false on a routine cert renewal, got %+v", result3)
+	}
+	if result3["fingerprint"] != result["fingerprint"] {
+		t.Fatalf("expected the same fingerprint across a cert-only rotation, got %v then %v", result["fingerprint"], result3["fingerprint"])
+	}
+}
+
+func TestDNSCryptEnableWithoutProvisioningReturnsClearError(t *testing.T) {
+	s := newDNSCryptTestServer(t)
+	body, _ := json.Marshal(map[string]any{
+		"dot_port": 853, "doh_port": 443, "doh_path": "/dns-query", "doq_port": 853, "doh3_port": 443,
+		"dnscrypt_enabled": true, "dnscrypt_port": 5443, "dnscrypt_provider_name": "x.example",
+	})
+	rec := httptest.NewRecorder()
+	s.handleUpdateDNSTransports(rec, httptest.NewRequest("PUT", "/api/dns-transports", bytes.NewReader(body)))
+	if rec.Code != 409 {
+		t.Fatalf("expected 409 for enabling DNSCrypt before provisioning, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

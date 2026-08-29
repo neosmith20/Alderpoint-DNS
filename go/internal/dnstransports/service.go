@@ -24,25 +24,33 @@
 //     time (dnsdist itself will simply fail to (re)start), surfaced as
 //     an honest Apply failure/rollback, not caught earlier at Update
 //     time the way Python's check does.
-//   - DNSCrypt identity/certificate provisioning (provider key pair,
-//     signed resolver certificate) is not stored here at all. Python's
-//     dnscrypt_settings keeps the real private key material in its
-//     SecretStore, never in control.db directly -- this migration has no
-//     Go-native secrets store yet (see internal/upstreams's doc comment
-//     for the same disclosed gap), so DNSCrypt here is enabled/port/
-//     provider_name only, honestly reported as never provisioned
-//     (identity_provisioned is always false).
+//   - DNSCrypt identity/certificate provisioning: real as of
+//     0017_dnscrypt_identity.sql -- see RotateDNSCrypt and
+//     internal/dnscryptprovision. The private provider key and the
+//     resolver's short-term private key are real FILES on disk (the
+//     same "a real file path, not a DB blob" convention
+//     internal/tlscert already uses for the management TLS key dnsdist
+//     itself also reuses), never stored in this table; only the
+//     resulting file paths and the genuinely non-sensitive metadata
+//     (the public key -- it IS the fingerprint clients pin -- and the
+//     certificate serial/validity window) live here.
 package dnstransports
 
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
+
+	"alderpointdns/go-controlplane/internal/dnscryptprovision"
 )
 
 var ErrValidation = errors.New("validation failed")
+var ErrDNSCryptNotProvisioned = errors.New("DNSCrypt has no provider identity/certificate yet -- rotate first")
 
 // Settings mirrors DnsTransportSettings + the non-secret subset of
 // DnscryptSettings.
@@ -60,11 +68,19 @@ type Settings struct {
 	DNSCryptEnabled      bool   `json:"dnscrypt_enabled"`
 	DNSCryptPort         int    `json:"dnscrypt_port"`
 	DNSCryptProviderName string `json:"dnscrypt_provider_name"`
-	// Always false here -- see the package doc comment's DNSCrypt
-	// disclosure. A real field, not a decorative placeholder: the
-	// frontend uses it exactly like Python's UI does, to show "not yet
-	// provisioned" rather than implying a working DNSCrypt listener.
-	DNSCryptIdentityProvisioned bool `json:"dnscrypt_identity_provisioned"`
+	// True once RotateDNSCrypt has generated a real provider identity --
+	// a real field, not a decorative placeholder: the frontend uses it
+	// to show "not yet provisioned" rather than implying a working
+	// DNSCrypt listener before one is.
+	DNSCryptIdentityProvisioned bool   `json:"dnscrypt_identity_provisioned"`
+	DNSCryptProviderPublicKeyB64 string `json:"dnscrypt_provider_public_key_b64,omitempty"`
+	DNSCryptFingerprint          string `json:"dnscrypt_fingerprint,omitempty"`
+	DNSCryptProviderKeyPath      string `json:"-"` // never serialized -- a path to real key material
+	DNSCryptCertPath             string `json:"-"`
+	DNSCryptKeyPath              string `json:"-"`
+	DNSCryptCertSerial           int64  `json:"dnscrypt_cert_serial,omitempty"`
+	DNSCryptCertValidFrom        int64  `json:"dnscrypt_cert_valid_from,omitempty"`
+	DNSCryptCertValidUntil       int64  `json:"dnscrypt_cert_valid_until,omitempty"`
 }
 
 func defaults() Settings {
@@ -85,10 +101,20 @@ func (s *Service) Get(ctx context.Context) (Settings, error) {
 	if err != nil && err != sql.ErrNoRows {
 		return Settings{}, err
 	}
-	err = s.DB.QueryRowContext(ctx, `SELECT enabled, port, provider_name FROM dnscrypt_settings WHERE id=1`).
-		Scan(&out.DNSCryptEnabled, &out.DNSCryptPort, &out.DNSCryptProviderName)
+	err = s.DB.QueryRowContext(ctx, `SELECT enabled, port, provider_name, provider_public_key_b64, provider_key_path, cert_path, key_path, cert_serial, cert_valid_from, cert_valid_until FROM dnscrypt_settings WHERE id=1`).
+		Scan(&out.DNSCryptEnabled, &out.DNSCryptPort, &out.DNSCryptProviderName, &out.DNSCryptProviderPublicKeyB64,
+			&out.DNSCryptProviderKeyPath, &out.DNSCryptCertPath, &out.DNSCryptKeyPath,
+			&out.DNSCryptCertSerial, &out.DNSCryptCertValidFrom, &out.DNSCryptCertValidUntil)
 	if err != nil && err != sql.ErrNoRows {
 		return Settings{}, err
+	}
+	out.DNSCryptIdentityProvisioned = out.DNSCryptProviderKeyPath != ""
+	if out.DNSCryptProviderPublicKeyB64 != "" {
+		if pub, decErr := base64.StdEncoding.DecodeString(out.DNSCryptProviderPublicKeyB64); decErr == nil {
+			if fp, fpErr := dnscryptprovision.ProviderFingerprint(pub); fpErr == nil {
+				out.DNSCryptFingerprint = fp
+			}
+		}
 	}
 	return out, nil
 }
@@ -111,6 +137,22 @@ func (s *Service) Update(ctx context.Context, in Settings) (Settings, error) {
 		return Settings{}, fmt.Errorf("%w: invalid dnscrypt_port", ErrValidation)
 	case in.DNSCryptProviderName == "":
 		return Settings{}, fmt.Errorf("%w: dnscrypt_provider_name must not be empty", ErrValidation)
+	}
+
+	if in.DNSCryptEnabled {
+		existing, err := s.Get(ctx)
+		if err != nil {
+			return Settings{}, err
+		}
+		// Real, deliberate guard, matching this appliance's established
+		// posture for consequential crypto/trust actions: enabling
+		// DNSCrypt before a provider identity has ever been issued is
+		// rejected with a clear error rather than silently
+		// auto-generating one as a side effect of a checkbox toggle --
+		// generate it explicitly via RotateDNSCrypt first.
+		if !existing.DNSCryptIdentityProvisioned {
+			return Settings{}, ErrDNSCryptNotProvisioned
+		}
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -144,4 +186,119 @@ func (s *Service) Update(ctx context.Context, in Settings) (Settings, error) {
 		return Settings{}, err
 	}
 	return s.Get(ctx)
+}
+
+const dnscryptCertValidityDays = 397 // matches internal/tlscert's own bounded-but-not-forever rationale
+
+// RotateDNSCrypt issues real DNSCrypt provider/resolver key material via
+// the real dnsdist binary (internal/dnscryptprovision) -- see that
+// package's doc comment for the full design and why generation always
+// goes through dnsdist itself. rotateProvider defaults to false (issue
+// a fresh resolver certificate under the EXISTING provider identity --
+// the routine action, e.g. before the current certificate expires)
+// since rotating the provider identity itself invalidates every
+// previously-pinned client's stamp and should never happen as a side
+// effect of a routine cert renewal.
+//
+// keyDir is the directory real key/cert files are written to (0600,
+// atomic rename) -- callers pass the same directory the management TLS
+// cert/key already live in (internal/tlscert), so this reuses
+// infrastructure the appliance already has a writable, dnsdist-
+// readable mount for, rather than needing a new one.
+func (s *Service) RotateDNSCrypt(ctx context.Context, rotateProvider bool, dnsdistBinary, keyDir string) (Settings, string, error) {
+	existing, err := s.Get(ctx)
+	if err != nil {
+		return Settings{}, "", err
+	}
+
+	needNewProvider := rotateProvider || !existing.DNSCryptIdentityProvisioned
+	var providerPrivateKey []byte
+	var providerPublicKeyB64 string
+	var providerKeyPath string
+	if needNewProvider {
+		pub, priv, err := dnscryptprovision.GenerateProviderKeypair(dnsdistBinary)
+		if err != nil {
+			return Settings{}, "", fmt.Errorf("generating provider keypair: %w", err)
+		}
+		providerPrivateKey = priv
+		providerPublicKeyB64 = base64.StdEncoding.EncodeToString(pub)
+		providerKeyPath = filepath.Join(keyDir, "dnscrypt-provider.private")
+		if err := atomicWriteFile(providerKeyPath, priv, 0o600); err != nil {
+			return Settings{}, "", fmt.Errorf("writing provider key: %w", err)
+		}
+	} else {
+		if existing.DNSCryptProviderKeyPath == "" {
+			return Settings{}, "", ErrDNSCryptNotProvisioned
+		}
+		key, err := os.ReadFile(existing.DNSCryptProviderKeyPath)
+		if err != nil {
+			return Settings{}, "", fmt.Errorf("reading existing provider key: %w", err)
+		}
+		providerPrivateKey = key
+		providerPublicKeyB64 = existing.DNSCryptProviderPublicKeyB64
+		providerKeyPath = existing.DNSCryptProviderKeyPath
+	}
+
+	serial := existing.DNSCryptCertSerial + 1
+	if needNewProvider {
+		serial = 1 // a new provider identity restarts the resolver-cert serial sequence
+	}
+	now := time.Now().Unix()
+	validUntil := now + dnscryptCertValidityDays*86400
+	cert, resolverKey, err := dnscryptprovision.GenerateResolverCertificate(dnsdistBinary, providerPrivateKey, serial, now, validUntil)
+	if err != nil {
+		return Settings{}, "", fmt.Errorf("generating resolver certificate: %w", err)
+	}
+	certPath := filepath.Join(keyDir, "dnscrypt-resolver.cert")
+	keyPath := filepath.Join(keyDir, "dnscrypt-resolver.key")
+	if err := atomicWriteFile(certPath, cert, 0o644); err != nil {
+		return Settings{}, "", fmt.Errorf("writing resolver certificate: %w", err)
+	}
+	if err := atomicWriteFile(keyPath, resolverKey, 0o600); err != nil {
+		return Settings{}, "", fmt.Errorf("writing resolver key: %w", err)
+	}
+
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+	if _, err := s.DB.ExecContext(ctx, `
+		INSERT INTO dnscrypt_settings (id, enabled, port, provider_name, provider_public_key_b64, provider_key_path, cert_path, key_path, cert_serial, cert_valid_from, cert_valid_until, updated_at)
+		VALUES (1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			provider_public_key_b64=excluded.provider_public_key_b64, provider_key_path=excluded.provider_key_path,
+			cert_path=excluded.cert_path, key_path=excluded.key_path, cert_serial=excluded.cert_serial,
+			cert_valid_from=excluded.cert_valid_from, cert_valid_until=excluded.cert_valid_until, updated_at=excluded.updated_at`,
+		defaults().DNSCryptPort, defaults().DNSCryptProviderName, providerPublicKeyB64, providerKeyPath, certPath, keyPath, serial, now, validUntil, nowStr,
+	); err != nil {
+		return Settings{}, "", err
+	}
+
+	updated, err := s.Get(ctx)
+	if err != nil {
+		return Settings{}, "", err
+	}
+	return updated, updated.DNSCryptFingerprint, nil
+}
+
+// atomicWriteFile writes to a temp file in the same directory then
+// renames over the target -- a reader (dnsdist reloading, or this
+// service's own next Get/rotate) never observes a partially-written
+// file, the same discipline internal/tlscert's own cert/key writer uses.
+func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpPath, mode); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }

@@ -372,6 +372,72 @@ func TestBuildGathersActiveClientIdentitiesExcludingDisabledClientsAndRevokedIde
 	}
 }
 
+// TestBuildWiresDoh3SettingsThroughToTheCompiler proves the orchestrator
+// actually forwards Doh3Enabled/Doh3Port from internal/dnstransports into
+// dnscompile.TransportSettings -- the same "not just stored, actually
+// compiled" bar every other transport on this page had to clear.
+func TestBuildWiresDoh3SettingsThroughToTheCompiler(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	transports := &dnstransports.Service{DB: db}
+	if _, err := transports.Update(ctx, dnstransports.Settings{
+		DotPort: 853, DohPort: 443, DohPath: "/dns-query", DoqPort: 853,
+		Doh3Enabled: true, Doh3Port: 8443,
+		DNSCryptPort: 5443, DNSCryptProviderName: "2.dnscrypt-cert.test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	o := &Orchestrator{DNSTransports: transports, DnsdistListenAddress: "127.0.0.1:15353", BindBackendAddress: "127.0.0.1:15553"}
+	in, _, _, err := o.build(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !in.Transports.Doh3Enabled || in.Transports.Doh3Port != 8443 {
+		t.Fatalf("expected Doh3Enabled=true Doh3Port=8443 to be forwarded, got %+v", in.Transports)
+	}
+}
+
+// TestBuildWiresDnscryptSettingsThroughToTheCompiler proves the
+// orchestrator forwards the real provisioned DNSCrypt cert/key paths
+// (not just enabled/port/provider_name) from internal/dnstransports into
+// dnscompile.TransportSettings.
+func TestBuildWiresDnscryptSettingsThroughToTheCompiler(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	transports := &dnstransports.Service{DB: db}
+	if _, err := transports.Update(ctx, dnstransports.Settings{
+		DotPort: 853, DohPort: 443, DohPath: "/dns-query", DoqPort: 853, Doh3Port: 443,
+		DNSCryptPort: 5443, DNSCryptProviderName: "2.dnscrypt-cert.test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	bin, err := exec.LookPath("dnsdist")
+	if err != nil {
+		t.Skip("dnsdist not installed, skipping real DNSCrypt provisioning test")
+	}
+	if _, _, err := transports.RotateDNSCrypt(ctx, false, bin, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transports.Update(ctx, dnstransports.Settings{
+		DotPort: 853, DohPort: 443, DohPath: "/dns-query", DoqPort: 853, Doh3Port: 443,
+		DNSCryptEnabled: true, DNSCryptPort: 5443, DNSCryptProviderName: "2.dnscrypt-cert.test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	o := &Orchestrator{DNSTransports: transports, DnsdistListenAddress: "127.0.0.1:15353", BindBackendAddress: "127.0.0.1:15553"}
+	in, _, _, err := o.build(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !in.Transports.DNSCryptEnabled || in.Transports.DNSCryptPort != 5443 {
+		t.Fatalf("expected DNSCryptEnabled=true DNSCryptPort=5443, got %+v", in.Transports)
+	}
+	if in.Transports.DNSCryptCertPath == "" || in.Transports.DNSCryptKeyPath == "" {
+		t.Fatalf("expected real cert/key paths to be forwarded, got %+v", in.Transports)
+	}
+}
+
 func freePort(t *testing.T) int {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"alderpointdns/go-controlplane/internal/dnscryptprovision"
 )
 
 // testBindDir returns a real, writable directory this host's AppArmor
@@ -611,6 +614,7 @@ func TestCompileDnsdistClientIdentityBindingAndOverridePrecedence(t *testing.T) 
 		DotEnabled: true, DotPort: 8853,
 		DohEnabled: true, DohPort: 8443, DohPath: "/dns-query",
 		DoqEnabled: true, DoqPort: 8854,
+		Doh3Enabled: true, Doh3Port: 8443,
 	}
 	hexA := strings.Repeat("a", 48)
 	hexB := strings.Repeat("b", 64)
@@ -631,6 +635,9 @@ func TestCompileDnsdistClientIdentityBindingAndOverridePrecedence(t *testing.T) 
 
 	if !strings.Contains(out, "addDOQLocal(") {
 		t.Fatalf("expected a DoQ listener directive, got:\n%s", out)
+	}
+	if !strings.Contains(out, "addDOH3Local(") {
+		t.Fatalf("expected a DoH3 listener directive, got:\n%s", out)
 	}
 
 	wantDoHPath := "/dns-query/cid/" + hexA
@@ -756,6 +763,87 @@ func TestCompileDnsdistDoqRequiresTlsPaths(t *testing.T) {
 	if _, err := CompileDnsdist(in); err == nil {
 		t.Fatal("expected an error for DoQ enabled with no TLS cert/key configured")
 	}
+}
+
+func TestCompileDnsdistDnscryptRequiresProvisionedPaths(t *testing.T) {
+	in := minimalInput()
+	in.Transports = TransportSettings{DNSCryptEnabled: true, DNSCryptPort: 5443, DNSCryptProviderName: "2.dnscrypt-cert.test"}
+	if _, err := CompileDnsdist(in); err == nil {
+		t.Fatal("expected an error for DNSCrypt enabled with no provider identity provisioned")
+	}
+}
+
+// TestCompileDnsdistDnscryptWithRealGeneratedMaterialValidatesAgainstRealDnsdist
+// proves DNSCrypt compiles a real addDNSCryptBind directive that the
+// real installed dnsdist accepts, using real generated key material
+// (internal/dnscryptprovision) -- not just a syntax check with fake
+// file paths.
+func TestCompileDnsdistDnscryptWithRealGeneratedMaterialValidatesAgainstRealDnsdist(t *testing.T) {
+	bin, err := exec.LookPath("dnsdist")
+	if err != nil {
+		t.Skip("dnsdist not installed, skipping real DNSCrypt validation")
+	}
+	_, providerPriv, err := dnscryptprovision.GenerateProviderKeypair(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	cert, key, err := dnscryptprovision.GenerateResolverCertificate(bin, providerPriv, 1, now, now+86400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "resolver.cert")
+	keyPath := filepath.Join(dir, "resolver.key")
+	if err := os.WriteFile(certPath, cert, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, key, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	in := minimalInput()
+	in.Transports = TransportSettings{
+		DNSCryptEnabled: true, DNSCryptPort: 5443, DNSCryptProviderName: "2.dnscrypt-cert.test",
+		DNSCryptCertPath: certPath, DNSCryptKeyPath: keyPath,
+	}
+	out, err := CompileDnsdist(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "addDNSCryptBind(") {
+		t.Fatalf("expected a DNSCrypt bind directive, got:\n%s", out)
+	}
+	checkDnsdist(t, out)
+}
+
+func TestCompileDnsdistDoh3RequiresTlsPaths(t *testing.T) {
+	in := minimalInput()
+	in.Transports = TransportSettings{Doh3Enabled: true, Doh3Port: 8443}
+	if _, err := CompileDnsdist(in); err == nil {
+		t.Fatal("expected an error for DoH3 enabled with no TLS cert/key configured")
+	}
+}
+
+// TestCompileDnsdistDoh3AloneValidatesAgainstRealDnsdist proves DoH3 can
+// be enabled independent of DoT/DoH/DoQ and still produces a config the
+// real installed dnsdist accepts -- addDOH3Local's real option table was
+// confirmed live to accept no path/urls key at all (every such key is
+// silently ignored with an "Unknown key" warning), so this only ever
+// emits reusePort, unlike addDOHLocal's path-table.
+func TestCompileDnsdistDoh3AloneValidatesAgainstRealDnsdist(t *testing.T) {
+	certPath, keyPath := testCert(t)
+	in := minimalInput()
+	in.TLSCertPath, in.TLSKeyPath = certPath, keyPath
+	in.Transports = TransportSettings{Doh3Enabled: true, Doh3Port: 8443}
+	out, err := CompileDnsdist(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "addDOH3Local(") {
+		t.Fatalf("expected a DoH3 listener directive, got:\n%s", out)
+	}
+	checkDnsdist(t, out)
 }
 
 // TestCompileDnsdistNetworkOverrideScopesResponseModeToCIDR proves the

@@ -344,6 +344,10 @@ export interface DnsTransportSettings {
   dnscrypt_port: number;
   dnscrypt_provider_name: string;
   dnscrypt_identity_provisioned: boolean;
+  dnscrypt_fingerprint?: string;
+  dnscrypt_cert_serial?: number;
+  dnscrypt_cert_valid_from?: number;
+  dnscrypt_cert_valid_until?: number;
   dns_runtime?: DNSRuntimeApplyResult;
 }
 
@@ -712,6 +716,11 @@ export const api = {
   getDnsTransports: (signal?: AbortSignal) => req<DnsTransportSettings>("/api/dns-transports", undefined, signal),
   updateDnsTransports: (settings: DnsTransportSettings) =>
     req<DnsTransportSettings>("/api/dns-transports", { method: "PUT", body: JSON.stringify(settings) }),
+  rotateDnscrypt: (rotateProvider: boolean) =>
+    req<{ status: string; rotated_provider: boolean; fingerprint: string; cert_serial: number; cert_valid_until: number }>(
+      "/api/dns-transports/dnscrypt/rotate",
+      { method: "POST", body: JSON.stringify({ rotate_provider: rotateProvider }) },
+    ),
   tlsStatus: (signal?: AbortSignal) => req<TlsStatus>("/api/tls/status", undefined, signal),
   tlsReplace: (certificatePem: string, privateKeyPem: string) =>
     req<{ status: string; restart_required: boolean; subject: string; not_valid_after: string }>("/api/tls/replace", {

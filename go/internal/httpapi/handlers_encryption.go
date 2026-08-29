@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 
 	"alderpointdns/go-controlplane/internal/dnstransports"
 	"alderpointdns/go-controlplane/internal/mobileconfig"
@@ -21,6 +22,8 @@ func transportsJSON(s dnstransports.Settings) map[string]any {
 		"doh3_enabled": s.Doh3Enabled, "doh3_port": s.Doh3Port,
 		"dnscrypt_enabled": s.DNSCryptEnabled, "dnscrypt_port": s.DNSCryptPort,
 		"dnscrypt_provider_name": s.DNSCryptProviderName, "dnscrypt_identity_provisioned": s.DNSCryptIdentityProvisioned,
+		"dnscrypt_fingerprint": s.DNSCryptFingerprint, "dnscrypt_cert_serial": s.DNSCryptCertSerial,
+		"dnscrypt_cert_valid_from": s.DNSCryptCertValidFrom, "dnscrypt_cert_valid_until": s.DNSCryptCertValidUntil,
 	}
 }
 
@@ -43,6 +46,10 @@ func (s *Server) handleUpdateDNSTransports(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		if errors.Is(err, dnstransports.ErrValidation) {
 			Err(http.StatusBadRequest, "validation_error", err.Error()).WriteJSON(w)
+			return
+		}
+		if errors.Is(err, dnstransports.ErrDNSCryptNotProvisioned) {
+			Err(http.StatusConflict, "dnscrypt_not_provisioned", err.Error()).WriteJSON(w)
 			return
 		}
 		Err(http.StatusInternalServerError, "internal_error", err.Error()).WriteJSON(w)
@@ -142,6 +149,52 @@ func (s *Server) handleDNSTransportMobileconfig(w http.ResponseWriter, r *http.R
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="alderpointdns-v2-%s.mobileconfig"`, protocol))
 	w.WriteHeader(http.StatusOK)
 	w.Write(profile)
+}
+
+type dnscryptRotateRequest struct {
+	RotateProvider bool `json:"rotate_provider"`
+}
+
+// handleDNSCryptRotate issues real DNSCrypt provider/resolver key
+// material via the real dnsdist binary (internal/dnscryptprovision) --
+// field-matched against Python's own POST /api/dns-transports/dnscrypt/
+// rotate. rotate_provider defaults to false (issue a fresh resolver
+// certificate under the EXISTING provider identity -- the routine
+// action) since rotating the provider identity itself invalidates every
+// previously-pinned client's stamp.
+func (s *Server) handleDNSCryptRotate(w http.ResponseWriter, r *http.Request) {
+	if s.TLSCertPath == "" {
+		Err(http.StatusServiceUnavailable, "unavailable", "this deployment has no management TLS cert path configured -- DNSCrypt key material reuses that directory").WriteJSON(w)
+		return
+	}
+	var req dnscryptRotateRequest
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			Err(http.StatusBadRequest, "validation_error", "invalid JSON body").WriteJSON(w)
+			return
+		}
+	}
+	dnsdistBinary := s.DNSCryptBinary
+	if dnsdistBinary == "" {
+		dnsdistBinary = "dnsdist"
+	}
+	before, err := s.DNSTransports.Get(r.Context())
+	if err != nil {
+		Err(http.StatusInternalServerError, "internal_error", "failed to load transport settings").WriteJSON(w)
+		return
+	}
+	rotatedProvider := req.RotateProvider || !before.DNSCryptIdentityProvisioned
+
+	keyDir := filepath.Dir(s.TLSCertPath)
+	updated, fingerprint, err := s.DNSTransports.RotateDNSCrypt(r.Context(), req.RotateProvider, dnsdistBinary, keyDir)
+	if err != nil {
+		Err(http.StatusInternalServerError, "provisioning_failed", err.Error()).WriteJSON(w)
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{
+		"status": "rotated", "rotated_provider": rotatedProvider,
+		"fingerprint": fingerprint, "cert_serial": updated.DNSCryptCertSerial, "cert_valid_until": updated.DNSCryptCertValidUntil,
+	})
 }
 
 // randomUUID generates a real RFC 4122 v4 UUID via crypto/rand (never

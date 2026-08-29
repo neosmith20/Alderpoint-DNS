@@ -68,6 +68,12 @@ type Server struct {
 	// level TLS listener does not hot-reload its certificate).
 	TLSCertPath, TLSKeyPath string
 
+	// DNSCryptBinary overrides the "dnsdist" binary name/path used to
+	// generate real DNSCrypt provider/resolver key material (internal/
+	// dnscryptprovision) -- empty means "dnsdist" (looked up on PATH),
+	// matching every other real-binary invocation in this codebase.
+	DNSCryptBinary string
+
 	// HostAgent is nil unless -hostagent-socket was given at startup --
 	// nil means Cache/Replication/Network/Logs/Software-Updates all
 	// honestly report unavailable, same nil-safe contract as every
@@ -247,6 +253,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/dns-transports", requireAuth(s.handleGetDNSTransports))
 	mux.HandleFunc("PUT /api/dns-transports", requireAuth(s.handleUpdateDNSTransports))
 	mux.HandleFunc("GET /api/dns-transports/mobileconfig/{protocol}", requireAuth(s.handleDNSTransportMobileconfig))
+	mux.HandleFunc("POST /api/dns-transports/dnscrypt/rotate", requireAuth(s.handleDNSCryptRotate))
 	mux.HandleFunc("GET /api/tls/status", requireAuth(s.handleTLSStatus))
 	mux.HandleFunc("POST /api/tls/replace", requireAuth(s.handleTLSReplace))
 

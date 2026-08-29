@@ -3,6 +3,8 @@ package dnstransports
 import (
 	"context"
 	"database/sql"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -48,7 +50,13 @@ func TestUpdateRoundTripsEverySettingIncludingDnscrypt(t *testing.T) {
 		DohEnabled: true, DohPort: 8443, DohPath: "/custom-query",
 		DoqEnabled: true, DoqPort: 8854,
 		Doh3Enabled: true, Doh3Port: 8444,
-		DNSCryptEnabled: true, DNSCryptPort: 5444, DNSCryptProviderName: "custom.provider.example",
+		// DNSCryptEnabled is deliberately NOT set here -- Update rejects
+		// enabling DNSCrypt before a provider identity is provisioned
+		// (see TestUpdateRejectsEnablingDnscryptBeforeProvisioning and
+		// TestRotateDNSCryptThenEnableSucceeds), so this round-trip
+		// proof only covers the always-updatable port/provider_name
+		// fields for DNSCrypt.
+		DNSCryptPort: 5444, DNSCryptProviderName: "custom.provider.example",
 	}
 	updated, err := s.Update(ctx, in)
 	if err != nil {
@@ -111,4 +119,120 @@ func TestUpdateIsAtomicAcrossBothTables(t *testing.T) {
 	if got != defaults() {
 		t.Fatalf("expected settings to remain at defaults after a rejected update, got %+v", got)
 	}
+}
+
+func TestUpdateRejectsEnablingDnscryptBeforeProvisioning(t *testing.T) {
+	s := newTestService(t)
+	ctx := context.Background()
+	_, err := s.Update(ctx, Settings{
+		DotPort: 853, DohPort: 443, DohPath: "/dns-query", DoqPort: 853, Doh3Port: 443,
+		DNSCryptEnabled: true, DNSCryptPort: 5443, DNSCryptProviderName: "x.example",
+	})
+	if err != ErrDNSCryptNotProvisioned {
+		t.Fatalf("expected ErrDNSCryptNotProvisioned, got %v", err)
+	}
+}
+
+func requireDnsdistBinary(t *testing.T) string {
+	t.Helper()
+	bin, err := exec.LookPath("dnsdist")
+	if err != nil {
+		t.Skip("dnsdist not installed, skipping real DNSCrypt provisioning test")
+	}
+	return bin
+}
+
+// TestRotateDNSCryptProvisionsThenEnableSucceeds proves the full real
+// workflow: RotateDNSCrypt actually writes real key/cert files and
+// records enough state that Update then allows enabling DNSCrypt.
+func TestRotateDNSCryptProvisionsThenEnableSucceeds(t *testing.T) {
+	bin := requireDnsdistBinary(t)
+	s := newTestService(t)
+	ctx := context.Background()
+	keyDir := t.TempDir()
+
+	updated, fingerprint, err := s.RotateDNSCrypt(ctx, false, bin, keyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !updated.DNSCryptIdentityProvisioned {
+		t.Fatal("expected DNSCryptIdentityProvisioned=true after rotation")
+	}
+	if fingerprint == "" {
+		t.Fatal("expected a real fingerprint")
+	}
+	if updated.DNSCryptCertSerial != 1 {
+		t.Fatalf("expected the first cert to have serial 1, got %d", updated.DNSCryptCertSerial)
+	}
+	for _, p := range []string{updated.DNSCryptProviderKeyPath, updated.DNSCryptCertPath, updated.DNSCryptKeyPath} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("expected real file at %s: %v", p, err)
+		}
+	}
+
+	if _, err := s.Update(ctx, Settings{
+		DotPort: 853, DohPort: 443, DohPath: "/dns-query", DoqPort: 853, Doh3Port: 443,
+		DNSCryptEnabled: true, DNSCryptPort: 5443, DNSCryptProviderName: "x.example",
+	}); err != nil {
+		t.Fatalf("expected enabling DNSCrypt to succeed once provisioned, got %v", err)
+	}
+}
+
+// TestRotateDNSCryptCertOnlyKeepsSameProviderIncrementsSerial proves the
+// routine (rotateProvider=false) path reuses the SAME provider identity
+// (same fingerprint, same provider key file) while still issuing a new
+// resolver certificate with an incremented serial -- rotating the
+// provider identity must never happen as a side effect of a routine
+// cert renewal.
+func TestRotateDNSCryptCertOnlyKeepsSameProviderIncrementsSerial(t *testing.T) {
+	bin := requireDnsdistBinary(t)
+	s := newTestService(t)
+	ctx := context.Background()
+	keyDir := t.TempDir()
+
+	first, fp1, err := s.RotateDNSCrypt(ctx, false, bin, keyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, fp2, err := s.RotateDNSCrypt(ctx, false, bin, keyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fp1 != fp2 {
+		t.Fatalf("expected the same provider fingerprint across a cert-only rotation, got %q then %q", fp1, fp2)
+	}
+	if first.DNSCryptProviderKeyPath != second.DNSCryptProviderKeyPath {
+		t.Fatalf("expected the same provider key file to be reused, got %q then %q", first.DNSCryptProviderKeyPath, second.DNSCryptProviderKeyPath)
+	}
+	if second.DNSCryptCertSerial != first.DNSCryptCertSerial+1 {
+		t.Fatalf("expected the cert serial to increment (from %d), got %d", first.DNSCryptCertSerial, second.DNSCryptCertSerial)
+	}
+}
+
+// TestRotateDNSCryptRotateProviderChangesFingerprintAndResetsSerial
+// proves the explicit rotateProvider=true path genuinely replaces the
+// provider identity (a different fingerprint) and restarts the
+// resolver-cert serial sequence at 1, matching Python's own documented
+// behavior for the same real workflow.
+func TestRotateDNSCryptRotateProviderChangesFingerprintAndResetsSerial(t *testing.T) {
+	bin := requireDnsdistBinary(t)
+	s := newTestService(t)
+	ctx := context.Background()
+	keyDir := t.TempDir()
+
+	first, fp1, err := s.RotateDNSCrypt(ctx, false, bin, keyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, fp2, err := s.RotateDNSCrypt(ctx, true, bin, keyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fp1 == fp2 {
+		t.Fatal("expected a different provider fingerprint after rotate_provider=true")
+	}
+	if second.DNSCryptCertSerial != 1 {
+		t.Fatalf("expected the cert serial to restart at 1 after a provider rotation, got %d", second.DNSCryptCertSerial)
+	}
+	_ = first
 }
