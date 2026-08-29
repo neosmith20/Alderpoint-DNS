@@ -1,0 +1,52 @@
+[Unit]
+Description=Alderpoint DNS Go control plane -- privileged host-side agent
+After=network-online.target
+Wants=network-online.target
+Before=alderpointdns-go.service
+# Caps a runaway restart loop (bad config, permission regression) at 5
+# attempts per minute instead of restarting forever.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# Root, deliberately: this is the one process allowed to write BIND/
+# dnsdist config, manage TLS/DNSCrypt private key material, and swap the
+# web binary during a self-update -- see internal/hostagentd's own doc
+# comment. The web control plane never runs as root; it reaches this
+# process only through the narrow, audited Unix-socket RPC protocol in
+# internal/hostagent, authorized by SO_PEERCRED against -allowed-uid.
+ExecStart=/opt/alderpointdns-go/apdns-hostagent \
+  -socket /run/apdns-hostagent/agent.sock \
+  -allowed-uid ${APDNS_WEB_UID} \
+  -audit-log /var/log/apdns-hostagent/audit.jsonl \
+  -secrets-key-dir /var/lib/apdns-hostagent/secrets \
+  -bind-compiled-dir /var/lib/bind/alderpointdns-go \
+  -rndc-conf /etc/bind/rndc.conf \
+  -dns-runtime-staging-dir /var/lib/apdns-hostagent/dns-staging \
+  -dns-runtime-bind-conf /var/lib/bind/alderpointdns-go/named.conf \
+  -dns-runtime-dnsdist-conf /var/lib/apdns-hostagent/dns-staging/dnsdist.conf \
+  -dns-runtime-bind-dir /var/lib/bind/alderpointdns-go \
+  -dns-runtime-dnsdist-listen-addr 0.0.0.0:53 \
+  -current-binary /opt/alderpointdns-go/alderpointdns-go \
+  -update-staging-dir /var/lib/apdns-hostagent/update-staging \
+  -update-backup /var/lib/apdns-hostagent/previous-binary \
+  -web-service-unit alderpointdns-go.service \
+  -web-health-url https://127.0.0.1:8443/api/health
+EnvironmentFile=-/etc/alderpointdns-go/hostagent.env
+RuntimeDirectory=apdns-hostagent
+RuntimeDirectoryMode=0750
+StateDirectory=apdns-hostagent
+StateDirectoryMode=0700
+LogsDirectory=apdns-hostagent
+LogsDirectoryMode=0700
+Restart=on-failure
+RestartSec=3
+# NoNewPrivileges is deliberately NOT set: this process signals/execs
+# named, dnsdist, and its own update-candidate binary as a privileged
+# root process -- that IS its job, not a privilege it needs to shed.
+PrivateTmp=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

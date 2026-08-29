@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  remove|deconfigure)
+    systemctl stop alderpointdns-go.service apdns-hostagent.service >/dev/null 2>&1 || true
+    systemctl disable alderpointdns-go.service apdns-hostagent.service >/dev/null 2>&1 || true
+    ;;
+esac
+
+#DEBHELPER#
+exit 0

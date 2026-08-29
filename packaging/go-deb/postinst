@@ -1,0 +1,127 @@
+#!/bin/sh
+set -e
+
+# Poll for a service reaching the active state instead of checking once
+# immediately after `systemctl restart`: a fast-crashing service (bad
+# config, permissions) has not necessarily been marked failed yet the
+# instant systemctl returns.
+apdns_go_wait_active() {
+  svc="$1"
+  i=0
+  while [ "$i" -lt 15 ]; do
+    if systemctl is-active --quiet "$svc"; then
+      return 0
+    fi
+    i=$((i + 1))
+    sleep 1
+  done
+  return 1
+}
+
+case "$1" in
+  configure)
+    if ! getent group apdns-go-web >/dev/null; then
+      addgroup --system apdns-go-web
+    fi
+    if ! id apdns-go-web >/dev/null 2>&1; then
+      adduser --system --home /var/lib/alderpointdns-go --no-create-home --ingroup apdns-go-web --disabled-login apdns-go-web
+    fi
+
+    install -d -o apdns-go-web -g apdns-go-web -m 0750 \
+      /var/lib/alderpointdns-go \
+      /var/lib/alderpointdns-go/data \
+      /var/lib/alderpointdns-go/backups \
+      /var/lib/alderpointdns-go/secret-backups \
+      /var/lib/alderpointdns-go/replication-certs
+    install -d -o root -g apdns-go-web -m 0750 /etc/alderpointdns-go
+    install -d -o root -g root -m 0700 \
+      /var/lib/apdns-hostagent \
+      /var/lib/apdns-hostagent/secrets \
+      /var/lib/apdns-hostagent/dns-staging \
+      /var/lib/apdns-hostagent/update-staging
+    install -d -o root -g root -m 0700 /var/log/apdns-hostagent
+    # named (a separate system account, unrelated to this package) must be
+    # able to traverse into its own working directory once the owner
+    # configures DNS Runtime through the setup UI -- created here so the
+    # directory has the right ownership from the very first promote, not
+    # created implicitly by root the first time with the wrong owner.
+    if getent passwd bind >/dev/null; then
+      install -d -o bind -g bind -m 0755 /var/lib/bind/alderpointdns-go
+    else
+      install -d -o root -g root -m 0755 /var/lib/bind/alderpointdns-go
+    fi
+
+    # A real self-signed cert so the management UI serves HTTPS from the
+    # very first boot, before the owner has configured anything through
+    # the Encryption page -- same real openssl invocation this product's
+    # own V1.1.1 predecessor used (packaging/debian's own
+    # ensure_tls_cert.sh, ported here), refusing to overwrite partial
+    # material rather than silently regenerating over it.
+    cert_dir=/etc/alderpointdns-go/certs
+    cert_file="$cert_dir/apdns-web.crt"
+    key_file="$cert_dir/apdns-web.key"
+    install -d -m 0751 -o root -g apdns-go-web "$cert_dir"
+    if [ -f "$cert_file" ] && [ -f "$key_file" ]; then
+      : # already provisioned -- never overwrite real cert material
+    elif [ -e "$cert_file" ] || [ -e "$key_file" ]; then
+      echo "apdns-go: refusing to overwrite partial TLS material in $cert_dir" >&2
+    else
+      openssl req -x509 -newkey rsa:3072 -sha256 -days 825 -nodes \
+        -subj "/CN=alderpointdns-go.local" \
+        -addext "subjectAltName=DNS:alderpointdns-go.local,IP:127.0.0.1" \
+        -keyout "$key_file" -out "$cert_file" 2>/dev/null
+      chown root:apdns-go-web "$cert_file" "$key_file"
+      chmod 0644 "$cert_file"
+      chmod 0640 "$key_file"
+    fi
+
+    if [ ! -f /etc/alderpointdns-go/appliance.yaml ]; then
+      cat > /etc/alderpointdns-go/appliance.yaml <<EOF
+schema_version: 1
+web:
+  tls_cert_path: "$cert_file"
+  tls_key_path: "$key_file"
+appliance:
+  name: "Alderpoint DNS"
+  timezone: "UTC"
+EOF
+      chown root:apdns-go-web /etc/alderpointdns-go/appliance.yaml
+      chmod 0640 /etc/alderpointdns-go/appliance.yaml
+    fi
+
+    # apdns-hostagent's -allowed-uid must be the REAL numeric UID of the
+    # web service account, resolved fresh here rather than hardcoded --
+    # -allowed-uid is the entire SO_PEERCRED authorization boundary
+    # between the unprivileged web process and this privileged one (see
+    # internal/hostagentd's own doc comment).
+    web_uid="$(id -u apdns-go-web)"
+    printf 'APDNS_WEB_UID=%s\n' "$web_uid" > /etc/alderpointdns-go/hostagent.env
+    chmod 0644 /etc/alderpointdns-go/hostagent.env
+
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    # Units are installed and enabled, but deliberately NOT started here:
+    # a real DNS Runtime promote (BIND/dnsdist) needs bind9/dnsdist
+    # actually configured, which only happens through this control
+    # plane's own setup wizard -- starting the web service before that is
+    # harmless (it serves the setup wizard itself), but this package makes
+    # no assumption about whether the operator wants it running
+    # immediately versus after reviewing appliance.yaml first. On an
+    # UPGRADE (not a fresh install), both services are restarted for real
+    # so the new binary actually takes effect, exactly matching this
+    # package's own self-update path's own restart-and-verify contract.
+    systemctl enable apdns-hostagent.service alderpointdns-go.service >/dev/null 2>&1 || true
+    if systemctl is-active --quiet apdns-hostagent.service || systemctl is-active --quiet alderpointdns-go.service; then
+      systemctl restart apdns-hostagent.service
+      if ! apdns_go_wait_active apdns-hostagent.service; then
+        echo "apdns-go: apdns-hostagent.service did not become active after upgrade -- check 'systemctl status apdns-hostagent'" >&2
+      fi
+      systemctl restart alderpointdns-go.service
+      if ! apdns_go_wait_active alderpointdns-go.service; then
+        echo "apdns-go: alderpointdns-go.service did not become active after upgrade -- check 'systemctl status alderpointdns-go'" >&2
+      fi
+    fi
+    ;;
+esac
+
+#DEBHELPER#
+exit 0

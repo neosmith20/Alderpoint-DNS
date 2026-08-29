@@ -5,18 +5,27 @@ set -eu
 # (go/cmd/alderpointdns-go, go/cmd/apdns-hostagent, go/frontend), from
 # whatever commit is currently checked out in the given source tree.
 #
-# Scope note (see go/PARITY_MATRIX.md, "Software Updates" row): full
-# production dpkg packaging (systemd units, postinst service
-# provisioning, dedicated system user) for this control plane has been
-# deliberately NOT built yet -- the appliance instead self-updates its
-# own binary via apdns-hostagent's update.check/stage/apply RPCs. This
-# script does not invent that packaging; it produces the same kind of
-# harmless, content-addressable candidate artifact build-v2-deb.sh
-# produces for the Python V2 line -- useful for archival, diffing
-# against a running instance's self-reported `version`, or as a real
-# candidate for the existing apdns-hostagent update-apply path (which
-# only requires a binary + checksum, not a .deb at all, but a .deb is a
-# convenient, versioned way to store/ship the whole build together).
+# packaging/systemd/*.service + packaging/debian/{postinst,prerm,postrm}
+# (2026-08-29) provide real, fresh-install provisioning: a dedicated
+# apdns-go-web system user, apdns-hostagent's -allowed-uid resolved to
+# that user's real UID at install time (never hardcoded), directory
+# ownership/modes, a real self-signed TLS cert generated on first
+# install (never overwritten), and unit enable (started only on an
+# upgrade of an already-running install, never forced on a fresh one --
+# see postinst's own comment for why). What THIS script deliberately
+# still does NOT do, unchanged from the prior disclosure (see
+# go/PARITY_MATRIX.md's "Software Updates" row): reimplement arbitrary
+# `.deb`/`dpkg` package-level self-update execution against a live
+# production system -- that was refused as too destructive-capable for
+# an unverifiable first cut, and this packaging work doesn't change that
+# judgment. The running appliance keeps self-updating its own binary via
+# apdns-hostagent's own audited update.check/stage/apply RPCs (verified
+# checksum + self-reported version, automatic health-check rollback).
+# This .deb is the same kind of versioned, whole-build artifact
+# build-v2-deb.sh produces for the Python V2 line -- for archival, for
+# diffing against a running instance's self-reported `version`, as the
+# payload behind that existing update-apply path, or now, genuinely, as
+# a real one-shot `dpkg -i` install path for a brand-new appliance.
 #
 # Usage: build-go-deb.sh [--source-dir DIR] [--output-dir DIR] [--version VERSION]
 
@@ -72,7 +81,18 @@ mkdir -p \
   "$PKG/opt/alderpointdns-go/frontend-dist" \
   "$PKG/opt/alderpointdns-go/schema/migrations" \
   "$PKG/etc/alderpointdns-go" \
+  "$PKG/lib/systemd/system" \
   "$PKG/usr/share/doc/alderpointdns-go"
+
+echo "+ installing systemd units + maintainer scripts"
+cp "$SOURCE_DIR/packaging/systemd/apdns-hostagent.service" "$PKG/lib/systemd/system/"
+cp "$SOURCE_DIR/packaging/systemd/alderpointdns-go.service" "$PKG/lib/systemd/system/"
+chmod 0644 "$PKG/lib/systemd/system/"*.service
+for script in postinst prerm postrm; do
+  cp "$SOURCE_DIR/packaging/go-deb/$script" "$PKG/DEBIAN/$script"
+  chmod 0755 "$PKG/DEBIAN/$script"
+  sh -n "$PKG/DEBIAN/$script"
+done
 
 echo "+ building frontend"
 (cd "$SOURCE_DIR/go/frontend" && npm install >/dev/null && npm run build >/dev/null)
@@ -104,26 +124,27 @@ Section: net
 Priority: optional
 Architecture: ${DEB_ARCH}
 Maintainer: Alderpoint DNS Maintainers <maintainers@example.invalid>
-Depends: dnsdist (>= 1.9.0), bind9, bind9-utils
+Depends: dnsdist (>= 1.9.0), bind9, bind9-utils, openssl, adduser
 Conflicts: alderpointdns, alderpointdns-v2
-Description: Alderpoint DNS Go control plane -- CANDIDATE BUILD (not a production install)
+Description: Alderpoint DNS Go control plane -- CANDIDATE BUILD (not an official release)
  Candidate build of the Go/Svelte control-plane rewrite: alderpointdns-go
  (management API + web UI, static frontend-dist bundle, SQL migrations)
  and apdns-hostagent (privileged host-side helper for BIND/dnsdist
  runtime control and self-update). Built from commit ${FULL_SHA}.
  .
- This package intentionally ships NO systemd units and NO postinst
- service provisioning: production install automation for this control
- plane has not been built yet (see go/PARITY_MATRIX.md's "Software
- Updates" row) -- the running appliance instead self-updates its own
- binary via apdns-hostagent's update.check/stage/apply RPCs, which
- verify a staged binary's checksum and self-reported version before
- trusting it. This .deb exists to carry a whole matched build (web
- binary + hostagent + frontend + migrations, all from one commit) as a
- single versioned artifact -- for archival, for diffing against a
- running instance's /api/version, or as the payload behind that
- existing update-apply path. Installing it only places files under
- /opt/alderpointdns-go and /etc/alderpointdns-go; nothing is started.
+ Real systemd units + postinst provisioning (2026-08-29): installing
+ this package creates a dedicated apdns-go-web system account, the
+ directories both services need, a self-signed TLS cert for the
+ management UI's first boot, and enables (but does not force-start on a
+ fresh install) apdns-hostagent.service and alderpointdns-go.service --
+ see each unit's own comments. What this package still does NOT do:
+ reimplement arbitrary dpkg-level self-update of a live production
+ install -- the running appliance keeps self-updating its own binary via
+ apdns-hostagent's own audited update.check/stage/apply RPCs (verified
+ checksum + self-reported version, automatic health-check rollback).
+ This .deb doubles as a versioned whole-build artifact for archival, for
+ diffing against a running instance's /api/version, or as the payload
+ behind that existing update-apply path.
 EOF
 
 cat > "$PKG/DEBIAN/conffiles" <<'EOF'

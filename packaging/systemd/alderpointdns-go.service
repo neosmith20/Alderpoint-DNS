@@ -1,0 +1,40 @@
+[Unit]
+Description=Alderpoint DNS Go control plane -- web application
+After=network-online.target apdns-hostagent.service
+Wants=network-online.target
+Requires=apdns-hostagent.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=apdns-go-web
+Group=apdns-go-web
+WorkingDirectory=/var/lib/alderpointdns-go
+ExecStart=/opt/alderpointdns-go/alderpointdns-go web \
+  -addr 0.0.0.0:8443 \
+  -db /var/lib/alderpointdns-go/data/app.db \
+  -analytics-db /var/lib/alderpointdns-go/data/analytics.db \
+  -bootstrap-token-path /var/lib/alderpointdns-go/data/bootstrap-token \
+  -config /etc/alderpointdns-go/appliance.yaml \
+  -static /opt/alderpointdns-go/frontend-dist \
+  -migrations /opt/alderpointdns-go/schema/migrations \
+  -backups-dir /var/lib/alderpointdns-go/backups \
+  -secret-backups-dir /var/lib/alderpointdns-go/secret-backups \
+  -replication-cert-dir /var/lib/alderpointdns-go/replication-certs \
+  -hostagent-socket /run/apdns-hostagent/agent.sock \
+  -dns-runtime-dnsdist-addr 0.0.0.0:53 \
+  -dns-runtime-bind-proxy-addr 127.0.0.1:26553
+Restart=on-failure
+RestartSec=3
+# NoNewPrivileges IS safe to set here, unlike the hostagent unit above --
+# this process never escalates; every privileged action goes through the
+# hostagent's own audited Unix-socket RPC boundary instead.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/alderpointdns-go
+
+[Install]
+WantedBy=multi-user.target

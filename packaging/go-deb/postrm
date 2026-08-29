@@ -1,0 +1,24 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  purge)
+    rm -rf /etc/alderpointdns-go /var/lib/alderpointdns-go /var/lib/apdns-hostagent /var/log/apdns-hostagent
+    rm -rf /etc/systemd/system/multi-user.target.wants/alderpointdns-go.service \
+      /etc/systemd/system/multi-user.target.wants/apdns-hostagent.service
+    if getent passwd apdns-go-web >/dev/null; then
+      deluser --system apdns-go-web >/dev/null 2>&1 || true
+    fi
+    if getent group apdns-go-web >/dev/null; then
+      delgroup --system apdns-go-web >/dev/null 2>&1 || true
+    fi
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    ;;
+  remove)
+    echo "Alderpoint DNS Go persistent data remains in /etc/alderpointdns-go, /var/lib/alderpointdns-go, and /var/lib/apdns-hostagent." >&2
+    echo "Use apt purge alderpointdns-go only when permanent data removal is intended." >&2
+    ;;
+esac
+
+#DEBHELPER#
+exit 0
