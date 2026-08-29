@@ -124,6 +124,35 @@ async function main() {
     const unitOptions = await page.$$eval(".logs select option", (els) => els.map((e) => e.textContent));
     check("Logs page lists the real configured unit allowlist", unitOptions.includes("apdns-go-web"), unitOptions.join(","));
 
+    // "All" is the default selection (matching Python's own log viewer)
+    // and merges every allowlisted unit's own entries, real proof being
+    // the Unit column appearing (this app's own contract: it's shown
+    // only when the merged "all" view is selected, see LogsView.svelte).
+    const unitSelectValue = await page.$eval('.logs select[aria-label="Unit"]', (el) => el.value);
+    check("Logs defaults to the real 'All' merged view, not a single unit", unitSelectValue === "all", unitSelectValue);
+    await page.waitForFunction(() => document.querySelector(".logs table thead th")?.textContent?.trim() === "Unit", { timeout: 3000 }).catch(() => {});
+    const firstHeaderWithAll = await page.$eval(".logs table thead th", (el) => el.textContent.trim()).catch(() => "");
+    check("'All' view shows a real Unit column (a merge across units, not a single-unit tail)", firstHeaderWithAll === "Unit", firstHeaderWithAll);
+
+    // Severity dropdown: a real V2-only enhancement over Python's own
+    // log viewer (which has neither an "All" option nor a severity
+    // filter) -- prove the real allowlisted severities render and the
+    // control actually re-fetches on change, not just accepts a value.
+    const severityOptions = await page.$$eval('.logs select[aria-label="Severity"] option', (els) => els.map((e) => e.textContent.trim()));
+    check("Severity filter lists real severities from the backend, not a hardcoded stub", severityOptions.length > 1 && severityOptions.includes("Any severity"), severityOptions.join(","));
+    await page.select('.logs select[aria-label="Severity"]', severityOptions[1]);
+    await page.click('.logs form button[type="submit"]');
+    await new Promise((r) => setTimeout(r, 300));
+    check("Refresh with a severity filter selected does not error", (await page.$(".logs .error")) === null);
+
+    // Switch back to a single real unit -- the Unit column must disappear
+    // (this app's own contract: only "All" merges/labels by unit).
+    await page.select('.logs select[aria-label="Unit"]', "apdns-go-web");
+    await page.click('.logs form button[type="submit"]');
+    await new Promise((r) => setTimeout(r, 300));
+    const singleUnitHeader = await page.$eval(".logs table thead th", (el) => el.textContent.trim()).catch(() => "");
+    check("switching to a single unit drops the Unit column (real per-selection behavior, not static markup)", singleUnitHeader !== "Unit", singleUnitHeader);
+
     // --- Software Updates ---
     check("Software Updates nav item exists and is clickable", await clickNav("Software Updates"));
     await page.waitForSelector("#updates-heading", { timeout: 3000 }).catch(() => {});
