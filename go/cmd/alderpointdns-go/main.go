@@ -761,6 +761,15 @@ func runWeb(args []string) {
 	schedulerCtx, cancelScheduler := context.WithCancel(context.Background())
 	go blSvc.RunScheduler(schedulerCtx, time.Duration(cfg.Blocklists.SchedulerTickSeconds)*time.Second)
 
+	// Real dispatch call site #3: the tls_cert_expiring health-check
+	// category, closing one of the five disclosed-but-unwired
+	// notification categories -- see internal/notifications/tlscheck.go.
+	// A daily tick is plenty for a warning window measured in days; the
+	// per-subscription cooldown (internal/notifications' own Dispatch)
+	// still applies on top of it.
+	notificationsSvc.Log = logger
+	go notificationsSvc.RunTLSExpiryScheduler(schedulerCtx, cfg.Web.TLSCertPath, notifications.DefaultTLSExpiryWarnDays, 24*time.Hour)
+
 	httpSrv := &http.Server{Addr: listenAddr, Handler: srv.Routes()}
 
 	if cfg.Web.TLSCertPath != "" && cfg.Web.TLSKeyPath != "" {

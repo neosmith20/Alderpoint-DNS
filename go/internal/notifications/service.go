@@ -33,6 +33,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -77,6 +78,7 @@ type Provider struct {
 type Service struct {
 	DB      *sql.DB
 	Secrets *secretstore.Service
+	Log     *slog.Logger // optional; used only by background schedulers (e.g. RunTLSExpiryScheduler)
 }
 
 func validate(kind, displayName string) error {

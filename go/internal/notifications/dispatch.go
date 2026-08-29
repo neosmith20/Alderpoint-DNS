@@ -36,7 +36,7 @@ var EventCategories = []EventCategory{
 	{"service_unavailable", "named, dnsdist, or the Go web/analytics service unavailable", false, "critical"},
 	{"resolver_all_unavailable", "All upstream resolvers unavailable", false, "critical"},
 	{"replication_delayed", "Replication delayed or failed", false, "warning"},
-	{"tls_cert_expiring", "TLS certificate approaching expiration", false, "warning"},
+	{"tls_cert_expiring", "TLS certificate approaching expiration", true, "warning"},
 }
 
 var validEventCategories = func() map[string]bool {
