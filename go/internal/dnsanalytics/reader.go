@@ -75,18 +75,27 @@ func (r *Reader) Live(ctx context.Context, start, end float64) ([]pyanalytics.Bu
 		OutcomeBlocked, int64(start), int64(end))
 }
 
-// TopDimension supports dimension="domain" only today (the one caller,
-// handleAnalyticsTopDomains, never asks for another) -- across every
-// outcome, matching Python's own "top domains overall" semantics
-// (top-blocked-only is the separate TopDomains method below).
+// dimensionColumns is the allowlist of query_events columns TopDimension
+// may group by -- never interpolate the caller's dimension string
+// directly into SQL. "domain" backs handleAnalyticsTopDomains; "client"
+// backs handleListObservedClients (Observed Clients' "who's actually
+// talking" list). Both were already real callers before this allowlist
+// existed; "client" was silently broken until this fix -- see the fix's
+// own commit message for the real bug this closed (every Observed
+// Clients load returned degraded:true, `unsupported dimension "client"`,
+// on the live Go-native analytics backend, because this method only
+// ever recognized "domain").
+var dimensionColumns = map[string]string{"domain": "domain", "client": "client"}
+
 func (r *Reader) TopDimension(ctx context.Context, dimension string, start, end float64, granularity string, limit int) ([]pyanalytics.DimensionCount, error) {
-	if dimension != "domain" {
+	column, ok := dimensionColumns[dimension]
+	if !ok {
 		return nil, fmt.Errorf("unsupported dimension %q", dimension)
 	}
 	rows, err := r.DB.QueryContext(ctx, `
-		SELECT domain, COUNT(*) AS total FROM query_events
+		SELECT `+column+`, COUNT(*) AS total FROM query_events
 		WHERE ts >= ? AND ts < ?
-		GROUP BY domain ORDER BY total DESC LIMIT ?`,
+		GROUP BY `+column+` ORDER BY total DESC LIMIT ?`,
 		int64(start), int64(end), limit)
 	if err != nil {
 		return nil, err
@@ -99,6 +108,37 @@ func (r *Reader) TopDimension(ctx context.Context, dimension string, start, end 
 			return nil, err
 		}
 		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// ClientAnalytics backs GET /api/analytics/top-clients (the Clients
+// page's Client analytics table) -- every client seen in the window,
+// ranked by query volume, with its own blocked count and last-seen
+// timestamp, matching Python's clients_data() query column-for-column.
+func (r *Reader) ClientAnalytics(ctx context.Context, minutes float64, limit int) ([]pyanalytics.ClientRow, error) {
+	now := float64(time.Now().Unix())
+	start := now - minutes*60
+	rows, err := r.DB.QueryContext(ctx, `
+		SELECT client,
+		       COUNT(*) AS total,
+		       SUM(CASE WHEN outcome=? THEN 1 ELSE 0 END) AS blocked,
+		       MAX(ts) AS last_seen
+		FROM query_events
+		WHERE ts >= ?
+		GROUP BY client ORDER BY total DESC LIMIT ?`,
+		OutcomeBlocked, int64(start), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []pyanalytics.ClientRow
+	for rows.Next() {
+		var c pyanalytics.ClientRow
+		if err := rows.Scan(&c.Client, &c.Total, &c.Blocked, &c.LastSeen); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
 	}
 	return out, rows.Err()
 }

@@ -117,6 +117,20 @@ type DimensionCount struct {
 	Count int    `json:"count"`
 }
 
+// ClientRow is the plain data shape for one ranked row of the Clients
+// page's Client analytics table (see internal/dnsanalytics.Reader's real
+// implementation, and internal/httpapi.AnalyticsReader, which both refer
+// to this type -- kept here, next to Bucket/DimensionCount, for the same
+// reason those live here: a shared shape both the real Go-native reader
+// and this legacy, Python-decommission-era reader can refer to without
+// an import cycle).
+type ClientRow struct {
+	Client   string
+	Total    int64
+	Blocked  int64
+	LastSeen int64
+}
+
 type Reader struct {
 	// mu guards db/openGenDir across currentDB's generation swaps --
 	// every query takes a read lock to snapshot the current *sql.DB
@@ -438,6 +452,20 @@ func FillGaps(rows []Bucket, start, end float64, granularity string) []Bucket {
 // different columns, and this is a one-off export path, not a query hot
 // path worth a typed schema for.
 type ExportRow = map[string]any
+
+// ClientAnalytics exists only so *Reader still satisfies
+// internal/httpapi.AnalyticsReader (some pre-existing tests construct a
+// real *pyanalytics.Reader to exercise other handler behavior). It is
+// never wired into production as the live Analytics reader -- see
+// cmd/alderpointdns-go/main.go, which always uses
+// *dnsanalytics.Reader's real implementation -- and this package's own
+// snapshot schema (time_buckets/dimension_counts) never stored a
+// per-client blocked-count/last-seen breakdown even before Python's
+// decommission, so an honest "not supported" is correct here, not a
+// regression.
+func (r *Reader) ClientAnalytics(ctx context.Context, minutes float64, limit int) ([]ClientRow, error) {
+	return nil, fmt.Errorf("client analytics not supported by the legacy pyanalytics reader (never wired into production; see internal/dnsanalytics.Reader)")
+}
 
 // ExportAll dumps every row of time_buckets and dimension_counts,
 // unfiltered -- the Go-native equivalent of Python's statistics export

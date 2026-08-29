@@ -149,7 +149,7 @@
 <div class="shell" class:app-shell={phase === "app"}>
   {#if phase !== "app"}
     <header>
-      <h1>Alderpoint DNS <span class="badge-preview">Go Migration Preview</span></h1>
+      <h1>Alderpoint DNS</h1>
       <button class="theme-toggle" onclick={toggleTheme} aria-label="Toggle color theme">
         {theme === "light" ? "🌙" : "☀️"}
       </button>
@@ -235,27 +235,45 @@
 </div>
 
 <style>
-  :global(:root) {
-    --bg: #f8fafc; --fg: #0f172a; --border: #e2e8f0; --card-bg: #ffffff;
-    --accent: #2563eb; --accent-fg: #ffffff;
-    --attention-bg: #fef2f2;
-    --badge-ok-bg: #dcfce7; --badge-ok-fg: #166534;
-    --badge-warn-bg: #fef9c3; --badge-warn-fg: #854d0e;
-    --badge-danger-bg: #fecaca; --badge-danger-fg: #991b1b;
-    --nav-hover-bg: #f1f5f9;
-  }
+  /* Alderpoint's real navy/teal theme, ported from the V1.1.1 reference
+     (web/static/app.css's :root token block, read directly) rather than
+     invented -- V1.1.1 only ever shipped this one dark, navy/teal look
+     (no separate light theme), so both the light-mode and dark-mode
+     blocks below resolve to the same real palette; --card-bg/--nav-
+     hover-bg/--accent-fg/--badge-*-bg/--attention-bg are this app's own
+     pre-existing token names, mapped onto the closest real V1.1.1
+     color rather than dropped, so every view that already reads them
+     keeps working unchanged. See frontend/src/lib/ui/index.ts's shared
+     components for the panel/page-header/segment-control/status-badge
+     classes that consume these same tokens. */
+  :global(:root),
   :global(:root[data-theme="dark"]) {
-    --bg: #0f172a; --fg: #e2e8f0; --border: #334155; --card-bg: #1e293b;
-    --accent: #3b82f6; --accent-fg: #ffffff;
+    color-scheme: dark;
+    --bg: #07111f; --bg-soft: #0b1828; --fg: #ecf4fb;
+    --border: #26384e; --border-strong: #36516d;
+    --card-bg: #101f32; --panel-elevated: #15283e;
+    --muted: #9cafc1; --faint: #6d8295;
+    --accent: #20d6b5; --accent-strong: #67e8f9; --accent-fg: #07111f;
+    --success: #36d399; --warning: #fbbf24; --danger: #f87171;
     --attention-bg: #3f1d1d;
-    --badge-ok-bg: #14532d; --badge-ok-fg: #bbf7d0;
-    --badge-warn-bg: #713f12; --badge-warn-fg: #fef08a;
-    --badge-danger-bg: #7f1d1d; --badge-danger-fg: #fecaca;
-    --nav-hover-bg: #273449;
+    --badge-ok-bg: #123b2c; --badge-ok-fg: #7be8c4;
+    --badge-warn-bg: #4a3510; --badge-warn-fg: #fbbf24;
+    --badge-danger-bg: #4a1620; --badge-danger-fg: #f87171;
+    --nav-hover-bg: rgba(255, 255, 255, 0.075);
+    --radius: 12px; --radius-sm: 8px; --shadow: 0 18px 44px rgba(0, 0, 0, 0.22);
   }
-  :global(body) { margin: 0; background: var(--bg); color: var(--fg); font-family: system-ui, sans-serif; }
-  :global(input, select) { padding: 0.4rem; border-radius: 4px; border: 1px solid var(--border); background: var(--card-bg); color: inherit; }
-  :global(button) { padding: 0.45rem 0.9rem; border-radius: 4px; border: none; background: var(--accent); color: var(--accent-fg); cursor: pointer; }
+  :global(body) {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  :global(input, select) { padding: 0.5rem 0.6rem; border-radius: var(--radius-sm); border: 1px solid var(--border-strong); background: #0a1423; color: inherit; }
+  :global(button) {
+    padding: 9px 12px; min-height: 40px; border-radius: var(--radius-sm); border: 1px solid rgba(32, 214, 181, 0.28);
+    background: #0e6f68; color: var(--fg); font-weight: 650; cursor: pointer;
+  }
+  :global(button:hover) { background: #12887f; }
+  :global(button.secondary) { background: #17283c; border-color: var(--border-strong); color: var(--fg); }
+  :global(button.danger) { background: #9f1239; border-color: rgba(251, 113, 133, 0.36); }
   :global(button:disabled) { opacity: 0.6; cursor: progress; }
   :global(.error) { color: #dc2626; }
   :global(.add-form) { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: end; margin: 1rem 0; }
@@ -266,7 +284,6 @@
   .shell.app-shell { height: 100vh; overflow: hidden; }
   header { display: flex; justify-content: space-between; align-items: center; padding: 1rem 0; }
   h1 { font-size: 1.2rem; display: flex; align-items: center; gap: 0.6rem; }
-  .badge-preview { font-size: 0.7rem; font-weight: normal; background: var(--badge-warn-bg); color: var(--badge-warn-fg); padding: 0.15rem 0.5rem; border-radius: 999px; }
   .theme-toggle { background: transparent; font-size: 1.1rem; }
   .centered { display: flex; justify-content: center; padding-top: 3rem; }
   .auth-form { display: flex; flex-direction: column; gap: 0.75rem; width: 22rem; max-width: 90vw; background: var(--card-bg); padding: 1.5rem; border-radius: 8px; border: 1px solid var(--border); }

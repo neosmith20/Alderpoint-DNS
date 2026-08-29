@@ -4,6 +4,7 @@
   import { StaleGuard } from "../staleGuard";
   import { router } from "../router.svelte";
   import { timestampPref } from "../timestamp.svelte";
+  import { queryLogPrefill } from "../queryLogPrefill.svelte";
   import DataGrid from "./DataGrid.svelte";
   import type { Column } from "./datagrid";
 
@@ -77,6 +78,8 @@
   }
 
   onMount(() => {
+    const prefill = queryLogPrefill.takeClient();
+    if (prefill) client = prefill;
     refresh();
   });
 

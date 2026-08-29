@@ -153,6 +153,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/analytics/live-activity", requireAuth(s.handleAnalyticsLiveActivity))
 	mux.HandleFunc("GET /api/analytics/top-domains", requireAuth(s.handleAnalyticsTopDomains))
 	mux.HandleFunc("GET /api/analytics/top-blocked-domains", requireAuth(s.handleAnalyticsTopBlockedDomains))
+	mux.HandleFunc("GET /api/analytics/top-clients", requireAuth(s.handleAnalyticsTopClients))
 	mux.HandleFunc("GET /api/analytics/query-log", requireAuth(s.handleAnalyticsQueryLog))
 	mux.HandleFunc("GET /api/statistics/export", requireAuth(s.handleStatisticsExport))
 	mux.HandleFunc("POST /api/statistics/clear", requireAuth(s.handleStatisticsClear))

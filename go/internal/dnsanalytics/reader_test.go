@@ -29,6 +29,65 @@ func insertEvent(t *testing.T, db *sql.DB, ts int64, domain, outcome string) {
 	}
 }
 
+func insertEventClient(t *testing.T, db *sql.DB, ts int64, client, domain, outcome string) {
+	t.Helper()
+	_, err := db.Exec(`INSERT INTO query_events (ts, domain, qtype, rcode, protocol, client, latency_ms, outcome)
+		VALUES (?, ?, 'A', 'NOERROR', 'udp', ?, 1.5, ?)`, ts, domain, client, outcome)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestReaderTopDimensionClient is a regression test for a real bug: this
+// method used to reject any dimension other than "domain", which meant
+// GET /api/clients/observed (Observed Clients) always came back
+// degraded:true on the live Go-native analytics backend the moment
+// Python was decommissioned, since handleListObservedClients has always
+// called TopDimension(ctx, "client", ...).
+func TestReaderTopDimensionClient(t *testing.T) {
+	db := openTestDB(t)
+	r := &Reader{DB: db}
+	ctx := context.Background()
+	now := time.Now().Unix()
+	insertEventClient(t, db, now, "192.168.1.50", "a.example.com", OutcomeAllowed)
+	insertEventClient(t, db, now, "192.168.1.50", "b.example.com", OutcomeAllowed)
+	insertEventClient(t, db, now, "192.168.1.99", "a.example.com", OutcomeAllowed)
+
+	rows, err := r.TopDimension(ctx, "client", float64(now-60), float64(now+60), "hour", 10)
+	if err != nil {
+		t.Fatalf("TopDimension(\"client\", ...) = err %v, want a real result", err)
+	}
+	if len(rows) != 2 || rows[0].Value != "192.168.1.50" || rows[0].Count != 2 {
+		t.Fatalf("rows = %+v, want 192.168.1.50 first with count 2", rows)
+	}
+}
+
+func TestReaderClientAnalytics(t *testing.T) {
+	db := openTestDB(t)
+	r := &Reader{DB: db}
+	ctx := context.Background()
+	now := time.Now().Unix()
+	insertEventClient(t, db, now, "192.168.1.50", "a.example.com", OutcomeAllowed)
+	insertEventClient(t, db, now, "192.168.1.50", "ads.example.com", OutcomeBlocked)
+	insertEventClient(t, db, now-10, "192.168.1.50", "b.example.com", OutcomeAllowed)
+	insertEventClient(t, db, now, "192.168.1.99", "a.example.com", OutcomeAllowed)
+
+	rows, err := r.ClientAnalytics(ctx, 60, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %+v, want 2 clients", rows)
+	}
+	top := rows[0]
+	if top.Client != "192.168.1.50" || top.Total != 3 || top.Blocked != 1 {
+		t.Fatalf("top row = %+v, want {192.168.1.50 total:3 blocked:1}", top)
+	}
+	if top.LastSeen != now {
+		t.Errorf("LastSeen = %d, want %d (the most recent of its three events)", top.LastSeen, now)
+	}
+}
+
 func TestReaderTimeSeriesBucketsRealRows(t *testing.T) {
 	db := openTestDB(t)
 	r := &Reader{DB: db}

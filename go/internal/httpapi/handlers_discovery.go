@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"time"
@@ -39,20 +40,10 @@ func (s *Server) handleListObservedClients(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	managed := map[string]int64{} // observed address -> owning client id, for every ipv4/ipv6 identifier already stored
-	if s.Clients != nil {
-		list, err := s.Clients.ListClients(r.Context())
-		if err != nil {
-			Err(http.StatusInternalServerError, "internal_error", "failed to load clients").WriteJSON(w)
-			return
-		}
-		for _, c := range list {
-			for _, id := range c.Identifiers {
-				if id.Kind == "ipv4" || id.Kind == "ipv6" {
-					managed[id.Value] = c.ID
-				}
-			}
-		}
+	managed, err := s.managedAddressLookup(r.Context())
+	if err != nil {
+		Err(http.StatusInternalServerError, "internal_error", "failed to load clients").WriteJSON(w)
+		return
 	}
 
 	out := make([]map[string]any, 0, len(rows))
@@ -72,9 +63,9 @@ func (s *Server) handleListObservedClients(w http.ResponseWriter, r *http.Reques
 			continue
 		}
 		entry := map[string]any{"address": d.Value, "query_count": d.Count}
-		if clientID, ok := managed[d.Value]; ok {
+		if m, ok := managed[d.Value]; ok {
 			entry["managed"] = true
-			entry["client_id"] = clientID
+			entry["client_id"] = m.ID
 		} else {
 			entry["managed"] = false
 		}
@@ -86,4 +77,38 @@ func (s *Server) handleListObservedClients(w http.ResponseWriter, r *http.Reques
 		"observed": out, "degraded": degraded, "degraded_reason": reason,
 		"window": map[string]any{"start": start, "end": now, "minutes": minutes},
 	})
+}
+
+// managedAddress is what managedAddressLookup resolves one exact ipv4/
+// ipv6 identifier value to.
+type managedAddress struct {
+	ID   int64
+	Name string
+}
+
+// managedAddressLookup cross-references a real client address against
+// every managed client's own ipv4/ipv6 identifiers (exact-value match
+// only -- CIDR identifiers are deliberately not expanded here, same
+// disclosed scope as Observed Clients has always had). Shared by
+// Observed Clients (handleListObservedClients) and the Clients page's
+// Client analytics table (handleAnalyticsTopClients), so both features
+// resolve "is this address already a named client" the exact same way
+// rather than drifting into two subtly different answers.
+func (s *Server) managedAddressLookup(ctx context.Context) (map[string]managedAddress, error) {
+	out := map[string]managedAddress{}
+	if s.Clients == nil {
+		return out, nil
+	}
+	list, err := s.Clients.ListClients(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range list {
+		for _, id := range c.Identifiers {
+			if id.Kind == "ipv4" || id.Kind == "ipv6" {
+				out[id.Value] = managedAddress{ID: c.ID, Name: c.Name}
+			}
+		}
+	}
+	return out, nil
 }

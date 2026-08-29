@@ -166,6 +166,20 @@ export interface ObservedClient {
   client_id?: number;
 }
 
+// ClientAnalyticsRow: one ranked row of the Clients page's "Client
+// analytics" table (GET /api/analytics/top-clients), matching V1.1.1's
+// clients_data() shape (app/analytics.py, read directly) field-for-field.
+export interface ClientAnalyticsRow {
+  raw_client: string;
+  label: string;
+  value: number;
+  share: number;
+  blocked: number;
+  blocked_percent: number;
+  last_seen: number;
+  last_seen_iso: string;
+}
+
 export interface ClientGroupMember {
   id: number;
   name: string;
@@ -795,6 +809,12 @@ export const api = {
     req<{ status: string }>(`/api/clients/${clientId}/groups/${encodeURIComponent(groupId)}`, { method: "DELETE" }),
   listObservedClients: (signal?: AbortSignal) =>
     req<{ observed: ObservedClient[]; degraded: boolean; degraded_reason?: string }>("/api/clients/observed", undefined, signal),
+  topClients: (minutes: number, signal?: AbortSignal) =>
+    req<{ clients: ClientAnalyticsRow[]; total: number; degraded: boolean; degraded_reason?: string }>(
+      `/api/analytics/top-clients?minutes=${minutes}&limit=500`,
+      undefined,
+      signal,
+    ),
 
   // Strong ClientID: the actual hex value is always generated
   // server-side (internal/clientid's OS-backed CSPRNG) -- the caller

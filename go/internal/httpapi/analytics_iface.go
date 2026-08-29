@@ -25,6 +25,12 @@ type AnalyticsReader interface {
 	TopDimension(ctx context.Context, dimension string, start, end float64, granularity string, limit int) ([]pyanalytics.DimensionCount, error)
 	ExportAll(ctx context.Context) (buckets []pyanalytics.ExportRow, dims []pyanalytics.ExportRow, err error)
 	Health(ctx context.Context) pyanalytics.AnalyticsHealth
+	// ClientAnalytics backs the Clients page's Client analytics table
+	// (GET /api/analytics/top-clients) -- only *dnsanalytics.Reader
+	// implements it today; pyanalytics.Reader is retained solely for its
+	// plain data types now that Python is decommissioned (see CUTOVER.md),
+	// so it is never asked to satisfy this interface in production.
+	ClientAnalytics(ctx context.Context, minutes float64, limit int) ([]pyanalytics.ClientRow, error)
 }
 
 type RawQueryLogReader interface {

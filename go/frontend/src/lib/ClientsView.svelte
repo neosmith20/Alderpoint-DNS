@@ -1,11 +1,26 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, ApiError, type ManagedClient, type ClientGroup, type ClientIdentifier, type PolicyExplainResult, type ObservedClient } from "../api";
+  import {
+    api,
+    ApiError,
+    type ManagedClient,
+    type ClientGroup,
+    type ClientIdentifier,
+    type PolicyExplainResult,
+    type ObservedClient,
+    type ClientAnalyticsRow,
+  } from "../api";
   import { StaleGuard } from "../staleGuard";
   import { router } from "../router.svelte";
+  import { queryLogPrefill } from "../queryLogPrefill.svelte";
   import DataGrid from "./DataGrid.svelte";
   import type { Column } from "./datagrid";
   import PolicyEditor from "./PolicyEditor.svelte";
+  import PageHeader from "./ui/PageHeader.svelte";
+  import Panel from "./ui/Panel.svelte";
+  import SegmentedControl from "./ui/SegmentedControl.svelte";
+  import StatusBadge from "./ui/StatusBadge.svelte";
+  import Modal from "./ui/Modal.svelte";
 
   // Native Go implementation (own schema/CRUD) -- see internal/clients's
   // and internal/policy's doc comments for exactly what's covered:
@@ -29,6 +44,91 @@
   let groups = $state<ClientGroup[]>([]);
   let loadError = $state("");
   const guard = new StaleGuard();
+
+  // Client analytics (V1.1.1's clients_data(), see
+  // internal/dnsanalytics.Reader.ClientAnalytics / GET
+  // /api/analytics/top-clients): every client seen in the selected
+  // window, ranked by query volume, with its own blocked count/percent
+  // and last-seen timestamp.
+  type RangeKey = "1h" | "24h" | "7d" | "30d";
+  const RANGE_MINUTES: Record<RangeKey, number> = { "1h": 60, "24h": 1440, "7d": 7 * 1440, "30d": 30 * 1440 };
+  const RANGE_OPTIONS: { key: RangeKey; label: string }[] = [
+    { key: "1h", label: "Last hour" },
+    { key: "24h", label: "Last 24 hours" },
+    { key: "7d", label: "Last 7 days" },
+    { key: "30d", label: "Last 30 days" },
+  ];
+  let analyticsRange = $state<RangeKey>("24h");
+  let analyticsRows = $state<ClientAnalyticsRow[]>([]);
+  let analyticsDegraded = $state(false);
+  let analyticsDegradedReason = $state("");
+  let analyticsError = $state("");
+  let analyticsLoading = $state(false);
+  const analyticsGuard = new StaleGuard();
+
+  async function loadAnalytics() {
+    const token = analyticsGuard.start();
+    analyticsLoading = true;
+    try {
+      const resp = await api.topClients(RANGE_MINUTES[analyticsRange], router.signal());
+      if (!analyticsGuard.isCurrent(token)) return;
+      analyticsRows = resp.clients;
+      analyticsDegraded = resp.degraded;
+      analyticsDegradedReason = resp.degraded_reason ?? "";
+      analyticsError = "";
+    } catch (err) {
+      if (!analyticsGuard.isCurrent(token)) return;
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      analyticsError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      if (analyticsGuard.isCurrent(token)) analyticsLoading = false;
+    }
+  }
+
+  function setAnalyticsRange(r: RangeKey) {
+    analyticsRange = r;
+    loadAnalytics();
+  }
+
+  function goToQueryLog(rawClient: string) {
+    queryLogPrefill.setClient(rawClient);
+    router.navigate("analytics");
+  }
+
+  function formatLastSeen(unixSeconds: number): string {
+    if (!unixSeconds) return "never";
+    return new Date(unixSeconds * 1000).toLocaleString();
+  }
+
+  const analyticsColumns: Column<ClientAnalyticsRow>[] = [
+    { key: "label", label: "Client", sortValue: (r) => r.label.toLowerCase(), minWidth: 16 },
+    { key: "value", label: "Queries", sortValue: (r) => r.value, minWidth: 10 },
+    { key: "share", label: "Share", sortValue: (r) => r.share, minWidth: 8 },
+    { key: "blocked", label: "Blocked", sortValue: (r) => r.blocked, minWidth: 10 },
+    { key: "last_seen", label: "Last Seen", sortValue: (r) => r.last_seen, minWidth: 14 },
+    { key: "query_log", label: "", minWidth: 10 },
+  ];
+
+  // Managed-client directory search/filter.
+  let clientSearch = $state("");
+  let statusFilter = $state<"all" | "enabled" | "disabled">("all");
+  let filteredManagedClients = $derived(
+    managedClients.filter((c) => {
+      if (statusFilter === "enabled" && !c.enabled) return false;
+      if (statusFilter === "disabled" && c.enabled) return false;
+      if (!clientSearch.trim()) return true;
+      const q = clientSearch.trim().toLowerCase();
+      return (
+        c.name.toLowerCase().includes(q) ||
+        c.description.toLowerCase().includes(q) ||
+        c.identifiers.some((id) => id.value.toLowerCase().includes(q)) ||
+        c.groups.some((g) => g.name.toLowerCase().includes(q))
+      );
+    }),
+  );
+
+  let addClientModalOpen = $state(false);
+  let addGroupModalOpen = $state(false);
 
   let observed = $state<ObservedClient[]>([]);
   let observedDegraded = $state(false);
@@ -137,6 +237,7 @@
   onMount(() => {
     refresh();
     refreshObserved();
+    loadAnalytics();
   });
 
   function startEditClient(c: ManagedClient) {
@@ -225,6 +326,7 @@
       await api.createClient(newClientName, newClientDescription);
       newClientName = "";
       newClientDescription = "";
+      addClientModalOpen = false;
       await refresh();
     } catch (err) {
       addClientError = err instanceof ApiError ? err.message : String(err);
@@ -240,6 +342,7 @@
     try {
       await api.createGroup(newGroupName, newGroupPriority);
       newGroupName = "";
+      addGroupModalOpen = false;
       await refresh();
     } catch (err) {
       addGroupError = err instanceof ApiError ? err.message : String(err);
@@ -363,7 +466,11 @@
 </script>
 
 <section aria-labelledby="clients-heading" class="clients">
-  <h2 id="clients-heading">Clients</h2>
+  <PageHeader
+    title="Clients"
+    headingId="clients-heading"
+    description="Every managed and observed client on this appliance -- query analytics, identity, group/network association, and per-client policy in one place."
+  />
   <p class="scope-note">
     Full managed-client lifecycle (native Go): create, edit, enable/disable, delete, group and
     network association, identifier removal. Strong ClientID (DoH path / DoT+DoQ SNI identity) is
@@ -373,26 +480,50 @@
   </p>
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
 
-  <div class="two-col">
-    <form onsubmit={addClient} class="add-form">
-      <h3>Add managed client</h3>
-      <label>Name <input required bind:value={newClientName} /></label>
-      <label>Description <input bind:value={newClientDescription} /></label>
-      <button type="submit" disabled={addClientBusy}>{addClientBusy ? "Adding…" : "Add client"}</button>
-      {#if addClientError}<p class="error" role="alert">{addClientError}</p>{/if}
-    </form>
+  <Panel heading="Client analytics">
+    {#snippet actions()}
+      <SegmentedControl label="Client analytics time range" options={RANGE_OPTIONS} value={analyticsRange} onChange={setAnalyticsRange} />
+    {/snippet}
+    {#if analyticsError}
+      <p class="error" role="alert">{analyticsError}</p>
+    {:else if analyticsDegraded}
+      <p class="hint">Client analytics degraded{analyticsDegradedReason ? `: ${analyticsDegradedReason}` : ""}.</p>
+    {/if}
+    {#if !analyticsLoading && !analyticsError && analyticsRows.length === 0}
+      <p class="hint">No client activity yet. Detailed rows will appear here once telemetry is collected for this range.</p>
+    {:else}
+      <DataGrid gridId="client-analytics" columns={analyticsColumns} rows={analyticsRows} rowKey={(r) => r.raw_client} emptyMessage="No client activity yet.">
+        {#snippet cell(r, colKey)}
+          {#if colKey === "label"}
+            <span class="mono" title={r.raw_client}>{r.label}</span>
+          {:else if colKey === "value"}
+            {r.value}
+          {:else if colKey === "share"}
+            {r.share.toFixed(1)}%
+          {:else if colKey === "blocked"}
+            {r.blocked} ({r.blocked_percent.toFixed(1)}%)
+          {:else if colKey === "last_seen"}
+            <span class="mono">{formatLastSeen(r.last_seen)}</span>
+          {:else if colKey === "query_log"}
+            <button type="button" class="secondary small" onclick={() => goToQueryLog(r.raw_client)}>Query Log</button>
+          {/if}
+        {/snippet}
+      </DataGrid>
+    {/if}
+  </Panel>
 
-    <form onsubmit={addGroup} class="add-form">
-      <h3>Add group</h3>
-      <label>Name <input required bind:value={newGroupName} /></label>
-      <label>Priority <input type="number" bind:value={newGroupPriority} /></label>
-      <button type="submit" disabled={addGroupBusy}>{addGroupBusy ? "Adding…" : "Add group"}</button>
-      {#if addGroupError}<p class="error" role="alert">{addGroupError}</p>{/if}
-    </form>
-  </div>
-
-  <h3>Managed Clients</h3>
-  <DataGrid gridId="managed-clients" {columns} rows={managedClients} rowKey={(c) => c.id} emptyMessage="No managed clients yet.">
+  <Panel heading="Managed clients">
+    {#snippet actions()}
+      <input class="search-input" placeholder="Search name, description, address, group…" bind:value={clientSearch} aria-label="Search managed clients" />
+      <select bind:value={statusFilter} aria-label="Filter by status">
+        <option value="all">All statuses</option>
+        <option value="enabled">Enabled</option>
+        <option value="disabled">Disabled</option>
+      </select>
+      <button type="button" onclick={() => { addClientError = ""; addClientModalOpen = true; }}>Add client</button>
+      <button type="button" class="secondary" onclick={() => { addGroupError = ""; addGroupModalOpen = true; }} disabled={managedClients.length === 0 && groups.length === 0}>Add group</button>
+    {/snippet}
+  <DataGrid gridId="managed-clients" {columns} rows={filteredManagedClients} rowKey={(c) => c.id} emptyMessage={managedClients.length === 0 ? "No managed clients yet." : "No clients match this search/filter."}>
     {#snippet cell(c, colKey)}
       {#if colKey === "name"}
         {#if editClientId === c.id}
@@ -563,82 +694,110 @@
       {/if}
     {/snippet}
   </DataGrid>
+  </Panel>
 
-  <h3>Groups</h3>
-  {#if groups.length === 0}
-    <p class="hint">No groups yet.</p>
-  {:else}
-    <ul class="group-list">
-      {#each groups as g}
-        <li>
-          <div class="group-row">
-            <span><strong>{g.name}</strong> (priority {g.priority}) -- {g.members.length} member{g.members.length === 1 ? "" : "s"}</span>
-            <button onclick={() => (policyEditorGroupId = policyEditorGroupId === g.group_id ? null : g.group_id)}>Policy</button>
-          </div>
-          {#if policyEditorGroupId === g.group_id}
-            <div class="inline-policy">
-              <PolicyEditor layer={g.policy} onSave={(l) => api.putGroupPolicy(g.group_id, l).then(refresh)} />
-            </div>
-          {/if}
-        </li>
-      {/each}
-    </ul>
-  {/if}
-
-  <h3>Observed Clients</h3>
-  <p class="scope-note">
-    Addresses that have actually sent DNS queries recently (from real traffic data, not a discovery
-    worker -- no history, no hostname/vendor detection). Loopback and unspecified addresses are never
-    shown as a host. Use "Manage Client" to turn an observed address into a managed client.
-  </p>
-  {#if observedLoadError}<p class="error" role="alert">{observedLoadError}</p>{/if}
-  {#if observedDegraded}<p class="hint">Observed traffic data degraded{observedDegradedReason ? `: ${observedDegradedReason}` : ""}.</p>{/if}
-  {#if observed.length === 0 && !observedLoadError}
-    <p class="hint">No recent traffic observed.</p>
-  {:else}
-    <ul class="observed-list">
-      {#each observed as o (o.address)}
-        <li class="observed-row">
-          <code>{o.address}</code>
-          <span class="hint">{o.query_count} quer{o.query_count === 1 ? "y" : "ies"}</span>
-          {#if o.managed}
-            <span class="chip">already managed</span>
-          {:else}
-            <button type="button" onclick={() => startManage(o.address)}>Manage Client</button>
-          {/if}
-        </li>
-        {#if manageAddress === o.address}
+  <Panel heading="Groups">
+    {#if groups.length === 0}
+      <p class="hint">No groups yet.</p>
+    {:else}
+      <ul class="group-list">
+        {#each groups as g}
           <li>
-            <form onsubmit={submitManage} class="inline-form">
-              <label><input type="radio" bind:group={manageMode} value="new" /> New client named <input bind:value={manageNewName} aria-label="New client name" /></label>
-              <label>
-                <input type="radio" bind:group={manageMode} value="existing" disabled={managedClients.length === 0} />
-                Attach to existing
-                <select bind:value={manageExistingClientId} disabled={managedClients.length === 0}>
-                  {#each managedClients as mc}
-                    <option value={mc.id}>{mc.name}</option>
-                  {/each}
-                </select>
-              </label>
-              <button type="submit" disabled={manageBusy}>{manageBusy ? "Saving…" : "Save"}</button>
-              <button type="button" onclick={() => (manageAddress = null)}>Cancel</button>
-              {#if manageError}<p class="error" role="alert">{manageError}</p>{/if}
-            </form>
+            <div class="group-row">
+              <span><strong>{g.name}</strong> (priority {g.priority}) -- {g.members.length} member{g.members.length === 1 ? "" : "s"}</span>
+              <button onclick={() => (policyEditorGroupId = policyEditorGroupId === g.group_id ? null : g.group_id)}>Policy</button>
+            </div>
+            {#if policyEditorGroupId === g.group_id}
+              <div class="inline-policy">
+                <PolicyEditor layer={g.policy} onSave={(l) => api.putGroupPolicy(g.group_id, l).then(refresh)} />
+              </div>
+            {/if}
           </li>
-        {/if}
-      {/each}
-    </ul>
-  {/if}
+        {/each}
+      </ul>
+    {/if}
+  </Panel>
+
+  <Panel heading="Observed Clients">
+    <p class="scope-note">
+      Addresses that have actually sent DNS queries recently (from real traffic data, not a discovery
+      worker -- no history, no hostname/vendor detection). Loopback and unspecified addresses are never
+      shown as a host. Use "Manage Client" to turn an observed address into a managed client.
+    </p>
+    {#if observedLoadError}<p class="error" role="alert">{observedLoadError}</p>{/if}
+    {#if observedDegraded}<p class="hint">Observed traffic data degraded{observedDegradedReason ? `: ${observedDegradedReason}` : ""}.</p>{/if}
+    {#if observed.length === 0 && !observedLoadError}
+      <p class="hint">No recent traffic observed.</p>
+    {:else}
+      <ul class="observed-list">
+        {#each observed as o (o.address)}
+          <li class="observed-row">
+            <code>{o.address}</code>
+            <span class="hint">{o.query_count} quer{o.query_count === 1 ? "y" : "ies"}</span>
+            {#if o.managed}
+              <StatusBadge label="Managed" tone="healthy" />
+            {:else}
+              <StatusBadge label="Unmanaged" tone="neutral" />
+              <button type="button" onclick={() => startManage(o.address)}>Manage Client</button>
+            {/if}
+          </li>
+          {#if manageAddress === o.address}
+            <li>
+              <form onsubmit={submitManage} class="inline-form">
+                <label><input type="radio" bind:group={manageMode} value="new" /> New client named <input bind:value={manageNewName} aria-label="New client name" /></label>
+                <label>
+                  <input type="radio" bind:group={manageMode} value="existing" disabled={managedClients.length === 0} />
+                  Attach to existing
+                  <select bind:value={manageExistingClientId} disabled={managedClients.length === 0}>
+                    {#each managedClients as mc}
+                      <option value={mc.id}>{mc.name}</option>
+                    {/each}
+                  </select>
+                </label>
+                <button type="submit" disabled={manageBusy}>{manageBusy ? "Saving…" : "Save"}</button>
+                <button type="button" onclick={() => (manageAddress = null)}>Cancel</button>
+                {#if manageError}<p class="error" role="alert">{manageError}</p>{/if}
+              </form>
+            </li>
+          {/if}
+        {/each}
+      </ul>
+    {/if}
+  </Panel>
 </section>
+
+{#if addClientModalOpen}
+  <Modal title="Add managed client" onClose={() => (addClientModalOpen = false)}>
+    <form onsubmit={addClient} class="modal-form">
+      <label>Name <input required bind:value={newClientName} /></label>
+      <label>Description <input bind:value={newClientDescription} /></label>
+      <div class="form-actions">
+        <button type="submit" disabled={addClientBusy}>{addClientBusy ? "Adding…" : "Add client"}</button>
+        <button type="button" class="secondary" onclick={() => (addClientModalOpen = false)}>Cancel</button>
+      </div>
+      {#if addClientError}<p class="error" role="alert">{addClientError}</p>{/if}
+    </form>
+  </Modal>
+{/if}
+
+{#if addGroupModalOpen}
+  <Modal title="Add group" onClose={() => (addGroupModalOpen = false)}>
+    <form onsubmit={addGroup} class="modal-form">
+      <label>Name <input required bind:value={newGroupName} /></label>
+      <label>Priority <input type="number" bind:value={newGroupPriority} /></label>
+      <div class="form-actions">
+        <button type="submit" disabled={addGroupBusy}>{addGroupBusy ? "Adding…" : "Add group"}</button>
+        <button type="button" class="secondary" onclick={() => (addGroupModalOpen = false)}>Cancel</button>
+      </div>
+      {#if addGroupError}<p class="error" role="alert">{addGroupError}</p>{/if}
+    </form>
+  </Modal>
+{/if}
 
 <style>
   .clients { display: flex; flex-direction: column; gap: 1rem; }
   .scope-note { font-size: 0.85rem; opacity: 0.75; max-width: 44rem; }
   .hint { font-size: 0.85rem; opacity: 0.75; }
-  .two-col { display: flex; flex-wrap: wrap; gap: 1rem; }
-  .add-form { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); display: flex; flex-direction: column; gap: 0.5rem; min-width: 16rem; flex: 1; }
-  .add-form h3 { margin: 0; }
-  .add-form label { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.85rem; }
   .chips { display: flex; flex-wrap: wrap; gap: 0.3rem; }
   .chip { background: var(--nav-hover-bg); padding: 0.1rem 0.5rem; border-radius: 999px; font-size: 0.78rem; display: inline-flex; align-items: center; gap: 0.3rem; }
   .chip-x { background: none; border: none; cursor: pointer; padding: 0; font-size: 0.9rem; line-height: 1; opacity: 0.7; }
@@ -675,4 +834,11 @@
   .edit-name-form { flex-direction: column; align-items: stretch; }
   .observed-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
   .observed-row { display: flex; align-items: center; gap: 0.6rem; }
+
+  .search-input { min-width: 16rem; flex: 1 1 16rem; }
+  button.secondary.small,
+  button.small { min-height: auto; padding: 0.3rem 0.6rem; font-size: 0.8rem; }
+  .modal-form { display: flex; flex-direction: column; gap: 0.75rem; }
+  .modal-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; }
+  .form-actions { display: flex; gap: 0.5rem; }
 </style>

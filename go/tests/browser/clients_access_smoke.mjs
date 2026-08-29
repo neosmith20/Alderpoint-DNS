@@ -45,6 +45,21 @@ async function clickNavItem(page, predicate) {
   return false;
 }
 
+// Add client/Add group on the Clients page open a real modal (no more
+// permanent on-page forms, see ClientsView.svelte's Modal-based
+// rebuild) -- click the toolbar button by its exact text, then fill and
+// submit the form inside `.modal-form`.
+async function openModalByButtonText(page, text) {
+  for (const btn of await page.$$("button")) {
+    if ((await btn.evaluate((el) => el.textContent?.trim())) === text) {
+      await btn.click();
+      await page.waitForSelector(".modal-form", { timeout: 2000 });
+      return true;
+    }
+  }
+  return false;
+}
+
 async function clickActionButton(page, label) {
   for (const btn of await page.$$(".data-grid tbody .actions button")) {
     if ((await btn.evaluate((el) => el.textContent?.trim())) === label) {
@@ -100,25 +115,26 @@ async function main() {
     const clientsScopeNote = await page.$eval(".clients .scope-note", (el) => el.textContent).catch(() => "");
     check("Clients page discloses full lifecycle coverage in its own scope note", /create, edit, enable\/disable, delete/.test(clientsScopeNote), clientsScopeNote);
 
-    // Create a group.
-    const groupForm = (await page.$$(".add-form"))[1];
-    await (await groupForm.$("input[required]")).type("Kids");
-    await Promise.all([
-      page.waitForFunction(() => document.querySelector(".group-list") !== null, { timeout: 3000 }),
-      groupForm.$eval("button[type=submit]", (el) => el.click()),
-    ]);
-    const groupListText = await page.$eval(".group-list", (el) => el.textContent);
-    check("creating a group adds a real entry", groupListText.includes("Kids"), groupListText);
-
-    // Create a managed client.
-    const clientForm = (await page.$$(".add-form"))[0];
-    await (await clientForm.$("input[required]")).type("Test Client");
+    // Create a group via its modal (Add group is disabled until at least
+    // one client or group exists -- this fixture has neither yet, so
+    // create the client first).
+    check("Add client button opens a real modal, not a permanent on-page form", await openModalByButtonText(page, "Add client"));
+    await page.type(".modal-form input[required]", "Test Client");
     await Promise.all([
       page.waitForFunction(() => document.querySelectorAll(".data-grid tbody tr").length > 0, { timeout: 3000 }),
-      clientForm.$eval("button[type=submit]", (el) => el.click()),
+      page.click(".modal-form button[type=submit]"),
     ]);
     let clientRows = await page.$$eval(".data-grid tbody tr", (rows) => rows.length);
     check("creating a managed client adds a real row", clientRows === 1, `rows=${clientRows}`);
+
+    check("Add group button opens a real modal", await openModalByButtonText(page, "Add group"));
+    await page.type(".modal-form input[required]", "Kids");
+    await Promise.all([
+      page.waitForFunction(() => document.querySelector(".group-list") !== null, { timeout: 3000 }),
+      page.click(".modal-form button[type=submit]"),
+    ]);
+    const groupListText = await page.$eval(".group-list", (el) => el.textContent);
+    check("creating a group adds a real entry", groupListText.includes("Kids"), groupListText);
 
     // Add an IP identifier: invalid, then valid.
     check("Add IP identifier button exists", await clickActionButton(page, "Add IP identifier"));
@@ -244,8 +260,12 @@ async function main() {
     // Observed Clients section: honest empty state on a fresh instance
     // with no query traffic (no Analytics configured here at all).
     const observedText = await page.evaluate(() => {
-      const h3 = [...document.querySelectorAll("h3")].find((e) => e.textContent.trim() === "Observed Clients");
-      return h3 ? h3.parentElement.textContent : null;
+      // Observed Clients is now a shared Panel component (ClientsView's
+      // design-system rebuild), whose heading renders as <h2>, not the
+      // page's old bespoke <h3> -- check both so this survives either
+      // heading level.
+      const heading = [...document.querySelectorAll("h2, h3")].find((e) => e.textContent.trim() === "Observed Clients");
+      return heading ? (heading.closest(".panel") ?? heading.parentElement)?.textContent : null;
     });
     check("Observed Clients section renders", observedText !== null, String(observedText));
     check("Observed Clients shows an honest degraded/empty state, not fake data", /No recent traffic observed|degraded/.test(observedText ?? ""), observedText);
@@ -326,11 +346,11 @@ async function main() {
     // has a real, still-existing managed client to find.
     check("Clients nav item exists and is clickable (for a fresh dashboard-check client)", await clickNavItem(page, (t) => t === "Clients"));
     await page.waitForSelector("#clients-heading", { timeout: 3000 }).catch(() => {});
-    const dashClientForm = (await page.$$(".add-form"))[0];
-    await (await dashClientForm.$("input[required]")).type("Dashboard Mini Client");
+    check("Add client button opens a real modal (second visit)", await openModalByButtonText(page, "Add client"));
+    await page.type(".modal-form input[required]", "Dashboard Mini Client");
     await Promise.all([
       page.waitForFunction(() => document.querySelectorAll(".data-grid tbody tr").length > 0, { timeout: 3000 }),
-      dashClientForm.$eval("button[type=submit]", (el) => el.click()),
+      page.click(".modal-form button[type=submit]"),
     ]);
     check("creating a second managed client for the dashboard check adds a real row", (await page.$$eval(".data-grid tbody tr", (rows) => rows.length)) > 0);
 

@@ -223,6 +223,69 @@ func (s *Server) handleAnalyticsTopDomains(w http.ResponseWriter, r *http.Reques
 	WriteJSON(w, http.StatusOK, resp)
 }
 
+// handleAnalyticsTopClients backs the Clients page's Client analytics
+// table (V1.1.1's app/analytics.py `clients_data()`, read directly):
+// every client seen in the window ranked by query volume, each with its
+// own blocked count/percent and last-seen timestamp. "label" is the
+// owning managed client's name when the raw address matches one of its
+// exact ipv4/ipv6 identifiers (see managedAddressLookup), else the raw
+// address itself -- the same "resolve to a friendly name, fall back to
+// the raw value" contract Python's own resolve_client_name() has,
+// narrowed (disclosed, not hidden) to exact-address matching only, no
+// CIDR expansion and no Local DNS alias lookup.
+func (s *Server) handleAnalyticsTopClients(w http.ResponseWriter, r *http.Request) {
+	minutes := floatQuery(r, "minutes", 1440, 1, 31*24*60)
+	limit := intQuery(r, "limit", 200, 1, 2000)
+
+	if s.Analytics == nil {
+		WriteJSON(w, http.StatusOK, map[string]any{"clients": []any{}, "total": 0, "degraded": true, "degraded_reason": analyticsUnavailable})
+		return
+	}
+	rows, err := s.Analytics.ClientAnalytics(r.Context(), minutes, limit)
+	if err != nil {
+		WriteJSON(w, http.StatusOK, map[string]any{"clients": []any{}, "total": 0, "degraded": true, "degraded_reason": err.Error()})
+		return
+	}
+	managed, err := s.managedAddressLookup(r.Context())
+	if err != nil {
+		Err(http.StatusInternalServerError, "internal_error", "failed to load clients").WriteJSON(w)
+		return
+	}
+	var total int64
+	for _, row := range rows {
+		total += row.Total
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		label := row.Client
+		if m, ok := managed[row.Client]; ok && m.Name != "" {
+			label = m.Name
+		}
+		var share, blockedPercent float64
+		if total > 0 {
+			share = round1(float64(row.Total) / float64(total) * 100)
+		}
+		if row.Total > 0 {
+			blockedPercent = round1(float64(row.Blocked) / float64(row.Total) * 100)
+		}
+		out = append(out, map[string]any{
+			"raw_client":      row.Client,
+			"label":           label,
+			"value":           row.Total,
+			"share":           share,
+			"blocked":         row.Blocked,
+			"blocked_percent": blockedPercent,
+			"last_seen":       row.LastSeen,
+			"last_seen_iso":   time.Unix(row.LastSeen, 0).UTC().Format(time.RFC3339),
+		})
+	}
+	degraded, reason := writerDegraded(s.Analytics.Health(r.Context()))
+	WriteJSON(w, http.StatusOK, map[string]any{
+		"clients": out, "total": total, "degraded": degraded, "degraded_reason": reason,
+		"window": map[string]any{"minutes": minutes},
+	})
+}
+
 // rawQueryLogUnavailable mirrors analyticsUnavailable for the second,
 // narrower compatibility boundary (see internal/rawquerylog).
 const rawQueryLogUnavailable = "raw query-log reader not configured (no -query-log-dir path given at startup)"
