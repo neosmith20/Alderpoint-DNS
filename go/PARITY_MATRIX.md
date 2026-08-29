@@ -1,5 +1,24 @@
 # Alderpoint DNS V2 — Go/Svelte Route-by-Route Parity Matrix
 
+**2026-08-29 durability pass, DNS Runtime dnstap crash fix** (full account in
+`AGENT_PROGRESS.md`'s own entry for this date): verifying the P0/P1 fixes below
+survive a clean rebuild/recreate found a real, separate, deterministic bug in **DNS
+Runtime**/**Dashboard analytics**: `newFrameStreamUnixLogger`'s `outputQueueSize`
+option (added earlier as a mitigation for a different, real problem -- the dnstap
+connection going silently idle) is fatal on the installed dnsdist 2.1.1, crashing the
+whole process on every promote once dnstap is enabled -- not a slow-parse or timeout
+problem, confirmed by bisecting directly against the real dnsdist binary. Fixed by
+reverting to the `reopenInterval`-only logger options (`internal/dnscompile`); the
+original idle-connection problem remains real and undocumented as unresolved. Also
+added: mid-health-check crash detection/restart in `internal/hostagentd`'s
+`waitHealthy` (real robustness, independent of this specific trigger), and a new
+committed redeploy path, `scripts/v2/redeploy-go-live.sh`, which itself caught 2
+latent bugs also present in `cutover.sh`'s own already-executed container-creation
+block (a `podman run --rm`/`commit` incompatibility, and a container GID typo that
+broke the dnstap socket's `bind()`). Live-verified: a real non-dry-run promote
+against the production blocklist-heavy config now succeeds (`promoted:true`) in
+12.4s, first success since dnstap was ever enabled against it.
+
 **2026-08-29 P0/P1 live-defect fixes** (owner priority interruption, commit `39e455f`; full account
 in `AGENT_PROGRESS.md`'s own entry for this date): seven live defects found by using the appliance
 were fixed and deployed, superseding stale claims elsewhere in this file for the affected rows --
