@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, ApiError, type ImportJob, type DNSRuntimeApplyResult } from "../api";
+  import { api, ApiError, type ImportJob, type DNSRuntimeApplyResult, type LegacyImportReport, type LegacyImportManifest } from "../api";
   import DnsRuntimeBadge from "./DnsRuntimeBadge.svelte";
 
   // Import. Real staged preview -> selection -> apply -> rollback/report
@@ -87,6 +87,49 @@
     job = null;
     sourceText = "";
     skipped = new Set();
+  }
+
+  // Legacy V1.1.1 appliance backup import -- a real .tar.gz/.tar.gz.enc
+  // archive (app/backup.py's create_backup output), reusing the same
+  // audited, bounded internal/pymigrate table set already used for the
+  // one-time cutover import. A different shape from the job-based
+  // workflow above (Report, not a plan/apply job row), so it gets its
+  // own card rather than a fourth sourceType.
+  let legacyFile: File | null = $state(null);
+  let legacyFileInput: HTMLInputElement | undefined = $state();
+  let legacyPassword = $state("");
+  let legacyBusy = $state(false);
+  let legacyError = $state("");
+  let legacyReport = $state<LegacyImportReport | null>(null);
+  let legacyManifest = $state<LegacyImportManifest | null>(null);
+
+  function onLegacyFileChange() {
+    legacyFile = legacyFileInput?.files?.[0] ?? null;
+    legacyReport = null;
+    legacyError = "";
+  }
+
+  async function runLegacyImport(dryRun: boolean) {
+    if (!legacyFile) return;
+    legacyBusy = true;
+    legacyError = "";
+    try {
+      const resp = await api.importLegacyAppliance(legacyFile, legacyPassword, dryRun);
+      legacyReport = resp.report;
+      legacyManifest = resp.manifest;
+    } catch (err) {
+      legacyError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      legacyBusy = false;
+    }
+  }
+
+  function legacyTotals(): { imported: number; skipped: number; rejected: number } {
+    if (!legacyReport) return { imported: 0, skipped: 0, rejected: 0 };
+    return Object.values(legacyReport.tables).reduce(
+      (acc, t) => ({ imported: acc.imported + t.imported, skipped: acc.skipped + t.skipped, rejected: acc.rejected + t.rejected }),
+      { imported: 0, skipped: 0, rejected: 0 },
+    );
   }
 
   // A previewed-but-not-yet-applied job is a real, server-persisted row
@@ -211,6 +254,69 @@
       {/if}
     </div>
   {/if}
+
+  <h3 id="legacy-import-heading">Import a V1.1.1 appliance backup</h3>
+  <p class="scope-note">
+    Upload a real V1.1.1 backup archive (<code>alderpointdns-backup-*.tar.gz</code> or
+    <code>.tar.gz.enc</code>) to import its Local DNS records, upstream profiles, DNS transport
+    settings, the global policy layer, and blocklist subscriptions -- the same bounded, audited
+    table set used for a live cutover, applied here to an uploaded file instead. A password is
+    required only for an encrypted (<code>.enc</code>) archive.
+  </p>
+  <div class="card">
+    <label>
+      Backup file
+      <input type="file" bind:this={legacyFileInput} onchange={onLegacyFileChange} aria-label="Legacy V1.1.1 backup file" accept=".tar.gz,.enc" />
+    </label>
+    <label>
+      Password (only for a <code>.tar.gz.enc</code> archive)
+      <input type="password" bind:value={legacyPassword} autocomplete="off" />
+    </label>
+    <div class="actions">
+      <button onclick={() => runLegacyImport(true)} disabled={!legacyFile || legacyBusy}>
+        {legacyBusy ? "Working…" : "Preview (dry run)"}
+      </button>
+      <button onclick={() => runLegacyImport(false)} disabled={!legacyFile || legacyBusy}>
+        {legacyBusy ? "Working…" : "Import for real"}
+      </button>
+    </div>
+    {#if legacyError}<p class="error" role="alert">{legacyError}</p>{/if}
+    {#if legacyReport}
+      {@const totals = legacyTotals()}
+      <p class={legacyReport.dry_run ? "" : "success"} role="status">
+        {legacyReport.dry_run ? "Dry run -- nothing written." : "Imported for real."}
+        <strong>{totals.imported}</strong> {legacyReport.dry_run ? "would import" : "imported"},
+        <strong>{totals.skipped}</strong> skipped, <strong>{totals.rejected}</strong> rejected.
+        {#if legacyReport.snapshot_filename}
+          A pre-migration safety backup was saved as "{legacyReport.snapshot_filename}".
+        {/if}
+      </p>
+      {#if legacyManifest}
+        <p class="scope-note">
+          Source: appliance {legacyManifest.source_node_id || "(unknown)"}, app version
+          {legacyManifest.alderpointdns_app_version || "unknown"}, created {legacyManifest.created_at || "unknown"}.
+        </p>
+      {/if}
+      <table class="plan-table">
+        <thead><tr><th>Table</th><th>Source rows</th><th>Imported</th><th>Skipped</th><th>Rejected</th></tr></thead>
+        <tbody>
+          {#each Object.entries(legacyReport.tables) as [table, summary] (table)}
+            <tr>
+              <td>{table}</td>
+              <td>{summary.source_count}</td>
+              <td>{summary.imported}</td>
+              <td>{summary.skipped}</td>
+              <td>{summary.rejected}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+      <details>
+        <summary>Not migrated (disclosed, not silently skipped)</summary>
+        <p class="scope-note">{legacyReport.not_migrated.join(", ")}</p>
+      </details>
+    {/if}
+  </div>
 </section>
 
 <style>

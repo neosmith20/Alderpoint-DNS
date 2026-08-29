@@ -293,6 +293,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/import/jobs/{id}", requireAuth(s.handleGetImportJob))
 	mux.HandleFunc("POST /api/import/jobs/{id}/apply", requireAuth(s.handleApplyImportJob))
 	mux.HandleFunc("POST /api/import/jobs/{id}/rollback", requireAuth(s.handleRollbackImportJob))
+	mux.HandleFunc("POST /api/import/legacy-appliance", requireAuth(s.handleImportLegacyAppliance))
 
 	mux.HandleFunc("GET /api/cache/status", requireAuth(s.handleCacheStatus))
 	mux.HandleFunc("POST /api/cache/flush", requireAuth(s.handleCacheFlush))

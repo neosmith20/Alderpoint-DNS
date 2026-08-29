@@ -577,6 +577,38 @@ export interface ImportJob {
   applied_at?: string;
 }
 
+export interface LegacyImportRowResult {
+  table: string;
+  key: string;
+  action: "would_import" | "imported" | "skipped_duplicate" | "skipped_unsupported" | "rejected";
+  detail?: string;
+}
+
+export interface LegacyImportTableSummary {
+  source_count: number;
+  imported: number;
+  skipped: number;
+  rejected: number;
+}
+
+export interface LegacyImportReport {
+  dry_run: boolean;
+  started_at: string;
+  finished_at: string;
+  snapshot_filename?: string;
+  tables: Record<string, LegacyImportTableSummary>;
+  results: LegacyImportRowResult[];
+  not_migrated: string[];
+}
+
+export interface LegacyImportManifest {
+  alderpointdns_app_version: string;
+  database_schema_version: string;
+  created_at: string;
+  source_node_id: string;
+  included_components: string[];
+}
+
 export interface SMTPConfig {
   host: string;
   port: number;
@@ -837,6 +869,24 @@ export const api = {
     }),
   rollbackImportJob: (id: number) =>
     req<{ status: string; safety_backup: string; dns_runtime?: DNSRuntimeApplyResult }>(`/api/import/jobs/${id}/rollback`, { method: "POST" }),
+
+  importLegacyAppliance: async (
+    file: File,
+    password: string,
+    dryRun: boolean,
+  ): Promise<{ report: LegacyImportReport; manifest: LegacyImportManifest }> => {
+    const headers: Record<string, string> = { "X-CSRF-Token": csrfToken };
+    if (password) headers["X-Legacy-Backup-Password"] = password;
+    const res = await fetch(
+      `/api/import/legacy-appliance?filename=${encodeURIComponent(file.name)}&dry_run=${dryRun}`,
+      { method: "POST", headers, credentials: "include", body: file },
+    );
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new ApiError(res.status, body.error ?? "unknown_error", body.detail ?? res.statusText);
+    }
+    return res.json();
+  },
 
   cacheStatus: (signal?: AbortSignal) => req<CacheStatusResponse>("/api/cache/status", undefined, signal),
   cacheFlush: (layer: "bind" | "dnsdist", opts?: { context?: string; scope?: string; target?: string }) =>
