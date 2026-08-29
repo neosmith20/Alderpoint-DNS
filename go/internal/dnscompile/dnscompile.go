@@ -691,18 +691,25 @@ func CompileDnsdist(in Input) (string, error) {
 		// that failure mode -- a real analytics gap of at most this
 		// many seconds, never a DNS-answering issue (this option only
 		// affects the logger, not the query hot path).
-		// outputQueueSize/queueNotifyThreshold/flushTimeout: found live
-		// -- with only default queue sizing, dnsdist's fstrm connection
-		// would go silently idle (stayed connected, stopped delivering
-		// any frames, no error on either side) within roughly a minute
-		// of real, modest-volume traffic, and reopenInterval=30 alone
-		// did not recover it. A generously large explicit queue plus a
-		// bounded flush timeout is the applicable mitigation for a
-		// queue/backpressure stall (as opposed to a real disconnect,
-		// which reopenInterval already covers) -- still just a real,
-		// disclosed mitigation for an unresolved dnsdist-side stall,
-		// never a DNS-answering concern (this only affects the logger).
-		w("apdnsDnstapLogger = newFrameStreamUnixLogger(%s, {reopenInterval=30, outputQueueSize=100000, queueNotifyThreshold=1, flushTimeout=1})", luaString(in.DnstapSocketPath))
+		// outputQueueSize/queueNotifyThreshold/flushTimeout: a PRIOR fix
+		// for the fstrm-goes-silently-idle problem above added these
+		// three options to the logger's options table, intending a
+		// generously large explicit queue as a mitigation. REVERTED here
+		// -- a durability pass proved live and reproduced deterministically
+		// (bisected directly against the real dnsdist binary, isolated
+		// from this whole pipeline) that outputQueueSize on its own makes
+		// dnsdist 2.1.1's newFrameStreamUnixLogger throw a FATAL, uncaught
+		// C++ exception on every single call ("FrameStreamLogger: setting
+		// outputQueueSize failed: 1"), crashing the entire dnsdist process
+		// before it ever binds the real DNS listeners at all -- not a
+		// logger-only degradation, a total DNS outage. This is strictly
+		// worse than the silent-idle stall it was meant to fix (which
+		// only ever degraded analytics, never DNS answering), so it is
+		// removed rather than tuned; reopenInterval alone (proven safe:
+		// this is what every currently-live, currently-answering
+		// deployment actually runs) remains the applicable mitigation
+		// until a dnsdist-version-compatible queue-sizing option is found.
+		w("apdnsDnstapLogger = newFrameStreamUnixLogger(%s, {reopenInterval=30})", luaString(in.DnstapSocketPath))
 		// Wrapped in pcall: found live and still unexplained -- the
 		// fstrm connection to the receiver goes silently idle (stays
 		// connected, stops delivering frames, no error logged on
