@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -80,15 +81,127 @@ func (c *DNSRuntimeConfig) applyDefaults() {
 	}
 }
 
+// trackedProcess is a real named/dnsdist OS process this dnsRuntimeState
+// is responsible for -- either one it started itself (cmd != nil, so
+// stopping it can Wait() for a clean exit) or one it ADOPTED from a PID
+// file left by a PRIOR generation of this same hostagent process, after
+// a restart (cmd == nil, pid only).
+//
+// This adoption path is not optional polish: a real, previously-
+// undisclosed bug (found live, 2026-08-29, during a routine web
+// container redeploy that triggered a burst of blocklist-refresh
+// auto-promotes) -- without it, the very first dns_runtime.promote
+// after ANY hostagent restart found bindCmd/dnsdistCmd nil (a fresh
+// dnsRuntimeState has no memory of what the PREVIOUS hostagent
+// generation started) and unconditionally spawned a brand-new named
+// process, permanently orphaning the one already live and answering
+// real queries -- two named processes bound to the same ports,
+// confirmed live via `ss -ltnp`. dnsdist's own always-restart-on-
+// promote design (see reloadDnsdist) has the identical exposure. PID
+// files under cfg.StagingDir close this gap: whichever hostagent
+// generation is currently running always knows the real PID of
+// whatever it (or a predecessor) left running, so "is it already
+// alive" is answered by checking the real OS process, never assumed
+// false just because this particular Go struct is new.
+type trackedProcess struct {
+	cmd *exec.Cmd // nil for an adopted process this state didn't start
+	pid int
+}
+
+func (p *trackedProcess) alive() bool {
+	return p != nil && p.pid != 0 && processAlive(p.pid)
+}
+
+// stop terminates the tracked process, waiting for a clean exit via
+// cmd.Wait() when this state started it itself, or via a raw signal +
+// poll loop when it was only adopted (no Cmd to Wait() on -- adopting a
+// process never fakes ownership of its exit-code plumbing).
+func (p *trackedProcess) stop() {
+	if p == nil || p.pid == 0 {
+		return
+	}
+	if p.cmd != nil && p.cmd.Process != nil {
+		stopCmd(p.cmd)
+		return
+	}
+	syscall.Kill(p.pid, syscall.SIGTERM)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !processAlive(p.pid) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	syscall.Kill(p.pid, syscall.SIGKILL)
+}
+
 type dnsRuntimeState struct {
 	mu            sync.Mutex
 	cfg           DNSRuntimeConfig
-	bindCmd       *exec.Cmd
-	dnsdistCmd    *exec.Cmd
+	bind          *trackedProcess
+	dnsdist       *trackedProcess
 	rndcKeySecret string // generated once, kept only in this process's memory
 	prevNamedConf string
 	prevDnsdist   string
 	havePrev      bool
+}
+
+func bindPIDFile(cfg DNSRuntimeConfig) string    { return filepath.Join(cfg.StagingDir, "named.pid") }
+func dnsdistPIDFile(cfg DNSRuntimeConfig) string { return filepath.Join(cfg.StagingDir, "dnsdist.pid") }
+
+// adoptFromPIDFile reads a real PID left by a prior generation of this
+// same hostagent process and adopts it if (and only if) that PID is
+// still actually alive -- a stale/missing PID file correctly yields
+// nil, which reloadBind/reloadDnsdist's "not tracked, start fresh"
+// branch already handles safely (the normal cold-start case).
+func adoptFromPIDFile(path string) *trackedProcess {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return nil
+	}
+	if !processAlive(pid) {
+		return nil
+	}
+	return &trackedProcess{pid: pid}
+}
+
+// loadOrGenerateRNDCKey returns the same rndc HMAC key across hostagent
+// restarts -- see RegisterDNSRuntimeOps's own doc comment for why a
+// fresh random key on every restart breaks rndc reconfig against an
+// ADOPTED (already-running, not started by this generation) named
+// process. The file lives under StagingDir (root-owned, 0600, never
+// world-readable) -- a real, if low-value (loopback-only, this
+// migration's own disposable runtime, never Python's control.db-
+// referenced secrets), piece of key material, same posture the
+// original comment already disclosed for the key itself.
+func loadOrGenerateRNDCKey(path string) (string, error) {
+	if data, err := os.ReadFile(path); err == nil {
+		key := strings.TrimSpace(string(data))
+		if key != "" {
+			return key, nil
+		}
+	}
+	keyBytes := make([]byte, 32)
+	if _, err := rand.Read(keyBytes); err != nil {
+		return "", fmt.Errorf("generating rndc key: %w", err)
+	}
+	key := base64.StdEncoding.EncodeToString(keyBytes)
+	if err := os.WriteFile(path, []byte(key), 0o600); err != nil {
+		return "", fmt.Errorf("persisting rndc key: %w", err)
+	}
+	return key, nil
+}
+
+func writePIDFile(path string, pid int) {
+	atomicWrite(path, strconv.Itoa(pid))
+}
+
+func removePIDFile(path string) {
+	os.Remove(path)
 }
 
 type DNSRuntimeStatus struct {
@@ -145,18 +258,36 @@ func RegisterDNSRuntimeOps(s *Server, cfg DNSRuntimeConfig) (func(), error) {
 	if err := os.MkdirAll(cfg.BindDirectory, 0o750); err != nil {
 		return nil, fmt.Errorf("dns runtime: creating BIND directory: %w", err)
 	}
-	keyBytes := make([]byte, 32)
-	if _, err := rand.Read(keyBytes); err != nil {
-		return nil, fmt.Errorf("dns runtime: generating rndc key: %w", err)
+	// The rndc HMAC key must survive a hostagent restart, not just the
+	// PID -- a real, second bug this adoption logic surfaced (found
+	// live, 2026-08-29, immediately after fixing the duplicate-process
+	// incident): an ADOPTED named process is still running with the
+	// PREVIOUS generation's key baked into its currently-loaded
+	// named.conf `controls` clause; `rndc reconfig` authenticates
+	// against that ALREADY-LOADED key, not whatever key the new
+	// named.conf this generation is about to write contains -- a fresh
+	// random key here would make every reconfig against an adopted
+	// process fail with "connection to remote host closed" (confirmed
+	// live). Reusing the same key file this generation may have
+	// inherited keeps the adopted process's real, currently-trusted key
+	// stable across restarts.
+	rndcKeySecret, err := loadOrGenerateRNDCKey(filepath.Join(cfg.StagingDir, "rndc.key.secret"))
+	if err != nil {
+		return nil, fmt.Errorf("dns runtime: rndc key: %w", err)
 	}
-	st := &dnsRuntimeState{cfg: cfg, rndcKeySecret: base64.StdEncoding.EncodeToString(keyBytes)}
+	st := &dnsRuntimeState{cfg: cfg, rndcKeySecret: rndcKeySecret}
+	// Adopt whatever a PRIOR generation of this same hostagent process
+	// left running -- see trackedProcess's own doc comment for the real
+	// duplicate-process incident this prevents.
+	st.bind = adoptFromPIDFile(bindPIDFile(cfg))
+	st.dnsdist = adoptFromPIDFile(dnsdistPIDFile(cfg))
 
 	s.Register(hostagent.OpDNSRuntimeStatus, func(ctx context.Context, params json.RawMessage) (any, error) {
 		st.mu.Lock()
 		defer st.mu.Unlock()
 		return DNSRuntimeStatus{
-			BindRunning:    st.bindCmd != nil && st.bindCmd.Process != nil && processAlive(st.bindCmd.Process.Pid),
-			DnsdistRunning: st.dnsdistCmd != nil && st.dnsdistCmd.Process != nil && processAlive(st.dnsdistCmd.Process.Pid),
+			BindRunning:    st.bind.alive(),
+			DnsdistRunning: st.dnsdist.alive(),
 		}, nil
 	})
 
@@ -273,7 +404,7 @@ func (st *dnsRuntimeState) rollback(ctx context.Context, stage, detail, prevName
 }
 
 func (st *dnsRuntimeState) reloadBind(ctx context.Context) error {
-	if st.bindCmd != nil && st.bindCmd.Process != nil && processAlive(st.bindCmd.Process.Pid) {
+	if st.bind.alive() {
 		rndcConfPath := filepath.Join(st.cfg.StagingDir, "rndc.conf")
 		rndcConf := fmt.Sprintf("key \"apdns-go-rndc-key\" {\n\talgorithm hmac-sha256;\n\tsecret %q;\n};\noptions {\n\tdefault-key \"apdns-go-rndc-key\";\n\tdefault-server 127.0.0.1;\n\tdefault-port %d;\n};\n", st.rndcKeySecret, st.cfg.BindRNDCPort)
 		if err := atomicWrite(rndcConfPath, rndcConf); err != nil {
@@ -294,7 +425,8 @@ func (st *dnsRuntimeState) reloadBind(ctx context.Context) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("starting named: %w", err)
 	}
-	st.bindCmd = cmd
+	st.bind = &trackedProcess{cmd: cmd, pid: cmd.Process.Pid}
+	writePIDFile(bindPIDFile(st.cfg), cmd.Process.Pid)
 	go cmd.Wait() // reap; we track liveness via processAlive, not Wait's return
 	// Give named a brief moment to bind its listeners before the caller
 	// proceeds to the dnsdist reload/health-check stage.
@@ -316,7 +448,8 @@ func (st *dnsRuntimeState) reloadDnsdist(ctx context.Context) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("starting dnsdist: %w", err)
 	}
-	st.dnsdistCmd = cmd
+	st.dnsdist = &trackedProcess{cmd: cmd, pid: cmd.Process.Pid}
+	writePIDFile(dnsdistPIDFile(st.cfg), cmd.Process.Pid)
 	go cmd.Wait()
 	time.Sleep(200 * time.Millisecond)
 	if !processAlive(cmd.Process.Pid) {
@@ -326,13 +459,15 @@ func (st *dnsRuntimeState) reloadDnsdist(ctx context.Context) error {
 }
 
 func (st *dnsRuntimeState) stopBind() {
-	stopCmd(st.bindCmd)
-	st.bindCmd = nil
+	st.bind.stop()
+	st.bind = nil
+	removePIDFile(bindPIDFile(st.cfg))
 }
 
 func (st *dnsRuntimeState) stopDnsdist() {
-	stopCmd(st.dnsdistCmd)
-	st.dnsdistCmd = nil
+	st.dnsdist.stop()
+	st.dnsdist = nil
+	removePIDFile(dnsdistPIDFile(st.cfg))
 }
 
 func stopCmd(cmd *exec.Cmd) {

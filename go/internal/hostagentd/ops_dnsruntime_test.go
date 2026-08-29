@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -502,6 +503,86 @@ func TestDNSRuntimeStatusReportsRunningProcesses(t *testing.T) {
 	if !status2.BindRunning || !status2.DnsdistRunning {
 		t.Fatalf("expected both real processes reported running after a successful promotion, got %+v", status2)
 	}
+}
+
+// TestHostagentRestartAdoptsRunningNamedInsteadOfDuplicating is the
+// direct regression proof for the 2026-08-29 incident (see
+// trackedProcess's own doc comment): a fresh dnsRuntimeState created by
+// a NEW hostagent generation (simulated here by a second, independent
+// RegisterDNSRuntimeOps call against the SAME cfg/staging dir, exactly
+// what a real hostagent restart does -- it never stops the previous
+// generation's named/dnsdist) must ADOPT the already-running real named
+// process, not spawn a second one alongside it.
+func TestHostagentRestartAdoptsRunningNamedInsteadOfDuplicating(t *testing.T) {
+	s1, cfg := newDNSRuntimeConfig(t)
+	in := dnscompile.Input{ListenAddress: cfg.DnsdistListenAddress, BindBackendAddress: fmt.Sprintf("127.0.0.1:%d", cfg.BindProxyPort), CacheMaxEntries: 1000}
+	dnsdistConf, err := dnscompile.CompileDnsdist(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res1 := callPromote(t, s1, DNSPromoteParams{DnsdistConf: dnsdistConf})
+	if !res1.Promoted {
+		t.Fatalf("expected the first generation's promotion to succeed, got %+v", res1)
+	}
+	firstBindPID := readPIDFile(t, bindPIDFile(cfg))
+	firstDnsdistPID := readPIDFile(t, dnsdistPIDFile(cfg))
+	if !processAlive(firstBindPID) || !processAlive(firstDnsdistPID) {
+		t.Fatal("expected the first generation's real named/dnsdist to be alive")
+	}
+
+	// Simulate a real hostagent restart: a brand-new Server + a brand-
+	// new dnsRuntimeState (RegisterDNSRuntimeOps creates one), same cfg
+	// -- the production agent never calls the first generation's stop
+	// func on this path (see RegisterDNSRuntimeOps's own doc comment:
+	// "the whole point of this runtime is that the live DNS processes
+	// outlive the agent's own restarts").
+	s2 := &Server{}
+	stop2, err := RegisterDNSRuntimeOps(s2, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(stop2)
+
+	res2 := callPromote(t, s2, DNSPromoteParams{DnsdistConf: dnsdistConf})
+	if !res2.Promoted {
+		t.Fatalf("expected the second generation's promotion to succeed, got %+v", res2)
+	}
+	secondBindPID := readPIDFile(t, bindPIDFile(cfg))
+	secondDnsdistPID := readPIDFile(t, dnsdistPIDFile(cfg))
+
+	if secondBindPID != firstBindPID {
+		t.Fatalf("expected the SAME named PID to be adopted and reconfigured (rndc reconfig), not a new process spawned: first=%d second=%d", firstBindPID, secondBindPID)
+	}
+	if !processAlive(firstBindPID) {
+		t.Fatal("expected the original named process to still be the one alive after the second generation's promote")
+	}
+
+	// dnsdist has no in-place reconfig wired (see reloadDnsdist's own
+	// doc comment) -- it's expected to be replaced, but the OLD one
+	// must actually be stopped (adopted-then-killed), never left
+	// running alongside a new one.
+	if secondDnsdistPID == firstDnsdistPID {
+		t.Fatal("expected reloadDnsdist to have replaced the process (no in-place reconfig exists)")
+	}
+	if processAlive(firstDnsdistPID) {
+		t.Fatalf("expected the FIRST generation's dnsdist (pid %d) to have been stopped when the second generation replaced it -- found it still alive, a real duplicate process", firstDnsdistPID)
+	}
+	if !processAlive(secondDnsdistPID) {
+		t.Fatal("expected the second generation's dnsdist to be alive")
+	}
+}
+
+func readPIDFile(t *testing.T, path string) int {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading PID file %s: %v", path, err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatalf("parsing PID file %s: %v", path, err)
+	}
+	return pid
 }
 
 func contains(haystack, needle string) bool {
