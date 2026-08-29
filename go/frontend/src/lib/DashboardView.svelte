@@ -447,7 +447,6 @@
   .range-select button { background: transparent; color: var(--fg); border: 1px solid var(--border); padding: 0.3rem 0.6rem; font-size: 0.8rem; }
   .range-select button.active { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
   .degraded-note { background: var(--badge-warn-bg); color: var(--badge-warn-fg); padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.85rem; }
-  .scope-note { margin-top: 1.25rem; max-width: 44rem; }
 
   .link { background: transparent; color: var(--accent); border: none; padding: 0; font-size: 0.85rem; cursor: pointer; text-decoration: underline; }
   .mono { font-family: monospace; font-size: 0.85rem; }

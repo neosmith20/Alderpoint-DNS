@@ -12,12 +12,24 @@
 // cmd/alderpointdns-go any more -- RawQueryLog and Analytics are the
 // same internal/dnsanalytics.Reader over the same -analytics-db now).
 //
-// Usage: node chromium_smoke.mjs <base-url> <username> <password>
+// A real fresh instance's first screen is now bootstrap-token-gated
+// (internal/bootstrap -- cmd/alderpointdns-go's own -bootstrap-token-path
+// always has a real default, so this step cannot be skipped on any
+// genuinely fresh instance), a step this script did not originally
+// handle -- see setup_bootstrap_smoke.mjs for the dedicated coverage of
+// that gate itself. Pass the token file path as a 4th argument so this
+// suite can still drive setup end-to-end from a true fresh instance;
+// omit it only when running against an instance that has ALREADY had
+// setup completed (this script then goes straight to the login screen,
+// same as before this fix).
+//
+// Usage: node chromium_smoke.mjs <base-url> <username> <password> [bootstrap-token-path]
+import fs from "node:fs";
 import puppeteer from "puppeteer-core";
 
-const [, , baseUrl, username, password] = process.argv;
+const [, , baseUrl, username, password, bootstrapTokenPath] = process.argv;
 if (!baseUrl || !username || !password) {
-  console.error("usage: node chromium_smoke.mjs <base-url> <username> <password>");
+  console.error("usage: node chromium_smoke.mjs <base-url> <username> <password> [bootstrap-token-path]");
   process.exit(2);
 }
 
@@ -91,6 +103,19 @@ async function main() {
     await page.setViewport({ width: 1440, height: 900 });
     await page.goto(baseUrl, { waitUntil: "networkidle0" });
 
+    // --- Bootstrap (real fresh instance only -- see the header comment) ---
+    await page.waitForSelector("#bootstrap-heading, #setup-heading, #login-heading", { timeout: 5000 });
+    if (await page.$("#bootstrap-heading")) {
+      check("bootstrap-token-path was given for a fresh instance landing on the bootstrap gate", !!bootstrapTokenPath);
+      const token = fs.readFileSync(bootstrapTokenPath, "utf8").trim();
+      await page.type('input[autocomplete="off"]', token);
+      await Promise.all([
+        page.waitForSelector("#setup-heading", { timeout: 5000 }),
+        page.click('button[type="submit"]'),
+      ]);
+      check("real bootstrap token advances to the setup/account-creation form", (await page.$("#setup-heading")) !== null);
+    }
+
     // --- Setup ---
     await page.waitForSelector("#setup-heading, #login-heading", { timeout: 5000 });
     const onSetup = (await page.$("#setup-heading")) !== null;
@@ -131,19 +156,17 @@ async function main() {
     await page.waitForSelector(".card .big", { timeout: 3000 }).catch(() => {});
     const cardCount = (await page.$$(".card")).length;
     check("Dashboard renders summary cards", cardCount >= 2, `found ${cardCount}`);
-    // 2026-08-28: Dashboard's analytics panels are no longer a Python
-    // compatibility boundary at all -- internal/dnsanalytics is this
-    // appliance's own real, Go-native query history (see CUTOVER.md) --
-    // so the honest disclosure this scope-note now carries is the
-    // Observed Clients narrowing (no discovery-worker history/
-    // fingerprinting), not a "compatibility boundary" claim that would
-    // itself now be stale.
-    const scopeNote = await page.$eval(".scope-note", (el) => el.textContent).catch(() => "");
-    check(
-      "Dashboard discloses its own real remaining scope narrowing (Observed Clients), not a stale compatibility-boundary claim",
-      scopeNote.replace(/\s+/g, " ").includes("narrower than") && !scopeNote.includes("compatibility boundar"),
-      scopeNote,
-    );
+    // 2026-08-29: this check is retired, not just updated -- the P0/P1
+    // live-defect pass (commit 39e455f, defect 7) removed Dashboard's
+    // own developer-disclosure paragraph entirely per an explicit owner
+    // instruction ("Owner UI should not contain internal implementation
+    // essays"), so there is no longer any `.scope-note` element on this
+    // page to assert text against at all. Confirmed by direct code read
+    // (DashboardView.svelte has no `.scope-note` markup, only an
+    // orphaned CSS rule -- removed alongside this fix) plus this
+    // check's own real failure the first time this suite ran against a
+    // build made after that removal.
+    check("Dashboard has no leftover developer-disclosure paragraph (removed per P0 defect 7)", (await page.$(".scope-note")) === null);
 
     // --- Dashboard: Clients and Upstreams mini-panels (real data, not
     // placeholders -- these were previously disclosed as blocked on "the
@@ -558,6 +581,38 @@ async function main() {
     check("confirming disables the profile for real", nowDisabled === "Disabled");
     const infoBanner = await page.$(".info-banner");
     check("native-recursion info banner appears once zero upstreams are enabled", infoBanner !== null);
+
+    // --- Domain Routing (same page, below the Upstream Profiles grid) ---
+    // The disabled "Test Upstream" profile from above still exists and
+    // is still selectable here -- routing doesn't require the target
+    // profile to be enabled, only to exist.
+    await page.select('.route-form select[aria-label="Match kind"]', "suffix");
+    await page.type('.route-form input[aria-label="Domain"]', "corp.example.com");
+    await page.select('.route-form select[aria-label="Upstream profile"]', await page.$eval(
+      '.route-form select[aria-label="Upstream profile"] option:not([value=""])',
+      (el) => el.value,
+    ));
+    await Promise.all([
+      page.waitForFunction(() => document.querySelectorAll(".routes-table tbody tr td button").length > 0, { timeout: 3000 }),
+      page.click('.route-form button[type="submit"]'),
+    ]);
+    const routeRowCount = await page.$$eval(".routes-table tbody tr", (rows) => rows.length);
+    check("adding a domain route creates a real row in the routes table", routeRowCount === 1, `rows=${routeRowCount}`);
+    const routeRowText = await page.$eval(".routes-table tbody tr", (el) => el.textContent);
+    check("the real route's match kind/domain/upstream name all render", /suffix/.test(routeRowText) && /corp\.example\.com/.test(routeRowText) && /Test Upstream/.test(routeRowText), routeRowText);
+
+    // Reload and confirm it persisted -- not just an optimistic client-side row.
+    await page.reload({ waitUntil: "networkidle0" });
+    await page.waitForSelector("#upstreams-heading", { timeout: 5000 });
+    await new Promise((r) => setTimeout(r, 200));
+    const routeRowCountAfterReload = await page.$$eval(".routes-table tbody tr", (rows) => rows.length).catch(() => 0);
+    check("the domain route survives a full page reload (real persistence)", routeRowCountAfterReload === 1, `rows=${routeRowCountAfterReload}`);
+
+    // Delete it.
+    await page.click(".routes-table tbody tr td button");
+    await page.waitForFunction(() => document.querySelector(".routes-table tbody .empty-row") !== null, { timeout: 3000 }).catch(() => {});
+    const routeEmptyAfterDelete = (await page.$(".routes-table tbody .empty-row")) !== null;
+    check("deleting the domain route removes it for real (honest empty state, not a leftover row)", routeEmptyAfterDelete);
 
     // --- Nav: Clients ---
     const clickedClients = await clickNavItem(page, (t) => t === "Clients");
