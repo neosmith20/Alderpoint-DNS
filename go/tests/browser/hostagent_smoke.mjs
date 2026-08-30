@@ -175,6 +175,37 @@ async function main() {
     const applyResultText = await page.$eval(".dnsruntime .success, .dnsruntime .error", (el) => el.textContent).catch(() => "");
     check("Apply Runtime Changes performs a real compile+promote and reports a real result", applyResultText.length > 0, applyResultText);
 
+    // --- System Status: DNS Performance benchmark (internal/dnsperf,
+    // internal/hostagentd/ops_dnsperf.go) -- real UDP/TCP/DoT/DoH
+    // packet-level query exchange against this deployment's own real
+    // dnsdist/BIND runtime, closing the disclosed "no Chromium run this
+    // session" gap. Needs the same real DNS-runtime-configured fixture
+    // as the DNS Runtime section just above (a real compiled/promoted
+    // dnsdist+BIND pair is required for the benchmark's own case list
+    // to have anything real to query), so it belongs in this suite, not
+    // chromium_smoke.mjs. ---
+    check("System Status nav item exists and is clickable", await clickNav("System Status"));
+    await page.waitForSelector("#health-heading", { timeout: 3000 }).catch(() => {});
+    check("System Status page content rendered", (await page.$("#health-heading")) !== null);
+    check("Run Safe DNS Benchmark button exists", (await page.$("[data-run-dns-benchmark]")) !== null);
+    await Promise.all([
+      page.waitForFunction(() => document.querySelector("[data-dns-performance]") !== null, { timeout: 60000 }),
+      page.click("[data-run-dns-benchmark]"),
+    ]);
+    const dnsPerfRows = await page.$$eval("[data-dns-performance] tbody tr", (rows) => rows.length);
+    check("Safe DNS Benchmark completes and renders a real per-case results table", dnsPerfRows > 0, `rows=${dnsPerfRows}`);
+    const dnsPerfFirstRow = await page.$eval("[data-dns-performance] tbody tr", (el) => el.textContent);
+    check("benchmark results show real, non-placeholder latency figures", /\d/.test(dnsPerfFirstRow), dnsPerfFirstRow);
+    const benchmarkFailedNote = await page.$(".health .degraded-note");
+    check("Safe DNS Benchmark does not report a working-directory/permission failure (the original P0 defect)", benchmarkFailedNote === null || !(await page.evaluate((el) => el.textContent.includes("mkdir"), benchmarkFailedNote)));
+
+    check("Copy DNS Performance Report button is enabled once a report exists", await page.$eval("[data-copy-dns-perf]", (el) => !el.disabled));
+    await Promise.all([
+      page.waitForFunction(() => document.querySelector("[data-dns-performance]") === null, { timeout: 3000 }),
+      page.click("[data-clear-dns-perf]"),
+    ]);
+    check("Clear Benchmark Measurements actually removes the stored report", (await page.$("[data-dns-performance]")) === null);
+
     const failed = results.filter((r) => !r.pass);
     console.log(`\n${results.length - failed.length}/${results.length} checks passed.`);
     if (failed.length > 0) process.exitCode = 1;
