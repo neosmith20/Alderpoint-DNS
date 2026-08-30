@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, ApiError, type BackupInfo, type BackupCategory, type SecretBackupInfo } from "../api";
+  import { api, ApiError, type BackupInfo, type BackupCategory, type SecretBackupInfo, type BackupScheduleSettings } from "../api";
   import { StaleGuard } from "../staleGuard";
   import { router } from "../router.svelte";
   import { timestampPref } from "../timestamp.svelte";
+  import { toast } from "../toast.svelte";
   import DataGrid from "./DataGrid.svelte";
   import type { Column } from "./datagrid";
 
@@ -118,6 +119,51 @@
     await refreshSecretBackups();
   }
 
+  // Scheduled Backups -- owner-configurable periodic backups, field-matched
+  // against V1.1.1's own real settings (schedule_enabled/schedule_interval_hours/
+  // retention_count) but run by this control plane's own in-process scheduler
+  // (see internal/backup/schedule.go's doc comment for why) rather than a
+  // systemd timer. This is also what makes the backup_failure notification
+  // category real: there's now a periodic background action for it to observe.
+  let schedule = $state<BackupScheduleSettings | null>(null);
+  let scheduleLoadError = $state("");
+  let scheduleEnabled = $state(false);
+  let scheduleIntervalHours = $state(24);
+  let scheduleRetentionCount = $state(7);
+  let scheduleSaveBusy = $state(false);
+  let scheduleSaveError = $state("");
+
+  async function refreshSchedule() {
+    try {
+      const s = await api.getBackupSchedule(router.signal());
+      schedule = s;
+      scheduleEnabled = s.enabled;
+      scheduleIntervalHours = s.interval_hours;
+      scheduleRetentionCount = s.retention_count;
+      scheduleLoadError = "";
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      scheduleLoadError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  async function saveSchedule() {
+    scheduleSaveError = "";
+    scheduleSaveBusy = true;
+    try {
+      schedule = await api.setBackupSchedule({
+        enabled: scheduleEnabled,
+        interval_hours: scheduleIntervalHours,
+        retention_count: scheduleRetentionCount,
+      });
+      toast.success("Backup schedule saved.");
+    } catch (err) {
+      scheduleSaveError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      scheduleSaveBusy = false;
+    }
+  }
+
   async function refresh() {
     const token = guard.start();
     try {
@@ -134,6 +180,7 @@
 
   onMount(() => {
     refresh();
+    refreshSchedule();
     refreshSecretBackups();
     api
       .listBackupCategories(router.signal())
@@ -283,6 +330,50 @@
     </div>
   </div>
 
+  <div class="card schedule-card">
+    <h3>Scheduled backups</h3>
+    {#if scheduleLoadError}<p class="error" role="alert">{scheduleLoadError}</p>{/if}
+    <label class="schedule-row">
+      <input type="checkbox" bind:checked={scheduleEnabled} />
+      Automatically create a backup on a schedule
+    </label>
+    <label class="schedule-row">
+      Every
+      <input
+        type="number"
+        min="1"
+        max="720"
+        bind:value={scheduleIntervalHours}
+        disabled={!scheduleEnabled}
+        aria-label="Backup interval in hours"
+      />
+      hours
+    </label>
+    <label class="schedule-row">
+      Keep the most recent
+      <input
+        type="number"
+        min="0"
+        max="100"
+        bind:value={scheduleRetentionCount}
+        disabled={!scheduleEnabled}
+        aria-label="Number of scheduled backups to retain"
+      />
+      scheduled backups
+    </label>
+    <button onclick={saveSchedule} disabled={scheduleSaveBusy}>{scheduleSaveBusy ? "Saving…" : "Save schedule"}</button>
+    {#if scheduleSaveError}<p class="error" role="alert">{scheduleSaveError}</p>{/if}
+    {#if schedule?.last_run_at}
+      <p class="schedule-status">
+        Last scheduled run: {timestampPref.format(schedule.last_run_at)} --
+        <span class={schedule.last_status === "failed" ? "error" : "success"}>{schedule.last_status}</span>
+        {#if schedule.last_status === "failed" && schedule.last_error}({schedule.last_error}){/if}
+      </p>
+    {:else if schedule?.enabled}
+      <p class="schedule-status">Enabled -- no scheduled run yet.</p>
+    {/if}
+  </div>
+
   {#if restoreResult}<p class="success" role="status">{restoreResult}</p>{/if}
 
   <DataGrid gridId="appliance-backups" {columns} rows={backups} rowKey={(b) => b.filename} emptyMessage="No backups yet.">
@@ -423,4 +514,8 @@
   .category-picker label { display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; }
   .category-picker .count { opacity: 0.6; font-size: 0.8rem; }
   .danger { background: var(--badge-danger-bg); color: var(--badge-danger-fg); }
+  .schedule-card { max-width: 28rem; }
+  .schedule-row { display: flex; align-items: center; gap: 0.4rem; font-size: 0.9rem; }
+  .schedule-row input[type="number"] { width: 5rem; }
+  .schedule-status { font-size: 0.85rem; opacity: 0.85; margin: 0; }
 </style>

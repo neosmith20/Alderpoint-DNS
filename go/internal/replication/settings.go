@@ -10,24 +10,24 @@ import (
 // a real, typed struct instead of Python's bare dict, but the same
 // fields, same defaults, same meanings.
 type Settings struct {
-	NodeID                     string `json:"node_id"`
-	Role                       string `json:"role"`
-	ListenHost                 string `json:"listen_host"`
-	ListenPort                 int    `json:"listen_port"`
-	PollIntervalSeconds        int    `json:"poll_interval_seconds"`
-	PrimaryAddress             string `json:"primary_address"`
-	Paused                     bool   `json:"paused"`
-	IncludeEncryptionSettings  bool   `json:"include_encryption_settings"`
-	LastAppliedGeneration      int64  `json:"last_applied_generation"`
-	LastAppliedHash            string `json:"last_applied_hash"`
-	LastSyncStatus             string `json:"last_sync_status"`
-	LastSyncAt                 string `json:"last_sync_at"`
-	DriftDetected              bool   `json:"drift_detected"`
-	DriftCheckedAt             string `json:"drift_checked_at"`
-	CACertPEM                  string `json:"-"` // never serialized -- public but not part of the owner-facing settings shape
-	CAKeyCiphertextB64         string `json:"-"`
-	CAKeyNonceB64              string `json:"-"`
-	CAKeyVersion               int    `json:"-"`
+	NodeID                    string `json:"node_id"`
+	Role                      string `json:"role"`
+	ListenHost                string `json:"listen_host"`
+	ListenPort                int    `json:"listen_port"`
+	PollIntervalSeconds       int    `json:"poll_interval_seconds"`
+	PrimaryAddress            string `json:"primary_address"`
+	Paused                    bool   `json:"paused"`
+	IncludeEncryptionSettings bool   `json:"include_encryption_settings"`
+	LastAppliedGeneration     int64  `json:"last_applied_generation"`
+	LastAppliedHash           string `json:"last_applied_hash"`
+	LastSyncStatus            string `json:"last_sync_status"`
+	LastSyncAt                string `json:"last_sync_at"`
+	DriftDetected             bool   `json:"drift_detected"`
+	DriftCheckedAt            string `json:"drift_checked_at"`
+	CACertPEM                 string `json:"-"` // never serialized -- public but not part of the owner-facing settings shape
+	CAKeyCiphertextB64        string `json:"-"`
+	CAKeyNonceB64             string `json:"-"`
+	CAKeyVersion              int    `json:"-"`
 }
 
 func boolFromStr(s string) bool { return s == "1" }

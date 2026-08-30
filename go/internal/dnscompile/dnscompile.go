@@ -340,7 +340,7 @@ func matchesSuffix(query, suffix string) bool {
 type EvaluationResult struct {
 	Domain  string `json:"domain"`
 	Blocked bool   `json:"blocked"`
-	Reason  string `json:"reason"`           // "regex_allow" | "regex_block" | "blocklist" | "no_match"
+	Reason  string `json:"reason"`            // "regex_allow" | "regex_block" | "blocklist" | "no_match"
 	Matched string `json:"matched,omitempty"` // the exact pattern/domain entry that decided it
 }
 

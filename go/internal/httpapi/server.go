@@ -8,8 +8,6 @@ import (
 
 	"alderpointdns/go-controlplane/internal/auth"
 	"alderpointdns/go-controlplane/internal/backup"
-	"alderpointdns/go-controlplane/internal/filterimport"
-	"alderpointdns/go-controlplane/internal/secretbackup"
 	"alderpointdns/go-controlplane/internal/blocklists"
 	"alderpointdns/go-controlplane/internal/bootstrap"
 	"alderpointdns/go-controlplane/internal/clientalias"
@@ -19,12 +17,14 @@ import (
 	"alderpointdns/go-controlplane/internal/dnsruntime"
 	"alderpointdns/go-controlplane/internal/dnstransports"
 	"alderpointdns/go-controlplane/internal/domainrouting"
+	"alderpointdns/go-controlplane/internal/filterimport"
 	"alderpointdns/go-controlplane/internal/hostagent"
 	"alderpointdns/go-controlplane/internal/importer"
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/notifications"
-	"alderpointdns/go-controlplane/internal/replication"
 	"alderpointdns/go-controlplane/internal/policy"
+	"alderpointdns/go-controlplane/internal/replication"
+	"alderpointdns/go-controlplane/internal/secretbackup"
 	"alderpointdns/go-controlplane/internal/secretstore"
 	"alderpointdns/go-controlplane/internal/upstreams"
 )
@@ -255,6 +255,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/backup/appliance/{name}/validate", requireAuth(s.handlePreviewBackup))
 	mux.HandleFunc("POST /api/backup/appliance/{name}/restore", requireAuth(s.handleRestoreBackup))
 	mux.HandleFunc("DELETE /api/backup/appliance/{name}", requireAuth(s.handleDeleteBackup))
+	mux.HandleFunc("GET /api/backup/schedule", requireAuth(s.handleGetBackupSchedule))
+	mux.HandleFunc("PUT /api/backup/schedule", requireAuth(s.handleSetBackupSchedule))
 	mux.HandleFunc("GET /api/backup/secrets", requireAuth(s.handleListSecretBackups))
 	mux.HandleFunc("POST /api/backup/secrets", requireAuth(s.handleCreateSecretBackup))
 	mux.HandleFunc("POST /api/backup/secrets/{name}/validate", requireAuth(s.handleValidateSecretBackup))

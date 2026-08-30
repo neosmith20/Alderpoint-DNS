@@ -78,12 +78,12 @@ type clientOverride struct {
 	Pattern      string `json:"pattern"`
 }
 type clientRecord struct {
-	Name             string             `json:"name"`
-	Description      string             `json:"description"`
-	Enabled          bool               `json:"enabled"`
-	Identifiers      []clientIdentifier `json:"identifiers"`
-	GroupIDs         []string           `json:"group_ids"`
-	DomainOverrides  []clientOverride   `json:"domain_overrides"`
+	Name            string             `json:"name"`
+	Description     string             `json:"description"`
+	Enabled         bool               `json:"enabled"`
+	Identifiers     []clientIdentifier `json:"identifiers"`
+	GroupIDs        []string           `json:"group_ids"`
+	DomainOverrides []clientOverride   `json:"domain_overrides"`
 }
 
 // Sections is the full canonical shape of one generation's payload --

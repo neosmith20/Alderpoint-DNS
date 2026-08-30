@@ -120,11 +120,11 @@ func (s *Service) RevokeEnrollment(ctx context.Context, id int64) error {
 // legitimately leaves apdns-hostagent as plaintext, by design -- see
 // ca.go's own doc comment).
 type EnrollmentResult struct {
-	NodeID       string `json:"node_id"`
-	NodeName     string `json:"node_name"`
-	CACertPEM    string `json:"ca_cert_pem"`
+	NodeID        string `json:"node_id"`
+	NodeName      string `json:"node_name"`
+	CACertPEM     string `json:"ca_cert_pem"`
 	ClientCertPEM string `json:"client_cert_pem"`
-	ClientKeyPEM string `json:"client_key_pem"`
+	ClientKeyPEM  string `json:"client_key_pem"`
 }
 
 // ConsumeEnrollment is the primary-side handler for a replica's

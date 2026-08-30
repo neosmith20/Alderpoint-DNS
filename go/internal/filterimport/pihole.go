@@ -33,7 +33,7 @@ var (
 	// Pi-hole's wildcard-blocking idiom: `pihole -wild domain.tld` stores
 	// the regex (\.|^)domain\.tld$ (also seen as (^|\.)domain\.tld$).
 	piholeWildcardRE = regexp.MustCompile(`^\((?:\\\.\|\^|\^\|\\\.)\)((?:[A-Za-z0-9_-]+\\\.)+[A-Za-z0-9_-]+)\$$`)
-	piholeDomainRE    = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+	piholeDomainRE   = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 )
 
 func piholeSectionFor(line string) string {

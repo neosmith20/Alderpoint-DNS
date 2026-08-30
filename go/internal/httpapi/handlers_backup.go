@@ -145,3 +145,38 @@ func (s *Server) handleDeleteBackup(w http.ResponseWriter, r *http.Request) {
 	}
 	WriteJSON(w, http.StatusOK, map[string]any{"status": "deleted"})
 }
+
+func (s *Server) handleGetBackupSchedule(w http.ResponseWriter, r *http.Request) {
+	settings, err := s.Backup.GetScheduleSettings(r.Context())
+	if err != nil {
+		Err(http.StatusInternalServerError, "internal_error", "failed to read backup schedule settings").WriteJSON(w)
+		return
+	}
+	WriteJSON(w, http.StatusOK, settings)
+}
+
+func (s *Server) handleSetBackupSchedule(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Enabled        bool `json:"enabled"`
+		IntervalHours  int  `json:"interval_hours"`
+		RetentionCount int  `json:"retention_count"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil {
+		Err(http.StatusBadRequest, "validation_error", "invalid JSON body").WriteJSON(w)
+		return
+	}
+	if err := s.Backup.SetScheduleSettings(r.Context(), body.Enabled, body.IntervalHours, body.RetentionCount); err != nil {
+		if errors.Is(err, backup.ErrInvalidSchedule) {
+			Err(http.StatusBadRequest, "validation_error", "interval_hours must be 1-720 and retention_count must be 0-100").WriteJSON(w)
+			return
+		}
+		Err(http.StatusInternalServerError, "internal_error", "failed to save backup schedule settings").WriteJSON(w)
+		return
+	}
+	settings, err := s.Backup.GetScheduleSettings(r.Context())
+	if err != nil {
+		Err(http.StatusInternalServerError, "internal_error", "failed to read back backup schedule settings").WriteJSON(w)
+		return
+	}
+	WriteJSON(w, http.StatusOK, settings)
+}

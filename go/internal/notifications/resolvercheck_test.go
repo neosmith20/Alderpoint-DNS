@@ -169,4 +169,3 @@ func TestCheckResolverAvailabilityWithNilServiceIsANoOp(t *testing.T) {
 		t.Fatalf("expected no error for a nil upstreams service, got %v", err)
 	}
 }
-

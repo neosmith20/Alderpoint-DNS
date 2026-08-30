@@ -53,9 +53,9 @@ type xlsxSheetData struct {
 	Sheet   struct {
 		Rows []struct {
 			Cells []struct {
-				R string `xml:"r,attr"` // cell reference, e.g. "B3"
-				T string `xml:"t,attr"` // type: "s" (shared string), "inlineStr", or numeric (empty)
-				V string `xml:"v"`
+				R  string `xml:"r,attr"` // cell reference, e.g. "B3"
+				T  string `xml:"t,attr"` // type: "s" (shared string), "inlineStr", or numeric (empty)
+				V  string `xml:"v"`
 				Is struct {
 					T string `xml:"t"`
 				} `xml:"is"`

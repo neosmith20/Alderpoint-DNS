@@ -32,7 +32,7 @@ type EventCategory struct {
 var EventCategories = []EventCategory{
 	{"blocklist_update_failure", "Blocklist update failure", true, "warning"},
 	{"deploy_failure", "Configuration compilation or deployment failure", true, "critical"},
-	{"backup_failure", "Backup failure", false, "warning"},
+	{"backup_failure", "Backup failure", true, "warning"},
 	{"service_unavailable", "named, dnsdist, or the Go web/analytics service unavailable", true, "critical"},
 	{"resolver_all_unavailable", "All upstream resolvers unavailable", true, "critical"},
 	{"replication_delayed", "Replication delayed or failed", true, "warning"},

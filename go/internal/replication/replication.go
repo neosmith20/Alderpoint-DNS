@@ -74,7 +74,7 @@ const (
 	DefaultPollIntervalSec = 60
 	MaxBackoffSeconds      = 300
 	SchemaVersion          = 1
-	DefaultCertDays         = 825
+	DefaultCertDays        = 825
 )
 
 // Service is the single entry point every HTTP handler and background

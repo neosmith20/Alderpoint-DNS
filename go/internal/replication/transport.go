@@ -29,8 +29,8 @@ import (
 	"time"
 )
 
-func certPath(dir string) string   { return filepath.Join(dir, "server.crt") }
-func keyPath(dir string) string    { return filepath.Join(dir, "server.key") }
+func certPath(dir string) string       { return filepath.Join(dir, "server.crt") }
+func keyPath(dir string) string        { return filepath.Join(dir, "server.key") }
 func clientCertPath(dir string) string { return filepath.Join(dir, "client.crt") }
 func clientKeyPath(dir string) string  { return filepath.Join(dir, "client.key") }
 func caCertPath(dir string) string     { return filepath.Join(dir, "ca.crt") }
@@ -274,7 +274,7 @@ func (s *Service) handleAckRequest(w http.ResponseWriter, r *http.Request) {
 // --- replica-side HTTP client ----------------------------------------------
 
 type replicaTransportConfig struct {
-	primaryHost, primaryPort string
+	primaryHost, primaryPort      string
 	caCert, clientCert, clientKey string
 }
 
@@ -383,7 +383,7 @@ func httpsJSONRequest(ctx context.Context, client *http.Client, method, url stri
 // verify against yet), exactly like Python's own enroll_with_primary().
 func (s *Service) EnrollWithPrimary(ctx context.Context, primaryHost string, primaryPort int, token string) (EnrollmentResult, error) {
 	client := &http.Client{
-		Timeout: 10 * time.Second,
+		Timeout:   10 * time.Second,
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, // TOFU bootstrap only, see doc comment
 	}
 	url := fmt.Sprintf("https://%s:%d/replication/enroll", primaryHost, primaryPort)

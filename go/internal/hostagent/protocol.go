@@ -50,8 +50,8 @@ const (
 	// mTLS listener, and the replica poller are all plain SQLite + Go
 	// crypto/tls, no privilege needed, and live entirely in
 	// internal/replication inside the unprivileged web process.
-	OpReplicationEnsureCA    = "replication.ensure_ca"
-	OpReplicationIssueCert   = "replication.issue_cert"
+	OpReplicationEnsureCA  = "replication.ensure_ca"
+	OpReplicationIssueCert = "replication.issue_cert"
 
 	OpNetworkStatus   = "network.status"
 	OpNetworkApply    = "network.apply"

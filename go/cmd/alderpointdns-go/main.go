@@ -154,8 +154,8 @@ func runBlocklistRefresh(args []string) {
 		Clients:              &clients.Service{DB: db},
 		HostAgent:            newPromoteHostAgentClient(*hostagentSocket),
 		DnsdistListenAddress: *dnsRuntimeDnsdistAddr, BindBackendAddress: *dnsRuntimeBindProxyAddr,
-		TLSCertPath: resolveDNSRuntimeTLSPath(*dnsRuntimeTLSCertPath, cfg.Web.TLSCertPath),
-		TLSKeyPath:  resolveDNSRuntimeTLSPath(*dnsRuntimeTLSKeyPath, cfg.Web.TLSKeyPath),
+		TLSCertPath:      resolveDNSRuntimeTLSPath(*dnsRuntimeTLSCertPath, cfg.Web.TLSCertPath),
+		TLSKeyPath:       resolveDNSRuntimeTLSPath(*dnsRuntimeTLSKeyPath, cfg.Web.TLSKeyPath),
 		DnstapSocketPath: *dnstapSocketPath,
 	}
 
@@ -332,8 +332,8 @@ func runDNSPromote(args []string) {
 		Clients:              &clients.Service{DB: db},
 		HostAgent:            newPromoteHostAgentClient(*hostagentSocket),
 		DnsdistListenAddress: *dnsRuntimeDnsdistAddr, BindBackendAddress: *dnsRuntimeBindProxyAddr,
-		TLSCertPath: resolveDNSRuntimeTLSPath(*dnsRuntimeTLSCertPath, cfg.Web.TLSCertPath),
-		TLSKeyPath:  resolveDNSRuntimeTLSPath(*dnsRuntimeTLSKeyPath, cfg.Web.TLSKeyPath),
+		TLSCertPath:      resolveDNSRuntimeTLSPath(*dnsRuntimeTLSCertPath, cfg.Web.TLSCertPath),
+		TLSKeyPath:       resolveDNSRuntimeTLSPath(*dnsRuntimeTLSKeyPath, cfg.Web.TLSKeyPath),
 		DnstapSocketPath: *dnstapSocketPath,
 	}
 
@@ -844,6 +844,19 @@ func runWeb(args []string) {
 	// without adding meaningful load; Dispatch's own per-subscription
 	// cooldown still applies on top.
 	go notificationsSvc.RunHealthChecksScheduler(schedulerCtx, hostAgentClient, replicationSvc, upSvc, 2*time.Minute)
+
+	// Real dispatch call site #6: backup_failure -- the last previously
+	// disclosed unwired notification category, closed now that scheduled
+	// backups (internal/backup's own RunScheduler) give it a real periodic
+	// action to observe. A 15-minute poll is plenty against interval_hours
+	// bounded 1..720; each tick either finds nothing due (a no-op, ignored
+	// by CheckBackupFailure) or actually attempts a backup, whose
+	// success/failure is what fires/clears the edge.
+	go backupSvc.RunScheduler(schedulerCtx, 15*time.Minute, func(result backup.ScheduleTickResult) {
+		notificationsSvc.CheckBackupFailure(schedulerCtx, notifications.BackupTickResult{
+			Ran: result.Ran, Failed: result.Failed, Detail: result.Detail,
+		})
+	})
 
 	// Real DNS-runtime recompilation after a successful replica apply --
 	// see internal/replication.SyncOnce's own doc comment for why this

@@ -8,13 +8,10 @@
 // is a second, independent layer of protection on top of this, exactly
 // matching Python's own two-layer design.
 //
-// resolver_all_unavailable is wired too now (see resolvercheck.go) --
-// still not attempted, disclosed rather than hidden: backup_failure
-// (this control plane has no scheduled/automatic backups yet -- see
-// the Backup & Restore row in PARITY_MATRIX.md -- so there is no
-// periodic background action for this category to observe failing;
-// a manual Create failure is already surfaced synchronously to the
-// caller in the HTTP response, which a background poller can't add to).
+// resolver_all_unavailable is wired too now (see resolvercheck.go), and
+// so is backup_failure now that internal/backup has scheduled backups
+// (see backupcheck.go and internal/backup/schedule.go) -- every
+// previously-disclosed unwired category is now wired.
 package notifications
 
 import (

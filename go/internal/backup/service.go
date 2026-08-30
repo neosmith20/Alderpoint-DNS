@@ -128,7 +128,7 @@ type Manifest struct {
 	ControlDBSchemaVersion int            `json:"control_db_schema_version"`
 	Contents               []string       `json:"contents"`
 	Product                string         `json:"product"`
-	Reason                 string         `json:"reason,omitempty"` // "manual" | "pre-restore-safety"
+	Reason                 string         `json:"reason,omitempty"` // "manual" | "pre-restore-safety" | "scheduled" | "pre-import-job-<id>"
 	TableCounts            map[string]int `json:"table_counts,omitempty"`
 }
 
@@ -262,18 +262,22 @@ func (s *Service) Create(ctx context.Context, reason string) (BackupInfo, error)
 		// one old file) is logged-by-caller-if-it-cares, never turned into
 		// a failed backup. The backup that was just created has already
 		// been written to disk successfully by this point.
-		_ = s.applyRetention(context.Background())
+		_ = s.applyRetention(context.Background(), "manual", s.RetentionMaxCount, s.RetentionMaxAgeDays)
 	}
 	return info, nil
 }
 
-// applyRetention prunes only "manual" backups, oldest first, down to
-// RetentionMaxCount and/or below RetentionMaxAgeDays (whichever is
-// enabled; 0 means that limit is off). The pre-restore safety backup
-// Restore always takes is never touched here -- it is deleted only by an
-// explicit Delete call, same as any backup an operator chooses to remove.
-func (s *Service) applyRetention(ctx context.Context) error {
-	if s.RetentionMaxCount <= 0 && s.RetentionMaxAgeDays <= 0 {
+// applyRetention prunes backups of exactly one reason, oldest first, down
+// to maxCount and/or below maxAgeDays (whichever is enabled; 0 means that
+// limit is off). Shared by Create's own "manual" retention (RetentionMaxCount/
+// RetentionMaxAgeDays, CLI-flag-configured) and RunScheduler's "scheduled"
+// retention (the owner-configurable retention_count in
+// backup_schedule_settings) -- scoped by reason so neither ever prunes the
+// other's backups, or the pre-restore safety backup Restore always takes
+// (deleted only by an explicit Delete call, same as any backup an operator
+// chooses to remove).
+func (s *Service) applyRetention(ctx context.Context, reason string, maxCount, maxAgeDays int) error {
+	if maxCount <= 0 && maxAgeDays <= 0 {
 		return nil
 	}
 	all, err := s.List(ctx)
@@ -282,7 +286,7 @@ func (s *Service) applyRetention(ctx context.Context) error {
 	}
 	var manual []BackupInfo
 	for _, b := range all {
-		if b.Reason == "manual" {
+		if b.Reason == reason {
 			manual = append(manual, b)
 		}
 	}
@@ -304,13 +308,13 @@ func (s *Service) applyRetention(ctx context.Context) error {
 	sort.Slice(manual, func(i, j int) bool { return mtime[manual[i].Filename].Before(mtime[manual[j].Filename]) })
 
 	cutoff := time.Time{}
-	if s.RetentionMaxAgeDays > 0 {
-		cutoff = time.Now().UTC().AddDate(0, 0, -s.RetentionMaxAgeDays)
+	if maxAgeDays > 0 {
+		cutoff = time.Now().UTC().AddDate(0, 0, -maxAgeDays)
 	}
 
 	toDelete := map[string]bool{}
-	if s.RetentionMaxCount > 0 && len(manual) > s.RetentionMaxCount {
-		for _, b := range manual[:len(manual)-s.RetentionMaxCount] {
+	if maxCount > 0 && len(manual) > maxCount {
+		for _, b := range manual[:len(manual)-maxCount] {
 			toDelete[b.Filename] = true
 		}
 	}

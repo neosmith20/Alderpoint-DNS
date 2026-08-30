@@ -72,7 +72,7 @@ type Settings struct {
 	// a real field, not a decorative placeholder: the frontend uses it
 	// to show "not yet provisioned" rather than implying a working
 	// DNSCrypt listener before one is.
-	DNSCryptIdentityProvisioned bool   `json:"dnscrypt_identity_provisioned"`
+	DNSCryptIdentityProvisioned  bool   `json:"dnscrypt_identity_provisioned"`
 	DNSCryptProviderPublicKeyB64 string `json:"dnscrypt_provider_public_key_b64,omitempty"`
 	DNSCryptFingerprint          string `json:"dnscrypt_fingerprint,omitempty"`
 	DNSCryptProviderKeyPath      string `json:"-"` // never serialized -- a path to real key material

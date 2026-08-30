@@ -91,6 +91,15 @@ export interface BackupCategory {
   tables: string[];
 }
 
+export interface BackupScheduleSettings {
+  enabled: boolean;
+  interval_hours: number;
+  retention_count: number;
+  last_run_at?: string;
+  last_status?: string;
+  last_error?: string;
+}
+
 export interface SecretBackupInfo {
   name: string;
   created_at: string;
@@ -1203,6 +1212,14 @@ export const api = {
       body: JSON.stringify({ categories: categories ?? [] }),
     }),
   deleteBackup: (name: string) => req<{ status: string }>(`/api/backup/appliance/${encodeURIComponent(name)}`, { method: "DELETE" }),
+
+  getBackupSchedule: (signal?: AbortSignal) =>
+    req<BackupScheduleSettings>("/api/backup/schedule", undefined, signal),
+  setBackupSchedule: (settings: { enabled: boolean; interval_hours: number; retention_count: number }) =>
+    req<BackupScheduleSettings>("/api/backup/schedule", {
+      method: "PUT",
+      body: JSON.stringify(settings),
+    }),
 
   listSecretBackups: (signal?: AbortSignal) =>
     req<{ backups: SecretBackupInfo[]; jobs: SecretBackupJob[] }>("/api/backup/secrets", undefined, signal),

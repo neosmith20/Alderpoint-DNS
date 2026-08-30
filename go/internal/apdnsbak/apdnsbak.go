@@ -67,16 +67,16 @@ var (
 
 // Manifest is the subset of the real manifest.json this package reads.
 type Manifest struct {
-	FormatVersion         int      `json:"format_version"`
-	Product               string   `json:"product"`
-	CreatedAt             string   `json:"created_at"`
-	SourceVersion         string   `json:"source_version"`
-	SourceNodeID          string   `json:"source_node_id"`
-	ControlDBSchemaVersion int     `json:"control_db_schema_version"`
-	Contents              []string `json:"contents"`
-	SecretCount           int      `json:"secret_count"`
-	CertFiles             []string `json:"cert_files"`
-	KeyMode               string   `json:"key_mode"`
+	FormatVersion          int      `json:"format_version"`
+	Product                string   `json:"product"`
+	CreatedAt              string   `json:"created_at"`
+	SourceVersion          string   `json:"source_version"`
+	SourceNodeID           string   `json:"source_node_id"`
+	ControlDBSchemaVersion int      `json:"control_db_schema_version"`
+	Contents               []string `json:"contents"`
+	SecretCount            int      `json:"secret_count"`
+	CertFiles              []string `json:"cert_files"`
+	KeyMode                string   `json:"key_mode"`
 }
 
 // IsApdnsbakName is a cheap up-front filename check -- V2's own
