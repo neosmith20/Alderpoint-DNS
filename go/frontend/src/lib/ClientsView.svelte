@@ -21,6 +21,8 @@
   import SegmentedControl from "./ui/SegmentedControl.svelte";
   import StatusBadge from "./ui/StatusBadge.svelte";
   import Modal from "./ui/Modal.svelte";
+  import ConfirmDialog from "./ui/ConfirmDialog.svelte";
+  import { toast } from "../toast.svelte";
 
   // Native Go implementation (own schema/CRUD) -- see internal/clients's
   // and internal/policy's doc comments for exactly what's covered:
@@ -135,6 +137,28 @@
   let observedDegradedReason = $state("");
   let observedLoadError = $state("");
   const observedGuard = new StaleGuard();
+
+  // Shared destructive-action confirm dialog (design-system unification):
+  // replaces every native window.confirm() on this page (delete client,
+  // delete/revoke/regenerate an identifier) with the one real,
+  // app-styled ConfirmDialog every future destructive action should use
+  // instead of inventing its own native-dialog or inline-banner pattern.
+  let pendingConfirm = $state<{ title: string; message: string; confirmLabel: string; run: () => Promise<void> } | null>(null);
+
+  function askConfirm(title: string, message: string, confirmLabel: string, run: () => Promise<void>) {
+    pendingConfirm = { title, message, confirmLabel, run };
+  }
+
+  async function runPendingConfirm() {
+    if (!pendingConfirm) return;
+    const { run } = pendingConfirm;
+    pendingConfirm = null;
+    try {
+      await run();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : String(err));
+    }
+  }
 
   let manageAddress = $state<string | null>(null);
   let manageMode = $state<"new" | "existing">("new");
@@ -268,10 +292,17 @@
     await refresh();
   }
 
-  async function deleteClient(c: ManagedClient) {
-    if (!confirm(`Permanently delete client "${c.name}"? This removes all its identifiers, group memberships, and domain overrides. This cannot be undone.`)) return;
-    await api.deleteClient(c.id);
-    await Promise.all([refresh(), refreshObserved()]);
+  function deleteClient(c: ManagedClient) {
+    askConfirm(
+      "Delete client",
+      `Permanently delete client "${c.name}"? This removes all its identifiers, group memberships, and domain overrides. This cannot be undone.`,
+      "Delete",
+      async () => {
+        await api.deleteClient(c.id);
+        await Promise.all([refresh(), refreshObserved()]);
+        toast.success(`Deleted client "${c.name}".`);
+      },
+    );
   }
 
   async function removeFromGroup(c: ManagedClient, groupId: string) {
@@ -279,10 +310,12 @@
     await refresh();
   }
 
-  async function deleteIpIdentifier(c: ManagedClient, id: ClientIdentifier) {
-    if (!confirm(`Remove identifier ${id.value} from "${c.name}"?`)) return;
-    await api.deleteClientIdentifier(c.id, id.id);
-    await Promise.all([refresh(), refreshObserved()]);
+  function deleteIpIdentifier(c: ManagedClient, id: ClientIdentifier) {
+    askConfirm("Remove identifier", `Remove identifier ${id.value} from "${c.name}"?`, "Remove", async () => {
+      await api.deleteClientIdentifier(c.id, id.id);
+      await Promise.all([refresh(), refreshObserved()]);
+      toast.success(`Removed identifier ${id.value}.`);
+    });
   }
 
   function startManage(address: string) {
@@ -407,24 +440,43 @@
     }
   }
 
-  async function revokeIdentifier(c: ManagedClient, id: ClientIdentifier) {
-    if (!confirm(`Revoke this Strong ClientID (${id.label || id.value.slice(0, 12) + "…"})? DoH/DoT/DoQ traffic using it will stop being recognized once applied.`)) return;
-    await api.revokeClientIdentifier(c.id, id.id);
-    await refresh();
+  function revokeIdentifier(c: ManagedClient, id: ClientIdentifier) {
+    const label = id.label || id.value.slice(0, 12) + "…";
+    askConfirm(
+      "Revoke Strong ClientID",
+      `Revoke this Strong ClientID (${label})? DoH/DoT/DoQ traffic using it will stop being recognized once applied.`,
+      "Revoke",
+      async () => {
+        await api.revokeClientIdentifier(c.id, id.id);
+        await refresh();
+        toast.success(`Revoked identifier ${label}.`);
+      },
+    );
   }
 
-  async function regenerateIdentifier(c: ManagedClient, id: ClientIdentifier) {
-    if (!confirm(`Regenerate this Strong ClientID (${id.label || id.value.slice(0, 12) + "…"})? The old value stops working immediately once applied; a new one replaces it.`)) return;
-    const result = await api.regenerateClientIdentifier(c.id, id.id);
-    lastGenerated = { clientId: c.id, identifier: result.identifier };
-    await refresh();
+  function regenerateIdentifier(c: ManagedClient, id: ClientIdentifier) {
+    const label = id.label || id.value.slice(0, 12) + "…";
+    askConfirm(
+      "Regenerate Strong ClientID",
+      `Regenerate this Strong ClientID (${label})? The old value stops working immediately once applied; a new one replaces it.`,
+      "Regenerate",
+      async () => {
+        const result = await api.regenerateClientIdentifier(c.id, id.id);
+        lastGenerated = { clientId: c.id, identifier: result.identifier };
+        await refresh();
+        toast.success(`Regenerated identifier ${label}.`);
+      },
+    );
   }
 
-  async function deleteIdentifier(c: ManagedClient, id: ClientIdentifier) {
-    if (!confirm(`Permanently delete this identifier (${id.label || id.value.slice(0, 12) + "…"})? This cannot be undone.`)) return;
-    await api.deleteClientIdentifier(c.id, id.id);
-    if (lastGenerated?.identifier.id === id.id) lastGenerated = null;
-    await refresh();
+  function deleteIdentifier(c: ManagedClient, id: ClientIdentifier) {
+    const label = id.label || id.value.slice(0, 12) + "…";
+    askConfirm("Delete identifier", `Permanently delete this identifier (${label})? This cannot be undone.`, "Delete", async () => {
+      await api.deleteClientIdentifier(c.id, id.id);
+      if (lastGenerated?.identifier.id === id.id) lastGenerated = null;
+      await refresh();
+      toast.success(`Deleted identifier ${label}.`);
+    });
   }
 
   function startAddOverride(c: ManagedClient) {
@@ -792,6 +844,16 @@
       {#if addGroupError}<p class="error" role="alert">{addGroupError}</p>{/if}
     </form>
   </Modal>
+{/if}
+
+{#if pendingConfirm}
+  <ConfirmDialog
+    title={pendingConfirm.title}
+    message={pendingConfirm.message}
+    confirmLabel={pendingConfirm.confirmLabel}
+    onConfirm={runPendingConfirm}
+    onCancel={() => (pendingConfirm = null)}
+  />
 {/if}
 
 <style>

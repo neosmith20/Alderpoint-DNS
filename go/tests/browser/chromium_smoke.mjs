@@ -783,10 +783,10 @@ async function main() {
     check("re-enabling removes the disabled badge", (await page.$(".disabled-badge")) === null);
 
     // Remove the IPv4 identifier added above (its own chip-x, not the
-    // Strong ClientID rows). The real native confirm() this triggers is
-    // handled by wirePage's own page.on("dialog") handler, registered
-    // once for the whole page's lifetime -- not a one-off script
-    // injection that a later reload would silently undo.
+    // Strong ClientID rows). This now opens the design-system's shared
+    // ConfirmDialog rather than a native confirm() -- clicking the
+    // chip-x only opens it, a real click on its own confirm button
+    // inside is what actually removes the identifier.
     const removedIdentifier = await page.evaluate(() => {
       const chip = [...document.querySelectorAll("[data-grid-id='managed-clients'] tbody .id-list .chip")].find((c) => c.textContent.includes("10.0.0.5"));
       const btn = chip?.querySelector(".chip-x");
@@ -795,6 +795,11 @@ async function main() {
       return true;
     });
     check("identifier remove control exists and is clickable", removedIdentifier);
+    await page.waitForSelector(".modal .danger", { timeout: 2000 });
+    await Promise.all([
+      page.waitForFunction(() => document.querySelector(".modal .danger") === null, { timeout: 3000 }),
+      page.click(".modal .danger"),
+    ]);
     await new Promise((r) => setTimeout(r, 300));
     const afterIdentifierRemoveText = await page.$eval("[data-grid-id='managed-clients'] tbody", (el) => el.textContent);
     check("removing an IP identifier actually removes it from the row", !afterIdentifierRemoveText.includes("10.0.0.5"), afterIdentifierRemoveText);
@@ -859,11 +864,21 @@ async function main() {
     const persistedValue = await page.$eval(".policy-editor select", (el) => el.value);
     check("saved policy field actually persisted server-side (survives a full page reload)", persistedValue === "strict", persistedValue);
 
-    // --- Delete client (real destructive action; native confirm() handled by wirePage's dialog handler) ---
+    // --- Delete client (real destructive action; the design-system's
+    // shared ConfirmDialog, not a native window.confirm() -- clicking
+    // Delete only OPENS the dialog now, a real second click on its own
+    // Delete button inside is what actually confirms the action). ---
     check("Delete button exists", await clickActionButton("Delete"));
+    await page.waitForSelector(".modal .danger", { timeout: 2000 });
+    check("Delete opens the shared ConfirmDialog rather than deleting immediately", (await page.$(".modal .danger")) !== null);
+    await Promise.all([
+      page.waitForFunction(() => document.querySelector(".modal .danger") === null, { timeout: 3000 }),
+      page.click(".modal .danger"),
+    ]);
     await new Promise((r) => setTimeout(r, 300));
     const clientRowsAfterDelete = await page.$$eval("[data-grid-id='managed-clients'] tbody tr:not(.empty-row)", (rows) => rows.length);
-    check("deleting a client actually removes its row", clientRowsAfterDelete === 0, `rows=${clientRowsAfterDelete}`);
+    check("confirming in the dialog actually deletes the client", clientRowsAfterDelete === 0, `rows=${clientRowsAfterDelete}`);
+    check("a real success toast appears after deleting", (await page.$(".toast--success")) !== null);
 
     // --- Nav: Clients & Access (global policy + networks) ---
     const clickedPolicies = await clickNavItem(page, (t) => t === "Clients & Access");

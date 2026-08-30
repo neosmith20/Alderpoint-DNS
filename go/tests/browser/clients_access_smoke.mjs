@@ -169,26 +169,30 @@ async function main() {
     check("DoT/DoQ SNI hostname shown", sniHostname.length > 0, sniHostname);
     check("reveal-once hint shown after generation", (await page.$(".reveal-once")) !== null);
 
-    // Regenerate: value must change.
-    await page.evaluate(() => {
-      window.confirm = () => true;
-    });
+    // Regenerate: value must change. Uses the design-system's shared
+    // ConfirmDialog now, not a native window.confirm() -- the action
+    // button only OPENS the dialog, a real click on its own confirm
+    // button inside is what actually regenerates.
     const regenBtn = await page.evaluateHandle(() => [...document.querySelectorAll(".clientid-actions button")].find((b) => b.textContent.trim() === "Regenerate"));
+    await regenBtn.asElement().click();
+    await page.waitForSelector(".modal .danger", { timeout: 2000 });
     await Promise.all([
       page.waitForFunction((oldHex) => {
         const el = document.querySelector(".clientid-row:not(.revoked) .hexval");
         return el && el.getAttribute("title") !== oldHex;
       }, { timeout: 3000 }, clientIdHex),
-      regenBtn.asElement().click(),
+      page.click(".modal .danger"),
     ]);
     const regeneratedHex = await page.$eval(".clientid-row:not(.revoked) .hexval", (el) => el.getAttribute("title"));
     check("regenerating produces a genuinely different value", regeneratedHex !== clientIdHex, regeneratedHex);
 
-    // Revoke: row should show the revoked badge.
+    // Revoke: row should show the revoked badge. Same shared dialog.
     const revokeBtn = await page.evaluateHandle(() => [...document.querySelectorAll(".clientid-actions button")].find((b) => b.textContent.trim() === "Revoke"));
+    await revokeBtn.asElement().click();
+    await page.waitForSelector(".modal .danger", { timeout: 2000 });
     await Promise.all([
       page.waitForSelector(".revoked-badge", { timeout: 3000 }),
-      revokeBtn.asElement().click(),
+      page.click(".modal .danger"),
     ]);
     check("revoking shows a real revoked badge", (await page.$(".revoked-badge")) !== null);
 
@@ -270,8 +274,14 @@ async function main() {
     check("Observed Clients section renders", observedText !== null, String(observedText));
     check("Observed Clients shows an honest degraded/empty state, not fake data", /No recent traffic observed|degraded/.test(observedText ?? ""), observedText);
 
-    // Delete client (destructive; confirm() already overridden above).
+    // Delete client (destructive; the shared ConfirmDialog now, not a
+    // native window.confirm()).
     check("Delete button exists", await clickActionButton(page, "Delete"));
+    await page.waitForSelector(".modal .danger", { timeout: 2000 });
+    await Promise.all([
+      page.waitForFunction(() => document.querySelector(".modal .danger") === null, { timeout: 3000 }),
+      page.click(".modal .danger"),
+    ]);
     await new Promise((r) => setTimeout(r, 300));
     clientRows = await page.$$eval(".data-grid tbody tr:not(.empty-row)", (rows) => rows.length);
     check("deleting a client actually removes its row", clientRows === 0, `rows=${clientRows}`);

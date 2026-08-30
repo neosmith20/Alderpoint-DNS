@@ -7,6 +7,7 @@
   import Nav from "./lib/Nav.svelte";
   import RouteLoader from "./lib/RouteLoader.svelte";
   import Icon from "./lib/Icon.svelte";
+  import ToastHost from "./lib/ui/ToastHost.svelte";
 
   type Phase = "loading" | "bootstrap" | "setup" | "login" | "app";
   let phase = $state<Phase>("loading");
@@ -147,6 +148,7 @@
 </script>
 
 <div class="shell" class:app-shell={phase === "app"}>
+  <ToastHost />
   {#if phase !== "app"}
     <header>
       <h1>Alderpoint DNS</h1>
