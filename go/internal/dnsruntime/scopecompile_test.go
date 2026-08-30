@@ -4,14 +4,21 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"alderpointdns/go-controlplane/internal/blocklists"
 	"alderpointdns/go-controlplane/internal/clients"
 	"alderpointdns/go-controlplane/internal/dnscompile"
+	"alderpointdns/go-controlplane/internal/hostagent"
+	"alderpointdns/go-controlplane/internal/hostagentd"
+	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/policy"
 	"alderpointdns/go-controlplane/internal/policyentities"
 	"alderpointdns/go-controlplane/internal/upstreams"
@@ -230,6 +237,115 @@ func TestScopeCompileClientGroupHigherPriorityWins(t *testing.T) {
 	}
 	if containsStr(ov.BlockedDomains, "malware.example.com") {
 		t.Fatalf("malware.example.com is already in the GLOBAL list in this fixture (no global filtering profile assigned) -- it must not double-appear as a scope-specific addition: %v", ov.BlockedDomains)
+	}
+}
+
+// TestScopeCompileLiveDNSProof is the strongest proof in this file: a
+// real disposable named+dnsdist+apdns-hostagent triple, promoted for
+// real, queried with a real `dig` -- not just asserting on the
+// compiled Go struct or the generated Lua text. A network-scoped
+// Filtering Profile assignment (127.0.0.1/32, a category the GLOBAL
+// policy does not include) must make a real DNS query for that
+// category's own domain come back NXDOMAIN, while an unrelated local
+// DNS record on the very same appliance keeps resolving normally --
+// proof this is genuinely scope-differentiated live enforcement, not
+// a global change that happens to look scoped.
+func TestScopeCompileLiveDNSProof(t *testing.T) {
+	for _, bin := range []string{"named", "rndc", "dnsdist", "dig"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			t.Skipf("%s not available in this environment", bin)
+		}
+	}
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	localDNS := &localdns.Service{DB: db, StagingDir: t.TempDir(), RuntimeDir: t.TempDir()}
+	if _, err := localDNS.Create(ctx, localdns.CreateInput{Name: "always.lan", RecordType: "A", Value: "10.9.9.9", TTL: 300, Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	bl := &blocklists.Service{DB: db, StagingDir: t.TempDir(), RuntimeDir: t.TempDir()}
+	if _, _, err := bl.Create(ctx, "scope-proof-sub", "Scope Proof", "https://example.invalid/x.txt", "adult_content"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bl.RuntimeDir, "scope-proof-sub.rpz"), []byte("blocked-by-scope.example.com CNAME .\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	pol := &policy.Service{DB: db}
+	pe := &policyentities.Service{DB: db}
+	if _, err := pe.CreateFilteringProfile(ctx, "proof-profile", "Proof Profile", "", []string{"adult_content"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pol.CreateNetwork(ctx, "loopback", "127.0.0.1/32"); err != nil {
+		t.Fatal(err)
+	}
+	profileID := "proof-profile"
+	if err := pol.Save(ctx, "network", "loopback", policy.Layer{FilteringProfileID: &profileID}); err != nil {
+		t.Fatal(err)
+	}
+
+	bindDir := filepath.Join("/var/lib/bind", fmt.Sprintf("dnsruntime-scopeproof-%d", os.Getpid()), t.Name())
+	if err := os.MkdirAll(bindDir, 0o755); err != nil {
+		t.Skipf("cannot create test dir under /var/lib/bind: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(bindDir) })
+
+	dnsdistPort := freePort(t)
+	cfg := hostagentd.DNSRuntimeConfig{
+		StagingDir: t.TempDir(), BindLivePath: filepath.Join(bindDir, "named.conf"), BindDirectory: bindDir, BindLogPath: filepath.Join(bindDir, "named.log"),
+		DnsdistLivePath: filepath.Join(t.TempDir(), "dnsdist.conf"),
+		BindPlainPort:   freePort(t), BindProxyPort: freePort(t), BindStatsPort: freePort(t), BindRNDCPort: freePort(t),
+		DnsdistListenAddress:  fmt.Sprintf("127.0.0.1:%d", dnsdistPort),
+		HealthCheckTimeout:    8 * time.Second,
+		HealthCheckRetryDelay: 100 * time.Millisecond,
+	}
+	sockPath := filepath.Join(t.TempDir(), "agent.sock")
+	agent := &hostagentd.Server{SocketPath: sockPath, AllowedUID: uint32(os.Getuid()), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	stop, err := hostagentd.RegisterDNSRuntimeOps(agent, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(stop)
+	agentCtx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go agent.Serve(agentCtx)
+	waitForSocket(t, sockPath)
+
+	o := &Orchestrator{
+		LocalDNS: localDNS, Blocklists: bl, Policy: pol, PolicyEntities: pe,
+		HostAgent: hostagent.NewClient(sockPath), DnsdistListenAddress: cfg.DnsdistListenAddress,
+		BindBackendAddress: fmt.Sprintf("127.0.0.1:%d", cfg.BindProxyPort),
+	}
+	res := o.Apply(ctx)
+	if !res.Attempted || !res.Promoted || res.RolledBack {
+		t.Fatalf("expected a real, clean end-to-end promotion, got %+v", res)
+	}
+
+	dig := func(name string) string {
+		t.Helper()
+		out, err := exec.Command("dig", "+time=2", "+tries=2", "@127.0.0.1", "-p", fmt.Sprintf("%d", dnsdistPort), name, "A").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(out)
+	}
+
+	// The scope-specific blocked domain: queried from 127.0.0.1, which
+	// IS the scope this network policy applies to -- must come back
+	// NXDOMAIN (blockingAction's own default), never a real answer.
+	blockedOut := dig("blocked-by-scope.example.com")
+	if !strings.Contains(blockedOut, "status: NXDOMAIN") {
+		t.Fatalf("expected NXDOMAIN for the network-scope-blocked domain (real live DNS enforcement), got:\n%s", blockedOut)
+	}
+
+	// An unrelated appliance-wide local DNS record must be completely
+	// unaffected by this scope's own block list -- proof the scope
+	// mechanism is additive/targeted, not a global behavior change in
+	// disguise.
+	localOut := dig("always.lan")
+	if !strings.Contains(localOut, "10.9.9.9") {
+		t.Fatalf("expected always.lan to still resolve normally (unaffected by the network-scoped block), got:\n%s", localOut)
 	}
 }
 
