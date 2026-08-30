@@ -182,7 +182,27 @@ func (s *Server) handleUpdateStage(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, result)
 }
 
+// handleUpdateApply enforces V1.1.1's own real, disclosed guarantee
+// (system_software_updates.html: "A mandatory pre-upgrade backup is
+// created before installation. If it fails, the update is aborted -- no
+// changes are made.") -- a real appliance data backup (internal/backup,
+// unencrypted like every other automated caller: an unattended/
+// programmatic path can't hold a passphrase, same as the scheduler's own
+// "scheduled" backups and Restore's own "pre-restore-safety" backup) is
+// taken before the binary swap even starts. A failed backup aborts
+// before OpUpdateApply is ever called -- this endpoint's OWN mandatory
+// backup, distinct from and in addition to ops_update.go's own binary
+// backup/rollback (that one recovers the Go binary itself; this one
+// recovers the appliance's data if the new version turns out to need a
+// schema rollback or otherwise corrupts state in a way a binary revert
+// alone can't undo).
 func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
+	if s.Backup != nil {
+		if _, err := s.Backup.Create(r.Context(), "pre-update-safety", ""); err != nil {
+			Err(http.StatusInternalServerError, "backup_failed", "mandatory pre-upgrade backup failed -- update aborted, no changes were made: "+err.Error()).WriteJSON(w)
+			return
+		}
+	}
 	result, ok := callAgent[json.RawMessage](s, w, r, hostagent.OpUpdateApply, nil)
 	if !ok {
 		return

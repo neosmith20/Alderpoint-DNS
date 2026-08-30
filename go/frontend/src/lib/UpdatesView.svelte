@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { api, ApiError, type UpdateCheckResponse } from "../api";
   import { router } from "../router.svelte";
+  import StatusBadge from "./ui/StatusBadge.svelte";
 
   // Software Updates. Real, for this control plane's own Go binary --
   // deliberately not Python's apt/dpkg package (see the parity matrix:
@@ -91,23 +92,37 @@
 <section aria-labelledby="updates-heading" class="updates">
   <h2 id="updates-heading">Software Updates</h2>
   <p class="scope-note">
-    Check for, stage, and apply updates to this appliance. A staged candidate's checksum and
-    version are verified before it's trusted; applying is gated on a health check, with automatic
-    rollback if the new version doesn't come up healthy.
+    Stage and apply updates to this appliance's own software. A staged candidate's checksum and
+    version are verified before it's trusted; applying always takes a real backup first (if that
+    backup fails, the update is aborted and nothing changes), then is gated on a health check with
+    automatic rollback if the new version doesn't come up healthy. This appliance does not yet
+    check any update server on its own -- obtain a new build from your administrator or vendor and
+    upload it below.
   </p>
 
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
 
-  <div class="card">
-    <h3>Current version</h3>
-    <p>{status?.current_version ?? "…"}</p>
-  </div>
+  <section class="status-grid">
+    <div class="card">
+      <h3>Current Version</h3>
+      <p class="mono">{status?.current_version ?? "…"}</p>
+    </div>
+    <div class="card">
+      <h3>Update Status</h3>
+      {#if status?.staged}
+        <StatusBadge label="Candidate staged, ready to apply" tone="warning" />
+      {:else}
+        <StatusBadge label="No candidate staged" tone="healthy" />
+      {/if}
+    </div>
+  </section>
 
   <form class="card" onsubmit={stage}>
-    <h3>Stage a candidate</h3>
+    <h3>Manual Update</h3>
+    <p class="hint">Upload a new Alderpoint DNS build directly -- fed into the same checksum/version-verification and mandatory-backup pipeline as any other update.</p>
     <input type="file" bind:files={file} aria-label="Candidate binary file" />
     <input placeholder="Claimed version (must match the binary's own report)" bind:value={claimedVersion} aria-label="Claimed version" />
-    <button type="submit" disabled={stageBusy || !file?.[0] || !claimedVersion.trim()}>{stageBusy ? "Staging…" : "Stage"}</button>
+    <button type="submit" disabled={stageBusy || !file?.[0] || !claimedVersion.trim()}>{stageBusy ? "Staging…" : "Validate & Stage"}</button>
     {#if stageError}<p class="error" role="alert">{stageError}</p>{/if}
     {#if stageResult}<p class="success" role="status">{stageResult}</p>{/if}
   </form>
@@ -126,6 +141,8 @@
 <style>
   .updates { display: flex; flex-direction: column; gap: 1rem; }
   .scope-note { font-size: 0.85rem; opacity: 0.75; max-width: 50rem; }
+  .status-grid { display: flex; flex-wrap: wrap; gap: 1rem; }
+  .hint { font-size: 0.85rem; opacity: 0.75; margin: 0; }
   .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); display: flex; flex-direction: column; gap: 0.6rem; max-width: 32rem; }
   .card h3 { margin: 0; }
   .pending { background: var(--attention-bg); }
