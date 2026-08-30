@@ -97,6 +97,12 @@ export const NAV_GROUPS: NavGroup[] = [
         icon: "security",
         load: () => import("./lib/EncryptionView.svelte") as unknown as Promise<{ default: Component }>,
       },
+      {
+        id: "policy-entities",
+        label: "Policy Profiles",
+        icon: "security",
+        load: () => import("./lib/PolicyEntitiesView.svelte") as unknown as Promise<{ default: Component }>,
+      },
     ],
   },
   {

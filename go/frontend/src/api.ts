@@ -309,7 +309,41 @@ export interface DomainRoute {
   match_kind: "exact" | "suffix";
   domain: string;
   upstream_profile_id: string;
+  ruleset_id?: string;
   created_at: string;
+}
+
+export interface DomainRoutingRuleset {
+  id: string;
+  name: string;
+  description: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// CategoryEntity: the shared shape of Filtering Profiles / Security
+// Policies (Parental Policy extends this with its own safesearch_mode
+// -- see PolicyEntity below).
+export interface CategoryEntity {
+  id: string;
+  name: string;
+  description: string;
+  categories: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ParentalPolicy extends CategoryEntity {
+  safesearch_mode: "off" | "moderate" | "strict";
+}
+
+export interface ServiceBlockingRuleset {
+  id: string;
+  name: string;
+  description: string;
+  domains: string[];
+  created_at: string;
+  updated_at: string;
 }
 
 export interface AnalyticsBucket {
@@ -1168,13 +1202,55 @@ export const api = {
     }),
 
   listDomainRoutes: (signal?: AbortSignal) => req<{ rules: DomainRoute[] }>("/api/domain-routing", undefined, signal),
-  createDomainRoute: (body: { match_kind: "exact" | "suffix"; domain: string; upstream_profile_id: string }) =>
+  createDomainRoute: (body: { match_kind: "exact" | "suffix"; domain: string; upstream_profile_id: string; ruleset_id?: string }) =>
     req<{ status: string; rule: DomainRoute; dns_runtime?: DNSRuntimeApplyResult }>("/api/domain-routing", {
       method: "POST",
       body: JSON.stringify(body),
     }),
   deleteDomainRoute: (id: number) =>
     req<{ status: string; dns_runtime?: DNSRuntimeApplyResult }>(`/api/domain-routing/${id}`, { method: "DELETE" }),
+  listDomainRoutingRulesets: (signal?: AbortSignal) => req<{ rulesets: DomainRoutingRuleset[] }>("/api/domain-routing/rulesets", undefined, signal),
+  createDomainRoutingRuleset: (body: { id: string; name: string; description?: string }) =>
+    req<{ status: string; ruleset: DomainRoutingRuleset }>("/api/domain-routing/rulesets", { method: "POST", body: JSON.stringify(body) }),
+  deleteDomainRoutingRuleset: (id: string) =>
+    req<{ status: string }>(`/api/domain-routing/rulesets/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  // Blocker-1 policy entities: real, ownable targets for
+  // filtering_profile_id/parental_policy_id/security_policy_id/
+  // service_blocking_ruleset_id (see internal/policyentities). Every
+  // write returns dns_runtime -- assigning/editing one of these can
+  // change what's actually enforced for every scope that references it.
+  listFilteringProfiles: (signal?: AbortSignal) => req<{ profiles: CategoryEntity[] }>("/api/policy-entities/filtering-profiles", undefined, signal),
+  createFilteringProfile: (body: { id: string; name: string; description?: string; categories: string[] }) =>
+    req<{ status: string; profile: CategoryEntity; dns_runtime?: DNSRuntimeApplyResult }>("/api/policy-entities/filtering-profiles", { method: "POST", body: JSON.stringify(body) }),
+  updateFilteringProfile: (id: string, body: { name: string; description?: string; categories: string[] }) =>
+    req<{ status: string; dns_runtime?: DNSRuntimeApplyResult }>(`/api/policy-entities/filtering-profiles/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(body) }),
+  deleteFilteringProfile: (id: string) =>
+    req<{ status: string; dns_runtime?: DNSRuntimeApplyResult }>(`/api/policy-entities/filtering-profiles/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  listSecurityPolicies: (signal?: AbortSignal) => req<{ policies: CategoryEntity[] }>("/api/policy-entities/security-policies", undefined, signal),
+  createSecurityPolicy: (body: { id: string; name: string; description?: string; categories: string[] }) =>
+    req<{ status: string; policy: CategoryEntity; dns_runtime?: DNSRuntimeApplyResult }>("/api/policy-entities/security-policies", { method: "POST", body: JSON.stringify(body) }),
+  updateSecurityPolicy: (id: string, body: { name: string; description?: string; categories: string[] }) =>
+    req<{ status: string; dns_runtime?: DNSRuntimeApplyResult }>(`/api/policy-entities/security-policies/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(body) }),
+  deleteSecurityPolicy: (id: string) =>
+    req<{ status: string; dns_runtime?: DNSRuntimeApplyResult }>(`/api/policy-entities/security-policies/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  listParentalPolicies: (signal?: AbortSignal) => req<{ policies: ParentalPolicy[] }>("/api/policy-entities/parental-policies", undefined, signal),
+  createParentalPolicy: (body: { id: string; name: string; description?: string; safesearch_mode: string; categories: string[] }) =>
+    req<{ status: string; policy: ParentalPolicy; dns_runtime?: DNSRuntimeApplyResult }>("/api/policy-entities/parental-policies", { method: "POST", body: JSON.stringify(body) }),
+  updateParentalPolicy: (id: string, body: { name: string; description?: string; safesearch_mode: string; categories: string[] }) =>
+    req<{ status: string; dns_runtime?: DNSRuntimeApplyResult }>(`/api/policy-entities/parental-policies/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(body) }),
+  deleteParentalPolicy: (id: string) =>
+    req<{ status: string; dns_runtime?: DNSRuntimeApplyResult }>(`/api/policy-entities/parental-policies/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  listServiceBlockingRulesets: (signal?: AbortSignal) => req<{ rulesets: ServiceBlockingRuleset[] }>("/api/policy-entities/service-blocking-rulesets", undefined, signal),
+  createServiceBlockingRuleset: (body: { id: string; name: string; description?: string; domains: string[] }) =>
+    req<{ status: string; ruleset: ServiceBlockingRuleset; dns_runtime?: DNSRuntimeApplyResult }>("/api/policy-entities/service-blocking-rulesets", { method: "POST", body: JSON.stringify(body) }),
+  updateServiceBlockingRuleset: (id: string, body: { name: string; description?: string; domains: string[] }) =>
+    req<{ status: string; dns_runtime?: DNSRuntimeApplyResult }>(`/api/policy-entities/service-blocking-rulesets/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(body) }),
+  deleteServiceBlockingRuleset: (id: string) =>
+    req<{ status: string; dns_runtime?: DNSRuntimeApplyResult }>(`/api/policy-entities/service-blocking-rulesets/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
   listGroups: (signal?: AbortSignal) => req<{ groups: ClientGroup[] }>("/api/groups", undefined, signal),
   createGroup: (name: string, priority: number) =>
@@ -1238,12 +1314,9 @@ export const api = {
     ),
 
   getGlobalPolicy: (signal?: AbortSignal) => req<PolicyLayer>("/api/policy/global", undefined, signal),
-  // Only the global scope is ever compiled into the live DNS runtime
-  // today (internal/dnscompile reads the global policy layer only) --
-  // a global save gets the real dns_runtime result every other
-  // auto-applying mutation returns; network/group/client saves get an
-  // honest "not compiled" DNSRuntimeApplyResult (attempted: false),
-  // never a faked promoted: true.
+  // Every scope (global/network/group/client) is a real, compiled DNS-
+  // runtime effect (internal/dnsruntime's computeScopeOverrides) --
+  // every save below gets the same real dns_runtime result.
   putGlobalPolicy: (layer: PolicyLayer) =>
     req<{ status: string; dns_runtime: DNSRuntimeApplyResult }>("/api/policy/global", { method: "PUT", body: JSON.stringify(layer) }),
   putNetworkPolicy: (id: string, layer: PolicyLayer) =>
