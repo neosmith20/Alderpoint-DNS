@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	_ "net/http/pprof" // registers /debug/pprof/* on http.DefaultServeMux -- only ever served if -debug-pprof-addr is explicitly set, see its own flag doc comment
 	"os"
 	"os/signal"
 	"syscall"
@@ -571,6 +572,7 @@ func runWeb(args []string) {
 	dnsPerfReportPath := fs.String("dns-perf-report-path", "/var/lib/alderpointdns-go/data/dns-performance/latest-report.json", "path to persist the Safe DNS Benchmark's latest report (see internal/dnsperf) -- an appliance-owned absolute path, matching -db/-analytics-db's own convention; a relative default previously resolved against whatever directory the process happened to be started from (podman's /, not writable), causing a live 'mkdir data: permission denied' failure")
 	replicationCertDir := fs.String("replication-cert-dir", "/var/lib/alderpointdns-go/data/replication/certs", "directory for this node's own real replication mTLS certificate material (server cert/key as primary, or client cert/key/CA cert as an enrolled replica) -- see internal/replication; only CA generation/signing needs -hostagent-socket, the listener/poller themselves need no privilege")
 	secretBackupsDir := fs.String("secret-backups-dir", "/var/lib/alderpointdns-go/data/secret-backups", "directory for real Secret Backup archive files (see internal/secretbackup); requires -hostagent-socket")
+	debugPprofAddr := fs.String("debug-pprof-addr", "", "if set, serve net/http/pprof (goroutine/heap/cpu profiles) on this address -- a SEPARATE, unauthenticated listener from the main -addr HTTPS one, added 2026-08-29 after a live OOM incident with no way to diagnose what was growing. Empty (default) disables it entirely. Never bind this to a publicly-reachable address; a container deployment should publish it, if at all, only to the host's own loopback (e.g. -p 127.0.0.1:6061:6061), never 0.0.0.0 on the host side.")
 	fs.Parse(args)
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -821,6 +823,23 @@ func runWeb(args []string) {
 	listenAddr := *addr
 	if listenAddr == "" {
 		listenAddr = fmt.Sprintf("%s:%d", cfg.Web.ListenAddress, cfg.Web.ListenPort)
+	}
+
+	if *debugPprofAddr != "" {
+		// Deliberately its own bare http.Server on a separate listener,
+		// registered against net/http/pprof's own DefaultServeMux side
+		// effect (its init() registers /debug/pprof/* there) -- never
+		// mounted on srv.Routes()/httpSrv below, so it carries none of
+		// this appliance's own session/CSRF auth and must never share
+		// -addr's listener. See the flag's own doc comment for the
+		// "why" (a real 2026-08-29 OOM incident with no way to see what
+		// was growing).
+		logger.Warn("debug pprof listener enabled -- unauthenticated, diagnostics only", "addr", *debugPprofAddr)
+		go func() {
+			if err := http.ListenAndServe(*debugPprofAddr, nil); err != nil {
+				logger.Error("debug pprof listener failed", "err", err)
+			}
+		}()
 	}
 
 	schedulerCtx, cancelScheduler := context.WithCancel(context.Background())

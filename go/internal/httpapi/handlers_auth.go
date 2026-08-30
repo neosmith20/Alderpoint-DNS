@@ -326,6 +326,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		components["analytics"] = map[string]any{"status": "unconfigured", "reason": analyticsUnavailable}
 	}
 
+	// Process memory/goroutine visibility -- see
+	// handlers_health_process.go's own doc comment for why this was
+	// added and why it never demotes overall status.
+	components["process"] = currentProcessStats()
+
 	WriteJSON(w, http.StatusOK, map[string]any{
 		"status":         status,
 		"components":     components,

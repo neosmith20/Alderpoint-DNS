@@ -42,7 +42,26 @@ GO_LIVE_WEB_GID=986   # NOT the same number as the UID -- apdns-go-web's real pr
                       # unaffected, but this was still a real regression from a clean recreate).
 GO_LIVE_DNSDIST_ADDR=0.0.0.0:53
 GO_LIVE_BIND_PROXY_ADDR=127.0.0.1:26553
-GO_LIVE_BASE_IMAGE="apdns-go-live-base:ca-certs"
+# ca-certs-curl (bumped 2026-08-29): adds curl, needed for the new
+# --health-cmd below (this image otherwise has no HTTP client at all).
+# A distinct tag rather than re-tagging ca-certs in place, so an
+# operator can tell from `podman images` which base a given container
+# was actually built from.
+GO_LIVE_BASE_IMAGE="apdns-go-live-base:ca-certs-curl"
+# GO_LIVE_WEB_MEMORY_LIMIT (2026-08-29, release-blocking incident fix):
+# a real live OOM incident (2026-08-29, see AGENT_PROGRESS.md) SIGKILL'd
+# this container after its RSS grew from a normal ~20MB idle baseline to
+# ~2.9GB over about two hours -- with no cap set, the KERNEL's own
+# global OOM killer had to pick a victim, and it also took out unrelated
+# processes on the same host (dnsdist itself, more than once, per
+# dmesg). A per-container memory limit contains any future runaway
+# growth to just this container (a clean, fast, CONTAINED cgroup OOM
+# kill instead of a host-wide one that can strike anything), paired with
+# --restart below so recovery is automatic rather than requiring a human
+# to notice and manually redeploy. 768m is generous headroom above the
+# real observed idle baseline (~20-40MB) while still bounding the worst
+# case to well under this host's total 3.8GB.
+GO_LIVE_WEB_MEMORY_LIMIT="768m"
 REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 
 SKIP_BUILD=0
@@ -182,7 +201,7 @@ grep -q "/var/lib/alderpointdns-go/local-dns/" "$container_config" || fail "$con
 if grep -q "18443" "$container_config"; then fail "$container_config still contains the banned :18443 value"; fi
 log "regenerated container-specific config: $container_config"
 
-log "ensuring $GO_LIVE_BASE_IMAGE (debian:trixie-slim + ca-certificates) exists"
+log "ensuring $GO_LIVE_BASE_IMAGE (debian:trixie-slim + ca-certificates + curl) exists"
 if ! podman image exists "$GO_LIVE_BASE_IMAGE"; then
     # Deliberately NOT --rm: podman commit below needs the exited
     # container to still exist. A real bug caught while first running
@@ -191,9 +210,9 @@ if ! podman image exists "$GO_LIVE_BASE_IMAGE"; then
     # container" -- removed explicitly, after committing, instead.
     podman rm -f apdns-go-live-base-build >/dev/null 2>&1 || true
     podman run --name apdns-go-live-base-build debian:trixie-slim \
-        sh -c "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ca-certificates && apt-get clean" \
-        || fail "building the ca-certificates base image failed"
-    podman commit apdns-go-live-base-build "$GO_LIVE_BASE_IMAGE" >/dev/null || fail "committing the ca-certificates base image failed"
+        sh -c "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ca-certificates curl && apt-get clean" \
+        || fail "building the ca-certificates+curl base image failed"
+    podman commit apdns-go-live-base-build "$GO_LIVE_BASE_IMAGE" >/dev/null || fail "committing the ca-certificates+curl base image failed"
     podman rm -f apdns-go-live-base-build >/dev/null 2>&1 || true
     log "built and tagged $GO_LIVE_BASE_IMAGE"
 else
@@ -232,6 +251,15 @@ log "recreating $GO_LIVE_CONTAINER"
 podman rm -f "$GO_LIVE_CONTAINER" >/dev/null 2>&1 || true
 podman create --name "$GO_LIVE_CONTAINER" \
     --user "$GO_LIVE_WEB_UID:$GO_LIVE_WEB_GID" \
+    --restart=on-failure:5 \
+    --memory="$GO_LIVE_WEB_MEMORY_LIMIT" \
+    --memory-swap="$GO_LIVE_WEB_MEMORY_LIMIT" \
+    --health-cmd="curl -fsk -o /dev/null https://127.0.0.1:8443/api/health || exit 1" \
+    --health-interval=30s \
+    --health-timeout=5s \
+    --health-retries=3 \
+    --health-start-period=20s \
+    --health-on-failure=restart \
     -p 8443:8443 \
     -v "$GO_LIVE_RELEASE:/opt/alderpointdns-go:ro" \
     -v "$GO_LIVE_STATE:/var/lib/alderpointdns-go" \
