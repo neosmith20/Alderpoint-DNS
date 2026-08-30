@@ -173,6 +173,33 @@ func TestScopeOverrideECSEnabledWithoutProfileErrors(t *testing.T) {
 	}
 }
 
+func TestScopeOverrideDomainRoutesWinOverGlobalForSameDomain(t *testing.T) {
+	in := minimalInput()
+	globalProfile := UpstreamProfile{Transport: "plain", Strategy: "first", Endpoints: []UpstreamEndpoint{{Address: "8.8.8.8:53"}}}
+	in.DomainRoutes = []DomainRoute{{MatchKind: "suffix", Domain: "corp.example.com", ProfileID: "global-corp", Profile: globalProfile}}
+	scopeProfile := UpstreamProfile{Transport: "plain", Strategy: "first", Endpoints: []UpstreamEndpoint{{Address: "10.0.0.9:53"}}}
+	in.ScopeOverrides = []ScopeOverride{{
+		Source: "network:branch", CIDRs: []string{"10.70.0.0/24"},
+		DomainRoutes: []DomainRoute{{MatchKind: "suffix", Domain: "corp.example.com", ProfileID: "branch-corp", Profile: scopeProfile}},
+	}}
+	out, err := CompileDnsdist(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scopeIdx := strings.Index(out, "scoperoute_")
+	globalIdx := strings.Index(out, `pool="route_global-corp"`)
+	if scopeIdx < 0 || globalIdx < 0 {
+		t.Fatalf("expected both a scope-specific and a global route pool, got:\n%s", out)
+	}
+	if scopeIdx > globalIdx {
+		t.Fatalf("scope-specific domain route must be emitted before the global one (more specific wins), got:\n%s", out)
+	}
+	if !strings.Contains(out, "10.0.0.9:53") || !strings.Contains(out, "8.8.8.8:53") {
+		t.Fatalf("expected both the scope and global route servers compiled, got:\n%s", out)
+	}
+	checkDnsdist(t, out)
+}
+
 func TestScopeOverrideIsDeterministicUnderReordering(t *testing.T) {
 	in := minimalInput()
 	in.ScopeOverrides = []ScopeOverride{

@@ -76,6 +76,15 @@ type ScopeOverride struct {
 
 	QueryLoggingDisabled bool
 	StatisticsDisabled   bool
+
+	// DomainRoutes: this scope's own resolved domain_routing_ruleset_id
+	// rules (internal/domainrouting.Rule, via
+	// internal/domainrouting.Service.ListForRuleset) -- takes
+	// precedence over the GLOBAL (ruleset_id=="") domain routes for
+	// this scope's own traffic, for the same domains; the global
+	// routes still apply to every other scope and to any domain this
+	// scope's own ruleset doesn't mention.
+	DomainRoutes []DomainRoute
 }
 
 func (o ScopeOverride) matcherExpr() (string, error) {
@@ -313,6 +322,76 @@ func writeScopePools(w func(string, ...any), overrides []ScopeOverride) error {
 		w("addAction(%s, PoolAction(%s))", matcher, luaString(poolName(key)))
 	}
 	w("")
+	return nil
+}
+
+// writeScopeDomainRoutes emits one dedicated pool + terminal routing
+// rule per (scope, domain-routing rule) pair, scoped via an
+// AndRule(matcher, ...) combining this scope's own CIDR/ClientKey
+// matcher with the same QNameRule/SuffixMatchNodeRule shape
+// writeDomainRoutes already uses. Emitted BEFORE the global
+// (ruleset_id=="") domain routes in CompileDnsdist, so a scope's own
+// ruleset wins for domains it names; the global routes still apply
+// to every other scope and to any domain this scope's ruleset doesn't
+// mention. Pool names are prefixed "scoperoute_<source>_" so they can
+// never collide with a global route's own "route_<profileID>" pool,
+// even when both reference the same upstream profile.
+func writeScopeDomainRoutes(w func(string, ...any), overrides []ScopeOverride) error {
+	ordered := append([]ScopeOverride(nil), overrides...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Source < ordered[j].Source })
+
+	wroteAny := false
+	for _, o := range ordered {
+		if len(o.DomainRoutes) == 0 {
+			continue
+		}
+		wroteAny = true
+		matcher, err := o.matcherExpr()
+		if err != nil {
+			return err
+		}
+		routes := append([]DomainRoute(nil), o.DomainRoutes...)
+		sort.Slice(routes, func(i, j int) bool {
+			di, dj := normalizeDomain(routes[i].Domain), normalizeDomain(routes[j].Domain)
+			if len(di) != len(dj) {
+				return len(di) > len(dj)
+			}
+			if di != dj {
+				return di < dj
+			}
+			return routes[i].MatchKind < routes[j].MatchKind
+		})
+		for _, r := range routes {
+			if r.MatchKind != "exact" && r.MatchKind != "suffix" {
+				return errf("scope %q domain route %q: unsupported match_kind %q", o.Source, r.Domain, r.MatchKind)
+			}
+			domain := normalizeDomain(r.Domain)
+			if domain == "" {
+				return errf("scope %q has a domain route with an empty domain", o.Source)
+			}
+			if len(r.Profile.Endpoints) == 0 {
+				return errf("scope %q domain route %q: upstream profile %q has no endpoints", o.Source, domain, r.ProfileID)
+			}
+			poolName := "scoperoute_" + sanitizePoolName(o.Source) + "_" + sanitizePoolName(r.ProfileID)
+			for i, ep := range r.Profile.Endpoints {
+				name := fmt.Sprintf("%s%s_%d", UpstreamServerNamePrefix, poolName, i)
+				line, err := endpointServerLine(ep, r.Profile.Transport, poolName, name)
+				if err != nil {
+					return err
+				}
+				w("%s", line)
+			}
+			trigger := domain + "."
+			domainMatcher := fmt.Sprintf("QNameRule(%s)", luaString(trigger))
+			if r.MatchKind == "suffix" {
+				domainMatcher = fmt.Sprintf("SuffixMatchNodeRule({%s})", luaString(trigger))
+			}
+			w("addAction(AndRule({%s, %s}), PoolAction(%s))", matcher, domainMatcher, luaString(poolName))
+		}
+	}
+	if wroteAny {
+		w("")
+	}
 	return nil
 }
 

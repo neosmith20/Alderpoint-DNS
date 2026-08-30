@@ -717,6 +717,16 @@ func CompileDnsdist(in Input) (string, error) {
 		}
 	}
 
+	// Per-scope domain routing: a scope's own domain_routing_ruleset_id
+	// rules win over the global ones below for the same domain -- must
+	// be emitted first, matching every other "more specific wins"
+	// ordering in this function.
+	if len(in.ScopeOverrides) > 0 {
+		if err := writeScopeDomainRoutes(w, in.ScopeOverrides); err != nil {
+			return "", err
+		}
+	}
+
 	// Domain routing: terminal PoolAction per rule, most-specific match
 	// first -- must be emitted before the default pool's own servers so
 	// a route's pool name can never collide with the unnamed default
