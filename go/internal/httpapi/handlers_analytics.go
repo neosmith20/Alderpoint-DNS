@@ -221,6 +221,51 @@ func (s *Server) handleAnalyticsTopDomains(w http.ResponseWriter, r *http.Reques
 	WriteJSON(w, http.StatusOK, resp)
 }
 
+// handleAnalyticsBreakdown backs the Dashboard's Query Types/Response
+// Codes/Protocol Usage ranked lists (V1.1.1 dashboard.html's qtypes/
+// rcodes/protocols panels, read directly from analytics.* -- see
+// dashboard.html in the shipped V1.1.1 package). Same TopDimension
+// reader as handleAnalyticsTopDomains, just a different allowlisted
+// column; dimension is restricted to a fixed set, never passed through
+// to SQL directly (see dnsanalytics.dimensionColumns).
+func (s *Server) handleAnalyticsBreakdown(w http.ResponseWriter, r *http.Request) {
+	dimension := r.URL.Query().Get("dimension")
+	switch dimension {
+	case "qtype", "rcode", "protocol":
+	default:
+		Err(http.StatusBadRequest, "validation_error", "dimension must be one of: qtype, rcode, protocol").WriteJSON(w)
+		return
+	}
+	minutes := floatQuery(r, "minutes", 60, 1, 31*24*60)
+	limit := intQuery(r, "limit", 20, 1, 500)
+	now := float64(time.Now().Unix())
+	start := now - minutes*60
+	granularity := "minute"
+	if minutes > 120 {
+		granularity = "hour"
+	}
+	columns := []string{dimension, "count"}
+
+	if s.Analytics == nil {
+		WriteJSON(w, http.StatusOK, map[string]any{"rows": []any{}, "columns": columns, "degraded": true, "degraded_reason": analyticsUnavailable})
+		return
+	}
+	rows, err := s.Analytics.TopDimension(r.Context(), dimension, start, now, granularity, limit)
+	if err != nil {
+		WriteJSON(w, http.StatusOK, map[string]any{"rows": []any{}, "columns": columns, "degraded": true, "degraded_reason": err.Error()})
+		return
+	}
+	out := make([][2]any, 0, len(rows))
+	for _, d := range rows {
+		out = append(out, [2]any{d.Value, d.Count})
+	}
+	degraded, reason := writerDegraded(s.Analytics.Health(r.Context()))
+	WriteJSON(w, http.StatusOK, map[string]any{
+		"rows": out, "columns": columns, "degraded": degraded, "degraded_reason": reason,
+		"window": map[string]any{"start": start, "end": now, "minutes": minutes},
+	})
+}
+
 // handleAnalyticsTopClients backs the Clients page's Client analytics
 // table (V1.1.1's app/analytics.py `clients_data()`, read directly):
 // every client seen in the window ranked by query volume, each with its

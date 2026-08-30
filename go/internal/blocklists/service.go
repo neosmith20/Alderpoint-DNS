@@ -284,6 +284,19 @@ func (s *Service) Toggle(ctx context.Context, subscriptionID string) error {
 	return nil
 }
 
+// SetAllEnabled bulk-sets every subscription's enabled flag in one
+// statement -- backs Dashboard "Protection Control" (V1.1.1's
+// POST /protection/toggle bulk-updated `sources.enabled` the same way;
+// see webapp.py's protection_toggle). Returns how many rows changed.
+func (s *Service) SetAllEnabled(ctx context.Context, enabled bool) (int64, error) {
+	res, err := s.DB.ExecContext(ctx, `UPDATE blocklist_subscriptions SET enabled=? WHERE enabled != ?`, enabled, enabled)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // Delete removes the subscription row and its runtime artifact. This
 // does NOT need a background job (no network I/O) -- a fast, synchronous,
 // isolated operation.

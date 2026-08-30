@@ -825,6 +825,10 @@ export const api = {
       blocklists: { total: number; enabled: number; attention_required: number; total_rules: number };
       local_dns: { total: number; enabled: number };
     }>("/api/dashboard/summary", undefined, signal),
+  protectionStatus: (signal?: AbortSignal) =>
+    req<{ active: boolean; enabled_blocklists: number; enabled_rules: number }>("/api/protection/status", undefined, signal),
+  protectionToggle: () =>
+    req<{ active: boolean; dns_runtime?: DNSRuntimeApplyResult }>("/api/protection/toggle", { method: "POST" }),
 
   analyticsTimeseries: (minutes: number, granularity: "minute" | "hour" | "day", signal?: AbortSignal) =>
     req<AnalyticsTimeseriesResponse>(`/api/analytics/timeseries?minutes=${minutes}&granularity=${granularity}`, undefined, signal),
@@ -838,6 +842,8 @@ export const api = {
     req<AnalyticsTopRowsResponse>(`/api/analytics/top-domains?minutes=${minutes}&limit=${limit}`, undefined, signal),
   analyticsTopBlockedDomains: (minutes: number, limit: number, signal?: AbortSignal) =>
     req<AnalyticsTopRowsResponse>(`/api/analytics/top-blocked-domains?minutes=${minutes}&limit=${limit}`, undefined, signal),
+  analyticsBreakdown: (dimension: "qtype" | "rcode" | "protocol", minutes: number, limit: number, signal?: AbortSignal) =>
+    req<AnalyticsTopRowsResponse>(`/api/analytics/breakdown?dimension=${dimension}&minutes=${minutes}&limit=${limit}`, undefined, signal),
   analyticsQueryLog: (filters: QueryLogFilters, signal?: AbortSignal) => {
     const params = new URLSearchParams();
     params.set("minutes", String(filters.minutes));

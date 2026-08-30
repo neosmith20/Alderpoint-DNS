@@ -168,6 +168,21 @@ func (s *Service) BulkSetEnabled(ctx context.Context, ids []int64, enabled bool)
 	return res.RowsAffected()
 }
 
+// SetAllEnabled bulk-sets every rule's enabled flag -- backs Dashboard
+// "Protection Control" alongside blocklists.Service.SetAllEnabled (see
+// its doc comment for the V1.1.1 behavior being matched).
+func (s *Service) SetAllEnabled(ctx context.Context, enabled bool) (int64, error) {
+	v := 0
+	if enabled {
+		v = 1
+	}
+	res, err := s.DB.ExecContext(ctx, `UPDATE custom_rules SET enabled=? WHERE enabled != ?`, v, v)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 func (s *Service) BulkDelete(ctx context.Context, ids []int64) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil

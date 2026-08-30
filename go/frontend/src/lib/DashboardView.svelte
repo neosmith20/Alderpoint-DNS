@@ -38,6 +38,104 @@
   let cardOrder = $state<CardState[]>(loadCardOrder());
   let customizeOpen = $state(false);
 
+  // Protection Control: the global filtering on/off switch (see
+  // handleProtectionToggle's doc comment for the exact V1.1.1 behavior
+  // being matched). A fixed panel above the customizable cards, same as
+  // V1's dashboard -- not itself a card an owner can hide.
+  let protection = $state<Awaited<ReturnType<typeof api.protectionStatus>> | null>(null);
+  let protectionError = $state("");
+  let protectionBusy = $state(false);
+
+  async function loadProtection() {
+    try {
+      protection = await api.protectionStatus(router.signal());
+      protectionError = "";
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      protectionError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  async function toggleProtection() {
+    protectionBusy = true;
+    try {
+      const resp = await api.protectionToggle();
+      protection = { active: resp.active, enabled_blocklists: protection?.enabled_blocklists ?? 0, enabled_rules: protection?.enabled_rules ?? 0 };
+      protectionError = "";
+      await Promise.all([loadProtection(), loadSummary()]);
+    } catch (err) {
+      protectionError = err instanceof Error ? err.message : String(err);
+    } finally {
+      protectionBusy = false;
+    }
+  }
+
+  let cacheStatus = $state<Awaited<ReturnType<typeof api.cacheStatus>> | null>(null);
+  let cacheError = $state("");
+  async function loadCache() {
+    try {
+      cacheStatus = await api.cacheStatus(router.signal());
+      cacheError = "";
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      cacheError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  let topClients = $state<Awaited<ReturnType<typeof api.topClients>> | null>(null);
+  async function loadTopClients() {
+    try {
+      topClients = await api.topClients(1440, router.signal());
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      const reason = err instanceof Error ? err.message : String(err);
+      topClients = { clients: [], total: 0, degraded: true, degraded_reason: reason };
+    }
+  }
+
+  let qtypeBreakdown = $state<Awaited<ReturnType<typeof api.analyticsBreakdown>> | null>(null);
+  let rcodeBreakdown = $state<Awaited<ReturnType<typeof api.analyticsBreakdown>> | null>(null);
+  let protocolBreakdown = $state<Awaited<ReturnType<typeof api.analyticsBreakdown>> | null>(null);
+  async function loadBreakdowns() {
+    try {
+      const [qtype, rcode, protocol] = await Promise.all([
+        api.analyticsBreakdown("qtype", 1440, 10, router.signal()),
+        api.analyticsBreakdown("rcode", 1440, 10, router.signal()),
+        api.analyticsBreakdown("protocol", 1440, 10, router.signal()),
+      ]);
+      qtypeBreakdown = qtype;
+      rcodeBreakdown = rcode;
+      protocolBreakdown = protocol;
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      const reason = err instanceof Error ? err.message : String(err);
+      const degraded = { rows: [] as [string, number][], columns: [], degraded: true, degraded_reason: reason };
+      qtypeBreakdown = degraded;
+      rcodeBreakdown = degraded;
+      protocolBreakdown = degraded;
+    }
+  }
+
+  let recentActivity = $state<Awaited<ReturnType<typeof api.analyticsQueryLog>> | null>(null);
+  async function loadRecentActivity() {
+    try {
+      recentActivity = await api.analyticsQueryLog({ minutes: 1440, limit: 15, offset: 0 }, router.signal());
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      const reason = err instanceof Error ? err.message : String(err);
+      recentActivity = { rows: [], degraded: true, degraded_reason: reason, limit: 15, offset: 0, filters: {} };
+    }
+  }
+
+  let systemHealth = $state<Awaited<ReturnType<typeof api.health>> | null>(null);
+  async function loadSystemHealth() {
+    try {
+      systemHealth = await api.health();
+    } catch {
+      systemHealth = null;
+    }
+  }
+
   // Clients/Upstreams mini-panels -- real data from internal/clients
   // (managed clients), the observed-clients boundary (internal/pyanalytics,
   // see GET /api/clients/observed's own doc comment), and internal/upstreams.
@@ -196,6 +294,12 @@
     loadTopDomains();
     loadClientsMini();
     loadUpstreamsMini();
+    loadProtection();
+    loadCache();
+    loadTopClients();
+    loadBreakdowns();
+    loadRecentActivity();
+    loadSystemHealth();
   });
 
   // --- card customization ---
@@ -228,6 +332,31 @@
     <button class="customize-btn" onclick={() => (customizeOpen = !customizeOpen)} aria-expanded={customizeOpen}>
       Customize
     </button>
+  </div>
+
+  <div class="card protection-panel">
+    <div class="card-head">
+      <h3>Protection Control</h3>
+      {#if protection}
+        <span class="mini-badge {protection.active ? 'mini-badge-ok' : 'mini-badge-observed'}">
+          {protection.active ? "Active" : "Disabled"}
+        </span>
+      {/if}
+    </div>
+    {#if protectionError}
+      <p class="degraded-note" role="status">Unable to load protection status: {protectionError}</p>
+    {:else if !protection}
+      <p class="hint">Loading…</p>
+    {:else}
+      <p class="hint">
+        {protection.active
+          ? `Filtering is active (${protection.enabled_blocklists} blocklist${protection.enabled_blocklists === 1 ? "" : "s"}, ${protection.enabled_rules} custom rule${protection.enabled_rules === 1 ? "" : "s"} enabled).`
+          : "Filtering is disabled -- DNS queries are not being blocked or rewritten by policy."}
+      </p>
+      <button class={protection.active ? "danger" : ""} disabled={protectionBusy} onclick={toggleProtection}>
+        {protectionBusy ? "Working…" : protection.active ? "Disable protection" : "Enable protection"}
+      </button>
+    {/if}
   </div>
 
   {#if customizeOpen}
@@ -293,6 +422,154 @@
             <p class="hint">Loading…</p>
           {:else}
             <ActivityChart points={chartPoints} />
+          {/if}
+        </div>
+      {:else if card.id === "outcomes"}
+        <div class="card wide-card">
+          <h3>Query Outcomes</h3>
+          {#if chartDegraded}
+            <p class="degraded-note" role="status">Analytics degraded: {chartDegradedReason || "unavailable"}</p>
+          {:else}
+            {@const total = chartPoints.reduce((s, p) => s + p.total, 0)}
+            {@const blocked = chartPoints.reduce((s, p) => s + p.blocked, 0)}
+            {@const allowed = Math.max(total - blocked, 0)}
+            {@const allowedPct = total ? (allowed / total) * 100 : 0}
+            {@const blockedPct = total ? (blocked / total) * 100 : 0}
+            <div class="outcome-row">
+              <div class="outcome-head"><span>Allowed</span><span>{allowed.toLocaleString()}{total ? ` / ${allowedPct.toFixed(1)}%` : ""}</span></div>
+              <span class="meter"><span style="width: {Math.min(allowedPct, 100).toFixed(1)}%"></span></span>
+            </div>
+            <div class="outcome-row">
+              <div class="outcome-head"><span>Blocked</span><span>{blocked.toLocaleString()}{total ? ` / ${blockedPct.toFixed(1)}%` : ""}</span></div>
+              <span class="meter blocked"><span style="width: {Math.min(blockedPct, 100).toFixed(1)}%"></span></span>
+            </div>
+            <p class="hint">Over the current Activity range ({RANGE_LABELS[rangeMode]}).</p>
+          {/if}
+        </div>
+      {:else if card.id === "top-clients"}
+        <div class="card wide-card">
+          <h3>Top Clients <span class="scope">(last 24h)</span></h3>
+          {#if !topClients}
+            <p class="hint">Loading…</p>
+          {:else if topClients.degraded}
+            <p class="degraded-note" role="status">Analytics degraded: {topClients.degraded_reason || "unavailable"}</p>
+          {:else if topClients.clients.length === 0}
+            <p class="hint">No client activity in this window.</p>
+          {:else}
+            <table class="mini-table">
+              <thead><tr><th>Client</th><th>Queries</th><th>Blocked</th></tr></thead>
+              <tbody>
+                {#each topClients.clients.slice(0, 8) as c (c.raw_client)}
+                  <tr>
+                    <td class="mono">{c.label}</td>
+                    <td>{c.value.toLocaleString()} <span class="hint">({c.share.toFixed(1)}%)</span></td>
+                    <td>{c.blocked.toLocaleString()} <span class="hint">({c.blocked_percent.toFixed(1)}%)</span></td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          {/if}
+        </div>
+      {:else if card.id === "qtypes" || card.id === "rcodes" || card.id === "protocols"}
+        {@const data = card.id === "qtypes" ? qtypeBreakdown : card.id === "rcodes" ? rcodeBreakdown : protocolBreakdown}
+        {@const label = card.id === "qtypes" ? "Query Types" : card.id === "rcodes" ? "Response Codes" : "Protocol Usage"}
+        <div class="card wide-card">
+          <h3>{label} <span class="scope">(last 24h)</span></h3>
+          {#if !data}
+            <p class="hint">Loading…</p>
+          {:else if data.degraded}
+            <p class="degraded-note" role="status">Analytics degraded: {data.degraded_reason || "unavailable"}</p>
+          {:else if data.rows.length === 0}
+            <p class="hint">No query activity in this window.</p>
+          {:else}
+            {@const total = data.rows.reduce((s, r) => s + r[1], 0)}
+            {#each data.rows as row (row[0])}
+              <div class="outcome-row">
+                <div class="outcome-head"><span>{row[0]}</span><span>{row[1].toLocaleString()}{total ? ` / ${((row[1] / total) * 100).toFixed(1)}%` : ""}</span></div>
+                <span class="meter"><span style="width: {Math.min(total ? (row[1] / total) * 100 : 0, 100).toFixed(1)}%"></span></span>
+              </div>
+            {/each}
+          {/if}
+        </div>
+      {:else if card.id === "cache"}
+        <div class="card wide-card">
+          <div class="card-head">
+            <h3>BIND Cache Effectiveness</h3>
+            <button class="link" onclick={() => router.navigate("cache")}>Manage</button>
+          </div>
+          {#if cacheError}
+            <p class="degraded-note" role="status">Unable to load cache status: {cacheError}</p>
+          {:else if !cacheStatus}
+            <p class="hint">Loading…</p>
+          {:else if cacheStatus.bind.length === 0}
+            <p class="hint">No BIND contexts configured.</p>
+          {:else}
+            {#each cacheStatus.bind as ctx (ctx.name)}
+              <div class="cache-ctx">
+                <div class="card-head"><strong>{ctx.name}</strong>{#if cacheStatus.bind.length > 1}<span class="hint">{ctx.reachable ? "reachable" : "unreachable"}</span>{/if}</div>
+                {#if !ctx.cache_stats || !ctx.cache_stats.available}
+                  <p class="hint">Unavailable: {ctx.cache_stats?.error || "BIND's statistics channel did not respond."}</p>
+                {:else}
+                  {@const hr = ctx.cache_stats.hit_ratio ?? 0}
+                  <div class="outcome-row">
+                    <div class="outcome-head"><span>Hit rate</span><span>{(hr * 100).toFixed(1)}%</span></div>
+                    <span class="meter"><span style="width: {Math.min(hr * 100, 100).toFixed(1)}%"></span></span>
+                  </div>
+                  <p class="hint">Hits / misses: {ctx.cache_stats.hits.toLocaleString()} / {ctx.cache_stats.misses.toLocaleString()}</p>
+                  {#if ctx.cache_stats.cache_size_bytes !== null}
+                    <p class="hint">Cache memory: {(ctx.cache_stats.cache_size_bytes / 1048576).toFixed(1)} MB</p>
+                  {/if}
+                {/if}
+              </div>
+            {/each}
+          {/if}
+        </div>
+      {:else if card.id === "recent-activity"}
+        <div class="card wide-card">
+          <div class="card-head">
+            <h3>Recent Activity</h3>
+            <button class="link" onclick={() => router.navigate("analytics")}>View all</button>
+          </div>
+          {#if !recentActivity}
+            <p class="hint">Loading…</p>
+          {:else if recentActivity.degraded}
+            <p class="degraded-note" role="status">Analytics degraded: {recentActivity.degraded_reason || "unavailable"}</p>
+          {:else if recentActivity.rows.length === 0}
+            <p class="hint">No recent activity.</p>
+          {:else}
+            <table class="mini-table">
+              <thead><tr><th>Time</th><th>Client</th><th>Domain</th><th>Type</th><th>Status</th></tr></thead>
+              <tbody>
+                {#each recentActivity.rows as row (row.id)}
+                  <tr>
+                    <td class="mono hint">{new Date(row.ts * 1000).toLocaleTimeString()}</td>
+                    <td class="mono">{row.client_name || row.client}</td>
+                    <td class="mono">{row.domain}</td>
+                    <td>{row.qtype}</td>
+                    <td><span class="mini-badge {row.blocked ? 'mini-badge-blocked' : 'mini-badge-ok'}">{row.blocked ? "Blocked" : row.rcode}</span></td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          {/if}
+        </div>
+      {:else if card.id === "system-health"}
+        <div class="card wide-card">
+          <div class="card-head">
+            <h3>System Health</h3>
+            <button class="link" onclick={() => router.navigate("health")}>Details</button>
+          </div>
+          {#if !systemHealth}
+            <p class="hint">Loading…</p>
+          {:else}
+            <div class="health-grid">
+              {#each Object.entries(systemHealth.components) as [name, c] (name)}
+                <div class="health-card">
+                  <span>{name}</span>
+                  <span class="mini-badge {c.status === 'ok' ? 'mini-badge-ok' : c.status === 'degraded' ? 'mini-badge-warn' : 'mini-badge-observed'}">{c.status}</span>
+                </div>
+              {/each}
+            </div>
           {/if}
         </div>
       {:else if card.id === "top-domains"}
@@ -457,4 +734,20 @@
   .mini-badge { display: inline-block; padding: 0.1rem 0.45rem; border-radius: 999px; font-size: 0.72rem; }
   .mini-badge-ok { background: var(--badge-ok-bg); color: var(--badge-ok-fg); }
   .mini-badge-observed { background: var(--border); color: var(--fg); }
+  .mini-badge-blocked { background: var(--badge-danger-bg); color: var(--badge-danger-fg); }
+  .mini-badge-warn { background: var(--badge-warn-bg); color: var(--badge-warn-fg); }
+
+  .protection-panel { flex: 1 1 100%; margin-top: 0.75rem; }
+  .protection-panel button { margin-top: 0.5rem; }
+  .protection-panel button.danger { background: var(--badge-danger-bg); color: var(--badge-danger-fg); border-color: transparent; }
+
+  .outcome-row { margin: 0.5rem 0; }
+  .outcome-head { display: flex; justify-content: space-between; font-size: 0.85rem; margin-bottom: 0.25rem; }
+  .meter { display: block; height: 0.5rem; border-radius: 999px; background: var(--border); overflow: hidden; }
+  .meter span { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
+  .meter.blocked span { background: var(--badge-danger-fg); }
+
+  .cache-ctx + .cache-ctx { margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid var(--border); }
+  .health-grid { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem; }
+  .health-card { display: flex; align-items: center; gap: 0.4rem; border: 1px solid var(--border); border-radius: 6px; padding: 0.3rem 0.6rem; font-size: 0.85rem; }
 </style>

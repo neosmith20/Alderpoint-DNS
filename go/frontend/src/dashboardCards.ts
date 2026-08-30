@@ -13,10 +13,18 @@ export const ALL_CARDS: CardDef[] = [
   { id: "blocklists", label: "Blocklists" },
   { id: "localdns", label: "Local DNS" },
   { id: "activity", label: "DNS Activity" },
+  { id: "outcomes", label: "Query Outcomes" },
   { id: "top-domains", label: "Top Domains" },
   { id: "top-blocked-domains", label: "Top Blocked Domains" },
+  { id: "top-clients", label: "Top Clients" },
+  { id: "qtypes", label: "Query Types" },
+  { id: "rcodes", label: "Response Codes" },
+  { id: "protocols", label: "Protocol Usage" },
   { id: "clients", label: "Clients" },
   { id: "upstreams", label: "Upstreams" },
+  { id: "cache", label: "BIND Cache Effectiveness" },
+  { id: "recent-activity", label: "Recent Activity" },
+  { id: "system-health", label: "System Health" },
 ];
 
 export interface CardState {

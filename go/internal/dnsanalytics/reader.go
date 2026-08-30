@@ -85,7 +85,10 @@ func (r *Reader) Live(ctx context.Context, start, end float64) ([]pyanalytics.Bu
 // Clients load returned degraded:true, `unsupported dimension "client"`,
 // on the live Go-native analytics backend, because this method only
 // ever recognized "domain").
-var dimensionColumns = map[string]string{"domain": "domain", "client": "client"}
+var dimensionColumns = map[string]string{
+	"domain": "domain", "client": "client",
+	"qtype": "qtype", "rcode": "rcode", "protocol": "protocol",
+}
 
 func (r *Reader) TopDimension(ctx context.Context, dimension string, start, end float64, granularity string, limit int) ([]pyanalytics.DimensionCount, error) {
 	column, ok := dimensionColumns[dimension]
