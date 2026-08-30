@@ -627,6 +627,24 @@ async function main() {
     // template), so the panel must show it, not still report empty.
     await clickNavItem(page, (t) => t === "Dashboard");
     await page.waitForSelector("#dashboard-heading", { timeout: 3000 }).catch(() => {});
+    // A real test race fixed here (found while re-verifying this session):
+    // loadUpstreamsMini()'s own fetch is async, so reading the row count
+    // immediately after the nav click can race ahead of it resolving,
+    // reading the still-empty pre-fetch state -- the exact same class of
+    // bug this file's own clientsCardRowsFn check already guards against
+    // with a real waitForFunction. Wait for the real row to actually
+    // appear (or the 3s timeout to prove it genuinely never did) instead
+    // of reading synchronously right after navigation.
+    await page
+      .waitForFunction(
+        () => {
+          const h3 = [...document.querySelectorAll("h3")].find((e) => e.textContent?.trim() === "Upstreams");
+          const card = h3?.closest(".card");
+          return (card ? card.querySelectorAll(".mini-table tbody tr").length : -1) === 1;
+        },
+        { timeout: 3000 },
+      )
+      .catch(() => {});
     const upstreamsCardRowsAfterCreate = await page.evaluate(upstreamsCardRowsFn);
     check("Dashboard Upstreams mini-panel reflects a just-created profile", upstreamsCardRowsAfterCreate === 1, `rows=${upstreamsCardRowsAfterCreate}`);
     await clickNavItem(page, (t) => t === "DNS Settings");
