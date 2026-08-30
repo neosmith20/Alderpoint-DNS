@@ -65,6 +65,17 @@ const (
 	OpDNSRuntimeStatus  = "dns_runtime.status"
 	OpDNSRuntimePromote = "dns_runtime.promote"
 
+	// OpDNSRuntimeUpstreamStats polls the currently-live dnsdist
+	// process's own real webserver/REST API (127.0.0.1-only, see
+	// internal/dnscompile's DnsdistAPIKey field) for real per-backend
+	// counters -- the same real per-resolver telemetry V1.1.1's own
+	// analytics.py polled (see its dnsdist_server_state/
+	// collect_upstream_resolver_aggregate), just from this side of the
+	// same network-isolation boundary OpDNSPerfBenchmark's own doc
+	// comment already explains (the unprivileged web container cannot
+	// reach 127.0.0.1:<dnsdist port> on the host at all).
+	OpDNSRuntimeUpstreamStats = "dns_runtime.upstream_stats"
+
 	OpAnalyticsSnapshotStatus  = "analytics_snapshot.status"
 	OpAnalyticsSnapshotRefresh = "analytics_snapshot.refresh"
 

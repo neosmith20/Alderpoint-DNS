@@ -67,6 +67,19 @@ type Orchestrator struct {
 	// compiled, same as this deployment simply not passing
 	// -dns-runtime-dnstap-socket at startup.
 	DnstapSocketPath string
+
+	// DnsdistAPIKey: forwarded into dnscompile.Input's own field of the
+	// same name -- see that field's doc comment for what it compiles.
+	// Generated once per process lifetime by this deployment's own
+	// cmd/alderpointdns-go startup (crypto/rand, never persisted --
+	// see that call site's own comment for why no cross-restart
+	// persistence is needed) rather than by this package, matching
+	// TLSCertPath/TLSKeyPath's own "fixed deployment configuration,
+	// not stored in any table" posture above. Empty means no webserver
+	// API is compiled at all, same honest zero-value contract as
+	// DnstapSocketPath.
+	DnsdistAPIKey  string
+	DnsdistAPIPort int
 }
 
 // Result mirrors hostagentd.DNSPromoteResult, plus whether the
@@ -80,6 +93,55 @@ type Result struct {
 	Stage      string `json:"stage,omitempty"`
 	Detail     string `json:"detail,omitempty"`
 	Error      string `json:"error,omitempty"`
+}
+
+// UpstreamServerStat/UpstreamStatsResult mirror
+// internal/hostagentd.UpstreamServerStat/UpstreamStatsResult exactly
+// (that package is agent-only -- root-level os/exec/syscall
+// dependencies this unprivileged web process must never link in --
+// so its wire-JSON shape is duplicated here rather than imported, the
+// same boundary DNSPromoteResult's own field-for-field mirror above
+// already crosses).
+type UpstreamServerStat struct {
+	Name                       string   `json:"name"`
+	Address                    string   `json:"address"`
+	Pools                      []string `json:"pools"`
+	Protocol                   string   `json:"protocol"`
+	State                      string   `json:"state"`
+	Latency                    float64  `json:"latency_ms"`
+	Queries                    int64    `json:"queries"`
+	Responses                  int64    `json:"responses"`
+	SendErrors                 int64    `json:"send_errors"`
+	HealthCheckFailures        int64    `json:"health_check_failures"`
+	HealthCheckFailuresTimeout int64    `json:"health_check_failures_timeout"`
+	TCPConnectTimeouts         int64    `json:"tcp_connect_timeouts"`
+	TCPReadTimeouts            int64    `json:"tcp_read_timeouts"`
+	TCPWriteTimeouts           int64    `json:"tcp_write_timeouts"`
+	TCPGaveUp                  int64    `json:"tcp_gave_up"`
+}
+
+type UpstreamStatsResult struct {
+	Available bool                 `json:"available"`
+	Reason    string               `json:"reason,omitempty"`
+	Servers   []UpstreamServerStat `json:"servers,omitempty"`
+	PolledAt  string               `json:"polled_at,omitempty"`
+}
+
+// UpstreamStats polls the live dnsdist process's own real per-backend
+// counters via the host-agent (see hostagent.OpDNSRuntimeUpstreamStats's
+// doc comment) -- a thin RPC wrapper, no local state, no polling loop
+// of its own (see internal/dnsanalytics's own scheduler for the real
+// periodic sampling that turns this into a time-windowed "Top Upstream
+// Resolvers" answer).
+func (o *Orchestrator) UpstreamStats(ctx context.Context) (UpstreamStatsResult, error) {
+	if o.HostAgent == nil {
+		return UpstreamStatsResult{Available: false, Reason: "no host-agent configured for this deployment"}, nil
+	}
+	var result UpstreamStatsResult
+	if err := o.HostAgent.Call(ctx, hostagent.OpDNSRuntimeUpstreamStats, nil, &result); err != nil {
+		return UpstreamStatsResult{}, err
+	}
+	return result, nil
 }
 
 // EvaluateDomain backs Filters' "Test a Domain": builds the same real
@@ -143,6 +205,8 @@ func (o *Orchestrator) run(ctx context.Context, dryRun bool) Result {
 		"bind_forwarders":   bindForwarders,
 		"bind_tls_hostname": bindTLSHostname,
 		"dry_run":           dryRun,
+		"dnsdist_api_key":   o.DnsdistAPIKey,
+		"dnsdist_api_port":  o.DnsdistAPIPort,
 	}
 	var promResult struct {
 		Promoted   bool   `json:"promoted"`
@@ -167,6 +231,8 @@ func (o *Orchestrator) build(ctx context.Context) (dnscompile.Input, []string, s
 		TLSKeyPath:         o.TLSKeyPath,
 		CacheMaxEntries:    10000,
 		DnstapSocketPath:   o.DnstapSocketPath,
+		DnsdistAPIKey:      o.DnsdistAPIKey,
+		DnsdistAPIPort:     o.DnsdistAPIPort,
 	}
 
 	if o.LocalDNS != nil {

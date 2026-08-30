@@ -22,6 +22,7 @@ export const ALL_CARDS: CardDef[] = [
   { id: "protocols", label: "Protocol Usage" },
   { id: "clients", label: "Clients" },
   { id: "upstreams", label: "Upstreams" },
+  { id: "top-upstreams", label: "Top Upstream Resolvers" },
   { id: "cache", label: "BIND Cache Effectiveness" },
   { id: "recent-activity", label: "Recent Activity" },
   { id: "system-health", label: "System Health" },

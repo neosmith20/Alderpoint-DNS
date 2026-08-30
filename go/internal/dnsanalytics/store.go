@@ -70,6 +70,54 @@ CREATE TABLE IF NOT EXISTS ingestion_events (
 	detail TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_ingestion_events_ts ON ingestion_events(ts);
+
+-- upstream_resolver_samples: one row per real-backend per poll, holding
+-- the DELTA since the previous poll (see upstream_resolver_counter_state
+-- below) -- never a raw cumulative snapshot, so a window query never
+-- needs restart-aware clamping of its own; a resolver's activity in any
+-- window is simply SUM(...) over its rows in that window, matching
+-- query_events' own "aggregate computed at read time from raw rows"
+-- design philosophy (see this package's own doc comment) while still
+-- surviving a dnsdist restart cleanly (see RecordUpstreamSample).
+CREATE TABLE IF NOT EXISTS upstream_resolver_samples (
+	id                INTEGER PRIMARY KEY AUTOINCREMENT,
+	ts                INTEGER NOT NULL,
+	resolver_key      TEXT NOT NULL, -- the compiled dnsdist server name (see internal/dnscompile.UpstreamServerNamePrefix); stable across polls, not across a policy edit that removes/renames the endpoint
+	protocol          TEXT NOT NULL DEFAULT '',
+	address            TEXT NOT NULL DEFAULT '',
+	health_state      TEXT NOT NULL DEFAULT '',
+	queries_delta     INTEGER NOT NULL DEFAULT 0,
+	responses_delta   INTEGER NOT NULL DEFAULT 0,
+	failures_delta    INTEGER NOT NULL DEFAULT 0,
+	timeouts_delta    INTEGER NOT NULL DEFAULT 0,
+	latency_sum_ms    REAL NOT NULL DEFAULT 0,
+	latency_count     INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_upstream_resolver_samples_ts ON upstream_resolver_samples(ts);
+CREATE INDEX IF NOT EXISTS idx_upstream_resolver_samples_key_ts ON upstream_resolver_samples(resolver_key, ts);
+
+-- upstream_resolver_counter_state: the last-seen CUMULATIVE counters
+-- for each resolver_key, purely so the next poll can compute a delta --
+-- same role as V1.1.1's own upstream_resolver_counter_state table (read
+-- directly from app/analytics.py, not guessed). A dnsdist restart resets
+-- its own cumulative counters to zero; RecordUpstreamSample clamps a
+-- decrease to a zero delta for that one poll rather than reporting a
+-- fabricated negative or huge wrapped value, then resumes normal
+-- delta-tracking from the new lower baseline -- identical to V1's own
+-- _server_deltas.
+CREATE TABLE IF NOT EXISTS upstream_resolver_counter_state (
+	resolver_key                    TEXT PRIMARY KEY,
+	queries                         INTEGER NOT NULL DEFAULT 0,
+	responses                       INTEGER NOT NULL DEFAULT 0,
+	send_errors                     INTEGER NOT NULL DEFAULT 0,
+	health_check_failures           INTEGER NOT NULL DEFAULT 0,
+	health_check_failures_timeout   INTEGER NOT NULL DEFAULT 0,
+	tcp_connect_timeouts            INTEGER NOT NULL DEFAULT 0,
+	tcp_read_timeouts               INTEGER NOT NULL DEFAULT 0,
+	tcp_write_timeouts              INTEGER NOT NULL DEFAULT 0,
+	tcp_gave_up                     INTEGER NOT NULL DEFAULT 0,
+	updated_at                      TEXT NOT NULL DEFAULT ''
+);
 `
 
 // Outcome values. Anything else received is stored verbatim (never

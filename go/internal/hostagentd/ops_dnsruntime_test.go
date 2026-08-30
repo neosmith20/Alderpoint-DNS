@@ -505,6 +505,94 @@ func TestDNSRuntimeStatusReportsRunningProcesses(t *testing.T) {
 	}
 }
 
+// TestDNSRuntimeUpstreamStatsReportsRealBackendCounters is the real
+// end-to-end proof for OpDNSRuntimeUpstreamStats: promotes a real
+// dnsdist with its own real webserver API enabled, sends it real DNS
+// traffic through a real apdns_-named backend, then confirms the op
+// reports that backend's real (nonzero) query counters -- not
+// fabricated, not just "the config compiled".
+func TestDNSRuntimeUpstreamStatsReportsRealBackendCounters(t *testing.T) {
+	s, cfg := newDNSRuntimeConfig(t)
+	fakeUpstreamAddr := startFakeUpstream(t, "203.0.113.55")
+	apiPort := freeTCPPort(t)
+	apiKey := "test-real-api-key-0123456789"
+
+	in := dnscompile.Input{
+		ListenAddress:  cfg.DnsdistListenAddress,
+		DefaultProfile: &dnscompile.UpstreamProfile{Transport: "plain", Strategy: "ordered", Endpoints: []dnscompile.UpstreamEndpoint{{Address: fakeUpstreamAddr}}},
+		DnsdistAPIKey:  apiKey,
+		DnsdistAPIPort: apiPort,
+	}
+	dnsdistConf, err := dnscompile.CompileDnsdist(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := callPromote(t, s, DNSPromoteParams{DnsdistConf: dnsdistConf, DnsdistAPIKey: apiKey, DnsdistAPIPort: apiPort})
+	if !res.Promoted {
+		t.Fatalf("expected promotion to succeed, got %+v", res)
+	}
+
+	// Before any query: available, but this specific backend has not
+	// yet answered anything.
+	statsHandler, ok := s.handlers["dns_runtime.upstream_stats"]
+	if !ok {
+		t.Fatal("dns_runtime.upstream_stats is not registered")
+	}
+	body, err := statsHandler(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := body.(*UpstreamStatsResult)
+	if !before.Available {
+		t.Fatalf("expected the stats op to be available right after a promotion with an API key, got %+v", before)
+	}
+	if len(before.Servers) != 1 || before.Servers[0].Name != "apdns_default_0" {
+		t.Fatalf("expected exactly one real apdns_default_0 backend, got %+v", before.Servers)
+	}
+
+	// Send real DNS traffic through the compiled backend.
+	host, port := splitHostPort(cfg.DnsdistListenAddress)
+	for i := 0; i < 3; i++ {
+		if _, err := exec.Command("dig", "+time=2", "+tries=2", "+short", "@"+host, "-p", port, "anything.example.test", "A").Output(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	body2, err := statsHandler(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := body2.(*UpstreamStatsResult)
+	if len(after.Servers) != 1 {
+		t.Fatalf("expected exactly one real backend, got %+v", after.Servers)
+	}
+	if after.Servers[0].Queries < 3 {
+		t.Fatalf("expected the real backend's own query counter to reflect the 3 real queries sent, got %+v", after.Servers[0])
+	}
+	if after.Servers[0].Address != fakeUpstreamAddr {
+		t.Fatalf("expected the backend's real configured address, got %+v", after.Servers[0])
+	}
+}
+
+// TestDNSRuntimeUpstreamStatsUnavailableBeforeAnyPromotion proves the
+// honest "not available yet" case -- no promotion has ever happened, so
+// no API key is known, distinct from a genuinely empty server list.
+func TestDNSRuntimeUpstreamStatsUnavailableBeforeAnyPromotion(t *testing.T) {
+	s, _ := newDNSRuntimeConfig(t)
+	statsHandler := s.handlers["dns_runtime.upstream_stats"]
+	body, err := statsHandler(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := body.(*UpstreamStatsResult)
+	if result.Available {
+		t.Fatalf("expected unavailable before any promotion, got %+v", result)
+	}
+	if result.Reason == "" {
+		t.Fatal("expected a real, non-empty reason for unavailability")
+	}
+}
+
 // TestHostagentRestartAdoptsRunningNamedInsteadOfDuplicating is the
 // direct regression proof for the 2026-08-29 incident (see
 // trackedProcess's own doc comment): a fresh dnsRuntimeState created by

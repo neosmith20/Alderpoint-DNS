@@ -131,6 +131,26 @@ type ClientRow struct {
 	LastSeen int64
 }
 
+// UpstreamResolverSummary is one resolver's real activity summed over a
+// requested time window -- see internal/dnsanalytics/upstreamstats.go's
+// TopUpstreams for the real (Go-native) implementation. Lives here
+// (like ClientRow above) purely so both internal/pyanalytics.Reader's
+// legacy stub and internal/dnsanalytics.Reader's real implementation
+// can share one type without an import cycle (dnsanalytics already
+// imports pyanalytics for Bucket/DimensionCount; the reverse is not
+// true).
+type UpstreamResolverSummary struct {
+	ResolverKey      string
+	Protocol         string
+	Address          string
+	HealthState      string
+	QueriesAttempted int64
+	SuccessfulResp   int64
+	Failures         int64
+	Timeouts         int64
+	AvgLatencyMS     float64
+}
+
 type Reader struct {
 	// mu guards db/openGenDir across currentDB's generation swaps --
 	// every query takes a read lock to snapshot the current *sql.DB
@@ -472,6 +492,14 @@ func (r *Reader) ClientAnalytics(ctx context.Context, minutes float64, limit int
 // comment for why -- same reasoning applies here).
 func (r *Reader) ClearAll(ctx context.Context) (int64, error) {
 	return 0, fmt.Errorf("clear not supported by the legacy pyanalytics reader (never wired into production; see internal/dnsanalytics.Reader)")
+}
+
+// TopUpstreams exists only so *Reader still satisfies
+// internal/httpapi.AnalyticsReader (see ClientAnalytics's own doc
+// comment for why -- same reasoning applies here: this snapshot
+// schema never stored per-resolver counters either).
+func (r *Reader) TopUpstreams(ctx context.Context, since time.Time, limit int) ([]UpstreamResolverSummary, error) {
+	return nil, fmt.Errorf("top upstreams not supported by the legacy pyanalytics reader (never wired into production; see internal/dnsanalytics.Reader)")
 }
 
 // ExportAll dumps every row of time_buckets and dimension_counts,

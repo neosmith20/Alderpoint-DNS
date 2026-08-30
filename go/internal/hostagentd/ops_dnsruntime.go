@@ -55,6 +55,11 @@ type DNSRuntimeConfig struct {
 	DigBinary             string
 	HealthCheckTimeout    time.Duration
 	HealthCheckRetryDelay time.Duration
+
+	// DnsdistAPITimeout bounds the real HTTP call
+	// dns_runtime.upstream_stats makes to dnsdist's own loopback-only
+	// webserver -- see that op's own doc comment.
+	DnsdistAPITimeout time.Duration
 }
 
 func (c *DNSRuntimeConfig) applyDefaults() {
@@ -94,6 +99,9 @@ func (c *DNSRuntimeConfig) applyDefaults() {
 	}
 	if c.HealthCheckRetryDelay <= 0 {
 		c.HealthCheckRetryDelay = 200 * time.Millisecond
+	}
+	if c.DnsdistAPITimeout <= 0 {
+		c.DnsdistAPITimeout = 3 * time.Second
 	}
 }
 
@@ -160,6 +168,20 @@ type dnsRuntimeState struct {
 	prevNamedConf string
 	prevDnsdist   string
 	havePrev      bool
+
+	// dnsdistAPIKey/dnsdistAPIPort: whatever the web side's own most
+	// recent successful promote() told us it compiled into the live
+	// dnsdist config's webserver block (see dnscompile's DnsdistAPIKey/
+	// DnsdistAPIPort). Never generated or persisted on this side --
+	// this agent only ever remembers what the currently-live process was
+	// actually configured with, the same "trust the received config
+	// text, never re-derive" posture DNSPromoteParams already has for
+	// everything else. Empty means no key is known yet (a fresh agent
+	// restart before the web side's own next promote/apply), which
+	// dns_runtime.upstream_stats reports as a clean, honest "not
+	// available yet", not a fabricated empty result.
+	dnsdistAPIKey  string
+	dnsdistAPIPort int
 }
 
 func bindPIDFile(cfg DNSRuntimeConfig) string    { return filepath.Join(cfg.StagingDir, "named.pid") }
@@ -241,6 +263,20 @@ type DNSPromoteParams struct {
 	// explicit requirement that live cutover never depend on a human
 	// clicking Apply in an authenticated browser session.
 	DryRun bool `json:"dry_run"`
+
+	// DnsdistAPIKey/DnsdistAPIPort: reported alongside DnsdistConf so
+	// this agent can poll the SAME loopback-only webserver API the
+	// config text it was just handed actually compiled in (see
+	// dnsRuntimeState.dnsdistAPIKey's own doc comment) -- never parsed
+	// back out of DnsdistConf itself, matching every other value here
+	// being explicit params, not something this side re-derives from
+	// caller-supplied text. Empty DnsdistAPIKey means this promotion's
+	// compiled config has no webserver API at all (dnscompile's own
+	// "empty key = no API compiled" contract), which a DryRun promote
+	// correctly leaves stale rather than clearing (validate-only never
+	// touches what's actually live).
+	DnsdistAPIKey  string `json:"dnsdist_api_key,omitempty"`
+	DnsdistAPIPort int    `json:"dnsdist_api_port,omitempty"`
 }
 
 type DNSPromoteResult struct {
@@ -317,6 +353,13 @@ func RegisterDNSRuntimeOps(s *Server, cfg DNSRuntimeConfig) (func(), error) {
 		}
 		return st.promote(ctx, p)
 	})
+
+	s.Register(hostagent.OpDNSRuntimeUpstreamStats, func(ctx context.Context, params json.RawMessage) (any, error) {
+		st.mu.Lock()
+		key, port := st.dnsdistAPIKey, st.dnsdistAPIPort
+		st.mu.Unlock()
+		return fetchUpstreamStats(ctx, key, port, cfg.DnsdistAPITimeout)
+	})
 	return func() {
 		st.mu.Lock()
 		defer st.mu.Unlock()
@@ -368,6 +411,7 @@ func (st *dnsRuntimeState) promote(ctx context.Context, p DNSPromoteParams) (*DN
 	prevNamed, prevNamedExisted := readIfExists(st.cfg.BindLivePath)
 	prevDnsdist, prevDnsdistExisted := readIfExists(st.cfg.DnsdistLivePath)
 	havePrev := prevNamedExisted || prevDnsdistExisted
+	prevAPIKey, prevAPIPort := st.dnsdistAPIKey, st.dnsdistAPIPort
 
 	if err := atomicWrite(st.cfg.BindLivePath, namedConf); err != nil {
 		return nil, fmt.Errorf("promoting named.conf: %w", err)
@@ -382,19 +426,20 @@ func (st *dnsRuntimeState) promote(ctx context.Context, p DNSPromoteParams) (*DN
 
 	// --- reload ---
 	if err := st.reloadBind(ctx); err != nil {
-		return st.rollback(ctx, "bind_reload", err.Error(), prevNamed, prevDnsdist, havePrev)
+		return st.rollback(ctx, "bind_reload", err.Error(), prevNamed, prevDnsdist, havePrev, prevAPIKey, prevAPIPort)
 	}
 	if err := st.reloadDnsdist(ctx); err != nil {
-		return st.rollback(ctx, "dnsdist_reload", err.Error(), prevNamed, prevDnsdist, havePrev)
+		return st.rollback(ctx, "dnsdist_reload", err.Error(), prevNamed, prevDnsdist, havePrev, prevAPIKey, prevAPIPort)
 	}
 
 	// --- health check: prove THIS promotion is actually live ---
 	started := time.Now()
 	if err := st.waitHealthy(ctx); err != nil {
-		return st.rollback(ctx, "health_check", err.Error(), prevNamed, prevDnsdist, havePrev)
+		return st.rollback(ctx, "health_check", err.Error(), prevNamed, prevDnsdist, havePrev, prevAPIKey, prevAPIPort)
 	}
 
 	st.prevNamedConf, st.prevDnsdist, st.havePrev = namedConf, p.DnsdistConf, true
+	st.dnsdistAPIKey, st.dnsdistAPIPort = p.DnsdistAPIKey, p.DnsdistAPIPort
 	return &DNSPromoteResult{Promoted: true, Stage: "healthy", HealthyAtMS: time.Since(started).Milliseconds()}, nil
 }
 
@@ -404,17 +449,19 @@ func (st *dnsRuntimeState) promote(ctx context.Context, p DNSPromoteParams) (*DN
 // rollback. Never returns a Go error itself -- a rollback that
 // succeeds is a successful *operation*, even though the requested
 // config was rejected.
-func (st *dnsRuntimeState) rollback(ctx context.Context, stage, detail, prevNamed, prevDnsdist string, havePrev bool) (*DNSPromoteResult, error) {
+func (st *dnsRuntimeState) rollback(ctx context.Context, stage, detail, prevNamed, prevDnsdist string, havePrev bool, prevAPIKey string, prevAPIPort int) (*DNSPromoteResult, error) {
 	if havePrev {
 		atomicWrite(st.cfg.BindLivePath, prevNamed)
 		atomicWrite(st.cfg.DnsdistLivePath, prevDnsdist)
 		st.reloadBind(ctx)
 		st.reloadDnsdist(ctx)
+		st.dnsdistAPIKey, st.dnsdistAPIPort = prevAPIKey, prevAPIPort
 	} else {
 		os.Remove(st.cfg.BindLivePath)
 		os.Remove(st.cfg.DnsdistLivePath)
 		st.stopBind()
 		st.stopDnsdist()
+		st.dnsdistAPIKey, st.dnsdistAPIPort = "", 0
 	}
 	return &DNSPromoteResult{Promoted: false, RolledBack: true, Stage: stage, Detail: detail}, nil
 }

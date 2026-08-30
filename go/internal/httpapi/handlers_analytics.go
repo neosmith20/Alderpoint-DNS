@@ -221,6 +221,51 @@ func (s *Server) handleAnalyticsTopDomains(w http.ResponseWriter, r *http.Reques
 	WriteJSON(w, http.StatusOK, resp)
 }
 
+// handleAnalyticsTopUpstreams backs Dashboard's real "Top Upstream
+// Resolvers" panel -- V1.1.1 parity (dashboard.html's own
+// analytics.top_upstreams panel, backed by real dnsdist backend
+// counters, read directly from the shipped package) via
+// internal/dnsanalytics's own dnsdist-webserver-API-backed telemetry,
+// not the "configured profiles only" Upstreams mini-panel this
+// deployment already had. Same degraded-not-hidden contract as every
+// other analytics handler here: a nil/failing reader reports
+// degraded=true with a real reason, never a silently empty "everything
+// is fine" response.
+func (s *Server) handleAnalyticsTopUpstreams(w http.ResponseWriter, r *http.Request) {
+	minutes := floatQuery(r, "minutes", 60, 1, 31*24*60)
+	limit := intQuery(r, "limit", 10, 1, 50)
+	since := time.Now().Add(-time.Duration(minutes * float64(time.Minute)))
+
+	if s.Analytics == nil {
+		WriteJSON(w, http.StatusOK, map[string]any{"resolvers": []any{}, "degraded": true, "degraded_reason": analyticsUnavailable})
+		return
+	}
+	rows, err := s.Analytics.TopUpstreams(r.Context(), since, limit)
+	if err != nil {
+		WriteJSON(w, http.StatusOK, map[string]any{"resolvers": []any{}, "degraded": true, "degraded_reason": err.Error()})
+		return
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, map[string]any{
+			"resolver_key":         row.ResolverKey,
+			"protocol":             row.Protocol,
+			"address":              row.Address,
+			"health_state":         row.HealthState,
+			"queries_attempted":    row.QueriesAttempted,
+			"successful_responses": row.SuccessfulResp,
+			"failures":             row.Failures,
+			"timeouts":             row.Timeouts,
+			"avg_latency_ms":       round1(row.AvgLatencyMS),
+		})
+	}
+	degraded, reason := writerDegraded(s.Analytics.Health(r.Context()))
+	WriteJSON(w, http.StatusOK, map[string]any{
+		"resolvers": out, "degraded": degraded, "degraded_reason": reason,
+		"window": map[string]any{"minutes": minutes},
+	})
+}
+
 // handleAnalyticsBreakdown backs the Dashboard's Query Types/Response
 // Codes/Protocol Usage ranked lists (V1.1.1 dashboard.html's qtypes/
 // rcodes/protocols panels, read directly from analytics.* -- see

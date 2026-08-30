@@ -155,10 +155,10 @@ var (
 	ifupdownIfaceRe = func(iface string) *regexp.Regexp {
 		return regexp.MustCompile(`(?m)^\s*iface\s+` + regexp.QuoteMeta(iface) + `\s+inet\s+(\w+)`)
 	}
-	netplanDHCP4Re   = regexp.MustCompile(`dhcp4:\s*true`)
-	netplanDHCP6Re   = regexp.MustCompile(`dhcp6:\s*true`)
-	netplanAddrsRe   = regexp.MustCompile(`addresses:`)
-	netplanAcceptRA  = regexp.MustCompile(`accept-ra:\s*true`)
+	netplanDHCP4Re  = regexp.MustCompile(`dhcp4:\s*true`)
+	netplanDHCP6Re  = regexp.MustCompile(`dhcp6:\s*true`)
+	netplanAddrsRe  = regexp.MustCompile(`addresses:`)
+	netplanAcceptRA = regexp.MustCompile(`accept-ra:\s*true`)
 )
 
 // networkdBlockForInterface returns the text of the [Network]-style

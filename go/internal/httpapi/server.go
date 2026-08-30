@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"alderpointdns/go-controlplane/internal/auditlog"
 	"alderpointdns/go-controlplane/internal/auth"
 	"alderpointdns/go-controlplane/internal/backup"
 	"alderpointdns/go-controlplane/internal/blocklists"
@@ -13,7 +14,6 @@ import (
 	"alderpointdns/go-controlplane/internal/clientalias"
 	"alderpointdns/go-controlplane/internal/clients"
 	"alderpointdns/go-controlplane/internal/customrules"
-	"alderpointdns/go-controlplane/internal/auditlog"
 	"alderpointdns/go-controlplane/internal/dnsanalytics"
 	"alderpointdns/go-controlplane/internal/dnsperf"
 	"alderpointdns/go-controlplane/internal/dnsruntime"
@@ -192,6 +192,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/analytics/top-domains", requireAuth(s.handleAnalyticsTopDomains))
 	mux.HandleFunc("GET /api/analytics/top-blocked-domains", requireAuth(s.handleAnalyticsTopBlockedDomains))
 	mux.HandleFunc("GET /api/analytics/top-clients", requireAuth(s.handleAnalyticsTopClients))
+	mux.HandleFunc("GET /api/analytics/top-upstreams", requireAuth(s.handleAnalyticsTopUpstreams))
 	mux.HandleFunc("GET /api/analytics/breakdown", requireAuth(s.handleAnalyticsBreakdown))
 	mux.HandleFunc("GET /api/analytics/query-log", requireAuth(s.handleAnalyticsQueryLog))
 	mux.HandleFunc("GET /api/statistics/export", requireAuth(s.handleStatisticsExport))

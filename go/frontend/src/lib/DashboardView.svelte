@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, type AnalyticsBucket, type AnalyticsTopRowsResponse, type ManagedClient, type ObservedClient, type UpstreamProfile } from "../api";
+  import { api, type AnalyticsBucket, type AnalyticsTopRowsResponse, type ManagedClient, type ObservedClient, type UpstreamProfile, type UpstreamResolverStat } from "../api";
   import { router } from "../router.svelte";
   import { StaleGuard } from "../staleGuard";
   import { ALL_CARDS, loadCardOrder, saveCardOrder, type CardState } from "../dashboardCards";
@@ -151,11 +151,21 @@
   let clientsError = $state("");
   let upstreamsError = $state("");
 
+  // Top Upstream Resolvers -- real per-resolver dnsdist backend
+  // telemetry (internal/dnsanalytics, polled from the live dnsdist
+  // webserver API via apdns-hostagent), distinct from the "Upstreams"
+  // mini-panel above (configured profiles only, no traffic data). See
+  // GET /api/analytics/top-upstreams's own doc comment.
+  let topUpstreams = $state<UpstreamResolverStat[] | null>(null);
+  let topUpstreamsDegraded = $state(false);
+  let topUpstreamsDegradedReason = $state("");
+
   const summaryGuard = new StaleGuard();
   const chartGuard = new StaleGuard();
   const topGuard = new StaleGuard();
   const clientsGuard = new StaleGuard();
   const upstreamsGuard = new StaleGuard();
+  const topUpstreamsGuard = new StaleGuard();
 
   async function loadClientsMini() {
     const token = clientsGuard.start();
@@ -188,6 +198,22 @@
       if (!upstreamsGuard.isCurrent(token)) return;
       if (err instanceof DOMException && err.name === "AbortError") return;
       upstreamsError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  async function loadTopUpstreams() {
+    const token = topUpstreamsGuard.start();
+    try {
+      const resp = await api.analyticsTopUpstreams(60, 10, router.signal());
+      if (!topUpstreamsGuard.isCurrent(token)) return;
+      topUpstreams = resp.resolvers;
+      topUpstreamsDegraded = resp.degraded;
+      topUpstreamsDegradedReason = resp.degraded_reason ?? "";
+    } catch (err) {
+      if (!topUpstreamsGuard.isCurrent(token)) return;
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      topUpstreamsDegraded = true;
+      topUpstreamsDegradedReason = err instanceof Error ? err.message : String(err);
     }
   }
 
@@ -294,6 +320,7 @@
     loadTopDomains();
     loadClientsMini();
     loadUpstreamsMini();
+    loadTopUpstreams();
     loadProtection();
     loadCache();
     loadTopClients();
@@ -690,6 +717,40 @@
                 {/each}
               </tbody>
             </table>
+          {/if}
+        </div>
+      {:else if card.id === "top-upstreams"}
+        <div class="card wide-card">
+          <div class="card-head">
+            <h3>Top Upstream Resolvers</h3>
+            <button class="link" onclick={() => router.navigate("dns-settings")}>Manage</button>
+          </div>
+          {#if topUpstreamsDegraded}
+            <p class="degraded-note" role="status">Resolver telemetry unavailable: {topUpstreamsDegradedReason || "unavailable"}</p>
+          {/if}
+          {#if topUpstreams === null}
+            <p class="hint">Loading…</p>
+          {:else if topUpstreams.length === 0}
+            {#if !topUpstreamsDegraded}
+              <p class="hint">No upstream resolver data yet. Resolver identities are configured; this panel fills once dnsdist reports real backend traffic.</p>
+            {/if}
+          {:else}
+            <table class="mini-table">
+              <thead><tr><th>Resolver</th><th>Protocol</th><th>Queries</th><th>Success</th><th>Avg latency</th><th>State</th></tr></thead>
+              <tbody>
+                {#each topUpstreams as u (u.resolver_key)}
+                  <tr>
+                    <td class="mono">{u.address || u.resolver_key}</td>
+                    <td class="mono">{u.protocol || "--"}</td>
+                    <td class="mono">{u.queries_attempted}</td>
+                    <td class="mono">{u.queries_attempted > 0 ? Math.round((u.successful_responses / u.queries_attempted) * 100) + "%" : "--"}</td>
+                    <td class="mono">{u.avg_latency_ms > 0 ? u.avg_latency_ms.toFixed(1) + " ms" : "--"}</td>
+                    <td>{u.health_state || "unknown"}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+            <p class="hint">Resolver attribution is based on real dnsdist backend counters for this appliance's own managed upstream pool (last 60 minutes).</p>
           {/if}
         </div>
       {/if}

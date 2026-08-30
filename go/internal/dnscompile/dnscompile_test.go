@@ -316,7 +316,7 @@ func TestCompileDnsdistDefaultPoolRoutesThroughBindWhenPlain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, `newServer({address="127.0.0.1:15553", pool="", useProxyProtocol=true})`) {
+	if !strings.Contains(out, `newServer({address="127.0.0.1:15553", pool="", useProxyProtocol=true, name="apdns_bind_backend"})`) {
 		t.Fatalf("expected the plain-transport default profile to route through BIND, got:\n%s", out)
 	}
 	if strings.Contains(out, "9.9.9.9") {
@@ -510,7 +510,7 @@ func TestCompileDnsdistDomainRoutingSuffixMatch(t *testing.T) {
 	if !strings.Contains(out, `PoolAction("route_corp-dns")`) {
 		t.Fatalf("expected a PoolAction targeting the route's own pool, got:\n%s", out)
 	}
-	if !strings.Contains(out, `newServer({address="10.9.9.9:53", pool="route_corp-dns"})`) {
+	if !strings.Contains(out, `newServer({address="10.9.9.9:53", pool="route_corp-dns", name="apdns_route_corp-dns_0"})`) {
 		t.Fatalf("expected the route's own upstream server bound to its own pool, got:\n%s", out)
 	}
 	checkDnsdist(t, out)
@@ -930,6 +930,69 @@ func TestCompileDnsdistNetworkOverrideAppliesToRegexBlockToo(t *testing.T) {
 	}
 	if !strings.Contains(out, `AndRule({NetmaskGroupRule({"192.168.60.0/24"}), RegexRule("^ad[0-9]+\\.example\\.com$")}), SpoofAction({"10.10.10.10"})`) {
 		t.Fatalf("expected the network-scoped custom_ip response for the regex-block rule, got:\n%s", out)
+	}
+	checkDnsdist(t, out)
+}
+
+func TestCompileDnsdistWebserverAPIDisabledByDefault(t *testing.T) {
+	in := minimalInput()
+	out, err := CompileDnsdist(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "webserver(") {
+		t.Fatalf("expected no webserver block when DnsdistAPIKey is unset, got:\n%s", out)
+	}
+	checkDnsdist(t, out)
+}
+
+func TestCompileDnsdistWebserverAPIEnabled(t *testing.T) {
+	in := minimalInput()
+	in.DnsdistAPIKey = "test-api-key-value"
+	in.DnsdistAPIPassword = "test-password-value"
+	out, err := CompileDnsdist(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, `webserver("127.0.0.1:8083")`) {
+		t.Fatalf("expected the default port 8083 webserver, got:\n%s", out)
+	}
+	if !strings.Contains(out, `acl="127.0.0.1/32,::1/128"`) {
+		t.Fatalf("expected a loopback-only ACL, got:\n%s", out)
+	}
+	if !strings.Contains(out, `apiKey="test-api-key-value"`) {
+		t.Fatalf("expected the API key to be compiled in, got:\n%s", out)
+	}
+	if !strings.Contains(out, "setAPIWritable(false)") {
+		t.Fatalf("expected the API to be read-only, got:\n%s", out)
+	}
+	checkDnsdist(t, out)
+}
+
+func TestCompileDnsdistWebserverAPICustomPort(t *testing.T) {
+	in := minimalInput()
+	in.DnsdistAPIKey = "test-api-key-value"
+	in.DnsdistAPIPort = 18083
+	out, err := CompileDnsdist(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, `webserver("127.0.0.1:18083")`) {
+		t.Fatalf("expected the custom port to be used, got:\n%s", out)
+	}
+	checkDnsdist(t, out)
+}
+
+func TestCompileDnsdistDefaultPoolServerNamedForTelemetry(t *testing.T) {
+	in := minimalInput()
+	in.DefaultProfile = &UpstreamProfile{Transport: "plain", Strategy: "ordered", Endpoints: []UpstreamEndpoint{{Address: "9.9.9.9:53"}}}
+	in.BindBackendAddress = "" // route direct, not through BIND, so the profile's own endpoint is named
+	out, err := CompileDnsdist(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, `newServer({address="9.9.9.9:53", pool="", name="apdns_default_0"})`) {
+		t.Fatalf("expected a deterministic apdns_-prefixed server name for telemetry attribution, got:\n%s", out)
 	}
 	checkDnsdist(t, out)
 }

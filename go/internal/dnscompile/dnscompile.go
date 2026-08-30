@@ -290,6 +290,21 @@ type Input struct {
 	// (a genuine NXDOMAIN for a non-blocked domain must never be
 	// miscounted as a block).
 	DnstapSocketPath string
+
+	// DnsdistAPIKey: when non-empty, compiles dnsdist's own real
+	// webserver/REST API (webserver()+setWebserverConfig()), bound to
+	// 127.0.0.1 only (never DnsdistListenAddress -- this is an
+	// operator/control-plane channel, never reachable from a DNS
+	// client), matching V1.1.1's own real
+	// packaging/dnsdist.conf ACL exactly ("127.0.0.1/32,::1/128"). This
+	// is what internal/hostagentd's dns_runtime.upstream_stats op polls
+	// for real per-backend counters (see that op's own doc comment) --
+	// empty means no API is compiled at all (the prior behavior),
+	// same honest "not attempted" contract as DnstapSocketPath's own
+	// zero value.
+	DnsdistAPIKey      string
+	DnsdistAPIPassword string
+	DnsdistAPIPort     int // defaults to 8083 (V1.1.1's own port) when zero
 }
 
 // HealthMarkerDomain/IP are a fixed, compile-time-constant marker record
@@ -304,6 +319,16 @@ const (
 	HealthMarkerDomain = "health-marker.apdns-go-dns-runtime.internal"
 	HealthMarkerIP     = "203.0.113.77"
 )
+
+// UpstreamServerNamePrefix names every newServer() this package emits
+// (default pool and every domain-routing pool alike) so
+// internal/hostagentd's dns_runtime.upstream_stats op can tell an
+// Alderpoint-managed backend apart from anything else that might ever
+// share this dnsdist process's webserver API, purely by a name prefix
+// -- no separate ID-to-backend lookup table to keep in sync, matching
+// this package's own "compiled output is self-describing" convention
+// (see the "apdns_outcome"/"apdns_client" tag names above).
+const UpstreamServerNamePrefix = "apdns_"
 
 type Error struct{ msg string }
 
@@ -415,6 +440,23 @@ func CompileDnsdist(in Input) (string, error) {
 	w("-- Do not hand-edit; regenerate from the effective Go control-plane state.")
 	w("setLocal(%s)", luaString(in.ListenAddress))
 	w("")
+
+	if in.DnsdistAPIKey != "" {
+		port := in.DnsdistAPIPort
+		if port == 0 {
+			port = 8083
+		}
+		w(`webserver("127.0.0.1:%d")`, port)
+		w("setWebserverConfig({")
+		w(`  acl="127.0.0.1/32,::1/128",`)
+		if in.DnsdistAPIPassword != "" {
+			w(`  password=%s,`, luaString(in.DnsdistAPIPassword))
+		}
+		w(`  apiKey=%s`, luaString(in.DnsdistAPIKey))
+		w("})")
+		w("setAPIWritable(false)")
+		w("")
+	}
 
 	if in.Transports.DotEnabled {
 		if in.TLSCertPath == "" || in.TLSKeyPath == "" {
@@ -793,8 +835,11 @@ func blockingAction(mode, customIPv4, customIPv6 string) (string, error) {
 // (pool="") and every domain-routing pool, so DoT/DoH kwargs handling
 // (including the "DoH needs tls_hostname" refusal) is defined exactly
 // once.
-func endpointServerLine(ep UpstreamEndpoint, transport, pool string) (string, error) {
+func endpointServerLine(ep UpstreamEndpoint, transport, pool string, name string) (string, error) {
 	kwargs := fmt.Sprintf("address=%s, pool=%s", luaString(ep.Address), luaString(pool))
+	if name != "" {
+		kwargs += fmt.Sprintf(", name=%s", luaString(name))
+	}
 	switch transport {
 	case "dot":
 		kwargs += `, tls="openssl"`
@@ -1042,8 +1087,9 @@ func writeDomainRoutes(w func(string, ...any), routes []DomainRoute) error {
 			return errf("domain route %q: upstream profile %q has no endpoints", r.domain, r.profileID)
 		}
 		poolName := "route_" + sanitizePoolName(r.profileID)
-		for _, ep := range r.profile.Endpoints {
-			line, err := endpointServerLine(ep, r.profile.Transport, poolName)
+		for i, ep := range r.profile.Endpoints {
+			name := fmt.Sprintf("%s%s_%d", UpstreamServerNamePrefix, poolName, i)
+			line, err := endpointServerLine(ep, r.profile.Transport, poolName, name)
 			if err != nil {
 				return err
 			}
@@ -1085,10 +1131,11 @@ func writeDefaultPool(w func(string, ...any), in Input) error {
 	switch {
 	case hasManaged && profile.Transport == "plain" && in.BindBackendAddress != "":
 		w("-- ordinary recursion: routed through the BIND recursive-cache backend")
-		w(`newServer({address=%s, pool="", useProxyProtocol=true})`, luaString(in.BindBackendAddress))
+		w(`newServer({address=%s, pool="", useProxyProtocol=true, name=%s})`, luaString(in.BindBackendAddress), luaString(UpstreamServerNamePrefix+"bind_backend"))
 	case hasManaged:
-		for _, ep := range profile.Endpoints {
-			line, err := endpointServerLine(ep, profile.Transport, "")
+		for i, ep := range profile.Endpoints {
+			name := fmt.Sprintf("%sdefault_%d", UpstreamServerNamePrefix, i)
+			line, err := endpointServerLine(ep, profile.Transport, "", name)
 			if err != nil {
 				return err
 			}
@@ -1101,7 +1148,7 @@ func writeDefaultPool(w func(string, ...any), in Input) error {
 		// behavior), never a silently substituted third-party resolver,
 		// and never a serverless pool that would make dnsdist hang.
 		w("-- no managed upstream: routed through BIND for native root-hints recursion")
-		w(`newServer({address=%s, pool="", useProxyProtocol=true})`, luaString(in.BindBackendAddress))
+		w(`newServer({address=%s, pool="", useProxyProtocol=true, name=%s})`, luaString(in.BindBackendAddress), luaString(UpstreamServerNamePrefix+"bind_backend"))
 	default:
 		return errf("no managed upstream and no BIND backend configured -- refusing to generate a serverless pool")
 	}

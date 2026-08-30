@@ -550,6 +550,9 @@ func (wtr *Writer) pruneOld(ctx context.Context) {
 	if _, err := wtr.DB.ExecContext(ctx, `DELETE FROM query_events WHERE ts < ?`, cutoff); err != nil && wtr.Log != nil {
 		wtr.Log.Warn("dnsanalytics: prune failed", "err", err)
 	}
+	if err := PruneUpstreamSamples(ctx, wtr.DB, cutoff); err != nil && wtr.Log != nil {
+		wtr.Log.Warn("dnsanalytics: upstream resolver sample prune failed", "err", err)
+	}
 	wtr.enforceSizeLimit(ctx)
 }
 

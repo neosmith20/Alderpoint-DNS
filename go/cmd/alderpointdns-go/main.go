@@ -8,7 +8,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -763,12 +765,30 @@ func runWeb(args []string) {
 	dnsRuntimeTLSKey := resolveDNSRuntimeTLSPath(*dnsRuntimeTLSKeyPath, cfg.Web.TLSKeyPath)
 	var dnsRuntimeOrch *dnsruntime.Orchestrator
 	if hostAgentClient != nil && *dnsRuntimeDnsdistAddr != "" && *dnsRuntimeBindProxyAddr != "" {
+		// Generated fresh once per process lifetime, never persisted --
+		// see internal/dnsruntime.Orchestrator's own DnsdistAPIKey doc
+		// comment for why this is safe: every promote() call (Apply/
+		// Validate) sends the current key to the host-agent as an
+		// explicit param alongside the compiled config it's part of, so
+		// there is never a "the agent remembers a stale key" problem
+		// across a restart of THIS process, only a brief window right
+		// after a fresh start (before the first promote) where the
+		// upstream-stats poller sees "not available yet" -- honest, not
+		// a silent failure (see UpstreamStatsResult.Reason).
+		dnsdistAPIKeyBytes := make([]byte, 24)
+		dnsdistAPIKey := ""
+		if _, err := rand.Read(dnsdistAPIKeyBytes); err == nil {
+			dnsdistAPIKey = base64.RawURLEncoding.EncodeToString(dnsdistAPIKeyBytes)
+		} else {
+			logger.Warn("could not generate a dnsdist webserver API key -- Top Upstream Resolvers telemetry will be unavailable", "err", err)
+		}
 		dnsRuntimeOrch = &dnsruntime.Orchestrator{
 			LocalDNS: ldSvc, CustomRules: customRulesSvc, Blocklists: blSvc, Upstreams: upSvc, DNSTransports: dnsTransportsSvc, Policy: policySvc,
 			DomainRouting: domainRoutingSvc, Clients: clientsSvc,
 			HostAgent: hostAgentClient, DnsdistListenAddress: *dnsRuntimeDnsdistAddr, BindBackendAddress: *dnsRuntimeBindProxyAddr,
 			TLSCertPath: dnsRuntimeTLSCert, TLSKeyPath: dnsRuntimeTLSKey,
 			DnstapSocketPath: *dnstapDialPath,
+			DnsdistAPIKey:    dnsdistAPIKey,
 		}
 		if *dnstapDialPath == "" {
 			logger.Warn("DNS runtime is configured but -dns-runtime-dnstap-socket is empty: the compiled dnsdist config will not log any real query events")
@@ -878,6 +898,36 @@ func runWeb(args []string) {
 	// without adding meaningful load; Dispatch's own per-subscription
 	// cooldown still applies on top.
 	go notificationsSvc.RunHealthChecksScheduler(schedulerCtx, hostAgentClient, replicationSvc, upSvc, 2*time.Minute)
+
+	// Real "Top Upstream Resolvers" telemetry (Dashboard parity vs
+	// V1.1.1's own real dnsdist-backend-counter-backed panel -- see
+	// internal/dnsanalytics/upstreamstats.go's own doc comment). A
+	// 1-minute tick matches this deployment's other short-interval
+	// pollers; nil dnsRuntimeOrch (no DNS runtime configured at all)
+	// makes every poll a clean, logged no-op via UpstreamStats' own
+	// "no host-agent configured" case, not a crash.
+	if dnsRuntimeOrch != nil {
+		go dnsanalytics.RunUpstreamStatsScheduler(schedulerCtx, analyticsDB, func(ctx context.Context) ([]dnsanalytics.UpstreamServerSample, error) {
+			result, err := dnsRuntimeOrch.UpstreamStats(ctx)
+			if err != nil {
+				return nil, err
+			}
+			if !result.Available {
+				return nil, nil // honest "nothing to record yet" -- see UpstreamStatsResult.Reason, logged at Warn only when it's a real error above
+			}
+			samples := make([]dnsanalytics.UpstreamServerSample, len(result.Servers))
+			for i, s := range result.Servers {
+				samples[i] = dnsanalytics.UpstreamServerSample{
+					ResolverKey: s.Name, Address: s.Address, Protocol: s.Protocol, HealthState: s.State, Latency: s.Latency,
+					Queries: s.Queries, Responses: s.Responses, SendErrors: s.SendErrors,
+					HealthCheckFailures: s.HealthCheckFailures, HealthCheckFailuresTimeout: s.HealthCheckFailuresTimeout,
+					TCPConnectTimeouts: s.TCPConnectTimeouts, TCPReadTimeouts: s.TCPReadTimeouts,
+					TCPWriteTimeouts: s.TCPWriteTimeouts, TCPGaveUp: s.TCPGaveUp,
+				}
+			}
+			return samples, nil
+		}, time.Minute, logger)
+	}
 
 	// Real dispatch call site #6: backup_failure -- the last previously
 	// disclosed unwired notification category, closed now that scheduled

@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"time"
 
 	"alderpointdns/go-controlplane/internal/pyanalytics"
 	"alderpointdns/go-controlplane/internal/rawquerylog"
@@ -37,6 +38,13 @@ type AnalyticsReader interface {
 	// pyanalytics.Reader's stub exists solely so it keeps satisfying
 	// this interface for pre-existing tests that construct one.
 	ClearAll(ctx context.Context) (int64, error)
+	// TopUpstreams backs Dashboard's real "Top Upstream Resolvers" panel
+	// (GET /api/analytics/top-upstreams) -- real per-resolver dnsdist
+	// backend telemetry (see internal/dnsanalytics/upstreamstats.go).
+	// Only *dnsanalytics.Reader implements this for real in production;
+	// pyanalytics.Reader's stub exists solely so it keeps satisfying
+	// this interface, same posture as ClientAnalytics/ClearAll above.
+	TopUpstreams(ctx context.Context, since time.Time, limit int) ([]pyanalytics.UpstreamResolverSummary, error)
 }
 
 type RawQueryLogReader interface {

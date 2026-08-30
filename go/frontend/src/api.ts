@@ -372,6 +372,24 @@ export interface AnalyticsTopRowsResponse {
   aggregation_note?: string;
 }
 
+export interface UpstreamResolverStat {
+  resolver_key: string;
+  protocol: string;
+  address: string;
+  health_state: string;
+  queries_attempted: number;
+  successful_responses: number;
+  failures: number;
+  timeouts: number;
+  avg_latency_ms: number;
+}
+
+export interface AnalyticsTopUpstreamsResponse {
+  resolvers: UpstreamResolverStat[];
+  degraded: boolean;
+  degraded_reason?: string;
+}
+
 export interface QueryLogRow {
   id: number;
   ts: number;
@@ -904,6 +922,8 @@ export const api = {
     req<AnalyticsTopRowsResponse>(`/api/analytics/top-blocked-domains?minutes=${minutes}&limit=${limit}`, undefined, signal),
   analyticsBreakdown: (dimension: "qtype" | "rcode" | "protocol", minutes: number, limit: number, signal?: AbortSignal) =>
     req<AnalyticsTopRowsResponse>(`/api/analytics/breakdown?dimension=${dimension}&minutes=${minutes}&limit=${limit}`, undefined, signal),
+  analyticsTopUpstreams: (minutes: number, limit: number, signal?: AbortSignal) =>
+    req<AnalyticsTopUpstreamsResponse>(`/api/analytics/top-upstreams?minutes=${minutes}&limit=${limit}`, undefined, signal),
   analyticsQueryLog: (filters: QueryLogFilters, signal?: AbortSignal) => {
     const params = new URLSearchParams();
     params.set("minutes", String(filters.minutes));
