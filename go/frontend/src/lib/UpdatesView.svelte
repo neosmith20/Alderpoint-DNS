@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, ApiError, type UpdateCheckResponse } from "../api";
+  import { api, ApiError, type UpdateCheckResponse, type UpdateChannel } from "../api";
   import { router } from "../router.svelte";
   import StatusBadge from "./ui/StatusBadge.svelte";
 
@@ -12,9 +12,30 @@
   // health-check-gated rollback if a newly applied version doesn't come
   // back up healthy -- see internal/hostagentd/ops_update.go, proven
   // end-to-end against real compiled binaries in its own test suite.
+  //
+  // Update channel (internal/softwareupdates): a real GitHub Releases
+  // feed, owner-confirmed real coordinates -- "Check for updates" hits
+  // it live; "Download & Stage" fetches the checksum-verified .deb and
+  // feeds it into the exact same stage/apply pipeline manual upload
+  // already uses below.
 
   let status = $state<UpdateCheckResponse | null>(null);
   let loadError = $state("");
+  let channel = $state<UpdateChannel | null>(null);
+  let channelError = $state("");
+
+  let channelOwner = $state("");
+  let channelRepo = $state("");
+  let channelToken = $state("");
+  let channelBusy = $state(false);
+  let channelSaveResult = $state("");
+
+  let checkBusy = $state(false);
+  let checkError = $state("");
+
+  let downloadBusy = $state(false);
+  let downloadError = $state("");
+  let downloadResult = $state("");
 
   let file: FileList | undefined = $state();
   let claimedVersion = $state("");
@@ -36,9 +57,74 @@
     }
   }
 
+  async function refreshChannel() {
+    channelError = "";
+    try {
+      channel = await api.getUpdateChannel(router.signal());
+      if (channel) {
+        channelOwner = channel.repo_owner;
+        channelRepo = channel.repo_name;
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      channelError = err instanceof ApiError ? err.message : String(err);
+    }
+  }
+
   onMount(() => {
     refresh();
+    refreshChannel();
   });
+
+  async function saveChannel(e: Event) {
+    e.preventDefault();
+    channelBusy = true;
+    channelSaveResult = "";
+    channelError = "";
+    try {
+      await api.setUpdateChannel({ repo_owner: channelOwner.trim(), repo_name: channelRepo.trim(), token: channelToken.trim() || undefined });
+      channelToken = "";
+      channelSaveResult = "Saved.";
+      await refreshChannel();
+    } catch (err) {
+      channelError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      channelBusy = false;
+    }
+  }
+
+  async function checkNow() {
+    checkBusy = true;
+    checkError = "";
+    try {
+      const resp = await api.checkForUpdate();
+      channel = resp.channel;
+      if (resp.error) checkError = resp.error;
+    } catch (err) {
+      checkError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      checkBusy = false;
+    }
+  }
+
+  async function downloadAndStage() {
+    downloadBusy = true;
+    downloadError = "";
+    downloadResult = "";
+    try {
+      const result = await api.updateDownloadAndStage();
+      downloadResult = `Downloaded, verified, and staged: version ${result.version}.`;
+      await refresh();
+    } catch (err) {
+      downloadError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      downloadBusy = false;
+    }
+  }
+
+  let updateAvailable = $derived(
+    !!channel?.latest_version && !!status?.current_version && channel.latest_version !== status.current_version,
+  );
 
   async function sha256Hex(data: ArrayBuffer): Promise<string> {
     const digest = await crypto.subtle.digest("SHA-256", data);
@@ -95,9 +181,7 @@
     Stage and apply updates to this appliance's own software. A staged candidate's checksum and
     version are verified before it's trusted; applying always takes a real backup first (if that
     backup fails, the update is aborted and nothing changes), then is gated on a health check with
-    automatic rollback if the new version doesn't come up healthy. This appliance does not yet
-    check any update server on its own -- obtain a new build from your administrator or vendor and
-    upload it below.
+    automatic rollback if the new version doesn't come up healthy.
   </p>
 
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
@@ -111,11 +195,55 @@
       <h3>Update Status</h3>
       {#if status?.staged}
         <StatusBadge label="Candidate staged, ready to apply" tone="warning" />
+      {:else if updateAvailable}
+        <StatusBadge label={`Update available: ${channel?.latest_version}`} tone="warning" />
       {:else}
         <StatusBadge label="No candidate staged" tone="healthy" />
       {/if}
     </div>
   </section>
+
+  <div class="card">
+    <h3>Update Channel</h3>
+    <p class="hint">
+      Checks this real GitHub repository's own published Releases for the latest version. Optional
+      token is only needed for a private repo or to avoid GitHub's anonymous rate limit.
+    </p>
+    {#if channelError}<p class="error" role="alert">{channelError}</p>{/if}
+    <form onsubmit={saveChannel} class="channel-form">
+      <input placeholder="Repo owner" bind:value={channelOwner} aria-label="Repo owner" />
+      <input placeholder="Repo name" bind:value={channelRepo} aria-label="Repo name" />
+      <input
+        placeholder={channel?.has_token ? "Token set (leave blank to keep)" : "Token (optional)"}
+        type="password"
+        bind:value={channelToken}
+        aria-label="Access token"
+      />
+      <button type="submit" disabled={channelBusy || !channelOwner.trim() || !channelRepo.trim()}>{channelBusy ? "Saving…" : "Save Channel"}</button>
+      {#if channelSaveResult}<span class="success" role="status">{channelSaveResult}</span>{/if}
+    </form>
+    <div class="row">
+      <button onclick={checkNow} disabled={checkBusy}>{checkBusy ? "Checking…" : "Check for Updates"}</button>
+      {#if channel?.last_checked_at}
+        <span class="hint">
+          Last checked {new Date(channel.last_checked_at).toLocaleString()} --
+          {#if channel.last_check_status === "ok"}
+            latest published version: <strong class="mono">{channel.latest_version || "unknown"}</strong>
+          {:else}
+            <span class="error">{channel.last_check_error}</span>
+          {/if}
+        </span>
+      {/if}
+    </div>
+    {#if checkError}<p class="error" role="alert">{checkError}</p>{/if}
+    {#if updateAvailable}
+      <div class="row">
+        <button onclick={downloadAndStage} disabled={downloadBusy}>{downloadBusy ? "Downloading…" : `Download & Stage v${channel?.latest_version}`}</button>
+      </div>
+      {#if downloadError}<p class="error" role="alert">{downloadError}</p>{/if}
+      {#if downloadResult}<p class="success" role="status">{downloadResult}</p>{/if}
+    {/if}
+  </div>
 
   <form class="card" onsubmit={stage}>
     <h3>Manual Update</h3>
@@ -148,4 +276,8 @@
   .pending { background: var(--attention-bg); }
   .success { color: #16a34a; }
   .error { color: var(--badge-danger-fg); }
+  .channel-form { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+  .channel-form input { flex: 1 1 10rem; }
+  .row { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; }
+  .mono { font-family: monospace; }
 </style>

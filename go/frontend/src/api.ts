@@ -683,6 +683,20 @@ export interface UpdateCheckResponse {
   staged: { version: string; sha256: string } | null;
 }
 
+export interface UpdateChannel {
+  repo_owner: string;
+  repo_name: string;
+  has_token: boolean;
+  last_checked_at: string;
+  last_check_status: string;
+  last_check_error: string;
+  latest_version: string;
+  latest_deb_url: string;
+  latest_sha256sums_url: string;
+  latest_deb_asset_name: string;
+  configured?: boolean;
+}
+
 export interface ImportHostsResult {
   imported: number;
   skipped: number;
@@ -1147,6 +1161,12 @@ export const api = {
       body: JSON.stringify({ claimed_version: claimedVersion, sha256, data_base64: dataBase64 }),
     }),
   updateApply: () => req<{ status: string; version: string }>("/api/updates/apply", { method: "POST" }),
+  getUpdateChannel: (signal?: AbortSignal) => req<UpdateChannel>("/api/updates/channel", undefined, signal),
+  setUpdateChannel: (body: { repo_owner: string; repo_name: string; token?: string; clear_token?: boolean }) =>
+    req<{ status: string }>("/api/updates/channel", { method: "PUT", body: JSON.stringify(body) }),
+  checkForUpdate: () => req<{ status: string; channel: UpdateChannel; error?: string }>("/api/updates/check", { method: "POST" }),
+  updateDownloadAndStage: () =>
+    req<{ status: string; version: string; sha256: string }>("/api/updates/download-and-stage", { method: "POST" }),
 
   listBlocklists: (signal?: AbortSignal) => req<BlocklistsResponse>("/api/blocklists", undefined, signal),
   createBlocklist: (name: string, url: string, category: string) =>
