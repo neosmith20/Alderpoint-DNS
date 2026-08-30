@@ -39,19 +39,21 @@ import (
 	"alderpointdns/go-controlplane/internal/hostagent"
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/policy"
+	"alderpointdns/go-controlplane/internal/policyentities"
 	"alderpointdns/go-controlplane/internal/upstreams"
 )
 
 type Orchestrator struct {
-	LocalDNS      *localdns.Service
-	CustomRules   *customrules.Service
-	Blocklists    *blocklists.Service
-	Upstreams     *upstreams.Service
-	DNSTransports *dnstransports.Service
-	Policy        *policy.Service
-	DomainRouting *domainrouting.Service
-	Clients       *clients.Service
-	HostAgent     *hostagent.Client
+	LocalDNS       *localdns.Service
+	CustomRules    *customrules.Service
+	Blocklists     *blocklists.Service
+	Upstreams      *upstreams.Service
+	DNSTransports  *dnstransports.Service
+	Policy         *policy.Service
+	DomainRouting  *domainrouting.Service
+	Clients        *clients.Service
+	PolicyEntities *policyentities.Service
+	HostAgent      *hostagent.Client
 
 	// DnsdistListenAddress, BindBackendAddress, and TLSCertPath/
 	// TLSKeyPath are fixed deployment configuration (not stored in any
@@ -278,11 +280,13 @@ func (o *Orchestrator) build(ctx context.Context) (dnscompile.Input, []string, s
 		}
 	}
 
+	var blocklistSubs []blocklists.Subscription
 	if o.Blocklists != nil {
 		subs, err := o.Blocklists.List(ctx)
 		if err != nil {
 			return in, nil, "", fmt.Errorf("loading blocklist subscriptions: %w", err)
 		}
+		blocklistSubs = subs
 		for _, sub := range subs {
 			if !sub.Enabled {
 				continue
@@ -466,6 +470,14 @@ func (o *Orchestrator) build(ctx context.Context) (dnscompile.Input, []string, s
 				}
 			}
 		}
+	}
+
+	if o.Policy != nil {
+		overrides, err := o.computeScopeOverrides(ctx, globalLayer, blocklistSubs, allProfiles)
+		if err != nil {
+			return in, nil, "", fmt.Errorf("computing per-scope policy overrides: %w", err)
+		}
+		in.ScopeOverrides = overrides
 	}
 
 	return in, bindForwarders, bindTLSHostname, nil
