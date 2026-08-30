@@ -21,16 +21,16 @@ func (s *Server) registerReplicationRoutes(mux *http.ServeMux) {
 		return RequireAuth(s.Auth, s.SessionTTL, s.LastSeen, h)
 	}
 	mux.HandleFunc("GET /api/replication/status", requireAuth(s.handleReplicationStatus))
-	mux.HandleFunc("POST /api/replication/role", requireAuth(s.handleReplicationSetRole))
-	mux.HandleFunc("POST /api/replication/token", requireAuth(s.handleReplicationGenerateToken))
-	mux.HandleFunc("POST /api/replication/enrollments/{id}/revoke", requireAuth(s.handleReplicationRevokeEnrollment))
-	mux.HandleFunc("POST /api/replication/replicas/{id}/status", requireAuth(s.handleReplicationSetReplicaStatus))
-	mux.HandleFunc("POST /api/replication/connect", requireAuth(s.handleReplicationConnect))
-	mux.HandleFunc("POST /api/replication/sync-now", requireAuth(s.handleReplicationSyncNow))
-	mux.HandleFunc("POST /api/replication/drift-check", requireAuth(s.handleReplicationDriftCheck))
-	mux.HandleFunc("POST /api/replication/pause", requireAuth(s.handleReplicationPause))
-	mux.HandleFunc("POST /api/replication/settings", requireAuth(s.handleReplicationSettings))
-	mux.HandleFunc("POST /api/replication/generations", requireAuth(s.handleReplicationPublishGeneration))
+	mux.HandleFunc("POST /api/replication/role", requireAuth(s.audited("replication_role_create", s.handleReplicationSetRole)))
+	mux.HandleFunc("POST /api/replication/token", requireAuth(s.audited("replication_token_create", s.handleReplicationGenerateToken)))
+	mux.HandleFunc("POST /api/replication/enrollments/{id}/revoke", requireAuth(s.audited("replication_enrollment_revoke", s.handleReplicationRevokeEnrollment)))
+	mux.HandleFunc("POST /api/replication/replicas/{id}/status", requireAuth(s.audited("replication_replica_status_set", s.handleReplicationSetReplicaStatus)))
+	mux.HandleFunc("POST /api/replication/connect", requireAuth(s.audited("replication_connect_create", s.handleReplicationConnect)))
+	mux.HandleFunc("POST /api/replication/sync-now", requireAuth(s.audited("replication_sync_now", s.handleReplicationSyncNow)))
+	mux.HandleFunc("POST /api/replication/drift-check", requireAuth(s.audited("replication_drift_check", s.handleReplicationDriftCheck)))
+	mux.HandleFunc("POST /api/replication/pause", requireAuth(s.audited("replication_pause_create", s.handleReplicationPause)))
+	mux.HandleFunc("POST /api/replication/settings", requireAuth(s.audited("replication_settings_create", s.handleReplicationSettings)))
+	mux.HandleFunc("POST /api/replication/generations", requireAuth(s.audited("replication_generation_publish", s.handleReplicationPublishGeneration)))
 }
 
 func (s *Server) replicationUnavailable(w http.ResponseWriter) bool {

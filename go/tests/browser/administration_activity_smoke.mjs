@@ -80,6 +80,35 @@ async function main() {
     check("Real Protection Control toggle appears in Recent Administrative Activity", /protection_(enabled|disabled)/.test(afterText), afterText.slice(0, 500));
     check("Recent activity row shows Success badge", /Success/.test(afterText));
 
+    // Blocker 4 (Full Admin Audit Log): appliance-wide coverage via
+    // internal/httpapi's audited() route wrapper -- not just the
+    // hand-picked security-relevant actions above. Trigger a real
+    // mutation on a completely different feature area (a Filtering
+    // Profile, part of blocker 1's own new policy-entities surface)
+    // and confirm it shows up too, proving the wrapper's coverage is
+    // real and appliance-wide, not limited to what was already
+    // individually instrumented.
+    const created = await page.evaluate(async () => {
+      const sess = await (await fetch("/api/session", { credentials: "same-origin" })).json();
+      const r = await fetch("/api/policy-entities/filtering-profiles", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json", "X-CSRF-Token": sess.csrf },
+        body: JSON.stringify({ id: "admin-audit-smoke-profile", name: "Admin Audit Smoke", categories: ["malware"] }),
+      });
+      return r.status;
+    });
+    check("a real mutation on an unrelated feature (Filtering Profiles) succeeds", created === 201, String(created));
+    await page.reload({ waitUntil: "networkidle0" });
+    await page.waitForSelector("#admin-heading", { timeout: 3000 });
+    await new Promise((r) => setTimeout(r, 500));
+    const afterUnrelatedText = await page.evaluate(() => document.querySelector(".admin").textContent);
+    check(
+      "the unrelated mutation appears in Recent Administrative Activity too -- proves appliance-wide audited() coverage, not just hand-picked actions",
+      /policy_entities_filtering_profiles_create/.test(afterUnrelatedText),
+      afterUnrelatedText.slice(0, 600),
+    );
+
     check(
       "zero unexpected browser console errors",
       consoleErrors.filter((e) => !/Failed to load resource: the server responded with a status of/.test(e)).length === 0,

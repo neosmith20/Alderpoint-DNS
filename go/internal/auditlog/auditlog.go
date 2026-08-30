@@ -4,17 +4,18 @@
 // from the shipped V1.1.1 package) field-for-field: at/admin_id/
 // username/action/success/ip/detail, admin-scoped, most recent first.
 //
-// Deliberately scoped, disclosed rather than silently partial: V1.1.1
-// recorded dozens of distinct action kinds across nearly every mutating
-// endpoint in the whole appliance (client CRUD, policy changes, access
-// rules, software updates, ...). Retrofitting a Record call into every
-// one of those V2 handlers is a real, substantial cross-cutting change
-// this pass does not attempt. What IS wired here (see each call site's
-// own comment): login/logout, password change, session revocation,
-// Protection Control toggle, Statistics settings save, and Software
-// Update apply -- the security-relevant/session-relevant actions this
-// very Administration page is otherwise silent about, not an
-// appliance-wide activity log yet.
+// 2026-08-30: closed the real gap this comment used to disclose.
+// internal/httpapi's audited() route-registration wrapper (see that
+// file's own doc comment) now records EVERY mutating endpoint in the
+// appliance -- client/group/policy CRUD, blocklists/custom rules,
+// backup/import/restore, network config, replication, TLS/encryption,
+// notifications, upstreams, local DNS -- not a hand-picked subset. A
+// handful of security-relevant actions (login, password change,
+// session revoke, Protection Control, Statistics settings save,
+// Software Update apply) are recorded directly at their own call
+// sites instead, with a richer, hand-written detail string than the
+// generic wrapper can produce -- audited() is deliberately not applied
+// to those same routes, so nothing is ever recorded twice.
 package auditlog
 
 import (
