@@ -258,6 +258,13 @@ type Input struct {
 	// internal/policy.MatchNetwork's own most-specific-wins contract.
 	NetworkOverrides []NetworkOverride
 
+	// ScopeOverrides: see ScopeOverride's own doc comment (scopeoverride.go)
+	// -- the real per-network/group/client policy enforcement (blocked-
+	// domain sets, SafeSearch, ECS, upstream routing, query-log/
+	// statistics participation), additive to and independent of
+	// NetworkOverride above.
+	ScopeOverrides []ScopeOverride
+
 	Transports  TransportSettings
 	TLSCertPath string // the appliance's own management TLS cert -- reused for DoT/DoH, never Python's
 	TLSKeyPath  string
@@ -642,6 +649,21 @@ func CompileDnsdist(in Input) (string, error) {
 		w("")
 	}
 
+	// Per-scope (network/group/client) policy enforcement: query-log/
+	// statistics tags, SafeSearch rewrites, and each scope's own
+	// resolved blocked-domain set -- see ScopeOverride's own doc
+	// comment. Runs here (after Local DNS/rewrite/regex-allow, so an
+	// owner's own local record or explicit allow still wins; before
+	// the global regex-block/blocked-domains section below, so a more
+	// specific scope's own blocking wins over the global fallback for
+	// its own domains) -- the same "more specific first" placement
+	// NetworkOverride below already establishes.
+	if len(in.ScopeOverrides) > 0 {
+		if err := writeScopeOverrides(w, in.ScopeOverrides); err != nil {
+			return "", err
+		}
+	}
+
 	// Per-network blocking-response overrides: a network whose own
 	// effective policy differs from global for the response-mode fields
 	// gets its own copy of the regex-block/blocked-domains rules below,
@@ -704,6 +726,18 @@ func CompileDnsdist(in Input) (string, error) {
 	// matched to it automatically).
 	if len(in.DomainRoutes) > 0 {
 		if err := writeDomainRoutes(w, in.DomainRoutes); err != nil {
+			return "", err
+		}
+	}
+
+	// Per-scope upstream/ECS pools: a scope's own upstream_profile_id
+	// or ecs_mode="enabled" routes its remaining (non-domain-routed)
+	// traffic to a dedicated pool -- see writeScopePools' own doc
+	// comment. Emitted after domain routing (which always wins for its
+	// own specific domains regardless of scope) and before the default
+	// pool.
+	if len(in.ScopeOverrides) > 0 {
+		if err := writeScopePools(w, in.ScopeOverrides); err != nil {
 			return "", err
 		}
 	}

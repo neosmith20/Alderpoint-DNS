@@ -171,10 +171,10 @@ func TestBuildGathersDomainRoutingRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	dr := &domainrouting.Service{DB: db}
-	if _, err := dr.Create(ctx, "suffix", "corp.example.com", "corp-dns"); err != nil {
+	if _, err := dr.Create(ctx, "suffix", "corp.example.com", "corp-dns", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := dr.Create(ctx, "suffix", "stale.example.com", "never-created"); err == nil {
+	if _, err := dr.Create(ctx, "suffix", "stale.example.com", "never-created", ""); err == nil {
 		t.Fatal("expected Create itself to reject an unknown upstream_profile_id -- this test relies on that to seed the 'stale reference' case below via direct SQL instead")
 	}
 	// Seed a rule referencing a profile that existed at creation time but
@@ -183,7 +183,7 @@ func TestBuildGathersDomainRoutingRules(t *testing.T) {
 	if err := up.Create(ctx, "temp-dns", "Temp DNS", "plain", "ordered", []upstreams.Endpoint{{Address: "10.9.9.8:53", Weight: 1}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := dr.Create(ctx, "exact", "gone.example.com", "temp-dns"); err != nil {
+	if _, err := dr.Create(ctx, "exact", "gone.example.com", "temp-dns", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := up.Delete(ctx, "temp-dns"); err != nil {
