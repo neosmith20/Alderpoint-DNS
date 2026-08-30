@@ -2,18 +2,33 @@
 // this control plane's own data. Real, tested, safety-conscious --
 // disclosed rather than hidden about what it doesn't do yet:
 //
-//   - Not byte-compatible with Python's `.apdnsbak` format. Python's
-//     format (app/v2/backup_restore.py) is a Fernet-encrypted tar
-//     containing a raw control.db copy, secrets.json, and certs, with a
-//     passphrase-derived (PBKDF2-HMAC-SHA256) key for cross-appliance
-//     portability. Go's schema is a different, smaller set of tables
-//     (no secrets store yet -- see internal/upstreams's doc comment) and
-//     this format is unencrypted (there's nothing secret in it yet to
-//     protect). A real cross-format bridge needs its own encryption and
-//     schema-mapping design, not a rushed reuse of this package.
-//   - No V1.1.1 `.tar.gz` import. That format is V1's own, older, and
-//     different again from V2's -- a separate parser, not attempted here.
-//   - No cert files, no secrets (Go has none of either yet).
+//   - Not byte-compatible with the intermediate Python "V2" rewrite's
+//     own `.apdnsbak` format (a DIFFERENT thing from V1.1.1's own
+//     `.tar.gz`/`.tar.gz.enc` -- V1.1.1 never used a `.apdnsbak`
+//     extension at all; see internal/legacyimport for that one).
+//     Python V2's format (app/v2/backup_restore.py) is a
+//     Fernet-encrypted tar containing a raw control.db copy,
+//     secrets.json, and certs, with a passphrase-derived
+//     (PBKDF2-HMAC-SHA256) key for cross-appliance portability. Go's
+//     schema is a different, larger set of tables now than when this
+//     comment was first written -- notably `admin_accounts` (argon2id
+//     password hashes) is a real, always-included category today (see
+//     CategoryOrder) -- and this format is still, as of 2026-08-29,
+//     genuinely UNENCRYPTED: unlike V1.1.1's own optional
+//     password-protected `.tar.gz.enc` (see backup.py's
+//     encrypt_archive_inplace), there is no passphrase option here at
+//     all. This is a real, owner-facing gap versus V1.1.1, disclosed
+//     plainly (not "nothing secret in it" -- that was true once, isn't
+//     any more) rather than implemented in this pass; see
+//     PARITY_MATRIX.md's Backup & Restore row for the full reconciliation.
+//     A real cross-format bridge to Python V2's own format would also
+//     need its own encryption and schema-mapping design, not a rushed
+//     reuse of this package.
+//   - No cert files, no secrets store contents in the MAIN archive
+//     (Go's own secrets store is real now -- see internal/secretstore
+//     -- but it's exported as its own separately-encrypted Secret
+//     Backups archive, internal/secretbackup, deliberately kept apart
+//     rather than folded into this one).
 //
 // What IS real: VACUUM INTO for a consistent snapshot (never a raw copy
 // of a live, possibly-mid-write file), the same class of archive-bomb

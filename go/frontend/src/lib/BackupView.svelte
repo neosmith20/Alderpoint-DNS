@@ -308,10 +308,13 @@
 <section aria-labelledby="backup-heading" class="backup">
   <h2 id="backup-heading">Backup &amp; Restore</h2>
   <p class="scope-note">
-    Native Go backup format (not yet byte-compatible with Python's encrypted <code>.apdnsbak</code>
-    or V1.1.1's <code>.tar.gz</code>) -- see the parity matrix. Covers this control plane's own data
-    (blocklists, Local DNS, DNS Settings, Clients &amp; Access, Filters), and supports restoring just
-    the categories you choose instead of everything at once.
+    Native Go backup format (not yet byte-compatible with the Python V2 rewrite's encrypted
+    <code>.apdnsbak</code> or V1.1.1's <code>.tar.gz</code>) -- see the parity matrix. Covers this
+    control plane's own data (blocklists, Local DNS, DNS Settings, Clients &amp; Access, Filters),
+    and supports restoring just the categories you choose instead of everything at once.
+    <strong>This archive is not password-protected</strong> -- unlike V1.1.1's own optional encrypted
+    backups, anyone with the downloaded file can read its contents (including admin account
+    password hashes). Store downloaded backups somewhere you trust.
   </p>
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
 
