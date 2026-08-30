@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { api, ApiError, type ReplicationStatusResponse } from "../api";
   import { timestampPref } from "../timestamp.svelte";
+  import ConfirmDialog from "./ui/ConfirmDialog.svelte";
 
   // Replication (rebuilt 2026-08-29, real Go-native): one-way primary-
   // to-replica configuration sync over mutual TLS, rebuilt against
@@ -59,10 +60,30 @@
     }
   }
 
+  // Shared ConfirmDialog for every destructive/impactful replication
+  // action on this page, replacing four separate native window.confirm()
+  // call sites -- same pattern as Clients & Access's own pendingConfirm.
+  let pendingConfirm = $state<{ title: string; message: string; confirmLabel: string; run: () => void } | null>(null);
+
+  function askConfirm(title: string, message: string, confirmLabel: string, doRun: () => void) {
+    pendingConfirm = { title, message, confirmLabel, run: doRun };
+  }
+
+  function runPendingConfirm() {
+    if (!pendingConfirm) return;
+    const { run: doRun } = pendingConfirm;
+    pendingConfirm = null;
+    doRun();
+  }
+
   function saveRole(e: Event) {
     e.preventDefault();
-    if (!confirm("Change this node's replication role? Switching away from a role stops its listener/sync activity, but never interrupts DNS service.")) return;
-    run(() => api.replicationSetRole(roleChoice), "Role updated.");
+    askConfirm(
+      "Change replication role",
+      "Change this node's replication role? Switching away from a role stops its listener/sync activity, but never interrupts DNS service.",
+      "Change role",
+      () => run(() => api.replicationSetRole(roleChoice), "Role updated."),
+    );
   }
 
   function generateToken(e: Event) {
@@ -75,12 +96,21 @@
   }
 
   function revokeEnrollment(id: number) {
-    if (!confirm("Revoke this enrollment token before it is used?")) return;
-    run(() => api.replicationRevokeEnrollment(id), "Enrollment revoked.");
+    askConfirm("Revoke enrollment token", "Revoke this enrollment token before it is used?", "Revoke", () =>
+      run(() => api.replicationRevokeEnrollment(id), "Enrollment revoked."),
+    );
   }
 
   function setReplicaStatus(id: number, newStatus: string) {
-    if (newStatus === "revoked" && !confirm("Revoke this replica? Its certificate will no longer be accepted even though it remains cryptographically valid.")) return;
+    if (newStatus === "revoked") {
+      askConfirm(
+        "Revoke replica",
+        "Revoke this replica? Its certificate will no longer be accepted even though it remains cryptographically valid.",
+        "Revoke",
+        () => run(() => api.replicationSetReplicaStatus(id, newStatus), `Replica ${newStatus}.`),
+      );
+      return;
+    }
     run(() => api.replicationSetReplicaStatus(id, newStatus), `Replica ${newStatus}.`);
   }
 
@@ -90,11 +120,16 @@
 
   function connect(e: Event) {
     e.preventDefault();
-    if (!confirm("Connect to this primary and enroll? This installs a client certificate and starts syncing.")) return;
-    run(async () => {
-      await api.replicationConnect(connectHost, connectPort, connectToken);
-      connectHost = connectToken = "";
-    }, "Enrolled. Sync will begin shortly.");
+    askConfirm(
+      "Connect and enroll",
+      "Connect to this primary and enroll? This installs a client certificate and starts syncing.",
+      "Connect",
+      () =>
+        run(async () => {
+          await api.replicationConnect(connectHost, connectPort, connectToken);
+          connectHost = connectToken = "";
+        }, "Enrolled. Sync will begin shortly."),
+    );
   }
 
   function syncNow() {
@@ -363,6 +398,16 @@
     <p class="hint">Loading…</p>
   {/if}
 </section>
+
+{#if pendingConfirm}
+  <ConfirmDialog
+    title={pendingConfirm.title}
+    message={pendingConfirm.message}
+    confirmLabel={pendingConfirm.confirmLabel}
+    onConfirm={runPendingConfirm}
+    onCancel={() => (pendingConfirm = null)}
+  />
+{/if}
 
 <style>
   .replication { display: flex; flex-direction: column; gap: 1rem; }

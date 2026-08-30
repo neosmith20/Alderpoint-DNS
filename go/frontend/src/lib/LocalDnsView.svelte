@@ -3,9 +3,11 @@
   import { api, type LocalDnsRecord, type DNSRuntimeApplyResult, type ClientAlias, ApiError } from "../api";
   import { StaleGuard } from "../staleGuard";
   import { router } from "../router.svelte";
+  import { toast } from "../toast.svelte";
   import DataGrid from "./DataGrid.svelte";
   import DnsRuntimeBadge from "./DnsRuntimeBadge.svelte";
   import type { Column } from "./datagrid";
+  import ConfirmDialog from "./ui/ConfirmDialog.svelte";
   import PageHeader from "./ui/PageHeader.svelte";
   import Panel from "./ui/Panel.svelte";
 
@@ -102,10 +104,23 @@
     }
   }
 
-  async function deleteAlias(a: ClientAlias) {
-    if (!confirm(`Remove the alias "${a.display_name}" for ${a.cidr}?`)) return;
-    await api.deleteClientAlias(a.id);
-    await refreshAliases();
+  let confirmDeleteAlias = $state<ClientAlias | null>(null);
+
+  function deleteAlias(a: ClientAlias) {
+    confirmDeleteAlias = a;
+  }
+
+  async function runDeleteAlias() {
+    const a = confirmDeleteAlias;
+    confirmDeleteAlias = null;
+    if (!a) return;
+    try {
+      await api.deleteClientAlias(a.id);
+      await refreshAliases();
+      toast.success(`Removed alias "${a.display_name}".`);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : String(err));
+    }
   }
 
   // Loaded on demand by RouteLoader when this page is routed to -- own our
@@ -289,6 +304,16 @@
     {/if}
   </Panel>
 </section>
+
+{#if confirmDeleteAlias}
+  <ConfirmDialog
+    title="Remove alias"
+    message={`Remove the alias "${confirmDeleteAlias.display_name}" for ${confirmDeleteAlias.cidr}?`}
+    confirmLabel="Remove"
+    onConfirm={runDeleteAlias}
+    onCancel={() => (confirmDeleteAlias = null)}
+  />
+{/if}
 
 <style>
   .localdns { display: flex; flex-direction: column; gap: 1rem; }

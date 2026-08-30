@@ -4,6 +4,7 @@
   import { router } from "../router.svelte";
   import { timestampPref } from "../timestamp.svelte";
   import DnsRuntimeBadge from "./DnsRuntimeBadge.svelte";
+  import ConfirmDialog from "./ui/ConfirmDialog.svelte";
 
   // Encryption. Two independently-scoped native pieces:
   //
@@ -94,14 +95,17 @@
   let rotateBusy = $state(false);
   let rotateResult = $state("");
   let rotateError = $state("");
+  let confirmRotateProvider = $state(false);
 
   async function rotateDnscrypt(rotateProvider: boolean) {
     if (rotateProvider) {
-      const confirmed = confirm(
-        "Rotating the provider identity invalidates every client's existing pinned DNSCrypt stamp. Continue?",
-      );
-      if (!confirmed) return;
+      confirmRotateProvider = true;
+      return;
     }
+    await doRotateDnscrypt(false);
+  }
+
+  async function doRotateDnscrypt(rotateProvider: boolean) {
     rotateBusy = true;
     rotateError = "";
     rotateResult = "";
@@ -301,6 +305,19 @@
     </form>
   {/if}
 </section>
+
+{#if confirmRotateProvider}
+  <ConfirmDialog
+    title="Rotate provider identity"
+    message="Rotating the provider identity invalidates every client's existing pinned DNSCrypt stamp. Continue?"
+    confirmLabel="Rotate"
+    onConfirm={() => {
+      confirmRotateProvider = false;
+      doRotateDnscrypt(true);
+    }}
+    onCancel={() => (confirmRotateProvider = false)}
+  />
+{/if}
 
 <style>
   .encryption { display: flex; flex-direction: column; gap: 1rem; }

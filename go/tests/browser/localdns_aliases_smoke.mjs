@@ -84,8 +84,9 @@ async function main() {
     });
     check("client alias persists across a full page reload", panelTextAfterReload.includes("Guest network"), panelTextAfterReload);
 
-    // Remove it.
-    page.on("dialog", (d) => d.accept());
+    // Remove it -- goes through the shared app-styled ConfirmDialog now,
+    // not a native window.confirm() (see LocalDnsView.svelte's own
+    // 2026-08-29 design-system unification).
     const removeClicked = await page.evaluate(() => {
       const heading = [...document.querySelectorAll("h2")].find((h) => h.textContent.trim() === "Client Aliases");
       const btn = [...heading.closest(".panel").querySelectorAll("button")].find((b) => b.textContent.trim() === "Remove");
@@ -94,6 +95,10 @@ async function main() {
       return true;
     });
     check("Remove button exists and is clickable", removeClicked);
+    await page.waitForSelector(".modal .danger", { timeout: 3000 });
+    await page.click(".modal .danger");
+    await page.waitForSelector(".toast--success", { timeout: 3000 }).catch(() => null);
+    check("removing an alias shows a real toast confirmation", !!(await page.$(".toast--success")));
     await new Promise((r) => setTimeout(r, 300));
     const panelTextAfterRemove = await page.evaluate(() => {
       const heading = [...document.querySelectorAll("h2")].find((h) => h.textContent.trim() === "Client Aliases");
