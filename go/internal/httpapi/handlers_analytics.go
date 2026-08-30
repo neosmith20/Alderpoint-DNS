@@ -415,6 +415,26 @@ func (s *Server) handleAnalyticsQueryLog(w http.ResponseWriter, r *http.Request)
 		}
 		rows = filtered
 	}
+
+	// Resolve each row's raw client address to a friendly name, same
+	// fallback chain (managed client's own name, else the most specific
+	// Client Alias, else the raw address) as the Clients page's own
+	// Client analytics table (handleAnalyticsTopClients) -- closing the
+	// "raw Query Log grid never resolves aliases" gap this row's own
+	// PARITY_MATRIX.md entry used to disclose. Best-effort: a lookup
+	// failure degrades to "no resolved name" (the frontend already falls
+	// back to the raw address), never a hard error for the whole grid.
+	if managed, err := s.managedAddressLookup(r.Context()); err == nil {
+		aliases := s.aliasResolver(r.Context())
+		for i := range rows {
+			if m, ok := managed[rows[i].Client]; ok && m.Name != "" {
+				rows[i].ClientName = m.Name
+			} else if alias := aliases.ResolveLabel(rows[i].Client); alias != "" {
+				rows[i].ClientName = alias
+			}
+		}
+	}
+
 	degraded, reason := false, ""
 	if s.Analytics != nil {
 		degraded, reason = writerDegraded(s.Analytics.Health(r.Context()))

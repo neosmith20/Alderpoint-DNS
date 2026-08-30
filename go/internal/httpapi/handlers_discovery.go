@@ -47,6 +47,13 @@ func (s *Server) handleListObservedClients(w http.ResponseWriter, r *http.Reques
 		Err(http.StatusInternalServerError, "internal_error", "failed to load clients").WriteJSON(w)
 		return
 	}
+	// Client Aliases (internal/clientalias) give an unmanaged-but-labeled
+	// address a friendly name too -- closes the "Dashboard's client
+	// mini-panel/Observed Clients never resolves aliases" gap this
+	// endpoint's own PARITY_MATRIX.md entry used to disclose. Same
+	// resolver, same "no match -> no label" degrade as every other
+	// alias-resolving endpoint.
+	aliases := s.aliasResolver(r.Context())
 
 	out := make([]map[string]any, 0, len(rows))
 	for _, d := range rows {
@@ -70,6 +77,9 @@ func (s *Server) handleListObservedClients(w http.ResponseWriter, r *http.Reques
 			entry["client_id"] = m.ID
 		} else {
 			entry["managed"] = false
+			if alias := aliases.ResolveLabel(d.Value); alias != "" {
+				entry["alias_label"] = alias
+			}
 		}
 		out = append(out, entry)
 	}

@@ -211,6 +211,11 @@ export interface ObservedClient {
   query_count: number;
   managed: boolean;
   client_id?: number;
+  // The most specific matching Client Alias's display name, when this
+  // unmanaged address falls inside one -- same resolution the Clients
+  // page's own Client analytics table already used. Absent when no
+  // alias matches; the UI falls back to the raw address.
+  alias_label?: string;
 }
 
 // ClientAnalyticsRow: one ranked row of the Clients page's "Client

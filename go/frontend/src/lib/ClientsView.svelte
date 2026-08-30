@@ -784,7 +784,12 @@
       <ul class="observed-list">
         {#each observed as o (o.address)}
           <li class="observed-row">
-            <code>{o.address}</code>
+            {#if o.alias_label}
+              <strong>{o.alias_label}</strong>
+              <code class="hint">{o.address}</code>
+            {:else}
+              <code>{o.address}</code>
+            {/if}
             <span class="hint">{o.query_count} quer{o.query_count === 1 ? "y" : "ies"}</span>
             {#if o.managed}
               <StatusBadge label="Managed" tone="healthy" />

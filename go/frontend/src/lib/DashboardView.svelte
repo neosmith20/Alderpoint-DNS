@@ -375,7 +375,7 @@
                   {#each unmanagedObserved as o (o.address)}
                     <tr>
                       <td><span class="mini-badge mini-badge-observed">observed</span></td>
-                      <td class="mono">{o.address}</td>
+                      <td class="mono">{o.alias_label ?? o.address}</td>
                       <td class="mono"><span class="hint">{o.query_count} queries</span></td>
                     </tr>
                   {/each}

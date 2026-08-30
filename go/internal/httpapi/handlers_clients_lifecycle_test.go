@@ -21,6 +21,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"alderpointdns/go-controlplane/internal/analyticssnapshot"
+	"alderpointdns/go-controlplane/internal/clientalias"
 	"alderpointdns/go-controlplane/internal/clients"
 	"alderpointdns/go-controlplane/internal/dbmigrate"
 	"alderpointdns/go-controlplane/internal/policy"
@@ -188,12 +189,18 @@ func TestObservedClientsHTTPFiltersLoopbackAndCrossReferencesManaged(t *testing.
 	}
 	t.Cleanup(func() { reader.Close() })
 
+	aliasSvc := &clientalias.Service{DB: db}
+	if _, err := aliasSvc.Create(context.Background(), "192.168.1.96/28", "Guest devices", ""); err != nil {
+		t.Fatal(err)
+	}
+
 	s := &Server{
-		DB:        db,
-		Policy:    &policy.Service{DB: db},
-		Clients:   clientsSvc,
-		Analytics: reader,
-		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		DB:            db,
+		Policy:        &policy.Service{DB: db},
+		Clients:       clientsSvc,
+		ClientAliases: aliasSvc,
+		Analytics:     reader,
+		Log:           slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
 	code, body := doHandler(t, s.handleListObservedClients, "GET", "", nil)
@@ -223,6 +230,15 @@ func TestObservedClientsHTTPFiltersLoopbackAndCrossReferencesManaged(t *testing.
 	}
 	if managed, _ := newAddr["managed"].(bool); managed {
 		t.Fatalf("expected 192.168.1.99 to be flagged unmanaged, got %+v", newAddr)
+	}
+	// 192.168.1.99 falls inside the real "Guest devices" alias CIDR
+	// (192.168.1.96/28) -- closing the "Observed Clients never resolves
+	// aliases" gap PARITY_MATRIX.md used to disclose.
+	if label, _ := newAddr["alias_label"].(string); label != "Guest devices" {
+		t.Fatalf("expected the unmanaged-but-aliased address to carry alias_label=\"Guest devices\", got %+v", newAddr)
+	}
+	if label, ok := known["alias_label"]; ok {
+		t.Fatalf("a managed address must not also carry an alias_label (managed name always wins), got %+v", label)
 	}
 }
 
