@@ -313,7 +313,11 @@
         Resolves the real global -&gt; network -&gt; group -&gt; client precedence
         (internal/policy/effective.go) for one client, field by field, showing exactly which scope
         won each field. An optional client IP lets you check which network layer (if any) would
-        match, independent of the client's own stored identifiers.
+        match, independent of the client's own stored identifiers. This shows which stored value
+        wins, not whether DNS answering actually enforces it yet -- see each scope's own Save
+        result above for that (global and network policy compile live today; group and client
+        general policy fields don't yet, aside from Strong ClientID's own separate domain
+        overrides on the Clients page).
       </p>
       <form onsubmit={runExplain} class="explain-form">
         <label>
