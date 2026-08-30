@@ -13,6 +13,7 @@ import (
 	"alderpointdns/go-controlplane/internal/clientalias"
 	"alderpointdns/go-controlplane/internal/clients"
 	"alderpointdns/go-controlplane/internal/customrules"
+	"alderpointdns/go-controlplane/internal/dnsanalytics"
 	"alderpointdns/go-controlplane/internal/dnsperf"
 	"alderpointdns/go-controlplane/internal/dnsruntime"
 	"alderpointdns/go-controlplane/internal/dnstransports"
@@ -113,6 +114,15 @@ type Server struct {
 	// Python-era compatibility boundaries -- see analytics_iface.go).
 	RawQueryLog RawQueryLogReader
 
+	// AnalyticsSettings is nil unless -analytics-db was given a real
+	// path at startup (same gate as Analytics/RawQueryLog above) --
+	// backs GET/PUT /api/statistics/settings (Statistics settings
+	// parity, see handlers_statistics_settings.go) and is the same
+	// *dnsanalytics.SettingsHolder the live analytics Writer reads on
+	// its own hot path, so a save here takes effect immediately with no
+	// restart.
+	AnalyticsSettings *dnsanalytics.SettingsHolder
+
 	// DNSPerf is nil unless a full DNS-runtime deployment was
 	// configured at startup -- same nil-safe contract as DNSRuntime
 	// above. See internal/dnsperf's doc comment: the real "Safe DNS
@@ -178,6 +188,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/analytics/query-log", requireAuth(s.handleAnalyticsQueryLog))
 	mux.HandleFunc("GET /api/statistics/export", requireAuth(s.handleStatisticsExport))
 	mux.HandleFunc("POST /api/statistics/clear", requireAuth(s.handleStatisticsClear))
+	mux.HandleFunc("GET /api/statistics/settings", requireAuth(s.handleGetAnalyticsSettings))
+	mux.HandleFunc("PUT /api/statistics/settings", requireAuth(s.handleUpdateAnalyticsSettings))
 
 	mux.HandleFunc("GET /api/blocklists", requireAuth(s.handleListBlocklists))
 	mux.HandleFunc("POST /api/blocklists", requireAuth(s.handleCreateBlocklist))

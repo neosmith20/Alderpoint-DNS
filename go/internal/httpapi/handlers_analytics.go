@@ -406,7 +406,17 @@ func (s *Server) handleAnalyticsTopBlockedDomains(w http.ResponseWriter, r *http
 func (s *Server) handleAnalyticsQueryLog(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	minutes := floatQuery(r, "minutes", 1440, 1, 31*24*60)
-	limit := intQuery(r, "limit", rawquerylog.DefaultLimit, 1, rawquerylog.MaxLimit)
+	// Statistics settings' recent_query_limit (V1.1.1 parity, see
+	// dnsanalytics.Settings) is this endpoint's own default page size
+	// whenever the caller doesn't explicitly pass ?limit= -- an explicit
+	// value (e.g. the Query Log page's own page-size control) always
+	// wins, matching how every other owner-configurable default on this
+	// appliance behaves.
+	defaultLimit := rawquerylog.DefaultLimit
+	if s.AnalyticsSettings != nil {
+		defaultLimit = s.AnalyticsSettings.Load().RecentQueryLimit
+	}
+	limit := intQuery(r, "limit", defaultLimit, 1, rawquerylog.MaxLimit)
 	offset := intQuery(r, "offset", 0, 0, rawquerylog.MaxOffset)
 	search := strings.TrimSpace(q.Get("search"))
 

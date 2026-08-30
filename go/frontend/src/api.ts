@@ -328,6 +328,23 @@ export interface AnalyticsTimeseriesResponse {
   buckets: AnalyticsBucket[];
 }
 
+// AnalyticsSettings mirrors internal/dnsanalytics.Settings -- V1.1.1's
+// real statistics_settings.html/analytics_settings row (webapp.py,
+// app/analytics.py) field-for-field wherever this single-table,
+// event-stream architecture has an honest equivalent. Two real V1
+// fields (aggregate_retention_days, collection_interval) governed a
+// separate poll-and-aggregate tier this architecture doesn't have and
+// are deliberately not modeled -- see the backend's own doc comment.
+export interface AnalyticsSettings {
+  analytics_enabled: boolean;
+  detailed_query_logging_enabled: boolean;
+  privacy_mode: "full" | "anonymized_clients" | "aggregate_only";
+  client_anonymization: "truncate" | "hash";
+  detailed_retention_days: number;
+  db_size_limit_bytes: number;
+  recent_query_limit: number;
+}
+
 export interface AnalyticsTopRowsResponse {
   rows: [string, number][];
   columns: string[];
@@ -816,6 +833,9 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ confirmation: "CLEAR" }),
     }),
+  getAnalyticsSettings: (signal?: AbortSignal) => req<AnalyticsSettings>("/api/statistics/settings", undefined, signal),
+  updateAnalyticsSettings: (settings: AnalyticsSettings) =>
+    req<AnalyticsSettings>("/api/statistics/settings", { method: "PUT", body: JSON.stringify(settings) }),
   systemStatus: () =>
     req<{ version: string; uptime_seconds: number; appliance_name: string; appliance_timezone: string }>("/api/system/status"),
   dashboardSummary: (signal?: AbortSignal) =>

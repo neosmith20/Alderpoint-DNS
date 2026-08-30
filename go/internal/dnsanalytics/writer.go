@@ -77,11 +77,29 @@ type Writer struct {
 	DB  *sql.DB
 	Log *slog.Logger
 
+	// DBPath is this database's own file path, needed only to stat its
+	// real on-disk size (main + -wal + -shm) for enforceSizeLimit --
+	// matching V1.1.1's own db_size() (analytics.py:965). Empty disables
+	// size-limit enforcement (dbFileSize simply finds nothing to stat),
+	// never a crash.
+	DBPath string
+
 	// TrafficProbe, when set, is consulted by the stall watchdog (see
 	// this file's own doc comment on the type). nil is a valid,
 	// supported "no probe wired" state -- Health then reports degraded
 	// rather than silently trusting a stale pipe (see reader.go).
 	TrafficProbe TrafficProbe
+
+	// Settings backs Statistics settings parity (see settings.go's own
+	// doc comment) -- a nil *SettingsHolder (never set) is a valid,
+	// supported state: Load() falls back to DefaultSettings, so a
+	// Writer never wired to real settings behaves exactly as this
+	// package always has.
+	Settings *SettingsHolder
+	// AnonymizationSecret keys client hashing when PrivacyMode requires
+	// it (see anonymizeClient) -- empty uses a fixed, disclosed fallback
+	// (see anonymizationSecret()).
+	AnonymizationSecret string
 
 	// lastHeartbeat is updated by the accept/decode loop roughly once a
 	// second regardless of query volume, so Health (reader.go) can tell
@@ -297,10 +315,15 @@ func (wtr *Writer) Run(ctx context.Context, socketPath string) error {
 			return nil
 		case f := <-raw:
 			if ev, ok := decodeFrame(f); ok {
+				// lastFrameAt is stamped before Settings is even
+				// consulted: turning analytics off must never look
+				// like a dnstap stall to the watchdog above.
 				wtr.lastFrameAt.Store(time.Now().Unix())
-				wtr.mu.Lock()
-				wtr.batch = append(wtr.batch, ev)
-				wtr.mu.Unlock()
+				if ev, keep := wtr.applySettings(ev); keep {
+					wtr.mu.Lock()
+					wtr.batch = append(wtr.batch, ev)
+					wtr.mu.Unlock()
+				}
 			} else {
 				wtr.decodeErrors.Add(1)
 			}
@@ -505,17 +528,82 @@ func (wtr *Writer) flush(ctx context.Context) {
 	wtr.insertedTotal.Add(int64(len(batch)))
 }
 
-// retentionSeconds bounds query_events growth on appliance-class disks.
-// 35 days comfortably covers the "Last 7 Days" requirement with margin;
-// this is a disclosed operational choice, not a requirement from the
-// governing task.
+// retentionSeconds is the hard ceiling this package enforces regardless
+// of Settings.DetailedRetentionDays -- 35 days comfortably covers the
+// "Last 7 Days" requirement with margin, and bounds query_events growth
+// even if Settings is misconfigured or unset. Statistics settings'
+// DetailedRetentionDays (see settings.go, matching V1.1.1's real
+// detailed_retention_days field-for-field, including its literal
+// "0 = delete everything not from this exact instant" semantics --
+// analytics.py cleanup(): `max(0, ...)`, no special-casing of 0) can
+// only ever prune MORE aggressively than this ceiling, never less.
 const retentionSeconds = 35 * 24 * 3600
 
 func (wtr *Writer) pruneOld(ctx context.Context) {
 	cutoff := time.Now().Unix() - retentionSeconds
+	if s := wtr.Settings.Load(); s.DetailedRetentionDays >= 0 {
+		configured := time.Now().Unix() - int64(s.DetailedRetentionDays)*86400
+		if configured > cutoff {
+			cutoff = configured
+		}
+	}
 	if _, err := wtr.DB.ExecContext(ctx, `DELETE FROM query_events WHERE ts < ?`, cutoff); err != nil && wtr.Log != nil {
 		wtr.Log.Warn("dnsanalytics: prune failed", "err", err)
 	}
+	wtr.enforceSizeLimit(ctx)
+}
+
+// enforceSizeLimit mirrors V1.1.1's own cleanup() size-limit behavior
+// (analytics.py:947 -- db_size() over main+WAL+SHM vs db_size_limit_bytes,
+// deleting the oldest quarter of rows on breach) field-for-field,
+// including logging a real warning event rather than silently pruning.
+func (wtr *Writer) enforceSizeLimit(ctx context.Context) {
+	s := wtr.Settings.Load()
+	if s.DBSizeLimitBytes <= 0 {
+		return
+	}
+	size, err := wtr.dbFileSize()
+	if err != nil {
+		if wtr.Log != nil {
+			wtr.Log.Warn("dnsanalytics: could not stat analytics db for size-limit enforcement", "err", err)
+		}
+		return
+	}
+	if size <= s.DBSizeLimitBytes {
+		return
+	}
+	res, err := wtr.DB.ExecContext(ctx, `
+		DELETE FROM query_events
+		WHERE id IN (SELECT id FROM query_events ORDER BY ts ASC LIMIT max(1, (SELECT count(*) / 4 FROM query_events)))`)
+	if err != nil {
+		if wtr.Log != nil {
+			wtr.Log.Warn("dnsanalytics: size-limit prune failed", "err", err)
+		}
+		return
+	}
+	n, _ := res.RowsAffected()
+	if wtr.Log != nil {
+		wtr.Log.Warn("dnsanalytics: database size exceeded analytics limit, oldest query events were pruned",
+			"size_bytes", size, "limit_bytes", s.DBSizeLimitBytes, "rows_pruned", n)
+	}
+}
+
+func (wtr *Writer) dbFileSize() (int64, error) {
+	if wtr.DBPath == "" {
+		return 0, nil
+	}
+	var total int64
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		info, err := os.Stat(wtr.DBPath + suffix)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return 0, err
+		}
+		total += info.Size()
+	}
+	return total, nil
 }
 
 // decodeFrame turns one raw dnstap Frame Streams payload into an event.

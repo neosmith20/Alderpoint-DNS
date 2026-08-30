@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { api } from "../api";
+  import { onMount } from "svelte";
+  import { api, type AnalyticsSettings } from "../api";
 
   // Statistics. Export is real: a genuine download of this appliance's
   // own Go-native query_events table, summarized the same way the
@@ -13,6 +14,49 @@
   // did against Python's now-permanently-inert aggregates.db/Parquet
   // bridge). There's exactly one table now, so there's no longer a
   // separate "raw history" toggle -- Clear removes all of it.
+  //
+  // Settings (2026-08-30): real, matching V1.1.1's own statistics_settings.html
+  // field-for-field wherever this architecture has an equivalent -- see
+  // GET/PUT /api/statistics/settings and internal/dnsanalytics.Settings's
+  // own doc comment for the two fields deliberately NOT modeled
+  // (aggregate_retention_days, collection_interval -- both governed a
+  // separate poll-and-aggregate tier this single-table design doesn't
+  // have) and for the one real behavioral difference from V1 (disabling
+  // detailed logging blanks just the domain field here rather than
+  // dropping the whole row, since there's no separate aggregate tier to
+  // fall back to).
+
+  let settings = $state<AnalyticsSettings | null>(null);
+  let settingsError = $state("");
+  let savingSettings = $state(false);
+  let savedNote = $state(false);
+
+  async function loadSettings() {
+    try {
+      settings = await api.getAnalyticsSettings();
+      settingsError = "";
+    } catch (err) {
+      settingsError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  async function saveSettings(e: SubmitEvent) {
+    e.preventDefault();
+    if (!settings) return;
+    savingSettings = true;
+    savedNote = false;
+    settingsError = "";
+    try {
+      settings = await api.updateAnalyticsSettings(settings);
+      savedNote = true;
+    } catch (err) {
+      settingsError = err instanceof Error ? err.message : String(err);
+    } finally {
+      savingSettings = false;
+    }
+  }
+
+  onMount(loadSettings);
 
   let confirmText = $state("");
   let clearing = $state(false);
@@ -41,6 +85,50 @@
   <p class="scope-note">
     Export downloads this appliance's own query history. Clear permanently deletes it.
   </p>
+
+  <div class="card settings-card">
+    <h3>Settings</h3>
+    {#if settingsError}
+      <p class="error" role="alert">{settingsError}</p>
+    {/if}
+    {#if !settings}
+      <p class="hint">Loading…</p>
+    {:else}
+      <form onsubmit={saveSettings} class="settings-form">
+        <label class="row"><input type="checkbox" bind:checked={settings.analytics_enabled} /> Analytics enabled</label>
+        <label class="row">
+          <input type="checkbox" bind:checked={settings.detailed_query_logging_enabled} /> Detailed query logging enabled
+        </label>
+        <label>
+          Privacy mode
+          <select bind:value={settings.privacy_mode}>
+            <option value="full">Full</option>
+            <option value="anonymized_clients">Anonymized clients</option>
+            <option value="aggregate_only">Aggregate only</option>
+          </select>
+        </label>
+        <label>
+          Client anonymization
+          <select bind:value={settings.client_anonymization} disabled={settings.privacy_mode === "full"}>
+            <option value="truncate">Truncate</option>
+            <option value="hash">Hash</option>
+          </select>
+        </label>
+        <label>Detailed retention (days) <input type="number" min="0" bind:value={settings.detailed_retention_days} /></label>
+        <label>Database size limit (bytes) <input type="number" min="1048576" bind:value={settings.db_size_limit_bytes} /></label>
+        <label>Recent query limit <input type="number" min="10" bind:value={settings.recent_query_limit} /></label>
+        <p class="hint">
+          Aggregate-tier retention and a separate collection interval don't apply here -- this
+          appliance keeps one real query history rather than a separate poll-and-aggregate tier, so
+          there's nothing distinct to configure for either.
+        </p>
+        <div>
+          <button type="submit" disabled={savingSettings}>{savingSettings ? "Saving…" : "Save settings"}</button>
+          {#if savedNote}<span class="ok" role="status">Saved.</span>{/if}
+        </div>
+      </form>
+    {/if}
+  </div>
 
   <div class="card">
     <h3>Export</h3>
@@ -78,6 +166,11 @@
   .statistics { display: flex; flex-direction: column; gap: 1rem; }
   .scope-note { font-size: 0.85rem; opacity: 0.75; max-width: 50rem; }
   .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); display: flex; flex-direction: column; gap: 0.6rem; max-width: 28rem; }
+  .settings-card { max-width: 34rem; }
+  .settings-form { display: flex; flex-direction: column; gap: 0.6rem; font-size: 0.88rem; }
+  .settings-form label { display: flex; flex-direction: column; gap: 0.2rem; }
+  .settings-form label.row { flex-direction: row; align-items: center; gap: 0.5rem; }
+  .settings-form input[type="number"] { width: 10rem; }
   .card h3 { margin: 0; }
   .hint { font-size: 0.85rem; opacity: 0.75; margin: 0; }
   .export-link { align-self: flex-start; padding: 0.4rem 0.8rem; border: 1px solid var(--border); border-radius: 6px; background: var(--accent); color: var(--accent-fg); text-decoration: none; font-size: 0.85rem; }

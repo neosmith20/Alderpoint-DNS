@@ -661,7 +661,19 @@ func runWeb(args []string) {
 		os.Exit(1)
 	}
 	defer analyticsDB.Close()
-	analyticsWriter := &dnsanalytics.Writer{DB: analyticsDB, Log: logger}
+	// Statistics settings (see internal/dnsanalytics/settings.go):
+	// loaded once here from the control-plane db (already migrated by
+	// openDB above -- schema/migrations/0022_analytics_settings.sql),
+	// then handed to the Writer as a live, swappable reference so a
+	// save from PUT /api/statistics/settings takes effect immediately
+	// with no restart (see handleUpdateAnalyticsSettings).
+	initialAnalyticsSettings, err := httpapi.LoadAnalyticsSettingsForBoot(ctx, db)
+	if err != nil {
+		logger.Warn("failed to load statistics settings, using defaults", "err", err)
+		initialAnalyticsSettings = dnsanalytics.DefaultSettings()
+	}
+	analyticsSettingsHolder := dnsanalytics.NewSettingsHolder(initialAnalyticsSettings)
+	analyticsWriter := &dnsanalytics.Writer{DB: analyticsDB, Log: logger, DBPath: *analyticsDBPath, Settings: analyticsSettingsHolder}
 	if hostAgentClient != nil {
 		// Real, independent-of-dnstap traffic signal for the stall
 		// watchdog (see dnsanalytics.TrafficProbe's doc comment): reuse
@@ -797,7 +809,7 @@ func runWeb(args []string) {
 		StaticDir: *staticDir, Log: logger, Version: Version, StartedAt: startedAt,
 		SessionTTL: cfg.SessionTTL(), LastSeen: cfg.LastSeenUpdateInterval(),
 		ApplianceName: cfg.Appliance.Name, ApplianceTimezone: cfg.Appliance.Timezone,
-		Analytics: analyticsReader, RawQueryLog: analyticsReader, HostAgent: hostAgentClient,
+		Analytics: analyticsReader, RawQueryLog: analyticsReader, AnalyticsSettings: analyticsSettingsHolder, HostAgent: hostAgentClient,
 		DNSRuntime: dnsRuntimeOrch, TLSCertPath: cfg.Web.TLSCertPath, TLSKeyPath: cfg.Web.TLSKeyPath,
 		DNSPerfBindPlainAddr: *dnsPerfBindPlainAddr,
 		Secrets:              secretsSvc,
