@@ -49,12 +49,26 @@ func main() {
 	webServiceUnit := flag.String("web-service-unit", "", "systemd unit to restart on update apply (empty = Software Updates apply unavailable)")
 	webHealthURL := flag.String("web-health-url", "", "URL to poll after a restart to confirm health (empty = Software Updates apply unavailable)")
 
-	analyticsSnapshotSource := flag.String("analytics-snapshot-source", "", "Python's real, live aggregates.db host path (empty = analytics snapshot publishing disabled -- Dashboard analytics reports degraded, see internal/analyticssnapshot)")
-	analyticsSnapshotPublishedDir := flag.String("analytics-snapshot-published-dir", "/var/lib/apdns-hostagent/analytics-snapshot/published", "directory this agent publishes completed snapshot generations into -- the web container mounts this read-only")
-	analyticsSnapshotStagingDir := flag.String("analytics-snapshot-staging-dir", "/var/lib/apdns-hostagent/analytics-snapshot/staging", "scratch directory (same filesystem as -analytics-snapshot-published-dir) this agent uses while building a generation, before the atomic publish")
-	analyticsSnapshotIntervalSeconds := flag.Int("analytics-snapshot-interval-seconds", 15, "how often to refresh the published analytics snapshot")
-	analyticsSnapshotRetain := flag.Int("analytics-snapshot-retain", 3, "how many past snapshot generations to keep (minimum 2)")
-	analyticsRawHistoryRoot := flag.String("analytics-raw-history-root", "", "Python's real raw-Parquet query-history root (analytics/queries/), for Statistics' Clear action's optional raw-history wipe (empty = Clear only touches the aggregate rollups, never the raw history, same as omitting include_raw_history)")
+	// DEPRECATED, inert on the current live appliance: this whole flag
+	// group only ever bridged to a separate Python analytics writer,
+	// which no longer exists (CUTOVER.md) -- Dashboard/Statistics/Query
+	// Log are all served today by internal/dnsanalytics, a Go-native
+	// dnstap receiver+reader owned entirely by the "web" process itself
+	// (see cmd/alderpointdns-go's own -analytics-db/-dns-runtime-dnstap-*
+	// flags), including Statistics' Clear action (rewritten 2026-08-28 to
+	// act directly on internal/dnsanalytics.Reader.ClearAll -- it no
+	// longer calls into this agent at all). Left registered rather than
+	// deleted for now (RegisterAnalyticsSnapshotOps only activates when
+	// -analytics-snapshot-source is explicitly set, which the real
+	// packaged systemd unit never does), but never pass these on a real
+	// deployment -- there is nothing left that writes to the path they'd
+	// point at.
+	analyticsSnapshotSource := flag.String("analytics-snapshot-source", "", "DEPRECATED/inert: bridges to a separate Python analytics writer that no longer exists on this appliance (empty, the real default, correctly disables this entirely -- see internal/dnsanalytics for the Go-native replacement actually in use)")
+	analyticsSnapshotPublishedDir := flag.String("analytics-snapshot-published-dir", "/var/lib/apdns-hostagent/analytics-snapshot/published", "DEPRECATED/inert: only meaningful if -analytics-snapshot-source is also set, which it should not be on a real deployment")
+	analyticsSnapshotStagingDir := flag.String("analytics-snapshot-staging-dir", "/var/lib/apdns-hostagent/analytics-snapshot/staging", "DEPRECATED/inert: only meaningful if -analytics-snapshot-source is also set, which it should not be on a real deployment")
+	analyticsSnapshotIntervalSeconds := flag.Int("analytics-snapshot-interval-seconds", 15, "DEPRECATED/inert: only meaningful if -analytics-snapshot-source is also set, which it should not be on a real deployment")
+	analyticsSnapshotRetain := flag.Int("analytics-snapshot-retain", 3, "DEPRECATED/inert: only meaningful if -analytics-snapshot-source is also set, which it should not be on a real deployment")
+	analyticsRawHistoryRoot := flag.String("analytics-raw-history-root", "", "DEPRECATED/inert: Statistics' Clear action no longer calls into this agent at all (see internal/dnsanalytics.Reader.ClearAll) -- this flag has had no real effect since that rewrite")
 
 	dnsRuntimeStagingDir := flag.String("dns-runtime-staging-dir", "/var/lib/apdns-hostagent/dns-staging", "staging directory for compiled BIND/dnsdist config (see internal/hostagentd/ops_dnsruntime.go)")
 	dnsRuntimeBindLivePath := flag.String("dns-runtime-bind-conf", "", "live named.conf path this agent manages (empty = DNS Runtime unavailable)")

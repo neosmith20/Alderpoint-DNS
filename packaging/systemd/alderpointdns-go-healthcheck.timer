@@ -1,0 +1,17 @@
+[Unit]
+Description=Periodic health check for alderpointdns-go.service
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=30s
+# Real, disclosed difference from the container deployment's own
+# --health-retries=3 (scripts/v2/redeploy-go-live.sh): this simpler
+# systemd timer restarts on the first failed check, not the third.
+# DNS answering itself is unaffected either way (named/dnsdist/
+# apdns-hostagent are separate processes this unit never touches) --
+# an extra restart of just the web UI/API process is low-cost, so this
+# trades a little restart sensitivity for not needing a separate state
+# file to count consecutive failures.
+
+[Install]
+WantedBy=timers.target

@@ -104,6 +104,26 @@ func TestLoadOrMigrateUnsupportedFutureVersion(t *testing.T) {
 	}
 }
 
+// TestListenPortDefaultMatchesPackagedSystemdUnit locks in the 2026-08-30
+// fix: an appliance.yaml with no web.listen_port at all (e.g. postinst's
+// own minimal fresh-install fallback template) must default to 8443,
+// matching packaging/systemd/alderpointdns-go.service's own real -addr
+// override -- never a value that would confusingly contradict what the
+// packaged service actually listens on.
+func TestListenPortDefaultMatchesPackagedSystemdUnit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "appliance.yaml")
+	os.WriteFile(path, []byte("appliance:\n  name: fresh-install\n"), 0o644)
+
+	cfg, _, err := LoadOrMigrate(path)
+	if err != nil {
+		t.Fatalf("LoadOrMigrate: %v", err)
+	}
+	if cfg.Web.ListenPort != 8443 {
+		t.Errorf("web.listen_port default = %d, want 8443 (matching the packaged systemd unit)", cfg.Web.ListenPort)
+	}
+}
+
 func TestAtomicWriteYAMLRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "out.yaml")

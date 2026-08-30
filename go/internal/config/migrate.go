@@ -81,7 +81,13 @@ func upgradeLegacyMap(m map[string]any) map[string]any {
 
 	web := getMap("web")
 	setDefault(web, "listen_address", "0.0.0.0")
-	setDefault(web, "listen_port", 8444)
+	// 8443 matches the real packaged systemd unit's own -addr override
+	// (packaging/systemd/alderpointdns-go.service) -- kept in sync so an
+	// appliance.yaml missing this field (e.g. postinst's own minimal
+	// fallback template) never defaults to a value that contradicts what
+	// the unit actually listens on. See config/appliance.yaml's own
+	// comment on the same field for the full explanation.
+	setDefault(web, "listen_port", 8443)
 	setDefault(web, "tls_cert_path", "")
 	setDefault(web, "tls_key_path", "")
 

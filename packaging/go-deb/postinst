@@ -131,7 +131,15 @@ EOF
     # so the new binary actually takes effect, exactly matching this
     # package's own self-update path's own restart-and-verify contract.
     systemctl enable apdns-hostagent.service alderpointdns-go.service >/dev/null 2>&1 || true
-    if systemctl is-active --quiet apdns-hostagent.service || systemctl is-active --quiet alderpointdns-go.service; then
+    # Safe to enable+start unconditionally, even on a fresh install
+    # before alderpointdns-go.service is ever started: the healthcheck
+    # unit's own Requisite= means a tick against a not-yet-running
+    # service simply fails harmlessly rather than doing anything (see
+    # alderpointdns-go-healthcheck.service's own comment for why this
+    # exists -- OOM-incident parity with the live container deployment's
+    # own --health-cmd/--health-on-failure=restart).
+    systemctl enable --now alderpointdns-go-healthcheck.timer >/dev/null 2>&1 || true
+    if systemctl is-active --quiet apdns-hostagent.service 2>/dev/null || systemctl is-active --quiet alderpointdns-go.service 2>/dev/null; then
       systemctl restart apdns-hostagent.service
       if ! apdns_go_wait_active apdns-hostagent.service; then
         echo "apdns-go: apdns-hostagent.service did not become active after upgrade -- check 'systemctl status apdns-hostagent'" >&2

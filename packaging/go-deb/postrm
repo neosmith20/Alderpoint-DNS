@@ -5,7 +5,8 @@ case "$1" in
   purge)
     rm -rf /etc/alderpointdns-go /var/lib/alderpointdns-go /var/lib/apdns-hostagent /var/log/apdns-hostagent
     rm -rf /etc/systemd/system/multi-user.target.wants/alderpointdns-go.service \
-      /etc/systemd/system/multi-user.target.wants/apdns-hostagent.service
+      /etc/systemd/system/multi-user.target.wants/apdns-hostagent.service \
+      /etc/systemd/system/timers.target.wants/alderpointdns-go-healthcheck.timer
     if getent passwd apdns-go-web >/dev/null; then
       deluser --system apdns-go-web >/dev/null 2>&1 || true
     fi

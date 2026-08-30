@@ -9,7 +9,13 @@ appliance:
 
 web:
   listen_address: 0.0.0.0
-  listen_port: 8444
+  # 8443 matches the real, packaged systemd unit's own -addr override
+  # (packaging/systemd/alderpointdns-go.service), which always wins over
+  # this value when both are present -- this field only actually governs
+  # the listen port if an operator removes that unit's -addr flag. Kept
+  # equal to it so this file is never confusingly wrong about which port
+  # the packaged service actually listens on.
+  listen_port: 8443
   tls_cert_path: ""
   tls_key_path: ""
 

@@ -1,0 +1,19 @@
+[Unit]
+Description=Alderpoint DNS Go control plane -- health check (restarts on a hang, not just a crash)
+# Mirrors the live container deployment's own --health-cmd/--health-on-
+# failure=restart (scripts/v2/redeploy-go-live.sh), ported to plain
+# systemd for a real .deb install: alderpointdns-go.service's own
+# Restart=on-failure only ever fires on a process exit/crash, never on
+# a hang that keeps the process alive but unresponsive -- that needs an
+# external prober, which is what this unit (run periodically by the
+# companion .timer) is for.
+After=alderpointdns-go.service
+Requisite=alderpointdns-go.service
+
+[Service]
+Type=oneshot
+# -k: this appliance's own TLS listener uses a self-signed cert by
+# default (see postinst) -- verifying it here would defeat the point.
+# --max-time bounds a single check; a failed curl (down or hung) falls
+# through to the real restart.
+ExecStart=/bin/sh -c 'curl -fsk --max-time 5 -o /dev/null https://127.0.0.1:8443/api/health || systemctl restart alderpointdns-go.service'

@@ -87,7 +87,9 @@ mkdir -p \
 echo "+ installing systemd units + maintainer scripts"
 cp "$SOURCE_DIR/packaging/systemd/apdns-hostagent.service" "$PKG/lib/systemd/system/"
 cp "$SOURCE_DIR/packaging/systemd/alderpointdns-go.service" "$PKG/lib/systemd/system/"
-chmod 0644 "$PKG/lib/systemd/system/"*.service
+cp "$SOURCE_DIR/packaging/systemd/alderpointdns-go-healthcheck.service" "$PKG/lib/systemd/system/"
+cp "$SOURCE_DIR/packaging/systemd/alderpointdns-go-healthcheck.timer" "$PKG/lib/systemd/system/"
+chmod 0644 "$PKG/lib/systemd/system/"*.service "$PKG/lib/systemd/system/"*.timer
 for script in postinst prerm postrm; do
   cp "$SOURCE_DIR/packaging/go-deb/$script" "$PKG/DEBIAN/$script"
   chmod 0755 "$PKG/DEBIAN/$script"
@@ -124,7 +126,7 @@ Section: net
 Priority: optional
 Architecture: ${DEB_ARCH}
 Maintainer: Alderpoint DNS Maintainers <maintainers@example.invalid>
-Depends: dnsdist (>= 1.9.0), bind9, bind9-utils, openssl, adduser
+Depends: dnsdist (>= 1.9.0), bind9, bind9-utils, openssl, adduser, curl
 Conflicts: alderpointdns, alderpointdns-v2
 Description: Alderpoint DNS Go control plane -- CANDIDATE BUILD (not an official release)
  Candidate build of the Go/Svelte control-plane rewrite: alderpointdns-go

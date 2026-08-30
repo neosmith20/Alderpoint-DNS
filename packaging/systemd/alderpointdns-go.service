@@ -27,6 +27,20 @@ ExecStart=/opt/alderpointdns-go/alderpointdns-go web \
   -dns-runtime-bind-proxy-addr 127.0.0.1:26553
 Restart=on-failure
 RestartSec=3
+# Memory-limit/restart parity with the live container deployment's own
+# 2026-08-29 OOM-incident guards (scripts/v2/redeploy-go-live.sh:
+# --memory=768m --restart=on-failure:5) -- a real, if not yet root-
+# caused, slow unbounded-growth incident took the live web process from
+# ~20MB idle to ~2.9GB over ~2h8m and collaterally OOM-killed dnsdist on
+# the same host. MemoryHigh throttles (cgroup memory pressure, no kill)
+# before MemoryMax hard-kills -- Restart=on-failure above then recovers
+# it automatically, same as the container's --restart. This unit has no
+# podman-style --health-cmd equivalent of its own; see the companion
+# alderpointdns-go-healthcheck.timer for that (a hang without a crash
+# needs an external prober, which this unit alone cannot provide).
+MemoryHigh=640M
+MemoryMax=768M
+MemorySwapMax=0
 # NoNewPrivileges IS safe to set here, unlike the hostagent unit above --
 # this process never escalates; every privileged action goes through the
 # hostagent's own audited Unix-socket RPC boundary instead.
