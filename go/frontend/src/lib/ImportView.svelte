@@ -261,9 +261,9 @@
   <h2 id="importexport-heading">Import</h2>
   <p class="scope-note">
     Preview a source, choose what to bring in, then apply -- with rollback available afterward.
-    Supported today: a hosts file, a simple Alderpoint CSV (name, record type, value, TTL), and a
-    BIND zone file (A/AAAA/CNAME/PTR, with <code>$ORIGIN</code> honored). AdGuard Home,
-    Pi-hole, and XLSX imports are coming in a future release.
+    Supported here: a hosts file, a simple Alderpoint CSV (name, record type, value, TTL), a BIND
+    zone file (A/AAAA/CNAME/PTR, with <code>$ORIGIN</code> honored), and a spreadsheet (.xlsx).
+    Pi-hole and AdGuard Home imports are further down this page, in their own section.
   </p>
 
   {#if !job}
@@ -372,7 +372,10 @@
     <code>.tar.gz.enc</code>) to import its Local DNS records, upstream profiles, DNS transport
     settings, the global policy layer, and blocklist subscriptions -- the same bounded, audited
     table set used for a live cutover, applied here to an uploaded file instead. A password is
-    required only for an encrypted (<code>.enc</code>) archive.
+    required only for an encrypted (<code>.enc</code>) archive. Always preview with a dry run first
+    -- a real import has no one-click undo; a real safety backup of this appliance's own data is
+    taken automatically right before it writes anything, and can be restored from the Backup &amp;
+    Restore page if needed.
   </p>
   <div class="card">
     <label>
@@ -436,7 +439,10 @@
     above. Only a <strong>portable (passphrase)</strong> backup can be imported here -- a "local
     mode" backup is keyed from a secret that only exists on the original appliance and cannot be
     decrypted anywhere else. <code>secrets.json</code> and TLS/DNSCrypt certificate files inside the
-    archive are not imported; reconfigure those directly on this appliance instead.
+    archive are not imported; reconfigure those directly on this appliance instead. Always preview
+    with a dry run first -- a real import has no one-click undo; a real safety backup of this
+    appliance's own data is taken automatically right before it writes anything, and can be
+    restored from the Backup &amp; Restore page if needed.
   </p>
   <div class="card">
     <label>

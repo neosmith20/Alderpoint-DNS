@@ -225,8 +225,9 @@
   <div class="card">
     <h3>Custom Filtering Rules</h3>
     <p class="hint">
-      A structured rule builder (block / allow / regex block / regex allow / rewrite). Importing
-      V1's free-text AdGuard-syntax rules directly is planned for a future release.
+      A structured rule builder (block / allow / regex block / regex allow / rewrite). To bring in
+      existing Pi-hole or AdGuard Home rules, use Import -&gt; Import from Pi-hole or AdGuard Home --
+      it translates them into these same rules automatically.
     </p>
     {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
     <DnsRuntimeBadge result={dnsRuntimeResult} />
