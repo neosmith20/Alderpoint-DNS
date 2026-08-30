@@ -25,6 +25,7 @@ import (
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/notifications"
 	"alderpointdns/go-controlplane/internal/policy"
+	"alderpointdns/go-controlplane/internal/policyentities"
 	"alderpointdns/go-controlplane/internal/replication"
 	"alderpointdns/go-controlplane/internal/secretbackup"
 	"alderpointdns/go-controlplane/internal/secretstore"
@@ -59,8 +60,9 @@ type Server struct {
 	Importer      *importer.Service
 	Upstreams     *upstreams.Service
 	Clients       *clients.Service
-	Policy        *policy.Service
-	DomainRouting *domainrouting.Service
+	Policy         *policy.Service
+	PolicyEntities *policyentities.Service
+	DomainRouting  *domainrouting.Service
 	CustomRules   *customrules.Service
 	Backup        *backup.Service
 	SecretBackup  *secretbackup.Service
@@ -233,6 +235,26 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/domain-routing", requireAuth(s.handleListDomainRoutes))
 	mux.HandleFunc("POST /api/domain-routing", requireAuth(s.handleCreateDomainRoute))
 	mux.HandleFunc("DELETE /api/domain-routing/{id}", requireAuth(s.handleDeleteDomainRoute))
+	mux.HandleFunc("GET /api/domain-routing/rulesets", requireAuth(s.handleListDomainRoutingRulesets))
+	mux.HandleFunc("POST /api/domain-routing/rulesets", requireAuth(s.handleCreateDomainRoutingRuleset))
+	mux.HandleFunc("DELETE /api/domain-routing/rulesets/{id}", requireAuth(s.handleDeleteDomainRoutingRuleset))
+
+	mux.HandleFunc("GET /api/policy-entities/filtering-profiles", requireAuth(s.handleListFilteringProfiles))
+	mux.HandleFunc("POST /api/policy-entities/filtering-profiles", requireAuth(s.handleCreateFilteringProfile))
+	mux.HandleFunc("PUT /api/policy-entities/filtering-profiles/{id}", requireAuth(s.handleUpdateFilteringProfile))
+	mux.HandleFunc("DELETE /api/policy-entities/filtering-profiles/{id}", requireAuth(s.handleDeleteFilteringProfile))
+	mux.HandleFunc("GET /api/policy-entities/parental-policies", requireAuth(s.handleListParentalPolicies))
+	mux.HandleFunc("POST /api/policy-entities/parental-policies", requireAuth(s.handleCreateParentalPolicy))
+	mux.HandleFunc("PUT /api/policy-entities/parental-policies/{id}", requireAuth(s.handleUpdateParentalPolicy))
+	mux.HandleFunc("DELETE /api/policy-entities/parental-policies/{id}", requireAuth(s.handleDeleteParentalPolicy))
+	mux.HandleFunc("GET /api/policy-entities/security-policies", requireAuth(s.handleListSecurityPolicies))
+	mux.HandleFunc("POST /api/policy-entities/security-policies", requireAuth(s.handleCreateSecurityPolicy))
+	mux.HandleFunc("PUT /api/policy-entities/security-policies/{id}", requireAuth(s.handleUpdateSecurityPolicy))
+	mux.HandleFunc("DELETE /api/policy-entities/security-policies/{id}", requireAuth(s.handleDeleteSecurityPolicy))
+	mux.HandleFunc("GET /api/policy-entities/service-blocking-rulesets", requireAuth(s.handleListServiceBlockingRulesets))
+	mux.HandleFunc("POST /api/policy-entities/service-blocking-rulesets", requireAuth(s.handleCreateServiceBlockingRuleset))
+	mux.HandleFunc("PUT /api/policy-entities/service-blocking-rulesets/{id}", requireAuth(s.handleUpdateServiceBlockingRuleset))
+	mux.HandleFunc("DELETE /api/policy-entities/service-blocking-rulesets/{id}", requireAuth(s.handleDeleteServiceBlockingRuleset))
 
 	mux.HandleFunc("GET /api/groups", requireAuth(s.handleListGroups))
 	mux.HandleFunc("POST /api/groups", requireAuth(s.handleCreateGroup))

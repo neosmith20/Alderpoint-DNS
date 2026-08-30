@@ -46,6 +46,7 @@ import (
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/notifications"
 	"alderpointdns/go-controlplane/internal/policy"
+	"alderpointdns/go-controlplane/internal/policyentities"
 	"alderpointdns/go-controlplane/internal/pymigrate"
 	"alderpointdns/go-controlplane/internal/replication"
 	"alderpointdns/go-controlplane/internal/secretbackup"
@@ -611,6 +612,7 @@ func runWeb(args []string) {
 	domainRoutingSvc := &domainrouting.Service{DB: db}
 	clientsSvc := &clients.Service{DB: db}
 	policySvc := &policy.Service{DB: db}
+	policyEntitiesSvc := &policyentities.Service{DB: db}
 	customRulesSvc := &customrules.Service{DB: db}
 	dnsTransportsSvc := &dnstransports.Service{DB: db}
 	notificationsSvc := &notifications.Service{DB: db}
@@ -784,7 +786,7 @@ func runWeb(args []string) {
 		}
 		dnsRuntimeOrch = &dnsruntime.Orchestrator{
 			LocalDNS: ldSvc, CustomRules: customRulesSvc, Blocklists: blSvc, Upstreams: upSvc, DNSTransports: dnsTransportsSvc, Policy: policySvc,
-			DomainRouting: domainRoutingSvc, Clients: clientsSvc,
+			DomainRouting: domainRoutingSvc, Clients: clientsSvc, PolicyEntities: policyEntitiesSvc,
 			HostAgent: hostAgentClient, DnsdistListenAddress: *dnsRuntimeDnsdistAddr, BindBackendAddress: *dnsRuntimeBindProxyAddr,
 			TLSCertPath: dnsRuntimeTLSCert, TLSKeyPath: dnsRuntimeTLSKey,
 			DnstapSocketPath: *dnstapDialPath,
@@ -825,7 +827,7 @@ func runWeb(args []string) {
 	}
 
 	srv := &httpapi.Server{
-		DB: db, Auth: authStore, Bootstrap: bootstrapMgr, Blocklists: blSvc, LocalDNS: ldSvc, ClientAliases: clientAliasSvc, Upstreams: upSvc, DomainRouting: domainRoutingSvc, Clients: clientsSvc, Policy: policySvc, CustomRules: customRulesSvc, Backup: backupSvc,
+		DB: db, Auth: authStore, Bootstrap: bootstrapMgr, Blocklists: blSvc, LocalDNS: ldSvc, ClientAliases: clientAliasSvc, Upstreams: upSvc, DomainRouting: domainRoutingSvc, Clients: clientsSvc, Policy: policySvc, PolicyEntities: policyEntitiesSvc, CustomRules: customRulesSvc, Backup: backupSvc,
 		DNSTransports: dnsTransportsSvc, Notifications: notificationsSvc, Importer: importerSvc,
 		StaticDir: *staticDir, Log: logger, Version: Version, StartedAt: startedAt,
 		SessionTTL: cfg.SessionTTL(), LastSeen: cfg.LastSeenUpdateInterval(),

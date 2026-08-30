@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"alderpointdns/go-controlplane/internal/dnsruntime"
 	"alderpointdns/go-controlplane/internal/policy"
 )
 
@@ -61,35 +60,20 @@ func (s *Server) putPolicyLayer(w http.ResponseWriter, r *http.Request, scope, s
 		Err(status, code, err.Error()).WriteJSON(w)
 		return
 	}
-	// global and network scopes are both real, compiled runtime effects
-	// as of 2026-08-28 (internal/dnsruntime.Orchestrator.build computes
-	// each network's own effective blocking_response_mode/custom_ip*
-	// fields via internal/policy.MergeLayers and hands any that differ
-	// from global to internal/dnscompile.NetworkOverride -- see that
-	// type's own doc comment for exactly which fields, and why the
-	// block/allow domain LIST itself stays global-only). group/client
-	// scope saves are still honestly reported as not compiled -- no
-	// per-group/per-client compiled effect exists for the general
-	// policy Layer fields (blocking_response_mode etc.) at those two
-	// scopes yet; Strong ClientID's own explicit domain block/allow
-	// overrides are a separate, already-compiled mechanism (see
-	// internal/clients, internal/dnscompile's ClientOverride), not this
-	// Layer-based policy at all. This used to unconditionally claim
+	// Every scope is now a real, compiled runtime effect
+	// (internal/dnsruntime's computeScopeOverrides -- see that file's
+	// own doc comment, 2026-08-30). "group" has no CIDR/ClientKey of
+	// its own to match on directly -- a group assignment only takes
+	// effect through whichever real clients are members of it (the
+	// same precedence internal/policy.MergeLayersForClient/OrderGroups
+	// already resolve), so a bare group save with no members yet
+	// re-applies cleanly but has nothing new to compile until a client
+	// actually belongs to it. This used to unconditionally claim
 	// "promoted": true regardless of scope, a real fake-success bug
 	// matching the exact class the old Upstreams/Custom Rules
 	// "runtimeStub()" already got fixed for; see PARITY_MATRIX.md's
 	// "httpapi: consistent DNS-runtime auto-apply UX" entry.
-	if scope == "global" || scope == "network" {
-		WriteJSON(w, http.StatusOK, map[string]any{"status": "updated", "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
-		return
-	}
-	WriteJSON(w, http.StatusOK, map[string]any{
-		"status": "updated",
-		"dns_runtime": &dnsruntime.Result{
-			Attempted: false,
-			Detail:    "group/client-scoped policy is not compiled into the DNS runtime yet (Strong ClientID's own explicit domain overrides are a separate, already-compiled mechanism -- see the Clients page) -- only global and network-scoped policy are (see internal/dnscompile's doc comment)",
-		},
-	})
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "updated", "dns_runtime": s.applyDNSRuntimeBestEffort(r)})
 }
 
 // handlePolicyExplain mirrors GET /api/policy/explain -- a direct HTTP

@@ -89,31 +89,25 @@ func TestPutGlobalPolicyReportsARealDNSRuntimeAttemptNotAFakeSuccess(t *testing.
 	}
 }
 
-// TestPutGroupClientPolicyNeverClaimsCompiledRuntimeEffect proves the
-// other half: internal/dnscompile has no per-group/per-client compiled
-// effect for the general policy Layer fields (blocking_response_mode
-// etc.) -- a group/client-scoped save must never claim a compiled-
-// runtime effect it cannot possibly have had, regardless of whether a
-// DNS runtime is even configured on this deployment. (Network scope is
-// a real, compiled effect as of 2026-08-28 -- see
-// TestPutNetworkPolicyReportsARealDNSRuntimeAttempt below, not this
-// test.)
-func TestPutGroupClientPolicyNeverClaimsCompiledRuntimeEffect(t *testing.T) {
+// TestPutGroupClientPolicyReportsTheSameRealDNSRuntimeAttemptAsGlobal
+// proves group/client scope now goes through the SAME real
+// applyDNSRuntimeBestEffort path global/network scope already did
+// (2026-08-30: internal/dnsruntime's computeScopeOverrides resolves
+// every registered client's own effective policy -- global -> matched
+// network -> groups in priority order -> client -- via the existing
+// policy.MergeLayersForClient, and a group's own assignment takes
+// effect through whichever real clients are members of it). With no
+// s.DNSRuntime configured (as in this fixture), the honest answer is
+// dns_runtime: null, the same nil-safe contract every other scope's
+// own test already establishes -- never the old "never compiled"
+// object shape, which would now be a real regression (a fake-gap
+// claim about a scope this deployment genuinely does compile).
+func TestPutGroupClientPolicyReportsTheSameRealDNSRuntimeAttemptAsGlobal(t *testing.T) {
 	s := newPolicyTestServer(t)
 	for _, path := range []string{"/api/policy/group/grp-1", "/api/policy/client/1"} {
 		body := putPolicy(t, s, path)
-		runtime, ok := body["dns_runtime"].(map[string]any)
-		if !ok {
-			t.Fatalf("%s: expected a dns_runtime object, got %+v", path, body)
-		}
-		if attempted, _ := runtime["attempted"].(bool); attempted {
-			t.Fatalf("%s: expected attempted=false for a scope the compiler never reads, got %+v", path, runtime)
-		}
-		if promoted, ok := runtime["promoted"].(bool); ok && promoted {
-			t.Fatalf("%s: must never claim promoted=true for a scope that was never compiled, got %+v", path, runtime)
-		}
-		if detail, _ := runtime["detail"].(string); detail == "" {
-			t.Fatalf("%s: expected an explicit, non-empty detail explaining why this scope isn't compiled, got %+v", path, runtime)
+		if v, present := body["dns_runtime"]; !present || v != nil {
+			t.Fatalf("%s: expected dns_runtime: null with no DNS runtime configured (same contract as global/network scope), got %+v", path, body)
 		}
 	}
 }
