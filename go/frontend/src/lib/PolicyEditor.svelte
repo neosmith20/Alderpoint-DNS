@@ -140,7 +140,7 @@
       </select>
     </label>
     <label>
-      Fallback strategy <span class="hint-inline">(stored, not yet compiled into DNS behavior at any scope)</span>
+      Fallback strategy <span class="hint-inline">(stored only -- has no compiled DNS effect at any scope)</span>
       <select value={draft.fallback_strategy ?? ""} onchange={(e) => (draft.fallback_strategy = textOrNull((e.target as HTMLSelectElement).value))}>
         <option value="">(Inherit)</option>
         <option value="none">None</option>

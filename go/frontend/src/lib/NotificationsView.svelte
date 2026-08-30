@@ -327,8 +327,7 @@
 
   <h3>Event Subscriptions</h3>
   <p class="scope-note">
-    A subscribed provider is sent a message when the event actually fires. Categories marked
-    "coming soon" can be subscribed to now, but won't trigger a notification until support ships.
+    A subscribed provider is sent a message when the event actually fires. Categories marked "not wired yet" can be subscribed to now, but won't trigger a notification until that event type is implemented.
   </p>
   {#if subsLoadError}<p class="error" role="alert">{subsLoadError}</p>{/if}
   <form class="add-form-row" onsubmit={addSubscription}>
@@ -340,7 +339,7 @@
     </select>
     <select bind:value={subEventCategory} aria-label="Event category">
       {#each eventCategories as c}
-        <option value={c.key}>{c.label}{c.wired ? "" : " (coming soon)"}</option>
+        <option value={c.key}>{c.label}{c.wired ? "" : " (not wired yet)"}</option>
       {/each}
     </select>
     <select bind:value={subMinSeverity} aria-label="Minimum severity">
@@ -362,7 +361,7 @@
         <li class="sub-row">
           <strong>{sub.provider_name}</strong>
           <span>{categoryLabel(sub.event_category)}</span>
-          {#if !categoryWired(sub.event_category)}<span class="badge-neutral">coming soon</span>{/if}
+          {#if !categoryWired(sub.event_category)}<span class="badge-neutral">not wired yet</span>{/if}
           <span class="hint">{sub.min_severity}+, cooldown {sub.cooldown_minutes ?? 30}m</span>
           <button type="button" class="secondary small" onclick={() => removeSubscription(sub)}>Remove</button>
         </li>

@@ -125,7 +125,7 @@
                     onclick={() => item.load && go(item.id)}
                   >
                     {item.label}
-                    {#if !item.load}<span class="soon">Coming soon</span>{/if}
+                    {#if !item.load}<span class="soon">Not built</span>{/if}
                   </button>
                 </li>
               {/each}
@@ -144,7 +144,7 @@
                   aria-current={router.current === item.id ? "page" : undefined}
                 >
                   <span class="label">{item.label}</span>
-                  {#if !item.load}<span class="soon">Coming soon</span>{/if}
+                  {#if !item.load}<span class="soon">Not built</span>{/if}
                 </button>
               </li>
             {/each}

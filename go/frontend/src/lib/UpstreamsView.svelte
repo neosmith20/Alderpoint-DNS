@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, ApiError, type UpstreamProfile, type UpstreamEndpointInput, type DNSRuntimeApplyResult, type DomainRoute } from "../api";
+  import { api, ApiError, type UpstreamProfile, type UpstreamEndpointInput, type DNSRuntimeApplyResult, type DomainRoute, type DomainRoutingRuleset } from "../api";
   import { StaleGuard } from "../staleGuard";
   import { router } from "../router.svelte";
   import DataGrid from "./DataGrid.svelte";
@@ -50,24 +50,36 @@
     }
   }
 
-  // --- domain routing (see internal/domainrouting's own doc comment:
-  // one flat global list of exact/suffix rules, not Python's real
-  // per-network rulesets -- a route is real and auto-applies through
-  // the same DNS runtime every other mutation on this page does) ---
+  // --- domain routing (see internal/domainrouting's own doc comment)
+  // -- a route with no ruleset applies globally, in every scope; a
+  // route assigned to a named ruleset only applies to a network/
+  // group/client whose own policy selects that ruleset (Clients &
+  // Access's Filtering profile / Parental policy / ... fields have a
+  // Domain routing ruleset field alongside them) -- both are real and
+  // auto-apply through the same DNS runtime every other mutation on
+  // this page does. ---
   let domainRoutes = $state<DomainRoute[]>([]);
   let routeMatchKind = $state<"exact" | "suffix">("suffix");
   let routeDomain = $state("");
   let routeProfileID = $state("");
+  let routeRulesetID = $state(""); // "" = global
   let routeBusy = $state(false);
   let routeError = $state("");
   const routeGuard = new StaleGuard();
 
+  let rulesets = $state<DomainRoutingRuleset[]>([]);
+  let newRulesetId = $state("");
+  let newRulesetName = $state("");
+  let rulesetBusy = $state(false);
+  let rulesetError = $state("");
+
   async function refreshRoutes(): Promise<void> {
     const token = routeGuard.start();
     try {
-      const resp = await api.listDomainRoutes(router.signal());
+      const [routesResp, rulesetsResp] = await Promise.all([api.listDomainRoutes(router.signal()), api.listDomainRoutingRulesets(router.signal())]);
       if (!routeGuard.isCurrent(token)) return;
-      domainRoutes = resp.rules;
+      domainRoutes = routesResp.rules;
+      rulesets = rulesetsResp.rulesets;
     } catch (err) {
       if (!routeGuard.isCurrent(token)) return;
       if (err instanceof DOMException && err.name === "AbortError") return;
@@ -80,7 +92,12 @@
     routeError = "";
     routeBusy = true;
     try {
-      const resp = await api.createDomainRoute({ match_kind: routeMatchKind, domain: routeDomain.trim(), upstream_profile_id: routeProfileID });
+      const resp = await api.createDomainRoute({
+        match_kind: routeMatchKind,
+        domain: routeDomain.trim(),
+        upstream_profile_id: routeProfileID,
+        ruleset_id: routeRulesetID || undefined,
+      });
       dnsRuntimeResult = resp.dns_runtime ?? null;
       routeDomain = "";
       await refreshRoutes();
@@ -88,6 +105,32 @@
       routeError = err instanceof ApiError ? err.message : String(err);
     } finally {
       routeBusy = false;
+    }
+  }
+
+  async function createRuleset(e: Event) {
+    e.preventDefault();
+    rulesetError = "";
+    rulesetBusy = true;
+    try {
+      await api.createDomainRoutingRuleset({ id: newRulesetId.trim(), name: newRulesetName.trim() });
+      newRulesetId = "";
+      newRulesetName = "";
+      await refreshRoutes();
+    } catch (err) {
+      rulesetError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      rulesetBusy = false;
+    }
+  }
+
+  async function deleteRuleset(id: string) {
+    rulesetError = "";
+    try {
+      await api.deleteDomainRoutingRuleset(id);
+      await refreshRoutes();
+    } catch (err) {
+      rulesetError = err instanceof ApiError ? err.message : String(err);
     }
   }
 
@@ -347,10 +390,29 @@
   <div class="card">
     <h3>Domain Routing</h3>
     <p class="scope-note">
-      A flat, global list of exact/suffix domain rules that send matching queries to a different
-      upstream profile instead of the default one. Per-network domain routing is planned for a
-      future release. The most specific match always wins.
+      Exact/suffix domain rules that send matching queries to a different upstream profile instead
+      of the default one. A route with no ruleset applies globally, in every scope; a route
+      assigned to a named ruleset below only applies to a network/group/client whose own policy
+      selects that ruleset (see the Domain routing ruleset field on Clients &amp; Access's policy
+      forms). The most specific match always wins.
     </p>
+
+    <div class="ruleset-row">
+      <h4>Rulesets</h4>
+      <div class="ruleset-list">
+        {#each rulesets as rs (rs.id)}
+          <span class="ruleset-chip">{rs.name} <button onclick={() => deleteRuleset(rs.id)} title="Delete">×</button></span>
+        {:else}
+          <span class="hint">No named rulesets yet -- every route below applies globally.</span>
+        {/each}
+      </div>
+      <form onsubmit={createRuleset} class="ruleset-form">
+        <input placeholder="id (e.g. kids-routes)" bind:value={newRulesetId} required aria-label="Ruleset id" />
+        <input placeholder="Display name" bind:value={newRulesetName} required aria-label="Ruleset name" />
+        <button type="submit" disabled={rulesetBusy}>{rulesetBusy ? "Adding…" : "New Ruleset"}</button>
+      </form>
+      {#if rulesetError}<p class="error" role="alert">{rulesetError}</p>{/if}
+    </div>
 
     <form class="route-form" onsubmit={submitRoute}>
       <select bind:value={routeMatchKind} aria-label="Match kind">
@@ -364,22 +426,29 @@
           <option value={p.upstream_profile_id}>{p.name}</option>
         {/each}
       </select>
+      <select bind:value={routeRulesetID} aria-label="Ruleset">
+        <option value="">Global (every scope)</option>
+        {#each rulesets as rs (rs.id)}
+          <option value={rs.id}>{rs.name}</option>
+        {/each}
+      </select>
       <button type="submit" disabled={routeBusy || !routeProfileID}>{routeBusy ? "Adding…" : "Add Route"}</button>
     </form>
     {#if routeError}<p class="error" role="alert">{routeError}</p>{/if}
 
     <table class="routes-table">
-      <thead><tr><th>Match</th><th>Domain</th><th>Upstream</th><th>Actions</th></tr></thead>
+      <thead><tr><th>Match</th><th>Domain</th><th>Upstream</th><th>Ruleset</th><th>Actions</th></tr></thead>
       <tbody>
         {#each domainRoutes as r (r.id)}
           <tr>
             <td>{r.match_kind}</td>
             <td>{r.domain}</td>
             <td>{profiles.find((p) => p.upstream_profile_id === r.upstream_profile_id)?.name ?? r.upstream_profile_id}</td>
+            <td>{r.ruleset_id ? (rulesets.find((rs) => rs.id === r.ruleset_id)?.name ?? r.ruleset_id) : "Global"}</td>
             <td><button onclick={() => deleteRoute(r)} disabled={routeBusy}>Delete</button></td>
           </tr>
         {:else}
-          <tr class="empty-row"><td colspan="4">No domain routes configured.</td></tr>
+          <tr class="empty-row"><td colspan="5">No domain routes configured.</td></tr>
         {/each}
       </tbody>
     </table>
@@ -414,6 +483,13 @@
   .scope-note { font-size: 0.85rem; opacity: 0.75; max-width: 50rem; }
   .route-form { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
   .route-form input { flex: 1 1 12rem; }
+  .ruleset-row { border: 1px solid var(--border); border-radius: 6px; padding: 0.6rem 0.8rem; margin: 0.6rem 0; display: flex; flex-direction: column; gap: 0.4rem; }
+  .ruleset-row h4 { margin: 0; font-size: 0.85rem; }
+  .ruleset-list { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+  .ruleset-chip { background: var(--card-bg); border: 1px solid var(--border); border-radius: 999px; padding: 0.15rem 0.6rem; font-size: 0.8rem; display: inline-flex; align-items: center; gap: 0.3rem; }
+  .ruleset-chip button { border: none; background: none; cursor: pointer; opacity: 0.6; }
+  .ruleset-form { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+  .ruleset-form input { flex: 1 1 8rem; }
   .routes-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
   .routes-table th, .routes-table td { text-align: left; padding: 0.3rem 0.6rem; border-bottom: 1px solid var(--border); }
   .empty-row td { opacity: 0.6; font-style: italic; }

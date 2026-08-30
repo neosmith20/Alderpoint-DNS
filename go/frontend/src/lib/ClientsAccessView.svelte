@@ -204,8 +204,7 @@
         {/snippet}
         <p class="hint">
           The default policy every client falls back to unless a network, group, or client layer
-          overrides a field. Compiled into the live DNS runtime (see internal/dnscompile's doc
-          comment).
+          overrides a field. Enforced live by this appliance's own DNS runtime.
         </p>
         {#if globalLoadError}<p class="error" role="alert">{globalLoadError}</p>{/if}
         {#if globalPolicy}
@@ -225,10 +224,11 @@
           A network is a CIDR range (e.g. a VLAN or subnet). Its policy layer applies to any client
           whose IP falls inside it, above global but below group/client layers.
           <strong>Enforced live:</strong> a network's own blocking-response fields
-          (NXDOMAIN/REFUSED/null IP/custom IP) change how a blocked query is answered for
-          clients inside its CIDR, whenever they differ from the global default. SafeSearch,
-          per-network upstream routing, and service-catalog blocking are not enforced at the
-          network level yet -- planned for a future release.
+          (NXDOMAIN/REFUSED/null IP/custom IP), its own Filtering/Parental/Security profile
+          category assignments, SafeSearch, ECS opt-in, per-network upstream/domain routing, and
+          query-log/statistics participation all compile into the live DNS runtime whenever they
+          differ from global (see the Filtering profile / Parental policy / Security policy /
+          SafeSearch / ECS mode fields on the policy form below).
         </p>
         {#if networksLoadError}<p class="error" role="alert">{networksLoadError}</p>{/if}
 
@@ -275,10 +275,11 @@
           A group's policy layer applies to every client assigned to it, above network but below a
           client's own overrides. Create groups and assign clients to them on the
           <button type="button" class="link-btn" onclick={() => router.navigate("clients")}>Clients</button> page;
-          this section edits the policy each group carries. <strong>Group policy is UI-only for now
-          and is not yet enforced by the live DNS service</strong> -- it does not change how a
-          query from a client in this group is answered. (Strong ClientID's own per-client domain
-          overrides are a separate mechanism that already enforces live -- see the Clients page.)
+          this section edits the policy each group carries. <strong>Enforced live:</strong> a
+          group's own fields are resolved into each real member client's own compiled DNS
+          behavior (highest-priority group wins a field when a client belongs to more than one),
+          the same precedence Explain shows. (Strong ClientID's own per-client domain overrides
+          are a separate mechanism that also enforces live -- see the Clients page.)
         </p>
         {#if groupsLoadError}<p class="error" role="alert">{groupsLoadError}</p>{/if}
         {#if groups.length === 0 && !groupsLoadError}
@@ -310,14 +311,11 @@
     <aside class="drawer">
     <Panel heading="Explain Effective Policy">
       <p class="hint">
-        Resolves the real global -&gt; network -&gt; group -&gt; client precedence
-        (internal/policy/effective.go) for one client, field by field, showing exactly which scope
-        won each field. An optional client IP lets you check which network layer (if any) would
-        match, independent of the client's own stored identifiers. This shows which stored value
-        wins, not whether DNS answering actually enforces it yet -- see each scope's own Save
-        result above for that (global and network policy compile live today; group and client
-        general policy fields don't yet, aside from Strong ClientID's own separate domain
-        overrides on the Clients page).
+        Resolves the real global -&gt; network -&gt; group -&gt; client precedence for one client, field by
+        field, showing exactly which scope won each field. An optional client IP lets you check which network layer (if any) would
+        match, independent of the client's own stored identifiers. Every scope shown here compiles
+        into the live DNS runtime -- see each scope's own Save result above for real-time
+        confirmation of the applied change.
       </p>
       <form onsubmit={runExplain} class="explain-form">
         <label>

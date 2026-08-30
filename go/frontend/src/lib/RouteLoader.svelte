@@ -69,7 +69,7 @@
 {:else if !item.load}
   <div class="panel unavailable">
     <h2>{item.label}</h2>
-    <p>This page is coming in a future release.</p>
+    <p>This page is not built yet.</p>
   </div>
 {:else if loadError}
   <div class="panel error">

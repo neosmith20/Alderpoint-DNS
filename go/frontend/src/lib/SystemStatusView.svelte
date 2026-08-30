@@ -165,7 +165,9 @@
   <h2 id="health-heading">System Status</h2>
   <p class="scope-note">
     Metric strip, Components, UI Performance, Node Identity, BIND Cache Counters, and the DNS
-    Performance benchmark are all live. Network Discovery is coming in a future release.
+    Performance benchmark are all live. Network Discovery (device fingerprinting, vendor/OS
+    detection, first/last-seen history) is not built -- the Clients page's Observed Clients list is
+    a narrower, real substitute drawn from actual DNS traffic.
   </p>
 
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
@@ -247,10 +249,9 @@
   <div class="card">
     <h3>DNS Performance</h3>
     <p class="scope-note">
-      A bounded, sequential set of real DNS/DoT/DoH queries against this deployment's own
-      Go-managed dnsdist/BIND runtime (the only runtime this appliance has -- Python is fully
-      decommissioned), never a load test (one query at a time, matching the reference
-      implementation's own "safe" design).
+      A bounded, sequential set of real DNS/DoT/DoH queries against this appliance's own live DNS
+      resolver, never a load test (one query at a time, matching the reference implementation's
+      own "safe" design).
     </p>
     <div class="actions">
       <button data-run-dns-benchmark onclick={runDnsBenchmark} disabled={dnsPerf?.benchmark_running}>
