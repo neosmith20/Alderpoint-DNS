@@ -256,6 +256,14 @@ type event struct {
 	client    string
 	latencyMs float64
 	outcome   string
+
+	// noLog/noStats: this response's own apdns_querylog/apdns_stats
+	// dnsdist tags (see internal/dnscompile's ScopeOverride) -- a
+	// network/group/client scope with query_log_enabled/
+	// statistics_enabled resolved to false. See applySettings' own
+	// doc comment for the effect each has.
+	noLog   bool
+	noStats bool
 }
 
 // Heartbeat reports (unix seconds of last activity, whether it has ever
@@ -629,8 +637,23 @@ func decodeFrame(raw []byte) (event, bool) {
 	}
 
 	outcome := OutcomeAllowed
-	if len(dt.Extra) > 0 && strings.TrimSpace(string(dt.Extra)) == OutcomeBlocked {
-		outcome = OutcomeBlocked
+	var noLog, noStats bool
+	if len(dt.Extra) > 0 {
+		// Format: "<outcome>" or "<outcome>|nolog|nostat" (either flag
+		// optional, see internal/dnscompile's apdnsDnstapAlter -- the
+		// exact, only writer of this field).
+		parts := strings.Split(strings.TrimSpace(string(dt.Extra)), "|")
+		if parts[0] == OutcomeBlocked {
+			outcome = OutcomeBlocked
+		}
+		for _, p := range parts[1:] {
+			switch p {
+			case "nolog":
+				noLog = true
+			case "nostat":
+				noStats = true
+			}
+		}
 	}
 
 	ts := time.Now().Unix()
@@ -670,5 +693,6 @@ func decodeFrame(raw []byte) (event, bool) {
 	return event{
 		ts: ts, domain: domain, qtype: qtype, rcode: rcode,
 		protocol: protocol, client: client, latencyMs: latencyMs, outcome: outcome,
+		noLog: noLog, noStats: noStats,
 	}, true
 }

@@ -124,6 +124,28 @@ func TestApplySettingsDetailedLoggingDisabledBlanksDomainEvenInFullPrivacy(t *te
 	}
 }
 
+func TestApplySettingsPerScopeNoStatsDropsTheEventEvenWithAnalyticsEnabled(t *testing.T) {
+	wtr := &Writer{Settings: NewSettingsHolder(DefaultSettings())}
+	_, keep := wtr.applySettings(event{domain: "example.com.", client: "203.0.113.9", noStats: true})
+	if keep {
+		t.Fatal("expected the event to be dropped -- statistics_enabled=false for this scope means its traffic is never stored, since stats are computed at read time from stored rows")
+	}
+}
+
+func TestApplySettingsPerScopeNoLogBlanksDomainButKeepsTheRow(t *testing.T) {
+	wtr := &Writer{Settings: NewSettingsHolder(DefaultSettings())}
+	ev, keep := wtr.applySettings(event{domain: "example.com.", client: "203.0.113.9", noLog: true})
+	if !keep {
+		t.Fatal("expected the event to be kept (query_log_enabled=false only blanks the domain, it must not drop the row entirely -- aggregate stats still reflect this scope's real traffic)")
+	}
+	if ev.domain != "" {
+		t.Fatalf("expected the domain blanked, got %q", ev.domain)
+	}
+	if ev.client != "203.0.113.9" {
+		t.Fatal("noLog alone must not touch the client")
+	}
+}
+
 func TestSettingsHolderNilIsSafeAndDefaults(t *testing.T) {
 	var h *SettingsHolder
 	got := h.Load()

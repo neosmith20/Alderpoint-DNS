@@ -124,17 +124,30 @@ func anonymizeClient(value, mode, anonymization, secret string) string {
 // applySettings is the Writer's single choke point for Settings
 // enforcement, called once per successfully decoded frame before it
 // joins the insert batch (see Run's own frame case). Returns keep=false
-// only when analytics is disabled outright -- the caller must still
-// treat the frame as having arrived (lastFrameAt already stamped by the
-// caller before this runs) so the stall watchdog is never confused by an
-// owner turning analytics off.
+// when analytics is disabled outright, OR when this one response's own
+// per-scope statistics_enabled resolved to false (ev.noStats -- see
+// internal/dnscompile's ScopeOverride/QueryLoggingDisabled doc
+// comment): since this package's own stats are computed at READ time
+// from stored query_events rows (see store.go's own doc comment), the
+// only real way to exclude one scope's traffic from statistics is to
+// never store its rows at all. The caller must still treat the frame
+// as having arrived (lastFrameAt already stamped by the caller before
+// this runs) so the stall watchdog is never confused by an owner
+// turning analytics (or one scope's own statistics participation) off.
+//
+// ev.noLog (per-scope query_log_enabled=false) is handled the same way
+// the pre-existing global DetailedQueryLoggingEnabled toggle already
+// is: the row is still stored (so aggregate stats/counts still reflect
+// this scope's real traffic), only its own domain is blanked --
+// matching that field's name (it disables the QUERY LOG, not
+// statistics).
 func (wtr *Writer) applySettings(ev event) (event, bool) {
 	s := wtr.Settings.Load()
-	if !s.AnalyticsEnabled {
+	if !s.AnalyticsEnabled || ev.noStats {
 		return event{}, false
 	}
 	ev.client = anonymizeClient(ev.client, s.PrivacyMode, s.ClientAnonymization, wtr.anonymizationSecret())
-	if s.PrivacyMode == "aggregate_only" || !s.DetailedQueryLoggingEnabled {
+	if s.PrivacyMode == "aggregate_only" || !s.DetailedQueryLoggingEnabled || ev.noLog {
 		ev.domain = ""
 	}
 	return ev, true

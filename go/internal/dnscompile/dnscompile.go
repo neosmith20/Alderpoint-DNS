@@ -811,10 +811,27 @@ func CompileDnsdist(in Input) (string, error) {
 		// mistagged) on the rare path where dr:getTag itself errors,
 		// which is strictly better than a whole-process-lifetime
 		// analytics outage from one bad response.
+		// Extra is a "|"-joined outcome plus zero or more per-scope
+		// participation flags this response's own apdns_querylog/
+		// apdns_stats tags carry (see ScopeOverride's own
+		// QueryLoggingDisabled/StatisticsDisabled -- set once, ahead of
+		// every other rule, by writeScopeOverrides), e.g.
+		// "allowed|nolog|nostat". internal/dnsanalytics.Writer's own
+		// decodeFrame parses this exact format -- see that function's
+		// own doc comment for the effect each flag has (nolog blanks the
+		// domain, matching the pre-existing global detailed-logging
+		// toggle's own behavior; nostat drops the row from analytics
+		// entirely, since this package's own stats are computed at read
+		// time from stored rows).
 		w("function apdnsDnstapAlter(dr, dm)")
 		w(`  local ok, outcome = pcall(function() return dr:getTag("apdns_outcome") end)`)
 		w("  if not ok or outcome == nil then outcome = \"allowed\" end")
-		w("  pcall(function() dm:setExtra(outcome) end)")
+		w("  local extra = outcome")
+		w(`  local okQL, ql = pcall(function() return dr:getTag("apdns_querylog") end)`)
+		w(`  if okQL and ql == "off" then extra = extra .. "|nolog" end`)
+		w(`  local okST, st = pcall(function() return dr:getTag("apdns_stats") end)`)
+		w(`  if okST and st == "off" then extra = extra .. "|nostat" end`)
+		w("  pcall(function() dm:setExtra(extra) end)")
 		w("end")
 		// Two separate registrations, deliberately: addResponseAction only
 		// fires for a response that actually came back from a backend

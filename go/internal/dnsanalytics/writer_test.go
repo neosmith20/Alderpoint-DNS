@@ -96,6 +96,42 @@ func TestDecodeFrameBlockedViaExtraTag(t *testing.T) {
 	// below rather than assumed here.
 }
 
+func TestDecodeFrameParsesPerScopeQuerylogAndStatsFlags(t *testing.T) {
+	resp := buildResponse(t, "example.com", dns.TypeA, dns.RcodeSuccess)
+	raw := buildDnstapMessage(t, resp, dnstap.SocketProtocol_UDP, "allowed|nolog|nostat", 100, 100)
+	ev, ok := decodeFrame(raw)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if !ev.noLog {
+		t.Error("expected noLog=true for Extra containing |nolog")
+	}
+	if !ev.noStats {
+		t.Error("expected noStats=true for Extra containing |nostat")
+	}
+	if ev.outcome != OutcomeAllowed {
+		t.Errorf("outcome = %q, want allowed", ev.outcome)
+	}
+}
+
+func TestDecodeFrameBlockedWithNolog(t *testing.T) {
+	resp := buildResponse(t, "ads.example.com", dns.TypeA, dns.RcodeNameError)
+	raw := buildDnstapMessage(t, resp, dnstap.SocketProtocol_UDP, "blocked|nolog", 100, 100)
+	ev, ok := decodeFrame(raw)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if ev.outcome != OutcomeBlocked {
+		t.Errorf("outcome = %q, want blocked (the compound Extra format must not break outcome parsing)", ev.outcome)
+	}
+	if !ev.noLog {
+		t.Error("expected noLog=true")
+	}
+	if ev.noStats {
+		t.Error("expected noStats=false (only |nolog was present)")
+	}
+}
+
 func TestDecodeFrameGenuineNXDOMAINIsNotMisclassifiedAsBlocked(t *testing.T) {
 	resp := buildResponse(t, "typo-that-does-not-exist.example.com", dns.TypeA, dns.RcodeNameError)
 	raw := buildDnstapMessage(t, resp, dnstap.SocketProtocol_UDP, "", 100, 100)
