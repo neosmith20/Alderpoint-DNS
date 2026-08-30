@@ -165,7 +165,7 @@
   <h2 id="health-heading">System Status</h2>
   <p class="scope-note">
     Metric strip, Components, UI Performance, Node Identity, BIND Cache Counters, and the DNS
-    Performance benchmark are real. Discovery status is not built yet -- see the parity matrix.
+    Performance benchmark are all live. Network Discovery is coming in a future release.
   </p>
 
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}

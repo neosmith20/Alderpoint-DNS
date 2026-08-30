@@ -57,13 +57,14 @@
   <h2 id="dnsruntime-heading">DNS Runtime</h2>
   <p class="scope-note">
     Real BIND + dnsdist compilation, validation (against the actual installed binaries), atomic
-    promotion, and automatic rollback on any failure -- see internal/dnscompile and
-    internal/hostagentd/ops_dnsruntime.go. Every resolver-affecting save already auto-applies
-    through this same pipeline (Local DNS, Upstreams/Domain Routing, Custom Rules, Blocklists, DNS
-    Transports, Clients &amp; Access global/network policy, Strong ClientID). "Apply Runtime
-    Changes" below is a manual re-compile-and-promote action, not the only path to a live effect.
-    One default upstream profile; a flat global domain-routing list; global and per-network
-    response-mode policy compile, per-group/per-client general policy does not yet.
+    promotion, and automatic rollback on any failure. Every resolver-affecting save already
+    auto-applies through this same pipeline (Local DNS, Upstreams/Domain Routing, Custom Rules,
+    Blocklists, DNS Transports, Clients &amp; Access global/network policy, Strong ClientID).
+    "Apply Runtime Changes" below is a manual re-compile-and-promote action, not the only path to
+    a live effect. One default upstream profile and a flat global domain-routing list; global and
+    per-network response-mode policy (blocked-answer type) enforce live today. Per-group and
+    per-client general policy fields do not enforce yet -- see Clients &amp; Access below for
+    exactly which fields.
   </p>
 
   {#if statusError}<p class="error" role="alert">{statusError}</p>{/if}

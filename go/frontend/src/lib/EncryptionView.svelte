@@ -126,12 +126,11 @@
 <section aria-labelledby="encryption-heading" class="encryption">
   <h2 id="encryption-heading">Encryption</h2>
   <p class="scope-note">
-    TLS Certificate is this control plane's own real, replaceable management certificate (also
-    reused by DoT/DoH/DoQ/DoH3). DNS Transport settings are stored natively and all five
-    transports compile into and auto-apply to the real DNS runtime. DNSCrypt needs a real
-    provider identity provisioned once before it can be enabled. Apple .mobileconfig enrollment
-    profiles are real downloads once a transport is enabled and a certificate is active -- see the
-    parity matrix.
+    The TLS Certificate is this appliance's own replaceable management certificate (also
+    reused by DoT/DoH/DoQ/DoH3). DNS Transport settings apply automatically to the live DNS
+    service as soon as they're saved. DNSCrypt needs a provider identity provisioned once before
+    it can be enabled. Apple .mobileconfig enrollment profiles are available for download once a
+    transport is enabled and a certificate is active.
   </p>
 
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}

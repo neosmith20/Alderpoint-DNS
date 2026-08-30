@@ -118,10 +118,9 @@
 <section aria-labelledby="analytics-heading" class="query-log">
   <h2 id="analytics-heading">Query Log</h2>
   <p class="scope-note">
-    Reads this appliance's own Go-native query history directly (<code>internal/dnsanalytics</code>,
-    fed by dnsdist's real dnstap query-event stream -- Python is fully decommissioned, see
-    CUTOVER.md). A wide window over a very large history is scanned with a bounded safety cap,
-    disclosed via <code>files_considered</code>, rather than an unbounded read.
+    Reads this appliance's own query history directly, fed by a real live DNS event stream.
+    A wide window over a very large history is scanned with a bounded safety cap, disclosed via
+    <code>files_considered</code>, rather than an unbounded read.
   </p>
 
   <form class="filters" onsubmit={(e) => { e.preventDefault(); refresh(); }}>

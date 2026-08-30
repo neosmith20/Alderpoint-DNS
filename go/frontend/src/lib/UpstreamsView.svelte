@@ -348,8 +348,8 @@
     <h3>Domain Routing</h3>
     <p class="scope-note">
       A flat, global list of exact/suffix domain rules that send matching queries to a different
-      upstream profile instead of the default one -- not yet per-network like Python's own design
-      (see the parity matrix). The most specific match always wins.
+      upstream profile instead of the default one. Per-network domain routing is planned for a
+      future release. The most specific match always wins.
     </p>
 
     <form class="route-form" onsubmit={submitRoute}>

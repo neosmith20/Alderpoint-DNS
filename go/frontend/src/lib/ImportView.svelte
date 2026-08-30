@@ -260,10 +260,10 @@
 <section aria-labelledby="importexport-heading" class="import-view">
   <h2 id="importexport-heading">Import</h2>
   <p class="scope-note">
-    Real staged preview -> selection -> apply -> rollback (internal/importer). hosts-file, a
-    simple Alderpoint CSV (name,record_type,value,ttl), and a BIND zone-file parser (a practical
-    subset -- A/AAAA/CNAME/PTR, $ORIGIN honored) are built; AdGuard YAML/live API, Pi-hole paste,
-    and XLSX are not -- see the parity matrix.
+    Preview a source, choose what to bring in, then apply -- with rollback available afterward.
+    Supported today: a hosts file, a simple Alderpoint CSV (name, record type, value, TTL), and a
+    BIND zone file (A/AAAA/CNAME/PTR, with <code>$ORIGIN</code> honored). AdGuard Home,
+    Pi-hole, and XLSX imports are coming in a future release.
   </p>
 
   {#if !job}
@@ -431,13 +431,12 @@
 
   <h3 id="apdnsbak-import-heading">Import a V2 (.apdnsbak) appliance backup</h3>
   <p class="scope-note">
-    Upload a real, portable V2 Python backup (<code>*.apdnsbak</code>, passphrase-protected) to
+    Upload a portable V2 appliance backup (<code>*.apdnsbak</code>, passphrase-protected) to
     import its configuration database through the same audited table set as the V1.1.1 import
     above. Only a <strong>portable (passphrase)</strong> backup can be imported here -- a "local
     mode" backup is keyed from a secret that only exists on the original appliance and cannot be
     decrypted anywhere else. <code>secrets.json</code> and TLS/DNSCrypt certificate files inside the
-    archive are not imported (Go's own secrets store and certificate management are not compatible
-    containers for that material).
+    archive are not imported; reconfigure those directly on this appliance instead.
   </p>
   <div class="card">
     <label>

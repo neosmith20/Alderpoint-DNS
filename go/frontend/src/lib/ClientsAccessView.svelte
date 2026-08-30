@@ -224,12 +224,11 @@
         <p class="hint">
           A network is a CIDR range (e.g. a VLAN or subnet). Its policy layer applies to any client
           whose IP falls inside it, above global but below group/client layers.
-          <strong>Compiled (2026-08-28):</strong> a network's own effective blocking-response fields
-          (nxdomain/refused/null_ip/custom_ip) now really change how a blocked query is answered for
-          clients inside its CIDR, whenever they differ from the global default -- see
-          internal/dnscompile.NetworkOverride's doc comment for exactly which fields (not yet
-          SafeSearch, per-network upstream routing, or service-catalog blocking, which have no Go
-          compiler at any scope today).
+          <strong>Enforced live:</strong> a network's own blocking-response fields
+          (NXDOMAIN/REFUSED/null IP/custom IP) change how a blocked query is answered for
+          clients inside its CIDR, whenever they differ from the global default. SafeSearch,
+          per-network upstream routing, and service-catalog blocking are not enforced at the
+          network level yet -- planned for a future release.
         </p>
         {#if networksLoadError}<p class="error" role="alert">{networksLoadError}</p>{/if}
 
@@ -276,9 +275,10 @@
           A group's policy layer applies to every client assigned to it, above network but below a
           client's own overrides. Create groups and assign clients to them on the
           <button type="button" class="link-btn" onclick={() => router.navigate("clients")}>Clients</button> page;
-          this section edits the policy each group carries. Not yet compiled into the DNS runtime
-          for its general policy fields (Strong ClientID's own per-client domain overrides are a
-          separate, already-compiled mechanism -- see the Clients page).
+          this section edits the policy each group carries. <strong>Group policy is UI-only for now
+          and is not yet enforced by the live DNS service</strong> -- it does not change how a
+          query from a client in this group is answered. (Strong ClientID's own per-client domain
+          overrides are a separate mechanism that already enforces live -- see the Clients page.)
         </p>
         {#if groupsLoadError}<p class="error" role="alert">{groupsLoadError}</p>{/if}
         {#if groups.length === 0 && !groupsLoadError}

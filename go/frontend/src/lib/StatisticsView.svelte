@@ -39,8 +39,7 @@
 <section aria-labelledby="statistics-heading" class="statistics">
   <h2 id="statistics-heading">Statistics</h2>
   <p class="scope-note">
-    Export is a real download of this appliance's own Go-native query history. Clear is a real,
-    destructive DELETE against that same store -- see the parity matrix.
+    Export downloads this appliance's own query history. Clear permanently deletes it.
   </p>
 
   <div class="card">

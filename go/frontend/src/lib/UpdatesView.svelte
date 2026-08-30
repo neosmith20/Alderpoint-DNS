@@ -91,10 +91,9 @@
 <section aria-labelledby="updates-heading" class="updates">
   <h2 id="updates-heading">Software Updates</h2>
   <p class="scope-note">
-    Real update check/stage/apply for this control plane's own binary, via apdns-hostagent. A staged
-    candidate's checksum and self-reported version are both verified before it's trusted; apply is
-    gated on a real health check with automatic rollback if the new version doesn't come up healthy.
-    Not Python's own package management -- see the parity matrix.
+    Check for, stage, and apply updates to this appliance. A staged candidate's checksum and
+    version are verified before it's trusted; applying is gated on a health check, with automatic
+    rollback if the new version doesn't come up healthy.
   </p>
 
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}

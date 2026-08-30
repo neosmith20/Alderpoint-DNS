@@ -524,11 +524,10 @@
     description="Every managed and observed client on this appliance -- query analytics, identity, group/network association, and per-client policy in one place."
   />
   <p class="scope-note">
-    Full managed-client lifecycle (native Go): create, edit, enable/disable, delete, group and
-    network association, identifier removal. Strong ClientID (DoH path / DoT+DoQ SNI identity) is
-    real: generated values are compiled into live dnsdist enforcement, with per-client explicit
-    domain overrides (deny beats allow beats default policy). See "Clients &amp; Access" for global
-    and network-level policy, and the parity matrix for exactly what's covered.
+    Full client lifecycle: create, edit, enable/disable, delete, group and network association,
+    identifier removal. Strong ClientID (DoH path / DoT+DoQ SNI identity) enforces live, with
+    per-client explicit domain overrides (deny beats allow beats default policy). See "Clients
+    &amp; Access" for global and network-level policy.
   </p>
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
 
