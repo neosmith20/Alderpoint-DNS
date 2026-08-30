@@ -154,10 +154,20 @@ EOF
 # Ship the actual default config template from the source tree so this
 # stays in sync with whatever the binary itself expects, rather than a
 # hand-maintained copy that can drift.
-if [ -f "$SOURCE_DIR/go/config/appliance.default.yaml" ]; then
-  cp "$SOURCE_DIR/go/config/appliance.default.yaml" "$PKG/etc/alderpointdns-go/appliance.yaml"
+#
+# A real, previously-undisclosed packaging bug fixed here: this checked
+# for "appliance.default.yaml", a filename that has never existed
+# anywhere in this repo's history -- the real file has always been
+# go/config/appliance.yaml (confirmed via `git log --follow`). Every
+# prior build of this script has silently hit the "no default config"
+# fallback and shipped without /etc/alderpointdns-go/appliance.yaml (and
+# without the conffiles entry marking it one) at all, never caught
+# because the fallback path degrades quietly instead of failing the
+# build.
+if [ -f "$SOURCE_DIR/go/config/appliance.yaml" ]; then
+  cp "$SOURCE_DIR/go/config/appliance.yaml" "$PKG/etc/alderpointdns-go/appliance.yaml"
 else
-  echo "no go/config/appliance.default.yaml found in source tree -- shipping no default config" >&2
+  echo "no go/config/appliance.yaml found in source tree -- shipping no default config" >&2
   rmdir "$PKG/etc/alderpointdns-go" 2>/dev/null || true
   rm -f "$PKG/DEBIAN/conffiles"
 fi

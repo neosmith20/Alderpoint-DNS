@@ -87,6 +87,27 @@ appliance:
 EOF
       chown root:apdns-go-web /etc/alderpointdns-go/appliance.yaml
       chmod 0640 /etc/alderpointdns-go/appliance.yaml
+    else
+      # The file already exists -- either it's the real default template
+      # this package ships as a conffile (go/config/appliance.yaml,
+      # deliberately shipped with EMPTY tls_cert_path/tls_key_path, since
+      # the real cert path can only be known here, at install time), or
+      # an operator's own pre-existing config from an earlier install. A
+      # real bug fixed here: dpkg unpacks a conffile BEFORE postinst
+      # ever runs, so the `if [ ! -f ... ]` branch above always sees the
+      # file as already present on a fresh install and used to skip cert
+      # path filling entirely -- leaving a real appliance.yaml with two
+      # empty path fields even though a real cert had genuinely just
+      # been generated a few lines above. Only ever patches an empty
+      # placeholder value, never a real path an operator (or an earlier
+      # run of this same block) already filled in -- safe to run on
+      # every install/upgrade, not just the first.
+      if grep -q 'tls_cert_path: ""' /etc/alderpointdns-go/appliance.yaml 2>/dev/null; then
+        sed -i "s#tls_cert_path: \"\"#tls_cert_path: \"$cert_file\"#" /etc/alderpointdns-go/appliance.yaml
+      fi
+      if grep -q 'tls_key_path: ""' /etc/alderpointdns-go/appliance.yaml 2>/dev/null; then
+        sed -i "s#tls_key_path: \"\"#tls_key_path: \"$key_file\"#" /etc/alderpointdns-go/appliance.yaml
+      fi
     fi
 
     # apdns-hostagent's -allowed-uid must be the REAL numeric UID of the
