@@ -76,8 +76,9 @@
 <section aria-labelledby="logs-heading" class="logs">
   <h2 id="logs-heading">Logs</h2>
   <p class="scope-note">
-    Real, bounded journalctl access via apdns-hostagent, restricted to a fixed allowlist of units.
-    "All" merges every allowlisted unit's own recent entries by time.
+    Real, bounded log access via apdns-hostagent, restricted to a fixed allowlist of units --
+    systemd services read via journalctl, others (like BIND/dnsdist, which log to their own
+    files) read directly. "All" merges every allowlisted unit's own recent entries by time.
   </p>
 
   <form class="filters" onsubmit={(e) => { e.preventDefault(); loadEntries(); }}>

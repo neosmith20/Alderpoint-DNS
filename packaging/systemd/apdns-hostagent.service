@@ -32,7 +32,10 @@ ExecStart=/opt/alderpointdns-go/apdns-hostagent \
   -update-staging-dir /var/lib/apdns-hostagent/update-staging \
   -update-backup /var/lib/apdns-hostagent/previous-binary \
   -web-service-unit alderpointdns-go.service \
-  -web-health-url https://127.0.0.1:8443/api/health
+  -web-health-url https://127.0.0.1:8443/api/health \
+  -log-units apdns-go-web,apdns-hostagent,named,dnsdist \
+  -log-file-units named,dnsdist \
+  -log-unit-map named=/var/lib/bind/alderpointdns-go/named.log,dnsdist=/var/lib/apdns-hostagent/dns-staging/dnsdist.startup.log
 EnvironmentFile=-/etc/alderpointdns-go/hostagent.env
 RuntimeDirectory=apdns-hostagent
 RuntimeDirectoryMode=0750
