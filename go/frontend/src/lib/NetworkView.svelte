@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, ApiError, type CurrentNetworkConfig } from "../api";
+  import { api, ApiError, type CurrentNetworkConfig, type NetworkApplyResult } from "../api";
   import StatusBadge from "./ui/StatusBadge.svelte";
 
   // Network Configuration. Compared directly against V1.1.1's real
@@ -11,19 +11,24 @@
   // unsupported/ambiguous -- matching V1's own layout and safety
   // language field-for-field.
   //
-  // Real, disclosed gap vs V1.1.1 (see
-  // internal/hostagentd/network_backend.go's own doc comment): apply
-  // below is real and safe -- the same auto-revert-on-timeout watchdog
-  // V1 used, proven against a real disposable test interface in
-  // internal/hostagentd's own test suite -- but is runtime-only via `ip
-  // addr`/`ip route`, so it does not persist across a reboot, and this
-  // page cannot yet switch an interface to DHCP (V1 could do both, per
-  // backend). Backend detection and current-mode reporting ARE real.
+  // Apply below is real and safe -- the same auto-revert-on-timeout
+  // watchdog V1 used, proven against a real disposable test interface
+  // in internal/hostagentd's own test suite -- and, for a supported
+  // detected backend, ALSO writes that backend's own real persistent
+  // config (netplan/systemd-networkd/ifupdown/NetworkManager -- see
+  // internal/hostagentd/network_persist.go, ported field-for-field
+  // from V1.1.1's own real stage_*/apply_* functions) so the change
+  // survives a reboot, not just a runtime `ip addr`/`ip route` change.
+  // On an unsupported/ambiguous backend, the live change still applies
+  // (useful for an immediate fix) but is honestly reported as
+  // not-persisted -- never silently claimed as durable. DHCP mode is
+  // now a real, selectable, persisted mode too (previously static-only).
 
   let current = $state<CurrentNetworkConfig | null>(null);
   let statusError = $state("");
 
   let selectedIface = $state("");
+  let ipv4Mode = $state<"static" | "dhcp">("static");
   let ipv4Address = $state("");
   // A number input's bind:value is a real JS number (or "" when empty),
   // never a string -- the CIDR builder below must never call .trim() on
@@ -31,8 +36,9 @@
   // rebuild: it did, and threw on every real Apply click).
   let ipv4Prefix = $state<number | "">(24);
   let ipv4Gateway = $state("");
+  let persistChange = $state(true);
   let applyError = $state("");
-  let applyResult = $state<{ auto_revert_seconds: number } | null>(null);
+  let applyResult = $state<NetworkApplyResult | null>(null);
   let busy = $state(false);
   let confirmBusy = $state(false);
   let rollbackBusy = $state(false);
@@ -53,13 +59,37 @@
 
   async function apply(e: Event) {
     e.preventDefault();
-    if (!selectedIface.trim() || !ipv4Address.trim()) return;
+    if (!selectedIface.trim()) return;
+    if (ipv4Mode === "static" && !ipv4Address.trim()) return;
     applyError = "";
     applyResult = null;
     busy = true;
     try {
-      const cidr = `${ipv4Address.trim()}/${ipv4Prefix || 24}`;
-      applyResult = await api.networkApply(selectedIface.trim(), [cidr], ipv4Gateway.trim() || undefined);
+      // Switching TO dhcp: this appliance's own `ip`-based live half
+      // (addresses/gateway below) has no DHCP client of its own -- it
+      // only ever sets a fixed address -- so a DHCP-mode apply leaves
+      // the CURRENT live address alone (a real no-op for the live
+      // half, honestly not "DHCP acquired now") while the persistent
+      // config genuinely switches to dhcp and takes effect on this
+      // backend's own next reload/reboot, exactly like every other
+      // persisted-but-not-yet-live setting on this page already is.
+      const liveCidr =
+        ipv4Mode === "static"
+          ? `${ipv4Address.trim()}/${ipv4Prefix || 24}`
+          : current?.ipv4?.address && current?.ipv4?.prefixlen
+            ? `${current.ipv4.address}/${current.ipv4.prefixlen}`
+            : null;
+      if (!liveCidr) {
+        applyError = "No current address to keep live while switching to DHCP -- set a static address instead, or check back once this interface has a real address.";
+        return;
+      }
+      applyResult = await api.networkApply(
+        selectedIface.trim(),
+        [liveCidr],
+        ipv4Mode === "static" ? ipv4Gateway.trim() || undefined : current?.ipv4?.gateway || undefined,
+        ipv4Mode === "static" ? { mode: "static", address: ipv4Address.trim(), prefix: Number(ipv4Prefix) || 24, gateway: ipv4Gateway.trim() } : { mode: "dhcp" },
+        persistChange,
+      );
     } catch (err) {
       applyError = err instanceof ApiError ? err.message : String(err);
     } finally {
@@ -102,9 +132,9 @@
   <h2 id="network-heading">Network Configuration</h2>
   <p class="scope-note">
     This server's own network interface (DHCP/static IP, gateway) -- separate from DNS
-    upstream/resolver settings. Applying a change here does not persist across a reboot yet, and
-    switching an interface to DHCP isn't wired up yet -- static changes apply live immediately, with
-    the same automatic-rollback safety window as every other change on this page.
+    upstream/resolver settings. A change applies live immediately, with the same automatic-rollback
+    safety window as every other change on this page, and -- on a supported detected backend -- is
+    also written into that backend's own real config so it survives a reboot.
   </p>
 
   {#if statusError}<p class="error" role="alert">{statusError}</p>{/if}
@@ -164,12 +194,30 @@
             {/each}
           </select>
         </label>
-        <div class="grid-compact">
-          <label>Static IPv4 address <input bind:value={ipv4Address} placeholder="192.168.1.10" /></label>
-          <label>Prefix length (CIDR) <input type="number" min="0" max="32" bind:value={ipv4Prefix} placeholder="24" /></label>
-          <label>Gateway <input bind:value={ipv4Gateway} placeholder="192.168.1.1" /></label>
-        </div>
-        <button type="submit" disabled={busy || !selectedIface.trim() || !ipv4Address.trim()}>{busy ? "Applying…" : "Apply"}</button>
+        <label>
+          Mode
+          <select bind:value={ipv4Mode}>
+            <option value="static">Static</option>
+            <option value="dhcp">DHCP</option>
+          </select>
+        </label>
+        {#if ipv4Mode === "static"}
+          <div class="grid-compact">
+            <label>Static IPv4 address <input bind:value={ipv4Address} placeholder="192.168.1.10" /></label>
+            <label>Prefix length (CIDR) <input type="number" min="0" max="32" bind:value={ipv4Prefix} placeholder="24" /></label>
+            <label>Gateway <input bind:value={ipv4Gateway} placeholder="192.168.1.1" /></label>
+          </div>
+        {:else}
+          <p class="hint">
+            The live address stays as it is right now; the persistent config switches to DHCP and a real
+            DHCP client takes over on this backend's own next reload or reboot.
+          </p>
+        {/if}
+        <label class="checkbox-row">
+          <input type="checkbox" bind:checked={persistChange} />
+          Persist this change so it survives a reboot (writes the detected backend's own config)
+        </label>
+        <button type="submit" disabled={busy || !selectedIface.trim() || (ipv4Mode === "static" && !ipv4Address.trim())}>{busy ? "Applying…" : "Apply"}</button>
         {#if applyError}<p class="error" role="alert">{applyError}</p>{/if}
       </form>
     {/if}
@@ -184,6 +232,16 @@
         If you are reading this from the <strong>new</strong> address, everything is working; confirm
         below to make it permanent for this boot.
       </p>
+      {#if applyResult.persist}
+        {#if applyResult.persist.persisted}
+          <p class="hint">
+            Persisted via <strong>{applyResult.persist.backend}</strong> -- this will still be in effect after a
+            reboot once confirmed.
+          </p>
+        {:else}
+          <p class="error" role="alert">Not persisted: {applyResult.persist.reason}</p>
+        {/if}
+      {/if}
       <div class="row">
         <button onclick={confirm} disabled={confirmBusy}>{confirmBusy ? "…" : "Keep Configuration"}</button>
         <button onclick={rollback} disabled={rollbackBusy}>{rollbackBusy ? "…" : "Roll back now"}</button>
@@ -211,5 +269,6 @@
   .pending { background: var(--attention-bg); }
   .empty-state { opacity: 0.85; }
   .hint { font-size: 0.85rem; opacity: 0.8; margin: 0; }
+  .checkbox-row { flex-direction: row; align-items: center; gap: 0.5rem; }
   .error { color: var(--badge-danger-fg); font-size: 0.85rem; margin: 0; }
 </style>

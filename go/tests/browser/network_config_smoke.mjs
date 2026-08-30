@@ -77,10 +77,25 @@ async function main() {
     const prefixInput = await page.$('.network input[placeholder="24"]');
     await prefixInput.evaluate((el) => { el.value = ""; el.dispatchEvent(new Event("input", { bubbles: true })); });
     await prefixInput.type("24");
+    // This suite proves the live apply/confirm/rollback UI round trip
+    // only -- it deliberately unchecks "Persist" so it never writes
+    // into this fixture host's own REAL backend config (netplan/
+    // networkd/ifupdown/NetworkManager -- whichever this real host
+    // happens to have): persistence itself has its own dedicated,
+    // safely-path-overridden Go tests
+    // (internal/hostagentd/network_persist_test.go).
+    const persistCheckbox = await page.$('.network input[type="checkbox"]');
+    if (persistCheckbox && (await persistCheckbox.evaluate((el) => el.checked))) {
+      await persistCheckbox.click();
+    }
     await page.click('.network button[type="submit"]');
 
     await page.waitForFunction(() => document.body.textContent.includes("Awaiting confirmation"), { timeout: 4000 }).catch(() => {});
     check("Apply shows the real 'Awaiting confirmation' pending state", await page.evaluate(() => document.body.textContent.includes("Awaiting confirmation")));
+    check(
+      "Persist unchecked -> the live-only apply is honestly reported (no 'persist' object claimed)",
+      await page.evaluate(() => !document.body.textContent.includes("Persisted via")),
+    );
 
     const confirmed = await page.evaluate(() => {
       const btn = [...document.querySelectorAll("button")].find((b) => b.textContent.trim() === "Keep Configuration");

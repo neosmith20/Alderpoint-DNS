@@ -39,9 +39,10 @@ type netInterfaceState struct {
 }
 
 type pendingChange struct {
-	iface    string
-	previous netInterfaceState
-	timer    *time.Timer
+	iface       string
+	previous    netInterfaceState
+	persistSnap *persistSnapshot // nil if persistence was never attempted (unsupported backend, or not requested)
+	timer       *time.Timer
 }
 
 type networkState struct {
@@ -68,6 +69,20 @@ func RegisterNetworkOps(s *Server, cfg NetworkConfig) {
 			Interface string   `json:"interface"`
 			Addresses []string `json:"addresses"`
 			Gateway   string   `json:"gateway"`
+			// Ipv4/Ipv6/Persist: when Persist is true (the default --
+			// omitting it entirely still persists, matching "an owner's
+			// network change should survive a reboot unless they
+			// deliberately chose otherwise" as the safe default) and at
+			// least one of Ipv4/Ipv6 has a real Mode, this call ALSO
+			// writes the detected backend's own persistent config
+			// (network_persist.go) alongside the live `ip`-based change
+			// above -- one shared pending-confirmation/auto-revert/
+			// rollback covers both, matching V1.1.1's own real
+			// apply_change()/perform_rollback() unified design (read
+			// directly from app/network_config.py, not guessed).
+			Ipv4    AddrConfig `json:"ipv4"`
+			Ipv6    AddrConfig `json:"ipv6"`
+			Persist *bool      `json:"persist"`
 		}
 		if err := json.Unmarshal(params, &in); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
@@ -83,6 +98,7 @@ func RegisterNetworkOps(s *Server, cfg NetworkConfig) {
 				return nil, fmt.Errorf("address %q must be in CIDR form (e.g. 10.0.0.5/24)", a)
 			}
 		}
+		persist := in.Persist == nil || *in.Persist
 
 		ns.mu.Lock()
 		if _, exists := ns.pending[in.Interface]; exists {
@@ -101,6 +117,27 @@ func RegisterNetworkOps(s *Server, cfg NetworkConfig) {
 		}
 
 		pc := &pendingChange{iface: in.Interface, previous: before}
+
+		var persistResult PersistResult
+		if persist && (in.Ipv4.Mode != "" || in.Ipv6.Mode != "") {
+			backend := DetectBackend(ctx).Backend
+			snap, res, err := persistChange(ctx, backend, in.Interface, in.Ipv4, in.Ipv6)
+			if err != nil {
+				// The persistent-config half failed -- roll back the
+				// live half immediately too (matching V1's own "apply
+				// failed, rolling back immediately" behavior) rather
+				// than leaving a live change with no way to survive a
+				// reboot and no record of why.
+				applyInterfaceState(ctx, in.Interface, before)
+				if snap != nil {
+					restorePersisted(ctx, snap, in.Interface)
+				}
+				return nil, fmt.Errorf("persisting configuration via %s failed, live change rolled back: %w", backend, err)
+			}
+			pc.persistSnap = snap
+			persistResult = res
+		}
+
 		pc.timer = time.AfterFunc(cfg.AutoRevertTimeout, func() {
 			ns.mu.Lock()
 			cur, still := ns.pending[in.Interface]
@@ -110,6 +147,9 @@ func RegisterNetworkOps(s *Server, cfg NetworkConfig) {
 			ns.mu.Unlock()
 			if still && cur == pc {
 				applyInterfaceState(context.Background(), in.Interface, pc.previous)
+				if pc.persistSnap != nil {
+					restorePersisted(context.Background(), pc.persistSnap, in.Interface)
+				}
 				s.Log.Warn("network change auto-reverted (not confirmed in time)", "interface", in.Interface)
 				s.Audit.Record(AuditEntry{Time: time.Now(), Op: "network.auto_revert", Detail: "not confirmed within " + cfg.AutoRevertTimeout.String() + ": interface=" + in.Interface, OK: true})
 			}
@@ -121,6 +161,7 @@ func RegisterNetworkOps(s *Server, cfg NetworkConfig) {
 		return map[string]any{
 			"status": "applied_pending_confirmation", "interface": in.Interface,
 			"auto_revert_seconds": int(cfg.AutoRevertTimeout.Seconds()),
+			"persist":             persistResult,
 		}, nil
 	})
 
@@ -163,6 +204,11 @@ func RegisterNetworkOps(s *Server, cfg NetworkConfig) {
 		}
 		if err := applyInterfaceState(ctx, in.Interface, pc.previous); err != nil {
 			return nil, fmt.Errorf("rollback failed: %w", err)
+		}
+		if pc.persistSnap != nil {
+			if err := restorePersisted(ctx, pc.persistSnap, in.Interface); err != nil {
+				return nil, fmt.Errorf("live rollback succeeded but restoring the persistent config failed: %w", err)
+			}
 		}
 		return map[string]any{"status": "rolled_back", "interface": in.Interface}, nil
 	})

@@ -634,10 +634,25 @@ export interface ReplicationStatusResponse {
   sync_history?: ReplicationSyncResult[];
 }
 
+export interface NetworkPersistResult {
+  backend: string;
+  persisted: boolean;
+  reason?: string;
+  files?: string[];
+}
+
 export interface NetworkApplyResult {
   status: string;
   interface: string;
   auto_revert_seconds: number;
+  persist?: NetworkPersistResult;
+}
+
+export interface NetworkAddrConfigInput {
+  mode: "static" | "dhcp" | "slaac" | "";
+  address?: string;
+  prefix?: number;
+  gateway?: string;
 }
 
 export interface FamilyConfig {
@@ -1103,14 +1118,16 @@ export const api = {
   // Network Configuration real-time reporting, field-matched against
   // V1.1.1's own read_current_config() (app/network_config.py, read
   // directly): backend detection, the active interface, and IPv4/IPv6
-  // mode+address+gateway. See internal/hostagentd/network_backend.go's
-  // own doc comment for the one real, disclosed gap vs V1 (no
-  // persistent-config write, no DHCP-switch action -- apply/confirm/
-  // rollback below is real but runtime-only).
+  // mode+address+gateway. apply/confirm/rollback below persists the
+  // change into the detected backend's own real config (netplan/
+  // networkd/ifupdown/NetworkManager -- see
+  // internal/hostagentd/network_persist.go) so it survives a reboot,
+  // in addition to the live runtime change -- one shared confirm/
+  // rollback safety window covers both.
   networkStatus: (iface: string, signal?: AbortSignal) =>
     req<{ raw_addr_json: string; current: CurrentNetworkConfig }>(`/api/network/status?interface=${encodeURIComponent(iface)}`, undefined, signal),
-  networkApply: (iface: string, addresses: string[], gateway?: string) =>
-    req<NetworkApplyResult>("/api/network/apply", { method: "POST", body: JSON.stringify({ interface: iface, addresses, gateway }) }),
+  networkApply: (iface: string, addresses: string[], gateway?: string, ipv4?: NetworkAddrConfigInput, persist?: boolean) =>
+    req<NetworkApplyResult>("/api/network/apply", { method: "POST", body: JSON.stringify({ interface: iface, addresses, gateway, ipv4, persist }) }),
   networkConfirm: (iface: string) => req<{ status: string }>("/api/network/confirm", { method: "POST", body: JSON.stringify({ interface: iface }) }),
   networkRollback: (iface: string) => req<{ status: string }>("/api/network/rollback", { method: "POST", body: JSON.stringify({ interface: iface }) }),
 
