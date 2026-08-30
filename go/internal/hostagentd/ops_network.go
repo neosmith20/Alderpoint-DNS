@@ -168,6 +168,12 @@ func RegisterNetworkOps(s *Server, cfg NetworkConfig) {
 	})
 }
 
+// networkStatus backs OpNetworkStatus. `current` is the real,
+// always-safe read-only report (backend detection, active interface,
+// IPv4/IPv6 mode+address+gateway) matching V1.1.1's own
+// read_current_config() -- see network_backend.go. raw_addr_json is
+// kept for backward compatibility with any existing caller of this
+// exact field.
 func networkStatus(ctx context.Context, iface string) (any, error) {
 	args := []string{"-j", "addr", "show"}
 	if iface != "" {
@@ -177,7 +183,10 @@ func networkStatus(ctx context.Context, iface string) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ip addr show: %w", err)
 	}
-	return map[string]any{"raw_addr_json": string(out)}, nil
+	return map[string]any{
+		"raw_addr_json": string(out),
+		"current":       ReadCurrentNetworkConfig(ctx),
+	}, nil
 }
 
 func readInterfaceState(ctx context.Context, iface string) (netInterfaceState, error) {

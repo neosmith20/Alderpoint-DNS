@@ -569,6 +569,23 @@ export interface NetworkApplyResult {
   auto_revert_seconds: number;
 }
 
+export interface FamilyConfig {
+  address?: string;
+  prefixlen?: number;
+  gateway?: string;
+  mode: string; // "dhcp" | "static" | "slaac" | "unknown"
+}
+
+export interface CurrentNetworkConfig {
+  backend: string; // "systemd-networkd" | "NetworkManager" | "ifupdown" | "netplan" | "unsupported"
+  ambiguous: boolean;
+  backend_detail: string;
+  interface?: string;
+  interfaces: string[];
+  ipv4: FamilyConfig | null;
+  ipv6: FamilyConfig | null;
+}
+
 export interface LogEntry {
   unit?: string;
   time: string;
@@ -1006,8 +1023,15 @@ export const api = {
     req<{ status: string }>("/api/replication/settings", { method: "POST", body: JSON.stringify(settings) }),
   replicationPublishGeneration: () => req<ReplicationGeneration>("/api/replication/generations", { method: "POST" }),
 
+  // Network Configuration real-time reporting, field-matched against
+  // V1.1.1's own read_current_config() (app/network_config.py, read
+  // directly): backend detection, the active interface, and IPv4/IPv6
+  // mode+address+gateway. See internal/hostagentd/network_backend.go's
+  // own doc comment for the one real, disclosed gap vs V1 (no
+  // persistent-config write, no DHCP-switch action -- apply/confirm/
+  // rollback below is real but runtime-only).
   networkStatus: (iface: string, signal?: AbortSignal) =>
-    req<{ raw_addr_json: string }>(`/api/network/status?interface=${encodeURIComponent(iface)}`, undefined, signal),
+    req<{ raw_addr_json: string; current: CurrentNetworkConfig }>(`/api/network/status?interface=${encodeURIComponent(iface)}`, undefined, signal),
   networkApply: (iface: string, addresses: string[], gateway?: string) =>
     req<NetworkApplyResult>("/api/network/apply", { method: "POST", body: JSON.stringify({ interface: iface, addresses, gateway }) }),
   networkConfirm: (iface: string) => req<{ status: string }>("/api/network/confirm", { method: "POST", body: JSON.stringify({ interface: iface }) }),
