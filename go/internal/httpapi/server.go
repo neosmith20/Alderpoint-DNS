@@ -27,6 +27,7 @@ import (
 	"alderpointdns/go-controlplane/internal/policy"
 	"alderpointdns/go-controlplane/internal/policyentities"
 	"alderpointdns/go-controlplane/internal/replication"
+	"alderpointdns/go-controlplane/internal/softwareupdates"
 	"alderpointdns/go-controlplane/internal/secretbackup"
 	"alderpointdns/go-controlplane/internal/secretstore"
 	"alderpointdns/go-controlplane/internal/upstreams"
@@ -64,7 +65,8 @@ type Server struct {
 	PolicyEntities *policyentities.Service
 	DomainRouting  *domainrouting.Service
 	CustomRules   *customrules.Service
-	Backup        *backup.Service
+	Backup          *backup.Service
+	SoftwareUpdates *softwareupdates.Service
 	SecretBackup  *secretbackup.Service
 	FilterImport  *filterimport.Service
 	DNSTransports *dnstransports.Service
@@ -369,6 +371,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/updates/status", requireAuth(s.handleUpdateCheck))
 	mux.HandleFunc("POST /api/updates/stage", requireAuth(s.handleUpdateStage))
 	mux.HandleFunc("POST /api/updates/apply", requireAuth(s.handleUpdateApply))
+	mux.HandleFunc("GET /api/updates/channel", requireAuth(s.handleGetUpdateChannel))
+	mux.HandleFunc("PUT /api/updates/channel", requireAuth(s.handleSetUpdateChannel))
+	mux.HandleFunc("POST /api/updates/check", requireAuth(s.handleCheckForUpdate))
+	mux.HandleFunc("POST /api/updates/download-and-stage", requireAuth(s.handleUpdateDownloadAndStage))
 
 	mux.HandleFunc("GET /api/dns-runtime/status", requireAuth(s.handleDNSRuntimeStatus))
 	mux.HandleFunc("POST /api/dns-runtime/apply", requireAuth(s.handleDNSRuntimeApply))
