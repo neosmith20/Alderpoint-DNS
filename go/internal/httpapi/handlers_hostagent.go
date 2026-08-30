@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 
+	"alderpointdns/go-controlplane/internal/auth"
 	"alderpointdns/go-controlplane/internal/hostagent"
 )
 
@@ -203,9 +204,12 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	sess, _ := auth.FromContext(r.Context())
 	result, ok := callAgent[json.RawMessage](s, w, r, hostagent.OpUpdateApply, nil)
 	if !ok {
+		s.AuditLog.Record(r.Context(), sess.AdminID, sess.Username, "software_update_install", false, clientIP(r), "")
 		return
 	}
+	s.AuditLog.Record(r.Context(), sess.AdminID, sess.Username, "software_update_install", true, clientIP(r), "")
 	WriteJSON(w, http.StatusOK, result)
 }

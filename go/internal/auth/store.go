@@ -185,6 +185,48 @@ func (s *Store) RevokeOtherSessions(ctx context.Context, adminID int64, keepID s
 	return res.RowsAffected()
 }
 
+// SessionRow is one row of the Administration page's Sessions table,
+// matching V1.1.1's own real administration_context() query
+// (webapp.py, read directly): every session belonging to this admin,
+// most recently active first.
+type SessionRow struct {
+	ID          string `json:"-"`
+	CreatedAt   string `json:"created_at"`
+	LastSeenAt  string `json:"last_seen_at"`
+	IP          string `json:"ip"`
+	UserAgent   string `json:"user_agent"`
+	IsCurrent   bool   `json:"is_current"`
+}
+
+// ListSessions mirrors V1.1.1's own real query field-for-field:
+// `SELECT id, created_at, last_seen_at, ip, user_agent FROM sessions
+// WHERE admin_id=? ORDER BY last_seen_at DESC`.
+func (s *Store) ListSessions(ctx context.Context, adminID int64, currentSessionID string) ([]SessionRow, error) {
+	rows, err := s.DB.QueryContext(ctx,
+		`SELECT id, created_at, last_seen_at, ip, user_agent FROM sessions WHERE admin_id=? ORDER BY last_seen_at DESC`,
+		adminID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SessionRow
+	for rows.Next() {
+		var row SessionRow
+		if err := rows.Scan(&row.ID, &row.CreatedAt, &row.LastSeenAt, &row.IP, &row.UserAgent); err != nil {
+			return nil, err
+		}
+		if row.IP == "" {
+			row.IP = "unknown"
+		}
+		if row.UserAgent == "" {
+			row.UserAgent = "unknown"
+		}
+		row.IsCurrent = row.ID == currentSessionID
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
 // ChangePassword verifies currentPassword against the stored hash before
 // setting newPassword -- same "must prove you know the current password"
 // contract as app/v2/webapp.py's POST /api/session/password. The calling

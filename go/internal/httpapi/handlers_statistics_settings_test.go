@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"alderpointdns/go-controlplane/internal/auth"
 	"alderpointdns/go-controlplane/internal/dnsanalytics"
 )
 
@@ -30,6 +31,10 @@ func putAnalyticsSettingsReq(t *testing.T, s *Server, body dnsanalytics.Settings
 	t.Helper()
 	raw, _ := json.Marshal(body)
 	req := httptest.NewRequest("PUT", "/api/statistics/settings", bytes.NewReader(raw))
+	// handleUpdateAnalyticsSettings records a real audit entry
+	// (2026-08-30: Administration parity), which needs a real session
+	// in context -- requireAuth always provides one in production.
+	req = req.WithContext(auth.WithSession(req.Context(), &auth.Session{AdminID: 0, Username: "test"}))
 	rec := httptest.NewRecorder()
 	s.handleUpdateAnalyticsSettings(rec, req)
 	var out map[string]any

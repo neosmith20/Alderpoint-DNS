@@ -1,6 +1,10 @@
 package httpapi
 
-import "net/http"
+import (
+	"net/http"
+
+	"alderpointdns/go-controlplane/internal/auth"
+)
 
 // Protection Control: the Dashboard's global filtering on/off switch,
 // matching V1.1.1's real POST /protection/toggle (webapp.py:
@@ -67,6 +71,12 @@ func (s *Server) handleProtectionToggle(w http.ResponseWriter, r *http.Request) 
 		Err(http.StatusInternalServerError, "internal_error", "failed to update custom rules").WriteJSON(w)
 		return
 	}
+	sess, _ := auth.FromContext(r.Context())
+	action := "protection_disabled"
+	if enable {
+		action = "protection_enabled"
+	}
+	s.AuditLog.Record(r.Context(), sess.AdminID, sess.Username, action, true, clientIP(r), "")
 	WriteJSON(w, http.StatusOK, map[string]any{
 		"active":      enable,
 		"dns_runtime": s.applyDNSRuntimeBestEffort(r),

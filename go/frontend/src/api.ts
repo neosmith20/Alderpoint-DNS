@@ -335,6 +335,25 @@ export interface AnalyticsTimeseriesResponse {
 // fields (aggregate_retention_days, collection_interval) governed a
 // separate poll-and-aggregate tier this architecture doesn't have and
 // are deliberately not modeled -- see the backend's own doc comment.
+// AdminSessionRow/AuditLogEntry back Administration's Sessions and
+// Recent Administrative Activity tables, matching V1.1.1's own real
+// administration_context() query field-for-field.
+export interface AdminSessionRow {
+  created_at: string;
+  last_seen_at: string;
+  ip: string;
+  user_agent: string;
+  is_current: boolean;
+}
+
+export interface AuditLogEntry {
+  at: string;
+  action: string;
+  success: boolean;
+  ip: string;
+  detail: string;
+}
+
 export interface AnalyticsSettings {
   analytics_enabled: boolean;
   detailed_query_logging_enabled: boolean;
@@ -834,11 +853,15 @@ export const api = {
   logout: () => req<{ status: string }>("/api/logout", { method: "POST" }),
   session: () => req<{ authenticated: boolean; username: string; csrf: string }>("/api/session"),
   changePassword: (currentPassword: string, newPassword: string) =>
-    req<{ status: string }>("/api/session/password", {
+    req<{ status: string; revoked_count: number }>("/api/session/password", {
       method: "POST",
       body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
     }),
   revokeOtherSessions: () => req<{ status: string; revoked_count: number }>("/api/session/revoke-others", { method: "POST" }),
+  listAdminSessions: (signal?: AbortSignal) =>
+    req<{ sessions: AdminSessionRow[] }>("/api/administration/sessions", undefined, signal),
+  listAuditLog: (signal?: AbortSignal) =>
+    req<{ entries: AuditLogEntry[] }>("/api/administration/audit-log", undefined, signal),
 
   // 2026-08-28: real DELETE against this appliance's own Go-native
   // query_events table (internal/dnsanalytics.Reader.ClearAll) --

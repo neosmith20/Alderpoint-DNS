@@ -1,10 +1,40 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, ApiError } from "../api";
+  import { api, ApiError, type AdminSessionRow, type AuditLogEntry } from "../api";
   import { timestampPref, type TimestampMode } from "../timestamp.svelte";
+  import StatusBadge from "./ui/StatusBadge.svelte";
 
   let applianceName = $state("");
   let statusError = $state("");
+
+  // Sessions / Recent Administrative Activity, matching V1.1.1's real
+  // administration.html field-for-field (see GET
+  // /api/administration/{sessions,audit-log}'s own doc comments for
+  // the one real, disclosed scope gap: audit entries only cover the
+  // security-relevant actions wired so far, not every mutating
+  // endpoint in the appliance).
+  let sessions = $state<AdminSessionRow[] | null>(null);
+  let sessionsError = $state("");
+  let auditEntries = $state<AuditLogEntry[] | null>(null);
+  let auditError = $state("");
+
+  async function loadSessions() {
+    try {
+      const resp = await api.listAdminSessions();
+      sessions = resp.sessions;
+    } catch (err) {
+      sessionsError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  async function loadAuditLog() {
+    try {
+      const resp = await api.listAuditLog();
+      auditEntries = resp.entries;
+    } catch (err) {
+      auditError = err instanceof Error ? err.message : String(err);
+    }
+  }
 
   let currentPassword = $state("");
   let newPassword = $state("");
@@ -25,6 +55,8 @@
       if (err instanceof DOMException && err.name === "AbortError") return;
       statusError = err instanceof Error ? err.message : String(err);
     }
+    loadSessions();
+    loadAuditLog();
   });
 
   async function changePassword(e: Event) {
@@ -42,6 +74,7 @@
       newPassword = "";
       confirmNewPassword = "";
       passwordSuccess = true;
+      await Promise.all([loadSessions(), loadAuditLog()]);
     } catch (err) {
       passwordError = err instanceof ApiError ? err.message : String(err);
     } finally {
@@ -55,6 +88,7 @@
     try {
       const resp = await api.revokeOtherSessions();
       revokeResult = resp.revoked_count === 0 ? "No other sessions were active." : `Revoked ${resp.revoked_count} other session${resp.revoked_count === 1 ? "" : "s"}.`;
+      await Promise.all([loadSessions(), loadAuditLog()]);
     } catch (err) {
       revokeResult = err instanceof Error ? err.message : String(err);
     } finally {
@@ -95,27 +129,75 @@
 
   <div class="card">
     <h3>Change Password</h3>
+    <p class="hint">Changing the password signs out every other active session automatically.</p>
     <form onsubmit={changePassword} class="stack-form">
       <label>Current password <input required type="password" bind:value={currentPassword} autocomplete="current-password" /></label>
       <label>New password (12+ characters) <input required minlength="12" type="password" bind:value={newPassword} autocomplete="new-password" /></label>
       <label>Confirm new password <input required type="password" bind:value={confirmNewPassword} autocomplete="new-password" /></label>
       <button type="submit" disabled={passwordBusy}>{passwordBusy ? "Changing…" : "Change password"}</button>
       {#if passwordError}<p class="error" role="alert">{passwordError}</p>{/if}
-      {#if passwordSuccess}<p class="success" role="status">Password changed.</p>{/if}
+      {#if passwordSuccess}<p class="success" role="status">Password changed. Other sessions were signed out.</p>{/if}
     </form>
   </div>
 
-  <div class="card">
+  <div class="card wide">
     <h3>Sessions</h3>
-    <p class="hint">Sign every other browser/device out of this admin account. This session stays signed in.</p>
-    <button class="danger" onclick={revokeOtherSessions} disabled={revokeBusy}>{revokeBusy ? "Revoking…" : "Revoke other sessions"}</button>
+    <p class="hint">Sessions other than this one can be revoked without changing the password.</p>
+    <button class="danger" onclick={revokeOtherSessions} disabled={revokeBusy}>{revokeBusy ? "Revoking…" : "Revoke all other sessions"}</button>
     {#if revokeResult}<p class="hint" role="status">{revokeResult}</p>{/if}
+    {#if sessionsError}
+      <p class="error" role="alert">{sessionsError}</p>
+    {:else if !sessions}
+      <p class="hint">Loading…</p>
+    {:else}
+      <div class="table-scroll"><table class="admin-table">
+        <thead><tr><th>Session</th><th>Started</th><th>Last seen</th><th>IP</th><th>Client</th></tr></thead>
+        <tbody>
+          {#each sessions as row, i (row.created_at + i)}
+            <tr>
+              <td>{#if row.is_current}<StatusBadge label="This session" tone="healthy" />{:else}&mdash;{/if}</td>
+              <td class="mono">{row.created_at}</td>
+              <td class="mono">{row.last_seen_at}</td>
+              <td class="mono">{row.ip}</td>
+              <td>{row.user_agent}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table></div>
+    {/if}
+  </div>
+
+  <div class="card wide">
+    <h3>Recent Administrative Activity</h3>
+    {#if auditError}
+      <p class="error" role="alert">{auditError}</p>
+    {:else if !auditEntries}
+      <p class="hint">Loading…</p>
+    {:else if auditEntries.length === 0}
+      <p class="hint">No administrative activity recorded yet.</p>
+    {:else}
+      <div class="table-scroll"><table class="admin-table">
+        <thead><tr><th>When</th><th>Action</th><th>Result</th><th>IP</th><th>Detail</th></tr></thead>
+        <tbody>
+          {#each auditEntries as entry, i (entry.at + i)}
+            <tr>
+              <td class="mono">{entry.at}</td>
+              <td>{entry.action}</td>
+              <td><StatusBadge label={entry.success ? "Success" : "Failed"} tone={entry.success ? "healthy" : "danger"} /></td>
+              <td class="mono">{entry.ip}</td>
+              <td>{entry.detail}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table></div>
+    {/if}
   </div>
 </section>
 
 <style>
-  .admin { max-width: 40rem; display: flex; flex-direction: column; gap: 1rem; }
-  .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); }
+  .admin { display: flex; flex-direction: column; gap: 1rem; }
+  .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); max-width: 40rem; }
+  .card.wide { max-width: 56rem; }
   .card h3 { margin-top: 0; }
   .hint { font-size: 0.85rem; opacity: 0.75; }
   .radio-row { display: flex; flex-wrap: wrap; gap: 1rem; }
@@ -124,5 +206,11 @@
   .stack-form { display: flex; flex-direction: column; gap: 0.65rem; max-width: 22rem; }
   .stack-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; }
   .success { color: #16a34a; }
-  .danger { background: var(--badge-danger-bg); color: var(--badge-danger-fg); }
+  .danger { background: var(--badge-danger-bg); color: var(--badge-danger-fg); margin-top: 0.5rem; }
+  .table-scroll { overflow-x: auto; margin-top: 0.75rem; }
+  .admin-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  .admin-table th { text-align: left; font-weight: 600; opacity: 0.7; padding: 0.3rem 0.5rem 0.3rem 0; border-bottom: 1px solid var(--border); }
+  .admin-table td { padding: 0.35rem 0.5rem 0.35rem 0; border-bottom: 1px solid var(--border); word-break: break-word; }
+  .admin-table tr:last-child td { border-bottom: none; }
+  .mono { font-family: monospace; }
 </style>

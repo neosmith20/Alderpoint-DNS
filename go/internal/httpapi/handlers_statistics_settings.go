@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"alderpointdns/go-controlplane/internal/auth"
 	"alderpointdns/go-controlplane/internal/dnsanalytics"
 )
 
@@ -99,6 +100,8 @@ func (s *Server) handleUpdateAnalyticsSettings(w http.ResponseWriter, r *http.Re
 	if s.AnalyticsSettings != nil {
 		s.AnalyticsSettings.Store(body)
 	}
+	sess, _ := auth.FromContext(r.Context())
+	s.AuditLog.Record(r.Context(), sess.AdminID, sess.Username, "statistics_settings_change", true, clientIP(r), "")
 	WriteJSON(w, http.StatusOK, body)
 }
 

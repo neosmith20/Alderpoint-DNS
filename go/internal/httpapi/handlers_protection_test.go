@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"net/http/httptest"
 	"testing"
+
+	"alderpointdns/go-controlplane/internal/auth"
 )
 
 func protectionStatusReq(t *testing.T, s *Server) (int, map[string]any) {
@@ -27,6 +29,11 @@ func protectionStatusReq(t *testing.T, s *Server) (int, map[string]any) {
 func protectionToggleReq(t *testing.T, s *Server) (int, map[string]any) {
 	t.Helper()
 	req := httptest.NewRequest("POST", "/api/protection/toggle", nil)
+	// handleProtectionToggle records a real audit entry (2026-08-30:
+	// Administration parity), which needs a real session in context --
+	// requireAuth always provides one in production; this test drives
+	// the handler directly, so it must provide one too.
+	req = req.WithContext(auth.WithSession(req.Context(), &auth.Session{AdminID: 0, Username: "test"}))
 	rec := httptest.NewRecorder()
 	s.handleProtectionToggle(rec, req)
 	var body map[string]any

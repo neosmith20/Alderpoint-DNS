@@ -13,6 +13,7 @@ import (
 	"alderpointdns/go-controlplane/internal/clientalias"
 	"alderpointdns/go-controlplane/internal/clients"
 	"alderpointdns/go-controlplane/internal/customrules"
+	"alderpointdns/go-controlplane/internal/auditlog"
 	"alderpointdns/go-controlplane/internal/dnsanalytics"
 	"alderpointdns/go-controlplane/internal/dnsperf"
 	"alderpointdns/go-controlplane/internal/dnsruntime"
@@ -33,6 +34,11 @@ import (
 type Server struct {
 	DB   *sql.DB
 	Auth *auth.Store
+	// AuditLog backs Administration's Recent Administrative Activity
+	// table (see internal/auditlog's own doc comment for exactly which
+	// actions are wired and which V1.1.1 rows aren't yet). nil is a
+	// valid, supported state in tests -- Record becomes a no-op.
+	AuditLog *auditlog.Service
 	// Bootstrap gates first-run owner setup with a real one-time
 	// capability -- see internal/bootstrap's doc comment. Required
 	// (never nil in practice; cmd/alderpointdns-go always wires it) --
@@ -175,6 +181,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/session", requireAuth(s.handleSession))
 	mux.HandleFunc("POST /api/session/revoke-others", requireAuth(s.handleRevokeOtherSessions))
 	mux.HandleFunc("POST /api/session/password", requireAuth(s.handleChangePassword))
+	mux.HandleFunc("GET /api/administration/sessions", requireAuth(s.handleListSessions))
+	mux.HandleFunc("GET /api/administration/audit-log", requireAuth(s.handleListAuditLog))
 	mux.HandleFunc("GET /api/system/status", requireAuth(s.handleSystemStatus))
 	mux.HandleFunc("GET /api/dashboard/summary", requireAuth(s.handleDashboardSummary))
 	mux.HandleFunc("GET /api/protection/status", requireAuth(s.handleProtectionStatus))

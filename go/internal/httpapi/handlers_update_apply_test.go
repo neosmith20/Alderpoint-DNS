@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"alderpointdns/go-controlplane/internal/auth"
 	"alderpointdns/go-controlplane/internal/backup"
 	"alderpointdns/go-controlplane/internal/dbmigrate"
 )
@@ -39,6 +40,11 @@ func TestUpdateApplyTakesRealBackupBeforeCallingAgent(t *testing.T) {
 	// (proving the mandatory backup step ran and succeeded first), it
 	// must fail with a clean "unavailable", never a panic.
 	req := httptest.NewRequest("POST", "/api/updates/apply", nil)
+	// handleUpdateApply records a real audit entry once it reaches
+	// callAgent (2026-08-30: Administration parity), which needs a real
+	// session in context -- requireAuth always provides one in
+	// production; this test drives the handler directly.
+	req = req.WithContext(auth.WithSession(req.Context(), &auth.Session{AdminID: 0, Username: "test"}))
 	rec := httptest.NewRecorder()
 	s.handleUpdateApply(rec, req)
 	if rec.Code != 503 {

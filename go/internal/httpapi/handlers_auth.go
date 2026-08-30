@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"strconv"
 
 	"alderpointdns/go-controlplane/internal/auth"
 	"alderpointdns/go-controlplane/internal/bootstrap"
@@ -249,7 +250,46 @@ func (s *Server) handleRevokeOtherSessions(w http.ResponseWriter, r *http.Reques
 		Err(http.StatusInternalServerError, "internal_error", "revoke failed").WriteJSON(w)
 		return
 	}
+	s.AuditLog.Record(r.Context(), sess.AdminID, sess.Username, "sessions_revoked", true, clientIP(r), sessionsRevokedDetail(n))
 	WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "revoked_count": n})
+}
+
+func sessionsRevokedDetail(n int64) string {
+	if n == 1 {
+		return "1 other session revoked"
+	}
+	return strconv.FormatInt(n, 10) + " other session(s) revoked"
+}
+
+// handleListSessions backs the Administration page's Sessions table,
+// matching V1.1.1's own real administration_context() query
+// field-for-field (see internal/auth.Store.ListSessions's own doc
+// comment).
+func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
+	sess, _ := auth.FromContext(r.Context())
+	rows, err := s.Auth.ListSessions(r.Context(), sess.AdminID, sess.ID)
+	if err != nil {
+		Err(http.StatusInternalServerError, "internal_error", "failed to load sessions").WriteJSON(w)
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"sessions": rows})
+}
+
+// handleListAuditLog backs the Administration page's Recent
+// Administrative Activity table -- see internal/auditlog's own doc
+// comment for exactly which actions are recorded.
+func (s *Server) handleListAuditLog(w http.ResponseWriter, r *http.Request) {
+	sess, _ := auth.FromContext(r.Context())
+	if s.AuditLog == nil {
+		WriteJSON(w, http.StatusOK, map[string]any{"entries": []any{}})
+		return
+	}
+	entries, err := s.AuditLog.List(r.Context(), sess.AdminID, 25)
+	if err != nil {
+		Err(http.StatusInternalServerError, "internal_error", "failed to load audit log").WriteJSON(w)
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"entries": entries})
 }
 
 type changePasswordRequest struct {
@@ -270,13 +310,22 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	}
 	err := s.Auth.ChangePassword(r.Context(), sess.AdminID, req.CurrentPassword, req.NewPassword)
 	if err == auth.ErrInvalidCredentials {
+		s.AuditLog.Record(r.Context(), sess.AdminID, sess.Username, "password_change", false, clientIP(r), "current password incorrect")
 		ErrField(http.StatusUnauthorized, "invalid_credentials", "current password is incorrect", "current_password").WriteJSON(w)
 		return
 	} else if err != nil {
 		Err(http.StatusInternalServerError, "internal_error", "password change failed").WriteJSON(w)
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+	// V1.1.1 parity: changing the password signs out every other active
+	// session automatically (webapp.py's own real
+	// administration_change_password, read directly -- and disclosed on
+	// this exact page's own copy in both V1 and V2's AdministrationView).
+	// Best-effort: a failure here must never undo an already-successful
+	// password change.
+	revoked, _ := s.Auth.RevokeOtherSessions(r.Context(), sess.AdminID, sess.ID)
+	s.AuditLog.Record(r.Context(), sess.AdminID, sess.Username, "password_change", true, clientIP(r), sessionsRevokedDetail(revoked))
+	WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "revoked_count": revoked})
 }
 
 // handleSystemStatus reports the appliance-level facts the Administration

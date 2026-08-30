@@ -22,6 +22,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"alderpointdns/go-controlplane/internal/auditlog"
 	"alderpointdns/go-controlplane/internal/auth"
 	"alderpointdns/go-controlplane/internal/backup"
 	"alderpointdns/go-controlplane/internal/blocklists"
@@ -810,6 +811,7 @@ func runWeb(args []string) {
 		SessionTTL: cfg.SessionTTL(), LastSeen: cfg.LastSeenUpdateInterval(),
 		ApplianceName: cfg.Appliance.Name, ApplianceTimezone: cfg.Appliance.Timezone,
 		Analytics: analyticsReader, RawQueryLog: analyticsReader, AnalyticsSettings: analyticsSettingsHolder, HostAgent: hostAgentClient,
+		AuditLog: &auditlog.Service{DB: db},
 		DNSRuntime: dnsRuntimeOrch, TLSCertPath: cfg.Web.TLSCertPath, TLSKeyPath: cfg.Web.TLSKeyPath,
 		DNSPerfBindPlainAddr: *dnsPerfBindPlainAddr,
 		Secrets:              secretsSvc,
