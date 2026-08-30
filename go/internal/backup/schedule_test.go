@@ -148,7 +148,7 @@ func TestScheduledRetentionOnlyPrunesScheduledBackups(t *testing.T) {
 
 	// A real manual backup must survive scheduled retention regardless
 	// of how low retention_count is set.
-	if _, err := svc.Create(ctx, "manual"); err != nil {
+	if _, err := svc.Create(ctx, "manual", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := svc.SetScheduleSettings(ctx, true, 24, 1); err != nil {

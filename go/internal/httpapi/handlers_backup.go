@@ -22,6 +22,10 @@ func backupErrorStatus(err error) (int, string) {
 		return http.StatusBadRequest, "invalid_archive"
 	case errors.Is(err, backup.ErrSchemaMismatch):
 		return http.StatusConflict, "schema_mismatch"
+	case errors.Is(err, backup.ErrPassphraseRequired):
+		return http.StatusUnprocessableEntity, "passphrase_required"
+	case errors.Is(err, backup.ErrWrongPassphrase):
+		return http.StatusUnprocessableEntity, "wrong_passphrase"
 	default:
 		return http.StatusInternalServerError, "internal_error"
 	}
@@ -51,8 +55,23 @@ func (s *Server) handleListBackups(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, map[string]any{"backups": list})
 }
 
+// handleCreateBackup's request body is optional -- an empty/absent body
+// (or "passphrase": "") creates the historical unencrypted archive; a
+// non-empty passphrase wraps it in internal/backup's own encrypted
+// envelope. The passphrase itself is read once into a local variable and
+// handed straight to Backup.Create -- never logged, never echoed back in
+// the response, never persisted anywhere by this handler.
 func (s *Server) handleCreateBackup(w http.ResponseWriter, r *http.Request) {
-	info, err := s.Backup.Create(r.Context(), "manual")
+	var body struct {
+		Passphrase string `json:"passphrase"`
+	}
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil && err != io.EOF {
+			Err(http.StatusBadRequest, "validation_error", "invalid JSON body").WriteJSON(w)
+			return
+		}
+	}
+	info, err := s.Backup.Create(r.Context(), "manual", body.Passphrase)
 	if err != nil {
 		status, code := backupErrorStatus(err)
 		Err(status, code, err.Error()).WriteJSON(w)
@@ -93,7 +112,12 @@ func (s *Server) handleUploadBackup(w http.ResponseWriter, r *http.Request) {
 		Err(http.StatusBadRequest, "archive_too_large", "upload exceeds the size limit").WriteJSON(w)
 		return
 	}
-	info, err := s.Backup.Preview(r.Context(), filenameHeader)
+	// PreviewOrMinimal, not Preview: an uploaded file that's one of our
+	// own encrypted envelopes must be ACCEPTED here (its contents can't
+	// be validated further without a passphrase, which upload doesn't
+	// collect -- that happens later, at preview/restore time), not
+	// rejected for lacking one.
+	info, err := s.Backup.PreviewOrMinimal(r.Context(), filenameHeader)
 	if err != nil {
 		os.Remove(dest)
 		status, code := backupErrorStatus(err)
@@ -103,8 +127,24 @@ func (s *Server) handleUploadBackup(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusCreated, map[string]any{"status": "uploaded", "backup": info})
 }
 
+// handlePreviewBackup's request body is optional -- an empty/absent body
+// (or "passphrase": "") is fine for an unencrypted backup; an encrypted
+// one requires a real passphrase (backup.ErrPassphraseRequired, mapped
+// to 422 passphrase_required) or returns backup.ErrWrongPassphrase (422
+// wrong_passphrase) for an incorrect one -- two distinct, non-secret
+// error codes the frontend can word a prompt around, never a generic
+// failure that would hide which case happened.
 func (s *Server) handlePreviewBackup(w http.ResponseWriter, r *http.Request) {
-	info, err := s.Backup.Preview(r.Context(), r.PathValue("name"))
+	var body struct {
+		Passphrase string `json:"passphrase"`
+	}
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil && err != io.EOF {
+			Err(http.StatusBadRequest, "validation_error", "invalid JSON body").WriteJSON(w)
+			return
+		}
+	}
+	info, err := s.Backup.Preview(r.Context(), r.PathValue("name"), body.Passphrase)
 	if err != nil {
 		status, code := backupErrorStatus(err)
 		Err(status, code, err.Error()).WriteJSON(w)
@@ -117,10 +157,15 @@ func (s *Server) handlePreviewBackup(w http.ResponseWriter, r *http.Request) {
 // (or "categories": []) restores everything, matching the historical
 // all-or-nothing behavior; a non-empty "categories" list restores only
 // those categories (see internal/backup.Categories), leaving every other
-// table's live data untouched.
+// table's live data untouched. "passphrase" is required for one of
+// internal/backup's own encrypted archives (see handlePreviewBackup's
+// own comment on the two distinct 422 error codes); the mandatory
+// pre-restore safety backup Restore always takes first is unaffected --
+// it's never itself encrypted, by design (see Restore's own doc comment).
 func (s *Server) handleRestoreBackup(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Categories []string `json:"categories"`
+		Passphrase string   `json:"passphrase"`
 	}
 	if r.ContentLength != 0 {
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil && err != io.EOF {
@@ -128,7 +173,7 @@ func (s *Server) handleRestoreBackup(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	safety, err := s.Backup.Restore(r.Context(), r.PathValue("name"), body.Categories)
+	safety, err := s.Backup.Restore(r.Context(), r.PathValue("name"), body.Passphrase, body.Categories)
 	if err != nil {
 		status, code := backupErrorStatus(err)
 		WriteJSON(w, status, map[string]any{"error": code, "detail": err.Error(), "safety_backup": safety})

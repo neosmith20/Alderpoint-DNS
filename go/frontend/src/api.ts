@@ -84,6 +84,12 @@ export interface BackupInfo {
   product: string;
   reason?: string;
   table_counts?: Record<string, number>;
+  // encrypted (2026-08-29): true when this archive is passphrase-
+  // protected. When true and no passphrase has been given yet, every
+  // field above except filename/size_bytes/created_at is zero-valued --
+  // real detail requires calling previewBackup/restoreBackup with the
+  // correct passphrase.
+  encrypted: boolean;
 }
 
 export interface BackupCategory {
@@ -1195,7 +1201,11 @@ export const api = {
     ),
 
   listBackups: (signal?: AbortSignal) => req<{ backups: BackupInfo[] }>("/api/backup/appliance", undefined, signal),
-  createBackup: () => req<{ status: string; backup: BackupInfo }>("/api/backup/appliance", { method: "POST" }),
+  createBackup: (passphrase?: string) =>
+    req<{ status: string; backup: BackupInfo }>("/api/backup/appliance", {
+      method: "POST",
+      body: JSON.stringify({ passphrase: passphrase ?? "" }),
+    }),
   uploadBackup: async (file: File): Promise<{ status: string; backup: BackupInfo }> => {
     const res = await fetch(`/api/backup/appliance/upload?filename=${encodeURIComponent(file.name)}`, {
       method: "POST",
@@ -1209,12 +1219,20 @@ export const api = {
     }
     return res.json();
   },
-  previewBackup: (name: string) => req<BackupInfo>(`/api/backup/appliance/${encodeURIComponent(name)}/validate`, { method: "POST" }),
+  // previewBackup: passphrase is required (a 422 "passphrase_required"
+  // ApiError) when BackupInfo.encrypted came back true from a prior
+  // no-passphrase call; a 422 "wrong_passphrase" ApiError means one was
+  // given but didn't decrypt.
+  previewBackup: (name: string, passphrase?: string) =>
+    req<BackupInfo>(`/api/backup/appliance/${encodeURIComponent(name)}/validate`, {
+      method: "POST",
+      body: JSON.stringify({ passphrase: passphrase ?? "" }),
+    }),
   listBackupCategories: (signal?: AbortSignal) => req<{ categories: BackupCategory[] }>("/api/backup/categories", undefined, signal),
-  restoreBackup: (name: string, categories?: string[]) =>
+  restoreBackup: (name: string, categories?: string[], passphrase?: string) =>
     req<{ status: string; safety_backup: BackupInfo }>(`/api/backup/appliance/${encodeURIComponent(name)}/restore`, {
       method: "POST",
-      body: JSON.stringify({ categories: categories ?? [] }),
+      body: JSON.stringify({ categories: categories ?? [], passphrase: passphrase ?? "" }),
     }),
   deleteBackup: (name: string) => req<{ status: string }>(`/api/backup/appliance/${encodeURIComponent(name)}`, { method: "DELETE" }),
 

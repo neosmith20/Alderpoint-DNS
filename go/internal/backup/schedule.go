@@ -138,7 +138,7 @@ func (s *Service) runScheduledTickOnce(ctx context.Context) ScheduleTickResult {
 	if !dueForScheduledBackup(settings, time.Now().UTC()) {
 		return ScheduleTickResult{}
 	}
-	_, err = s.Create(ctx, "scheduled")
+	_, err = s.Create(ctx, "scheduled", "")
 	if err != nil {
 		s.recordScheduleRun(ctx, "failed", err.Error())
 		return ScheduleTickResult{Ran: true, Failed: true, Detail: err.Error()}

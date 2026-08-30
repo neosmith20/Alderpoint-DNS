@@ -151,6 +151,13 @@ type BackupInfo struct {
 	Manifest
 	Filename  string `json:"filename"`
 	SizeBytes int64  `json:"size_bytes"`
+	// Encrypted is computed at read time from the on-disk file's own
+	// envelope header (see crypto.go) -- never persisted inside the
+	// manifest itself. When true and the caller didn't supply a
+	// passphrase, every other Manifest field is zero-valued except
+	// CreatedAt (derived from the file's own mtime, not the real
+	// manifest, which is unreadable without the passphrase).
+	Encrypted bool `json:"encrypted"`
 }
 
 type Service struct {
@@ -196,7 +203,18 @@ func (s *Service) tableCounts(ctx context.Context) (map[string]int, error) {
 // raw copy of a live file) and wraps it in a tar archive with a
 // manifest.json. reason is "manual" for an operator-initiated backup or
 // "pre-restore-safety" for the automatic one Restore always takes first.
-func (s *Service) Create(ctx context.Context, reason string) (BackupInfo, error) {
+//
+// passphrase is optional ("" = unencrypted, the historical behavior and
+// the only option every automated caller -- the pre-restore safety
+// backup, the scheduler, import/migration snapshots -- ever uses,
+// matching V1.1.1's own pre_restore_backup_path(password=None): an
+// unattended backup with a passphrase only a human remembers would be
+// unrecoverable by the very automation that made it). A non-empty
+// passphrase wraps the finished archive in this package's own envelope
+// (see crypto.go) before it ever touches disk -- the passphrase itself
+// is a local variable on this call's own stack, never logged, never
+// persisted, never returned in BackupInfo.
+func (s *Service) Create(ctx context.Context, reason, passphrase string) (BackupInfo, error) {
 	if err := s.ensureDir(); err != nil {
 		return BackupInfo{}, err
 	}
@@ -256,6 +274,19 @@ func (s *Service) Create(ctx context.Context, reason string) (BackupInfo, error)
 		return BackupInfo{}, ErrTooLarge
 	}
 
+	onDisk := buf.Bytes()
+	encrypted := passphrase != ""
+	if encrypted {
+		enveloped, err := encryptArchive(onDisk, passphrase)
+		if err != nil {
+			return BackupInfo{}, fmt.Errorf("encrypting backup: %w", err)
+		}
+		onDisk = enveloped
+		if int64(len(onDisk)) > maxArchiveBytes {
+			return BackupInfo{}, ErrTooLarge
+		}
+	}
+
 	// A random suffix, not just the second-resolution timestamp: Restore
 	// always creates a safety backup immediately before its own restore
 	// work, so two backups landing in the same wall-clock second is a
@@ -266,10 +297,10 @@ func (s *Service) Create(ctx context.Context, reason string) (BackupInfo, error)
 	rand.Read(suffix)
 	filename := fmt.Sprintf("apdns-go-backup-%s-%s.tar", time.Now().UTC().Format("20060102T150405Z"), hex.EncodeToString(suffix))
 	fullPath := filepath.Join(s.Dir, filename)
-	if err := os.WriteFile(fullPath, buf.Bytes(), 0o640); err != nil {
+	if err := os.WriteFile(fullPath, onDisk, 0o640); err != nil {
 		return BackupInfo{}, err
 	}
-	info := BackupInfo{Manifest: manifest, Filename: filename, SizeBytes: int64(buf.Len())}
+	info := BackupInfo{Manifest: manifest, Filename: filename, SizeBytes: int64(len(onDisk)), Encrypted: encrypted}
 
 	if reason == "manual" {
 		// Retention is best-effort housekeeping, not part of the backup's
@@ -368,7 +399,7 @@ func (s *Service) List(ctx context.Context) ([]BackupInfo, error) {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".tar") {
 			continue
 		}
-		info, err := s.inspect(filepath.Join(s.Dir, e.Name()))
+		info, err := s.inspect(filepath.Join(s.Dir, e.Name()), "")
 		if err != nil {
 			continue // a corrupt file in the backups dir is skipped, not fatal to listing the rest
 		}
@@ -382,7 +413,14 @@ func (s *Service) List(ctx context.Context) ([]BackupInfo, error) {
 // control.db entry -- a real archive-bomb defense: the size/compression
 // check on the whole file happens before any per-entry read, and this
 // path never expands the db payload at all for a mere listing/preview.
-func (s *Service) inspect(path string) (BackupInfo, error) {
+// inspect reads a backup's manifest. passphrase="" is List's own bulk-
+// listing contract: an encrypted file degrades to minimal metadata
+// (Encrypted:true, CreatedAt from the file's own mtime, everything else
+// zero-valued) rather than erroring, so an encrypted backup still shows
+// up in the grid -- only Preview/Restore, given a real passphrase,
+// error with ErrPassphraseRequired/ErrWrongPassphrase when one is
+// actually needed.
+func (s *Service) inspect(path, passphrase string) (BackupInfo, error) {
 	stat, err := os.Stat(path)
 	if err != nil {
 		return BackupInfo{}, err
@@ -390,13 +428,22 @@ func (s *Service) inspect(path string) (BackupInfo, error) {
 	if stat.Size() > maxArchiveBytes {
 		return BackupInfo{}, ErrTooLarge
 	}
-	f, err := os.Open(path)
+
+	body, encrypted, err := readArchiveBody(path, passphrase)
 	if err != nil {
+		if errors.Is(err, ErrPassphraseRequired) {
+			// The bulk-listing contract: no passphrase was given (or
+			// available) -- report just enough for the grid to render an
+			// "Encrypted" row, not an error.
+			return BackupInfo{
+				Filename: filepath.Base(path), SizeBytes: stat.Size(), Encrypted: true,
+				Manifest: Manifest{CreatedAt: stat.ModTime().UTC().Format(time.RFC3339)},
+			}, nil
+		}
 		return BackupInfo{}, err
 	}
-	defer f.Close()
 
-	tr := tar.NewReader(f)
+	tr := tar.NewReader(bytes.NewReader(body))
 	var manifest Manifest
 	found := false
 	for {
@@ -425,15 +472,58 @@ func (s *Service) inspect(path string) (BackupInfo, error) {
 	if !found {
 		return BackupInfo{}, fmt.Errorf("%w: no manifest.json", ErrInvalidArchive)
 	}
-	return BackupInfo{Manifest: manifest, Filename: filepath.Base(path), SizeBytes: stat.Size()}, nil
+	return BackupInfo{Manifest: manifest, Filename: filepath.Base(path), SizeBytes: stat.Size(), Encrypted: encrypted}, nil
 }
 
-func (s *Service) Preview(ctx context.Context, filename string) (BackupInfo, error) {
+// Preview returns the real manifest detail for one backup -- the
+// per-category picker's own data source. passphrase is required
+// (ErrPassphraseRequired) when the target is one of this package's own
+// encrypted envelopes; a wrong one returns ErrWrongPassphrase, never a
+// generic parse error that would leak whether the issue was the
+// passphrase or a corrupt file.
+func (s *Service) Preview(ctx context.Context, filename, passphrase string) (BackupInfo, error) {
 	if strings.ContainsAny(filename, "/\\") {
 		return BackupInfo{}, fmt.Errorf("%w: invalid filename", ErrInvalidArchive)
 	}
 	path := filepath.Join(s.Dir, filename)
-	info, err := s.inspect(path)
+	if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+		return BackupInfo{}, ErrNotFound
+	}
+	info, err := s.inspect(path, passphrase)
+	if os.IsNotExist(err) {
+		return BackupInfo{}, ErrNotFound
+	}
+	if err != nil {
+		return BackupInfo{}, err
+	}
+	// Preview's own contract (unlike List's bulk one): a real passphrase
+	// is required up front for an encrypted backup, not a degraded
+	// minimal-metadata response -- inspect only degrades like that when
+	// it hit ErrPassphraseRequired internally, which info.Encrypted with
+	// an empty Manifest.Contents/TableCounts and the caller's own empty
+	// passphrase both confirm happened here.
+	if info.Encrypted && passphrase == "" {
+		return BackupInfo{}, ErrPassphraseRequired
+	}
+	return info, nil
+}
+
+// PreviewOrMinimal is Preview without the "a passphrase is required"
+// hard error -- an encrypted file degrades to the same minimal metadata
+// List's own bulk pass already uses (Encrypted:true, everything else
+// zero-valued except CreatedAt from the file's own mtime), rather than
+// failing. Used by upload validation: the point there is confirming
+// "this is a real archive of ours" before accepting the file, not
+// previewing its restorable contents (that still needs the real
+// passphrase, via Preview, once one is available) -- an encrypted
+// upload must succeed, not be rejected for lacking a passphrase nobody
+// was asked for at upload time.
+func (s *Service) PreviewOrMinimal(ctx context.Context, filename string) (BackupInfo, error) {
+	if strings.ContainsAny(filename, "/\\") {
+		return BackupInfo{}, fmt.Errorf("%w: invalid filename", ErrInvalidArchive)
+	}
+	path := filepath.Join(s.Dir, filename)
+	info, err := s.inspect(path, "")
 	if os.IsNotExist(err) {
 		return BackupInfo{}, ErrNotFound
 	}
@@ -464,11 +554,18 @@ func (s *Service) Delete(filename string) error {
 // historical all-or-nothing behavior); a non-empty list restores only
 // those categories' tables, leaving every other table's live data
 // untouched -- real selective restore, not a cosmetic checkbox. The
-// safety backup taken first is always a *full* backup regardless of
-// categories, since it exists to undo this restore, not to mirror its
-// scope.
-func (s *Service) Restore(ctx context.Context, filename string, categories []string) (safetyBackup BackupInfo, err error) {
-	safetyBackup, err = s.Create(ctx, "pre-restore-safety")
+// safety backup taken first is always a *full*, UNENCRYPTED backup
+// regardless of categories or whether the target archive itself is
+// encrypted -- it exists to undo this restore automatically if
+// something goes wrong, which a passphrase only a human remembers would
+// defeat (same reasoning as Create's own doc comment).
+//
+// passphrase decrypts filename if (and only if) it's one of this
+// package's own encrypted envelopes -- see ErrPassphraseRequired/
+// ErrWrongPassphrase in crypto.go for the two distinct failure modes a
+// caller (the HTTP handler) needs to tell apart.
+func (s *Service) Restore(ctx context.Context, filename, passphrase string, categories []string) (safetyBackup BackupInfo, err error) {
+	safetyBackup, err = s.Create(ctx, "pre-restore-safety", "")
 	if err != nil {
 		return BackupInfo{}, fmt.Errorf("aborting restore: mandatory safety backup failed: %w", err)
 	}
@@ -482,18 +579,13 @@ func (s *Service) Restore(ctx context.Context, filename string, categories []str
 		return safetyBackup, fmt.Errorf("%w: invalid filename", ErrInvalidArchive)
 	}
 	path := filepath.Join(s.Dir, filename)
-	stat, statErr := os.Stat(path)
-	if os.IsNotExist(statErr) {
+	if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
 		return safetyBackup, ErrNotFound
-	}
-	if statErr != nil {
+	} else if statErr != nil {
 		return safetyBackup, statErr
 	}
-	if stat.Size() > maxArchiveBytes {
-		return safetyBackup, ErrTooLarge
-	}
 
-	dbBytes, manifest, err := extractControlDB(path)
+	dbBytes, manifest, err := extractControlDB(path, passphrase)
 	if err != nil {
 		return safetyBackup, err
 	}
@@ -524,13 +616,12 @@ func (s *Service) Restore(ctx context.Context, filename string, categories []str
 	return safetyBackup, nil
 }
 
-func extractControlDB(path string) ([]byte, Manifest, error) {
-	f, err := os.Open(path)
+func extractControlDB(path, passphrase string) ([]byte, Manifest, error) {
+	body, _, err := readArchiveBody(path, passphrase)
 	if err != nil {
 		return nil, Manifest{}, err
 	}
-	defer f.Close()
-	tr := tar.NewReader(f)
+	tr := tar.NewReader(bytes.NewReader(body))
 	var manifest Manifest
 	var dbBytes []byte
 	haveManifest, haveDB := false, false

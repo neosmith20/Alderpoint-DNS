@@ -844,6 +844,7 @@ func runWeb(args []string) {
 
 	schedulerCtx, cancelScheduler := context.WithCancel(context.Background())
 	go blSvc.RunScheduler(schedulerCtx, time.Duration(cfg.Blocklists.SchedulerTickSeconds)*time.Second)
+	go runMemoryWatchdog(schedulerCtx, logger, 2*time.Minute)
 
 	// Real dispatch call site #3: the tls_cert_expiring health-check
 	// category, closing one of the five disclosed-but-unwired

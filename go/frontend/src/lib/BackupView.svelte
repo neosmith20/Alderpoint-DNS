@@ -23,6 +23,16 @@
 
   let createBusy = $state(false);
   let createError = $state("");
+  // Passphrase protection (2026-08-29): opt-in, defaulting to unchecked
+  // -- matching V1.1.1's own optional password protection default and
+  // this format's historical unencrypted-only behavior, so an owner who
+  // never notices the checkbox gets the same result as before. Left
+  // unchecked, a real warning renders (see the markup below) rather than
+  // silently exporting admin password hashes in the clear with no
+  // indication anything is unprotected.
+  let createEncrypt = $state(false);
+  let createPassphrase = $state("");
+  let createPassphraseConfirm = $state("");
 
   let uploadBusy = $state(false);
   let uploadError = $state("");
@@ -39,6 +49,16 @@
   let restoreBusy = $state(false);
   let restoreError = $state("");
   let restoreResult = $state("");
+  // Passphrase-gated preview (2026-08-29): for an encrypted backup, the
+  // real manifest (table counts, real category contents) is unreadable
+  // until the correct passphrase is given -- restoreUnlocked holds the
+  // real BackupInfo once that's happened (or immediately, for an
+  // already-unencrypted row); restorePassphrase/restorePassphraseError
+  // drive the "enter passphrase to preview" sub-step gating it.
+  let restorePassphrase = $state("");
+  let restorePassphraseError = $state("");
+  let restorePassphraseBusy = $state(false);
+  let restoreUnlocked = $state<BackupInfo | null>(null);
 
   // Secret Backups: a separate, smaller archive of just the sealed
   // provider/notification secrets (see internal/secretbackup) -- kept
@@ -192,9 +212,22 @@
 
   async function createBackup() {
     createError = "";
+    if (createEncrypt) {
+      if (createPassphrase.length < 8) {
+        createError = "Passphrase must be at least 8 characters.";
+        return;
+      }
+      if (createPassphrase !== createPassphraseConfirm) {
+        createError = "Passphrases do not match.";
+        return;
+      }
+    }
     createBusy = true;
     try {
-      await api.createBackup();
+      await api.createBackup(createEncrypt ? createPassphrase : undefined);
+      createPassphrase = "";
+      createPassphraseConfirm = "";
+      toast.success(createEncrypt ? "Encrypted backup created." : "Backup created.");
       await refresh();
     } catch (err) {
       createError = err instanceof ApiError ? err.message : String(err);
@@ -225,6 +258,26 @@
     restoreError = "";
     restoreResult = "";
     restoreCategoryOverrides = null; // reset to "full restore" every time the dialog opens
+    restorePassphrase = "";
+    restorePassphraseError = "";
+    // An already-unencrypted row already carries its own real manifest
+    // (List returns full detail for those) -- only an encrypted row
+    // needs the separate "unlock" sub-step below before the real
+    // category picker has anything real to show.
+    restoreUnlocked = b.encrypted ? null : b;
+  }
+
+  async function unlockRestore(b: BackupInfo) {
+    restorePassphraseError = "";
+    restorePassphraseBusy = true;
+    try {
+      restoreUnlocked = await api.previewBackup(b.filename, restorePassphrase);
+    } catch (err) {
+      restorePassphraseError =
+        err instanceof ApiError && err.code === "wrong_passphrase" ? "Wrong passphrase." : err instanceof ApiError ? err.message : String(err);
+    } finally {
+      restorePassphraseBusy = false;
+    }
   }
 
   function categoryChecked(name: string): boolean {
@@ -265,10 +318,11 @@
       // same way. Otherwise send exactly the categories still checked.
       const isFullRestore = restoreCategoryOverrides === null || restoreCategoryOverrides.size === categories.length;
       const chosen = isFullRestore ? [] : [...restoreCategoryOverrides!];
-      const resp = await api.restoreBackup(b.filename, chosen);
+      const resp = await api.restoreBackup(b.filename, chosen, b.encrypted ? restorePassphrase : undefined);
       const scope = isFullRestore ? "Restored." : `Restored (${chosen.join(", ")} only).`;
       restoreResult = `${scope} A safety backup of the previous state was saved as "${resp.safety_backup.filename}".`;
       restoreTarget = null;
+      toast.success("Restore complete.");
       await refresh();
     } catch (err) {
       restoreError = err instanceof ApiError ? err.message : String(err);
@@ -321,6 +375,35 @@
   <div class="two-col">
     <div class="card">
       <h3>Create a backup</h3>
+      <label class="schedule-row">
+        <input type="checkbox" class="encrypt-toggle" bind:checked={createEncrypt} />
+        Protect this backup with a passphrase
+      </label>
+      {#if createEncrypt}
+        <input
+          type="password"
+          bind:value={createPassphrase}
+          placeholder="Passphrase (min. 8 characters)"
+          aria-label="Backup passphrase"
+          autocomplete="new-password"
+        />
+        <input
+          type="password"
+          bind:value={createPassphraseConfirm}
+          placeholder="Confirm passphrase"
+          aria-label="Confirm backup passphrase"
+          autocomplete="new-password"
+        />
+        <p class="hint">
+          Keep this passphrase somewhere safe -- it is never stored anywhere, and a backup cannot be
+          previewed or restored without it, not even by an administrator.
+        </p>
+      {:else}
+        <p class="warning" role="alert">
+          ⚠ This backup will NOT be encrypted. It will include admin account password hashes and every
+          managed client/network's identifying data in the clear.
+        </p>
+      {/if}
       <button onclick={createBackup} disabled={createBusy}>{createBusy ? "Creating…" : "Create backup now"}</button>
       {#if createError}<p class="error" role="alert">{createError}</p>{/if}
     </div>
@@ -383,6 +466,7 @@
     {#snippet cell(b, colKey)}
       {#if colKey === "filename"}
         {b.filename}
+        {#if b.encrypted}<span class="lock-badge" title="Passphrase-protected">🔒 Encrypted</span>{/if}
       {:else if colKey === "created_at"}
         {timestampPref.format(b.created_at)}
       {:else if colKey === "reason"}
@@ -396,41 +480,59 @@
         </div>
         {#if restoreTarget === b.filename}
           <div class="restore-confirm">
-            <p>
-              This replaces current data (except your active session) with this backup's contents,
-              for the categories selected below. A safety backup of the current state is taken
-              automatically first.
-            </p>
-            {#if categories.length > 0}
-              <fieldset class="category-picker">
-                <legend>Restore these categories:</legend>
-                {#each categories as cat (cat.name)}
-                  <label>
-                    <input
-                      type="checkbox"
-                      checked={categoryChecked(cat.name)}
-                      onchange={() => toggleRestoreCategory(cat.name)}
-                    />
-                    {cat.name.replaceAll("_", " ")}
-                    {#if b.table_counts}<span class="count">({categoryCount(b, cat)} rows)</span>{/if}
-                  </label>
-                {/each}
-              </fieldset>
+            {#if b.encrypted && !restoreUnlocked}
+              <p>This backup is passphrase-protected. Enter the passphrase to preview its real contents before restoring.</p>
+              <input
+                type="password"
+                bind:value={restorePassphrase}
+                placeholder="Backup passphrase"
+                aria-label="Enter the backup's passphrase"
+                autocomplete="current-password"
+              />
+              <div class="actions">
+                <button disabled={!restorePassphrase || restorePassphraseBusy} onclick={() => unlockRestore(b)}>
+                  {restorePassphraseBusy ? "Checking…" : "Unlock"}
+                </button>
+                <button onclick={() => (restoreTarget = null)}>Cancel</button>
+              </div>
+              {#if restorePassphraseError}<p class="error" role="alert">{restorePassphraseError}</p>{/if}
+            {:else}
+              <p>
+                This replaces current data (except your active session) with this backup's contents,
+                for the categories selected below. A safety backup of the current state is taken
+                automatically first.
+              </p>
+              {#if categories.length > 0}
+                <fieldset class="category-picker">
+                  <legend>Restore these categories:</legend>
+                  {#each categories as cat (cat.name)}
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={categoryChecked(cat.name)}
+                        onchange={() => toggleRestoreCategory(cat.name)}
+                      />
+                      {cat.name.replaceAll("_", " ")}
+                      {#if restoreUnlocked?.table_counts}<span class="count">({categoryCount(restoreUnlocked, cat)} rows)</span>{/if}
+                    </label>
+                  {/each}
+                </fieldset>
+              {/if}
+              <p>Type the filename to confirm:</p>
+              <code>{b.filename}</code>
+              <input class="filename-confirm" bind:value={restoreConfirmText} aria-label="Type the filename to confirm restore" />
+              <div class="actions">
+                <button
+                  class="danger"
+                  disabled={restoreConfirmText !== b.filename || restoreBlockedByCategories() || restoreBusy}
+                  onclick={() => confirmRestore(b)}
+                >
+                  {restoreBusy ? "Restoring…" : "Confirm restore"}
+                </button>
+                <button onclick={() => (restoreTarget = null)}>Cancel</button>
+              </div>
+              {#if restoreError}<p class="error" role="alert">{restoreError}</p>{/if}
             {/if}
-            <p>Type the filename to confirm:</p>
-            <code>{b.filename}</code>
-            <input class="filename-confirm" bind:value={restoreConfirmText} aria-label="Type the filename to confirm restore" />
-            <div class="actions">
-              <button
-                class="danger"
-                disabled={restoreConfirmText !== b.filename || restoreBlockedByCategories() || restoreBusy}
-                onclick={() => confirmRestore(b)}
-              >
-                {restoreBusy ? "Restoring…" : "Confirm restore"}
-              </button>
-              <button onclick={() => (restoreTarget = null)}>Cancel</button>
-            </div>
-            {#if restoreError}<p class="error" role="alert">{restoreError}</p>{/if}
           </div>
         {/if}
       {/if}
@@ -509,7 +611,11 @@
   .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); display: flex; flex-direction: column; gap: 0.6rem; flex: 1; min-width: 14rem; }
   .card h3 { margin: 0; }
   .actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+  .error { color: var(--badge-danger-fg); }
   .success { color: #16a34a; }
+  .warning { color: var(--badge-danger-fg); font-size: 0.85rem; margin: 0; }
+  .hint { font-size: 0.8rem; opacity: 0.75; margin: 0; }
+  .lock-badge { margin-left: 0.5rem; font-size: 0.78rem; opacity: 0.8; }
   .restore-confirm { margin-top: 0.6rem; padding: 0.75rem; border-radius: 6px; background: var(--attention-bg); display: flex; flex-direction: column; gap: 0.5rem; max-width: 28rem; }
   .restore-confirm p { margin: 0; font-size: 0.85rem; }
   .category-picker { border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem 0.75rem; display: flex; flex-direction: column; gap: 0.3rem; }

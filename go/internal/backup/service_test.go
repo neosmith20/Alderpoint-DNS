@@ -41,7 +41,7 @@ func TestCreateProducesAListableBackup(t *testing.T) {
 	ctx := context.Background()
 	seedOneLocalDNSRecord(t, s.DB, "host1.lan")
 
-	info, err := s.Create(ctx, "manual")
+	info, err := s.Create(ctx, "manual", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -62,11 +62,11 @@ func TestPreviewReadsManifestWithoutModifyingLiveData(t *testing.T) {
 	s := newTestService(t)
 	ctx := context.Background()
 	seedOneLocalDNSRecord(t, s.DB, "host1.lan")
-	info, err := s.Create(ctx, "manual")
+	info, err := s.Create(ctx, "manual", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	preview, err := s.Preview(ctx, info.Filename)
+	preview, err := s.Preview(ctx, info.Filename, "")
 	if err != nil {
 		t.Fatalf("Preview: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestPreviewReadsManifestWithoutModifyingLiveData(t *testing.T) {
 
 func TestPreviewUnknownFileReturnsNotFound(t *testing.T) {
 	s := newTestService(t)
-	if _, err := s.Preview(context.Background(), "does-not-exist.tar"); err != ErrNotFound {
+	if _, err := s.Preview(context.Background(), "does-not-exist.tar", ""); err != ErrNotFound {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }
@@ -92,7 +92,7 @@ func TestRestoreRoundTripsData(t *testing.T) {
 	s := newTestService(t)
 	ctx := context.Background()
 	seedOneLocalDNSRecord(t, s.DB, "original.lan")
-	backupOfOriginal, err := s.Create(ctx, "manual")
+	backupOfOriginal, err := s.Create(ctx, "manual", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestRestoreRoundTripsData(t *testing.T) {
 	}
 	seedOneLocalDNSRecord(t, s.DB, "changed.lan")
 
-	safety, err := s.Restore(ctx, backupOfOriginal.Filename, nil)
+	safety, err := s.Restore(ctx, backupOfOriginal.Filename, "", nil)
 	if err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestCreateManifestReportsRealTableCounts(t *testing.T) {
 	seedOneLocalDNSRecord(t, s.DB, "host1.lan")
 	seedOneLocalDNSRecord(t, s.DB, "host2.lan")
 
-	info, err := s.Create(ctx, "manual")
+	info, err := s.Create(ctx, "manual", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestSelectiveRestoreOnlyTouchesChosenCategory(t *testing.T) {
 	ctx := context.Background()
 	seedOneLocalDNSRecord(t, s.DB, "original.lan")
 	seedOneCustomRule(t, s.DB, "original.example.com")
-	backupOfOriginal, err := s.Create(ctx, "manual")
+	backupOfOriginal, err := s.Create(ctx, "manual", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +200,7 @@ func TestSelectiveRestoreOnlyTouchesChosenCategory(t *testing.T) {
 
 	// Restore only local_dns -- custom_rules must be left exactly as it
 	// is now ("changed.example.com"), not rolled back to the backup.
-	if _, err := s.Restore(ctx, backupOfOriginal.Filename, []string{"local_dns"}); err != nil {
+	if _, err := s.Restore(ctx, backupOfOriginal.Filename, "", []string{"local_dns"}); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
 
@@ -225,11 +225,11 @@ func TestRestoreRejectsUnknownCategory(t *testing.T) {
 	s := newTestService(t)
 	ctx := context.Background()
 	seedOneLocalDNSRecord(t, s.DB, "host1.lan")
-	backupOfOriginal, err := s.Create(ctx, "manual")
+	backupOfOriginal, err := s.Create(ctx, "manual", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Restore(ctx, backupOfOriginal.Filename, []string{"not_a_real_category"}); err == nil {
+	if _, err := s.Restore(ctx, backupOfOriginal.Filename, "", []string{"not_a_real_category"}); err == nil {
 		t.Fatal("expected an error for an unknown category")
 	}
 }
@@ -242,14 +242,14 @@ func TestRetentionMaxCountPrunesOldestManualBackupsOnly(t *testing.T) {
 
 	var last BackupInfo
 	for i := 0; i < 4; i++ {
-		info, err := s.Create(ctx, "manual")
+		info, err := s.Create(ctx, "manual", "")
 		if err != nil {
 			t.Fatal(err)
 		}
 		last = info
 	}
 	// A safety backup must never be pruned by manual-backup retention.
-	safety, err := s.Restore(ctx, last.Filename, nil)
+	safety, err := s.Restore(ctx, last.Filename, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +277,7 @@ func TestRetentionMaxCountPrunesOldestManualBackupsOnly(t *testing.T) {
 
 func TestRestoreOfMissingArchiveReturnsNotFound(t *testing.T) {
 	s := newTestService(t)
-	if _, err := s.Restore(context.Background(), "no-such-file.tar", nil); err != ErrNotFound {
+	if _, err := s.Restore(context.Background(), "no-such-file.tar", "", nil); err != ErrNotFound {
 		t.Fatalf("expected ErrNotFound for a missing archive, got %v", err)
 	}
 }
@@ -296,7 +296,7 @@ func TestRestoreOfCorruptArchiveLeavesLiveDataUntouched(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := s.Restore(ctx, "corrupt.tar", nil)
+	_, err := s.Restore(ctx, "corrupt.tar", "", nil)
 	if err == nil {
 		t.Fatal("expected an error restoring a corrupt archive")
 	}

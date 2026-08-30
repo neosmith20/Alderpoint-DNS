@@ -173,7 +173,7 @@ func (im *Importer) Run(ctx context.Context, dryRun bool) (Report, error) {
 		if im.Backup == nil {
 			return report, fmt.Errorf("no backup service configured -- refusing to run a real (non-dry-run) migration with no snapshot/rollback path")
 		}
-		snap, err := im.Backup.Create(ctx, "pre-migration-snapshot")
+		snap, err := im.Backup.Create(ctx, "pre-migration-snapshot", "")
 		if err != nil {
 			return report, fmt.Errorf("pre-migration snapshot failed, nothing imported: %w", err)
 		}
@@ -209,7 +209,7 @@ func (im *Importer) Rollback(ctx context.Context, snapshotFilename string) (back
 	if im.Backup == nil {
 		return backup.BackupInfo{}, fmt.Errorf("no backup service configured")
 	}
-	return im.Backup.Restore(ctx, snapshotFilename, nil)
+	return im.Backup.Restore(ctx, snapshotFilename, "", nil)
 }
 
 // --- local DNS ---------------------------------------------------------

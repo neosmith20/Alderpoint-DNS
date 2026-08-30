@@ -1212,6 +1212,91 @@ async function main() {
     const rowsAfterRestore = await page.$$eval(`${applianceBackupsGrid} tbody tr:not(.empty-row)`, (rows) => rows.length);
     check("the safety backup taken during restore appears in the list too", rowsAfterRestore === backupRows + 1, `before-restore=${backupRows} after-restore=${rowsAfterRestore}`);
 
+    // --- Encrypted backup: create -> preview with passphrase -> selective restore/apply
+    // (2026-08-29, closing a real owner-facing gap versus V1.1.1's own optional
+    // password-protected .tar.gz.enc -- see PARITY_MATRIX.md's Backup & Restore row) ---
+    const TEST_BACKUP_PASSPHRASE = "chromium test passphrase 2026";
+    const rowsBeforeEncryptedCreate = await page.$$eval(`${applianceBackupsGrid} tbody tr:not(.empty-row)`, (rows) => rows.length);
+    await page.click(".encrypt-toggle"); // "Protect this backup with a passphrase"
+    const passwordInputs = await page.$$(".card input[type=password]");
+    check("encryption checkbox reveals two passphrase inputs", passwordInputs.length === 2, `count=${passwordInputs.length}`);
+    await passwordInputs[0].type(TEST_BACKUP_PASSPHRASE);
+    await passwordInputs[1].type(TEST_BACKUP_PASSPHRASE);
+    await Promise.all([
+      page.waitForFunction(
+        (sel, before) => document.querySelectorAll(`${sel} tbody tr:not(.empty-row)`).length > before,
+        { timeout: 5000 }, applianceBackupsGrid, rowsBeforeEncryptedCreate,
+      ),
+      page.click(".card button"),
+    ]);
+    const encryptedRowHandle = await page.evaluateHandle((sel) => {
+      const rows = [...document.querySelectorAll(`${sel} tbody tr`)];
+      return rows.find((r) => r.textContent.includes("Encrypted"));
+    }, applianceBackupsGrid);
+    check("creating an encrypted backup adds a real row marked Encrypted", (await encryptedRowHandle.jsonValue()) !== null);
+
+    await (await encryptedRowHandle.$("button")).click(); // that row's own "Restore…"
+    await page.waitForSelector(".restore-confirm", { timeout: 2000 });
+    check(
+      "restore dialog asks for a passphrase before showing the category picker, for an encrypted backup",
+      (await page.$(".restore-confirm input[type=password]")) !== null,
+    );
+    check(
+      "the category picker is NOT shown yet, before the passphrase is unlocked",
+      (await page.$(".category-picker")) === null,
+    );
+    await page.type(".restore-confirm input[type=password]", "the wrong passphrase");
+    await Promise.all([
+      page.waitForFunction(() => document.querySelector(".restore-confirm .error"), { timeout: 3000 }),
+      page.click(".restore-confirm .actions button"), // "Unlock"
+    ]);
+    const wrongPassphraseErr = await page.$eval(".restore-confirm .error", (el) => el.textContent);
+    check("a wrong passphrase shows a real error and does not unlock the preview", /wrong passphrase/i.test(wrongPassphraseErr), wrongPassphraseErr);
+    check("the category picker is still not shown after a wrong passphrase", (await page.$(".category-picker")) === null);
+
+    await page.$eval(".restore-confirm input[type=password]", (el) => (el.value = ""));
+    await page.type(".restore-confirm input[type=password]", TEST_BACKUP_PASSPHRASE);
+    await Promise.all([
+      page.waitForSelector(".category-picker", { timeout: 3000 }),
+      page.click(".restore-confirm .actions button"), // "Unlock"
+    ]);
+    check("the correct passphrase unlocks the real category picker (a genuine preview, not a stub)", (await page.$(".category-picker")) !== null);
+    const encFilenameText = await page.$eval(".restore-confirm code", (el) => el.textContent.trim());
+    await page.type(".restore-confirm input.filename-confirm", encFilenameText);
+    // Selective: uncheck all but one category, proving the passphrase-gated
+    // preview's own category picker is real and independently interactive,
+    // not just a copy of the plain-backup dialog above.
+    const encCategoryCheckboxes = await page.$$(".category-picker input[type=checkbox]");
+    for (const cb of encCategoryCheckboxes.slice(1)) await cb.click();
+    // A fresh baseline captured right before this specific restore click
+    // -- not the earlier rowsAfterRestore snapshot, which the encrypted
+    // create above already moved past (a real race this test itself
+    // caught: waiting on a stale baseline that's already satisfied
+    // resolves immediately instead of waiting for the actual new row).
+    const rowsBeforeEncryptedRestore = await page.$$eval(`${applianceBackupsGrid} tbody tr:not(.empty-row)`, (rows) => rows.length);
+    await Promise.all([
+      page.waitForFunction(
+        (sel, before) => document.querySelectorAll(`${sel} tbody tr:not(.empty-row)`).length > before,
+        { timeout: 5000 }, applianceBackupsGrid, rowsBeforeEncryptedRestore,
+      ),
+      page.click(".restore-confirm .danger"),
+    ]);
+    const rowsAfterEncryptedRestore = await page.$$eval(`${applianceBackupsGrid} tbody tr:not(.empty-row)`, (rows) => rows.length);
+    check(
+      "restoring from an encrypted backup with the correct passphrase actually applies, and its own safety backup appears",
+      rowsAfterEncryptedRestore === rowsBeforeEncryptedRestore + 1, // just the new safety backup -- the encrypted backup itself was already counted
+      `before=${rowsBeforeEncryptedRestore} after=${rowsAfterEncryptedRestore}`,
+    );
+    // The mandatory pre-restore safety backup this restore just took must
+    // itself never be encrypted (see internal/backup.Restore's own doc
+    // comment) -- real, visible proof, not just a Go-layer unit test.
+    const safetyRowIsUnencrypted = await page.evaluate((sel) => {
+      const rows = [...document.querySelectorAll(`${sel} tbody tr`)];
+      const safetyRow = rows.find((r) => r.textContent.includes("Safety (auto)"));
+      return safetyRow ? !safetyRow.textContent.includes("Encrypted") : false;
+    }, applianceBackupsGrid);
+    check("the pre-restore safety backup taken during an encrypted restore is itself unencrypted", safetyRowIsUnencrypted);
+
     // --- Systematic viewport sweep: every implemented route x desktop/tablet/mobile x light/dark ---
     const VIEWPORTS = [
       { name: "desktop-1440", width: 1440, height: 900 },

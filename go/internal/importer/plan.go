@@ -399,7 +399,7 @@ func (s *Service) ApplyJob(ctx context.Context, id int64, skipIndexes []int) (*J
 
 	var snapshotFilename string
 	if s.Backup != nil {
-		snap, err := s.Backup.Create(ctx, fmt.Sprintf("pre-import-job-%d", id))
+		snap, err := s.Backup.Create(ctx, fmt.Sprintf("pre-import-job-%d", id), "")
 		if err != nil {
 			return nil, fmt.Errorf("pre-apply snapshot failed, nothing imported: %w", err)
 		}
@@ -452,5 +452,5 @@ func (s *Service) Rollback(ctx context.Context, id int64) (backup.BackupInfo, er
 	if s.Backup == nil {
 		return backup.BackupInfo{}, fmt.Errorf("no backup service configured")
 	}
-	return s.Backup.Restore(ctx, *job.SnapshotFilename, nil)
+	return s.Backup.Restore(ctx, *job.SnapshotFilename, "", nil)
 }
