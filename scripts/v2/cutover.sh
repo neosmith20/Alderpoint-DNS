@@ -571,9 +571,32 @@ cmd_execute() {
     # compounding bug: this container's own /etc/alderpointdns-go
     # directory was never mounted at all, only its certs/ subdirectory
     # -- see AGENT_PROGRESS.md's incident writeup for both).
+    #
+    # This same host-vs-container path problem also applies to
+    # blocklists.staging_dir/runtime_dir and local_dns.staging_dir/
+    # runtime_dir (both real host-absolute paths in the staged config,
+    # correct for the host-side CLI tools but not for the container,
+    # which mounts $GO_LIVE_STATE at /var/lib/alderpointdns-go, not at
+    # its own host-absolute path) and to web.listen_port carrying the
+    # explicitly-banned :18443 (harmless only because -addr always
+    # overrides it) -- a real gap in this exact sed transformation that
+    # was never caught here since this script's own one-time run never
+    # exercised the container's own scheduler-triggered blocklist
+    # refresh; found and fixed live during a later durability pass once
+    # that scheduler tick finally fired for real and every subscription
+    # failed with "mkdir .../apdns-go-live-staging: permission denied",
+    # silently emptying live blocklist enforcement. This script is not
+    # safe to re-run (see its own top-of-file doc comment), so this fix
+    # is for historical/documentation correctness -- the real, ongoing,
+    # re-runnable fix lives in scripts/v2/redeploy-go-live.sh, which
+    # actually regenerates this file the same, corrected way on every
+    # redeploy.
     local container_config="$GO_LIVE_STATE/container-appliance.yaml"
     sed -e 's#tls_cert_path: .*#tls_cert_path: "/etc/alderpointdns-go/certs/server.crt"#' \
         -e 's#tls_key_path: .*#tls_key_path: "/etc/alderpointdns-go/certs/server.key"#' \
+        -e "s#$GO_LIVE_STATE/blocklists/#/var/lib/alderpointdns-go/blocklists/#g" \
+        -e "s#$GO_LIVE_STATE/local-dns/#/var/lib/alderpointdns-go/local-dns/#g" \
+        -e 's#listen_port: 18443#listen_port: 8443#' \
         "$GO_LIVE_STATE/config/appliance.yaml" > "$container_config" \
         || { phase_set "failed_prepare"; fail "generating the container-specific appliance.yaml failed"; }
     grep -q "/etc/alderpointdns-go/certs/server.crt" "$container_config" \

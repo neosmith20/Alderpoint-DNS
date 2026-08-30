@@ -142,14 +142,45 @@ else
     log "--skip-build: reusing already-staged binaries/frontend at $GO_LIVE_RELEASE"
 fi
 
-# The same container-specific config this deployment has always used --
-# regenerated here (not assumed already correct) so a redeploy is
-# self-contained, matching the exact tls_cert_path/tls_key_path the
-# container-internal web process needs (distinct from the HOST-side
-# path dnsdist itself needs -- see -dns-runtime-tls-cert-path below).
+# The container-specific config this deployment uses -- ACTUALLY
+# regenerated here (previously only checked for existence + one grep,
+# despite a comment on this exact line already claiming it was
+# "regenerated" -- a real gap found live, 2026-08-29: cutover.sh's own
+# one-time generation of this file only ever rewrote tls_cert_path/
+# tls_key_path from $GO_LIVE_STATE/config/appliance.yaml -- the real,
+# host-oriented source config the host-side CLI tools use, where
+# HOST-absolute paths are correct -- and never rewrote
+# blocklists.staging_dir/runtime_dir or local_dns.staging_dir/
+# runtime_dir the same way, even though those are real filesystem
+# paths the CONTAINER-internal web process also reads, and the
+# container mounts $GO_LIVE_STATE at /var/lib/alderpointdns-go, not at
+# its own host-absolute path. The container's own scheduler-triggered
+# blocklist refresh failed every single subscription with "mkdir
+# .../apdns-go-live-staging: permission denied" as a direct result (a
+# path that doesn't exist inside the container's own filesystem
+# namespace) -- and because dnscompile only compiles a subscription
+# whose most recent refresh succeeded, ALL 20 subscriptions failing at
+# once silently emptied the live blocklist enforcement entirely,
+# despite their real .rpz files still sitting untouched on disk. Also
+# corrected here: web.listen_port, which the source config carries as
+# the historical, explicitly-banned :18443 (inert only because -addr
+# always overrides it on every real launch of this binary -- fixed
+# anyway rather than left as a live standing violation of that rule).
 container_config="$GO_LIVE_STATE/container-appliance.yaml"
-[ -f "$container_config" ] || fail "$container_config does not exist -- this script only redeploys an already-cutover appliance, it does not perform first-time setup"
+source_config="$GO_LIVE_STATE/config/appliance.yaml"
+[ -f "$source_config" ] || fail "$source_config does not exist -- this script only redeploys an already-cutover appliance, it does not perform first-time setup"
+sed -e 's#tls_cert_path: .*#tls_cert_path: "/etc/alderpointdns-go/certs/server.crt"#' \
+    -e 's#tls_key_path: .*#tls_key_path: "/etc/alderpointdns-go/certs/server.key"#' \
+    -e "s#$GO_LIVE_STATE/blocklists/#/var/lib/alderpointdns-go/blocklists/#g" \
+    -e "s#$GO_LIVE_STATE/local-dns/#/var/lib/alderpointdns-go/local-dns/#g" \
+    -e 's#listen_port: 18443#listen_port: 8443#' \
+    "$source_config" > "$container_config" \
+    || fail "generating the container-specific appliance.yaml failed"
 grep -q "/etc/alderpointdns-go/certs/server.crt" "$container_config" || fail "$container_config does not contain the expected container cert path"
+grep -q "/var/lib/alderpointdns-go/blocklists/" "$container_config" || fail "$container_config does not contain the expected container-mounted blocklists path"
+grep -q "/var/lib/alderpointdns-go/local-dns/" "$container_config" || fail "$container_config does not contain the expected container-mounted local-dns path"
+if grep -q "18443" "$container_config"; then fail "$container_config still contains the banned :18443 value"; fi
+log "regenerated container-specific config: $container_config"
 
 log "ensuring $GO_LIVE_BASE_IMAGE (debian:trixie-slim + ca-certificates) exists"
 if ! podman image exists "$GO_LIVE_BASE_IMAGE"; then
