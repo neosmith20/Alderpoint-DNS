@@ -237,45 +237,65 @@
 </div>
 
 <style>
-  /* Alderpoint's real navy/teal theme, ported from the V1.1.1 reference
-     (web/static/app.css's :root token block, read directly) rather than
-     invented -- V1.1.1 only ever shipped this one dark, navy/teal look
-     (no separate light theme), so both the light-mode and dark-mode
-     blocks below resolve to the same real palette; --card-bg/--nav-
-     hover-bg/--accent-fg/--badge-*-bg/--attention-bg are this app's own
-     pre-existing token names, mapped onto the closest real V1.1.1
-     color rather than dropped, so every view that already reads them
-     keeps working unchanged. See frontend/src/lib/ui/index.ts's shared
-     components for the panel/page-header/segment-control/status-badge
-     classes that consume these same tokens. */
+  /* Alderpoint DNS product theme: a navy/teal identity carried through
+     both a real dark mode and a real light mode. V1.1.1 only ever
+     shipped the dark navy/teal look, so the dark block below still
+     starts from that palette (refined for contrast/less flat-gray
+     repetition); the light block is new -- previously :root[data-theme
+     ="light"] didn't exist at all, so toggling themes only flipped the
+     `data-theme` attribute with no CSS reacting to it. --card-bg/--nav-
+     hover-bg/--accent-fg/--badge-*-bg/--attention-bg/--field-bg are
+     this app's own token names, defined for both themes so every view
+     that reads them renders correctly either way. See frontend/src/lib
+     /ui/index.ts's shared components for the panel/page-header/segment
+     -control/status-badge classes that consume these same tokens. */
   :global(:root),
   :global(:root[data-theme="dark"]) {
     color-scheme: dark;
-    --bg: #07111f; --bg-soft: #0b1828; --fg: #ecf4fb;
-    --border: #26384e; --border-strong: #36516d;
-    --card-bg: #101f32; --panel-elevated: #15283e;
-    --muted: #9cafc1; --faint: #6d8295;
-    --accent: #20d6b5; --accent-strong: #67e8f9; --accent-fg: #07111f;
-    --success: #36d399; --warning: #fbbf24; --danger: #f87171;
+    --bg: #08121f; --bg-soft: #0c1a2b; --fg: #eef4fa;
+    --border: #24384d; --border-strong: #37536f;
+    --card-bg: #112238; --panel-elevated: #17293f;
+    --muted: #a3b7c9; --faint: #74899d;
+    --accent: #2dd9b9; --accent-strong: #6ee7f2; --accent-fg: #05121c;
+    --success: #3ddb9d; --warning: #fbbf24; --danger: #f87171;
     --attention-bg: #3f1d1d;
     --badge-ok-bg: #123b2c; --badge-ok-fg: #7be8c4;
     --badge-warn-bg: #4a3510; --badge-warn-fg: #fbbf24;
     --badge-danger-bg: #4a1620; --badge-danger-fg: #f87171;
-    --nav-hover-bg: rgba(255, 255, 255, 0.075);
-    --radius: 12px; --radius-sm: 8px; --shadow: 0 18px 44px rgba(0, 0, 0, 0.22);
+    --nav-hover-bg: rgba(255, 255, 255, 0.08);
+    --field-bg: #0b1626;
+    --btn-bg: #0e7d73; --btn-bg-hover: #14988c;
+    --radius: 12px; --radius-sm: 8px; --shadow: 0 18px 44px rgba(0, 0, 0, 0.28);
+  }
+  :global(:root[data-theme="light"]) {
+    color-scheme: light;
+    --bg: #f3f7fa; --bg-soft: #e8eef3; --fg: #10202f;
+    --border: #d7e1e9; --border-strong: #b7c6d1;
+    --card-bg: #ffffff; --panel-elevated: #f6f9fb;
+    --muted: #4a5f70; --faint: #7891a0;
+    --accent: #0d9488; --accent-strong: #0a7d8f; --accent-fg: #ffffff;
+    --success: #15803d; --warning: #b45309; --danger: #b91c1c;
+    --attention-bg: #fde9e9;
+    --badge-ok-bg: #dcfce7; --badge-ok-fg: #166534;
+    --badge-warn-bg: #fef3c7; --badge-warn-fg: #92400e;
+    --badge-danger-bg: #fee2e2; --badge-danger-fg: #991b1b;
+    --nav-hover-bg: rgba(16, 32, 47, 0.06);
+    --field-bg: #ffffff;
+    --btn-bg: #0d9488; --btn-bg-hover: #0b7d8f;
+    --radius: 12px; --radius-sm: 8px; --shadow: 0 10px 26px rgba(16, 32, 47, 0.1);
   }
   :global(body) {
     margin: 0; background: var(--bg); color: var(--fg);
     font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
-  :global(input, select) { padding: 0.5rem 0.6rem; border-radius: var(--radius-sm); border: 1px solid var(--border-strong); background: #0a1423; color: inherit; }
+  :global(input, select) { padding: 0.5rem 0.6rem; border-radius: var(--radius-sm); border: 1px solid var(--border-strong); background: var(--field-bg); color: inherit; }
   :global(button) {
-    padding: 9px 12px; min-height: 40px; border-radius: var(--radius-sm); border: 1px solid rgba(32, 214, 181, 0.28);
-    background: #0e6f68; color: var(--fg); font-weight: 650; cursor: pointer;
+    padding: 9px 12px; min-height: 40px; border-radius: var(--radius-sm); border: 1px solid rgba(45, 217, 185, 0.3);
+    background: var(--btn-bg); color: var(--accent-fg); font-weight: 650; cursor: pointer;
   }
-  :global(button:hover) { background: #12887f; }
-  :global(button.secondary) { background: #17283c; border-color: var(--border-strong); color: var(--fg); }
-  :global(button.danger) { background: #9f1239; border-color: rgba(251, 113, 133, 0.36); }
+  :global(button:hover) { background: var(--btn-bg-hover); }
+  :global(button.secondary) { background: var(--panel-elevated); border-color: var(--border-strong); color: var(--fg); }
+  :global(button.danger) { background: #9f1239; border-color: rgba(251, 113, 133, 0.36); color: #fff; }
   :global(button:disabled) { opacity: 0.6; cursor: progress; }
   :global(.error) { color: #dc2626; }
   :global(.add-form) { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: end; margin: 1rem 0; }

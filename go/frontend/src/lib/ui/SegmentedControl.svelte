@@ -31,5 +31,5 @@
     border-radius: 999px; color: var(--muted); padding: 0.4rem 0.7rem; white-space: nowrap;
     background: transparent; border: none; min-height: auto; font-weight: 600; font-size: 0.85rem;
   }
-  .segment-control button[aria-current="true"] { background: #0e6f68; color: var(--fg); }
+  .segment-control button[aria-current="true"] { background: var(--btn-bg, var(--accent)); color: var(--accent-fg); }
 </style>

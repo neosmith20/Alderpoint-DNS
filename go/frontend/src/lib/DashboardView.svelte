@@ -762,17 +762,38 @@
 <style>
   .dash-header { display: flex; justify-content: space-between; align-items: center; }
   .customize-btn { background: transparent; color: var(--fg); border: 1px solid var(--border); }
-  .customize-panel { border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem 1rem; margin: 0.75rem 0; background: var(--card-bg); }
-  .customize-panel ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
-  .customize-panel li { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
-  .customize-panel label { display: flex; align-items: center; gap: 0.5rem; font-size: 0.88rem; }
-  .reorder-btns { display: flex; gap: 0.25rem; }
-  .reorder-btns button { padding: 0.15rem 0.5rem; }
+  .customize-panel { border: 1px solid var(--border); border-radius: 8px; padding: 0.4rem 0.25rem; margin: 0.75rem 0; background: var(--card-bg); box-shadow: var(--shadow); }
+  .customize-panel ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+  /* Each row gets its own boundary (border-bottom, not just a gap) and a
+     hover/focus highlight -- previously rows had only a small flex gap
+     between them with nothing to mark where one ends and the next
+     begins, which made reordering by eye easy to lose track of. */
+  .customize-panel li {
+    display: flex; justify-content: space-between; align-items: center; gap: 1rem;
+    padding: 0.55rem 0.75rem; border-bottom: 1px solid var(--border); border-radius: 6px;
+  }
+  .customize-panel li:last-child { border-bottom: none; }
+  .customize-panel li:hover { background: var(--nav-hover-bg); }
+  .customize-panel li:has(:focus-visible) { background: var(--nav-hover-bg); outline: 2px solid var(--accent); outline-offset: -2px; }
+  .customize-panel label { display: flex; align-items: center; gap: 0.6rem; font-size: 0.88rem; flex: 1; min-width: 0; }
+  .reorder-btns { display: flex; gap: 0.3rem; flex-shrink: 0; }
+  .reorder-btns button {
+    padding: 0.2rem 0.55rem; background: var(--panel-elevated); border: 1px solid var(--border-strong);
+    color: var(--fg); min-height: 30px;
+  }
+  .reorder-btns button:hover:not(:disabled) { background: var(--btn-bg); color: var(--accent-fg); border-color: var(--btn-bg); }
 
   .hint { font-size: 0.85rem; opacity: 0.75; }
-  .cards { display: flex; flex-wrap: wrap; gap: 1rem; margin-top: 0.75rem; }
-  .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); }
-  .stat-card { min-width: 12rem; }
+  /* Flex, with stat-cards actually allowed to grow: previously
+     stat-card had no flex-grow, so a short row (e.g. just Blocklists +
+     Local DNS, with nothing else narrow enough to share it) stopped at
+     two card-widths and left the rest of the row as dead space instead
+     of the cards using it. flex: 1 1 14rem lets any number of
+     stat-cards on one row share it evenly; wide-card still always
+     takes the full row on its own. */
+  .cards { display: flex; flex-wrap: wrap; gap: 1rem; margin-top: 0.75rem; align-items: stretch; }
+  .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); box-shadow: var(--shadow); }
+  .stat-card { flex: 1 1 14rem; min-width: 12rem; }
   .wide-card { flex: 1 1 100%; min-width: 20rem; }
   .card h3 { margin: 0 0 0.4rem; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.03em; opacity: 0.75; }
   .card-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem; }

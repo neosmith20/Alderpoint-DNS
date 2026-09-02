@@ -195,6 +195,7 @@
   .item {
     display: flex;
     align-items: center;
+    justify-content: center;
     gap: 0.65rem;
     width: 100%;
     background: transparent;
@@ -202,7 +203,7 @@
     border: none;
     border-radius: 6px;
     padding: 0.5rem 0.6rem;
-    text-align: left;
+    text-align: center;
     font-size: 0.88rem;
     cursor: pointer;
   }
@@ -219,7 +220,7 @@
     cursor: default;
   }
   .item .soon {
-    margin-left: auto;
+    margin-left: 0.4rem;
     font-size: 0.65rem;
     opacity: 0.85;
     white-space: nowrap;
@@ -242,15 +243,20 @@
     position: relative;
   }
   .group-toggle {
+    position: relative;
     display: flex;
     align-items: center;
+    justify-content: center;
     gap: 0.65rem;
     width: 100%;
     background: transparent;
     color: var(--fg);
     border: none;
     border-radius: 6px;
-    padding: 0.5rem 0.6rem;
+    /* Reserve room on the right for the absolutely-positioned chevron
+       (below) so the icon+label pair centers in the remaining space
+       rather than under it. */
+    padding: 0.5rem 1.8rem 0.5rem 0.6rem;
     font-size: 0.78rem;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -265,12 +271,15 @@
     color: var(--accent);
   }
   .chevron {
-    margin-left: auto;
+    position: absolute;
+    right: 0.6rem;
+    top: 50%;
+    transform: translateY(-50%);
     display: inline-flex;
     transition: transform 0.15s ease;
   }
   .chevron.open {
-    transform: rotate(180deg);
+    transform: translateY(-50%) rotate(180deg);
   }
   .panel {
     list-style: none;
