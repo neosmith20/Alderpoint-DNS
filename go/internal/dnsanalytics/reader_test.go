@@ -235,6 +235,35 @@ func TestReaderHealthDegradedOnStaleWriterHeartbeat(t *testing.T) {
 	}
 }
 
+// TestReaderHealthOkWhenProbeUnreachableOnQuietNetwork is the
+// Health()-level half of the 2026-09-02 regression fix (see
+// TestWatchdogNotStalledWhenProbeUnreachable in writer_test.go for the
+// watchdog-level half): a probe poll that couldn't confirm anything
+// must surface as an informational note, never as overall "degraded" --
+// that was a real live false positive that demoted /api/health on a
+// perfectly healthy but merely idle appliance.
+func TestReaderHealthOkWhenProbeUnreachableOnQuietNetwork(t *testing.T) {
+	db := openTestDB(t)
+	wtr := &Writer{DB: db, StaleThreshold: 1 * time.Millisecond}
+	wtr.started = true
+	wtr.lastHeartbeat.Store(time.Now().Unix())
+	wtr.startedAt.Store(time.Now().Add(-1 * time.Hour).Unix())
+	wtr.TrafficProbe = func(ctx context.Context) (int64, bool) { return 0, false }
+	wtr.checkIngestionOnce(context.Background())
+
+	r := &Reader{DB: db, Writer: wtr}
+	h := r.Health(context.Background())
+	if h.Status != "ok" {
+		t.Errorf("status = %q, want ok -- an unreachable probe on a quiet network must never demote overall status, reason=%q", h.Status, h.Reason)
+	}
+	if h.IngestionStalled {
+		t.Error("IngestionStalled = true, want false")
+	}
+	if h.Reason == "" {
+		t.Error("expected an informational Reason explaining the unconfirmed probe, got empty string")
+	}
+}
+
 func TestReaderHealthFailedOnClosedDB(t *testing.T) {
 	db := openTestDB(t)
 	db.Close()

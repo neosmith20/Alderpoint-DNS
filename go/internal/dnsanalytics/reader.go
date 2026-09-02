@@ -374,10 +374,19 @@ func (r *Reader) Health(ctx context.Context) pyanalytics.AnalyticsHealth {
 	h.Status = "ok"
 	h.WriterStatus = "ok"
 	inserted, decodeErrs := r.Writer.Stats()
-	if decodeErrs > 0 && inserted == 0 {
+	switch {
+	case decodeErrs > 0 && inserted == 0:
 		// Real signal worth surfacing even though it doesn't demote
 		// status: frames are arriving but none have decoded yet.
 		h.Reason = fmt.Sprintf("%d dnstap frames failed to decode, 0 inserted so far", decodeErrs)
+	case ing.TrafficProbeConfigured && !ing.TrafficProbeOK && frameAge >= ingestionStaleThreshold.Seconds():
+		// Also informational-only (see checkIngestionOnce's own doc
+		// comment on the !ok branch): no frames for a while AND the
+		// independent traffic probe couldn't confirm anything on its
+		// last poll -- genuinely unconfirmable, not a fault, so this
+		// never demotes Status, only explains why IngestionTrafficProbeOK
+		// is false in an otherwise "ok" report.
+		h.Reason = fmt.Sprintf("no dnstap frames for %.0fs; the independent BIND traffic probe could not confirm real traffic on its last check -- treated as a quiet network, not a fault, until a stall is actually confirmed", frameAge)
 	}
 	return h
 }

@@ -410,3 +410,38 @@ func TestWatchdogDegradedWhenProbeUnconfigured(t *testing.T) {
 		t.Error("connection must not have been closed -- no probe means no basis for forcing a reconnect")
 	}
 }
+
+// TestWatchdogNotStalledWhenProbeUnreachable is the regression test for
+// a real live false-positive (2026-09-02): a probe IS wired up (unlike
+// TestWatchdogDegradedWhenProbeUnconfigured's nil-probe case), but this
+// specific poll fails (hostagent RPC hiccup, or BIND's statistics
+// channel not yet available). That must be treated the same as a
+// genuinely quiet/unconfirmable network -- NOT a confirmed stall -- so
+// it never demotes the whole appliance's /api/health to "degraded" on
+// an otherwise perfectly healthy, merely-idle connection.
+func TestWatchdogNotStalledWhenProbeUnreachable(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "analytics.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	wtr := &Writer{DB: db, StaleThreshold: 1 * time.Millisecond}
+	wtr.startedAt.Store(time.Now().Add(-1 * time.Hour).Unix())
+	wtr.TrafficProbe = func(ctx context.Context) (int64, bool) {
+		return 0, false // probe configured but unreachable/unavailable this poll
+	}
+
+	wtr.checkIngestionOnce(context.Background())
+
+	ing := wtr.Ingestion()
+	if ing.Stalled {
+		t.Error("must not report stalled when the traffic probe is merely unreachable this poll -- that's unconfirmable, not a confirmed stall")
+	}
+	if !ing.TrafficProbeConfigured || ing.TrafficProbeOK {
+		t.Errorf("TrafficProbeConfigured=%v TrafficProbeOK=%v, want configured=true ok=false (the honest signal should still be visible)", ing.TrafficProbeConfigured, ing.TrafficProbeOK)
+	}
+	if ing.RecoveryCount != 0 {
+		t.Error("must never force-close on an unconfirmable probe result")
+	}
+}

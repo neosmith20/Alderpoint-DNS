@@ -439,7 +439,26 @@ func (wtr *Writer) checkIngestionOnce(ctx context.Context) {
 	cancel()
 	wtr.lastProbeOK.Store(ok)
 	if !ok {
-		wtr.stalled.Store(true) // can't verify right now; conservative
+		// A probe IS wired up here (see the TrafficProbe==nil branch
+		// above for the genuinely-no-signal-at-all case) but this
+		// specific poll couldn't confirm anything either way -- e.g. a
+		// transient hostagent RPC hiccup, or BIND's statistics channel
+		// not yet available on a freshly-promoted context. This is
+		// exactly the "quiet/unconfirmable" case this function's own
+		// doc comment says must be left alone, not thrashed into a
+		// false "stalled": a real live regression (2026-09-02) had this
+		// branch instead marking Stalled=true, which demoted the WHOLE
+		// appliance's /api/health to "degraded" on a perfectly healthy,
+		// merely-idle network the moment a single probe poll missed --
+		// the opposite of "conservative", since it manufactured a false
+		// positive on a schedule (every watchdog tick) rather than only
+		// when a stall is actually independently confirmed. The
+		// still-honest signal (IngestionTrafficProbeOK=false) stays
+		// visible at the Health()/reader level as an informational
+		// note, it just never demotes overall status on its own -- only
+		// a CONFIRMED stall (real traffic proven flowing while frames
+		// stay stuck) does that, below.
+		wtr.stalled.Store(false)
 		return
 	}
 
