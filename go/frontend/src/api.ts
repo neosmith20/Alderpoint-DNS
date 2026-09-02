@@ -1479,6 +1479,7 @@ export const api = {
 export interface DNSRuntimeStatus {
   bind_running: boolean;
   dnsdist_running: boolean;
+  last_promoted_at?: string;
 }
 
 export interface DNSRuntimeApplyResult {

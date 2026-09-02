@@ -182,6 +182,16 @@ type dnsRuntimeState struct {
 	// available yet", not a fabricated empty result.
 	dnsdistAPIKey  string
 	dnsdistAPIPort int
+
+	// lastPromotedAt: RFC3339 UTC timestamp of the most recent
+	// successful promotion this hostagent generation itself performed.
+	// Deliberately not persisted or backfilled from an adopted process
+	// (see adoptFromPIDFile's own doc comment) -- unlike bind_running/
+	// dnsdist_running, "when did DNS Runtime last actually promote" has
+	// no equivalent real signal to recover from an OS process alone, so
+	// a fresh hostagent restart honestly reports this empty rather than
+	// fabricating a time.
+	lastPromotedAt string
 }
 
 func bindPIDFile(cfg DNSRuntimeConfig) string    { return filepath.Join(cfg.StagingDir, "named.pid") }
@@ -340,6 +350,7 @@ func RegisterDNSRuntimeOps(s *Server, cfg DNSRuntimeConfig) (func(), error) {
 		return DNSRuntimeStatus{
 			BindRunning:    st.bind.alive(),
 			DnsdistRunning: st.dnsdist.alive(),
+			LastPromotedAt: st.lastPromotedAt,
 		}, nil
 	})
 
@@ -440,6 +451,7 @@ func (st *dnsRuntimeState) promote(ctx context.Context, p DNSPromoteParams) (*DN
 
 	st.prevNamedConf, st.prevDnsdist, st.havePrev = namedConf, p.DnsdistConf, true
 	st.dnsdistAPIKey, st.dnsdistAPIPort = p.DnsdistAPIKey, p.DnsdistAPIPort
+	st.lastPromotedAt = time.Now().UTC().Format(time.RFC3339)
 	return &DNSPromoteResult{Promoted: true, Stage: "healthy", HealthyAtMS: time.Since(started).Milliseconds()}, nil
 }
 
