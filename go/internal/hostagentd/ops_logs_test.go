@@ -139,22 +139,47 @@ func TestLogsListUnitsExposesAllUnitsValueAndSeverities(t *testing.T) {
 // journalctl calls) proving unit="all" actually merges more than one
 // unit's own real journal history into one time-sorted result, not a
 // single unit renamed.
+// TestLogsReadAllMergesEveryAllowlistedUnitSortedByTime used to pick
+// two arbitrary real systemd units off the live host and rely on both
+// having comparably recent journal activity -- a real, live-observed
+// flake (2026-09-02): "merge every allowlisted unit's own most-recent
+// `lines` entries, then keep only the overall most recent `lines`" (see
+// this package's own RegisterLogsOps doc comment) is genuinely correct
+// truncation behavior, but it means a unit that logs continuously
+// (e.g. a periodic-poll agent) can legitimately crowd a quiet unit's
+// much older entries entirely out of a small top-N window -- that's
+// not a merge bug, it's an artifact of whichever two real units happen
+// to get picked on a given host at a given moment. Rewritten to use
+// two synthetic file-backed units with controlled, interleaved
+// timestamps instead: deterministic, and it still proves the actual
+// thing under test (cross-unit merge + newest-first sort), without
+// depending on incidental live host log volume.
 func TestLogsReadAllMergesEveryAllowlistedUnitSortedByTime(t *testing.T) {
-	if _, err := exec.LookPath("journalctl"); err != nil {
-		t.Skip("journalctl not available in this environment")
+	pathA := filepath.Join(t.TempDir(), "unit-a.log")
+	pathB := filepath.Join(t.TempDir(), "unit-b.log")
+	linesA := []string{
+		`{"time":"2026-08-01T00:00:00Z","level":"INFO","msg":"a-older"}`,
+		`{"time":"2026-08-01T00:00:04Z","level":"INFO","msg":"a-newest"}`,
 	}
-	units := findTwoUnitsWithRealJournalHistory(t)
-	if len(units) < 2 {
-		t.Skip("fewer than two systemd units on this host have queryable journal history")
+	linesB := []string{
+		`{"time":"2026-08-01T00:00:01Z","level":"INFO","msg":"b-older"}`,
+		`{"time":"2026-08-01T00:00:03Z","level":"INFO","msg":"b-newest"}`,
+	}
+	if err := os.WriteFile(pathA, []byte(strings.Join(linesA, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pathB, []byte(strings.Join(linesB, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 
 	s := &Server{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	RegisterLogsOps(s, LogsConfig{
 		Units: []string{"unit-a", "unit-b"},
 		UnitNameOverride: map[string]string{
-			"unit-a": units[0],
-			"unit-b": units[1],
+			"unit-a": pathA,
+			"unit-b": pathB,
 		},
+		FileUnits: map[string]bool{"unit-a": true, "unit-b": true},
 	})
 
 	result, err := s.handlers["logs.read"](context.Background(), json.RawMessage(`{"unit":"all","lines":10}`))
@@ -168,8 +193,8 @@ func TestLogsReadAllMergesEveryAllowlistedUnitSortedByTime(t *testing.T) {
 	if err := json.Unmarshal(encoded, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if len(decoded.Entries) == 0 {
-		t.Fatal("expected at least one merged entry")
+	if len(decoded.Entries) != 4 {
+		t.Fatalf("expected all 4 entries across both units (lines=10 is well above the total), got %d: %+v", len(decoded.Entries), decoded.Entries)
 	}
 	seenUnits := map[string]bool{}
 	for i, e := range decoded.Entries {
@@ -179,32 +204,11 @@ func TestLogsReadAllMergesEveryAllowlistedUnitSortedByTime(t *testing.T) {
 		}
 	}
 	if len(seenUnits) < 2 {
-		t.Fatalf("expected entries from both real units in the merge, got only %v", seenUnits)
+		t.Fatalf("expected entries from both units in the merge, got only %v", seenUnits)
 	}
-}
-
-func findTwoUnitsWithRealJournalHistory(t *testing.T) []string {
-	t.Helper()
-	out, err := exec.Command("systemctl", "list-units", "--type=service", "--no-legend", "--no-pager", "--plain").Output()
-	if err != nil {
-		return nil
+	if decoded.Entries[0].Time != "2026-08-01T00:00:04Z" || decoded.Entries[0].Unit != "unit-a" {
+		t.Fatalf("expected the real newest entry (unit-a's 00:00:04) first, got %+v", decoded.Entries[0])
 	}
-	found := []string{}
-	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 0 {
-			continue
-		}
-		unit := fields[0]
-		check, err := exec.Command("journalctl", "-u", unit, "-n", "1", "-o", "json", "--no-pager").Output()
-		if err == nil && len(strings.TrimSpace(string(check))) > 0 {
-			found = append(found, unit)
-			if len(found) == 2 {
-				return found
-			}
-		}
-	}
-	return found
 }
 
 func TestLogsReadClampsAnOutOfRangeLineCount(t *testing.T) {
