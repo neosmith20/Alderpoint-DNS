@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,13 @@ import (
 	"alderpointdns/go-controlplane/internal/mobileconfig"
 	"alderpointdns/go-controlplane/internal/tlscert"
 )
+
+// isLoopbackHostname matches mobileconfig's own definition -- a
+// certificate subject that only ever means something to a client running
+// ON this appliance itself, never a remote device.
+func isLoopbackHostname(h string) bool {
+	return h == "localhost" || h == "127.0.0.1" || h == "::1"
+}
 
 func transportsJSON(s dnstransports.Settings) map[string]any {
 	return map[string]any{
@@ -38,13 +46,64 @@ func (s *Server) handleGetDNSTransports(w http.ResponseWriter, r *http.Request) 
 	// uses (the active HTTPS cert's own first SAN entry) -- surfaced
 	// here too so the UI can show real manual connection details
 	// (server address:port) for every transport, not just an
-	// Apple-specific downloadable profile for DoT/DoH.
+	// Apple-specific downloadable profile for DoT/DoH. cert_san is the
+	// FULL SAN list (not just the first entry) so the frontend can
+	// actually check "would a client validating this address against the
+	// cert succeed" instead of guessing.
+	var san []string
 	if s.TLSCertPath != "" {
 		if status, err := (&tlscert.Reader{CertPath: s.TLSCertPath}).Status(); err == nil && status.Active && len(status.SAN) > 0 {
 			out["server_hostname"] = status.SAN[0]
+			san = status.SAN
 		}
 	}
+	out["cert_san"] = san
+
+	// lan_ip(s): a real, separately-sourced client-facing candidate --
+	// the appliance's own detected LAN address(es) -- distinct from
+	// whatever this process happens to bind/listen on (which is
+	// frequently 0.0.0.0/::, itself never something to hand a client).
+	// The frontend falls back to this when the certificate's own
+	// hostname is only "localhost"/loopback, so setup guidance never
+	// recommends an address that only means something on this box.
+	lanIPs := detectServerIPs()
+	out["lan_ips"] = lanIPs
+	if len(lanIPs) > 0 {
+		out["lan_ip"] = lanIPs[0]
+	}
+
+	// DNSCrypt's real sdns:// stamp, once a provider identity actually
+	// exists -- built from the same client-facing address resolution
+	// (real hostname if the cert has one and it isn't loopback,
+	// otherwise the detected LAN IP): unlike DoT/DoH/DoQ/DoH3, DNSCrypt
+	// doesn't use the TLS certificate as its trust anchor at all (the
+	// provider public key pinned in the stamp is), so this has no
+	// certificate-validity gate.
+	if settings.DNSCryptIdentityProvisioned && settings.DNSCryptProviderPublicKeyB64 != "" {
+		addr := clientFacingAddress(san, lanIPs)
+		if addr != "" {
+			if pub, err := base64.StdEncoding.DecodeString(settings.DNSCryptProviderPublicKeyB64); err == nil {
+				stampAddr := fmt.Sprintf("%s:%d", addr, settings.DNSCryptPort)
+				out["dnscrypt_stamp"] = dnstransports.BuildDNSCryptStamp(stampAddr, pub, settings.DNSCryptProviderName)
+			}
+		}
+	}
+
 	WriteJSON(w, http.StatusOK, out)
+}
+
+// clientFacingAddress picks the same "what should a client actually be
+// told" candidate the frontend derives independently for display: the
+// certificate's own hostname when it's real (not loopback), else the
+// first detected LAN IP, else nothing.
+func clientFacingAddress(san, lanIPs []string) string {
+	if len(san) > 0 && !isLoopbackHostname(san[0]) {
+		return san[0]
+	}
+	if len(lanIPs) > 0 {
+		return lanIPs[0]
+	}
+	return ""
 }
 
 func (s *Server) handleUpdateDNSTransports(w http.ResponseWriter, r *http.Request) {

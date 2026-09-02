@@ -106,7 +106,7 @@ Version: ${DEB_VERSION}
 Section: net
 Priority: optional
 Architecture: ${DEB_ARCH}
-Maintainer: Alderpoint DNS Maintainers <maintainers@example.invalid>
+Maintainer: BindGuard Builder <bindguard@localhost>
 Depends: dnsdist (>= 1.9.0), bind9, bind9-utils, bind9-dnsutils, curl, gnupg, python3 (>= 3.11), python3-argon2, python3-cryptography, python3-yaml, python3-pip, python3-fastapi, python3-itsdangerous, python3-pydantic, python3-openpyxl, uvicorn, sqlite3
 Conflicts: alderpointdns
 Description: Alderpoint DNS V2 -- PRIVATE RELEASE CANDIDATE (not for production)

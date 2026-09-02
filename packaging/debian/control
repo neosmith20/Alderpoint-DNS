@@ -1,7 +1,7 @@
 Source: alderpointdns
 Section: net
 Priority: optional
-Maintainer: Alderpoint DNS Maintainers <maintainers@example.invalid>
+Maintainer: BindGuard Builder <bindguard@localhost>
 Standards-Version: 4.7.0
 Rules-Requires-Root: no
 Build-Depends: debhelper-compat (= 13), dh-python, python3

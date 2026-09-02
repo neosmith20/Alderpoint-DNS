@@ -26,6 +26,10 @@ func (e *Error) Error() string { return e.msg }
 
 func errf(format string, args ...any) error { return &Error{fmt.Sprintf(format, args...)} }
 
+func isLoopbackHostname(h string) bool {
+	return h == "localhost" || h == "127.0.0.1" || h == "::1"
+}
+
 // TransportInput is the subset of dnstransports.Settings this package
 // needs -- kept narrow and decoupled rather than importing that package
 // directly, matching this codebase's existing preference for small,
@@ -68,6 +72,15 @@ func Build(protocol string, transport TransportInput, cert CertInput, newUUID UU
 	}
 
 	hostname := cert.SAN[0]
+	// Real, deliberate block (not just a UI hint the caller could route
+	// around): "localhost"/loopback only ever validates for a client
+	// running ON this appliance itself. Apple's profile installer does a
+	// normal TLS handshake against ServerName/ServerURL from another
+	// device, so shipping a loopback hostname here would silently hand
+	// out a profile guaranteed to fail with a certificate error.
+	if isLoopbackHostname(hostname) {
+		return nil, errf("this appliance's certificate subject (%q) only ever validates for a client running on this appliance itself -- it cannot be used in a configuration profile for another device; replace the certificate with one whose subject is a real hostname or LAN IP first", hostname)
+	}
 	payloadUUID := strings.ToUpper(newUUID())
 	profileUUID := strings.ToUpper(newUUID())
 

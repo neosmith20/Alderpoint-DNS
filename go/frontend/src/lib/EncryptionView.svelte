@@ -92,13 +92,55 @@
     }
   }
 
-  // Whether the hostname manual-setup instructions actually resolve for
-  // a client on another device -- "localhost" (or a bare loopback IP)
-  // only ever means something to a client running ON this appliance
-  // itself, never a phone/laptop/router elsewhere on the network. This
-  // was the real, disclosed defect: showing "tls://localhost:853" as if
-  // it were usable setup guidance for a normal client.
-  const hostnameIsLoopback = $derived(!!settings?.server_hostname && ["localhost", "127.0.0.1", "::1"].includes(settings.server_hostname));
+  // --- Client-facing address resolution -----------------------------
+  //
+  // The real, disclosed defect this replaces: every manual-setup card
+  // used to interpolate settings.server_hostname directly, which is
+  // simply the active TLS cert's first SAN entry -- on an appliance
+  // whose cert subject is "localhost" (a very common state: it's this
+  // package's own first-boot self-signed cert default), every card told
+  // a REMOTE client to connect to "localhost", which only ever means
+  // something to a client running ON this appliance itself.
+  //
+  // The fix has three parts, all driven by real backend-reported facts
+  // (never guessed client-side):
+  //   1. Separate "what does the cert say" (server_hostname/cert_san)
+  //      from "what should a client actually be told" (clientAddress) --
+  //      falling back to this box's own detected LAN IP (lan_ip) when
+  //      the cert's own hostname is loopback or missing.
+  //   2. Check whether clientAddress is actually IN cert_san -- i.e.
+  //      whether a client validating the certificate against it would
+  //      succeed -- rather than assuming it always does.
+  //   3. Gate every certificate-dependent setup instruction (Apple
+  //      profiles, Android Private DNS, the DoT/DoH/DoQ/DoH3 manual
+  //      cards) on that check, with an honest blocked/warned message
+  //      instead of confidently-wrong instructions.
+  function isLoopbackName(h: string): boolean {
+    return h === "localhost" || h === "127.0.0.1" || h === "::1";
+  }
+  function isIpAddress(s: string): boolean {
+    return /^\d{1,3}(\.\d{1,3}){3}$/.test(s) || s.includes(":");
+  }
+
+  const certSan = $derived(settings?.cert_san ?? []);
+  const lanIp = $derived(settings?.lan_ip ?? "");
+  const rawCertHostname = $derived(settings?.server_hostname ?? "");
+  const certHostnameIsLoopback = $derived(isLoopbackName(rawCertHostname));
+  // Kept for the "only for commands run on this appliance itself" note.
+  const hostnameIsLoopback = certHostnameIsLoopback;
+
+  /** The address to actually hand a remote client. Never "localhost". */
+  const clientAddress = $derived(rawCertHostname && !certHostnameIsLoopback ? rawCertHostname : lanIp);
+  const clientAddressIsLanFallback = $derived(!rawCertHostname || certHostnameIsLoopback);
+  const noClientAddress = $derived(!settings || !clientAddress);
+  const clientAddressIsIp = $derived(isIpAddress(clientAddress));
+  /** Would a client validating the TLS cert against clientAddress succeed? DNSCrypt doesn't use
+   *  the TLS cert at all (its own provider key is the trust anchor), so this only gates
+   *  DoT/DoH/DoQ/DoH3 -- see each fieldset below. */
+  const clientAddressCertValid = $derived(!!clientAddress && certSan.includes(clientAddress));
+  /** Android's Private DNS "hostname" field rejects raw IP addresses on stock Android -- it needs
+   *  a real, cert-covered DNS name. */
+  const androidPrivateDnsUsable = $derived(clientAddressCertValid && !clientAddressIsIp);
 
   let rotateBusy = $state(false);
   let rotateResult = $state("");
@@ -141,13 +183,21 @@
     device, plus setup steps for the platforms that support it.
   </p>
 
-  {#if settings && hostnameIsLoopback}
+  {#if settings && noClientAddress}
+    <p class="degraded-note" role="alert">
+      No client-facing address is available yet -- this appliance's TLS certificate has no real
+      hostname (only "{rawCertHostname || "none"}") and no LAN IP could be detected on this box.
+      Fix the network configuration and/or replace the certificate below before handing setup
+      instructions to any client device; nothing below is safe to hand out yet.
+    </p>
+  {:else if settings && !clientAddressCertValid}
     <p class="degraded-note" role="status">
-      This appliance's TLS certificate doesn't have a real hostname or LAN IP as its subject --
-      only "{settings.server_hostname}", which only ever means something to a client running on
-      this appliance itself. Replace the certificate below with one whose subject/SAN is this
-      appliance's real hostname or LAN IP before handing setup instructions to another device;
-      until then, the addresses shown below won't resolve anywhere else on the network.
+      This appliance's TLS certificate does not cover "{clientAddress}" -- its Subject Alternative
+      Names are: {certSan.join(", ") || "none"}. Clients connecting to DoT/DoH/DoQ/DoH3 at this
+      address will get a certificate validation error, so Apple profile downloads and Android
+      Private DNS setup below are blocked until this is fixed. Replace the certificate with one
+      whose SAN includes "{clientAddress}" (or point clients at a name/address the certificate
+      does cover) -- DNSCrypt is unaffected, since it doesn't use this certificate at all.
     </p>
   {/if}
 
@@ -199,24 +249,48 @@
         </p>
         <label class="port">Port <input type="number" min="1" max="65535" bind:value={settings.dot_port} /></label>
         {#if settings.dot_enabled}
-          {@const hostname = settings.server_hostname ?? "(configure a management TLS certificate first)"}
+          {@const addr = clientAddress || "(no client-facing address configured -- see warning above)"}
           <div class="manual-setup">
-            <p class="manual-setup-label">Hostname / address:</p>
-            <code>{hostname}</code>, port <code>{settings.dot_port}</code> (some clients want the full URI: <code>tls://{hostname}:{settings.dot_port}</code>)
+            <p class="manual-setup-label">Hostname / address clients should use:</p>
+            <code>{addr}</code>, port <code>{settings.dot_port}</code> (some clients want the full URI: <code>tls://{addr}:{settings.dot_port}</code>)
+            {#if clientAddressIsLanFallback && clientAddress}
+              <p class="hint">This is this box's detected LAN IP (its certificate has no real hostname of its own yet) -- see the warning above.</p>
+            {/if}
+            {#if hostnameIsLoopback}
+              <p class="hint local-only">
+                Only for commands run ON this appliance itself (e.g. <code>kdig -d @localhost -p {settings.dot_port} +tls example.com</code>) -- never hand "{rawCertHostname}" to another device.
+              </p>
+            {/if}
+
             <p class="manual-setup-label">Android (Settings &rarr; Network &amp; internet &rarr; Private DNS &rarr; Private DNS provider hostname):</p>
-            <code>{hostname}</code>
-            <p class="hint">Android needs a real DNS hostname here, not an IP address or a <code>tls://</code> prefix -- if this appliance's certificate only has an IP as its subject, Private DNS setup will fail even though DoT itself is working.</p>
+            {#if androidPrivateDnsUsable}
+              <code>{addr}</code>
+              <p class="hint">Enter exactly this hostname -- no <code>tls://</code> prefix, no port, and never an IP address.</p>
+            {:else if !clientAddress}
+              <p class="hint blocked">Blocked: no client-facing address is configured yet.</p>
+            {:else if clientAddressIsIp}
+              <p class="hint blocked">Blocked: Android's Private DNS field needs a real DNS hostname, not an IP address ("{addr}") -- configure a DNS name for this appliance and put it on the certificate to use Android Private DNS.</p>
+            {:else}
+              <p class="hint blocked">Blocked: the certificate doesn't cover "{addr}" yet -- Android will fail to validate it. Fix the certificate (see warning above) first.</p>
+            {/if}
+
             <p class="manual-setup-label">Router / dnsmasq / stubby / unbound (forward to this resolver over DoT):</p>
-            <code>tls_upstream_send_client_subnet: 0<br />tls_upstream: {hostname}@{settings.dot_port}</code>
+            <code>tls_upstream_send_client_subnet: 0<br />tls_upstream: {addr}@{settings.dot_port}</code>
             <p class="hint">(stubby-style syntax shown; unbound uses <code>forward-tls-upstream: yes</code> plus a matching <code>forward-addr</code>/<code>forward-host</code> pair -- consult your router's own DoT forwarding docs for its exact syntax.)</p>
+
             <p class="manual-setup-label">Windows:</p>
             <p class="hint">Windows has no built-in DoT client; use a third-party stub resolver (e.g. YogaDNS) pointed at the hostname/port above, or configure DoT at the router instead.</p>
           </div>
-          <a class="mobileconfig-link" href="/api/dns-transports/mobileconfig/dot">
-            Download an Apple .mobileconfig profile -- installs this DoT server as the device's
-            resolver automatically (iOS/iPadOS/macOS only; other platforms use the manual setup
-            above)
-          </a>
+          {#if clientAddressCertValid}
+            <a class="mobileconfig-link" href="/api/dns-transports/mobileconfig/dot">
+              Download an Apple .mobileconfig profile -- installs this DoT server as the device's
+              resolver automatically. iOS/iPadOS/macOS only: <code>.mobileconfig</code> is Apple's
+              own configuration-profile format, so every other platform uses the manual setup above
+              instead.
+            </a>
+          {:else}
+            <p class="hint blocked">Apple .mobileconfig download blocked: the certificate doesn't validate for "{addr}" yet (see warning above) -- Apple's profile installer would reject the connection.</p>
+          {/if}
         {/if}
       </fieldset>
 
@@ -230,10 +304,15 @@
         <label class="port">Port <input type="number" min="1" max="65535" bind:value={settings.doh_port} /></label>
         <label class="path">Path <input bind:value={settings.doh_path} placeholder="/dns-query" /></label>
         {#if settings.doh_enabled}
-          {@const dohUrl = `https://${settings.server_hostname ?? "(configure a management TLS certificate first)"}:${settings.doh_port}${settings.doh_path}`}
+          {@const addr = clientAddress || "(no client-facing address configured -- see warning above)"}
+          {@const portSuffix = settings.doh_port === 443 ? "" : `:${settings.doh_port}`}
+          {@const dohUrl = `https://${addr}${portSuffix}${settings.doh_path}`}
           <div class="manual-setup">
             <p class="manual-setup-label">DoH server URL (this is what every client below wants):</p>
             <code>{dohUrl}</code>
+            {#if clientAddress && !clientAddressCertValid}
+              <p class="hint blocked">This won't validate yet -- the certificate doesn't cover "{addr}" (see warning above); browsers/apps will reject it as untrusted.</p>
+            {/if}
             <p class="manual-setup-label">Firefox (Settings &rarr; Privacy &amp; Security &rarr; DNS over HTTPS &rarr; Custom):</p>
             <code>{dohUrl}</code>
             <p class="manual-setup-label">Chrome / Edge (Settings &rarr; Privacy and security &rarr; Security &rarr; Use secure DNS &rarr; With Custom):</p>
@@ -253,11 +332,16 @@
               point that bridge's upstream at the URL above.
             </p>
           </div>
-          <a class="mobileconfig-link" href="/api/dns-transports/mobileconfig/doh">
-            Download an Apple .mobileconfig profile -- installs this DoH server as the device's
-            resolver automatically (iOS/iPadOS/macOS only; other platforms use the manual setup
-            above)
-          </a>
+          {#if clientAddressCertValid}
+            <a class="mobileconfig-link" href="/api/dns-transports/mobileconfig/doh">
+              Download an Apple .mobileconfig profile -- installs this DoH server as the device's
+              resolver automatically. iOS/iPadOS/macOS only: <code>.mobileconfig</code> is Apple's
+              own configuration-profile format, so every other platform uses the manual setup above
+              instead.
+            </a>
+          {:else}
+            <p class="hint blocked">Apple .mobileconfig download blocked: the certificate doesn't validate for "{addr}" yet (see warning above).</p>
+          {/if}
         {/if}
       </fieldset>
 
@@ -270,9 +354,13 @@
         </p>
         <label class="port">Port <input type="number" min="1" max="65535" bind:value={settings.doq_port} /></label>
         {#if settings.doq_enabled}
+          {@const addr = clientAddress || "(no client-facing address configured -- see warning above)"}
           <div class="manual-setup">
             <p class="manual-setup-label">Manual setup (a DoQ-capable client, e.g. dnscrypt-proxy or AdGuard's own apps):</p>
-            <code>quic://{settings.server_hostname ?? "(configure a management TLS certificate first)"}:{settings.doq_port}</code>
+            <code>quic://{addr}:{settings.doq_port}</code>
+            {#if clientAddress && !clientAddressCertValid}
+              <p class="hint blocked">This won't validate yet -- the certificate doesn't cover "{addr}" (see warning above).</p>
+            {/if}
             <p class="hint">
               No mainstream OS (Windows, Android, iOS/macOS) has a built-in DoQ setting, and there is
               no Apple configuration-profile format for DoQ -- it needs a client application that
@@ -290,13 +378,20 @@
         </p>
         <label class="port">Port <input type="number" min="1" max="65535" bind:value={settings.doh3_port} /></label>
         {#if settings.doh3_enabled}
+          {@const addr = clientAddress || "(no client-facing address configured -- see warning above)"}
+          {@const portSuffix = settings.doh3_port === 443 ? "" : `:${settings.doh3_port}`}
           <div class="manual-setup">
             <p class="manual-setup-label">Manual setup (a client that specifically supports HTTP/3 DoH):</p>
-            <code>https://{settings.server_hostname ?? "(configure a management TLS certificate first)"}:{settings.doh3_port}{settings.doh_path}</code>
+            <code>https://{addr}{portSuffix}{settings.doh_path}</code>
+            {#if clientAddress && !clientAddressCertValid}
+              <p class="hint blocked">This won't validate yet -- the certificate doesn't cover "{addr}" (see warning above).</p>
+            {/if}
             <p class="hint">
-              Same URL shape as the DoH transport above -- most DoH clients (browsers included) will
-              actually use HTTP/2 against this URL unless they specifically negotiate HTTP/3. If a
-              client doesn't explicitly document DoH3/HTTP-3 support, use the DoH transport instead.
+              Same URL shape as the DoH transport above -- HTTP/3 is a negotiated transport, not a
+              separate URL scheme: a client that supports it upgrades to QUIC/HTTP-3 automatically
+              against this same HTTPS URL, while most DoH clients (browsers included) will simply
+              keep using HTTP/2 against it. If a client doesn't explicitly document DoH3/HTTP-3
+              support, use the DoH transport instead -- the effective result is identical either way.
             </p>
           </div>
         {/if}
@@ -320,11 +415,23 @@
           </button>
         {:else}
           {#if settings.dnscrypt_enabled}
+            {@const addr = clientAddress || "(no client-facing address configured -- see warning above)"}
             <div class="manual-setup">
-              <p class="manual-setup-label">Manual setup (e.g. dnscrypt-proxy's static resolver config):</p>
-              <code>server_address = '{settings.server_hostname ?? "(this appliance's address)"}:{settings.dnscrypt_port}'</code>
+              <p class="manual-setup-label">Stamp (paste directly into any DNSCrypt client that accepts one):</p>
+              {#if settings.dnscrypt_stamp}
+                <code>{settings.dnscrypt_stamp}</code>
+              {:else}
+                <p class="hint blocked">No stamp yet: no client-facing address is configured (see warning above).</p>
+              {/if}
+              <p class="manual-setup-label">Static resolver config (e.g. dnscrypt-proxy):</p>
+              <code>server_address = '{addr}:{settings.dnscrypt_port}'</code>
               <code>provider_name = '{settings.dnscrypt_provider_name}'</code>
               <code>provider_key = '{settings.dnscrypt_fingerprint}'</code>
+              <p class="hint">
+                DNSCrypt doesn't use this appliance's TLS certificate at all -- the provider key
+                above (pinned in the stamp) is its own trust anchor, so this setup isn't affected by
+                the certificate warning at the top of this page.
+              </p>
             </div>
           {/if}
           <dl class="cert-info">
@@ -405,4 +512,6 @@
   .error { color: var(--badge-danger-fg); }
   .degraded-note { background: var(--badge-warn-bg); color: var(--badge-warn-fg); padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.85rem; }
   .hint { font-size: 0.8rem; opacity: 0.7; }
+  .hint.blocked { opacity: 1; color: var(--badge-danger-fg); font-weight: 500; }
+  .hint.local-only { opacity: 1; color: var(--badge-warn-fg); }
 </style>

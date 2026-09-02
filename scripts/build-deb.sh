@@ -54,7 +54,7 @@ Version: ${DEB_VERSION}
 Section: net
 Priority: optional
 Architecture: all
-Maintainer: Alderpoint DNS Maintainers <maintainers@example.invalid>
+Maintainer: BindGuard Builder <bindguard@localhost>
 Depends: bind9, bind9-dnsutils, curl, dnsdist (>= 1.9.0), gnupg, jq, knot-dnsutils, openssl, python3-aioquic, python3-argon2, python3-dnspython, python3-fastapi, python3-httpx, python3-itsdangerous, python3-jinja2, python3-pip, python3-python-multipart, python3-openpyxl, python3-yaml, sqlite3, sudo, uvicorn
 Description: Private DNS filtering and administration appliance
  Alderpoint DNS combines BIND, dnsdist, local DNS records, filtering policy,

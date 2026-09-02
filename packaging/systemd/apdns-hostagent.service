@@ -50,6 +50,18 @@ RestartSec=3
 # root process -- that IS its job, not a privilege it needs to shed.
 PrivateTmp=true
 ProtectHome=true
+# Real, load-bearing setting, not a hardening nicety: named and dnsdist
+# run as plain child exec.Cmds of this process (see ops_dnsruntime.go),
+# deliberately left running -- reparented to init, still holding real
+# :53 -- across a routine restart/update of this binary (see main.go's
+# 2026-08-28 incident-fix comment for why). systemd's DEFAULT
+# KillMode=control-group would silently defeat that entirely: on
+# `systemctl restart`/`stop` it signals every process in this service's
+# cgroup, not just the one PID systemd itself started, which kills
+# named/dnsdist right along with hostagent -- a live DNS outage on every
+# ordinary hostagent restart. KillMode=process signals only the main PID
+# systemd tracks, leaving named/dnsdist genuinely untouched.
+KillMode=process
 
 [Install]
 WantedBy=multi-user.target

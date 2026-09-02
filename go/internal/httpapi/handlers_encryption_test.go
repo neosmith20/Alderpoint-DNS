@@ -27,13 +27,22 @@ import (
 
 func genTestCertKeyPair(t *testing.T, notBefore, notAfter time.Time) (certPEM, keyPEM []byte) {
 	t.Helper()
+	return genTestCertKeyPairWithSAN(t, notBefore, notAfter, "localhost")
+}
+
+// genTestCertKeyPairWithSAN is genTestCertKeyPair with an explicit SAN --
+// used by tests that specifically need a real (non-loopback) hostname,
+// e.g. anything exercising the client-facing-address logic that now
+// deliberately rejects "localhost" as a client setup target.
+func genTestCertKeyPairWithSAN(t *testing.T, notBefore, notAfter time.Time, dnsName string) (certPEM, keyPEM []byte) {
+	t.Helper()
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test"},
-		NotBefore: notBefore, NotAfter: notAfter, DNSNames: []string{"localhost"},
+		NotBefore: notBefore, NotAfter: notAfter, DNSNames: []string{dnsName},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
 	if err != nil {

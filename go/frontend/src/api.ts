@@ -487,6 +487,20 @@ export interface DnsTransportSettings {
   dnscrypt_cert_valid_until?: number;
   dns_runtime?: DNSRuntimeApplyResult;
   server_hostname?: string;
+  /** Full Subject Alternative Name list of the active management TLS
+   *  certificate -- lets the UI check whether a given client-facing
+   *  address will actually validate, instead of assuming server_hostname
+   *  always does. */
+  cert_san?: string[];
+  /** This box's detected LAN IP (first of cert_lan_ips), independent of
+   *  whatever address the server process happens to bind/listen on --
+   *  the fallback client-facing address when the certificate's own
+   *  hostname is only "localhost"/loopback. */
+  lan_ip?: string;
+  lan_ips?: string[];
+  /** Real sdns:// DNSCrypt stamp, present once a provider identity
+   *  exists and a client-facing address is known. */
+  dnscrypt_stamp?: string;
 }
 
 export interface TlsStatus {

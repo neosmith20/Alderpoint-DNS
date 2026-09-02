@@ -56,7 +56,7 @@ alderpointdns (1.1.1-1) unstable; urgency=medium
     `#updateStatusBanner[hidden] { display: none; }` override, matching
     the same defensive pattern already used elsewhere in this stylesheet.
 
- -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Fri, 14 Aug 2026 11:35:00 +0000
+ -- BindGuard Builder <bindguard@localhost>  Fri, 14 Aug 2026 11:35:00 +0000
 
 alderpointdns (1.1.0-1) unstable; urgency=medium
 
@@ -81,7 +81,7 @@ alderpointdns (1.1.0-1) unstable; urgency=medium
     fresh-install default on every package upgrade, by only bootstrapping
     that default when no administrator-configured drop-in already exists.
 
- -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Fri, 14 Aug 2026 00:00:00 -0600
+ -- BindGuard Builder <bindguard@localhost>  Fri, 14 Aug 2026 00:00:00 -0600
 
 alderpointdns (1.0.2-1) unstable; urgency=medium
 
@@ -97,7 +97,7 @@ alderpointdns (1.0.2-1) unstable; urgency=medium
     stored job state and reconnect to that state after transient
     alderpointdns web-service restarts instead of appearing frozen.
 
- -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Tue, 11 Aug 2026 00:00:00 -0600
+ -- BindGuard Builder <bindguard@localhost>  Tue, 11 Aug 2026 00:00:00 -0600
 
 alderpointdns (1.0.1-1) unstable; urgency=medium
 
@@ -123,7 +123,7 @@ alderpointdns (1.0.1-1) unstable; urgency=medium
     upstream resolvers are appliance-local by design and must never be
     overwritten by primary-to-replica sync.
 
- -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Mon, 10 Aug 2026 01:56:48 -0600
+ -- BindGuard Builder <bindguard@localhost>  Mon, 10 Aug 2026 01:56:48 -0600
 
 alderpointdns (1.0.0-1) unstable; urgency=medium
 
@@ -143,7 +143,7 @@ alderpointdns (1.0.0-1) unstable; urgency=medium
     Administration decluttered of redundant launcher cards). See
     CHANGELOG.md for the full detailed log.
 
- -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Sun, 09 Aug 2026 09:13:00 -0600
+ -- BindGuard Builder <bindguard@localhost>  Sun, 09 Aug 2026 09:13:00 -0600
 
 alderpointdns (0.4.0~beta5-1) unstable; urgency=medium
 
@@ -181,7 +181,7 @@ alderpointdns (0.4.0~beta5-1) unstable; urgency=medium
     path on a from-source install; dpkg-installed units live under
     /usr/lib/systemd/system and are already restored by dpkg itself.
 
- -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Fri, 31 Jul 2026 20:58:12 -0600
+ -- BindGuard Builder <bindguard@localhost>  Fri, 31 Jul 2026 20:58:12 -0600
 
 alderpointdns (0.4.0~beta4-1) unstable; urgency=medium
 
@@ -218,7 +218,7 @@ alderpointdns (0.4.0~beta4-1) unstable; urgency=medium
     live web requests against the database alongside the analytics
     writer under lock contention.
 
- -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Fri, 31 Jul 2026 15:45:00 -0600
+ -- BindGuard Builder <bindguard@localhost>  Fri, 31 Jul 2026 15:45:00 -0600
 
 alderpointdns (0.4.0~beta2-1) unstable; urgency=medium
 
@@ -350,10 +350,10 @@ alderpointdns (0.4.0~beta2-1) unstable; urgency=medium
     repeated AdGuard/Pi-hole imports (as separate jobs) do not increase
     any destination table's row count.
 
- -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Thu, 30 Jul 2026 23:59:00 -0600
+ -- BindGuard Builder <bindguard@localhost>  Thu, 30 Jul 2026 23:59:00 -0600
 
 alderpointdns (0.4.0~beta1-1) unstable; urgency=medium
 
   * Beta packaging scaffold for fresh installation and upgrade testing.
 
- -- Alderpoint DNS Maintainers <maintainers@example.invalid>  Wed, 29 Jul 2026 16:00:00 -0600
+ -- BindGuard Builder <bindguard@localhost>  Wed, 29 Jul 2026 16:00:00 -0600

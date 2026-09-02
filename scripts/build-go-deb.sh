@@ -125,8 +125,8 @@ Version: ${DEB_VERSION}
 Section: net
 Priority: optional
 Architecture: ${DEB_ARCH}
-Maintainer: Alderpoint DNS Maintainers <maintainers@example.invalid>
-Depends: dnsdist (>= 1.9.0), bind9, bind9-utils, openssl, adduser, curl
+Maintainer: BindGuard Builder <bindguard@localhost>
+Depends: dnsdist (>= 1.9.0), bind9, bind9-utils, openssl, adduser, curl, iproute2
 Conflicts: alderpointdns, alderpointdns-v2
 Description: Alderpoint DNS Go control plane -- CANDIDATE BUILD (not an official release)
  Candidate build of the Go/Svelte control-plane rewrite: alderpointdns-go
@@ -180,7 +180,7 @@ alderpointdns-go (${DEB_VERSION}) unstable; urgency=low
 
   * Candidate build from commit ${FULL_SHA}.
 
- -- Alderpoint DNS Maintainers <maintainers@example.invalid>
+ -- BindGuard Builder <bindguard@localhost>
 EOF
 gzip -9n "$PKG/usr/share/doc/alderpointdns-go/changelog"
 

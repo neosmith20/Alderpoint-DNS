@@ -186,20 +186,33 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 // app/v2/network_config.py-driven detection is a later-milestone item;
 // see the migration report's "known limitations".
 func detectLikelyServerIP() string {
+	if ips := detectServerIPs(); len(ips) > 0 {
+		return ips[0]
+	}
+	return ""
+}
+
+// detectServerIPs lists every non-loopback IPv4 address on the host, in
+// net.InterfaceAddrs' own order -- used both by first-run setup (via
+// detectLikelyServerIP above) and by the Encryption page's DNS Transports
+// client-setup guidance, which needs to offer a real LAN address to hand
+// a remote client instead of ever suggesting "localhost".
+func detectServerIPs() []string {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
-		return ""
+		return nil
 	}
+	var out []string
 	for _, a := range addrs {
 		ipNet, ok := a.(*net.IPNet)
 		if !ok || ipNet.IP.IsLoopback() {
 			continue
 		}
 		if v4 := ipNet.IP.To4(); v4 != nil {
-			return v4.String()
+			out = append(out, v4.String())
 		}
 	}
-	return ""
+	return out
 }
 
 type loginRequest struct {
