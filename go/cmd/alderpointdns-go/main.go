@@ -45,6 +45,7 @@ import (
 	"alderpointdns/go-controlplane/internal/importer"
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/notifications"
+	"alderpointdns/go-controlplane/internal/observedretention"
 	"alderpointdns/go-controlplane/internal/policy"
 	"alderpointdns/go-controlplane/internal/policyentities"
 	"alderpointdns/go-controlplane/internal/softwareupdates"
@@ -716,6 +717,17 @@ func runWeb(args []string) {
 		}
 	}
 	analyticsReader := &dnsanalytics.Reader{DB: analyticsDB, Writer: analyticsWriter}
+	// Observed Clients retention (internal/observedretention): settings
+	// live in the control-plane db (already migrated by openDB above --
+	// schema/migrations/0026_observed_client_retention.sql), the actual
+	// clean/preview operations run against analyticsReader (the same
+	// query_events table Observed Clients itself reads). Always wired
+	// once analytics is configured -- no separate opt-in flag, matching
+	// AnalyticsSettings' own "always present once -analytics-db is set"
+	// posture; the safe "manual" default schedule (see the migration's
+	// own doc comment) is what actually keeps this inert until an owner
+	// opts into a schedule.
+	observedRetentionSvc := &observedretention.Service{DB: db, Analytics: analyticsReader}
 	listenPath := *dnstapListenPath
 	if listenPath == "" {
 		listenPath = *dnstapDialPath
@@ -834,7 +846,7 @@ func runWeb(args []string) {
 		StaticDir: *staticDir, Log: logger, Version: Version, StartedAt: startedAt,
 		SessionTTL: cfg.SessionTTL(), LastSeen: cfg.LastSeenUpdateInterval(),
 		ApplianceName: cfg.Appliance.Name, ApplianceTimezone: cfg.Appliance.Timezone,
-		Analytics: analyticsReader, RawQueryLog: analyticsReader, AnalyticsSettings: analyticsSettingsHolder, HostAgent: hostAgentClient,
+		Analytics: analyticsReader, RawQueryLog: analyticsReader, AnalyticsSettings: analyticsSettingsHolder, ObservedRetention: observedRetentionSvc, HostAgent: hostAgentClient,
 		AuditLog: &auditlog.Service{DB: db},
 		DNSRuntime: dnsRuntimeOrch, TLSCertPath: cfg.Web.TLSCertPath, TLSKeyPath: cfg.Web.TLSKeyPath,
 		DNSPerfBindPlainAddr: *dnsPerfBindPlainAddr,
@@ -945,6 +957,18 @@ func runWeb(args []string) {
 		notificationsSvc.CheckBackupFailure(schedulerCtx, notifications.BackupTickResult{
 			Ran: result.Ran, Failed: result.Failed, Detail: result.Detail,
 		})
+	})
+
+	// Observed Clients retention auto-clean: schedule is "manual" by
+	// default (this tick then never actually runs anything -- see
+	// dueForCleanup's own doc comment), so a 1-hour poll is plenty
+	// against the coarsest real schedule granularity (daily).
+	go observedRetentionSvc.RunScheduler(schedulerCtx, time.Hour, func(result observedretention.TickResult) {
+		if result.Ran && result.Failed {
+			logger.Warn("observed-client retention cleanup failed", "detail", result.Detail)
+		} else if result.Ran {
+			logger.Info("observed-client retention cleanup ran", "removed_clients", result.Removed)
+		}
 	})
 
 	// Real DNS-runtime recompilation after a successful replica apply --

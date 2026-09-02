@@ -224,6 +224,17 @@ export interface ObservedClient {
   alias_label?: string;
 }
 
+export type ObservedRetentionSchedule = "manual" | "daily" | "weekly" | "monthly";
+
+export interface ObservedRetentionSettings {
+  retention_days: number;
+  schedule: ObservedRetentionSchedule;
+  last_run_at?: string;
+  last_status?: string;
+  last_error?: string;
+  last_removed_clients: number;
+}
+
 // ClientAnalyticsRow: one ranked row of the Clients page's "Client
 // analytics" table (GET /api/analytics/top-clients), matching V1.1.1's
 // clients_data() shape (app/analytics.py, read directly) field-for-field.
@@ -1309,6 +1320,20 @@ export const api = {
     req<{ status: string }>(`/api/clients/${clientId}/groups/${encodeURIComponent(groupId)}`, { method: "DELETE" }),
   listObservedClients: (signal?: AbortSignal) =>
     req<{ observed: ObservedClient[]; degraded: boolean; degraded_reason?: string }>("/api/clients/observed", undefined, signal),
+  getObservedRetentionSettings: (signal?: AbortSignal) =>
+    req<ObservedRetentionSettings>("/api/clients/observed-retention/settings", undefined, signal),
+  updateObservedRetentionSettings: (retentionDays: number, schedule: ObservedRetentionSchedule) =>
+    req<ObservedRetentionSettings>("/api/clients/observed-retention/settings", {
+      method: "PUT",
+      body: JSON.stringify({ retention_days: retentionDays, schedule }),
+    }),
+  previewObservedRetention: (retentionDays: number, signal?: AbortSignal) =>
+    req<{ would_remove_clients: number; retention_days: number; degraded: boolean; degraded_reason?: string }>(
+      `/api/clients/observed-retention/preview?retention_days=${retentionDays}`,
+      undefined,
+      signal,
+    ),
+  cleanObservedRetention: () => req<{ removed_clients: number }>("/api/clients/observed-retention/clean", { method: "POST" }),
   topClients: (minutes: number, signal?: AbortSignal) =>
     req<{ clients: ClientAnalyticsRow[]; total: number; degraded: boolean; degraded_reason?: string }>(
       `/api/analytics/top-clients?minutes=${minutes}&limit=500`,

@@ -45,6 +45,14 @@ type AnalyticsReader interface {
 	// pyanalytics.Reader's stub exists solely so it keeps satisfying
 	// this interface, same posture as ClientAnalytics/ClearAll above.
 	TopUpstreams(ctx context.Context, since time.Time, limit int) ([]pyanalytics.UpstreamResolverSummary, error)
+	// PreviewStaleClients/CleanStaleClients back Observed Clients
+	// retention (GET/POST /api/clients/observed-retention/*) -- a
+	// targeted per-client prune, never ClearAll's blanket delete. Only
+	// *dnsanalytics.Reader implements these for real in production;
+	// pyanalytics.Reader's stubs exist solely so it keeps satisfying
+	// this interface, same posture as ClientAnalytics/ClearAll above.
+	PreviewStaleClients(ctx context.Context, cutoff int64) (int, error)
+	CleanStaleClients(ctx context.Context, cutoff int64) (int, error)
 }
 
 type RawQueryLogReader interface {

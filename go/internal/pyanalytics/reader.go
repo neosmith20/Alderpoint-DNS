@@ -502,6 +502,17 @@ func (r *Reader) TopUpstreams(ctx context.Context, since time.Time, limit int) (
 	return nil, fmt.Errorf("top upstreams not supported by the legacy pyanalytics reader (never wired into production; see internal/dnsanalytics.Reader)")
 }
 
+// PreviewStaleClients/CleanStaleClients exist only so *Reader still
+// satisfies internal/httpapi.AnalyticsReader (see ClientAnalytics's own
+// doc comment for why -- same reasoning applies here).
+func (r *Reader) PreviewStaleClients(ctx context.Context, cutoff int64) (int, error) {
+	return 0, fmt.Errorf("observed-client retention not supported by the legacy pyanalytics reader (never wired into production; see internal/dnsanalytics.Reader)")
+}
+
+func (r *Reader) CleanStaleClients(ctx context.Context, cutoff int64) (int, error) {
+	return 0, fmt.Errorf("observed-client retention not supported by the legacy pyanalytics reader (never wired into production; see internal/dnsanalytics.Reader)")
+}
+
 // ExportAll dumps every row of time_buckets and dimension_counts,
 // unfiltered -- the Go-native equivalent of Python's statistics export
 // (GET /api/statistics/export). Raw per-query history is deliberately

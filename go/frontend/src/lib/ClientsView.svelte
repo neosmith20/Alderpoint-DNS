@@ -8,6 +8,8 @@
     type ClientIdentifier,
     type PolicyExplainResult,
     type ObservedClient,
+    type ObservedRetentionSettings,
+    type ObservedRetentionSchedule,
     type ClientAnalyticsRow,
   } from "../api";
   import { StaleGuard } from "../staleGuard";
@@ -138,6 +140,98 @@
   let observedLoadError = $state("");
   const observedGuard = new StaleGuard();
 
+  // Observed Clients retention: previously the only way to forget a
+  // stale observed client was the appliance-wide "Clear statistics"
+  // button on the Statistics page, which deletes ALL query history, not
+  // just old clients. This is a targeted per-client prune instead --
+  // see internal/observedretention's own doc comment for the exact
+  // "only a client whose OWN most recent query is older than
+  // retention_days" safety property.
+  let retentionSettings = $state<ObservedRetentionSettings | null>(null);
+  let retentionLoadError = $state("");
+  let retentionSaving = $state(false);
+  let retentionSaveError = $state("");
+  let retentionSaveResult = $state("");
+  let retentionPreviewCount = $state<number | null>(null);
+  let retentionPreviewError = $state("");
+  let retentionCleaning = $state(false);
+  let retentionCleanError = $state("");
+  let retentionCleanResult = $state("");
+  // Editable draft, separate from the persisted settings, so typing in
+  // the retention-days field doesn't change behavior until Save is
+  // pressed -- only the live preview count reacts immediately.
+  let retentionDaysDraft = $state(90);
+  let retentionScheduleDraft = $state<ObservedRetentionSchedule>("manual");
+
+  async function loadRetentionSettings() {
+    try {
+      retentionSettings = await api.getObservedRetentionSettings();
+      retentionDaysDraft = retentionSettings.retention_days;
+      retentionScheduleDraft = retentionSettings.schedule;
+      retentionLoadError = "";
+      await refreshRetentionPreview();
+    } catch (err) {
+      retentionLoadError = err instanceof ApiError ? err.message : String(err);
+    }
+  }
+
+  async function refreshRetentionPreview() {
+    retentionPreviewError = "";
+    try {
+      const resp = await api.previewObservedRetention(retentionDaysDraft);
+      retentionPreviewCount = resp.degraded ? null : resp.would_remove_clients;
+      if (resp.degraded) retentionPreviewError = resp.degraded_reason || "unavailable";
+    } catch (err) {
+      retentionPreviewCount = null;
+      retentionPreviewError = err instanceof ApiError ? err.message : String(err);
+    }
+  }
+
+  async function saveRetentionSettings(e: Event) {
+    e.preventDefault();
+    retentionSaving = true;
+    retentionSaveError = "";
+    retentionSaveResult = "";
+    try {
+      retentionSettings = await api.updateObservedRetentionSettings(retentionDaysDraft, retentionScheduleDraft);
+      retentionSaveResult = "Saved.";
+      await refreshRetentionPreview();
+    } catch (err) {
+      retentionSaveError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      retentionSaving = false;
+    }
+  }
+
+  function confirmCleanNow() {
+    const count = retentionPreviewCount;
+    askConfirm(
+      "Clean old observed clients",
+      count === null
+        ? `This will permanently remove every observed client not seen in the last ${retentionDaysDraft} days (and their query history). Recently-seen clients are never touched. This cannot be undone.`
+        : `This will permanently remove ${count} observed client${count === 1 ? "" : "s"} not seen in the last ${retentionDaysDraft} days (and their query history). Recently-seen clients are never touched. This cannot be undone.`,
+      "Clean now",
+      cleanRetentionNow,
+    );
+  }
+
+  async function cleanRetentionNow() {
+    retentionCleaning = true;
+    retentionCleanError = "";
+    retentionCleanResult = "";
+    try {
+      const resp = await api.cleanObservedRetention();
+      retentionCleanResult = resp.removed_clients === 0
+        ? "No stale observed clients to remove."
+        : `Removed ${resp.removed_clients} observed client${resp.removed_clients === 1 ? "" : "s"}.`;
+      await Promise.all([refreshObserved(), loadRetentionSettings()]);
+    } catch (err) {
+      retentionCleanError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      retentionCleaning = false;
+    }
+  }
+
   // Shared destructive-action confirm dialog (design-system unification):
   // replaces every native window.confirm() on this page (delete client,
   // delete/revoke/regenerate an identifier) with the one real,
@@ -262,6 +356,7 @@
     refresh();
     refreshObserved();
     loadAnalytics();
+    loadRetentionSettings();
   });
 
   function startEditClient(c: ManagedClient) {
@@ -819,6 +914,74 @@
         {/each}
       </ul>
     {/if}
+
+    <div class="retention-block">
+      <h4>Retention &amp; cleanup</h4>
+      <p class="scope-note">
+        Observed Clients otherwise accumulates forever. Configure how long an address can go
+        unseen before it's removed (and its query history with it) -- an address that has queried
+        at all within that window is never touched, no matter how old its earliest activity is.
+      </p>
+      {#if retentionLoadError}
+        <p class="error" role="alert">{retentionLoadError}</p>
+      {:else if !retentionSettings}
+        <p class="hint">Loading…</p>
+      {:else}
+        <form onsubmit={saveRetentionSettings} class="retention-form">
+          <label>
+            Remove clients not seen in
+            <input
+              type="number"
+              min="1"
+              max="3650"
+              bind:value={retentionDaysDraft}
+              oninput={refreshRetentionPreview}
+              aria-label="Retention days"
+            /> days
+          </label>
+          <label>
+            Auto-clean schedule
+            <select bind:value={retentionScheduleDraft} aria-label="Auto-clean schedule">
+              <option value="manual">Manual only (never auto-runs)</option>
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+              <option value="monthly">Monthly</option>
+            </select>
+          </label>
+          <button type="submit" disabled={retentionSaving}>{retentionSaving ? "Saving…" : "Save settings"}</button>
+          {#if retentionSaveResult}<span class="success" role="status">{retentionSaveResult}</span>{/if}
+          {#if retentionSaveError}<p class="error" role="alert">{retentionSaveError}</p>{/if}
+        </form>
+
+        <p class="hint preview-line">
+          {#if retentionPreviewError}
+            Preview unavailable: {retentionPreviewError}
+          {:else if retentionPreviewCount === null}
+            Calculating how many clients this would remove…
+          {:else if retentionPreviewCount === 0}
+            No observed clients currently qualify for removal at {retentionDaysDraft} days.
+          {:else}
+            This would currently remove <strong>{retentionPreviewCount}</strong> observed client{retentionPreviewCount === 1 ? "" : "s"} not seen in {retentionDaysDraft} days.
+          {/if}
+        </p>
+
+        <div class="actions">
+          <button type="button" class="danger-btn" onclick={confirmCleanNow} disabled={retentionCleaning || retentionPreviewCount === 0}>
+            {retentionCleaning ? "Cleaning…" : "Clean old observed clients now"}
+          </button>
+        </div>
+        {#if retentionCleanResult}<p class="success" role="status">{retentionCleanResult}</p>{/if}
+        {#if retentionCleanError}<p class="error" role="alert">{retentionCleanError}</p>{/if}
+        {#if retentionSettings.last_run_at}
+          <p class="hint">
+            Last cleanup: {new Date(retentionSettings.last_run_at).toLocaleString()} --
+            {retentionSettings.last_status === "succeeded"
+              ? `removed ${retentionSettings.last_removed_clients} client${retentionSettings.last_removed_clients === 1 ? "" : "s"}.`
+              : `failed${retentionSettings.last_error ? `: ${retentionSettings.last_error}` : ""}.`}
+          </p>
+        {/if}
+      {/if}
+    </div>
   </Panel>
 </section>
 
@@ -907,4 +1070,13 @@
   .modal-form { display: flex; flex-direction: column; gap: 0.75rem; }
   .modal-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; }
   .form-actions { display: flex; gap: 0.5rem; }
+
+  .retention-block { border-top: 1px solid var(--border); margin-top: 1rem; padding-top: 1rem; display: flex; flex-direction: column; gap: 0.6rem; }
+  .retention-block h4 { margin: 0; }
+  .retention-form { display: flex; flex-wrap: wrap; align-items: end; gap: 1rem; }
+  .retention-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; }
+  .retention-form input[type="number"] { width: 6rem; }
+  .preview-line { margin: 0; }
+  .success { color: var(--success); }
+  .danger-btn { background: var(--badge-danger-bg); color: var(--badge-danger-fg); border-color: transparent; }
 </style>

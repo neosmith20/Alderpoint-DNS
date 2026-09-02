@@ -24,6 +24,7 @@ import (
 	"alderpointdns/go-controlplane/internal/importer"
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/notifications"
+	"alderpointdns/go-controlplane/internal/observedretention"
 	"alderpointdns/go-controlplane/internal/policy"
 	"alderpointdns/go-controlplane/internal/policyentities"
 	"alderpointdns/go-controlplane/internal/replication"
@@ -134,6 +135,15 @@ type Server struct {
 	// its own hot path, so a save here takes effect immediately with no
 	// restart.
 	AnalyticsSettings *dnsanalytics.SettingsHolder
+
+	// ObservedRetention is nil unless -analytics-db was given a real
+	// path at startup (same optional-boundary contract as
+	// Analytics/AnalyticsSettings above) -- backs GET/PUT
+	// /api/clients/observed-retention/settings and the manual "Clean old
+	// observed clients" action (POST .../clean) plus its live preview
+	// (GET .../preview). See internal/observedretention's own doc
+	// comment for the full design.
+	ObservedRetention *observedretention.Service
 
 	// DNSPerf is nil unless a full DNS-runtime deployment was
 	// configured at startup -- same nil-safe contract as DNSRuntime
@@ -268,6 +278,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("DELETE /api/clients/{id}", requireAuth(s.audited("clients_delete", s.handleDeleteClient)))
 	mux.HandleFunc("POST /api/clients/{id}/enabled", requireAuth(s.audited("clients_set_enabled", s.handleSetClientEnabled)))
 	mux.HandleFunc("GET /api/clients/observed", requireAuth(s.handleListObservedClients))
+	mux.HandleFunc("GET /api/clients/observed-retention/settings", requireAuth(s.handleGetObservedRetentionSettings))
+	mux.HandleFunc("PUT /api/clients/observed-retention/settings", requireAuth(s.audited("observed_retention_settings_update", s.handleSetObservedRetentionSettings)))
+	mux.HandleFunc("GET /api/clients/observed-retention/preview", requireAuth(s.handlePreviewObservedRetention))
+	mux.HandleFunc("POST /api/clients/observed-retention/clean", requireAuth(s.audited("observed_retention_clean", s.handleCleanObservedRetention)))
 	mux.HandleFunc("POST /api/clients/{id}/identifiers", requireAuth(s.audited("clients_identifiers_create", s.handleAddClientIdentifier)))
 	mux.HandleFunc("POST /api/clients/{id}/identifiers/generate", requireAuth(s.audited("clients_identifiers_generate", s.handleGenerateClientID)))
 	mux.HandleFunc("POST /api/clients/{id}/identifiers/{identifierId}/revoke", requireAuth(s.audited("clients_identifiers_revoke", s.handleRevokeClientIdentifier)))

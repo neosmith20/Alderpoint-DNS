@@ -165,6 +165,62 @@ func (r *Reader) ClearAll(ctx context.Context) (int64, error) {
 	return res.RowsAffected()
 }
 
+// staleClients returns every distinct client whose most recent query is
+// strictly older than cutoff (a Unix timestamp) -- the exact set
+// Observed Clients retention cleanup targets. A client that has never
+// been seen after cutoff is "stale"; a client with even one query at or
+// after cutoff is not, regardless of how much older history it also
+// has, matching the "only remove clients older than the configured
+// last-seen threshold" requirement (never touch a recently-seen
+// client's own history).
+func (r *Reader) staleClients(ctx context.Context, cutoff int64) ([]string, error) {
+	rows, err := r.DB.QueryContext(ctx, `SELECT client FROM query_events GROUP BY client HAVING MAX(ts) < ?`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// PreviewStaleClients counts how many distinct clients a cleanup at this
+// cutoff would remove, without deleting anything -- backs the "what will
+// be removed" preview the owner sees before running Observed Clients
+// cleanup for real (manually or on schedule).
+func (r *Reader) PreviewStaleClients(ctx context.Context, cutoff int64) (int, error) {
+	clients, err := r.staleClients(ctx, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return len(clients), nil
+}
+
+// CleanStaleClients permanently deletes every query_events row belonging
+// to a client whose most recent query is strictly older than cutoff.
+// Recently-seen clients, and every row belonging to them, are never
+// touched -- this is a targeted per-client prune, never the blanket
+// "delete everything" ClearAll above. Returns how many distinct clients
+// were removed.
+func (r *Reader) CleanStaleClients(ctx context.Context, cutoff int64) (int, error) {
+	clients, err := r.staleClients(ctx, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	for _, c := range clients {
+		if _, err := r.DB.ExecContext(ctx, `DELETE FROM query_events WHERE client = ?`, c); err != nil {
+			return 0, err
+		}
+	}
+	return len(clients), nil
+}
+
 // TopDomains backs handleAnalyticsTopBlockedDomains's s.RawQueryLog
 // interface (blockedOnly=true is its only real caller; supported for
 // both values for interface parity with rawquerylog.Reader.TopDomains).
