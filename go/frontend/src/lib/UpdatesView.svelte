@@ -203,6 +203,7 @@
     </div>
   </section>
 
+  <div class="grid-2col">
   <div class="card">
     <h3>Update Channel</h3>
     <p class="hint">
@@ -254,6 +255,7 @@
     {#if stageError}<p class="error" role="alert">{stageError}</p>{/if}
     {#if stageResult}<p class="success" role="status">{stageResult}</p>{/if}
   </form>
+  </div>
 
   {#if status?.staged}
     <div class="card pending">
@@ -270,11 +272,16 @@
   .updates { display: flex; flex-direction: column; gap: 1rem; }
   .scope-note { font-size: 0.85rem; opacity: 0.75; max-width: 50rem; }
   .status-grid { display: flex; flex-wrap: wrap; gap: 1rem; }
+  .status-grid .card { flex: 1 1 14rem; }
+  /* Two responsive columns on desktop/tablet, one on mobile -- Update
+     Channel and Manual Update previously each had a fixed max-width and
+     stacked full-width one above the other with no shared container. */
+  .grid-2col { display: grid; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); gap: 1rem; align-items: start; }
   .hint { font-size: 0.85rem; opacity: 0.75; margin: 0; }
-  .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); display: flex; flex-direction: column; gap: 0.6rem; max-width: 32rem; }
+  .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 0.6rem; }
   .card h3 { margin: 0; }
   .pending { background: var(--attention-bg); }
-  .success { color: #16a34a; }
+  .success { color: var(--success); }
   .error { color: var(--badge-danger-fg); }
   .channel-form { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
   .channel-form input { flex: 1 1 10rem; }

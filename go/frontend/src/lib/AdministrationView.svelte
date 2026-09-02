@@ -107,6 +107,7 @@
   <h2 id="admin-heading">Administration</h2>
   {#if statusError}<p class="error" role="alert">{statusError}</p>{/if}
 
+  <div class="grid-2col">
   <div class="card">
     <h3>Timestamp Display</h3>
     <p class="hint">Controls how every timestamp in this application is shown. Changes apply instantly, everywhere, with no reload.</p>
@@ -138,6 +139,7 @@
       {#if passwordError}<p class="error" role="alert">{passwordError}</p>{/if}
       {#if passwordSuccess}<p class="success" role="status">Password changed. Other sessions were signed out.</p>{/if}
     </form>
+  </div>
   </div>
 
   <div class="card wide">
@@ -196,8 +198,13 @@
 
 <style>
   .admin { display: flex; flex-direction: column; gap: 1rem; }
-  .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); max-width: 40rem; }
-  .card.wide { max-width: 56rem; }
+  /* Two responsive columns on desktop/tablet, one on mobile -- Timestamp
+     Display and Change Password previously had no shared container, so
+     they simply stacked full-width one above the other regardless of
+     how much horizontal room the page had. */
+  .grid-2col { display: grid; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); gap: 1rem; align-items: start; }
+  .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); box-shadow: var(--shadow); }
+  .card.wide { max-width: 72rem; }
   .card h3 { margin-top: 0; }
   .hint { font-size: 0.85rem; opacity: 0.75; }
   .radio-row { display: flex; flex-wrap: wrap; gap: 1rem; }
@@ -205,7 +212,7 @@
   .preview { margin-top: 0.75rem; font-size: 0.85rem; }
   .stack-form { display: flex; flex-direction: column; gap: 0.65rem; max-width: 22rem; }
   .stack-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; }
-  .success { color: #16a34a; }
+  .success { color: var(--success); }
   .danger { background: var(--badge-danger-bg); color: var(--badge-danger-fg); margin-top: 0.5rem; }
   .table-scroll { overflow-x: auto; margin-top: 0.75rem; }
   .admin-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
