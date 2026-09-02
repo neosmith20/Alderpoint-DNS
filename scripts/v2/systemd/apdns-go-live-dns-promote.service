@@ -1,0 +1,23 @@
+[Unit]
+Description=Alderpoint DNS Go live appliance -- promote DNS runtime (named + dnsdist)
+Documentation=file:///root/alderpointdns-go-migration/scripts/v2/systemd/README.md
+After=apdns-go-live-hostagent.service apdns-go-live-web.service
+Requires=apdns-go-live-hostagent.service apdns-go-live-web.service
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/root/alderpointdns-go-migration/scripts/v2/systemd/dns-promote-live.sh
+# named/dnsdist are separate OS processes apdns-hostagent itself
+# manages (started via ops_dnsruntime.go, not by this unit) -- a
+# restart of THIS unit re-runs dns-promote, which is itself idempotent
+# (stop-then-start, matching normal redeploy/blocklist-refresh
+# behavior), so a transient failure (e.g. a late-clearing port 53
+# conflict) self-heals without risking a duplicate named/dnsdist.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

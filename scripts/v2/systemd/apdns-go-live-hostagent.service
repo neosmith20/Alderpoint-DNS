@@ -1,0 +1,48 @@
+[Unit]
+Description=Alderpoint DNS Go live appliance -- apdns-hostagent (privileged host-side agent)
+Documentation=file:///root/alderpointdns-go-migration/scripts/v2/systemd/README.md
+After=network-online.target local-fs.target
+Wants=network-online.target
+# Caps a runaway restart loop at 5 attempts per minute instead of
+# restarting forever.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# Root, deliberately -- see packaging/systemd/apdns-hostagent.service's
+# own comment (this live unit mirrors that packaged one, with this
+# specific ad hoc deployment's own real paths instead of the packaged
+# /opt/alderpointdns-go layout -- see scripts/v2/redeploy-go-live.sh /
+# scripts/v2/cutover.sh for where these paths come from).
+ExecStartPre=/root/alderpointdns-go-migration/scripts/v2/systemd/hostagent-live-precheck.sh
+ExecStart=/root/apdns-go-live-hostagent/apdns-hostagent \
+  -socket /run/apdns-go-live-hostagent/agent.sock \
+  -allowed-uid 996 \
+  -audit-log /root/apdns-go-live-hostagent/audit/audit.jsonl \
+  -secrets-key-dir /var/lib/apdns-hostagent/secrets \
+  -bind-compiled-dir /nonexistent \
+  -rndc-conf /root/apdns-go-live-hostagent/dns-staging/rndc.conf \
+  -dns-runtime-staging-dir /root/apdns-go-live-hostagent/dns-staging \
+  -dns-runtime-bind-conf /var/lib/bind/apdns-go-live/named.conf \
+  -dns-runtime-dnsdist-conf /root/apdns-go-live-hostagent/dns-staging/dnsdist.conf \
+  -dns-runtime-bind-dir /var/lib/bind/apdns-go-live \
+  -dns-runtime-bind-plain-port 26453 -dns-runtime-bind-proxy-port 26553 \
+  -dns-runtime-bind-stats-port 26153 -dns-runtime-bind-rndc-port 26653 \
+  -dns-runtime-dnsdist-listen-addr 0.0.0.0:53 \
+  -current-binary /var/lib/apdns-go-live-staging/alderpointdns-go \
+  -update-staging-dir /root/apdns-go-live-hostagent/update-staging \
+  -update-backup /root/apdns-go-live-hostagent/previous-binary \
+  -web-health-url https://127.0.0.1:8443/api/health \
+  -log-units apdns-go-web,apdns-hostagent,named,dnsdist \
+  -log-file-units named,dnsdist \
+  -log-unit-map named=/var/lib/bind/apdns-go-live/named.log,dnsdist=/root/apdns-go-live-hostagent/dns-staging/dnsdist.startup.log
+Restart=on-failure
+RestartSec=3
+# NoNewPrivileges is deliberately NOT set -- this process signals/execs
+# named, dnsdist, and its own update-candidate binary as a privileged
+# root process, matching packaging/systemd/apdns-hostagent.service.
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

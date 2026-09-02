@@ -1,0 +1,36 @@
+[Unit]
+Description=Alderpoint DNS Go live appliance -- web container (apdns-go-live)
+Documentation=file:///root/alderpointdns-go-migration/scripts/v2/systemd/README.md
+After=network-online.target apdns-go-live-hostagent.service
+Wants=network-online.target
+Requires=apdns-go-live-hostagent.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# The container itself (image, mounts, --memory=768m, --restart=on-
+# failure:5, healthcheck) is created once by
+# scripts/v2/redeploy-go-live.sh / scripts/v2/cutover.sh -- this unit
+# only starts/stops the ALREADY-CREATED container across reboots; it
+# never creates or recreates it. A clear failure here (rather than a
+# silent no-op) is deliberate: if the container doesn't exist yet, that
+# is a real "run a redeploy first" situation, not something this unit
+# should paper over.
+ExecStartPre=/usr/bin/podman container exists apdns-go-live
+ExecStart=/usr/bin/podman start -a apdns-go-live
+# Type=simple only marks this unit "active" the instant conmon attaches
+# -- well before the web process inside has actually finished starting.
+# This blocks that transition until it's really ready (dnstap socket +
+# a real /api/health 200), so apdns-go-live-dns-promote.service (which
+# is gated on this unit via After=/Requires=) never races a half-started
+# container. See wait-web-ready.sh's own comment for why this was added.
+ExecStartPost=/root/alderpointdns-go-migration/scripts/v2/systemd/wait-web-ready.sh
+ExecStop=/usr/bin/podman stop -t 15 apdns-go-live
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=90
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

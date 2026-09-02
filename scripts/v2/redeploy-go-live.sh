@@ -219,34 +219,66 @@ else
     log "$GO_LIVE_BASE_IMAGE already built, reusing"
 fi
 
-# --- hostagent: SIGTERM + relaunch with the exact same flags (its own
-# trackedProcess/PID-file adoption logic, internal/hostagentd/
-# ops_dnsruntime.go, already makes this safe -- it adopts the still-
-# running named/dnsdist rather than duplicating them). ---
-current_ha_pid="$(pgrep -f "^$GO_LIVE_HOSTAGENT_DIR/apdns-hostagent " || true)"
-if [ -n "$current_ha_pid" ]; then
-    ha_cmdline=()
-    while IFS= read -r -d '' arg; do ha_cmdline+=("$arg"); done < "/proc/$current_ha_pid/cmdline"
-    log "stopping current apdns-hostagent (pid $current_ha_pid)"
-    kill -TERM "$current_ha_pid"
-    sleep 2
+# --- hostagent: restart it. Since 2026-09-02 (see
+# scripts/v2/systemd/README.md), apdns-go-live-hostagent.service is the
+# committed source of truth for its launch flags -- prefer
+# `systemctl restart` so systemd's own Restart=on-failure supervision
+# is never left racing a manually kill+relaunched process (that race
+# could otherwise produce two hostagent processes fighting over the
+# same socket: systemd resurrecting the old flags the instant an
+# external `kill` looks like an unexpected exit, while this script
+# separately starts a new one of its own). Falls back to the old
+# manual kill+relaunch (its own trackedProcess/PID-file adoption logic,
+# internal/hostagentd/ops_dnsruntime.go, already makes that safe too --
+# it adopts the still-running named/dnsdist rather than duplicating
+# them) only if that unit somehow isn't installed.
+if systemctl cat apdns-go-live-hostagent.service >/dev/null 2>&1; then
+    log "restarting apdns-hostagent via systemd (apdns-go-live-hostagent.service)"
+    systemctl restart apdns-go-live-hostagent.service || fail "systemctl restart apdns-go-live-hostagent.service failed"
+    waited=0
+    while [ ! -S "$GO_LIVE_HOSTAGENT_SOCKET_DIR/agent.sock" ]; do
+        sleep 1
+        waited=$((waited+1))
+        [ "$waited" -ge 15 ] && fail "apdns-hostagent did not create its socket within 15s after systemd restart"
+    done
+    log "apdns-hostagent redeployed via systemd, real socket confirmed"
 else
-    fail "no running apdns-hostagent process found matching $GO_LIVE_HOSTAGENT_DIR/apdns-hostagent -- refusing to guess its flags; start it manually first"
+    log "WARNING: apdns-go-live-hostagent.service not installed -- falling back to manual kill+relaunch (see scripts/v2/systemd/README.md to install boot-survival units)"
+    current_ha_pid="$(pgrep -f "^$GO_LIVE_HOSTAGENT_DIR/apdns-hostagent " || true)"
+    if [ -n "$current_ha_pid" ]; then
+        ha_cmdline=()
+        while IFS= read -r -d '' arg; do ha_cmdline+=("$arg"); done < "/proc/$current_ha_pid/cmdline"
+        log "stopping current apdns-hostagent (pid $current_ha_pid)"
+        kill -TERM "$current_ha_pid"
+        sleep 2
+    else
+        fail "no running apdns-hostagent process found matching $GO_LIVE_HOSTAGENT_DIR/apdns-hostagent -- refusing to guess its flags; start it manually first"
+    fi
+    log "relaunching apdns-hostagent with its exact prior flags"
+    setsid "${ha_cmdline[@]}" > "$GO_LIVE_HOSTAGENT_DIR/hostagent-redeploy-$(date +%s).log" 2>&1 < /dev/null &
+    disown
+    waited=0
+    while [ ! -S "$GO_LIVE_HOSTAGENT_SOCKET_DIR/agent.sock" ]; do
+        sleep 1
+        waited=$((waited+1))
+        [ "$waited" -ge 10 ] && fail "apdns-hostagent did not create its socket within 10s after redeploy"
+    done
+    log "apdns-hostagent redeployed, real socket confirmed"
 fi
-log "relaunching apdns-hostagent with its exact prior flags"
-setsid "${ha_cmdline[@]}" > "$GO_LIVE_HOSTAGENT_DIR/hostagent-redeploy-$(date +%s).log" 2>&1 < /dev/null &
-disown
-waited=0
-while [ ! -S "$GO_LIVE_HOSTAGENT_SOCKET_DIR/agent.sock" ]; do
-    sleep 1
-    waited=$((waited+1))
-    [ "$waited" -ge 10 ] && fail "apdns-hostagent did not create its socket within 10s after redeploy"
-done
-log "apdns-hostagent redeployed, real socket confirmed"
 
 # --- web container: full recreate, the only way to pick up a changed
 # CLI argument (podman restart cannot add a new flag to an existing
-# container's entrypoint). ---
+# container's entrypoint). Stop the systemd unit first (if installed)
+# so it isn't left supervising a container ID this script is about to
+# `rm -f` out from under it -- otherwise Restart=on-failure could try
+# to restart a container that no longer exists, or fight this script's
+# own podman start below. ---
+WEB_UNIT_INSTALLED=0
+if systemctl cat apdns-go-live-web.service >/dev/null 2>&1; then
+    WEB_UNIT_INSTALLED=1
+    log "stopping apdns-go-live-web.service before recreate"
+    systemctl stop apdns-go-live-web.service || true
+fi
 log "recreating $GO_LIVE_CONTAINER"
 podman rm -f "$GO_LIVE_CONTAINER" >/dev/null 2>&1 || true
 podman create --name "$GO_LIVE_CONTAINER" \
@@ -282,7 +314,11 @@ podman create --name "$GO_LIVE_CONTAINER" \
     -dns-runtime-tls-key-path "$GO_LIVE_STATE/certs/server.key" \
     -addr 0.0.0.0:8443 \
     || fail "creating $GO_LIVE_CONTAINER failed"
-podman start "$GO_LIVE_CONTAINER" || fail "starting $GO_LIVE_CONTAINER failed"
+if [ "$WEB_UNIT_INSTALLED" -eq 1 ]; then
+    systemctl start apdns-go-live-web.service || fail "systemctl start apdns-go-live-web.service failed"
+else
+    podman start "$GO_LIVE_CONTAINER" || fail "starting $GO_LIVE_CONTAINER failed"
+fi
 log "$GO_LIVE_CONTAINER recreated and started from the committed base image (ca-certificates baked in, not a manual post-create install)"
 
 log "waiting for /api/health"
