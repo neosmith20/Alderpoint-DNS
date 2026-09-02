@@ -92,6 +92,14 @@
     }
   }
 
+  // Whether the hostname manual-setup instructions actually resolve for
+  // a client on another device -- "localhost" (or a bare loopback IP)
+  // only ever means something to a client running ON this appliance
+  // itself, never a phone/laptop/router elsewhere on the network. This
+  // was the real, disclosed defect: showing "tls://localhost:853" as if
+  // it were usable setup guidance for a normal client.
+  const hostnameIsLoopback = $derived(!!settings?.server_hostname && ["localhost", "127.0.0.1", "::1"].includes(settings.server_hostname));
+
   let rotateBusy = $state(false);
   let rotateResult = $state("");
   let rotateError = $state("");
@@ -129,9 +137,19 @@
     The TLS Certificate is this appliance's own replaceable management certificate (also
     reused by DoT/DoH/DoQ/DoH3). DNS Transport settings apply automatically to the live DNS
     service as soon as they're saved. DNSCrypt needs a provider identity provisioned once before
-    it can be enabled. Apple .mobileconfig enrollment profiles are available for download once a
-    transport is enabled and a certificate is active.
+    it can be enabled. Each enabled transport below shows the exact address to hand a client
+    device, plus setup steps for the platforms that support it.
   </p>
+
+  {#if settings && hostnameIsLoopback}
+    <p class="degraded-note" role="status">
+      This appliance's TLS certificate doesn't have a real hostname or LAN IP as its subject --
+      only "{settings.server_hostname}", which only ever means something to a client running on
+      this appliance itself. Replace the certificate below with one whose subject/SAN is this
+      appliance's real hostname or LAN IP before handing setup instructions to another device;
+      until then, the addresses shown below won't resolve anywhere else on the network.
+    </p>
+  {/if}
 
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
 
@@ -181,12 +199,23 @@
         </p>
         <label class="port">Port <input type="number" min="1" max="65535" bind:value={settings.dot_port} /></label>
         {#if settings.dot_enabled}
+          {@const hostname = settings.server_hostname ?? "(configure a management TLS certificate first)"}
           <div class="manual-setup">
-            <p class="manual-setup-label">Manual setup (Android, most routers, dnsmasq, etc.):</p>
-            <code>tls://{settings.server_hostname ?? "(configure a management TLS certificate first)"}:{settings.dot_port}</code>
+            <p class="manual-setup-label">Hostname / address:</p>
+            <code>{hostname}</code>, port <code>{settings.dot_port}</code> (some clients want the full URI: <code>tls://{hostname}:{settings.dot_port}</code>)
+            <p class="manual-setup-label">Android (Settings &rarr; Network &amp; internet &rarr; Private DNS &rarr; Private DNS provider hostname):</p>
+            <code>{hostname}</code>
+            <p class="hint">Android needs a real DNS hostname here, not an IP address or a <code>tls://</code> prefix -- if this appliance's certificate only has an IP as its subject, Private DNS setup will fail even though DoT itself is working.</p>
+            <p class="manual-setup-label">Router / dnsmasq / stubby / unbound (forward to this resolver over DoT):</p>
+            <code>tls_upstream_send_client_subnet: 0<br />tls_upstream: {hostname}@{settings.dot_port}</code>
+            <p class="hint">(stubby-style syntax shown; unbound uses <code>forward-tls-upstream: yes</code> plus a matching <code>forward-addr</code>/<code>forward-host</code> pair -- consult your router's own DoT forwarding docs for its exact syntax.)</p>
+            <p class="manual-setup-label">Windows:</p>
+            <p class="hint">Windows has no built-in DoT client; use a third-party stub resolver (e.g. YogaDNS) pointed at the hostname/port above, or configure DoT at the router instead.</p>
           </div>
           <a class="mobileconfig-link" href="/api/dns-transports/mobileconfig/dot">
-            Apple devices only: download a .mobileconfig profile
+            Download an Apple .mobileconfig profile -- installs this DoT server as the device's
+            resolver automatically (iOS/iPadOS/macOS only; other platforms use the manual setup
+            above)
           </a>
         {/if}
       </fieldset>
@@ -201,12 +230,33 @@
         <label class="port">Port <input type="number" min="1" max="65535" bind:value={settings.doh_port} /></label>
         <label class="path">Path <input bind:value={settings.doh_path} placeholder="/dns-query" /></label>
         {#if settings.doh_enabled}
+          {@const dohUrl = `https://${settings.server_hostname ?? "(configure a management TLS certificate first)"}:${settings.doh_port}${settings.doh_path}`}
           <div class="manual-setup">
-            <p class="manual-setup-label">Manual setup (browsers, Android, most routers, etc.):</p>
-            <code>https://{settings.server_hostname ?? "(configure a management TLS certificate first)"}:{settings.doh_port}{settings.doh_path}</code>
+            <p class="manual-setup-label">DoH server URL (this is what every client below wants):</p>
+            <code>{dohUrl}</code>
+            <p class="manual-setup-label">Firefox (Settings &rarr; Privacy &amp; Security &rarr; DNS over HTTPS &rarr; Custom):</p>
+            <code>{dohUrl}</code>
+            <p class="manual-setup-label">Chrome / Edge (Settings &rarr; Privacy and security &rarr; Security &rarr; Use secure DNS &rarr; With Custom):</p>
+            <code>{dohUrl}</code>
+            <p class="manual-setup-label">Windows 11 (Settings &rarr; Network &amp; internet &rarr; your connection &rarr; DNS server assignment &rarr; Edit &rarr; DNS over HTTPS on):</p>
+            <p class="hint">
+              Windows requires the plain IP address as the DNS server first, then lets you pick
+              "On (encrypted only)" and enter this same DoH template URL for it. Windows 10 has no
+              built-in DoH UI.
+            </p>
+            <p class="manual-setup-label">Android (Settings &rarr; Network &amp; internet &rarr; Private DNS):</p>
+            <p class="hint">Android's Private DNS field only accepts a DoT hostname, not a DoH URL -- use the DoT transport above for Android instead.</p>
+            <p class="manual-setup-label">Router / dnsmasq:</p>
+            <p class="hint">
+              dnsmasq has no native DoH client; most routers instead run a small local bridge
+              (e.g. cloudflared or dnsproxy) that speaks DoH upstream and plain DNS to the LAN --
+              point that bridge's upstream at the URL above.
+            </p>
           </div>
           <a class="mobileconfig-link" href="/api/dns-transports/mobileconfig/doh">
-            Apple devices only: download a .mobileconfig profile
+            Download an Apple .mobileconfig profile -- installs this DoH server as the device's
+            resolver automatically (iOS/iPadOS/macOS only; other platforms use the manual setup
+            above)
           </a>
         {/if}
       </fieldset>
@@ -221,8 +271,13 @@
         <label class="port">Port <input type="number" min="1" max="65535" bind:value={settings.doq_port} /></label>
         {#if settings.doq_enabled}
           <div class="manual-setup">
-            <p class="manual-setup-label">Manual setup:</p>
+            <p class="manual-setup-label">Manual setup (a DoQ-capable client, e.g. dnscrypt-proxy or AdGuard's own apps):</p>
             <code>quic://{settings.server_hostname ?? "(configure a management TLS certificate first)"}:{settings.doq_port}</code>
+            <p class="hint">
+              No mainstream OS (Windows, Android, iOS/macOS) has a built-in DoQ setting, and there is
+              no Apple configuration-profile format for DoQ -- it needs a client application that
+              specifically supports DoQ.
+            </p>
           </div>
         {/if}
       </fieldset>
@@ -236,8 +291,13 @@
         <label class="port">Port <input type="number" min="1" max="65535" bind:value={settings.doh3_port} /></label>
         {#if settings.doh3_enabled}
           <div class="manual-setup">
-            <p class="manual-setup-label">Manual setup:</p>
-            <code>h3://{settings.server_hostname ?? "(configure a management TLS certificate first)"}:{settings.doh3_port}{settings.doh_path}</code>
+            <p class="manual-setup-label">Manual setup (a client that specifically supports HTTP/3 DoH):</p>
+            <code>https://{settings.server_hostname ?? "(configure a management TLS certificate first)"}:{settings.doh3_port}{settings.doh_path}</code>
+            <p class="hint">
+              Same URL shape as the DoH transport above -- most DoH clients (browsers included) will
+              actually use HTTP/2 against this URL unless they specifically negotiate HTTP/3. If a
+              client doesn't explicitly document DoH3/HTTP-3 support, use the DoH transport instead.
+            </p>
           </div>
         {/if}
       </fieldset>
@@ -341,7 +401,7 @@
   .actions { display: flex; align-items: center; gap: 0.6rem; }
   .fingerprint { font-family: monospace; font-size: 0.82rem; word-break: break-all; }
   button.danger { color: var(--badge-danger-fg); border-color: var(--badge-danger-fg); }
-  .success { color: #16a34a; }
+  .success { color: var(--success); }
   .error { color: var(--badge-danger-fg); }
   .degraded-note { background: var(--badge-warn-bg); color: var(--badge-warn-fg); padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.85rem; }
   .hint { font-size: 0.8rem; opacity: 0.7; }
