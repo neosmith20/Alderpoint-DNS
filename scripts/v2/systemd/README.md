@@ -127,6 +127,41 @@ is packaged into the `.deb` (`scripts/build-go-deb.sh` only packages
   `packaging/systemd/*.service`, an entirely separate unit set) doesn't
   have to begin with.
 
+## Reboot validation (observe-only, one-time, survives CC dying)
+
+Because the actual reboot proof kills whatever session is running it
+(including a Claude Code session on this same VM), the reboot proof
+itself doesn't depend on any session surviving the reboot:
+`apdns-reboot-validate.service` runs automatically after boot (once
+armed) and writes its findings to a plain log file on disk --
+`/root/apdns-reboot-proof/post-reboot-validation.log` -- that anything
+(a human over SSH, or a fresh CC session started afterward) can read
+independently, with no dependency on the process that armed it still
+existing.
+
+- `scripts/v2/systemd/pre-reboot-capture.sh` -- run manually right
+  before a reboot. Writes `/root/apdns-reboot-proof/pre-reboot-capture.log`
+  (repo HEAD, live SHA, unit/mask status, topology, listeners, and a
+  full DNS proof) -- purely observational, changes nothing.
+- `scripts/v2/systemd/apdns-reboot-validate.service` +
+  `post-reboot-validate.sh` -- a systemd unit installed but **disabled**
+  by default (`systemctl is-enabled` -> `disabled`); arm it explicitly
+  (`systemctl enable apdns-reboot-validate.service`) right before each
+  planned reboot test. On the next boot it waits briefly (up to 90s) for
+  the web API, then runs the full checklist (health/login/UDP+TCP DNS/
+  local record/blocklist/upstream/exactly-one-of-each-process/no banned
+  ports/dnscrypt-proxy still masked/live SHA unchanged vs. the
+  pre-reboot capture) and writes
+  `/root/apdns-reboot-proof/post-reboot-validation.log`. **It never
+  starts, stops, restarts, or promotes anything** -- if something didn't
+  come back on its own, the log says so plainly and recovery is left to
+  a human or CC after login, exactly as this appliance's boot-survival
+  design is meant to be tested (does it come back BY ITSELF, with zero
+  intervention -- a script that "helpfully" repaired failures would be
+  testing something else). Self-disables at the end of its own run
+  (success or failure) so it doesn't fire again on a later, unrelated
+  reboot -- re-arm it explicitly before every future planned test.
+
 ## Not covered by this pattern
 
 `apdns-go-live-dns-promote.service` is a one-shot **compile of current

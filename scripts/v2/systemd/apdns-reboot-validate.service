@@ -1,0 +1,19 @@
+[Unit]
+Description=Alderpoint DNS Go live appliance -- ONE-TIME post-reboot validation (observe only, no repair)
+Documentation=file:///root/alderpointdns-go-migration/scripts/v2/systemd/README.md
+# Ordering only (After=, deliberately NOT Requires=) -- this validator
+# must still run and record the truth even if apdns-go-live-dns-promote
+# itself failed to start. Requires= would skip this unit entirely in
+# exactly the failure case it exists to observe.
+After=network-online.target apdns-go-live-hostagent.service apdns-go-live-web.service apdns-go-live-dns-promote.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/root/alderpointdns-go-migration/scripts/v2/systemd/post-reboot-validate.sh
+# No Restart= -- this runs exactly once per arming (systemctl enable),
+# and self-disables at the end of its own script regardless of outcome.
+
+[Install]
+WantedBy=multi-user.target
