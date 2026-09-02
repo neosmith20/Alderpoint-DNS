@@ -43,6 +43,20 @@ RestartSec=3
 # named, dnsdist, and its own update-candidate binary as a privileged
 # root process, matching packaging/systemd/apdns-hostagent.service.
 PrivateTmp=true
+# KillMode=process (NOT the systemd default control-group) -- real live
+# defect found and fixed 2026-09-02, first real redeploy after adding
+# this unit: named/dnsdist are execed directly BY apdns-hostagent (see
+# internal/hostagentd/ops_dnsruntime.go), so they land in this unit's
+# own cgroup. The default control-group KillMode sends its stop signal
+# to the WHOLE cgroup, which killed named+dnsdist too on a plain
+# `systemctl restart apdns-go-live-hostagent.service` -- turning a
+# hostagent-only restart (previously a real, tested no-DNS-disruption
+# operation via manual `kill -TERM $pid`, relying on
+# trackedProcess/PID-file adoption to pick the still-running named/
+# dnsdist back up) into a real DNS outage. KillMode=process signals
+# only the main ExecStart process, leaving named/dnsdist alive for that
+# adoption logic to actually do its job.
+KillMode=process
 
 [Install]
 WantedBy=multi-user.target
