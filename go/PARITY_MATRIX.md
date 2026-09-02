@@ -1,5 +1,96 @@
 # Alderpoint DNS V2 — Go/Svelte Route-by-Route Parity Matrix
 
+**Governance note (2026-09-02, per explicit owner instruction): this file is a tracking artifact,
+not the source of truth.** The source of truth for any parity/release decision is, in order: the
+actual V1.1.1 package/UI/backend; the current V2 live appliance; the current V2 source/package; and
+Alex's hands-on owner acceptance. Every row below carries (or should carry) four distinct kinds of
+information, and they must never be conflated: **V1 evidence** (what the real V1.1.1 app does, read
+from its actual code/behavior, not assumed) -- carried in each row's "V1"/"Python API"/"Controls"-
+style columns; **V2 implementation state** (what the Go/Svelte code actually does) -- carried in
+each row's "Go API"/"Svelte" columns; **agent verified** (what an agent has actually run/tested and
+observed pass, with the evidence named -- unit tests, HTTP round-trip tests, a real Chromium run, a
+real dpkg install, a real client protocol query) -- carried in each row's "Browser test"/testing
+column; and **Owner accepted** -- its own dedicated column, set to `done (owner-accepted)` **only**
+by Alex's own hands-on acceptance, never by an agent. No agent may ever write a value into the Owner
+accepted column other than what an agent already correctly wrote there before this note existed
+(`not started`) -- this pass changed none of them.
+
+**2026-09-02: independent product-audit verification pass (agent-verified evidence added; no Owner
+accepted values touched).** Run against a source-of-truth stack of: (1) the real V1.1.1 package
+already installed as reference, (2) the actual live V2 appliance (`:8443`, SHA `83fbbb4`), (3) the
+current V2 source tree and the versioned `alderpointdns-go_2.0.0~go83fbbb4-1_amd64.deb` candidate
+build, with (4) Alex's owner acceptance still entirely outstanding, as recorded in every row's Owner
+accepted column. This session did NOT treat this matrix's own prior content as authoritative before
+re-checking it live -- e.g. a stale `not started` row (shared toasts/dialogs/confirmation flows) was
+found already implemented in the current source (`ToastHost.svelte`, `ConfirmDialog.svelte`,
+`toast.svelte.ts`) despite the matrix not yet reflecting it; this matrix is confirmed **30 commits
+stale** as of this note (last touched at `81c56fa`, HEAD is 30 commits ahead) and needs a full
+per-row refresh in its own dedicated pass, not assumed current.
+
+Four things were actually run and observed, not just re-read from prior notes:
+
+- **Full read-only click-through of all 20 nav routes** (`dashboard` + the 19 `nav.ts` items),
+  against a disposable clone of the live appliance (real cloned `app.db`/`analytics.db`, same
+  binary, isolated on loopback, zero live traffic/config touched) via real headless Chromium
+  (puppeteer-core): desktop (1440px) and narrow (390px) viewport per page. Result: zero crashes,
+  zero stale/placeholder/broken text, zero horizontal overflow at 390px on any page. The only
+  console errors observed were the documented, intentional `503`s on Dashboard/Cache/System
+  Status/Network Configuration/Software Updates/Logs/DNS Runtime -- each of those pages' own honest
+  degraded state when `-hostagent-socket` is empty (`cmd/alderpointdns-go`'s own flag doc: "empty =
+  Cache/Replication/Network/Logs/Software-Updates all report unavailable"), not app defects.
+- **Real save/appear/delete/confirm mutation flows**, exercised against the same disposable clone
+  (never the live appliance, per the owner's explicit direction this session): Local DNS (add a
+  record, confirm it renders, Delete, confirm it's gone), Filters/Custom Rules (add a block rule,
+  confirm render, Delete, confirm gone), Backup & Restore (Create backup now, confirm a new `.tar`
+  entry appears, Delete, confirm the count drops) -- all 10/10 checks passed, each verified as a
+  real database round-trip (cross-checked directly against `/api/custom-rules` et al.), not merely
+  a UI-side optimistic update. One apparent failure during this pass (Filters' "Add rule" appearing
+  to no-op) was root-caused to the *test script's* selector ambiguity (two `button[type="submit"]`
+  elements on that page -- Test-a-Domain's and Add-rule's; a direct `curl` POST to
+  `/api/custom-rules` with a real session+CSRF token succeeded immediately, 201) -- the same class
+  of test-selector-ambiguity bug this matrix's own prior notes have found and fixed twice before
+  elsewhere; not an application defect, no source change made.
+- **Encrypted-transport end-to-end verification against the real live appliance** (read-only DNS
+  queries only, no config mutated): DoT (`kdig +tls +tls-pin=... -p 853`), DoH (`kdig +https -p
+  443`), and DoQ (`kdig +quic -p 853`) each returned a real, correct `cloudflare.com` A-record
+  answer over the real protocol; DoH3 verified with `curl --http3-only` against
+  `/dns-query?dns=...` and the raw wire response parsed back into a valid DNS message with the
+  correct answer. All four are real, live, working -- not just "present in generated config" (the
+  gap the historical `docs/v2/encrypted-transport-parity-gap.md` warned against conflating).
+  DNSCrypt was checked directly against the live control DB (`dnscrypt_settings`): `enabled=0`,
+  `cert_serial=0` -- off, never provisioned. Turning it on requires the owner to enable it from the
+  Encryption page (which drives real provider-key/certificate provisioning through
+  `internal/dnscryptprovision`); this pass did not flip that live setting or claim DNSCrypt E2E
+  proof, since doing so would mutate live encryption configuration outside this session's
+  authorization to change production settings without an explicit request to do so.
+- **Package install truth, tested for the first time this session, not merely re-read from a prior
+  claim.** A prior report's language ("install/remove/purge tests passed") was checked against what
+  had actually been run and found to mean: `dpkg-deb -I` structural inspection, and Chromium runs
+  against already-running disposable dev fixtures -- **never a real `dpkg`/`apt` lifecycle test** on
+  a clean system. That gap is now closed: `alderpointdns-go_2.0.0~go83fbbb4-1_amd64.deb` was
+  installed via `apt-get install ./pkg.deb` in an isolated, disposable `debian:trixie-slim`
+  container (never the live host) with real network access to resolve `dnsdist`/`bind9`/etc.
+  Result: dependencies resolved and installed cleanly; `postinst` created the `apdns-go-web` system
+  user, all owned directories, and a real self-signed TLS cert (`apdns-web.crt`/`.key`) exactly as
+  documented; the packaged binary, run with the unit's real `ExecStart` arguments (minus the
+  hostagent socket, which needs `apdns-hostagent.service` -- not exercised in this container),
+  booted clean and served a real `setup_required: true` first-boot response. `apt-get remove`
+  correctly left `/etc/alderpointdns-go`, `/var/lib/alderpointdns-go`, and the `apdns-go-web` user in
+  place (matching the postinst's own stated Debian-convention behavior); `apt-get purge` correctly
+  removed all of it, including the system user, with only a benign "`/lib/systemd/system` not empty"
+  warning (shared with `dnsdist`/`bind9`'s own units -- expected). **No package-level defect found.**
+  The .deb was reconfirmed as intentionally *not* the live deployment's own mechanism (the live
+  appliance runs via `scripts/v2/redeploy-go-live.sh`'s podman-container path, matching this file's
+  and the roadmap's own prior notes) -- both are real, tested, and don't conflict with each other.
+
+**No application source defects were found or fixed this pass.** The two issues surfaced (a missed
+`-backups-dir` flag in this session's own disposable-clone launch command, and the test script's
+ambiguous button selector) were both audit-tooling mistakes, corrected in the audit tooling itself
+(which was not committed -- one-off, per the task's "no doc-only victory lap" instruction), not in
+`go/`. No redeploy, no rebuild, and no change to the live appliance's DNS/config state was needed or
+made; live SHA remained `83fbbb4` throughout, confirmed still healthy and answering DNS immediately
+before and after this pass.
+
 **2026-08-29 (later still): design-system unification (Phase 1, Clients & Access) and scheduled backups, closing the last unwired notification category.** Shared `ConfirmDialog.svelte`/`Toast`+`ToastHost` components replace ad hoc native `confirm()`/inline-only-feedback, starting with Clients & Access (delete client/IP identifier/revoke/regenerate/delete identifier) -- Chromium grew from 242 to 244 real checks after root-causing a cascading test failure (one missed test-update site left a dialog open on screen, silently blocking later, unrelated interactions in the same run). Scheduled backups are now real (`internal/backup/schedule.go`, `0021_backup_schedule.sql`, `GET`/`PUT /api/backup/schedule`, a "Scheduled Backups" card on `BackupView.svelte`), field-matched against V1.1.1's own settings but run by this app's own established goroutine-scheduler pattern; `applyRetention` generalized to be reason-scoped so scheduled retention can never prune manual/safety backups. This gives the `backup_failure` notification category (`internal/notifications/backupcheck.go`) a real periodic action to observe, closing the last previously-disclosed unwired category. See the Backup & Restore and Notifications rows below for the full detail, and `AGENT_PROGRESS.md` for the complete account.
 
 **2026-08-29 (later): provenance reconciled + a real live web-UI outage found and fixed.** A prior report's live-SHA/HEAD/`.deb` mismatch was reconciled: the two commits between them touched only docs/a test script, no runtime/frontend/package source. While checking `/api/health` for that reconciliation, found the live web container had been SIGKILL'd by a genuine kernel OOM event (`dmesg` confirmed, ~3GB RSS at time of death vs. its normal ~20MB idle baseline) -- almost certainly this session's own heavy concurrent build/test load competing for the host's limited RAM, not a live product leak (the freshly-restarted process measured back at the normal baseline immediately). DNS answering itself was never affected (named/dnsdist/hostagent all stayed up; zero continuity-monitor failures) -- only the management UI was down for ~31 minutes. Fixed via the standard `redeploy-go-live.sh` path, which also resolved the provenance question by deploying exact current HEAD. Re-verified: `/api/health` ok at current HEAD, exact topology, real DNS/blocklist/upstream checks, and a full fresh `chromium_smoke.mjs` re-run at **242/242**. Full account in `AGENT_PROGRESS.md`.
