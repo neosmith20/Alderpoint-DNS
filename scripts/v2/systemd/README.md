@@ -56,12 +56,40 @@ Confirmed unused before masking:
 It is `systemctl mask`ed (stronger than `disable` -- prevents any unit,
 including a future package upgrade re-enabling it, or an admin
 accidentally `systemctl start`ing it, from bringing it back) rather
-than left merely disabled. `apdns-go-live-dns-promote.service`'s own
-`ExecStartPre` (`check-port53-free.sh`) also verifies port 53 is
-genuinely free immediately before every promote attempt and fails with
-a clear message naming `dnscrypt-proxy` specifically if anything holds
-it, so a *different* future port-53 squatter is caught loudly instead
-of reproducing the same multi-hour diagnosis.
+than left merely disabled. `check-port53-free.sh` (still run by
+`dns-promote-live.sh` -- see below for when) verifies port 53 is
+genuinely free immediately before every real promote attempt and fails
+with a clear message naming `dnscrypt-proxy` specifically if anything
+holds it, so a *different* future port-53 squatter is caught loudly
+instead of reproducing the same multi-hour diagnosis.
+
+## Two real deploy-time defects found the first time this was exercised live
+
+Both fixed the same session the units were added, once a real redeploy
+(not just the simulated cold-start test) actually exercised them:
+
+1. **`KillMode=process` on the hostagent unit.** `apdns-hostagent` execs
+   `named`/`dnsdist` directly, so they land in
+   `apdns-go-live-hostagent.service`'s own cgroup. Systemd's *default*
+   `KillMode=control-group` sends the stop signal to that whole cgroup on
+   `systemctl restart` -- so a routine hostagent restart killed
+   `named`/`dnsdist` too, turning what should be a no-DNS-disruption
+   operation (the existing `trackedProcess`/PID-file adoption logic is
+   designed to pick the still-running processes back up) into a real
+   outage. `KillMode=process` (only the main process) fixes it.
+2. **`dns-promote-live.sh` now checks whether DNS is already healthy
+   before attempting a promote.** `apdns-go-live-dns-promote.service`
+   `Requires=` the hostagent unit, so *any* hostagent restart tears the
+   promote unit down too, and systemd auto-restarts it. With fix #1 in
+   place, `named`/`dnsdist` are still alive and fine at that point --
+   but the old promote logic didn't know that, and always failed via
+   `check-port53-free.sh` (dnsdist already legitimately owns `:53`),
+   leaving `systemctl status` on the promote unit looking like a real
+   failure even though DNS never broke. The script now asks
+   `apdns-hostagent` directly (`dns_runtime.status`) whether it already
+   considers both processes running, and skips the promote entirely
+   (exit 0) if so -- `check-port53-free.sh` is unchanged and still runs,
+   still catching a genuine rival, whenever that's not the case.
 
 ## Interaction with `redeploy-go-live.sh`
 
@@ -72,6 +100,32 @@ its own manual process management can never race systemd's
 `Restart=on-failure` into running two hostagent processes or two web
 containers at once. See that script's own comments at each step for the
 detail.
+
+## SHA/package alignment note
+
+Everything in this directory, plus `scripts/v2/redeploy-go-live.sh`, is
+**live-ops tooling for this one ad hoc deployment only** -- none of it
+is packaged into the `.deb` (`scripts/build-go-deb.sh` only packages
+`go/` build output + `packaging/`, never `scripts/v2/`). That means:
+
+- The live appliance's *app* version (`/api/health`'s `version` field)
+  tracks the `go/` source tree's commit, via `redeploy-go-live.sh`
+  stamping `main.Version` at build time.
+- The repo's overall `git rev-parse HEAD` can be AHEAD of that live app
+  version whenever only files under `scripts/v2/` (this directory,
+  `redeploy-go-live.sh`) changed -- those commits affect how the live
+  appliance is *supervised*, not what binary it's running, so no app
+  rebuild/redeploy is implied or needed by them alone.
+- The `.deb`'s embedded commit (its `Version:` field, `main.Version` in
+  the packaged binary) only needs to match `go/`+`packaging/`'s state,
+  never `scripts/v2/`'s -- rebuild it when either of those change, not
+  on every commit to this directory.
+- This live appliance was never installed via the `.deb` in the first
+  place (see [[alderpointdns-owner-preview]]/`docs/v2/owner-preview.md`)
+  -- these units exist because this ad hoc deployment has no systemd
+  coverage of its own otherwise, a gap the packaged install (native,
+  `packaging/systemd/*.service`, an entirely separate unit set) doesn't
+  have to begin with.
 
 ## Not covered by this pattern
 
