@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"alderpointdns/go-controlplane/internal/blocklists"
 	"alderpointdns/go-controlplane/internal/clients"
@@ -95,6 +96,32 @@ type Result struct {
 	Stage      string `json:"stage,omitempty"`
 	Detail     string `json:"detail,omitempty"`
 	Error      string `json:"error,omitempty"`
+
+	// Timings: real, measured instrumentation of THIS apply -- see
+	// hostagentd.PromoteTimings' own doc comment for what each
+	// agent-side field means and why compiling/validating is fast but
+	// reloading/health-checking is not. BuildMS/CompileMS/RPCMS are this
+	// unprivileged web process's own share of the total (gathering
+	// current DB state, compiling dnsdist.conf, and the host-agent RPC
+	// round trip itself, which wraps the agent-side stages this same
+	// struct also reports) -- consistently the smallest slice; the
+	// dominant cost lives inside RPCMS, in the agent-side fields.
+	Timings *ApplyTimings `json:"timings,omitempty"`
+}
+
+// ApplyTimings mirrors hostagentd.PromoteTimings field-for-field (same
+// cross-process wire-JSON duplication boundary as Result/DNSPromoteResult
+// above), plus this web process's own BuildMS/CompileMS/RPCMS.
+type ApplyTimings struct {
+	BuildMS    int64 `json:"build_ms"`        // gathering current DB state (upstreams, blocklists, etc.)
+	WebCompile int64 `json:"web_compile_ms"`  // this process's own dnscompile.CompileDnsdist
+	RPCMS      int64 `json:"rpc_ms"`          // the host-agent round trip -- wraps every agent-side stage below
+	CompileMS  int64 `json:"compile_ms"`      // agent-side: compiling named.conf + staging both config files
+	ValidateMS int64 `json:"validate_ms"`     // agent-side: named-checkconf + dnsdist --check-config
+	PromoteMS  int64 `json:"promote_ms"`      // agent-side: writing both live config files
+	ReloadMS   int64 `json:"reload_ms"`       // agent-side: BIND rndc reconfig + dnsdist stop/start cycle
+	HealthMS   int64 `json:"health_check_ms"` // agent-side: real dig polling until confirmed serving
+	TotalMS    int64 `json:"total_ms"`        // this process's own end-to-end wall time for the whole Apply/Validate call
 }
 
 // UpstreamServerStat/UpstreamStatsResult mirror
@@ -192,15 +219,21 @@ func (o *Orchestrator) run(ctx context.Context, dryRun bool) Result {
 	if o.HostAgent == nil {
 		return Result{Attempted: false, Error: "no host-agent configured for this deployment -- DNS runtime compilation is unavailable"}
 	}
+	runStarted := time.Now()
 
+	buildStarted := runStarted
 	in, bindForwarders, bindTLSHostname, err := o.build(ctx)
 	if err != nil {
 		return Result{Attempted: true, Error: fmt.Sprintf("gathering runtime state: %v", err)}
 	}
+	buildMS := time.Since(buildStarted).Milliseconds()
+
+	compileStarted := time.Now()
 	dnsdistConf, err := dnscompile.CompileDnsdist(in)
 	if err != nil {
 		return Result{Attempted: true, Error: fmt.Sprintf("compiling dnsdist config: %v", err)}
 	}
+	webCompileMS := time.Since(compileStarted).Milliseconds()
 
 	params := map[string]any{
 		"dnsdist_conf":      dnsdistConf,
@@ -211,17 +244,29 @@ func (o *Orchestrator) run(ctx context.Context, dryRun bool) Result {
 		"dnsdist_api_port":  o.DnsdistAPIPort,
 	}
 	var promResult struct {
-		Promoted   bool   `json:"promoted"`
-		RolledBack bool   `json:"rolled_back"`
-		Stage      string `json:"stage"`
-		Detail     string `json:"detail"`
+		Promoted   bool          `json:"promoted"`
+		RolledBack bool          `json:"rolled_back"`
+		Stage      string        `json:"stage"`
+		Detail     string        `json:"detail"`
+		Timings    *ApplyTimings `json:"timings"`
 	}
+	rpcStarted := time.Now()
 	if err := o.HostAgent.Call(ctx, hostagent.OpDNSRuntimePromote, params, &promResult); err != nil {
 		return Result{Attempted: true, Error: err.Error()}
 	}
+	rpcMS := time.Since(rpcStarted).Milliseconds()
+
+	timings := &ApplyTimings{BuildMS: buildMS, WebCompile: webCompileMS, RPCMS: rpcMS, TotalMS: time.Since(runStarted).Milliseconds()}
+	if promResult.Timings != nil {
+		timings.CompileMS = promResult.Timings.CompileMS
+		timings.ValidateMS = promResult.Timings.ValidateMS
+		timings.PromoteMS = promResult.Timings.PromoteMS
+		timings.ReloadMS = promResult.Timings.ReloadMS
+		timings.HealthMS = promResult.Timings.HealthMS
+	}
 	return Result{
 		Attempted: true, Promoted: promResult.Promoted, RolledBack: promResult.RolledBack,
-		Stage: promResult.Stage, Detail: promResult.Detail,
+		Stage: promResult.Stage, Detail: promResult.Detail, Timings: timings,
 	}
 }
 

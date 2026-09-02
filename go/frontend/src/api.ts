@@ -1514,4 +1514,23 @@ export interface DNSRuntimeApplyResult {
   stage?: string;
   detail?: string;
   error?: string;
+  // Real, measured instrumentation of this specific apply -- added in
+  // direct response to the owner-reported "upstream apply takes 20-30
+  // seconds with no visibility into where" defect. build_ms/web_compile_ms
+  // are this control-plane process's own share; rpc_ms is the
+  // host-agent round trip (wraps compile_ms/validate_ms/promote_ms/
+  // reload_ms/health_check_ms, all measured on the agent side). Absent
+  // entirely on a dry-run's "validated" response before promote() ever
+  // ran, and on any response where attempted is false.
+  timings?: {
+    build_ms: number;
+    web_compile_ms: number;
+    rpc_ms: number;
+    compile_ms: number;
+    validate_ms: number;
+    promote_ms: number;
+    reload_ms: number;
+    health_check_ms: number;
+    total_ms: number;
+  };
 }

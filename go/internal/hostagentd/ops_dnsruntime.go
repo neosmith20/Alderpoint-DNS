@@ -295,6 +295,33 @@ type DNSPromoteResult struct {
 	Stage       string `json:"stage"`
 	Detail      string `json:"detail,omitempty"`
 	HealthyAtMS int64  `json:"healthy_after_ms,omitempty"`
+
+	// Timings: real, measured wall-clock milliseconds per stage of THIS
+	// promote call, only ever populated on the path that actually ran
+	// that stage (dry-run responses only fill CompileMS/ValidateMS since
+	// nothing after "validated" ever runs). Added 2026-09-02 in direct
+	// response to a real owner complaint that upstream-provider apply
+	// (and every other resolver-affecting save) "takes 20-30 seconds"
+	// with no visibility into where that time actually goes -- these are
+	// exactly the numbers that answer that, surfaced all the way through
+	// dnsruntime.Result to every page's own DnsRuntimeBadge. Compiling/
+	// staging/validating is consistently sub-second in practice; the
+	// real cost is ReloadMS (dnsdist cannot hot-reload its config, so a
+	// full stop/start cycle is unavoidable -- see reloadDnsdist's own
+	// doc comment for the specific live incident that makes shortening
+	// its restart backoff unsafe) and HealthCheckMS (real `dig` queries
+	// polling until the just-promoted config is confirmed actually
+	// serving, not just that the process exists).
+	Timings *PromoteTimings `json:"timings,omitempty"`
+}
+
+type PromoteTimings struct {
+	CompileMS     int64 `json:"compile_ms"`      // dnscompile.CompileNamedConf + staging both config files
+	ValidateMS    int64 `json:"validate_ms"`     // named-checkconf + dnsdist --check-config
+	PromoteMS     int64 `json:"promote_ms"`      // writing both live config files
+	ReloadMS      int64 `json:"reload_ms"`       // BIND rndc reconfig + dnsdist stop/start cycle
+	HealthCheckMS int64 `json:"health_check_ms"` // real dig polling until confirmed serving
+	TotalMS       int64 `json:"total_ms"`
 }
 
 // RegisterDNSRuntimeOps wires dns.status/dns.promote. Generates a fresh
@@ -383,6 +410,9 @@ func (st *dnsRuntimeState) promote(ctx context.Context, p DNSPromoteParams) (*DN
 	st.mu.Lock()
 	defer st.mu.Unlock()
 
+	promoteStarted := time.Now()
+	stageStarted := promoteStarted
+
 	namedConf, err := dnscompile.CompileNamedConf(dnscompile.NamedConfInput{
 		Forwarders: p.BindForwarders, TLSHostname: p.BindTLSHostname,
 		PlainPort: st.cfg.BindPlainPort, ProxyPort: st.cfg.BindProxyPort, StatsPort: st.cfg.BindStatsPort,
@@ -402,6 +432,8 @@ func (st *dnsRuntimeState) promote(ctx context.Context, p DNSPromoteParams) (*DN
 	if err := atomicWrite(dnsdistStagePath, p.DnsdistConf); err != nil {
 		return nil, fmt.Errorf("staging dnsdist.conf: %w", err)
 	}
+	compileMS := time.Since(stageStarted).Milliseconds()
+	stageStarted = time.Now()
 
 	// --- validate (both must pass before either promotes) ---
 	if out, err := exec.CommandContext(ctx, st.cfg.NamedCheckconfBinary, namedStagePath).CombinedOutput(); err != nil {
@@ -410,13 +442,17 @@ func (st *dnsRuntimeState) promote(ctx context.Context, p DNSPromoteParams) (*DN
 	if out, err := exec.CommandContext(ctx, st.cfg.DnsdistBinary, "-C", dnsdistStagePath, "--check-config").CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("dnsdist --check-config rejected the compiled config, nothing promoted: %s", strings.TrimSpace(string(out)))
 	}
+	validateMS := time.Since(stageStarted).Milliseconds()
 
 	if p.DryRun {
 		// Proof the exact config is valid -- nothing live touched, no
 		// socket bound, safe to call while another process still owns
 		// the real DNS port.
-		return &DNSPromoteResult{Promoted: false, Stage: "validated"}, nil
+		return &DNSPromoteResult{Promoted: false, Stage: "validated", Timings: &PromoteTimings{
+			CompileMS: compileMS, ValidateMS: validateMS, TotalMS: time.Since(promoteStarted).Milliseconds(),
+		}}, nil
 	}
+	stageStarted = time.Now()
 
 	// --- back up whatever is currently live, then promote atomically ---
 	prevNamed, prevNamedExisted := readIfExists(st.cfg.BindLivePath)
@@ -434,6 +470,8 @@ func (st *dnsRuntimeState) promote(ctx context.Context, p DNSPromoteParams) (*DN
 		}
 		return nil, fmt.Errorf("promoting dnsdist.conf: %w", err)
 	}
+	promoteMS := time.Since(stageStarted).Milliseconds()
+	stageStarted = time.Now()
 
 	// --- reload ---
 	if err := st.reloadBind(ctx); err != nil {
@@ -442,6 +480,7 @@ func (st *dnsRuntimeState) promote(ctx context.Context, p DNSPromoteParams) (*DN
 	if err := st.reloadDnsdist(ctx); err != nil {
 		return st.rollback(ctx, "dnsdist_reload", err.Error(), prevNamed, prevDnsdist, havePrev, prevAPIKey, prevAPIPort)
 	}
+	reloadMS := time.Since(stageStarted).Milliseconds()
 
 	// --- health check: prove THIS promotion is actually live ---
 	started := time.Now()
@@ -449,10 +488,14 @@ func (st *dnsRuntimeState) promote(ctx context.Context, p DNSPromoteParams) (*DN
 		return st.rollback(ctx, "health_check", err.Error(), prevNamed, prevDnsdist, havePrev, prevAPIKey, prevAPIPort)
 	}
 
+	healthCheckMS := time.Since(started).Milliseconds()
 	st.prevNamedConf, st.prevDnsdist, st.havePrev = namedConf, p.DnsdistConf, true
 	st.dnsdistAPIKey, st.dnsdistAPIPort = p.DnsdistAPIKey, p.DnsdistAPIPort
 	st.lastPromotedAt = time.Now().UTC().Format(time.RFC3339)
-	return &DNSPromoteResult{Promoted: true, Stage: "healthy", HealthyAtMS: time.Since(started).Milliseconds()}, nil
+	return &DNSPromoteResult{Promoted: true, Stage: "healthy", HealthyAtMS: healthCheckMS, Timings: &PromoteTimings{
+		CompileMS: compileMS, ValidateMS: validateMS, PromoteMS: promoteMS, ReloadMS: reloadMS,
+		HealthCheckMS: healthCheckMS, TotalMS: time.Since(promoteStarted).Milliseconds(),
+	}}, nil
 }
 
 // rollback restores whatever was live before this promotion attempt

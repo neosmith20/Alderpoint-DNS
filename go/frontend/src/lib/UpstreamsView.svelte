@@ -35,6 +35,30 @@
   let formError = $state("");
   let dnsRuntimeResult = $state<DNSRuntimeApplyResult | null>(null);
 
+  // Applying an upstream change compiles/validates/promotes/restarts the
+  // resolver and verifies DNS health before this request returns -- a
+  // real, owner-reported 20-30 second wait (dnsdist cannot hot-reload
+  // its config, so a full stop/start cycle is unavoidable; see
+  // DnsRuntimeBadge's own "where did the time go" breakdown for the
+  // measured proof once it completes). A disabled button with only
+  // "Saving…" for that whole window is exactly the "silently blocks the
+  // UI" defect being fixed here -- this ticking elapsed-time line is
+  // real (setInterval against Date.now(), not a fake progress bar) so
+  // the owner can see it's still working, not frozen.
+  let applyElapsedMs = $state(0);
+  let applyTimer: ReturnType<typeof setInterval> | undefined;
+
+  function startApplyTimer() {
+    applyElapsedMs = 0;
+    const startedAt = Date.now();
+    applyTimer = setInterval(() => (applyElapsedMs = Date.now() - startedAt), 200);
+  }
+
+  function stopApplyTimer() {
+    if (applyTimer) clearInterval(applyTimer);
+    applyTimer = undefined;
+  }
+
   async function refresh(): Promise<void> {
     const token = guard.start();
     try {
@@ -181,6 +205,7 @@
     e.preventDefault();
     formError = "";
     formBusy = true;
+    startApplyTimer();
     const body = {
       name: formName,
       transport: formTransport,
@@ -204,6 +229,7 @@
       formError = err instanceof ApiError ? err.message : String(err);
     } finally {
       formBusy = false;
+      stopApplyTimer();
     }
   }
 
@@ -335,6 +361,13 @@
       <button type="submit" disabled={formBusy}>{formBusy ? "Saving…" : editingId ? "Save changes" : "Add profile"}</button>
       {#if editingId}<button type="button" onclick={resetForm}>Cancel</button>{/if}
     </div>
+    {#if formBusy}
+      <p class="applying-note" role="status">
+        Applying to the DNS runtime ({(applyElapsedMs / 1000).toFixed(1)}s elapsed) -- this can take up to 30
+        seconds while it recompiles, restarts the resolver, and verifies DNS is answering correctly. This is
+        not frozen; see the timing breakdown below once it finishes.
+      </p>
+    {/if}
     {#if formError}<p class="error" role="alert">{formError}</p>{/if}
   </form>
 
@@ -469,6 +502,7 @@
   .endpoint-row input.narrow { flex: 0 0 4rem; }
   .add-endpoint-btn { align-self: flex-start; background: transparent; color: var(--fg); border: 1px dashed var(--border); }
   .form-actions { display: flex; gap: 0.5rem; }
+  .applying-note { font-size: 0.82rem; opacity: 0.85; background: var(--panel-elevated); border-radius: 6px; padding: 0.5rem 0.75rem; margin: 0; }
   .chips { display: flex; flex-wrap: wrap; gap: 0.3rem; }
   .chip { background: var(--nav-hover-bg); padding: 0.1rem 0.5rem; border-radius: 999px; font-size: 0.78rem; }
   .badge { padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 0.78rem; }

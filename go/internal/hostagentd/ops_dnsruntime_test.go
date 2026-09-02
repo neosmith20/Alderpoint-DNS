@@ -128,6 +128,68 @@ func TestDNSRuntimePromoteBringsUpRealBindAndDnsdist(t *testing.T) {
 	}
 }
 
+// TestDNSRuntimePromoteReportsRealStageTimings is the regression proof
+// for the owner-reported "upstream apply takes 20-30 seconds with no
+// visibility into where" defect: a real, successful promote must report
+// non-negative timings for every stage it actually ran, with TotalMS at
+// least as large as the sum of the stages that take real, measurable
+// time (reload + health check dominate in practice; compile/validate/
+// promote are typically sub-millisecond in a test fixture, so they are
+// only asserted non-negative, not strictly positive).
+func TestDNSRuntimePromoteReportsRealStageTimings(t *testing.T) {
+	s, cfg := newDNSRuntimeConfig(t)
+	in := dnscompile.Input{ListenAddress: cfg.DnsdistListenAddress, BindBackendAddress: fmt.Sprintf("127.0.0.1:%d", cfg.BindProxyPort), CacheMaxEntries: 1000}
+	dnsdistConf, err := dnscompile.CompileDnsdist(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := callPromote(t, s, DNSPromoteParams{DnsdistConf: dnsdistConf})
+	if !res.Promoted || res.RolledBack {
+		t.Fatalf("expected a clean promotion, got %+v", res)
+	}
+	if res.Timings == nil {
+		t.Fatal("expected Timings to be populated on a real successful promote")
+	}
+	tm := res.Timings
+	for name, v := range map[string]int64{
+		"CompileMS": tm.CompileMS, "ValidateMS": tm.ValidateMS, "PromoteMS": tm.PromoteMS,
+		"ReloadMS": tm.ReloadMS, "HealthCheckMS": tm.HealthCheckMS, "TotalMS": tm.TotalMS,
+	} {
+		if v < 0 {
+			t.Errorf("%s = %d, want >= 0", name, v)
+		}
+	}
+	if tm.TotalMS < tm.ReloadMS+tm.HealthCheckMS {
+		t.Errorf("TotalMS (%d) must be at least ReloadMS+HealthCheckMS (%d+%d), got %+v", tm.TotalMS, tm.ReloadMS, tm.HealthCheckMS, tm)
+	}
+	if tm.HealthCheckMS != res.HealthyAtMS {
+		t.Errorf("HealthCheckMS (%d) should match the existing HealthyAtMS field (%d) -- same measurement, kept for back-compat", tm.HealthCheckMS, res.HealthyAtMS)
+	}
+}
+
+// TestDNSRuntimeDryRunReportsCompileAndValidateTimingsOnly is the dry-run
+// counterpart: a validated-but-not-promoted response never ran
+// promote/reload/health-check, so those fields must stay zero rather
+// than fabricating a measurement for a stage that never executed.
+func TestDNSRuntimeDryRunReportsCompileAndValidateTimingsOnly(t *testing.T) {
+	s, cfg := newDNSRuntimeConfig(t)
+	in := dnscompile.Input{ListenAddress: cfg.DnsdistListenAddress, BindBackendAddress: fmt.Sprintf("127.0.0.1:%d", cfg.BindProxyPort), CacheMaxEntries: 1000}
+	dnsdistConf, err := dnscompile.CompileDnsdist(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := callPromote(t, s, DNSPromoteParams{DnsdistConf: dnsdistConf, DryRun: true})
+	if res.Promoted || res.Stage != "validated" {
+		t.Fatalf("expected a dry-run 'validated' result, got %+v", res)
+	}
+	if res.Timings == nil {
+		t.Fatal("expected Timings to be populated even on a dry run")
+	}
+	if res.Timings.PromoteMS != 0 || res.Timings.ReloadMS != 0 || res.Timings.HealthCheckMS != 0 {
+		t.Errorf("expected promote/reload/health-check timings to stay zero on a dry run (never ran), got %+v", res.Timings)
+	}
+}
+
 // TestDNSRuntimePromoteHealthCheckDialsLoopbackNotWildcard is the
 // direct regression proof for the 2026-08-28 incident's disclosed
 // health-check bug (see AGENT_PROGRESS.md): every real live deployment
