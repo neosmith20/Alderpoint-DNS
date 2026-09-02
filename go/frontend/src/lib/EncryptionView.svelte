@@ -126,8 +126,6 @@
   const lanIp = $derived(settings?.lan_ip ?? "");
   const rawCertHostname = $derived(settings?.server_hostname ?? "");
   const certHostnameIsLoopback = $derived(isLoopbackName(rawCertHostname));
-  // Kept for the "only for commands run on this appliance itself" note.
-  const hostnameIsLoopback = certHostnameIsLoopback;
 
   /** The address to actually hand a remote client. Never "localhost". */
   const clientAddress = $derived(rawCertHostname && !certHostnameIsLoopback ? rawCertHostname : lanIp);
@@ -256,7 +254,7 @@
             {#if clientAddressIsLanFallback && clientAddress}
               <p class="hint">This is this box's detected LAN IP (its certificate has no real hostname of its own yet) -- see the warning above.</p>
             {/if}
-            {#if hostnameIsLoopback}
+            {#if certHostnameIsLoopback}
               <p class="hint local-only">
                 Only for commands run ON this appliance itself (e.g. <code>kdig -d @localhost -p {settings.dot_port} +tls example.com</code>) -- never hand "{rawCertHostname}" to another device.
               </p>
