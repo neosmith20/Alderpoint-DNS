@@ -57,7 +57,19 @@ type UUIDFunc func() string
 // error matching Python's own MobileconfigError messages exactly (field
 // for field) when the requested transport isn't actually enabled or no
 // certificate is configured yet -- never a fabricated profile.
-func Build(protocol string, transport TransportInput, cert CertInput, newUUID UUIDFunc) ([]byte, error) {
+//
+// clientFacingAddress is the owner's own selected/saved/detected
+// client-facing hostname or IP (internal/httpapi's clientFacingAddress) --
+// NOT necessarily cert.SAN[0]. This is the backend half of "Apple profile
+// generation must be blocked when the selected client-facing name does
+// not match the cert": Build refuses to emit a profile at all unless
+// clientFacingAddress is both non-loopback AND actually present in the
+// certificate's own SAN list, since Apple's profile installer performs a
+// real TLS handshake against exactly that ServerName/ServerURL from
+// another device -- a mismatch here is not a cosmetic warning, it is a
+// profile guaranteed to fail with a certificate error the moment a client
+// installs it.
+func Build(protocol string, transport TransportInput, cert CertInput, clientFacingAddress string, newUUID UUIDFunc) ([]byte, error) {
 	if !SupportedProtocols[protocol] {
 		return nil, errf("unsupported protocol: %q (supported: doh, dot)", protocol)
 	}
@@ -70,17 +82,29 @@ func Build(protocol string, transport TransportInput, cert CertInput, newUUID UU
 	if !cert.Active || len(cert.SAN) == 0 {
 		return nil, errf("no active HTTPS certificate with a subject alternative name is configured yet")
 	}
-
-	hostname := cert.SAN[0]
+	if clientFacingAddress == "" {
+		return nil, errf("no client-facing address has been chosen for this appliance yet -- set one in Encryption > DNS Transports before generating a profile")
+	}
 	// Real, deliberate block (not just a UI hint the caller could route
 	// around): "localhost"/loopback only ever validates for a client
 	// running ON this appliance itself. Apple's profile installer does a
 	// normal TLS handshake against ServerName/ServerURL from another
 	// device, so shipping a loopback hostname here would silently hand
 	// out a profile guaranteed to fail with a certificate error.
-	if isLoopbackHostname(hostname) {
-		return nil, errf("this appliance's certificate subject (%q) only ever validates for a client running on this appliance itself -- it cannot be used in a configuration profile for another device; replace the certificate with one whose subject is a real hostname or LAN IP first", hostname)
+	if isLoopbackHostname(clientFacingAddress) {
+		return nil, errf("this appliance's client-facing address (%q) only ever validates for a client running on this appliance itself -- it cannot be used in a configuration profile for another device; configure a real client-facing hostname or LAN IP first", clientFacingAddress)
 	}
+	matches := false
+	for _, s := range cert.SAN {
+		if s == clientFacingAddress {
+			matches = true
+			break
+		}
+	}
+	if !matches {
+		return nil, errf("the selected client-facing address (%q) is not in this certificate's subject alternative names (%s) -- Apple's profile installer would fail the TLS handshake; replace the certificate with one covering %q, or choose a different client-facing address that the current certificate already covers", clientFacingAddress, strings.Join(cert.SAN, ", "), clientFacingAddress)
+	}
+	hostname := clientFacingAddress
 	payloadUUID := strings.ToUpper(newUUID())
 	profileUUID := strings.ToUpper(newUUID())
 

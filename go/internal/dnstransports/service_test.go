@@ -63,6 +63,7 @@ func TestUpdateRoundTripsEverySettingIncludingDnscrypt(t *testing.T) {
 		t.Fatal(err)
 	}
 	in.DNSCryptIdentityProvisioned = false // never set by Update
+	in.ClientFacingPrefer = "auto"         // Update defaults an empty value to "auto"
 	if updated != in {
 		t.Fatalf("expected round-tripped settings %+v, got %+v", in, updated)
 	}
@@ -92,6 +93,14 @@ func TestUpdateValidatesPortsAndPaths(t *testing.T) {
 		{"doh3_port negative", func(s *Settings) { s.Doh3Port = -1 }},
 		{"dnscrypt_port too high", func(s *Settings) { s.DNSCryptPort = 99999 }},
 		{"empty dnscrypt provider name", func(s *Settings) { s.DNSCryptProviderName = "" }},
+		{"invalid client_facing_prefer", func(s *Settings) { s.ClientFacingPrefer = "bogus" }},
+		// The exact real-world defect this rejects: a container-internal
+		// address (here, Podman's own default bridge subnet -- see
+		// migration 0027's doc comment) saved as if it were the
+		// appliance's real client-facing LAN IP.
+		{"client_facing_ip inside podman bridge range", func(s *Settings) { s.ClientFacingIP = "10.88.0.15" }},
+		{"client_facing_ip loopback", func(s *Settings) { s.ClientFacingIP = "127.0.0.1" }},
+		{"client_facing_hostname loopback", func(s *Settings) { s.ClientFacingHostname = "localhost" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -101,6 +110,25 @@ func TestUpdateValidatesPortsAndPaths(t *testing.T) {
 				t.Fatalf("expected a validation error for %s", tc.name)
 			}
 		})
+	}
+}
+
+// TestUpdateAcceptsRealLANClientFacingAddress is the positive-path
+// sibling of the container-bridge-rejection cases above: a real LAN
+// address (this live appliance's own actual DHCP address, per the
+// owner's report) must be accepted and round-trip cleanly.
+func TestUpdateAcceptsRealLANClientFacingAddress(t *testing.T) {
+	s := newTestService(t)
+	ctx := context.Background()
+	in := defaults()
+	in.ClientFacingIP = "172.16.43.100"
+	in.ClientFacingPrefer = "ip"
+	updated, err := s.Update(ctx, in)
+	if err != nil {
+		t.Fatalf("expected a real LAN IP to be accepted: %v", err)
+	}
+	if updated.ClientFacingIP != "172.16.43.100" || updated.ClientFacingPrefer != "ip" {
+		t.Fatalf("expected client-facing IP/prefer to round-trip, got %+v", updated)
 	}
 }
 

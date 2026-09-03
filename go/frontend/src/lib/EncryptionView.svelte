@@ -94,27 +94,28 @@
 
   // --- Client-facing address resolution -----------------------------
   //
-  // The real, disclosed defect this replaces: every manual-setup card
-  // used to interpolate settings.server_hostname directly, which is
-  // simply the active TLS cert's first SAN entry -- on an appliance
-  // whose cert subject is "localhost" (a very common state: it's this
-  // package's own first-boot self-signed cert default), every card told
-  // a REMOTE client to connect to "localhost", which only ever means
-  // something to a client running ON this appliance itself.
+  // The real, disclosed defects this replaces, in order:
   //
-  // The fix has three parts, all driven by real backend-reported facts
-  // (never guessed client-side):
-  //   1. Separate "what does the cert say" (server_hostname/cert_san)
-  //      from "what should a client actually be told" (clientAddress) --
-  //      falling back to this box's own detected LAN IP (lan_ip) when
-  //      the cert's own hostname is loopback or missing.
-  //   2. Check whether clientAddress is actually IN cert_san -- i.e.
-  //      whether a client validating the certificate against it would
-  //      succeed -- rather than assuming it always does.
-  //   3. Gate every certificate-dependent setup instruction (Apple
-  //      profiles, Android Private DNS, the DoT/DoH/DoQ/DoH3 manual
-  //      cards) on that check, with an honest blocked/warned message
-  //      instead of confidently-wrong instructions.
+  //   1. (2026-09-02) Every manual-setup card interpolated
+  //      settings.server_hostname directly -- simply the active TLS
+  //      cert's first SAN entry, which on a fresh appliance is
+  //      "localhost". Fixed by deriving a client-facing address instead.
+  //   2. (2026-09-03, owner report) That fix's own fallback --
+  //      settings.lan_ip -- was detected via net.InterfaceAddrs() INSIDE
+  //      THE WEB CONTAINER's own isolated Podman network namespace,
+  //      which showed 10.88.0.15 (a container bridge address) as if a
+  //      phone or router could reach it. No LAN device ever can.
+  //
+  // The real fix: apdns-hostagent (the only process that ever sees the
+  // HOST's own real network namespace) now reports real LAN candidates,
+  // and the backend computes an authoritative effective_client_address
+  // using, in order: an explicit owner preference/saved value, a real
+  // (non-loopback) cert hostname, any owner-saved fallback, or EXACTLY
+  // ONE detected host LAN candidate -- never guessing when detection is
+  // ambiguous (zero or more than one). This page trusts that backend
+  // value rather than re-deriving its own from settings.lan_ip, and
+  // surfaces "choose a client-facing address" whenever the backend says
+  // client_facing_selection_required.
   function isLoopbackName(h: string): boolean {
     return h === "localhost" || h === "127.0.0.1" || h === "::1";
   }
@@ -124,13 +125,18 @@
 
   const certSan = $derived(settings?.cert_san ?? []);
   const lanIp = $derived(settings?.lan_ip ?? "");
+  const lanIps = $derived(settings?.lan_ips ?? []);
+  const lanDetectionAmbiguous = $derived(settings?.lan_detection_ambiguous ?? true);
+  const hostagentReachable = $derived(settings?.hostagent_reachable ?? false);
   const rawCertHostname = $derived(settings?.server_hostname ?? "");
   const certHostnameIsLoopback = $derived(isLoopbackName(rawCertHostname));
 
-  /** The address to actually hand a remote client. Never "localhost". */
-  const clientAddress = $derived(rawCertHostname && !certHostnameIsLoopback ? rawCertHostname : lanIp);
-  const clientAddressIsLanFallback = $derived(!rawCertHostname || certHostnameIsLoopback);
-  const noClientAddress = $derived(!settings || !clientAddress);
+  /** The backend's own authoritative "what should a client actually be told" value.
+   *  Never derived independently client-side -- the backend also gates mobileconfig
+   *  generation on this exact same computation, so this page must never disagree with it. */
+  const clientAddress = $derived(settings?.effective_client_address ?? "");
+  const clientAddressIsLanFallback = $derived(!!clientAddress && clientAddress === lanIp && (!rawCertHostname || certHostnameIsLoopback));
+  const noClientAddress = $derived(!settings || (settings.client_facing_selection_required ?? clientAddress === ""));
   const clientAddressIsIp = $derived(isIpAddress(clientAddress));
   /** Would a client validating the TLS cert against clientAddress succeed? DNSCrypt doesn't use
    *  the TLS cert at all (its own provider key is the trust anchor), so this only gates
@@ -183,10 +189,20 @@
 
   {#if settings && noClientAddress}
     <p class="degraded-note" role="alert">
-      No client-facing address is available yet -- this appliance's TLS certificate has no real
-      hostname (only "{rawCertHostname || "none"}") and no LAN IP could be detected on this box.
-      Fix the network configuration and/or replace the certificate below before handing setup
-      instructions to any client device; nothing below is safe to hand out yet.
+      No client-facing address is available yet.
+      {#if lanDetectionAmbiguous && hostagentReachable && lanIps.length > 1}
+        This appliance has {lanIps.length} real LAN addresses ({lanIps.join(", ")}) and this
+        control plane will not guess which one clients should use.
+      {:else if !hostagentReachable}
+        The host-control agent (the only thing that can see this box's real network -- never this
+        web process's own isolated container network) is not reachable right now, so no LAN
+        address could be detected.
+      {:else}
+        This appliance's TLS certificate has no real hostname (only "{rawCertHostname || "none"}")
+        and no LAN address could be detected on this box.
+      {/if}
+      Choose a client-facing hostname and/or IP below before handing setup instructions to any
+      client device -- nothing further down this page is safe to hand out yet.
     </p>
   {:else if settings && !clientAddressCertValid}
     <p class="degraded-note" role="status">
@@ -236,6 +252,52 @@
   </div>
 
   {#if settings}
+    <div class="card">
+      <h3>Client-Facing Address</h3>
+      <p class="scope-note">
+        What every setup card below tells a client device to connect to. Left blank, this control
+        plane uses a real cert hostname when one exists, otherwise the one real LAN address
+        detected on this box's actual host network (never a container-internal address) -- but
+        will never guess if more than one real LAN address exists. Save an explicit hostname
+        and/or IP here to override that, or to resolve an ambiguous detection.
+      </p>
+      <dl class="cert-info">
+        <dt>Detected host LAN address(es)</dt>
+        <dd>
+          {#if !hostagentReachable}
+            unavailable (host-control agent not reachable)
+          {:else if lanIps.length === 0}
+            none detected
+          {:else}
+            {lanIps.join(", ")}
+          {/if}
+        </dd>
+        <dt>Currently in effect</dt>
+        <dd>{clientAddress || "none -- choose one below"}</dd>
+      </dl>
+      <label>
+        Client-facing hostname
+        <input bind:value={settings.client_facing_hostname} placeholder="e.g. dns.example.com" />
+      </label>
+      <label>
+        Client-facing IP
+        <input bind:value={settings.client_facing_ip} placeholder="e.g. 172.16.43.100" />
+      </label>
+      <label>
+        When both a hostname and an IP are set, prefer
+        <select bind:value={settings.client_facing_prefer}>
+          <option value="auto">Auto (real cert hostname, else IP)</option>
+          <option value="hostname">Hostname</option>
+          <option value="ip">IP</option>
+        </select>
+      </label>
+      <p class="hint">
+        Saved here with the rest of DNS Transports below -- click Save to apply. A localhost/
+        loopback value or a Podman/Docker default bridge address (10.88.0.0/16, 10.89.0.0/16,
+        172.17-172.31.x.x) is rejected outright; it is never a real client-facing address.
+      </p>
+    </div>
+
     <form class="card transports" onsubmit={(e) => { e.preventDefault(); save(); }}>
       <h3>DNS Transports</h3>
 

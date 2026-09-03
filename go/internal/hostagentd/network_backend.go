@@ -24,6 +24,7 @@ package hostagentd
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -302,6 +303,125 @@ func DetectIPv6Mode(backend, iface string) string {
 		}
 	}
 	return "unknown"
+}
+
+// virtualInterfacePrefixes names the interface-naming conventions of
+// every container/VM networking backend this appliance's own deploy
+// path (or a co-located one) is known to create: podman's rootful
+// bridge (cni-podman0 + veth*), podman rootless (podman0), Docker
+// (docker0 + veth*, plus docker-compose's br-<id> per-network
+// bridges), generic Linux bridges/CNI plugins (cni0, flannel.1,
+// cali*, weave*), libvirt (virbr*), and TUN/TAP devices. This is a
+// disclosed, best-effort denylist by naming convention, not a
+// complete taxonomy of every possible virtual interface -- but these
+// are exactly the prefixes a real Podman/Docker-hosting appliance
+// like this one's own web/hostagent split actually creates, which is
+// the concrete defect this list exists to prevent: the DNS Transports
+// page once auto-detected and displayed 10.88.0.15 (a cni-podman0
+// bridge address from the WEB CONTAINER's own network namespace) as a
+// client-setup address, which no phone, router, or LAN device could
+// ever reach. HostLANCandidates below runs this filter from the
+// host's OWN interface list (via this already-host-side agent), so it
+// never repeats that exact mistake.
+var virtualInterfacePrefixes = []string{
+	"veth", "docker", "br-", "cni", "podman", "virbr", "tun", "tap",
+	"flannel", "cali", "weave", "vxlan", "dummy", "wg",
+}
+
+func isVirtualInterface(name string) bool {
+	if name == "lo" {
+		return true
+	}
+	for _, p := range virtualInterfacePrefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// containerBridgeCIDRs are the well-known DEFAULT subnets Podman and
+// Docker assign their own bridge networks out of, unless an operator
+// has customized them. Never offered as an auto-detected client-facing
+// candidate and rejected outright if an owner tries to manually save
+// one -- these are Podman/Docker installation defaults, never a real
+// appliance LAN, so an address here is far more likely a copy-paste of
+// this exact defect than a deliberate real network.
+var containerBridgeCIDRs = mustParseCIDRs(
+	"10.88.0.0/16",                                                                      // Podman default rootful bridge network
+	"10.89.0.0/16",                                                                      // Podman additional default bridge networks
+	"172.17.0.0/16",                                                                     // Docker default bridge (docker0)
+	"172.18.0.0/16", "172.19.0.0/16", "172.20.0.0/14", "172.24.0.0/14", "172.28.0.0/14", // Docker's docker-compose per-project br-* pool
+)
+
+func mustParseCIDRs(cidrs ...string) []*net.IPNet {
+	var out []*net.IPNet
+	for _, c := range cidrs {
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			panic(err)
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// IsContainerBridgeAddress reports whether ip falls inside one of
+// Podman/Docker's own default bridge-network ranges -- see
+// containerBridgeCIDRs above.
+func IsContainerBridgeAddress(ip string) bool {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	for _, n := range containerBridgeCIDRs {
+		if n.Contains(parsed) {
+			return true
+		}
+	}
+	return false
+}
+
+// LANCandidate is one real, non-virtual interface's address, as seen
+// from the host's own network namespace (this agent's, never the web
+// container's).
+type LANCandidate struct {
+	Interface string `json:"interface"`
+	Address   string `json:"address"`
+}
+
+// HostLANCandidates lists every IPv4 address on every non-virtual,
+// non-loopback host interface -- the real candidate set for "what
+// should a client actually be told to connect to", gathered from this
+// already-host-side agent process rather than the unprivileged web
+// container's own isolated network namespace (see the doc comment on
+// virtualInterfacePrefixes above for the exact defect this exists to
+// prevent). Link-local (169.254.0.0/16) addresses are skipped -- never
+// a usable client-facing address. Callers decide what "ambiguous"
+// means for their purpose; this just reports the real, filtered facts.
+func HostLANCandidates(ctx context.Context) []LANCandidate {
+	interfaces, err := ListInterfaces(ctx)
+	if err != nil {
+		return nil
+	}
+	var out []LANCandidate
+	for _, iface := range interfaces {
+		if isVirtualInterface(iface) {
+			continue
+		}
+		v4s, _, err := InterfaceAddresses(ctx, iface)
+		if err != nil {
+			continue
+		}
+		for _, a := range v4s {
+			ip := net.ParseIP(a.Address)
+			if ip == nil || ip.IsLinkLocalUnicast() || ip.IsLoopback() {
+				continue
+			}
+			out = append(out, LANCandidate{Interface: iface, Address: a.Address})
+		}
+	}
+	return out
 }
 
 // ListInterfaces mirrors V1.1.1's list_interfaces() -- every real

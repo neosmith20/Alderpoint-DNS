@@ -47,10 +47,18 @@ import (
 	"time"
 
 	"alderpointdns/go-controlplane/internal/dnscryptprovision"
+	"alderpointdns/go-controlplane/internal/hostagentd"
 )
 
 var ErrValidation = errors.New("validation failed")
 var ErrDNSCryptNotProvisioned = errors.New("DNSCrypt has no provider identity/certificate yet -- rotate first")
+
+// isLoopbackHostname matches internal/httpapi's and internal/mobileconfig's
+// own definition -- a value that only ever means something to a client
+// running ON this appliance itself, never a remote device.
+func isLoopbackHostname(h string) bool {
+	return h == "localhost" || h == "127.0.0.1" || h == "::1"
+}
 
 // Settings mirrors DnsTransportSettings + the non-secret subset of
 // DnscryptSettings.
@@ -64,6 +72,18 @@ type Settings struct {
 	DoqPort     int    `json:"doq_port"`
 	Doh3Enabled bool   `json:"doh3_enabled"`
 	Doh3Port    int    `json:"doh3_port"`
+
+	// ClientFacing*: the owner's own record of what a REMOTE client
+	// should actually be told to connect to -- see migration
+	// 0027_client_facing_address.sql's doc comment for the exact defect
+	// this exists to fix (a container bridge address auto-detected from
+	// the web process's own isolated network namespace, shown to owners
+	// as if it were a usable client-setup address). ClientFacingPrefer
+	// is "auto" (prefer a real cert hostname, else the IP), "hostname",
+	// or "ip".
+	ClientFacingHostname string `json:"client_facing_hostname"`
+	ClientFacingIP       string `json:"client_facing_ip"`
+	ClientFacingPrefer   string `json:"client_facing_prefer"`
 
 	DNSCryptEnabled      bool   `json:"dnscrypt_enabled"`
 	DNSCryptPort         int    `json:"dnscrypt_port"`
@@ -86,7 +106,8 @@ type Settings struct {
 func defaults() Settings {
 	return Settings{
 		DotPort: 853, DohPort: 443, DohPath: "/dns-query", DoqPort: 853, Doh3Port: 443,
-		DNSCryptPort: 5443, DNSCryptProviderName: "2.dnscrypt-cert.alderpointdns-go.local",
+		ClientFacingPrefer: "auto",
+		DNSCryptPort:       5443, DNSCryptProviderName: "2.dnscrypt-cert.alderpointdns-go.local",
 	}
 }
 
@@ -96,10 +117,14 @@ type Service struct {
 
 func (s *Service) Get(ctx context.Context) (Settings, error) {
 	out := defaults()
-	err := s.DB.QueryRowContext(ctx, `SELECT dot_enabled, dot_port, doh_enabled, doh_port, doh_path, doq_enabled, doq_port, doh3_enabled, doh3_port FROM dns_transport_settings WHERE id=1`).
-		Scan(&out.DotEnabled, &out.DotPort, &out.DohEnabled, &out.DohPort, &out.DohPath, &out.DoqEnabled, &out.DoqPort, &out.Doh3Enabled, &out.Doh3Port)
+	err := s.DB.QueryRowContext(ctx, `SELECT dot_enabled, dot_port, doh_enabled, doh_port, doh_path, doq_enabled, doq_port, doh3_enabled, doh3_port, client_facing_hostname, client_facing_ip, client_facing_prefer FROM dns_transport_settings WHERE id=1`).
+		Scan(&out.DotEnabled, &out.DotPort, &out.DohEnabled, &out.DohPort, &out.DohPath, &out.DoqEnabled, &out.DoqPort, &out.Doh3Enabled, &out.Doh3Port,
+			&out.ClientFacingHostname, &out.ClientFacingIP, &out.ClientFacingPrefer)
 	if err != nil && err != sql.ErrNoRows {
 		return Settings{}, err
+	}
+	if out.ClientFacingPrefer == "" {
+		out.ClientFacingPrefer = "auto"
 	}
 	err = s.DB.QueryRowContext(ctx, `SELECT enabled, port, provider_name, provider_public_key_b64, provider_key_path, cert_path, key_path, cert_serial, cert_valid_from, cert_valid_until FROM dnscrypt_settings WHERE id=1`).
 		Scan(&out.DNSCryptEnabled, &out.DNSCryptPort, &out.DNSCryptProviderName, &out.DNSCryptProviderPublicKeyB64,
@@ -137,6 +162,27 @@ func (s *Service) Update(ctx context.Context, in Settings) (Settings, error) {
 		return Settings{}, fmt.Errorf("%w: invalid dnscrypt_port", ErrValidation)
 	case in.DNSCryptProviderName == "":
 		return Settings{}, fmt.Errorf("%w: dnscrypt_provider_name must not be empty", ErrValidation)
+	case in.ClientFacingPrefer != "" && in.ClientFacingPrefer != "auto" && in.ClientFacingPrefer != "hostname" && in.ClientFacingPrefer != "ip":
+		return Settings{}, fmt.Errorf("%w: client_facing_prefer must be auto, hostname, or ip", ErrValidation)
+	}
+	if in.ClientFacingPrefer == "" {
+		in.ClientFacingPrefer = "auto"
+	}
+	// Never let an owner accidentally save the exact defect this feature
+	// exists to prevent: a loopback address, or a Podman/Docker default
+	// bridge-network address, as the deliberate client-facing IP. A real
+	// LAN address a client can actually reach is never inside these
+	// ranges in practice.
+	if in.ClientFacingIP != "" {
+		if isLoopbackHostname(in.ClientFacingIP) {
+			return Settings{}, fmt.Errorf("%w: client_facing_ip must not be localhost/loopback -- that only ever validates for a client running on this appliance itself", ErrValidation)
+		}
+		if hostagentd.IsContainerBridgeAddress(in.ClientFacingIP) {
+			return Settings{}, fmt.Errorf("%w: client_facing_ip %q falls inside a Podman/Docker default bridge-network range, not a real LAN -- this is almost always a container-internal address a client can never reach; enter the appliance's real LAN IP instead", ErrValidation, in.ClientFacingIP)
+		}
+	}
+	if in.ClientFacingHostname != "" && isLoopbackHostname(in.ClientFacingHostname) {
+		return Settings{}, fmt.Errorf("%w: client_facing_hostname must not be localhost -- that only ever validates for a client running on this appliance itself", ErrValidation)
 	}
 
 	if in.DNSCryptEnabled {
@@ -163,14 +209,17 @@ func (s *Service) Update(ctx context.Context, in Settings) (Settings, error) {
 	defer tx.Rollback()
 
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO dns_transport_settings (id, dot_enabled, dot_port, doh_enabled, doh_port, doh_path, doq_enabled, doq_port, doh3_enabled, doh3_port, updated_at)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO dns_transport_settings (id, dot_enabled, dot_port, doh_enabled, doh_port, doh_path, doq_enabled, doq_port, doh3_enabled, doh3_port, client_facing_hostname, client_facing_ip, client_facing_prefer, updated_at)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			dot_enabled=excluded.dot_enabled, dot_port=excluded.dot_port,
 			doh_enabled=excluded.doh_enabled, doh_port=excluded.doh_port, doh_path=excluded.doh_path,
 			doq_enabled=excluded.doq_enabled, doq_port=excluded.doq_port,
-			doh3_enabled=excluded.doh3_enabled, doh3_port=excluded.doh3_port, updated_at=excluded.updated_at`,
-		in.DotEnabled, in.DotPort, in.DohEnabled, in.DohPort, in.DohPath, in.DoqEnabled, in.DoqPort, in.Doh3Enabled, in.Doh3Port, now,
+			doh3_enabled=excluded.doh3_enabled, doh3_port=excluded.doh3_port,
+			client_facing_hostname=excluded.client_facing_hostname, client_facing_ip=excluded.client_facing_ip, client_facing_prefer=excluded.client_facing_prefer,
+			updated_at=excluded.updated_at`,
+		in.DotEnabled, in.DotPort, in.DohEnabled, in.DohPort, in.DohPath, in.DoqEnabled, in.DoqPort, in.Doh3Enabled, in.Doh3Port,
+		in.ClientFacingHostname, in.ClientFacingIP, in.ClientFacingPrefer, now,
 	); err != nil {
 		return Settings{}, err
 	}

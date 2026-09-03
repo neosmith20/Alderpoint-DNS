@@ -498,6 +498,29 @@ export interface DnsTransportSettings {
    *  hostname is only "localhost"/loopback. */
   lan_ip?: string;
   lan_ips?: string[];
+  /** True when host-side LAN detection did not resolve to EXACTLY one
+   *  real address (hostagent unreachable, zero candidates, or more than
+   *  one) -- the UI must not guess in this case; lan_ip is absent. */
+  lan_detection_ambiguous?: boolean;
+  /** Whether apdns-hostagent (the ONLY thing that can see the real host
+   *  network namespace, never this web process's own container/bridge
+   *  namespace) was reachable at all for this request. */
+  hostagent_reachable?: boolean;
+  /** Owner-configured client-facing hostname/IP/preference -- see
+   *  migration 0027_client_facing_address.sql. Empty string = not set. */
+  client_facing_hostname?: string;
+  client_facing_ip?: string;
+  client_facing_prefer?: "auto" | "hostname" | "ip";
+  /** The backend's own resolved "what should a client actually be told"
+   *  value -- same priority order the frontend must not re-derive
+   *  independently for anything that gates Apple profile downloads or
+   *  Android Private DNS instructions (server-side is authoritative
+   *  since it also gates mobileconfig generation). "" means no safe
+   *  address exists yet. */
+  effective_client_address?: string;
+  /** True when effective_client_address is "" -- the owner must choose
+   *  a client-facing hostname/IP before setup instructions can be shown. */
+  client_facing_selection_required?: boolean;
   /** Real sdns:// DNSCrypt stamp, present once a provider identity
    *  exists and a client-facing address is known. */
   dnscrypt_stamp?: string;

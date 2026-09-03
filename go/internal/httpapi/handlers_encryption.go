@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 
 	"alderpointdns/go-controlplane/internal/dnstransports"
+	"alderpointdns/go-controlplane/internal/hostagent"
 	"alderpointdns/go-controlplane/internal/mobileconfig"
 	"alderpointdns/go-controlplane/internal/tlscert"
 )
@@ -58,19 +59,30 @@ func (s *Server) handleGetDNSTransports(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	out["cert_san"] = san
+	out["client_facing_hostname"] = settings.ClientFacingHostname
+	out["client_facing_ip"] = settings.ClientFacingIP
+	out["client_facing_prefer"] = settings.ClientFacingPrefer
 
-	// lan_ip(s): a real, separately-sourced client-facing candidate --
-	// the appliance's own detected LAN address(es) -- distinct from
-	// whatever this process happens to bind/listen on (which is
-	// frequently 0.0.0.0/::, itself never something to hand a client).
-	// The frontend falls back to this when the certificate's own
-	// hostname is only "localhost"/loopback, so setup guidance never
-	// recommends an address that only means something on this box.
-	lanIPs := detectServerIPs()
+	// lan_ip(s): real, host-side-detected client-facing candidates --
+	// gathered from apdns-hostagent's own host network namespace, NEVER
+	// from this web process's own net.InterfaceAddrs(), which sees only
+	// the isolated container/bridge namespace it actually runs in (a
+	// real, previously-shipped defect: this page once auto-detected and
+	// displayed 10.88.0.15, a Podman bridge address from inside the web
+	// container, as if a phone or router could use it -- none can; see
+	// migration 0027's doc comment). When the agent is unreachable or
+	// detection is ambiguous (zero or more than one real LAN interface),
+	// this deliberately returns nothing rather than falling back to the
+	// web container's own address -- the frontend must fall back only to
+	// an owner-saved client_facing_ip/hostname, or ask the owner to
+	// choose, never guess a container-internal address.
+	ambiguous, lanIPs := s.detectClientFacingLAN(r)
 	out["lan_ips"] = lanIPs
-	if len(lanIPs) > 0 {
+	if len(lanIPs) == 1 {
 		out["lan_ip"] = lanIPs[0]
 	}
+	out["lan_detection_ambiguous"] = ambiguous
+	out["hostagent_reachable"] = s.HostAgent != nil
 
 	// DNSCrypt's real sdns:// stamp, once a provider identity actually
 	// exists -- built from the same client-facing address resolution
@@ -79,8 +91,12 @@ func (s *Server) handleGetDNSTransports(w http.ResponseWriter, r *http.Request) 
 	// doesn't use the TLS certificate as its trust anchor at all (the
 	// provider public key pinned in the stamp is), so this has no
 	// certificate-validity gate.
+	effective := clientFacingAddress(settings, san, lanIPs)
+	out["effective_client_address"] = effective
+	out["client_facing_selection_required"] = effective == ""
+
 	if settings.DNSCryptIdentityProvisioned && settings.DNSCryptProviderPublicKeyB64 != "" {
-		addr := clientFacingAddress(san, lanIPs)
+		addr := effective
 		if addr != "" {
 			if pub, err := base64.StdEncoding.DecodeString(settings.DNSCryptProviderPublicKeyB64); err == nil {
 				stampAddr := fmt.Sprintf("%s:%d", addr, settings.DNSCryptPort)
@@ -92,15 +108,76 @@ func (s *Server) handleGetDNSTransports(w http.ResponseWriter, r *http.Request) 
 	WriteJSON(w, http.StatusOK, out)
 }
 
+// detectClientFacingLAN gathers real, host-side-detected client-facing
+// candidates via apdns-hostagent's own host network namespace, NEVER
+// from this web process's own net.InterfaceAddrs(), which sees only the
+// isolated container/bridge namespace it actually runs in (a real,
+// previously-shipped defect: this page once auto-detected and displayed
+// 10.88.0.15, a Podman bridge address from inside the web container, as
+// if a phone or router could use it -- none can; see migration 0027's
+// doc comment). ambiguous is true whenever there is not EXACTLY one
+// distinct real LAN address (zero candidates, hostagent unreachable, or
+// more than one) -- callers must not guess in that case; the owner must
+// choose one via client_facing_ip/client_facing_hostname instead.
+func (s *Server) detectClientFacingLAN(r *http.Request) (ambiguous bool, lanIPs []string) {
+	if s.HostAgent == nil {
+		return true, nil
+	}
+	var lanResult struct {
+		Candidates []struct {
+			Interface string `json:"interface"`
+			Address   string `json:"address"`
+		} `json:"candidates"`
+		DefaultInterface string `json:"default_interface"`
+	}
+	if err := s.HostAgent.Call(r.Context(), hostagent.OpNetworkLANCandidates, nil, &lanResult); err != nil {
+		return true, nil
+	}
+	seen := map[string]bool{}
+	for _, c := range lanResult.Candidates {
+		if !seen[c.Address] {
+			seen[c.Address] = true
+			lanIPs = append(lanIPs, c.Address)
+		}
+	}
+	return len(lanIPs) != 1, lanIPs
+}
+
 // clientFacingAddress picks the same "what should a client actually be
-// told" candidate the frontend derives independently for display: the
-// certificate's own hostname when it's real (not loopback), else the
-// first detected LAN IP, else nothing.
-func clientFacingAddress(san, lanIPs []string) string {
+// told" candidate the frontend derives independently for display, in
+// priority order:
+//
+//  1. An explicit owner preference (client_facing_prefer=hostname/ip)
+//     with the corresponding saved value actually set -- an owner who
+//     configured both a hostname and a static IP gets to choose which
+//     one setup guidance leads with.
+//  2. The certificate's own hostname, when it's real (not loopback) --
+//     it's the one value guaranteed to make the cert validate.
+//  3. The owner's saved client_facing_hostname/client_facing_ip.
+//  4. Exactly one detected host-side LAN candidate -- never used when
+//     detection found zero or more than one (that's the "ambiguous,
+//     don't guess" case the owner must resolve by saving a value).
+//
+// Returns "" when none of the above apply -- callers must treat that as
+// "no safe client-facing address exists yet", never fall back to
+// something container-internal.
+func clientFacingAddress(settings dnstransports.Settings, san, lanIPs []string) string {
+	if settings.ClientFacingPrefer == "hostname" && settings.ClientFacingHostname != "" {
+		return settings.ClientFacingHostname
+	}
+	if settings.ClientFacingPrefer == "ip" && settings.ClientFacingIP != "" {
+		return settings.ClientFacingIP
+	}
 	if len(san) > 0 && !isLoopbackHostname(san[0]) {
 		return san[0]
 	}
-	if len(lanIPs) > 0 {
+	if settings.ClientFacingHostname != "" {
+		return settings.ClientFacingHostname
+	}
+	if settings.ClientFacingIP != "" {
+		return settings.ClientFacingIP
+	}
+	if len(lanIPs) == 1 {
 		return lanIPs[0]
 	}
 	return ""
@@ -202,15 +279,19 @@ func (s *Server) handleDNSTransportMobileconfig(w http.ResponseWriter, r *http.R
 		return
 	}
 	var cert mobileconfig.CertInput
+	var san []string
 	if s.TLSCertPath != "" {
 		if status, err := (&tlscert.Reader{CertPath: s.TLSCertPath}).Status(); err == nil {
 			cert = mobileconfig.CertInput{Active: status.Active, SAN: status.SAN}
+			san = status.SAN
 		}
 	}
+	_, lanIPs := s.detectClientFacingLAN(r)
+	effective := clientFacingAddress(transport, san, lanIPs)
 	profile, err := mobileconfig.Build(protocol, mobileconfig.TransportInput{
 		DotEnabled: transport.DotEnabled, DohEnabled: transport.DohEnabled,
 		DohPort: transport.DohPort, DohPath: transport.DohPath,
-	}, cert, randomUUID)
+	}, cert, effective, randomUUID)
 	if err != nil {
 		Err(http.StatusBadRequest, "unavailable", err.Error()).WriteJSON(w)
 		return

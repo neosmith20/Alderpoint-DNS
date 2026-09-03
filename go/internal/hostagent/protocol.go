@@ -53,6 +53,16 @@ const (
 	OpReplicationEnsureCA  = "replication.ensure_ca"
 	OpReplicationIssueCert = "replication.issue_cert"
 
+	// OpNetworkLANCandidates reports the real, host-side LAN address
+	// candidates the DNS Transports client-setup page may offer a client
+	// (see hostagentd.HostLANCandidates's own doc comment) -- gathered
+	// from THIS agent's own host network namespace, never the
+	// unprivileged web container's isolated bridge namespace, which is
+	// exactly the defect this operation exists to prevent (the web
+	// container's own address is always something like 10.88.0.x, a
+	// Podman bridge address no LAN client can ever reach).
+	OpNetworkLANCandidates = "network.lan_candidates"
+
 	OpNetworkStatus   = "network.status"
 	OpNetworkApply    = "network.apply"
 	OpNetworkConfirm  = "network.confirm"

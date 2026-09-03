@@ -56,6 +56,17 @@ func RegisterNetworkOps(s *Server, cfg NetworkConfig) {
 	}
 	ns := &networkState{pending: map[string]*pendingChange{}}
 
+	s.Register(hostagent.OpNetworkLANCandidates, func(ctx context.Context, params json.RawMessage) (any, error) {
+		candidates := HostLANCandidates(ctx)
+		if candidates == nil {
+			candidates = []LANCandidate{}
+		}
+		return map[string]any{
+			"candidates":        candidates,
+			"default_interface": DefaultRouteInterface(ctx, "-4"),
+		}, nil
+	})
+
 	s.Register(hostagent.OpNetworkStatus, func(ctx context.Context, params json.RawMessage) (any, error) {
 		var in struct {
 			Interface string `json:"interface"`
