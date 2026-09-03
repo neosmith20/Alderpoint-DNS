@@ -189,6 +189,22 @@
     }
   }
 
+  // Real, owner-found gap this closes: this appliance's real DNS
+  // architecture has dnsdist forward every non-local, non-blocked
+  // query to a single internal BIND backend ("apdns_bind_backend",
+  // 127.0.0.1:<bind-proxy-port>) -- BIND itself is what actually holds
+  // the configured upstream forwarders (Cloudflare/Google/etc, see
+  // Upstreams). dnsdist itself never dials those providers directly,
+  // so this table's real, honest ceiling today is exactly one row:
+  // total traffic dnsdist forwarded to BIND, not a per-provider
+  // breakdown. Left as a raw loopback address ("127.0.0.1:26553") that
+  // row read as a meaningless internal detail; this gives it a real
+  // name an owner would actually understand instead.
+  function resolverDisplayName(u: UpstreamResolverStat): string {
+    if (u.resolver_key === "apdns_bind_backend") return "Local resolver (BIND)";
+    return u.address || u.resolver_key;
+  }
+
   async function loadTopUpstreams() {
     const token = topUpstreamsGuard.start();
     try {
@@ -662,11 +678,14 @@
             <p class="hint">No upstream profiles configured.</p>
           {:else}
             <table class="mini-table">
+              <colgroup>
+                <col style="width: 34%" /><col style="width: 20%" /><col style="width: 26%" /><col style="width: 20%" />
+              </colgroup>
               <thead><tr><th>Name</th><th>Transport</th><th>Strategy</th><th>Enabled</th></tr></thead>
               <tbody>
                 {#each upstreams.slice(0, 5) as u (u.upstream_profile_id)}
                   <tr>
-                    <td>{u.name}</td>
+                    <td title={u.name}>{u.name}</td>
                     <td class="mono">{u.transport}</td>
                     <td class="mono">{u.strategy}</td>
                     <td>{u.enabled ? "yes" : "no"}</td>
@@ -692,21 +711,41 @@
               <p class="hint">No upstream resolver data yet. Resolver identities are configured; this panel fills once dnsdist reports real backend traffic.</p>
             {/if}
           {:else}
-            <table class="mini-table">
-              <thead><tr><th>Resolver</th><th>Protocol</th><th>Queries</th><th>Success</th><th>Avg latency</th><th>State</th></tr></thead>
-              <tbody>
-                {#each topUpstreams as u (u.resolver_key)}
-                  <tr>
-                    <td class="mono" title={u.address || u.resolver_key}>{u.address || u.resolver_key}</td>
-                    <td class="mono">{u.protocol || "--"}</td>
-                    <td class="mono">{u.queries_attempted}</td>
-                    <td class="mono">{u.queries_attempted > 0 ? Math.round((u.successful_responses / u.queries_attempted) * 100) + "%" : "--"}</td>
-                    <td class="mono">{u.avg_latency_ms > 0 ? u.avg_latency_ms.toFixed(1) + " ms" : "--"}</td>
-                    <td>{u.health_state || "unknown"}</td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
+            {#if topUpstreams.some((u) => u.resolver_key === "apdns_bind_backend")}
+              <p class="hint">
+                Upstream forwarding happens inside BIND, not dnsdist itself -- this is total traffic
+                dnsdist forwarded to it, not a breakdown per configured provider. See Upstreams for
+                which providers BIND is configured to use.
+              </p>
+            {/if}
+            <!-- Name + share-of-total bar, same pattern as every other ranked
+                 list on this dashboard (Query Outcomes, Query Types, ...) --
+                 not a dense multi-column table: a real owner-reported defect
+                 (6 columns crammed into one card, headers overlapping/cut
+                 off at "Avg latency") plus a real design-reference check
+                 against AdGuard Home's own equivalent "Top Upstreams" panel
+                 (client_v2/src/components/Dashboard/blocks/TopUpstreams),
+                 which uses this exact name+count/percent+bar shape, not a
+                 table either. Success/latency/state -- genuinely useful
+                 operational detail AdGuard's own simpler version doesn't
+                 carry -- survive as a compact hint line per row instead of
+                 three more columns. -->
+            {@const totalQueries = topUpstreams.reduce((s, r) => s + r.queries_attempted, 0)}
+            {#each topUpstreams as u (u.resolver_key)}
+              {@const share = totalQueries ? (u.queries_attempted / totalQueries) * 100 : 0}
+              <div class="outcome-row">
+                <div class="outcome-head">
+                  <span title={u.address || u.resolver_key}>{resolverDisplayName(u)}</span>
+                  <span>{u.queries_attempted.toLocaleString()}{totalQueries ? ` / ${share.toFixed(1)}%` : ""}</span>
+                </div>
+                <span class="meter"><span style="width: {Math.min(share, 100).toFixed(1)}%"></span></span>
+                <p class="hint">
+                  {u.protocol || "unknown protocol"} · {u.health_state || "unknown state"} ·
+                  {u.queries_attempted > 0 ? Math.round((u.successful_responses / u.queries_attempted) * 100) + "% success" : "no responses yet"} ·
+                  {u.avg_latency_ms > 0 ? u.avg_latency_ms.toFixed(1) + " ms avg" : "latency n/a"}
+                </p>
+              </div>
+            {/each}
             <p class="hint">Resolver attribution is based on real dnsdist backend counters for this appliance's own managed upstream pool (last 60 minutes).</p>
           {/if}
         </div>
@@ -791,7 +830,7 @@
      still gets a real `title` attribute (see the markup) so the full
      value is always available on hover, not just silently cut off. */
   .mini-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 0.88rem; margin-top: 0.5rem; }
-  .mini-table th { text-align: left; font-weight: 600; opacity: 0.7; padding: 0.25rem 0.5rem 0.25rem 0; border-bottom: 1px solid var(--border); overflow: hidden; white-space: nowrap; }
+  .mini-table th { text-align: left; font-weight: 600; font-size: 0.78rem; opacity: 0.7; padding: 0.25rem 0.5rem 0.25rem 0; border-bottom: 1px solid var(--border); overflow: hidden; white-space: nowrap; }
   .mini-table td { max-width: 0; padding: 0.3rem 0.5rem 0.3rem 0; border-bottom: 1px solid var(--border); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mini-table tr:last-child td { border-bottom: none; }
   .mini-badge { display: inline-block; padding: 0.1rem 0.45rem; border-radius: 999px; font-size: 0.72rem; }
