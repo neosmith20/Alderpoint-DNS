@@ -8,6 +8,9 @@
   import { router } from "../router.svelte";
 
   let applianceName = $state("");
+  let sessionTimeoutSeconds = $state(0);
+  let loginRateLimitMax = $state(0);
+  let loginRateLimitWindowSeconds = $state(0);
   let statusError = $state("");
 
   // Appearance: which palette swatch (colorPalette.ts) drives each of
@@ -60,6 +63,9 @@
       const status = await api.systemStatus();
       applianceName = status.appliance_name;
       timestampPref.applianceTimezone = status.appliance_timezone || "UTC";
+      sessionTimeoutSeconds = status.session_timeout_seconds;
+      loginRateLimitMax = status.login_rate_limit_max_attempts;
+      loginRateLimitWindowSeconds = status.login_rate_limit_window_seconds;
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
       statusError = err instanceof Error ? err.message : String(err);
@@ -225,11 +231,16 @@
 
   <div class="card wide">
     <h3>Authentication Security</h3>
+    <dl class="security-facts">
+      <dt>Session timeout</dt>
+      <dd>{sessionTimeoutSeconds ? `${Math.round(sessionTimeoutSeconds / 3600)} hours of inactivity` : "…"}</dd>
+      <dt>Login rate limit</dt>
+      <dd>{loginRateLimitMax ? `${loginRateLimitMax} failed attempts per ${Math.round(loginRateLimitWindowSeconds / 60)} minutes, per source IP` : "…"}</dd>
+      <dt>Password policy</dt>
+      <dd>12+ characters, enforced server-side on every change</dd>
+    </dl>
     <p class="hint">
-      Passwords require 12+ characters (enforced above and server-side). Login rate-limiting state,
-      configurable session timeout, and a broader password policy are not yet exposed as
-      owner-facing settings anywhere in this appliance -- this section discloses that rather than
-      hiding it.
+      These values are real and already enforced -- not yet owner-configurable from this page.
     </p>
   </div>
 
@@ -263,6 +274,9 @@
   .card.wide { max-width: 72rem; }
   .card h3 { margin-top: 0; }
   .hint { font-size: 0.85rem; opacity: 0.75; }
+  .security-facts { display: grid; grid-template-columns: auto 1fr; gap: 0.4rem 1rem; margin: 0 0 0.75rem; font-size: 0.88rem; }
+  .security-facts dt { font-weight: 600; opacity: 0.75; }
+  .security-facts dd { margin: 0; }
   .radio-row { display: flex; flex-wrap: wrap; gap: 1rem; }
   .radio-row label, .checkbox-row { display: flex; align-items: center; gap: 0.4rem; font-size: 0.9rem; }
   .preview { margin-top: 0.75rem; font-size: 0.85rem; }

@@ -378,6 +378,15 @@ func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
 		"uptime_seconds":     int(s.Uptime().Seconds()),
 		"appliance_name":     s.applianceDisplayName(r.Context()),
 		"appliance_timezone": s.ApplianceTimezone,
+		// Real, already-enforced authentication security state
+		// (Administration > Authentication Security) -- s.SessionTTL is
+		// the exact value RequireAuth checks on every request;
+		// auth.LoginFailureMax/Window are the exact constants Login
+		// itself rate-limits against. Not owner-configurable yet, but
+		// real, not invented.
+		"session_timeout_seconds":         int(s.SessionTTL.Seconds()),
+		"login_rate_limit_max_attempts":   auth.LoginFailureMax,
+		"login_rate_limit_window_seconds": int(auth.LoginFailureWindow.Seconds()),
 	})
 }
 

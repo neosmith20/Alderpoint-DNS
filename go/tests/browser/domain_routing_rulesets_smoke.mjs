@@ -40,10 +40,22 @@ async function main() {
     await page.type('input[autocomplete="current-password"]', password);
     await Promise.all([page.waitForSelector(".app-layout", { timeout: 5000 }), page.click('button[type="submit"]')]);
 
-    check("DNS Settings nav clickable", await clickNavItem(page, (t) => t === "DNS Settings"));
-    await new Promise((r) => setTimeout(r, 500));
+    // Upstreams & Routing is Advanced-only nav (Domain Routes moved off
+    // the simplified Standard "DNS" page entirely, see nav.ts) -- direct
+    // URL navigation works regardless of the selected profile, same as
+    // any other Advanced page reached by a direct link.
+    await page.goto(new URL("/ui/upstreams-routing", baseUrl).toString(), { waitUntil: "networkidle0" });
+    await page.waitForSelector("#upstreams-heading", { timeout: 5000 });
+    check("Upstreams & Routing page renders", (await page.$("#upstreams-heading")) !== null);
+
+    const routesTabClicked = await page.evaluate(() => {
+      const tab = [...document.querySelectorAll('[role="tab"]')].find((t) => t.textContent.includes("Domain Routes"));
+      if (tab) { tab.click(); return true; }
+      return false;
+    });
+    check("Domain Routes tab is clickable", routesTabClicked);
+    await new Promise((r) => setTimeout(r, 300));
     const text0 = await page.evaluate(() => document.body.textContent);
-    check("Domain Routing section renders", /Domain Routing/.test(text0));
     check("Rulesets section renders", /Rulesets/.test(text0));
 
     // Create a ruleset via the real form

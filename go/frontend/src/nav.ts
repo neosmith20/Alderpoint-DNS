@@ -105,7 +105,7 @@ export const NAV_GROUPS: NavGroup[] = [
         id: "upstreams",
         label: "DNS",
         icon: "dns",
-        load: () => import("./lib/UpstreamsView.svelte") as unknown as Promise<{ default: Component }>,
+        load: () => import("./lib/DnsSettingsView.svelte") as unknown as Promise<{ default: Component }>,
       },
       {
         id: "encryption",
@@ -162,7 +162,7 @@ export const NAV_GROUPS: NavGroup[] = [
         id: "upstreams-routing",
         label: "Upstreams & Routing",
         icon: "dns",
-        load: () => import("./lib/UpstreamsView.svelte") as unknown as Promise<{ default: Component }>,
+        load: () => import("./lib/UpstreamsRoutingView.svelte") as unknown as Promise<{ default: Component }>,
       },
       {
         id: "cache",

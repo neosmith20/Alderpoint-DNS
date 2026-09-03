@@ -1057,7 +1057,10 @@ export const api = {
   updateAnalyticsSettings: (settings: AnalyticsSettings) =>
     req<AnalyticsSettings>("/api/statistics/settings", { method: "PUT", body: JSON.stringify(settings) }),
   systemStatus: () =>
-    req<{ version: string; uptime_seconds: number; appliance_name: string; appliance_timezone: string }>("/api/system/status"),
+    req<{
+      version: string; uptime_seconds: number; appliance_name: string; appliance_timezone: string;
+      session_timeout_seconds: number; login_rate_limit_max_attempts: number; login_rate_limit_window_seconds: number;
+    }>("/api/system/status"),
   dashboardSummary: (signal?: AbortSignal) =>
     req<{
       appliance_name: string;
