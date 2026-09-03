@@ -48,6 +48,19 @@ func (s *Service) ListServiceBlockingRulesets(ctx context.Context) ([]ServiceBlo
 	return out, nil
 }
 
+// ServiceBlockingDomains is the exported form of serviceBlockingDomains,
+// for a caller (internal/dnsruntime's orchestrator) that needs just one
+// ruleset's own compiled domain list without paging through
+// ListServiceBlockingRulesets' full catalog -- see that caller's own use
+// for compiling the GLOBAL scope's service_blocking_ruleset_id (Blocked
+// Services), which previously had no live effect at all: only a
+// network/group/client override that differed from global ever
+// compiled into anything (see computeScopeOverrides), and nothing ever
+// enforced the global baseline itself.
+func (s *Service) ServiceBlockingDomains(ctx context.Context, id string) ([]string, error) {
+	return s.serviceBlockingDomains(ctx, id)
+}
+
 func (s *Service) serviceBlockingDomains(ctx context.Context, id string) ([]string, error) {
 	rows, err := s.DB.QueryContext(ctx, `SELECT domain FROM service_blocking_ruleset_domains WHERE ruleset_id = ? ORDER BY domain`, id)
 	if err != nil {

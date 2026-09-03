@@ -344,8 +344,37 @@ func (o *Orchestrator) build(ctx context.Context) (dnscompile.Input, []string, s
 			if err != nil {
 				continue // not yet pulled, or a stale/removed file -- not a hard error
 			}
+			// Allowlists (list_type=="allow") feed the exact same
+			// allowedSet a rule_type=="allow" custom rule does -- always
+			// wins over a same-named block entry below, real precedence,
+			// not a second/different mechanism (see migration 0029's own
+			// doc comment).
+			target := blockedSet
+			if sub.ListType == "allow" {
+				target = allowedSet
+			}
 			for _, d := range domains {
-				blockedSet[d] = true
+				target[d] = true
+			}
+		}
+	}
+	var globalLayer policy.Layer
+	if o.Policy != nil {
+		layer, err := o.Policy.Load(ctx, "global", "global")
+		if err == nil {
+			globalLayer = layer
+			// Blocked Services (Standard) / Policy Profiles > Service
+			// Blocking Rulesets (Advanced): the GLOBAL scope's own
+			// service_blocking_ruleset_id is compiled here, into the same
+			// blockedSet a blocklist subscription feeds -- a real fix,
+			// not pre-existing behavior (see ServiceBlockingDomains' own
+			// doc comment for the gap this closes).
+			if layer.ServiceBlockingRulesetID != nil && o.PolicyEntities != nil {
+				if domains, err := o.PolicyEntities.ServiceBlockingDomains(ctx, *layer.ServiceBlockingRulesetID); err == nil {
+					for _, d := range domains {
+						blockedSet[strings.ToLower(d)] = true
+					}
+				}
 			}
 		}
 	}
@@ -355,20 +384,15 @@ func (o *Orchestrator) build(ctx context.Context) (dnscompile.Input, []string, s
 		}
 	}
 
-	var globalLayer policy.Layer
 	if o.Policy != nil {
-		layer, err := o.Policy.Load(ctx, "global", "global")
-		if err == nil {
-			globalLayer = layer
-			if layer.BlockingResponseMode != nil {
-				in.BlockingResponseMode = *layer.BlockingResponseMode
-			}
-			if layer.CustomIPv4 != nil {
-				in.CustomIPv4 = *layer.CustomIPv4
-			}
-			if layer.CustomIPv6 != nil {
-				in.CustomIPv6 = *layer.CustomIPv6
-			}
+		if globalLayer.BlockingResponseMode != nil {
+			in.BlockingResponseMode = *globalLayer.BlockingResponseMode
+		}
+		if globalLayer.CustomIPv4 != nil {
+			in.CustomIPv4 = *globalLayer.CustomIPv4
+		}
+		if globalLayer.CustomIPv6 != nil {
+			in.CustomIPv6 = *globalLayer.CustomIPv6
 		}
 
 		// Per-network blocking-response overrides (see

@@ -24,7 +24,9 @@ import (
 
 	"alderpointdns/go-controlplane/internal/auditlog"
 	"alderpointdns/go-controlplane/internal/auth"
+	"alderpointdns/go-controlplane/internal/appliancesettings"
 	"alderpointdns/go-controlplane/internal/backup"
+	"alderpointdns/go-controlplane/internal/blockedservices"
 	"alderpointdns/go-controlplane/internal/blocklists"
 	"alderpointdns/go-controlplane/internal/bootstrap"
 	"alderpointdns/go-controlplane/internal/clientalias"
@@ -629,6 +631,8 @@ func runWeb(args []string) {
 	clientsSvc := &clients.Service{DB: db}
 	policySvc := &policy.Service{DB: db}
 	policyEntitiesSvc := &policyentities.Service{DB: db}
+	blockedServicesSvc := &blockedservices.Service{DB: db, Policy: policySvc, PolicyEntities: policyEntitiesSvc}
+	applianceSettingsSvc := &appliancesettings.Service{DB: db}
 	customRulesSvc := &customrules.Service{DB: db}
 	dnsTransportsSvc := &dnstransports.Service{DB: db}
 	notificationsSvc := &notifications.Service{DB: db}
@@ -849,7 +853,7 @@ func runWeb(args []string) {
 	}
 
 	srv := &httpapi.Server{
-		DB: db, Auth: authStore, Bootstrap: bootstrapMgr, Blocklists: blSvc, LocalDNS: ldSvc, ClientAliases: clientAliasSvc, Upstreams: upSvc, DomainRouting: domainRoutingSvc, Clients: clientsSvc, Policy: policySvc, PolicyEntities: policyEntitiesSvc, CustomRules: customRulesSvc, Backup: backupSvc,
+		DB: db, Auth: authStore, Bootstrap: bootstrapMgr, Blocklists: blSvc, LocalDNS: ldSvc, ClientAliases: clientAliasSvc, Upstreams: upSvc, DomainRouting: domainRoutingSvc, Clients: clientsSvc, Policy: policySvc, PolicyEntities: policyEntitiesSvc, BlockedServices: blockedServicesSvc, ApplianceSettings: applianceSettingsSvc, CustomRules: customRulesSvc, Backup: backupSvc,
 		DNSTransports: dnsTransportsSvc, Notifications: notificationsSvc, Importer: importerSvc,
 		StaticDir: *staticDir, Log: logger, Version: Version, StartedAt: startedAt,
 		SessionTTL: cfg.SessionTTL(), LastSeen: cfg.LastSeenUpdateInterval(),
@@ -952,6 +956,22 @@ func runWeb(args []string) {
 			}
 			return samples, nil
 		}, time.Minute, logger)
+	}
+
+	// Blocked Services schedule: a real background evaluator, not just a
+	// stored preference -- a 1-minute tick re-checks whether the
+	// configured day/time window just turned on or off and, only on a
+	// real flip, recompiles the reserved ruleset and applies it to the
+	// live DNS runtime. Gated on dnsRuntimeOrch (nothing to apply to
+	// otherwise); SetEnabledServices/SetSchedule themselves already
+	// recompile+apply synchronously on every save regardless of this
+	// ticker, matching every other mutation's own "the handler applies
+	// immediately" contract -- this only catches the schedule's own
+	// clock-driven transitions between saves.
+	if dnsRuntimeOrch != nil {
+		go blockedServicesSvc.RunScheduler(schedulerCtx, time.Minute, func() {
+			dnsRuntimeOrch.Apply(context.Background())
+		})
 	}
 
 	// Real dispatch call site #6: backup_failure -- the last previously

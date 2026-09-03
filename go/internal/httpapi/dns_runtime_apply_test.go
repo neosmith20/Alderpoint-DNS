@@ -237,7 +237,7 @@ func TestBlocklistToggleAutoApplies(t *testing.T) {
 	// real network pull against an unreachable URL) -- seed directly
 	// via the service, matching this test's own narrow focus on the
 	// Toggle handler's auto-apply wiring.
-	if _, _, err := s.Blocklists.Create(context.Background(), "test-list", "Test List", "https://example.invalid/list.txt", "test"); err != nil {
+	if _, _, err := s.Blocklists.Create(context.Background(), "test-list", "Test List", "https://example.invalid/list.txt", "test", "block"); err != nil {
 		t.Fatal(err)
 	}
 

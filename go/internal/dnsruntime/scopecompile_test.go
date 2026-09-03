@@ -30,13 +30,13 @@ func newScopeTestOrchestrator(t *testing.T) (*Orchestrator, *sqlHandles) {
 	ctx := context.Background()
 
 	bl := &blocklists.Service{DB: db, StagingDir: t.TempDir(), RuntimeDir: t.TempDir()}
-	if _, _, err := bl.Create(ctx, "standard-sub", "Standard", "https://example.invalid/std.txt", "malware"); err != nil {
+	if _, _, err := bl.Create(ctx, "standard-sub", "Standard", "https://example.invalid/std.txt", "malware", "block"); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(bl.RuntimeDir, "standard-sub.rpz"), []byte("malware.example.com CNAME .\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := bl.Create(ctx, "adult-sub", "Adult Content", "https://example.invalid/adult.txt", "adult_content"); err != nil {
+	if _, _, err := bl.Create(ctx, "adult-sub", "Adult Content", "https://example.invalid/adult.txt", "adult_content", "block"); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(bl.RuntimeDir, "adult-sub.rpz"), []byte("adult.example.com CNAME .\n"), 0o644); err != nil {
@@ -265,7 +265,7 @@ func TestScopeCompileLiveDNSProof(t *testing.T) {
 	}
 
 	bl := &blocklists.Service{DB: db, StagingDir: t.TempDir(), RuntimeDir: t.TempDir()}
-	if _, _, err := bl.Create(ctx, "scope-proof-sub", "Scope Proof", "https://example.invalid/x.txt", "adult_content"); err != nil {
+	if _, _, err := bl.Create(ctx, "scope-proof-sub", "Scope Proof", "https://example.invalid/x.txt", "adult_content", "block"); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(bl.RuntimeDir, "scope-proof-sub.rpz"), []byte("blocked-by-scope.example.com CNAME .\n"), 0o644); err != nil {

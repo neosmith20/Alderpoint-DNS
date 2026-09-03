@@ -47,7 +47,7 @@ func TestProtectionToggleDisablesThenEnablesEverything(t *testing.T) {
 	s := newTestDomainTestServer(t)
 	ctx := context.Background()
 
-	if _, _, err := s.Blocklists.Create(ctx, "sub-1", "Sub One", "http://example.com/list.txt", ""); err != nil {
+	if _, _, err := s.Blocklists.Create(ctx, "sub-1", "Sub One", "http://example.com/list.txt", "", "block"); err != nil {
 		t.Fatalf("create blocklist: %v", err)
 	}
 	if _, err := s.CustomRules.Create(ctx, "block", "example.net", nil); err != nil {

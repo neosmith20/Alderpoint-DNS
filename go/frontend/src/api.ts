@@ -7,6 +7,9 @@ export interface Subscription {
   name: string;
   url: string;
   category: string;
+  /** "block" (Blocklists) or "allow" (Allowlists) -- same table/pipeline,
+   * see migration 0029's own doc comment. */
+  list_type: "block" | "allow";
   enabled: boolean;
   created_at: string;
   last_refresh_at: string | null;
@@ -355,6 +358,33 @@ export interface ServiceBlockingRuleset {
   domains: string[];
   created_at: string;
   updated_at: string;
+}
+
+export interface BlockedServiceCatalogEntry {
+  id: string;
+  name: string;
+  category: string;
+  domains: string[];
+}
+
+export interface BlockedServicesSettings {
+  enabled_service_ids: string[];
+  schedule_enabled: boolean;
+  schedule_days: string[];
+  schedule_start: string;
+  schedule_end: string;
+  schedule_all_day: boolean;
+  updated_at: string;
+  schedule_active_now: boolean;
+  next_activation: string | null;
+}
+
+export interface BlockedServicesScheduleInput {
+  enabled: boolean;
+  days: string[];
+  start: string;
+  end: string;
+  all_day: boolean;
 }
 
 export interface AnalyticsBucket {
@@ -1021,6 +1051,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ confirmation: "CLEAR" }),
     }),
+  setApplianceDisplayName: (displayName: string) =>
+    req<{ status: string; appliance_name: string }>("/api/appliance/display-name", { method: "PUT", body: JSON.stringify({ display_name: displayName }) }),
   getAnalyticsSettings: (signal?: AbortSignal) => req<AnalyticsSettings>("/api/statistics/settings", undefined, signal),
   updateAnalyticsSettings: (settings: AnalyticsSettings) =>
     req<AnalyticsSettings>("/api/statistics/settings", { method: "PUT", body: JSON.stringify(settings) }),
@@ -1236,10 +1268,10 @@ export const api = {
     req<{ status: string; version: string; sha256: string }>("/api/updates/download-and-stage", { method: "POST" }),
 
   listBlocklists: (signal?: AbortSignal) => req<BlocklistsResponse>("/api/blocklists", undefined, signal),
-  createBlocklist: (name: string, url: string, category: string) =>
+  createBlocklist: (name: string, url: string, category: string, listType: "block" | "allow" = "block") =>
     req<{ subscription_id: string; job_id: number; subscription: Subscription }>("/api/blocklists", {
       method: "POST",
-      body: JSON.stringify({ name, url, category }),
+      body: JSON.stringify({ name, url, category, list_type: listType }),
     }),
   setDefaultInterval: (seconds: number) =>
     req<{ status: string }>("/api/blocklists/settings", { method: "POST", body: JSON.stringify({ default_interval_seconds: seconds }) }),
@@ -1355,6 +1387,16 @@ export const api = {
     req<{ status: string; dns_runtime?: DNSRuntimeApplyResult }>(`/api/policy-entities/service-blocking-rulesets/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(body) }),
   deleteServiceBlockingRuleset: (id: string) =>
     req<{ status: string; dns_runtime?: DNSRuntimeApplyResult }>(`/api/policy-entities/service-blocking-rulesets/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  // Blocked Services (Standard > Filters): a fixed catalog + a real
+  // toggle grid, distinct from the arbitrary-domain Service Blocking
+  // Rulesets above -- see internal/blockedservices' own doc comment.
+  listBlockedServicesCatalog: (signal?: AbortSignal) => req<{ services: BlockedServiceCatalogEntry[] }>("/api/blocked-services/catalog", undefined, signal),
+  getBlockedServicesSettings: (signal?: AbortSignal) => req<BlockedServicesSettings>("/api/blocked-services/settings", undefined, signal),
+  setBlockedServicesEnabled: (serviceIds: string[]) =>
+    req<{ status: string; settings: BlockedServicesSettings; dns_runtime?: DNSRuntimeApplyResult }>("/api/blocked-services/enabled", { method: "PUT", body: JSON.stringify({ service_ids: serviceIds }) }),
+  setBlockedServicesSchedule: (schedule: BlockedServicesScheduleInput) =>
+    req<{ status: string; settings: BlockedServicesSettings; dns_runtime?: DNSRuntimeApplyResult }>("/api/blocked-services/schedule", { method: "PUT", body: JSON.stringify(schedule) }),
 
   listGroups: (signal?: AbortSignal) => req<{ groups: ClientGroup[] }>("/api/groups", undefined, signal),
   createGroup: (name: string, priority: number) =>

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net"
@@ -375,9 +376,22 @@ func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, map[string]any{
 		"version":            s.Version,
 		"uptime_seconds":     int(s.Uptime().Seconds()),
-		"appliance_name":     s.ApplianceName,
+		"appliance_name":     s.applianceDisplayName(r.Context()),
 		"appliance_timezone": s.ApplianceTimezone,
 	})
+}
+
+// applianceDisplayName: the DB-stored override (General Settings >
+// Appliance Identity) when one has been set, else the boot-time
+// appliance.yaml value -- see internal/appliancesettings' own doc
+// comment for why this indirection exists at all.
+func (s *Server) applianceDisplayName(ctx context.Context) string {
+	if s.ApplianceSettings != nil {
+		if name, err := s.ApplianceSettings.Get(ctx); err == nil && name != "" {
+			return name
+		}
+	}
+	return s.ApplianceName
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

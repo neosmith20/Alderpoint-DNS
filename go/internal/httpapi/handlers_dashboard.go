@@ -55,7 +55,7 @@ func (s *Server) handleDashboardSummary(w http.ResponseWriter, r *http.Request) 
 	}
 
 	WriteJSON(w, http.StatusOK, map[string]any{
-		"appliance_name":      s.ApplianceName,
+		"appliance_name":      s.applianceDisplayName(r.Context()),
 		"analytics_available": analyticsAvailable,
 		"analytics_health":    analyticsHealth,
 		"blocklists": map[string]any{

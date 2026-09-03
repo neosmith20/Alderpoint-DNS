@@ -27,6 +27,7 @@ import (
 	"alderpointdns/go-controlplane/internal/hostagentd"
 	"alderpointdns/go-controlplane/internal/localdns"
 	"alderpointdns/go-controlplane/internal/policy"
+	"alderpointdns/go-controlplane/internal/policyentities"
 	"alderpointdns/go-controlplane/internal/upstreams"
 )
 
@@ -81,7 +82,7 @@ func TestBuildGathersEveryConfiguredSource(t *testing.T) {
 	}
 
 	bl := &blocklists.Service{DB: db, StagingDir: t.TempDir(), RuntimeDir: t.TempDir()}
-	if _, _, err := bl.Create(ctx, "sub1", "Test List", "https://example.invalid/list.txt", "test"); err != nil {
+	if _, _, err := bl.Create(ctx, "sub1", "Test List", "https://example.invalid/list.txt", "test", "block"); err != nil {
 		t.Fatal(err)
 	}
 	// Simulate a real pulled/promoted subscription runtime file --
@@ -226,6 +227,89 @@ func TestBuildExplicitAllowOverridesBlock(t *testing.T) {
 		if d == "shared.example.com" {
 			t.Fatalf("an explicitly allowed domain must never appear in BlockedDomains, got %v", in.BlockedDomains)
 		}
+	}
+}
+
+// TestBuildAllowlistSubscriptionOverridesBlocklistSubscription proves
+// list_type=="allow" on a blocklist_subscriptions row (an Allowlist,
+// same table/pipeline as Blocklists -- see migration 0029) feeds
+// allowedSet exactly like a rule_type=="allow" custom rule does, and so
+// wins over a same-named domain compiled from a real block-type
+// subscription's own RPZ file.
+func TestBuildAllowlistSubscriptionOverridesBlocklistSubscription(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	bl := &blocklists.Service{DB: db, StagingDir: t.TempDir(), RuntimeDir: t.TempDir()}
+	if _, _, err := bl.Create(ctx, "block-sub", "Block List", "https://example.invalid/block.txt", "test", "block"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bl.RuntimeDir, "block-sub.rpz"), []byte("shared-list.example.com CNAME .\nonly-blocked.example.com CNAME .\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := bl.Create(ctx, "allow-sub", "Allow List", "https://example.invalid/allow.txt", "test", "allow"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bl.RuntimeDir, "allow-sub.rpz"), []byte("shared-list.example.com CNAME .\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	o := &Orchestrator{Blocklists: bl}
+	in, _, _, err := o.build(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range in.BlockedDomains {
+		if d == "shared-list.example.com" {
+			t.Fatalf("a domain on an allowlist subscription must never appear in BlockedDomains, got %v", in.BlockedDomains)
+		}
+	}
+	found := false
+	for _, d := range in.BlockedDomains {
+		if d == "only-blocked.example.com" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("a domain only on the blocklist subscription must still be blocked, got %v", in.BlockedDomains)
+	}
+}
+
+// TestBuildCompilesGlobalServiceBlockingRuleset proves the GLOBAL
+// scope's own service_blocking_ruleset_id (Blocked Services / Policy
+// Profiles > Service Blocking Rulesets) actually compiles into
+// BlockedDomains -- a real fix: previously only a network/group/client
+// override that happened to differ from an unenforced global baseline
+// ever compiled into anything (see computeScopeOverrides), so setting
+// this at global scope alone had zero live effect.
+func TestBuildCompilesGlobalServiceBlockingRuleset(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	pe := &policyentities.Service{DB: db}
+	if _, err := pe.CreateServiceBlockingRuleset(ctx, "social-media", "Social Media", "", []string{"social.example.com"}); err != nil {
+		t.Fatal(err)
+	}
+
+	pol := &policy.Service{DB: db}
+	rulesetID := "social-media"
+	if err := pol.Save(ctx, "global", "global", policy.Layer{ServiceBlockingRulesetID: &rulesetID}); err != nil {
+		t.Fatal(err)
+	}
+
+	o := &Orchestrator{Policy: pol, PolicyEntities: pe}
+	in, _, _, err := o.build(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, d := range in.BlockedDomains {
+		if d == "social.example.com" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected the global service blocking ruleset's own domain to be blocked, got %v", in.BlockedDomains)
 	}
 }
 

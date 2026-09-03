@@ -497,7 +497,7 @@ func (im *Importer) migrateBlocklists(ctx context.Context, pydb *sql.DB, dryRun 
 			record(RowResult{Table: "blocklist_subscriptions", Key: subID, Action: "would_import", Detail: fmt.Sprintf("url=%s enabled=%v", url, enabled != 0)})
 			continue
 		}
-		_, _, err := im.Blocklists.Create(ctx, subID, name, url, category)
+		_, _, err := im.Blocklists.Create(ctx, subID, name, url, category, "block")
 		if err != nil {
 			record(RowResult{Table: "blocklist_subscriptions", Key: subID, Action: "rejected", Detail: err.Error()})
 			continue

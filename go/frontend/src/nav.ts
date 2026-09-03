@@ -64,12 +64,12 @@ export const NAV_GROUPS: NavGroup[] = [
         icon: "blocklists",
         load: () => import("./lib/BlocklistsView.svelte") as unknown as Promise<{ default: Component }>,
       },
-      // Allowlists: no allow/deny "kind" on internal/blocklists.Subscription
-      // today, so there is no real backend list to point this at yet --
-      // left unavailable rather than aiming "Allowlists" at the Blocklists
-      // page under a second label, which would make an operator manage the
-      // same rows twice under two names. See the final report.
-      { id: "allowlists", label: "Allowlists", icon: "blocklists" },
+      {
+        id: "allowlists",
+        label: "Allowlists",
+        icon: "blocklists",
+        load: () => import("./lib/AllowlistsView.svelte") as unknown as Promise<{ default: Component }>,
+      },
       {
         id: "filtering",
         label: "Custom Rules",
@@ -82,12 +82,12 @@ export const NAV_GROUPS: NavGroup[] = [
         icon: "localdns",
         load: () => import("./lib/LocalDnsView.svelte") as unknown as Promise<{ default: Component }>,
       },
-      // Blocked Services: internal/policyentities has real service-blocking
-      // rulesets (Advanced > Policy Profiles > Service Blocking Rulesets),
-      // but no Standard-facing "toggle common services on/off" grid wired
-      // to a default/global ruleset yet. Left unavailable rather than
-      // reusing the Advanced ruleset editor under a simplified label.
-      { id: "blocked-services", label: "Blocked Services", icon: "security" },
+      {
+        id: "blocked-services",
+        label: "Blocked Services",
+        icon: "security",
+        load: () => import("./lib/BlockedServicesView.svelte") as unknown as Promise<{ default: Component }>,
+      },
     ],
   },
   {
@@ -95,13 +95,12 @@ export const NAV_GROUPS: NavGroup[] = [
     label: "Settings",
     icon: "settings",
     items: [
-      // General: no single consolidated "Appliance Identity / Protection
-      // Defaults / Query Log / Statistics / Interface Preferences" page
-      // exists yet -- those controls are currently split across
-      // Administration (Appearance/Timestamp), Statistics (collection
-      // settings) and PolicyEditor (global protection defaults). Left
-      // unavailable rather than shipping a half-composed page.
-      { id: "settings-general", label: "General", icon: "settings" },
+      {
+        id: "settings-general",
+        label: "General",
+        icon: "settings",
+        load: () => import("./lib/GeneralSettingsView.svelte") as unknown as Promise<{ default: Component }>,
+      },
       {
         id: "upstreams",
         label: "DNS",

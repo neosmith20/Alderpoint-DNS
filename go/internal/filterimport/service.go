@@ -140,7 +140,7 @@ func (s *Service) apply(ctx context.Context, sourceType string, parsed PiholePar
 			report.record("blocklist", bl.URL, "would_import", bl.Name)
 			continue
 		}
-		if _, _, err := s.Blocklists.Create(ctx, "pihole-"+randSlug(), bl.Name, bl.URL, bl.Category); err != nil {
+		if _, _, err := s.Blocklists.Create(ctx, "pihole-"+randSlug(), bl.Name, bl.URL, bl.Category, "block"); err != nil {
 			report.record("blocklist", bl.URL, "failed", err.Error())
 			continue
 		}

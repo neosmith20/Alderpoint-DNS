@@ -55,6 +55,11 @@ type Subscription struct {
 	Name                  string  `json:"name"`
 	URL                   string  `json:"url"`
 	Category              string  `json:"category"`
+	// ListType: "block" (default) or "allow". Same fetch/parse/schedule
+	// pipeline either way -- only how internal/dnsruntime's orchestrator
+	// consumes the compiled domain list differs (allowedSet vs
+	// blockedSet). See migration 0029's own doc comment.
+	ListType              string  `json:"list_type"`
 	Enabled               bool    `json:"enabled"`
 	CreatedAt             string  `json:"created_at"`
 	LastRefreshAt         *string `json:"last_refresh_at"`
@@ -153,7 +158,7 @@ var subscriptionColumns = []string{
 	"id", "subscription_id", "name", "url", "category", "enabled", "created_at",
 	"last_refresh_at", "last_status", "last_error", "rule_count", "last_success_at",
 	"next_update_at", "update_duration_ms", "update_interval_seconds", "failure_count",
-	"first_failure_at", "update_in_progress",
+	"first_failure_at", "update_in_progress", "list_type",
 }
 
 func scanSubscription(scanner interface{ Scan(...any) error }) (Subscription, error) {
@@ -162,7 +167,7 @@ func scanSubscription(scanner interface{ Scan(...any) error }) (Subscription, er
 	err := scanner.Scan(&sub.ID, &sub.SubscriptionID, &sub.Name, &sub.URL, &sub.Category, &enabled, &sub.CreatedAt,
 		&sub.LastRefreshAt, &sub.LastStatus, &sub.LastError, &sub.RuleCount, &sub.LastSuccessAt,
 		&sub.NextUpdateAt, &sub.UpdateDurationMs, &sub.UpdateIntervalSeconds, &sub.FailureCount,
-		&sub.FirstFailureAt, &inProgress)
+		&sub.FirstFailureAt, &inProgress, &sub.ListType)
 	sub.Enabled = enabled != 0
 	sub.UpdateInProgress = inProgress != 0
 	return sub, err
@@ -233,12 +238,15 @@ func join(cols []string) string {
 // exactly like app/v2/webapp.py's create_blocklist_subscription_route
 // docstring explains: a newly added subscription must not sit inert
 // until either a manual click or a possibly-day-away scheduled run.
-func (s *Service) Create(ctx context.Context, subscriptionID, name, url, category string) (*Subscription, int64, error) {
+func (s *Service) Create(ctx context.Context, subscriptionID, name, url, category, listType string) (*Subscription, int64, error) {
 	s.init()
+	if listType != "allow" {
+		listType = "block" // any unrecognized value is the safe default, never silently "allow"
+	}
 	nowStr := now()
 	_, err := s.DB.ExecContext(ctx,
-		`INSERT INTO blocklist_subscriptions(subscription_id, name, url, category, enabled, created_at, update_in_progress)
-		 VALUES(?,?,?,?,1,?,1)`, subscriptionID, name, url, category, nowStr)
+		`INSERT INTO blocklist_subscriptions(subscription_id, name, url, category, enabled, created_at, update_in_progress, list_type)
+		 VALUES(?,?,?,?,1,?,1,?)`, subscriptionID, name, url, category, nowStr, listType)
 	if err != nil {
 		return nil, 0, fmt.Errorf("duplicate subscription_id: %w", err)
 	}

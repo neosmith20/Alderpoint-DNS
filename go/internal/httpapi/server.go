@@ -8,7 +8,9 @@ import (
 
 	"alderpointdns/go-controlplane/internal/auditlog"
 	"alderpointdns/go-controlplane/internal/auth"
+	"alderpointdns/go-controlplane/internal/appliancesettings"
 	"alderpointdns/go-controlplane/internal/backup"
+	"alderpointdns/go-controlplane/internal/blockedservices"
 	"alderpointdns/go-controlplane/internal/blocklists"
 	"alderpointdns/go-controlplane/internal/bootstrap"
 	"alderpointdns/go-controlplane/internal/clientalias"
@@ -75,6 +77,8 @@ type Server struct {
 	DNSTransports *dnstransports.Service
 	Notifications *notifications.Service
 	Replication   *replication.Service
+	BlockedServices *blockedservices.Service
+	ApplianceSettings *appliancesettings.Service
 	StaticDir     string
 	Log           *slog.Logger
 
@@ -266,6 +270,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/policy-entities/security-policies", requireAuth(s.audited("policy_entities_security_policies_create", s.handleCreateSecurityPolicy)))
 	mux.HandleFunc("PUT /api/policy-entities/security-policies/{id}", requireAuth(s.audited("policy_entities_security_policies_update", s.handleUpdateSecurityPolicy)))
 	mux.HandleFunc("DELETE /api/policy-entities/security-policies/{id}", requireAuth(s.audited("policy_entities_security_policies_delete", s.handleDeleteSecurityPolicy)))
+	mux.HandleFunc("PUT /api/appliance/display-name", requireAuth(s.audited("appliance_display_name_set", s.handleSetApplianceDisplayName)))
+	mux.HandleFunc("GET /api/blocked-services/catalog", requireAuth(s.handleListBlockedServicesCatalog))
+	mux.HandleFunc("GET /api/blocked-services/settings", requireAuth(s.handleGetBlockedServicesSettings))
+	mux.HandleFunc("PUT /api/blocked-services/enabled", requireAuth(s.audited("blocked_services_set_enabled", s.handleSetBlockedServicesEnabled)))
+	mux.HandleFunc("PUT /api/blocked-services/schedule", requireAuth(s.audited("blocked_services_set_schedule", s.handleSetBlockedServicesSchedule)))
 	mux.HandleFunc("GET /api/policy-entities/service-blocking-rulesets", requireAuth(s.handleListServiceBlockingRulesets))
 	mux.HandleFunc("POST /api/policy-entities/service-blocking-rulesets", requireAuth(s.audited("policy_entities_service_blocking_rulesets_create", s.handleCreateServiceBlockingRuleset)))
 	mux.HandleFunc("PUT /api/policy-entities/service-blocking-rulesets/{id}", requireAuth(s.audited("policy_entities_service_blocking_rulesets_update", s.handleUpdateServiceBlockingRuleset)))

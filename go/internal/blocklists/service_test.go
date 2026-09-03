@@ -56,7 +56,8 @@ func newTestService(t *testing.T) *Service {
 			last_refresh_at TEXT, last_status TEXT, last_error TEXT, rule_count INTEGER,
 			last_success_at TEXT, next_update_at TEXT, update_duration_ms INTEGER,
 			update_interval_seconds INTEGER, failure_count INTEGER NOT NULL DEFAULT 0,
-			first_failure_at TEXT, update_in_progress INTEGER NOT NULL DEFAULT 0
+			first_failure_at TEXT, update_in_progress INTEGER NOT NULL DEFAULT 0,
+			list_type TEXT NOT NULL DEFAULT 'block'
 		);
 		CREATE TABLE blocklist_jobs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, subscription_ids TEXT NOT NULL,
@@ -118,7 +119,7 @@ func TestCreateTriggersImmediatePull(t *testing.T) {
 
 	s := newTestService(t)
 	ctx := context.Background()
-	sub, jobID, err := s.Create(ctx, "sub1", "Test List", srv.URL, "standard")
+	sub, jobID, err := s.Create(ctx, "sub1", "Test List", srv.URL, "standard", "block")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -143,6 +144,43 @@ func TestCreateTriggersImmediatePull(t *testing.T) {
 	}
 }
 
+// TestCreateListTypeRoundTrips proves an Allowlist ("allow") and a
+// Blocklist ("block", the default) are real, distinct, persisted rows
+// on this same table -- not just an in-memory label -- and that an
+// unrecognized value never silently becomes "allow".
+func TestCreateListTypeRoundTrips(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("0.0.0.0 example.com\n"))
+	}))
+	defer srv.Close()
+	s := newTestService(t)
+	ctx := context.Background()
+
+	allowSub, jobID, err := s.Create(ctx, "allow1", "An Allowlist", srv.URL, "standard", "allow")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if allowSub.ListType != "allow" {
+		t.Fatalf("ListType = %q immediately after Create, want allow", allowSub.ListType)
+	}
+	waitJob(t, s, jobID)
+	reloaded, err := s.Get(ctx, "allow1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.ListType != "allow" {
+		t.Fatalf("ListType = %q after reload from disk, want allow", reloaded.ListType)
+	}
+
+	blockSub, _, err := s.Create(ctx, "block1", "Default", srv.URL, "standard", "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if blockSub.ListType != "block" {
+		t.Fatalf("ListType = %q for an unrecognized/empty value, want the safe default block", blockSub.ListType)
+	}
+}
+
 func TestFailedPullRetainsPreviousGoodArtifact(t *testing.T) {
 	var good atomic.Bool
 	good.Store(true)
@@ -157,7 +195,7 @@ func TestFailedPullRetainsPreviousGoodArtifact(t *testing.T) {
 
 	s := newTestService(t)
 	ctx := context.Background()
-	_, jobID, err := s.Create(ctx, "sub2", "Flaky List", srv.URL, "standard")
+	_, jobID, err := s.Create(ctx, "sub2", "Flaky List", srv.URL, "standard", "block")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +250,7 @@ func TestAttentionRequiredAfterThreeConsecutiveFailures(t *testing.T) {
 
 	s := newTestService(t)
 	ctx := context.Background()
-	_, jobID, err := s.Create(ctx, "sub3", "Always Broken", srv.URL, "standard")
+	_, jobID, err := s.Create(ctx, "sub3", "Always Broken", srv.URL, "standard", "block")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +289,7 @@ func TestRefreshOneRejectsWhileAlreadyRunning(t *testing.T) {
 
 	s := newTestService(t)
 	ctx := context.Background()
-	_, _, err := s.Create(ctx, "sub4", "Slow List", srv.URL, "standard")
+	_, _, err := s.Create(ctx, "sub4", "Slow List", srv.URL, "standard", "block")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -90,7 +90,7 @@ func TestHandleTestDomainMatchesRealCustomRule(t *testing.T) {
 // runtime compiler itself reads), not just the custom-rules table.
 func TestHandleTestDomainMatchesRealBlocklistSubscriptionFile(t *testing.T) {
 	s := newTestDomainTestServer(t)
-	if _, _, err := s.Blocklists.Create(context.Background(), "test-sub", "Test List", "https://example.test/list.txt", "custom"); err != nil {
+	if _, _, err := s.Blocklists.Create(context.Background(), "test-sub", "Test List", "https://example.test/list.txt", "custom", "block"); err != nil {
 		t.Fatal(err)
 	}
 	rpzPath := filepath.Join(s.Blocklists.RuntimeDir, "test-sub.rpz")

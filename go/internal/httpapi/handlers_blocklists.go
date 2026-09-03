@@ -33,6 +33,9 @@ type createBlocklistRequest struct {
 	Name           string `json:"name"`
 	URL            string `json:"url"`
 	Category       string `json:"category"`
+	// ListType: "block" (default, omit-safe -- every existing caller
+	// predating Allowlists never sends this field) or "allow".
+	ListType string `json:"list_type"`
 }
 
 // subscriptionIDFromName derives a stable, URL/path-safe id when the
@@ -60,7 +63,7 @@ func (s *Server) handleCreateBlocklist(w http.ResponseWriter, r *http.Request) {
 	if subID == "" {
 		subID = subscriptionIDFromName(req.Name)
 	}
-	sub, jobID, err := s.Blocklists.Create(r.Context(), subID, req.Name, req.URL, req.Category)
+	sub, jobID, err := s.Blocklists.Create(r.Context(), subID, req.Name, req.URL, req.Category, req.ListType)
 	if err != nil {
 		Err(http.StatusConflict, "conflict", err.Error()).WriteJSON(w)
 		return
