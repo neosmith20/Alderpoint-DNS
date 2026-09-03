@@ -8,6 +8,8 @@
   import DataGrid from "./DataGrid.svelte";
   import type { Column } from "./datagrid";
   import ConfirmDialog from "./ui/ConfirmDialog.svelte";
+  import Modal from "./ui/Modal.svelte";
+  import PageHeader from "./ui/PageHeader.svelte";
 
   // Backup & Restore, native Go (own format -- see internal/backup's doc
   // comment for exactly why this isn't byte-compatible with Python's
@@ -22,6 +24,8 @@
   let loadError = $state("");
   const guard = new StaleGuard();
 
+  let createModalOpen = $state(false);
+  let uploadModalOpen = $state(false);
   let createBusy = $state(false);
   let createError = $state("");
   // Passphrase protection (2026-08-29): opt-in, defaulting to unchecked
@@ -238,6 +242,7 @@
       await api.createBackup(createEncrypt ? createPassphrase : undefined);
       createPassphrase = "";
       createPassphraseConfirm = "";
+      createModalOpen = false;
       toast.success(createEncrypt ? "Encrypted backup created." : "Backup created.");
       await refresh();
     } catch (err) {
@@ -255,6 +260,8 @@
     try {
       await api.uploadBackup(file);
       if (fileInput) fileInput.value = "";
+      uploadModalOpen = false;
+      toast.success("Backup uploaded.");
       await refresh();
     } catch (err) {
       uploadError = err instanceof ApiError ? err.message : String(err);
@@ -380,17 +387,19 @@
   ];
 </script>
 
-<section aria-labelledby="backup-heading" class="backup">
-  <h2 id="backup-heading">Backup &amp; Restore</h2>
-  <p class="scope-note">
-    Covers this appliance's own data (blocklists, Local DNS, DNS Settings, Clients &amp; Access,
-    Filters), and supports restoring just the categories you choose instead of everything at once.
-    Backups can optionally be protected with a passphrase (see the checkbox below).
-    <strong>An unprotected backup is not encrypted</strong> -- anyone with the downloaded file can
-    read its contents, including admin account password hashes -- so store downloaded backups
-    somewhere you trust, or protect them with a passphrase.
-  </p>
-  {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
+<PageHeader
+  headingId="backup-heading"
+  title="Backup &amp; Restore"
+  description="Covers this appliance's own data (blocklists, Local DNS, DNS Settings, Scope Policies, Filters), and supports restoring just the categories you choose instead of everything at once."
+>
+  {#snippet actions()}
+    <button type="button" onclick={() => (createModalOpen = true)}>Create Backup</button>
+    <button type="button" class="secondary" onclick={() => (uploadModalOpen = true)}>Upload Backup</button>
+  {/snippet}
+</PageHeader>
+
+<div class="backup">
+{#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
 
   {#if backups}
     {@const lastBackup = backups[0]}
@@ -402,50 +411,6 @@
       <span>Encryption: <strong>{backups.some((b) => b.encrypted) ? `${backups.filter((b) => b.encrypted).length} encrypted, ${backups.filter((b) => !b.encrypted).length} not` : "none encrypted"}</strong></span>
     </div>
   {/if}
-
-  <div class="two-col">
-    <div class="card">
-      <h3>Create a backup</h3>
-      <label class="schedule-row">
-        <input type="checkbox" class="encrypt-toggle" bind:checked={createEncrypt} />
-        Protect this backup with a passphrase
-      </label>
-      {#if createEncrypt}
-        <input
-          type="password"
-          bind:value={createPassphrase}
-          placeholder="Passphrase (min. 8 characters)"
-          aria-label="Backup passphrase"
-          autocomplete="new-password"
-        />
-        <input
-          type="password"
-          bind:value={createPassphraseConfirm}
-          placeholder="Confirm passphrase"
-          aria-label="Confirm backup passphrase"
-          autocomplete="new-password"
-        />
-        <p class="hint">
-          Keep this passphrase somewhere safe -- it is never stored anywhere, and a backup cannot be
-          previewed or restored without it, not even by an administrator.
-        </p>
-      {:else}
-        <p class="warning" role="alert">
-          ⚠ This backup will NOT be encrypted. It will include admin account password hashes and every
-          managed client/network's identifying data in the clear.
-        </p>
-      {/if}
-      <button onclick={createBackup} disabled={createBusy}>{createBusy ? "Creating…" : "Create backup now"}</button>
-      {#if createError}<p class="error" role="alert">{createError}</p>{/if}
-    </div>
-
-    <div class="card">
-      <h3>Upload a backup</h3>
-      <input type="file" bind:this={fileInput} aria-label="Backup file to upload" />
-      <button onclick={uploadFile} disabled={uploadBusy}>{uploadBusy ? "Uploading…" : "Upload"}</button>
-      {#if uploadError}<p class="error" role="alert">{uploadError}</p>{/if}
-    </div>
-  </div>
 
   <div class="card schedule-card">
     <h3>Scheduled backups</h3>
@@ -633,7 +598,49 @@
       {/snippet}
     </DataGrid>
   {/if}
-</section>
+</div>
+
+{#if createModalOpen}
+  <Modal title="Create Backup" onClose={() => (createModalOpen = false)}>
+    <div class="modal-form">
+      <label class="schedule-row">
+        <input type="checkbox" class="encrypt-toggle" bind:checked={createEncrypt} />
+        Protect this backup with a passphrase
+      </label>
+      {#if createEncrypt}
+        <input type="password" bind:value={createPassphrase} placeholder="Passphrase (min. 8 characters)" aria-label="Backup passphrase" autocomplete="new-password" />
+        <input type="password" bind:value={createPassphraseConfirm} placeholder="Confirm passphrase" aria-label="Confirm backup passphrase" autocomplete="new-password" />
+        <p class="hint">
+          Keep this passphrase somewhere safe -- it is never stored anywhere, and a backup cannot be
+          previewed or restored without it, not even by an administrator.
+        </p>
+      {:else}
+        <p class="warning" role="alert">
+          ⚠ This backup will NOT be encrypted. It will include admin account password hashes and every
+          managed client/network's identifying data in the clear.
+        </p>
+      {/if}
+      <div class="form-actions">
+        <button onclick={createBackup} disabled={createBusy}>{createBusy ? "Creating…" : "Create Backup"}</button>
+        <button type="button" class="secondary" onclick={() => (createModalOpen = false)}>Cancel</button>
+      </div>
+      {#if createError}<p class="error" role="alert">{createError}</p>{/if}
+    </div>
+  </Modal>
+{/if}
+
+{#if uploadModalOpen}
+  <Modal title="Upload Backup" onClose={() => (uploadModalOpen = false)}>
+    <div class="modal-form">
+      <label>Backup file <input type="file" bind:this={fileInput} aria-label="Backup file to upload" /></label>
+      <div class="form-actions">
+        <button onclick={uploadFile} disabled={uploadBusy}>{uploadBusy ? "Uploading…" : "Upload"}</button>
+        <button type="button" class="secondary" onclick={() => (uploadModalOpen = false)}>Cancel</button>
+      </div>
+      {#if uploadError}<p class="error" role="alert">{uploadError}</p>{/if}
+    </div>
+  </Modal>
+{/if}
 
 {#if confirmDeleteBackup}
   <ConfirmDialog
@@ -662,7 +669,9 @@
     display: flex; flex-wrap: wrap; gap: 0.75rem 1.5rem; font-size: 0.85rem;
     padding: 0.75rem 1rem; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-elevated);
   }
-  .two-col { display: flex; flex-wrap: wrap; gap: 1rem; }
+  .modal-form { display: flex; flex-direction: column; gap: 0.65rem; }
+  .modal-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; }
+  .form-actions { display: flex; gap: 0.5rem; align-items: center; }
   .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); display: flex; flex-direction: column; gap: 0.6rem; flex: 1; min-width: 14rem; }
   .card h3 { margin: 0; }
   .actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
