@@ -20,23 +20,6 @@ function check(name, cond, detail) {
   console.log(`[${cond ? "PASS" : "FAIL"}] ${name}${!cond && detail ? " -- " + detail : ""}`);
 }
 
-async function clickNavItem(page, predicate) {
-  const tryFind = async () => {
-    for (const btn of await page.$$(".sidebar .item")) {
-      const text = await btn.evaluate((el) => el.textContent?.trim());
-      if (predicate(text)) { await btn.click(); return true; }
-    }
-    return false;
-  };
-  if (await tryFind()) return true;
-  for (const toggle of await page.$$(".sidebar .group-toggle")) {
-    await toggle.click();
-    await new Promise((r) => setTimeout(r, 40));
-    if (await tryFind()) return true;
-  }
-  return false;
-}
-
 async function main() {
   const browser = await puppeteer.launch({
     executablePath: process.env.CHROMIUM_PATH || "/usr/bin/chromium",
@@ -55,7 +38,12 @@ async function main() {
     await page.type('input[autocomplete="current-password"]', password);
     await Promise.all([page.waitForSelector(".app-layout", { timeout: 5000 }), page.click('button[type="submit"]')]);
 
-    check("Network Configuration nav item exists and is clickable", await clickNavItem(page, (t) => t === "Network Configuration"));
+    // Network Configuration is Advanced-only nav (nav.ts's "operations"
+    // group) -- direct URL navigation works regardless of the selected
+    // profile, same pattern domain_routing_rulesets_smoke.mjs already
+    // uses for its own Advanced-only page.
+    await page.goto(new URL("/ui/network", baseUrl).toString(), { waitUntil: "networkidle0" });
+    check("Network Configuration page renders", (await page.$("#network-heading")) !== null);
     await page.waitForSelector("#network-heading", { timeout: 3000 });
     await page.waitForSelector(".settings-table", { timeout: 3000 });
 
