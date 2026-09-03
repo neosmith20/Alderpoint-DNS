@@ -326,6 +326,21 @@ func runDNSPromote(args []string) {
 	}
 	defer db.Close()
 
+	// A real, separate gap this command always had (independent of
+	// LoadOrCreateDnsdistAPIKey's own fix to the "web" subcommand's
+	// startup path): this one-shot promoter never set DnsdistAPIKey at
+	// all, so dnscompile never compiled a webserver() block -- every
+	// promote through THIS command (the boot-time systemd unit that
+	// brings up named+dnsdist from cold on every host reboot -- see
+	// scripts/v2/systemd/dns-promote-live.sh) permanently stripped the
+	// dnsdist webserver API until the real "web" process's own next
+	// promote happened to restore it. Loading the same persisted key
+	// here means a reboot can never disagree with what "web" itself
+	// would compile.
+	dnsdistAPIKey, err := dnsruntime.LoadOrCreateDnsdistAPIKey(ctx, db)
+	if err != nil {
+		logger.Warn("could not load/create the persisted dnsdist webserver API key -- promoting without it (Top Upstream Resolvers telemetry will be unavailable)", "err", err)
+	}
 	orch := &dnsruntime.Orchestrator{
 		LocalDNS:             &localdns.Service{DB: db},
 		CustomRules:          &customrules.Service{DB: db},
@@ -340,6 +355,7 @@ func runDNSPromote(args []string) {
 		TLSCertPath:      resolveDNSRuntimeTLSPath(*dnsRuntimeTLSCertPath, cfg.Web.TLSCertPath),
 		TLSKeyPath:       resolveDNSRuntimeTLSPath(*dnsRuntimeTLSKeyPath, cfg.Web.TLSKeyPath),
 		DnstapSocketPath: *dnstapSocketPath,
+		DnsdistAPIKey:    dnsdistAPIKey,
 	}
 
 	var result dnsruntime.Result
