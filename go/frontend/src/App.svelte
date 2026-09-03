@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { api, setCsrfToken, ApiError } from "./api";
   import { loadTheme, applyTheme, type Theme } from "./theme";
+  import { loadColors, applyColors } from "./colors";
   import { router } from "./router.svelte";
   import { defaultRouteId, findItem, groupOf } from "./nav";
   import Nav from "./lib/Nav.svelte";
@@ -30,6 +31,7 @@
   onMount(async () => {
     theme = loadTheme();
     applyTheme(theme);
+    applyColors(loadColors());
 
     // Immediate shell: the login/setup form below renders instantly while
     // this resolves in the background, rather than a blank page.

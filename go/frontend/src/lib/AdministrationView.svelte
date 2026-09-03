@@ -4,9 +4,27 @@
   import { timestampPref, type TimestampMode } from "../timestamp.svelte";
   import StatusBadge from "./ui/StatusBadge.svelte";
   import ConfirmDialog from "./ui/ConfirmDialog.svelte";
+  import { COLOR_PALETTE, loadColors, saveColors, applyColors, type ColorRole, type ColorChoices } from "../colors";
 
   let applianceName = $state("");
   let statusError = $state("");
+
+  // Appearance: which palette swatch (colorPalette.ts) drives each of
+  // three real UI roles. Applied instantly on click (no Save button --
+  // matching the existing light/dark theme toggle's own "changes apply
+  // instantly, everywhere" convention this page's Timestamp Display
+  // card already documents), persisted per-viewer in localStorage.
+  let colorChoices = $state<ColorChoices>(loadColors());
+  function pickColor(role: ColorRole, id: string) {
+    colorChoices = { ...colorChoices, [role]: id };
+    saveColors(colorChoices);
+    applyColors(colorChoices);
+  }
+  function resetColors() {
+    colorChoices = { accent: "", success: "", danger: "" };
+    saveColors(colorChoices);
+    applyColors(colorChoices);
+  }
 
   // Sessions / Recent Administrative Activity, matching V1.1.1's real
   // administration.html field-for-field (see GET
@@ -151,6 +169,45 @@
   </div>
 
   <div class="card wide">
+    <div class="appearance-head">
+      <h3>Appearance</h3>
+      <button type="button" class="secondary" onclick={resetColors}>Reset to defaults</button>
+    </div>
+    <p class="hint">
+      Pick a color for each real role in the interface -- Primary drives buttons, links, and the
+      active nav item; Success and Danger drive allowed/blocked status text and badges. Changes
+      apply instantly, everywhere, with no reload. This is a per-browser preference, like light/dark
+      mode above -- it doesn't sync across devices or other people viewing this appliance.
+    </p>
+    {#each [{ role: "accent" as ColorRole, label: "Primary (buttons, links, active nav)" }, { role: "success" as ColorRole, label: "Success (allowed / healthy)" }, { role: "danger" as ColorRole, label: "Danger (blocked / failed)" }] as group (group.role)}
+      <div class="swatch-group">
+        <span class="swatch-label">{group.label}</span>
+        <div class="swatch-row" role="radiogroup" aria-label={`${group.label} color`}>
+          <button
+            type="button"
+            class="swatch swatch-default"
+            class:selected={!colorChoices[group.role]}
+            aria-pressed={!colorChoices[group.role]}
+            title="Theme default"
+            onclick={() => pickColor(group.role, "")}
+          >?</button>
+          {#each COLOR_PALETTE as s (s.id)}
+            <button
+              type="button"
+              class="swatch"
+              class:selected={colorChoices[group.role] === s.id}
+              aria-pressed={colorChoices[group.role] === s.id}
+              style="background: {s.base};"
+              title={s.name}
+              onclick={() => pickColor(group.role, s.id)}
+            ></button>
+          {/each}
+        </div>
+      </div>
+    {/each}
+  </div>
+
+  <div class="card wide">
     <h3>Sessions</h3>
     <p class="hint">Sessions other than this one can be revoked without changing the password.</p>
     <button class="danger" onclick={revokeOtherSessions} disabled={revokeBusy}>{revokeBusy ? "Revoking…" : "Revoke all other sessions"}</button>
@@ -232,6 +289,21 @@
   .stack-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; }
   .success { color: var(--success); }
   .danger { background: var(--badge-danger-bg); color: var(--badge-danger-fg); margin-top: 0.5rem; }
+  .appearance-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem; }
+  .appearance-head h3 { margin: 0; }
+  .swatch-group { margin-top: 0.9rem; }
+  .swatch-label { display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 0.4rem; }
+  .swatch-row { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+  .swatch {
+    width: 1.7rem; height: 1.7rem; border-radius: 999px; padding: 0;
+    border: 2px solid transparent; cursor: pointer; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.15);
+  }
+  .swatch.selected { border-color: var(--fg); }
+  .swatch-default {
+    background: var(--panel-elevated); color: var(--fg); font-size: 0.85rem; font-weight: 700;
+    display: flex; align-items: center; justify-content: center; border-color: var(--border-strong);
+  }
+  .swatch-default.selected { border-color: var(--fg); border-width: 2px; }
   .table-scroll { overflow-x: auto; margin-top: 0.75rem; }
   .admin-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
   .admin-table th { text-align: left; font-weight: 600; opacity: 0.7; padding: 0.3rem 0.5rem 0.3rem 0; border-bottom: 1px solid var(--border); }
