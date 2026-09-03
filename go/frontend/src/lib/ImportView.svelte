@@ -288,7 +288,7 @@
 </script>
 
 <section aria-labelledby="importexport-heading" class="import-view">
-  <h2 id="importexport-heading">Import</h2>
+  <h2 id="importexport-heading">Import &amp; Migration</h2>
   <p class="scope-note">
     Bring data in <em>from another source</em> -- another Alderpoint DNS or V1.1.1 appliance, or a
     different product entirely (AdGuard Home, Pi-hole). This is different from

@@ -199,6 +199,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/session/password", requireAuth(s.handleChangePassword))
 	mux.HandleFunc("GET /api/administration/sessions", requireAuth(s.handleListSessions))
 	mux.HandleFunc("GET /api/administration/audit-log", requireAuth(s.handleListAuditLog))
+	mux.HandleFunc("GET /api/administration/audit-log/all", requireAuth(s.handleListAuditLogAll))
 	mux.HandleFunc("GET /api/system/status", requireAuth(s.handleSystemStatus))
 	mux.HandleFunc("GET /api/dashboard/summary", requireAuth(s.handleDashboardSummary))
 	mux.HandleFunc("GET /api/protection/status", requireAuth(s.handleProtectionStatus))

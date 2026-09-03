@@ -3,8 +3,9 @@
   import { api, setCsrfToken, ApiError } from "./api";
   import { loadTheme, applyTheme, type Theme } from "./theme";
   import { loadColors, applyColors } from "./colors";
+  import { loadProfile, saveProfile, type NavProfile } from "./profile";
   import { router } from "./router.svelte";
-  import { defaultRouteId, findItem, groupOf } from "./nav";
+  import { defaultRouteId, findItem, groupOf, isAdvancedRoute } from "./nav";
   import Nav from "./lib/Nav.svelte";
   import RouteLoader from "./lib/RouteLoader.svelte";
   import Icon from "./lib/Icon.svelte";
@@ -27,6 +28,12 @@
 
   let theme = $state<Theme>("light");
   let mobileNavOpen = $state(false);
+  let profile = $state<NavProfile>(loadProfile());
+
+  function setProfile(p: NavProfile) {
+    profile = p;
+    saveProfile(p);
+  }
 
   onMount(async () => {
     theme = loadTheme();
@@ -73,6 +80,10 @@
 
   const activeLabel = $derived(findItem(router.current)?.label ?? "");
   const activeGroupLabel = $derived(groupOf(router.current)?.label);
+  // A direct link/bookmark to an Advanced-only page must still render
+  // normally while Standard is selected -- see nav.ts's isAdvancedRoute
+  // doc comment. This only adds a label; it never redirects or 404s.
+  const currentIsAdvanced = $derived(isAdvancedRoute(router.current));
 
   function toggleTheme() {
     theme = theme === "light" ? "dark" : "light";
@@ -204,7 +215,15 @@
     </main>
   {:else}
     <div class="app-layout">
-      <Nav bind:mobileOpen={mobileNavOpen} />
+      <Nav
+        bind:mobileOpen={mobileNavOpen}
+        {profile}
+        onProfileChange={setProfile}
+        {theme}
+        onToggleTheme={toggleTheme}
+        username={authedUsername}
+        onLogout={doLogout}
+      />
       <div class="content-col">
         <header class="topbar">
           <button
@@ -215,20 +234,20 @@
           >
             <Icon name="menu" />
           </button>
+          <span class="topbar-brand" aria-hidden="true">Alderpoint DNS</span>
           <div class="crumb">
             {#if activeGroupLabel}<span class="crumb-group">{activeGroupLabel}</span>{/if}
             <span class="crumb-page">{activeLabel}</span>
+            {#if currentIsAdvanced}<span class="advanced-tag" title="This page lives under Advanced navigation.">Advanced page</span>{/if}
           </div>
-          <span class="spacer"></span>
-          <button class="theme-toggle" onclick={toggleTheme} aria-label="Toggle color theme">
-            <Icon name={theme === "light" ? "moon" : "sun"} size={17} />
-          </button>
-          <span class="whoami">{authedUsername}</span>
-          <button class="logout-btn" onclick={doLogout} aria-label="Log out">
-            <Icon name="logout" size={16} />
-          </button>
         </header>
         <main>
+          {#if currentIsAdvanced && profile === "standard"}
+            <p class="advanced-banner" role="status">
+              This is an Advanced page. It isn't shown in Standard navigation, but it works the same
+              either way -- nothing about switching profiles changes what it does.
+            </p>
+          {/if}
           {#key router.current}
             <RouteLoader routeId={router.current} />
           {/key}
@@ -320,25 +339,37 @@
   .auth-form { display: flex; flex-direction: column; gap: 0.75rem; width: 22rem; max-width: 90vw; background: var(--card-bg); padding: 1.5rem; border-radius: 8px; border: 1px solid var(--border); }
   .auth-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; }
   .checkbox { flex-direction: row !important; align-items: center; gap: 0.5rem !important; }
-  .spacer { flex: 1; }
-  .whoami { font-size: 0.85rem; opacity: 0.8; }
 
   .app-layout { display: flex; height: 100%; }
   .content-col { flex: 1; min-width: 0; display: flex; flex-direction: column; height: 100%; }
+  /* The app shell's own top bar is the mobile/tablet replacement for the
+     sidebar (hamburger + brand + current page) -- theme/account/logout
+     now live in Nav.svelte's own bottom section instead, both desktop and
+     drawer, so they aren't duplicated up here. On desktop this bar
+     collapses to just the current-page crumb: a slim orientation aid, not
+     a second controls row. */
   .topbar {
     display: flex; align-items: center; gap: 0.75rem;
     padding: 0.6rem 1rem; border-bottom: 1px solid var(--border);
     background: var(--card-bg); flex-shrink: 0;
   }
   .menu-btn { display: none; background: transparent; color: var(--fg); padding: 0.35rem; }
-  .crumb { display: flex; align-items: baseline; gap: 0.45rem; font-size: 0.95rem; min-width: 0; }
+  .topbar-brand { display: none; font-weight: 700; font-size: 0.95rem; }
+  .crumb { display: flex; align-items: baseline; gap: 0.5rem; font-size: 0.95rem; min-width: 0; flex-wrap: wrap; }
   .crumb-group { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.65; }
   .crumb-page { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .logout-btn { background: transparent; color: var(--fg); padding: 0.4rem; border-radius: 6px; }
-  .logout-btn:hover { background: var(--nav-hover-bg); }
+  .advanced-tag {
+    font-size: 0.68rem; font-weight: 650; text-transform: uppercase; letter-spacing: 0.03em;
+    padding: 0.12rem 0.5rem; border-radius: 999px; background: var(--badge-warn-bg); color: var(--badge-warn-fg);
+  }
+  .advanced-banner {
+    margin: 0 0 1rem; padding: 0.6rem 0.85rem; border-radius: 8px;
+    background: var(--panel-elevated); border: 1px solid var(--border); font-size: 0.85rem; color: var(--muted);
+  }
   .app-layout main { flex: 1; overflow-y: auto; padding: 1.25rem; }
 
   @media (max-width: 760px) {
     .menu-btn { display: inline-flex; }
+    .topbar-brand { display: inline; }
   }
 </style>

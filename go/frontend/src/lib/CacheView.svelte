@@ -3,6 +3,7 @@
   import { api, ApiError, type CacheStatusResponse, type DNSRuntimeApplyResult } from "../api";
   import { router } from "../router.svelte";
   import DnsRuntimeBadge from "./DnsRuntimeBadge.svelte";
+  import PageHeader from "./ui/PageHeader.svelte";
 
   // Cache. Real, via internal/hostagent -> apdns-hostagent (a separate,
   // root-owned process this web service talks to over a Unix socket --
@@ -86,19 +87,49 @@
       flushBusy = null;
     }
   }
+
+  // Top metrics: aggregated from the same real per-BIND-context stats the
+  // table below shows -- the only real numbers this appliance's cache
+  // backend exposes today are hits/misses/hit-ratio/memory. There is no
+  // entries/nodes count, no eviction counter, and no stale-answer counter
+  // anywhere in internal/hostagent's own cache stats yet, so those are
+  // disclosed as unavailable rather than invented.
+  const aggregate = $derived.by(() => {
+    const withStats = (status?.bind ?? []).filter((c) => c.cache_stats?.available);
+    if (withStats.length === 0) return null;
+    const hits = withStats.reduce((s, c) => s + (c.cache_stats?.hits ?? 0), 0);
+    const misses = withStats.reduce((s, c) => s + (c.cache_stats?.misses ?? 0), 0);
+    const memory = withStats.reduce((s, c) => s + (c.cache_stats?.cache_size_bytes ?? 0), 0);
+    const total = hits + misses;
+    return { hits, misses, memory, hitRate: total ? (hits / total) * 100 : null };
+  });
+
+  function formatBytes(n: number): string {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  }
 </script>
 
-<section aria-labelledby="cache-heading" class="cache">
-  <h2 id="cache-heading">Cache</h2>
-  <p class="scope-note">
-    Real status and flush, via the root-owned apdns-hostagent process (never direct root access from
-    this web service). Each BIND context can be flushed entirely, by an exact domain name, or by a
-    whole subtree. dnsdist has no live flush channel by design -- see the note below.
-  </p>
+<PageHeader
+  headingId="cache-heading"
+  title="Cache"
+  description="Real status and flush for this appliance's own resolver cache, via the root-owned apdns-hostagent process (never direct root access from this web service)."
+/>
 
-  {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
-  {#if flushResult}<p class="success" role="status">{flushResult}</p>{/if}
-  {#if flushError}<p class="error" role="alert">{flushError}</p>{/if}
+<div class="cache">
+{#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
+{#if flushResult}<p class="success" role="status">{flushResult}</p>{/if}
+{#if flushError}<p class="error" role="alert">{flushError}</p>{/if}
+
+{#if aggregate}
+  <div class="metrics-row">
+    <div class="metric-card"><span class="metric-label">Hit rate</span><span class="metric-value">{aggregate.hitRate !== null ? `${aggregate.hitRate.toFixed(1)}%` : "—"}</span></div>
+    <div class="metric-card"><span class="metric-label">Hits / misses</span><span class="metric-value">{aggregate.hits.toLocaleString()} / {aggregate.misses.toLocaleString()}</span></div>
+    <div class="metric-card"><span class="metric-label">Memory</span><span class="metric-value">{formatBytes(aggregate.memory)}</span></div>
+    <div class="metric-card metric-unavailable"><span class="metric-label">Entries / evictions / stale answers</span><span class="metric-value">Not reported</span></div>
+  </div>
+{/if}
 
   <div class="card">
     <h3>BIND contexts</h3>
@@ -166,11 +197,25 @@
     </button>
     <DnsRuntimeBadge result={dnsdistRuntimeResult} />
   </div>
-</section>
+
+  <div class="card">
+    <h3>Cache configuration</h3>
+    <p class="hint">
+      Size, minimum/maximum TTL, negative TTL, prefetch, and serve-stale behavior are not yet
+      exposed as owner-configurable settings anywhere in this appliance's DNS runtime -- this section
+      is a disclosed gap, not a hidden control.
+    </p>
+  </div>
+</div>
 
 <style>
   .cache { display: flex; flex-direction: column; gap: 1rem; }
-  .scope-note { font-size: 0.85rem; opacity: 0.75; max-width: 50rem; }
+  .metrics-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; }
+  @media (max-width: 900px) { .metrics-row { grid-template-columns: repeat(2, 1fr); } }
+  .metric-card { border: 1px solid var(--border); border-radius: 8px; padding: 0.85rem 1rem; background: var(--card-bg); display: flex; flex-direction: column; gap: 0.25rem; }
+  .metric-label { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; opacity: 0.7; }
+  .metric-value { font-size: 1.3rem; font-weight: 700; }
+  .metric-unavailable .metric-value { font-size: 0.95rem; opacity: 0.6; font-weight: 500; }
   .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); display: flex; flex-direction: column; gap: 0.6rem; }
   .card h3 { margin: 0; }
   table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }

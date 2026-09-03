@@ -1,9 +1,27 @@
 <script lang="ts">
   import Icon from "./Icon.svelte";
-  import { NAV_GROUPS, TOP_LEVEL, groupOf, type NavGroup } from "../nav";
+  import { TOP_ITEMS, NAV_GROUPS, BOTTOM_ITEMS, groupOf, type NavGroup, type NavItem } from "../nav";
   import { router } from "../router.svelte";
+  import type { NavProfile } from "../profile";
+  import type { Theme } from "../theme";
 
-  let { mobileOpen = $bindable(false) }: { mobileOpen?: boolean } = $props();
+  let {
+    mobileOpen = $bindable(false),
+    profile,
+    onProfileChange,
+    theme,
+    onToggleTheme,
+    username,
+    onLogout,
+  }: {
+    mobileOpen?: boolean;
+    profile: NavProfile;
+    onProfileChange: (p: NavProfile) => void;
+    theme: Theme;
+    onToggleTheme: () => void;
+    username: string;
+    onLogout: () => void;
+  } = $props();
 
   const COLLAPSED_KEY = "apdns-go-nav-collapsed";
 
@@ -17,6 +35,12 @@
   let collapsed = $state(localStorage.getItem(COLLAPSED_KEY) === "1");
   let flyoutGroup = $state<string | null>(null);
   let navEl: HTMLElement | undefined;
+
+  // Groups the current profile actually shows in nav -- an Advanced-only
+  // group stays fully reachable by direct link/route even while hidden
+  // here (see nav.ts's isAdvancedRoute doc comment and App.svelte's own
+  // "Advanced page" label for a route that isn't in this filtered list).
+  const visibleGroups = $derived(NAV_GROUPS.filter((g) => profile === "advanced" || !g.advanced));
 
   // Navigating directly to a child route (a sidebar click is one case,
   // but also a Dashboard card link, browser back/forward, or a deep
@@ -83,22 +107,62 @@
   class:mobile-open={mobileOpen}
   aria-label="Main"
 >
-  <button
-    class="item top-level"
-    class:active={router.current === TOP_LEVEL.id}
-    onclick={() => go(TOP_LEVEL.id)}
-    aria-current={router.current === TOP_LEVEL.id ? "page" : undefined}
-  >
-    <Icon name={TOP_LEVEL.icon} />
-    <span class="label">{TOP_LEVEL.label}</span>
-  </button>
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linejoin="round">
+        <path d="M12 2.5l8 3.2v6c0 5.1-3.3 8.8-8 9.8-4.7-1-8-4.7-8-9.8v-6l8-3.2z" />
+        <path d="M8.3 12.2l2.6 2.6 4.8-5.1" />
+      </svg>
+    </span>
+    <span class="brand-name">Alderpoint DNS</span>
+  </div>
+
+  <div class="profile-switch" role="group" aria-label="Navigation profile">
+    <button
+      type="button"
+      class:active={profile === "standard"}
+      title="Standard navigation"
+      onclick={() => onProfileChange("standard")}
+    >
+      <span class="profile-full">Standard</span>
+      <span class="profile-short">Std</span>
+    </button>
+    <button
+      type="button"
+      class:active={profile === "advanced"}
+      title="Advanced navigation"
+      onclick={() => onProfileChange("advanced")}
+    >
+      <span class="profile-full">Advanced</span>
+      <span class="profile-short">Adv</span>
+    </button>
+  </div>
+
+  <ul class="top-items">
+    {#each TOP_ITEMS as item (item.id)}
+      <li>
+        <button
+          class="item top-level"
+          class:active={router.current === item.id}
+          title={item.label}
+          onclick={() => item.load && go(item.id)}
+          disabled={!item.load}
+          aria-current={router.current === item.id ? "page" : undefined}
+        >
+          <Icon name={item.icon} />
+          <span class="label">{item.label}</span>
+        </button>
+      </li>
+    {/each}
+  </ul>
 
   <ul class="groups">
-    {#each NAV_GROUPS as group (group.id)}
+    {#each visibleGroups as group (group.id)}
       <li class="group" class:flyout-open={flyoutGroup === group.id}>
         <button
           class="group-toggle"
           class:active={groupHasActive(group)}
+          title={group.label}
           aria-expanded={collapsed ? flyoutGroup === group.id : openGroupId === group.id}
           onclick={() => toggleGroup(group.id)}
         >
@@ -154,10 +218,40 @@
     {/each}
   </ul>
 
-  <button class="rail-toggle" onclick={toggleCollapsed} aria-label={collapsed ? "Expand navigation" : "Collapse navigation"}>
-    <Icon name="menu" size={16} />
-    {#if !collapsed}<span class="label">Collapse</span>{/if}
-  </button>
+  <div class="spacer"></div>
+
+  <div class="bottom-section">
+    {#each BOTTOM_ITEMS as item (item.id)}
+      <button
+        class="item bottom-item"
+        class:active={router.current === item.id}
+        class:unavailable={!item.load}
+        disabled={!item.load}
+        title={item.label}
+        onclick={() => item.load && go(item.id)}
+      >
+        <Icon name={item.icon} />
+        <span class="label">{item.label}{#if !item.load} <span class="soon">Not built</span>{/if}</span>
+      </button>
+    {/each}
+
+    <button class="item bottom-item" title={theme === "light" ? "Switch to dark theme" : "Switch to light theme"} onclick={onToggleTheme}>
+      <Icon name={theme === "light" ? "moon" : "sun"} size={17} />
+      <span class="label">{theme === "light" ? "Dark theme" : "Light theme"}</span>
+    </button>
+
+    <div class="account-row">
+      <span class="whoami" title={username}>{username}</span>
+      <button class="logout-btn" onclick={onLogout} title="Log out" aria-label="Log out">
+        <Icon name="logout" size={16} />
+      </button>
+    </div>
+
+    <button class="rail-toggle" onclick={toggleCollapsed} aria-label={collapsed ? "Expand navigation" : "Collapse navigation"} title={collapsed ? "Expand navigation" : "Collapse navigation"}>
+      <Icon name="menu" size={16} />
+      {#if !collapsed}<span class="label">Collapse</span>{/if}
+    </button>
+  </div>
 </nav>
 
 <style>
@@ -168,7 +262,7 @@
     display: flex;
     flex-direction: column;
     gap: 0.2rem;
-    width: 15.5rem;
+    width: 15rem;
     flex-shrink: 0;
     padding: 0.75rem 0.5rem;
     border-right: 1px solid var(--border);
@@ -176,20 +270,85 @@
     overflow-y: auto;
   }
   .sidebar.collapsed {
-    width: 3.75rem;
+    width: 4.25rem;
   }
   .sidebar.collapsed .label,
-  .sidebar.collapsed .chevron {
+  .sidebar.collapsed .chevron,
+  .sidebar.collapsed .brand-name,
+  .sidebar.collapsed .profile-full,
+  .sidebar.collapsed .whoami {
+    display: none;
+  }
+  .sidebar:not(.collapsed) .profile-short {
     display: none;
   }
   /* Collapsed rail: only the icon remains once its label is hidden --
      center it in the narrow rail instead of leaving it flush against
      the button's own left padding, which read as visibly off-center. */
   .sidebar.collapsed .item,
-  .sidebar.collapsed .group-toggle {
+  .sidebar.collapsed .group-toggle,
+  .sidebar.collapsed .brand,
+  .sidebar.collapsed .account-row {
     justify-content: center;
     padding-left: 0;
     padding-right: 0;
+  }
+  .sidebar.collapsed .account-row {
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    padding: 0.35rem 0.6rem 0.6rem;
+    color: var(--fg);
+  }
+  .brand-mark {
+    color: var(--accent);
+    flex-shrink: 0;
+    display: inline-flex;
+  }
+  .brand-name {
+    font-weight: 700;
+    font-size: 0.95rem;
+    letter-spacing: 0.01em;
+  }
+
+  .profile-switch {
+    display: flex;
+    gap: 0.2rem;
+    padding: 0.15rem;
+    margin: 0 0.1rem 0.6rem;
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+  }
+  .profile-switch button {
+    flex: 1;
+    background: transparent;
+    color: var(--muted);
+    border: none;
+    padding: 0.32rem 0.4rem;
+    min-height: auto;
+    border-radius: 999px;
+    font-size: 0.76rem;
+    font-weight: 650;
+    cursor: pointer;
+  }
+  .profile-switch button.active {
+    background: var(--accent);
+    color: var(--accent-fg);
+  }
+
+  .top-items {
+    list-style: none;
+    margin: 0 0 0.4rem;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
   }
 
   .item {
@@ -227,7 +386,6 @@
   }
   .top-level {
     font-weight: 600;
-    margin-bottom: 0.4rem;
   }
 
   .groups {
@@ -237,8 +395,49 @@
     display: flex;
     flex-direction: column;
     gap: 0.15rem;
+    flex: 0 0 auto;
+  }
+  .spacer {
     flex: 1;
   }
+  .bottom-section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    padding-top: 0.5rem;
+    margin-top: 0.4rem;
+    border-top: 1px solid var(--border);
+  }
+  .bottom-item {
+    justify-content: flex-start;
+  }
+  .account-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.4rem;
+    padding: 0.4rem 0.6rem;
+  }
+  .whoami {
+    font-size: 0.82rem;
+    opacity: 0.8;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .logout-btn {
+    background: transparent;
+    color: var(--fg);
+    padding: 0.35rem;
+    min-height: auto;
+    border: none;
+    border-radius: 6px;
+    flex-shrink: 0;
+  }
+  .logout-btn:hover {
+    background: var(--nav-hover-bg);
+  }
+
   .group {
     position: relative;
   }
@@ -322,15 +521,18 @@
     padding: 0.45rem 0.6rem;
     font-size: 0.8rem;
     cursor: pointer;
-    margin-top: 0.5rem;
+    margin-top: 0.4rem;
   }
 
   @media (max-width: 1120px) {
     .sidebar:not(.mobile-open) {
-      width: 3.75rem;
+      width: 4.25rem;
     }
     .sidebar:not(.mobile-open) .label,
-    .sidebar:not(.mobile-open) .chevron {
+    .sidebar:not(.mobile-open) .chevron,
+    .sidebar:not(.mobile-open) .brand-name,
+    .sidebar:not(.mobile-open) .profile-full,
+    .sidebar:not(.mobile-open) .whoami {
       display: none;
     }
   }
@@ -349,8 +551,14 @@
       transform: translateX(0);
     }
     .sidebar.mobile-open .label,
-    .sidebar.mobile-open .chevron {
+    .sidebar.mobile-open .chevron,
+    .sidebar.mobile-open .brand-name,
+    .sidebar.mobile-open .profile-full,
+    .sidebar.mobile-open .whoami {
       display: inline;
+    }
+    .sidebar.mobile-open .brand-name {
+      display: block;
     }
     .rail-toggle {
       display: none;

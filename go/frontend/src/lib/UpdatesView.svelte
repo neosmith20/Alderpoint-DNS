@@ -3,6 +3,7 @@
   import { api, ApiError, type UpdateCheckResponse, type UpdateChannel } from "../api";
   import { router } from "../router.svelte";
   import StatusBadge from "./ui/StatusBadge.svelte";
+  import PageHeader from "./ui/PageHeader.svelte";
 
   // Software Updates. Real, for this control plane's own Go binary --
   // deliberately not Python's apt/dpkg package (see the parity matrix:
@@ -175,14 +176,13 @@
   }
 </script>
 
-<section aria-labelledby="updates-heading" class="updates">
-  <h2 id="updates-heading">Software Updates</h2>
-  <p class="scope-note">
-    Stage and apply updates to this appliance's own software. A staged candidate's checksum and
-    version are verified before it's trusted; applying always takes a real backup first (if that
-    backup fails, the update is aborted and nothing changes), then is gated on a health check with
-    automatic rollback if the new version doesn't come up healthy.
-  </p>
+<PageHeader
+  headingId="updates-heading"
+  title="Software Updates"
+  description="Stage and apply updates to this appliance's own software -- its Go binary directly, checksum- and version-verified, not an arbitrary uploaded .deb/apt package."
+/>
+
+<div class="updates">
 
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
 
@@ -270,11 +270,29 @@
       {#if applyResult}<p class="success" role="status">{applyResult}</p>{/if}
     </div>
   {/if}
-</section>
+
+  <div class="card">
+    <h3>Update Safety</h3>
+    <p class="hint">
+      A real backup is always taken immediately before Apply -- if that backup fails, the update
+      is aborted and nothing changes. The new version must pass a health check after applying;
+      a failed health check rolls back automatically. Expect a brief DNS-serving interruption
+      during the restart, not an extended outage.
+    </p>
+  </div>
+
+  <div class="card">
+    <h3>Update History</h3>
+    <p class="hint">
+      Not persisted anywhere yet -- there is no owner-facing log of past update attempts (time,
+      from/to version, result, backup used). Only the current version and the most recent staged
+      candidate (above) are tracked. This is a disclosed gap, not a hidden feature.
+    </p>
+  </div>
+</div>
 
 <style>
   .updates { display: flex; flex-direction: column; gap: 1rem; }
-  .scope-note { font-size: 0.85rem; opacity: 0.75; max-width: 50rem; }
   .status-grid { display: flex; flex-wrap: wrap; gap: 1rem; }
   .status-grid .card { flex: 1 1 14rem; }
   /* Two responsive columns on desktop/tablet, one on mobile -- Update

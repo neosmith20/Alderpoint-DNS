@@ -5,6 +5,7 @@
   import { timestampPref } from "../timestamp.svelte";
   import DnsRuntimeBadge from "./DnsRuntimeBadge.svelte";
   import ConfirmDialog from "./ui/ConfirmDialog.svelte";
+  import StatusBadge from "./ui/StatusBadge.svelte";
 
   // Encryption. Two independently-scoped native pieces:
   //
@@ -186,6 +187,23 @@
     it can be enabled. Each enabled transport below shows the exact address to hand a client
     device, plus setup steps for the platforms that support it.
   </p>
+
+  {#if settings && tls}
+    {@const enabledTransports = [
+      settings.dot_enabled && "DoT", settings.doh_enabled && "DoH", settings.doq_enabled && "DoQ",
+      settings.doh3_enabled && "DoH3", settings.dnscrypt_enabled && "DNSCrypt",
+    ].filter(Boolean)}
+    <div class="status-summary">
+      <StatusBadge
+        label={noClientAddress || !tls.active ? "Not ready" : clientAddressCertValid ? "Ready" : "Needs attention"}
+        tone={noClientAddress || !tls.active ? "danger" : clientAddressCertValid ? "healthy" : "warning"}
+      />
+      <span>Client-facing address: <strong>{clientAddress || "not set"}</strong></span>
+      <span>Certificate: {tls.active ? (tls.not_valid_after ? `valid until ${timestampPref.format(tls.not_valid_after)}` : "active") : "unavailable"}</span>
+      <span>Enabled transports: {enabledTransports.length ? enabledTransports.join(", ") : "Plain DNS only"}</span>
+      <button type="button" class="secondary small" onclick={() => router.navigate("setup-guide")}>Setup Guide</button>
+    </div>
+  {/if}
 
   {#if settings && noClientAddress}
     <p class="degraded-note" role="alert">
@@ -546,8 +564,13 @@
 {/if}
 
 <style>
-  .encryption { display: flex; flex-direction: column; gap: 1rem; }
-  .scope-note { font-size: 0.85rem; opacity: 0.75; max-width: 50rem; }
+  .encryption { display: flex; flex-direction: column; gap: 1rem; max-width: 46rem; }
+  .scope-note { font-size: 0.85rem; opacity: 0.75; }
+  .status-summary {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; font-size: 0.85rem;
+    padding: 0.75rem 1rem; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-elevated);
+  }
+  .status-summary button.secondary.small { margin-left: auto; min-height: auto; padding: 0.3rem 0.6rem; font-size: 0.8rem; }
   .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); display: flex; flex-direction: column; gap: 0.75rem; }
   .card h3 { margin: 0; }
   .cert-info { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1rem; font-size: 0.9rem; }

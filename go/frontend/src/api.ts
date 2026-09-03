@@ -393,6 +393,9 @@ export interface AdminSessionRow {
 
 export interface AuditLogEntry {
   at: string;
+  /** Only populated by listAuditLogAll (the Audit Log page) -- the
+   * admin-scoped listAuditLog already implies whose entries they are. */
+  username?: string;
   action: string;
   success: boolean;
   ip: string;
@@ -1002,6 +1005,11 @@ export const api = {
     req<{ sessions: AdminSessionRow[] }>("/api/administration/sessions", undefined, signal),
   listAuditLog: (signal?: AbortSignal) =>
     req<{ entries: AuditLogEntry[] }>("/api/administration/audit-log", undefined, signal),
+  /** Advanced > Operations > Audit Log page -- every administrator's
+   * activity (unlike listAuditLog above, which stays scoped to the
+   * calling admin for Administration's own smaller summary card). */
+  listAuditLogAll: (limit = 500, signal?: AbortSignal) =>
+    req<{ entries: AuditLogEntry[] }>(`/api/administration/audit-log/all?limit=${limit}`, undefined, signal),
 
   // 2026-08-28: real DELETE against this appliance's own Go-native
   // query_events table (internal/dnsanalytics.Reader.ClearAll) --

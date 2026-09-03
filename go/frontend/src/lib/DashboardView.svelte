@@ -3,7 +3,7 @@
   import { api, type AnalyticsBucket, type AnalyticsTopRowsResponse, type ManagedClient, type ObservedClient, type UpstreamProfile, type UpstreamResolverStat } from "../api";
   import { router } from "../router.svelte";
   import { StaleGuard } from "../staleGuard";
-  import { ALL_CARDS, loadCardOrder, saveCardOrder, type CardState } from "../dashboardCards";
+  import { ALL_CARDS, loadCardOrder, saveCardOrder, defaultCardOrder, type CardState } from "../dashboardCards";
   import ActivityChart from "./ActivityChart.svelte";
   import DataGrid from "./DataGrid.svelte";
   import type { Column } from "./datagrid";
@@ -22,6 +22,13 @@
 
   type RangeMode = "live" | "1h" | "24h" | "7d";
   const RANGE_LABELS: Record<RangeMode, string> = { live: "Live", "1h": "Last hour", "24h": "Last 24 hours", "7d": "Last 7 days" };
+  /** Minutes for the currently selected period -- "live" reads the same
+   * rolling 5-minute window analyticsLiveActivity itself polls, since
+   * there's no other real definition of "live" to hand the headline
+   * metrics/Active Clients/Query Performance loaders below. */
+  function rangeMinutes(mode: RangeMode): number {
+    return mode === "1h" ? 60 : mode === "24h" ? 1440 : mode === "7d" ? 10080 : 5;
+  }
 
   let summary = $state<Awaited<ReturnType<typeof api.dashboardSummary>> | null>(null);
   let summaryError = $state("");
@@ -71,15 +78,71 @@
   }
 
   let topClients = $state<Awaited<ReturnType<typeof api.topClients>> | null>(null);
-  async function loadTopClients() {
+  async function loadTopClients(minutes: number) {
     try {
-      topClients = await api.topClients(1440, router.signal());
+      topClients = await api.topClients(minutes, router.signal());
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
       const reason = err instanceof Error ? err.message : String(err);
       topClients = { clients: [], total: 0, degraded: true, degraded_reason: reason };
     }
   }
+
+  // Query Performance headline metric: real per-query latency_ms values
+  // from a bounded sample of the selected period's own query log rows
+  // (never a synthesized/benchmark figure -- see the card's own doc
+  // comment below for why DNSPerfSummary, the manual benchmark tool's
+  // output, is deliberately NOT reused here). p95/p99 are computed
+  // client-side over that sample; both the sample size and "sampled" vs
+  // "complete" are disclosed on the card itself rather than presented as
+  // exact appliance-wide figures.
+  const LATENCY_SAMPLE_LIMIT = 500;
+  interface LatencyStats { avg: number; p95: number; p99: number; sampleSize: number; totalInPeriod: number }
+  let latencyStats = $state<LatencyStats | null>(null);
+  let latencyError = $state("");
+  async function loadLatencyStats(minutes: number) {
+    try {
+      const resp = await api.analyticsQueryLog({ minutes, limit: LATENCY_SAMPLE_LIMIT, offset: 0 }, router.signal());
+      if (resp.degraded) {
+        latencyError = resp.degraded_reason || "unavailable";
+        latencyStats = null;
+        return;
+      }
+      const values = resp.rows.map((r) => r.latency_ms).filter((v): v is number => typeof v === "number" && v > 0).sort((a, b) => a - b);
+      latencyError = "";
+      if (values.length === 0) {
+        latencyStats = null;
+        return;
+      }
+      const pct = (p: number) => values[Math.min(values.length - 1, Math.floor((p / 100) * values.length))];
+      latencyStats = {
+        avg: values.reduce((s, v) => s + v, 0) / values.length,
+        p95: pct(95),
+        p99: pct(99),
+        sampleSize: values.length,
+        totalInPeriod: resp.rows.length,
+      };
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      latencyError = err instanceof Error ? err.message : String(err);
+      latencyStats = null;
+    }
+  }
+
+  // Cache Effectiveness headline/grid card: real BIND cache hit ratio
+  // (internal/hostagent -> rndc/named stats), not a manufactured figure.
+  let cacheStatus = $state<Awaited<ReturnType<typeof api.cacheStatus>> | null>(null);
+  let cacheStatusError = $state("");
+  async function loadCacheStatus() {
+    try {
+      cacheStatus = await api.cacheStatus(router.signal());
+      cacheStatusError = "";
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      cacheStatusError = err instanceof Error ? err.message : String(err);
+    }
+  }
+  const primaryCacheStats = $derived(cacheStatus?.bind?.find((b) => b.cache_stats?.available)?.cache_stats ?? null);
 
   let qtypeBreakdown = $state<Awaited<ReturnType<typeof api.analyticsBreakdown>> | null>(null);
   let rcodeBreakdown = $state<Awaited<ReturnType<typeof api.analyticsBreakdown>> | null>(null);
@@ -317,6 +380,9 @@
       chartPoints = [];
       loadTimeseries(mode);
     }
+    const minutes = rangeMinutes(mode);
+    loadTopClients(minutes);
+    loadLatencyStats(minutes);
   }
 
   onMount(() => {
@@ -326,11 +392,29 @@
     loadUpstreamsMini();
     loadTopUpstreams();
     loadProtection();
-    loadTopClients();
+    loadTopClients(rangeMinutes(rangeMode));
+    loadLatencyStats(rangeMinutes(rangeMode));
+    loadCacheStatus();
     loadBreakdowns();
     loadRecentActivity();
     loadSystemHealth();
   });
+
+  function refreshAll() {
+    loadSummary();
+    loadTopDomains();
+    loadClientsMini();
+    loadUpstreamsMini();
+    loadTopUpstreams();
+    loadProtection();
+    loadTopClients(rangeMinutes(rangeMode));
+    loadLatencyStats(rangeMinutes(rangeMode));
+    loadCacheStatus();
+    loadBreakdowns();
+    loadRecentActivity();
+    loadSystemHealth();
+    if (rangeMode !== "live") loadTimeseries(rangeMode);
+  }
 
   // --- card customization ---
   function toggleVisible(id: string) {
@@ -349,48 +433,68 @@
   function cardLabel(id: string): string {
     return ALL_CARDS.find((c) => c.id === id)?.label ?? id;
   }
+  function restoreDefaults() {
+    cardOrder = defaultCardOrder();
+    saveCardOrder(cardOrder);
+  }
 
   const domainColumns: Column<[string, number]>[] = [
     { key: "domain", label: "Domain", sortValue: (r) => r[0] },
     { key: "count", label: "Queries", sortValue: (r) => r[1] },
   ];
+
+  // Headline metrics: derived from data already loaded for the DNS
+  // Activity chart/Top Clients/Query Performance sample above -- no
+  // separate fetch, no manufactured numbers. No period-over-period
+  // comparison is fetched anywhere in this app yet, so "trend" is
+  // deliberately omitted rather than invented (see the spec's own "never
+  // manufacture latency statistics" -- the same standard applies to
+  // trend arrows).
+  const totalQueriesHeadline = $derived(chartPoints.reduce((s, p) => s + p.total, 0));
+  const blockedQueriesHeadline = $derived(chartPoints.reduce((s, p) => s + p.blocked, 0));
+  const blockedPctHeadline = $derived(totalQueriesHeadline ? (blockedQueriesHeadline / totalQueriesHeadline) * 100 : 0);
 </script>
 
 <section aria-labelledby="dashboard-heading" class="dashboard">
   <div class="dash-header">
-    <h2 id="dashboard-heading">Dashboard</h2>
-    <button class="customize-btn" onclick={() => (customizeOpen = !customizeOpen)} aria-expanded={customizeOpen}>
-      Customize
-    </button>
-  </div>
-
-  <div class="card protection-panel">
-    <div class="card-head">
-      <h3>Protection Control</h3>
+    <div class="dash-header__title">
+      <h2 id="dashboard-heading">Dashboard</h2>
       {#if protection}
         <span class="mini-badge {protection.active ? 'mini-badge-ok' : 'mini-badge-observed'}">
-          {protection.active ? "Active" : "Disabled"}
+          {protection.active ? "Protection active" : "Protection disabled"}
         </span>
       {/if}
     </div>
-    {#if protectionError}
-      <p class="degraded-note" role="status">Unable to load protection status: {protectionError}</p>
-    {:else if !protection}
-      <p class="hint">Loading…</p>
-    {:else}
-      <p class="hint">
-        {protection.active
-          ? `Filtering is active (${protection.enabled_blocklists} blocklist${protection.enabled_blocklists === 1 ? "" : "s"}, ${protection.enabled_rules} custom rule${protection.enabled_rules === 1 ? "" : "s"} enabled).`
-          : "Filtering is disabled -- DNS queries are not being blocked or rewritten by policy."}
-      </p>
-      <button class={protection.active ? "danger" : ""} disabled={protectionBusy} onclick={toggleProtection}>
-        {protectionBusy ? "Working…" : protection.active ? "Disable protection" : "Enable protection"}
+    <div class="dash-header__actions">
+      <button class={protection?.active ? "danger" : ""} disabled={protectionBusy || !protection} onclick={toggleProtection}>
+        {protectionBusy ? "Working…" : protection?.active ? "Disable protection" : "Enable protection"}
       </button>
-    {/if}
+      <div class="range-select" role="radiogroup" aria-label="Dashboard time range">
+        {#each Object.keys(RANGE_LABELS) as m}
+          <button class:active={rangeMode === m} onclick={() => selectRange(m as RangeMode)}>{RANGE_LABELS[m as RangeMode]}</button>
+        {/each}
+      </div>
+      <button class="secondary" onclick={refreshAll} aria-label="Refresh dashboard">Refresh</button>
+      <button class="secondary" onclick={() => (customizeOpen = !customizeOpen)} aria-expanded={customizeOpen}>
+        Customize Dashboard
+      </button>
+    </div>
   </div>
+  {#if protectionError}
+    <p class="degraded-note" role="status">Unable to load protection status: {protectionError}</p>
+  {:else if protection && !protection.active}
+    <p class="degraded-note" role="status">
+      Filtering is disabled -- DNS queries are not being blocked or rewritten by policy.
+    </p>
+  {:else if protection}
+    <p class="hint dash-subhead">
+      Filtering is active ({protection.enabled_blocklists} blocklist{protection.enabled_blocklists === 1 ? "" : "s"}, {protection.enabled_rules} custom rule{protection.enabled_rules === 1 ? "" : "s"} enabled).
+    </p>
+  {/if}
 
   {#if customizeOpen}
     <div class="customize-panel" role="region" aria-label="Customize dashboard cards">
+      <p class="hint customize-intro">Enable/disable and reorder the cards below the DNS Activity chart. Headline metrics and DNS Activity itself are always shown.</p>
       <ul>
         {#each cardOrder as card, i (card.id)}
           <li>
@@ -405,12 +509,73 @@
           </li>
         {/each}
       </ul>
+      <button type="button" class="secondary" onclick={restoreDefaults}>Restore Defaults</button>
     </div>
   {/if}
 
   {#if summaryError}
     <p class="error" role="alert">{summaryError}</p>
   {/if}
+
+  <!-- Headline metrics: always exactly these four, not part of card
+       customization (spec: "One row of four compact cards", distinct
+       from the customizable lower grid below). -->
+  <div class="headline-row">
+    <div class="card headline-card">
+      <h3>DNS Queries</h3>
+      <p class="big">{totalQueriesHeadline.toLocaleString()}</p>
+      <p class="hint">{RANGE_LABELS[rangeMode]}</p>
+    </div>
+    <div class="card headline-card">
+      <h3>Blocked Queries</h3>
+      <p class="big">{blockedQueriesHeadline.toLocaleString()}</p>
+      <p class="hint">{totalQueriesHeadline ? `${blockedPctHeadline.toFixed(1)}% of total` : RANGE_LABELS[rangeMode]}</p>
+    </div>
+    <div class="card headline-card">
+      <h3>Active Clients</h3>
+      {#if !topClients}
+        <p class="hint">Loading…</p>
+      {:else if topClients.degraded}
+        <p class="degraded-note-inline">Unavailable</p>
+      {:else}
+        <p class="big">{topClients.clients.length.toLocaleString()}</p>
+        <p class="hint">Unique clients, {RANGE_LABELS[rangeMode].toLowerCase()}</p>
+      {/if}
+    </div>
+    <div class="card headline-card">
+      <h3>Query Performance</h3>
+      {#if latencyError}
+        <p class="degraded-note-inline">Unavailable: {latencyError}</p>
+      {:else if !latencyStats}
+        <p class="hint">Loading…</p>
+      {:else}
+        <p class="big">{latencyStats.avg.toFixed(1)}<span class="of"> ms avg</span></p>
+        <p class="hint">P95 {latencyStats.p95.toFixed(1)} ms · P99 {latencyStats.p99.toFixed(1)} ms</p>
+        <p class="hint">
+          {latencyStats.sampleSize < latencyStats.totalInPeriod
+            ? `Sampled from ${latencyStats.sampleSize.toLocaleString()} of ${latencyStats.totalInPeriod.toLocaleString()}+ queries`
+            : `From ${latencyStats.sampleSize.toLocaleString()} queries`}
+        </p>
+      {/if}
+    </div>
+  </div>
+
+  <!-- DNS Activity: one full-width chart, fixed (not a customizable card). -->
+  <div class="card wide-card activity-card">
+    <div class="card-head">
+      <h3>DNS Activity</h3>
+      <button class="link" onclick={() => router.navigate("analytics")}>View Query Log</button>
+    </div>
+    {#if chartDegraded}
+      <p class="degraded-note" role="status">Statistics are disabled or unavailable: {chartDegradedReason || "unavailable"}</p>
+    {:else if chartLoading && chartPoints.length === 0}
+      <p class="hint">Loading…</p>
+    {:else if chartPoints.length === 0}
+      <p class="hint">No query activity recorded in this period yet.</p>
+    {:else}
+      <ActivityChart points={chartPoints} />
+    {/if}
+  </div>
 
   <div class="cards">
     {#each cardOrder.filter((c) => c.visible) as card (card.id)}
@@ -434,24 +599,6 @@
             <p class="hint">Loading…</p>
           {:else}
             <p class="big">{summary.local_dns.enabled}<span class="of"> / {summary.local_dns.total} enabled</span></p>
-          {/if}
-        </div>
-      {:else if card.id === "activity"}
-        <div class="card wide-card">
-          <div class="card-head">
-            <h3>DNS Activity</h3>
-            <div class="range-select" role="radiogroup" aria-label="Activity time range">
-              {#each Object.keys(RANGE_LABELS) as m}
-                <button class:active={rangeMode === m} onclick={() => selectRange(m as RangeMode)}>{RANGE_LABELS[m as RangeMode]}</button>
-              {/each}
-            </div>
-          </div>
-          {#if chartDegraded}
-            <p class="degraded-note" role="status">Analytics degraded: {chartDegradedReason || "unavailable"}</p>
-          {:else if chartLoading && chartPoints.length === 0}
-            <p class="hint">Loading…</p>
-          {:else}
-            <ActivityChart points={chartPoints} />
           {/if}
         </div>
       {:else if card.id === "outcomes"}
@@ -522,7 +669,7 @@
           {/if}
         </div>
       {:else if card.id === "recent-activity"}
-        <div class="card grid-card grid-card-2x">
+        <div class="card grid-card">
           <div class="card-head">
             <h3>Recent Activity</h3>
             <button class="link" onclick={() => router.navigate("analytics")}>View all</button>
@@ -749,6 +896,25 @@
             <p class="hint">Resolver attribution is based on real dnsdist backend counters for this appliance's own managed upstream pool (last 60 minutes).</p>
           {/if}
         </div>
+      {:else if card.id === "cache-effectiveness"}
+        <div class="card grid-card">
+          <div class="card-head">
+            <h3>Cache Effectiveness</h3>
+            <button class="link" onclick={() => router.navigate("cache")}>Manage</button>
+          </div>
+          {#if cacheStatusError}
+            <p class="degraded-note" role="status">Unable to load cache status: {cacheStatusError}</p>
+          {:else if !cacheStatus}
+            <p class="hint">Loading…</p>
+          {:else if !primaryCacheStats}
+            <p class="hint">Cache statistics are not available from this appliance's DNS runtime right now.</p>
+          {:else}
+            {@const pct = (primaryCacheStats.hit_ratio ?? 0) * 100}
+            <p class="big">{primaryCacheStats.hit_ratio !== null ? `${pct.toFixed(1)}%` : "—"}<span class="of"> hit rate</span></p>
+            <span class="meter"><span style="width: {Math.min(pct, 100).toFixed(1)}%"></span></span>
+            <p class="hint">{primaryCacheStats.hits.toLocaleString()} hits · {primaryCacheStats.misses.toLocaleString()} misses</p>
+          {/if}
+        </div>
       {/if}
     {/each}
   </div>
@@ -756,8 +922,29 @@
 </section>
 
 <style>
-  .dash-header { display: flex; justify-content: space-between; align-items: center; }
-  .customize-btn { background: transparent; color: var(--fg); border: 1px solid var(--border); }
+  /* Global page header pattern (title/status left, actions upper right) --
+     see App.svelte's own header conventions and PageHeader.svelte; the
+     Dashboard doesn't reuse that component directly because it needs a
+     second action row (time range) and an inline status line beneath the
+     title, but the left/right split and spacing rhythm match. */
+  .dash-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; flex-wrap: wrap; }
+  .dash-header__title { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+  .dash-header__title h2 { margin: 0; }
+  .dash-header__actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+  .dash-subhead { margin: 0.35rem 0 0; }
+  .degraded-note-inline { color: var(--warning); font-size: 0.85rem; margin: 0; }
+
+  .headline-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-top: 1rem; }
+  .headline-card { display: flex; flex-direction: column; gap: 0.15rem; }
+  .activity-card { margin-top: 1rem; }
+  @media (max-width: 1024px) {
+    .headline-row { grid-template-columns: repeat(2, 1fr); }
+  }
+  @media (max-width: 620px) {
+    .headline-row { grid-template-columns: 1fr; }
+  }
+
+  .customize-intro { margin: 0.1rem 0.75rem 0.5rem; }
   .customize-panel { border: 1px solid var(--border); border-radius: 8px; padding: 0.4rem 0.25rem; margin: 0.75rem 0; background: var(--card-bg); box-shadow: var(--shadow); }
   .customize-panel ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
   /* Each row gets its own boundary (border-bottom, not just a gap) and a
@@ -778,35 +965,24 @@
     color: var(--fg); min-height: 30px;
   }
   .reorder-btns button:hover:not(:disabled) { background: var(--btn-bg); color: var(--accent-fg); border-color: var(--btn-bg); }
+  .customize-panel > button.secondary { margin: 0.4rem 0.75rem 0.25rem; }
 
   .hint { font-size: 0.85rem; opacity: 0.75; }
-  /* Flex, with stat-cards actually allowed to grow: previously
-     stat-card had no flex-grow, so a short row (e.g. just Blocklists +
-     Local DNS, with nothing else narrow enough to share it) stopped at
-     two card-widths and left the rest of the row as dead space instead
-     of the cards using it. flex: 1 1 14rem lets any number of
-     stat-cards on one row share it evenly; wide-card still always
-     takes the full row on its own. */
-  .cards { display: flex; flex-wrap: wrap; gap: 1rem; margin-top: 0.75rem; align-items: stretch; }
+  /* Lower grid: a real fixed two-column grid on desktop (spec's "Lower
+     two-column grid" with predictable row pairs), one column on mobile.
+     Cards flow through cardOrder in pairs -- the default order matches
+     the four named row pairs exactly (see dashboardCards.ts's own doc
+     comment); reordering in Customize Dashboard changes which two cards
+     share a row, but every enabled card still gets a full-width row
+     partner rather than leaving a dangling half-empty row, because
+     grid-auto-flow packs them in order with no gaps. */
+  .cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; margin-top: 1rem; align-items: stretch; }
   .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); box-shadow: var(--shadow); }
-  .stat-card { flex: 1 1 14rem; min-width: 12rem; }
-  /* wide-card: reserved for the one card that genuinely needs full row
-     width -- DNS Activity's own timeseries chart. Every other
-     stat/list-shaped card below uses grid-card instead, which packs
-     2-3 per row on a wide screen instead of always claiming a whole
-     row each (a real, previously-reported "dashboard leaves an empty
-     row/wasted space" defect: on a 1440px desktop, Query Outcomes, Top
-     Domains, Top Blocked Domains, etc. each sat alone on their own full-
-     width row with most of that width empty). */
-  .wide-card { flex: 1 1 100%; min-width: 20rem; }
-  .grid-card { flex: 1 1 24rem; min-width: 20rem; }
-  /* Recent Activity's own 5-column table (Time/Client/Domain/Type/Status)
-     needs real room to be legible rather than lean on truncation alone --
-     owner-reported ("cut off, can't see what is going on"). Roughly two
-     grid-card widths plus the gap between them, so it claims two slots in
-     the flex-wrap layout instead of one; still wraps to full-width alone
-     on narrow viewports like every other grid-card. */
-  .grid-card-2x { flex-basis: 49rem; min-width: 41rem; }
+  .wide-card { grid-column: 1 / -1; }
+  .grid-card { min-width: 0; }
+  @media (max-width: 900px) {
+    .cards { grid-template-columns: 1fr; }
+  }
   .card h3 { margin: 0 0 0.4rem; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.03em; opacity: 0.75; }
   .card-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem; }
   .scope { text-transform: none; font-weight: 400; opacity: 0.7; }
@@ -839,9 +1015,7 @@
   .mini-badge-blocked { background: var(--badge-danger-bg); color: var(--badge-danger-fg); }
   .mini-badge-warn { background: var(--badge-warn-bg); color: var(--badge-warn-fg); }
 
-  .protection-panel { flex: 1 1 100%; margin-top: 0.75rem; }
-  .protection-panel button { margin-top: 0.5rem; }
-  .protection-panel button.danger { background: var(--badge-danger-bg); color: var(--badge-danger-fg); border-color: transparent; }
+  .dash-header__actions button.danger { background: var(--badge-danger-bg); color: var(--badge-danger-fg); border-color: transparent; }
 
   .outcome-row { margin: 0.5rem 0; }
   .outcome-head { display: flex; justify-content: space-between; font-size: 0.85rem; margin-bottom: 0.25rem; }

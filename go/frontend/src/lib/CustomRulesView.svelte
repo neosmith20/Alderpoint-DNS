@@ -9,6 +9,8 @@
   import type { Column } from "./datagrid";
   import PolicyEditor from "./PolicyEditor.svelte";
   import ConfirmDialog from "./ui/ConfirmDialog.svelte";
+  import PageHeader from "./ui/PageHeader.svelte";
+  import StatusBadge from "./ui/StatusBadge.svelte";
 
   // Filters page: Custom Filtering Rules (native Go, new functionality --
   // see internal/customrules's doc comment for why: Python V2 has no
@@ -200,54 +202,17 @@
   }
 </script>
 
-<section aria-labelledby="filtering-heading" class="filtering">
-  <h2 id="filtering-heading">Filters</h2>
+<PageHeader
+  headingId="filtering-heading"
+  title="Custom Rules"
+  description="A structured rule builder (block / allow / regex block / regex allow / rewrite) -- not free-text AdGuard/Pi-hole syntax. Bring in existing Pi-hole or AdGuard Home rules via Import & Migration; it translates them into these same rules automatically."
+/>
 
-  <div class="grid-2col">
-    <div class="card">
-      <h3>Global Answer Policy</h3>
-      <PolicyEditor
-        layer={globalPolicy}
-        onSave={(l) =>
-          api.putGlobalPolicy(l).then((resp) => {
-            dnsRuntimeResult = resp.dns_runtime ?? null;
-            return refresh();
-          })}
-      />
-    </div>
-
-    <div class="card">
-      <h3>Test a Domain</h3>
-      <p class="hint">
-        Checks whether a query for this domain would be blocked, against the real compiled global
-        custom-rules and blocklist state (not per-network/per-client overrides yet).
-      </p>
-      <form onsubmit={runTestDomain} class="test-domain-form">
-        <input required bind:value={testDomainInput} placeholder="ads.example.com" aria-label="Domain to test" />
-        <button type="submit" disabled={testDomainBusy}>{testDomainBusy ? "Testing…" : "Test"}</button>
-      </form>
-      {#if testDomainError}<p class="error" role="alert">{testDomainError}</p>{/if}
-      {#if testDomainResult}
-        <p class="test-domain-result" class:blocked={testDomainResult.blocked} class:allowed={!testDomainResult.blocked} role="status">
-          <strong>{testDomainResult.domain}</strong> would be
-          <strong>{testDomainResult.blocked ? "BLOCKED" : "ALLOWED"}</strong>
-          {#if testDomainResult.reason === "no_match"}
-            (no rule matches -- default allow)
-          {:else if testDomainResult.matched}
-            by {testDomainResult.reason.replace("_", " ")}: <code>{testDomainResult.matched}</code>
-          {/if}
-        </p>
-      {/if}
-    </div>
-  </div>
-
-  <div class="card">
+<!-- Desktop: editor (larger, left) + Test a Domain (smaller, right).
+     Mobile: editor first, test panel below -- see the media query. -->
+<div class="workspace">
+  <div class="card editor-col">
     <h3>Custom Filtering Rules</h3>
-    <p class="hint">
-      A structured rule builder (block / allow / regex block / regex allow / rewrite). To bring in
-      existing Pi-hole or AdGuard Home rules, use Import -&gt; Import from Pi-hole or AdGuard Home --
-      it translates them into these same rules automatically.
-    </p>
     {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
     <DnsRuntimeBadge result={dnsRuntimeResult} />
     {#if prefillAnnounced}
@@ -272,13 +237,18 @@
       <button type="submit" disabled={addBusy}>{addBusy ? "Adding…" : "Add rule"}</button>
       {#if addError}<p class="error" role="alert">{addError}</p>{/if}
     </form>
+    <p class="hint">
+      Block / Allow match an exact domain (and its subdomains); Regex block / Regex allow match a
+      regular expression against the full query name; Rewrite answers with the given target instead
+      of resolving normally. Precedence: explicit allow beats explicit block beats blocklists.
+    </p>
 
     {#if selected.size > 0}
       <div class="bulk-bar" role="toolbar" aria-label="Bulk actions">
         <span>{selected.size} selected</span>
-        <button onclick={bulkEnable}>Enable</button>
-        <button onclick={bulkDisable}>Disable</button>
-        <button class="danger" onclick={bulkDelete}>Delete</button>
+        <button type="button" class="secondary small" onclick={bulkEnable}>Enable</button>
+        <button type="button" class="secondary small" onclick={bulkDisable}>Disable</button>
+        <button type="button" class="secondary small danger" onclick={bulkDelete}>Delete</button>
       </div>
     {/if}
 
@@ -300,25 +270,67 @@
             {r.pattern}{r.rewrite_target ? ` -> ${r.rewrite_target}` : ""}
           {/if}
         {:else if colKey === "status"}
-          <span class="badge" class:badge-ok={r.enabled} class:badge-warn={!r.enabled}>{r.enabled ? "Enabled" : "Disabled"}</span>
+          <StatusBadge label={r.enabled ? "Enabled" : "Disabled"} tone={r.enabled ? "healthy" : "neutral"} />
         {:else if colKey === "actions"}
           <div class="actions">
             {#if editingId === r.id}
-              <button onclick={() => saveEdit(r)}>Save</button>
-              <button onclick={() => (editingId = null)}>Cancel</button>
+              <button type="button" class="secondary small" onclick={() => saveEdit(r)}>Save</button>
+              <button type="button" class="secondary small" onclick={() => (editingId = null)}>Cancel</button>
             {:else}
-              <button onclick={() => startEdit(r)}>Edit</button>
-              <button onclick={() => toggleRule(r)}>{r.enabled ? "Disable" : "Enable"}</button>
-              <button onclick={() => deleteRule(r)}>Delete</button>
-              <button onclick={() => move(r, -1)} aria-label="Move up">&uarr;</button>
-              <button onclick={() => move(r, 1)} aria-label="Move down">&darr;</button>
+              <button type="button" class="secondary small" onclick={() => startEdit(r)}>Edit</button>
+              <button type="button" class="secondary small" onclick={() => toggleRule(r)}>{r.enabled ? "Disable" : "Enable"}</button>
+              <button type="button" class="secondary small danger" onclick={() => deleteRule(r)}>Delete</button>
+              <button type="button" class="secondary small" onclick={() => move(r, -1)} aria-label="Move up">&uarr;</button>
+              <button type="button" class="secondary small" onclick={() => move(r, 1)} aria-label="Move down">&darr;</button>
             {/if}
           </div>
         {/if}
       {/snippet}
     </DataGrid>
   </div>
-</section>
+
+  <div class="card test-col">
+    <h3>Test a Domain</h3>
+    <p class="hint">
+      Checks whether a query for this domain would be blocked, against the real compiled global
+      custom-rules and blocklist state (not per-network/per-client overrides yet).
+    </p>
+    <form onsubmit={runTestDomain} class="test-domain-form">
+      <input required bind:value={testDomainInput} placeholder="ads.example.com" aria-label="Domain to test" />
+      <button type="submit" disabled={testDomainBusy}>{testDomainBusy ? "Testing…" : "Test"}</button>
+    </form>
+    {#if testDomainError}<p class="error" role="alert">{testDomainError}</p>{/if}
+    {#if testDomainResult}
+      <p class="test-domain-result" class:blocked={testDomainResult.blocked} class:allowed={!testDomainResult.blocked} role="status">
+        <strong>{testDomainResult.domain}</strong> would be
+        <strong>{testDomainResult.blocked ? "BLOCKED" : "ALLOWED"}</strong>
+        {#if testDomainResult.reason === "no_match"}
+          (no rule matches -- default allow)
+        {:else if testDomainResult.matched}
+          by {testDomainResult.reason.replace("_", " ")}: <code>{testDomainResult.matched}</code>
+        {/if}
+      </p>
+      {#if testDomainResult.blocked}
+        <button type="button" class="secondary small" onclick={() => { ruleType = "allow"; pattern = testDomainResult!.domain; }}>Add allow rule for this domain</button>
+      {:else}
+        <button type="button" class="secondary small" onclick={() => { ruleType = "block"; pattern = testDomainResult!.domain; }}>Add block rule for this domain</button>
+      {/if}
+    {/if}
+  </div>
+</div>
+
+<div class="card policy-card">
+  <h3>Global Answer Policy</h3>
+  <p class="hint">The appliance-wide default -- every network, group, and client falls back to this unless it has its own override.</p>
+  <PolicyEditor
+    layer={globalPolicy}
+    onSave={(l) =>
+      api.putGlobalPolicy(l).then((resp) => {
+        dnsRuntimeResult = resp.dns_runtime ?? null;
+        return refresh();
+      })}
+  />
+</div>
 
 {#if confirmDeleteRule}
   <ConfirmDialog
@@ -341,10 +353,17 @@
 {/if}
 
 <style>
-  .filtering { display: flex; flex-direction: column; gap: 1rem; }
-  .grid-2col { display: grid; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); gap: 1rem; align-items: start; }
+  .workspace { display: grid; grid-template-columns: 2fr 1fr; gap: 1rem; align-items: start; margin-bottom: 1rem; }
+  .test-col { position: sticky; top: 0; }
+  @media (max-width: 900px) {
+    .workspace { grid-template-columns: 1fr; }
+    .test-col { position: static; }
+  }
   .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); }
   .card h3 { margin-top: 0; }
+  .policy-card { max-width: 44rem; }
+  button.secondary.small { min-height: auto; padding: 0.3rem 0.6rem; font-size: 0.8rem; }
+  .danger { color: var(--danger); }
   .test-domain-form { display: flex; gap: 0.5rem; align-items: center; max-width: 28rem; }
   .test-domain-form input { flex: 1; }
   .test-domain-result { margin-top: 0.6rem; padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.9rem; }
@@ -356,8 +375,4 @@
   .add-form label { display: flex; flex-direction: column; font-size: 0.85rem; gap: 0.25rem; }
   .bulk-bar { display: flex; align-items: center; gap: 0.6rem; padding: 0.5rem 0.75rem; background: var(--nav-hover-bg); border-radius: 6px; margin-bottom: 0.75rem; font-size: 0.85rem; }
   .actions { display: flex; gap: 0.3rem; flex-wrap: wrap; }
-  .badge { padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 0.78rem; }
-  .badge-ok { background: var(--badge-ok-bg); color: var(--badge-ok-fg); }
-  .badge-warn { background: var(--badge-warn-bg); color: var(--badge-warn-fg); }
-  .danger { background: var(--badge-danger-bg); color: var(--badge-danger-fg); }
 </style>

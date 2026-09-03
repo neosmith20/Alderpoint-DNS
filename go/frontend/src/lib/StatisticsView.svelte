@@ -99,6 +99,47 @@
 
   onMount(loadOverview);
 
+  // Headline metrics: unique clients + real per-query latency sample
+  // (same technique Dashboard's own Query Performance card uses -- see
+  // its doc comment for why a bounded, disclosed sample rather than a
+  // manufactured figure), scoped to the same fixed 24h window as the
+  // rest of this page.
+  let uniqueClients = $state<number | null>(null);
+  let uniqueClientsDegraded = $state(false);
+  interface LatencyStats { avg: number; p95: number; p99: number; sampleSize: number; totalInPeriod: number }
+  let latencyStats = $state<LatencyStats | null>(null);
+  let latencyError = $state("");
+
+  async function loadHeadlineExtras() {
+    try {
+      const resp = await api.topClients(1440);
+      uniqueClientsDegraded = resp.degraded;
+      uniqueClients = resp.degraded ? null : resp.clients.length;
+    } catch {
+      uniqueClientsDegraded = true;
+    }
+    try {
+      const resp = await api.analyticsQueryLog({ minutes: 1440, limit: 500, offset: 0 });
+      if (resp.degraded) {
+        latencyError = resp.degraded_reason || "unavailable";
+        return;
+      }
+      const values = resp.rows.map((r) => r.latency_ms).filter((v): v is number => typeof v === "number" && v > 0).sort((a, b) => a - b);
+      if (values.length === 0) return;
+      const pct = (p: number) => values[Math.min(values.length - 1, Math.floor((p / 100) * values.length))];
+      latencyStats = {
+        avg: values.reduce((s, v) => s + v, 0) / values.length,
+        p95: pct(95),
+        p99: pct(99),
+        sampleSize: values.length,
+        totalInPeriod: resp.rows.length,
+      };
+    } catch (err) {
+      latencyError = err instanceof Error ? err.message : String(err);
+    }
+  }
+  onMount(loadHeadlineExtras);
+
   // BIND Cache Effectiveness -- moved here from the Dashboard (2026-09-03,
   // owner-requested: it's a point-in-time cache health reading, not a
   // query-history summary, and belongs alongside the appliance's other
@@ -139,11 +180,41 @@
 </script>
 
 <section aria-labelledby="statistics-heading" class="statistics">
-  <h2 id="statistics-heading">Statistics</h2>
+  <h2 id="statistics-heading">Advanced Analytics</h2>
   <p class="scope-note">
     A real overview of this appliance's own query history, and the settings that govern how much
     of it gets kept. Export downloads it; Clear permanently deletes it.
   </p>
+
+  <div class="headline-row">
+    <div class="card headline-card">
+      <h3>Query volume</h3>
+      <p class="big">{overview ? overview.total.toLocaleString() : overviewDegraded ? "—" : "…"}</p>
+      <p class="hint">Last 24h</p>
+    </div>
+    <div class="card headline-card">
+      <h3>Blocked volume</h3>
+      <p class="big">{overview ? overview.blocked.toLocaleString() : overviewDegraded ? "—" : "…"}</p>
+      <p class="hint">{overview && overview.total ? `${((overview.blocked / overview.total) * 100).toFixed(1)}% of total` : "Last 24h"}</p>
+    </div>
+    <div class="card headline-card">
+      <h3>Unique clients</h3>
+      <p class="big">{uniqueClientsDegraded ? "—" : (uniqueClients ?? "…")}</p>
+      <p class="hint">Last 24h</p>
+    </div>
+    <div class="card headline-card">
+      <h3>Query performance</h3>
+      {#if latencyError}
+        <p class="hint">Unavailable: {latencyError}</p>
+      {:else if !latencyStats}
+        <p class="hint">…</p>
+      {:else}
+        <p class="big">{latencyStats.avg.toFixed(1)}<span class="of"> ms avg</span></p>
+        <p class="hint">P95 {latencyStats.p95.toFixed(1)} ms &middot; P99 {latencyStats.p99.toFixed(1)} ms</p>
+        <p class="hint">{latencyStats.sampleSize < latencyStats.totalInPeriod ? `Sampled from ${latencyStats.sampleSize.toLocaleString()} of ${latencyStats.totalInPeriod.toLocaleString()}+ queries` : `From ${latencyStats.sampleSize.toLocaleString()} queries`}</p>
+      {/if}
+    </div>
+  </div>
 
   <h3 class="section-heading">Overview <span class="scope">(last 24h)</span></h3>
   <div class="grid-2col">
@@ -329,6 +400,10 @@
      stacked full-height regardless of viewport, and there was no actual
      statistics content on a page named "Statistics" at all. */
   .grid-2col { display: grid; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); gap: 1rem; align-items: start; margin-bottom: 0.5rem; }
+  .headline-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 1rem; }
+  @media (max-width: 1024px) { .headline-row { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 620px) { .headline-row { grid-template-columns: 1fr; } }
+  .headline-card h3 { margin: 0 0 0.3rem; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; opacity: 0.75; }
   .stacked-column { display: flex; flex-direction: column; gap: 1rem; }
   .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 0.6rem; }
   .card.wide-card { grid-column: 1 / -1; }

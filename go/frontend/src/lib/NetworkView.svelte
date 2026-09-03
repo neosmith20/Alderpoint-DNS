@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { api, ApiError, type CurrentNetworkConfig, type NetworkApplyResult } from "../api";
   import StatusBadge from "./ui/StatusBadge.svelte";
+  import PageHeader from "./ui/PageHeader.svelte";
 
   // Network Configuration. Compared directly against V1.1.1's real
   // system_network.html/app/network_config.py (read directly from the
@@ -128,16 +129,21 @@
   }
 </script>
 
-<section aria-labelledby="network-heading" class="network">
-  <h2 id="network-heading">Network Configuration</h2>
-  <p class="scope-note">
-    This server's own network interface (DHCP/static IP, gateway) -- separate from DNS
-    upstream/resolver settings. A change applies live immediately, with the same automatic-rollback
-    safety window as every other change on this page, and -- on a supported detected backend -- is
-    also written into that backend's own real config so it survives a reboot.
-  </p>
+<PageHeader
+  headingId="network-heading"
+  title="Network Configuration"
+  description="This server's own network interface (DHCP/static IP, gateway) -- separate from DNS upstream/resolver settings."
+/>
 
-  {#if statusError}<p class="error" role="alert">{statusError}</p>{/if}
+<p class="impact-warning" role="alert">
+  This is the address DNS clients connect to. Changing it can make this appliance briefly
+  unreachable for DNS and for this web console -- a change applies live immediately with an
+  automatic-rollback safety window (see below), and, on a supported detected backend, is also
+  written into that backend's own real config so it survives a reboot.
+</p>
+
+<div class="network">
+{#if statusError}<p class="error" role="alert">{statusError}</p>{/if}
 
   {#if current}
     <section class="status-grid">
@@ -249,11 +255,14 @@
     </div>
   {/if}
   {#if actionResult}<p class="hint" role="status">{actionResult}</p>{/if}
-</section>
+</div>
 
 <style>
   .network { display: flex; flex-direction: column; gap: 1rem; }
-  .scope-note { font-size: 0.85rem; opacity: 0.75; max-width: 50rem; }
+  .impact-warning {
+    font-size: 0.85rem; max-width: 50rem; margin: 0 0 1rem; padding: 0.6rem 0.85rem;
+    border-radius: 8px; background: var(--badge-warn-bg); color: var(--badge-warn-fg);
+  }
   .status-grid { display: flex; flex-wrap: wrap; gap: 1rem; }
   .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); display: flex; flex-direction: column; gap: 0.6rem; max-width: 32rem; }
   .card.wide { max-width: 44rem; }

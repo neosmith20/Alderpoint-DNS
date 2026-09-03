@@ -16,7 +16,14 @@ export type IconName =
   | "sun"
   | "moon"
   | "logout"
-  | "spinner";
+  | "spinner"
+  | "filters"
+  | "settings"
+  | "guide"
+  | "clients"
+  | "cache"
+  | "audit"
+  | "advanced";
 
 // Each entry is the inner markup of an <svg viewBox="0 0 24 24">.
 export const ICONS: Record<IconName, string> = {
@@ -34,4 +41,11 @@ export const ICONS: Record<IconName, string> = {
   moon: `<path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/>`,
   logout: `<path d="M9 4H5.8A1.8 1.8 0 0 0 4 5.8v12.4A1.8 1.8 0 0 0 5.8 20H9M15.5 16.5L20 12l-4.5-4.5M20 12H9"/>`,
   spinner: `<circle cx="12" cy="12" r="8.5" opacity="0.25"/><path d="M20.5 12a8.5 8.5 0 0 0-8.5-8.5"/>`,
+  filters: `<path d="M4 5h16M7 12h10M10.5 19h3"/>`,
+  settings: `<circle cx="12" cy="12" r="3.2"/><path d="M12 4v2.4M12 17.6V20M20 12h-2.4M6.4 12H4M17.3 6.7l-1.7 1.7M8.4 15.6l-1.7 1.7M17.3 17.3l-1.7-1.7M8.4 8.4L6.7 6.7"/>`,
+  guide: `<path d="M4 5.5c2.5-1 5.2-1 7.5.5v13c-2.3-1.5-5-1.5-7.5-.5v-13z"/><path d="M20 5.5c-2.5-1-5.2-1-7.5.5v13c2.3-1.5 5-1.5 7.5-.5v-13z"/>`,
+  clients: `<circle cx="8.5" cy="8" r="3"/><circle cx="16" cy="9.5" r="2.4"/><path d="M3 19c.4-3 2.6-5 5.5-5s5.1 2 5.5 5M14.8 14.5c2.3.2 4 1.9 4.3 4.5"/>`,
+  cache: `<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/>`,
+  audit: `<rect x="4.5" y="3" width="15" height="18" rx="1.5"/><path d="M8 8h8M8 12h8M8 16h5"/>`,
+  advanced: `<path d="M4 12l3.5-8h9L20 12l-3.5 8h-9L4 12z"/><circle cx="12" cy="12" r="2.6"/>`,
 };

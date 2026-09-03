@@ -132,6 +132,8 @@
   // Delivery History
   let history = $state<NotificationHistoryEntry[]>([]);
   let historyLoadError = $state("");
+  const enabledProviderCount = $derived(providers.filter((p) => p.enabled).length);
+  const failedDeliveryCount = $derived(history.filter((h) => h.status === "failed").length);
   const historyGuard = new StaleGuard();
 
   async function refreshHistory() {
@@ -282,8 +284,15 @@
     condition actually fires -- see each category's own "wired" state for what's real today.
   </p>
 
+  <div class="status-summary">
+    <span>Notification system: <strong>{enabledProviderCount > 0 ? `${enabledProviderCount} destination${enabledProviderCount === 1 ? "" : "s"} enabled` : "no destinations enabled"}</strong></span>
+    <span>Last sent: <strong>{history[0] ? history[0].at : "never"}</strong></span>
+    <span>Failed deliveries (recent history): <strong class={failedDeliveryCount > 0 ? "attention" : ""}>{failedDeliveryCount}</strong></span>
+  </div>
+
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
 
+  <h3>Destinations</h3>
   <form class="add-form" onsubmit={createProvider}>
     <div class="add-form-row">
       <select bind:value={kind}>
@@ -436,6 +445,11 @@
 <style>
   .notifications { display: flex; flex-direction: column; gap: 1rem; }
   .scope-note { font-size: 0.85rem; opacity: 0.75; max-width: 50rem; }
+  .status-summary {
+    display: flex; flex-wrap: wrap; gap: 0.75rem 1.5rem; font-size: 0.85rem; margin: 0.5rem 0 1rem;
+    padding: 0.75rem 1rem; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-elevated);
+  }
+  .status-summary .attention { color: var(--warning); }
   .add-form { display: flex; flex-direction: column; gap: 0.5rem; }
   .add-form-row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
   .add-form input { flex: 1; min-width: 10rem; }

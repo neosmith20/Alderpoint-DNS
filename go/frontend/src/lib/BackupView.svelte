@@ -392,6 +392,17 @@
   </p>
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
 
+  {#if backups}
+    {@const lastBackup = backups[0]}
+    {@const totalSize = backups.reduce((s, b) => s + b.size_bytes, 0)}
+    <div class="status-summary">
+      <span>Last successful backup: <strong>{lastBackup ? timestampPref.format(lastBackup.created_at) : "none yet"}</strong></span>
+      <span>Next scheduled: <strong>{schedule?.enabled ? `every ${schedule.interval_hours}h` : "not scheduled"}</strong></span>
+      <span>Storage used: <strong>{formatSize(totalSize)}</strong> ({backups.length} backup{backups.length === 1 ? "" : "s"})</span>
+      <span>Encryption: <strong>{backups.some((b) => b.encrypted) ? `${backups.filter((b) => b.encrypted).length} encrypted, ${backups.filter((b) => !b.encrypted).length} not` : "none encrypted"}</strong></span>
+    </div>
+  {/if}
+
   <div class="two-col">
     <div class="card">
       <h3>Create a backup</h3>
@@ -647,6 +658,10 @@
 <style>
   .backup { display: flex; flex-direction: column; gap: 1rem; }
   .scope-note { font-size: 0.85rem; opacity: 0.75; max-width: 44rem; }
+  .status-summary {
+    display: flex; flex-wrap: wrap; gap: 0.75rem 1.5rem; font-size: 0.85rem;
+    padding: 0.75rem 1rem; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-elevated);
+  }
   .two-col { display: flex; flex-wrap: wrap; gap: 1rem; }
   .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); display: flex; flex-direction: column; gap: 0.6rem; flex: 1; min-width: 14rem; }
   .card h3 { margin: 0; }

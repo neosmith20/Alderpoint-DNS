@@ -3,6 +3,8 @@
   import { api, ApiError, type ReplicationStatusResponse } from "../api";
   import { timestampPref } from "../timestamp.svelte";
   import ConfirmDialog from "./ui/ConfirmDialog.svelte";
+  import PageHeader from "./ui/PageHeader.svelte";
+  import StatusBadge from "./ui/StatusBadge.svelte";
 
   // Replication (rebuilt 2026-08-29, real Go-native): one-way primary-
   // to-replica configuration sync over mutual TLS, rebuilt against
@@ -168,21 +170,43 @@
     if (result === "failed" || result === "error") return "badge-danger";
     return "badge-neutral";
   }
+
+  function promoteToPrimary() {
+    askConfirm(
+      "Promote this node to Primary",
+      "This is a manual, deliberate action, not automatic failover. This node stops applying a primary's generations and starts accepting its own replicas instead. It does not affect the previous primary, which keeps running independently -- if it's also still reachable, you now have two primaries until you resolve that by hand.",
+      "Promote to Primary",
+      () => run(() => api.replicationSetRole("primary"), "Promoted to Primary."),
+    );
+  }
 </script>
 
-<section aria-labelledby="replication-heading" class="replication">
-  <h2 id="replication-heading">Replication</h2>
-  <p class="scope-note">
-    One-way primary-to-replica configuration sync over mutual TLS. Node identity, token-based
-    enrollment, numbered content-hashed generations, and drift detection are all real. Manual
-    promotion (replica &rarr; primary) is a deliberate, documented action -- there is no automatic
-    failover.
+<PageHeader
+  headingId="replication-heading"
+  title="Replication"
+  description="One-way primary-to-replica configuration sync over mutual TLS. Node identity, token-based enrollment, numbered content-hashed generations, and drift detection are all real."
+/>
+
+{#if status}
+  <div class="status-summary">
+    <span>Node role: <strong>{status.settings.role}</strong></span>
+    <span>Peers: <strong>{status.settings.role === "primary" ? `${status.replicas?.length ?? 0} enrolled` : status.settings.primary_address ? "1 primary" : "not connected"}</strong></span>
+    <span>Last sync: <strong>{status.settings.role === "replica" ? (status.settings.last_sync_status || "never") : status.latest_generation ? `generation #${status.latest_generation.generation_number} published` : "no generation yet"}</strong></span>
+    {#if status.settings.role === "replica"}
+      <StatusBadge label={status.settings.drift_detected ? "Drift detected" : "In sync"} tone={status.settings.drift_detected ? "warning" : "healthy"} />
+    {/if}
+  </div>
+  <p class="hint">
+    Replication is not automatic failover -- promoting a replica to primary is always a manual,
+    deliberate action (see Manual Promotion below), and this appliance never switches roles on its own.
   </p>
+{/if}
 
-  {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
-  {#if actionResult}<p class="success" role="status">{actionResult}</p>{/if}
-  {#if actionError}<p class="error" role="alert">{actionError}</p>{/if}
+{#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
+{#if actionResult}<p class="success" role="status">{actionResult}</p>{/if}
+{#if actionError}<p class="error" role="alert">{actionError}</p>{/if}
 
+<div class="replication">
   {#if status}
     <section class="grid">
       <article class="card">
@@ -387,17 +411,23 @@
       </form>
     {/if}
 
-    <div class="card">
+    <div class="card danger-card">
       <h3>Manual Promotion</h3>
       <p class="hint">
         Promoting a replica to primary is a manual, deliberate action, not an automated failover --
-        automatic bidirectional sync is intentionally not implemented.
+        automatic bidirectional sync is intentionally not implemented. It does not demote or affect
+        any other node; resolving a resulting two-primary situation is on you.
       </p>
+      {#if status.settings.role === "replica"}
+        <button type="button" class="danger" onclick={promoteToPrimary} disabled={busy}>Promote to Primary</button>
+      {:else}
+        <p class="hint">Only available while this node's role is Replica.</p>
+      {/if}
     </div>
   {:else if !loadError}
     <p class="hint">Loading…</p>
   {/if}
-</section>
+</div>
 
 {#if pendingConfirm}
   <ConfirmDialog
@@ -411,7 +441,11 @@
 
 <style>
   .replication { display: flex; flex-direction: column; gap: 1rem; }
-  .scope-note { font-size: 0.85rem; opacity: 0.75; max-width: 50rem; }
+  .status-summary {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; font-size: 0.85rem; margin-bottom: 0.5rem;
+    padding: 0.75rem 1rem; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-elevated);
+  }
+  .danger-card { border-color: var(--danger); }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 1rem; }
   .grid.compact { grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: 0.6rem; }
   .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); display: flex; flex-direction: column; gap: 0.6rem; }
@@ -433,5 +467,5 @@
   .badge-ok { background: var(--badge-ok-bg); color: var(--badge-ok-fg); }
   .badge-danger { background: var(--badge-danger-bg); color: var(--badge-danger-fg); }
   .badge-neutral { background: var(--border); color: var(--text); }
-  button.danger { color: var(--badge-danger-fg); border-color: var(--badge-danger-fg); }
+  button.danger { background: var(--badge-danger-bg); color: var(--badge-danger-fg); border-color: var(--badge-danger-fg); }
 </style>

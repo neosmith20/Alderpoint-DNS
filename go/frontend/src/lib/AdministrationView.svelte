@@ -1,10 +1,11 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, ApiError, type AdminSessionRow, type AuditLogEntry } from "../api";
+  import { api, ApiError, type AdminSessionRow } from "../api";
   import { timestampPref, type TimestampMode } from "../timestamp.svelte";
   import StatusBadge from "./ui/StatusBadge.svelte";
   import ConfirmDialog from "./ui/ConfirmDialog.svelte";
   import { COLOR_PALETTE, loadColors, saveColors, applyColors, type ColorRole, type ColorChoices } from "../colors";
+  import { router } from "../router.svelte";
 
   let applianceName = $state("");
   let statusError = $state("");
@@ -34,8 +35,6 @@
   // endpoint in the appliance).
   let sessions = $state<AdminSessionRow[] | null>(null);
   let sessionsError = $state("");
-  let auditEntries = $state<AuditLogEntry[] | null>(null);
-  let auditError = $state("");
 
   async function loadSessions() {
     try {
@@ -43,15 +42,6 @@
       sessions = resp.sessions;
     } catch (err) {
       sessionsError = err instanceof Error ? err.message : String(err);
-    }
-  }
-
-  async function loadAuditLog() {
-    try {
-      const resp = await api.listAuditLog();
-      auditEntries = resp.entries;
-    } catch (err) {
-      auditError = err instanceof Error ? err.message : String(err);
     }
   }
 
@@ -75,7 +65,6 @@
       statusError = err instanceof Error ? err.message : String(err);
     }
     loadSessions();
-    loadAuditLog();
   });
 
   async function changePassword(e: Event) {
@@ -93,7 +82,7 @@
       newPassword = "";
       confirmNewPassword = "";
       passwordSuccess = true;
-      await Promise.all([loadSessions(), loadAuditLog()]);
+      await loadSessions();
     } catch (err) {
       passwordError = err instanceof ApiError ? err.message : String(err);
     } finally {
@@ -114,7 +103,7 @@
     try {
       const resp = await api.revokeOtherSessions();
       revokeResult = resp.revoked_count === 0 ? "No other sessions were active." : `Revoked ${resp.revoked_count} other session${resp.revoked_count === 1 ? "" : "s"}.`;
-      await Promise.all([loadSessions(), loadAuditLog()]);
+      await loadSessions();
     } catch (err) {
       revokeResult = err instanceof Error ? err.message : String(err);
     } finally {
@@ -155,8 +144,8 @@
   </div>
 
   <div class="card">
-    <h3>Change Password</h3>
-    <p class="hint">Changing the password signs out every other active session automatically.</p>
+    <h3>Administrator Account</h3>
+    <p class="hint">This appliance supports a single administrator account -- there is no multi-account list to manage. Changing the password signs out every other active session automatically.</p>
     <form onsubmit={changePassword} class="stack-form">
       <label>Current password <input required type="password" bind:value={currentPassword} autocomplete="current-password" /></label>
       <label>New password (12+ characters) <input required minlength="12" type="password" bind:value={newPassword} autocomplete="new-password" /></label>
@@ -208,9 +197,9 @@
   </div>
 
   <div class="card wide">
-    <h3>Sessions</h3>
-    <p class="hint">Sessions other than this one can be revoked without changing the password.</p>
-    <button class="danger" onclick={revokeOtherSessions} disabled={revokeBusy}>{revokeBusy ? "Revoking…" : "Revoke all other sessions"}</button>
+    <h3>Active Sessions</h3>
+    <p class="hint">Every other session can be revoked at once, below (there is no per-session revoke endpoint yet -- only all-others).</p>
+    <button class="danger" onclick={revokeOtherSessions} disabled={revokeBusy}>{revokeBusy ? "Revoking…" : "Revoke Other Sessions"}</button>
     {#if revokeResult}<p class="hint" role="status">{revokeResult}</p>{/if}
     {#if sessionsError}
       <p class="error" role="alert">{sessionsError}</p>
@@ -218,7 +207,7 @@
       <p class="hint">Loading…</p>
     {:else}
       <div class="table-scroll"><table class="admin-table">
-        <thead><tr><th>Session</th><th>Started</th><th>Last seen</th><th>IP</th><th>Client</th></tr></thead>
+        <thead><tr><th>Administrator</th><th>Started</th><th>Last seen</th><th>Source IP</th><th>Client</th></tr></thead>
         <tbody>
           {#each sessions as row, i (row.created_at + i)}
             <tr>
@@ -235,29 +224,21 @@
   </div>
 
   <div class="card wide">
-    <h3>Recent Administrative Activity</h3>
-    {#if auditError}
-      <p class="error" role="alert">{auditError}</p>
-    {:else if !auditEntries}
-      <p class="hint">Loading…</p>
-    {:else if auditEntries.length === 0}
-      <p class="hint">No administrative activity recorded yet.</p>
-    {:else}
-      <div class="table-scroll"><table class="admin-table">
-        <thead><tr><th>When</th><th>Action</th><th>Result</th><th>IP</th><th>Detail</th></tr></thead>
-        <tbody>
-          {#each auditEntries as entry, i (entry.at + i)}
-            <tr>
-              <td class="mono">{entry.at}</td>
-              <td>{entry.action}</td>
-              <td><StatusBadge label={entry.success ? "Success" : "Failed"} tone={entry.success ? "healthy" : "danger"} /></td>
-              <td class="mono">{entry.ip}</td>
-              <td>{entry.detail}</td>
-            </tr>
-          {/each}
-        </tbody>
-      </table></div>
-    {/if}
+    <h3>Authentication Security</h3>
+    <p class="hint">
+      Passwords require 12+ characters (enforced above and server-side). Login rate-limiting state,
+      configurable session timeout, and a broader password policy are not yet exposed as
+      owner-facing settings anywhere in this appliance -- this section discloses that rather than
+      hiding it.
+    </p>
+  </div>
+
+  <div class="card wide audit-link-card">
+    <div>
+      <h3>Recent Administrative Activity</h3>
+      <p class="hint">Sign-ins, password changes, session revocations and other administrative actions now have their own page, with real filtering and search.</p>
+    </div>
+    <button type="button" onclick={() => router.navigate("audit")}>Open Audit Log</button>
   </div>
 </section>
 
@@ -304,6 +285,9 @@
     display: flex; align-items: center; justify-content: center; border-color: var(--border-strong);
   }
   .swatch-default.selected { border-color: var(--fg); border-width: 2px; }
+  .audit-link-card { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+  .audit-link-card h3 { margin: 0 0 0.35rem; }
+  .audit-link-card p { margin: 0; }
   .table-scroll { overflow-x: auto; margin-top: 0.75rem; }
   .admin-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
   .admin-table th { text-align: left; font-weight: 600; opacity: 0.7; padding: 0.3rem 0.5rem 0.3rem 0; border-bottom: 1px solid var(--border); }

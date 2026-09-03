@@ -10,6 +10,7 @@
   import ConfirmDialog from "./ui/ConfirmDialog.svelte";
   import PageHeader from "./ui/PageHeader.svelte";
   import Panel from "./ui/Panel.svelte";
+  import Modal from "./ui/Modal.svelte";
 
   let records = $state<LocalDnsRecord[]>([]);
   let loadError = $state("");
@@ -131,6 +132,8 @@
     refreshAliases();
   });
 
+  let addModalOpen = $state(false);
+
   async function addRecord(e: Event) {
     e.preventDefault();
     addError = "";
@@ -140,12 +143,27 @@
       dnsRuntimeResult = resp.dns_runtime ?? null;
       newName = "";
       newValue = "";
+      addModalOpen = false;
       await refresh();
     } catch (err) {
       addError = err instanceof Error ? err.message : String(err);
     } finally {
       addBusy = false;
     }
+  }
+
+  function exportCsv() {
+    const header = ["Name", "Type", "Value", "TTL", "Enabled"];
+    const csvRows = records.map((r) => [r.name, r.record_type, r.value, String(r.ttl), r.enabled ? "yes" : "no"]);
+    const esc = (v: string) => `"${v.replace(/"/g, '""')}"`;
+    const csv = [header, ...csvRows].map((row) => row.map((c) => esc(String(c))).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "alderpoint-local-dns.csv";
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   function startEdit(r: LocalDnsRecord) {
@@ -211,26 +229,18 @@
     title="Local DNS"
     headingId="localdns-heading"
     description="Appliance-wide A/AAAA/CNAME/PTR records, answered directly by the compiled dnsdist runtime, plus Client Aliases for labeling addresses elsewhere in the UI."
-  />
+  >
+    {#snippet actions()}
+      <button type="button" onclick={() => { addError = ""; addModalOpen = true; }}>Add Record</button>
+      <button type="button" class="secondary" onclick={() => router.navigate("importexport")}>Import</button>
+      <button type="button" class="secondary" onclick={exportCsv} disabled={records.length === 0}>Export</button>
+    {/snippet}
+  </PageHeader>
 
   <Panel heading="Records">
     {#snippet actions()}
       <input class="search-input" placeholder="Search name, value, type…" bind:value={search} aria-label="Search Local DNS records" />
     {/snippet}
-    <form onsubmit={addRecord} class="add-form">
-      <label>Name <input required bind:value={newName} placeholder="host.lan" /></label>
-      <label>
-        Type
-        <select bind:value={newType}>
-          <option>A</option><option>AAAA</option><option>CNAME</option><option>PTR</option>
-        </select>
-      </label>
-      <label>Value <input required bind:value={newValue} placeholder="10.0.0.5" /></label>
-      <label>TTL <input type="number" min="1" bind:value={newTTL} /></label>
-      <button type="submit" disabled={addBusy}>{addBusy ? "Adding…" : "Add record"}</button>
-      {#if addError}<p class="error" role="alert">{addError}</p>{/if}
-    </form>
-
     <DnsRuntimeBadge result={dnsRuntimeResult} />
 
     {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
@@ -315,6 +325,27 @@
   </Panel>
 </section>
 
+{#if addModalOpen}
+  <Modal title="Add Record" onClose={() => (addModalOpen = false)}>
+    <form onsubmit={addRecord} class="modal-form">
+      <label>Name <input required bind:value={newName} placeholder="host.lan" /></label>
+      <label>
+        Type
+        <select bind:value={newType}>
+          <option>A</option><option>AAAA</option><option>CNAME</option><option>PTR</option>
+        </select>
+      </label>
+      <label>Value <input required bind:value={newValue} placeholder="10.0.0.5" /></label>
+      <label>TTL <input type="number" min="1" bind:value={newTTL} /></label>
+      <div class="form-actions">
+        <button type="submit" disabled={addBusy}>{addBusy ? "Adding…" : "Add Record"}</button>
+        <button type="button" class="secondary" onclick={() => (addModalOpen = false)}>Cancel</button>
+      </div>
+      {#if addError}<p class="error" role="alert">{addError}</p>{/if}
+    </form>
+  </Modal>
+{/if}
+
 {#if confirmDeleteAlias}
   <ConfirmDialog
     title="Remove alias"
@@ -341,6 +372,9 @@
   .add-form { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: end; margin: 0.75rem 0; }
   .add-form label { display: flex; flex-direction: column; font-size: 0.85rem; gap: 0.25rem; }
   .search-input { min-width: 14rem; }
+  .modal-form { display: flex; flex-direction: column; gap: 0.75rem; }
+  .modal-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; }
+  .form-actions { display: flex; gap: 0.5rem; }
   .hint { font-size: 0.85rem; opacity: 0.75; }
   .alias-list { list-style: none; margin: 0 0 0.75rem; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
   .alias-row { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }

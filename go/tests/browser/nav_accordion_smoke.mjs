@@ -7,6 +7,12 @@
 // see that file's own equivalent inline checks for the same assertions
 // exercised as part of the full suite.
 //
+// 2026-09: rewritten against the Standard/Advanced nav redesign -- group
+// membership changed (Local DNS and Blocklists both moved into "Filters";
+// Administration moved into the Advanced-only "Operations" group), so
+// this now exercises Filters vs System (both Standard-visible, distinct
+// groups) instead of the old dns/security/system split.
+//
 // Usage: node nav_accordion_smoke.mjs <base-url> <username> <password>
 import puppeteer from "puppeteer-core";
 
@@ -79,18 +85,19 @@ async function main() {
     let openGroups = await openPanelGroups(page);
     check("no sidebar section is open while on the top-level Dashboard route", openGroups.length === 0, JSON.stringify(openGroups));
 
-    // --- Open A -> open B closes A ---
-    check("clicked Local DNS (dns group)", await clickNavItem(page, (t) => t?.startsWith("Local DNS")));
+    // --- Open A -> open B closes A (Filters vs System -- both Standard
+    // nav, distinct groups) ---
+    check("clicked Local DNS (Filters group)", await clickNavItem(page, (t) => t?.startsWith("Local DNS")));
     await page.waitForSelector("#localdns-heading", { timeout: 3000 });
     openGroups = await openPanelGroups(page);
-    check("opening Local DNS opens exactly the dns group", openGroups.length === 1 && openGroups[0]?.includes("DNS"), JSON.stringify(openGroups));
+    check("opening Local DNS opens exactly the Filters group", openGroups.length === 1 && openGroups[0]?.includes("Filters"), JSON.stringify(openGroups));
 
-    check("clicked Administration (system group)", await clickNavItem(page, (t) => t?.startsWith("Administration")));
-    await page.waitForSelector("#admin-heading", { timeout: 3000 });
+    check("clicked Backup & Restore (System group)", await clickNavItem(page, (t) => t?.startsWith("Backup & Restore")));
+    await page.waitForSelector("#backup-heading, .backup", { timeout: 3000 });
     openGroups = await openPanelGroups(page);
-    check("opening Administration closes dns and opens exactly the system group", openGroups.length === 1 && openGroups[0]?.includes("System"), JSON.stringify(openGroups));
+    check("opening Backup & Restore closes Filters and opens exactly the System group", openGroups.length === 1 && openGroups[0]?.includes("System"), JSON.stringify(openGroups));
     const activeInPanel = await page.$$eval(".sidebar .panel .item.active", (els) => els.map((e) => e.textContent?.trim()));
-    check("the active child stays visibly selected within the open section", activeInPanel.some((t) => t?.startsWith("Administration")), activeInPanel.join(","));
+    check("the active child stays visibly selected within the open section", activeInPanel.some((t) => t?.startsWith("Backup")), activeInPanel.join(","));
 
     // --- Direct-route navigation (not a sidebar click) opens only that
     // route's own parent section ---
@@ -99,7 +106,7 @@ async function main() {
     openGroups = await openPanelGroups(page);
     check(
       "direct navigation to a child route opens only that child's own parent section",
-      openGroups.length === 1 && openGroups[0]?.includes("Security"),
+      openGroups.length === 1 && openGroups[0]?.includes("Filters"),
       JSON.stringify(openGroups),
     );
 
@@ -123,13 +130,13 @@ async function main() {
     check("collapsed rail: the icon is horizontally centered in its button", centering !== null && centering < 2, `gap difference=${centering}px`);
 
     const toggles = await page.$$(".sidebar.collapsed .group-toggle");
-    let dnsToggle, systemToggle;
+    let filtersToggle, systemToggle;
     for (const t of toggles) {
       const text = await t.evaluate((el) => el.textContent?.trim());
-      if (text?.includes("DNS")) dnsToggle = t;
+      if (text?.includes("Filters")) filtersToggle = t;
       if (text?.includes("System")) systemToggle = t;
     }
-    await dnsToggle.click();
+    await filtersToggle.click();
     await new Promise((r) => setTimeout(r, 80));
     let flyoutCount = await page.$$eval(".sidebar .flyout", (els) => els.length);
     check("collapsed rail: opening a flyout shows exactly one", flyoutCount === 1, `count=${flyoutCount}`);
@@ -147,21 +154,21 @@ async function main() {
     await new Promise((r) => setTimeout(r, 150));
     const drawerOpen = await page.$eval(".sidebar", (el) => el.classList.contains("mobile-open"));
     check("mobile menu button opens the drawer", drawerOpen);
-    // Currently on /ui/blocklists -- the drawer should show "security" open.
+    // Currently on /ui/blocklists -- the drawer should show "Filters" open.
     openGroups = await openPanelGroups(page, ".sidebar.mobile-open .group");
-    check("mobile drawer opens the current route's own section", openGroups.length === 1 && openGroups[0]?.includes("Security"), JSON.stringify(openGroups));
+    check("mobile drawer opens the current route's own section", openGroups.length === 1 && openGroups[0]?.includes("Filters"), JSON.stringify(openGroups));
 
-    let dnsToggleMobile = null;
+    let systemToggleMobile = null;
     for (const btn of await page.$$(".sidebar.mobile-open .group-toggle")) {
-      if ((await btn.evaluate((el) => el.textContent?.trim())).includes("DNS")) {
-        dnsToggleMobile = btn;
+      if ((await btn.evaluate((el) => el.textContent?.trim())).includes("System")) {
+        systemToggleMobile = btn;
         break;
       }
     }
-    await dnsToggleMobile.click();
+    await systemToggleMobile.click();
     await new Promise((r) => setTimeout(r, 80));
     openGroups = await openPanelGroups(page, ".sidebar.mobile-open .group");
-    check("opening a different section in the mobile drawer closes the previous one", openGroups.length === 1 && openGroups[0]?.includes("DNS"), JSON.stringify(openGroups));
+    check("opening a different section in the mobile drawer closes the previous one", openGroups.length === 1 && openGroups[0]?.includes("System"), JSON.stringify(openGroups));
     const stillOpen = await page.$eval(".sidebar", (el) => el.classList.contains("mobile-open"));
     check("toggling a section in the drawer does not close the drawer itself", stillOpen);
 

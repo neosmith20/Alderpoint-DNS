@@ -19,8 +19,6 @@
   import type { Column } from "./datagrid";
   import PolicyEditor from "./PolicyEditor.svelte";
   import PageHeader from "./ui/PageHeader.svelte";
-  import Panel from "./ui/Panel.svelte";
-  import SegmentedControl from "./ui/SegmentedControl.svelte";
   import StatusBadge from "./ui/StatusBadge.svelte";
   import Modal from "./ui/Modal.svelte";
   import ConfirmDialog from "./ui/ConfirmDialog.svelte";
@@ -40,58 +38,47 @@
   // Clients below is a real but disclosed-narrower substitute for a
   // dedicated discovery worker: it reads recent real traffic straight
   // from internal/pyanalytics's snapshot boundary (see
-  // GET /api/clients/observed's Go doc comment) -- no first-seen/
-  // last-seen history, no hostname/vendor fingerprinting, no
-  // loopback/unspecified addresses ever presented as a host.
+  // GET /api/clients/observed's Go doc comment) -- no first-seen
+  // history, no hostname/vendor fingerprinting, no loopback/unspecified
+  // addresses ever presented as a host.
+  //
+  // 2026-09 redesign: every per-row inline edit form (edit name, add
+  // identifier, assign group, generate/revoke Strong ClientID, add
+  // override, policy, explain) is consolidated into one "Add/Edit
+  // Managed Client" modal with grouped sections, replacing eight
+  // separate per-row toggle states with one -- see clientModal below.
+
+  let activeTab = $state<"managed" | "observed">("managed");
 
   let managedClients = $state<ManagedClient[]>([]);
   let groups = $state<ClientGroup[]>([]);
   let loadError = $state("");
   const guard = new StaleGuard();
 
-  // Client analytics (V1.1.1's clients_data(), see
-  // internal/dnsanalytics.Reader.ClientAnalytics / GET
-  // /api/analytics/top-clients): every client seen in the selected
-  // window, ranked by query volume, with its own blocked count/percent
-  // and last-seen timestamp.
-  type RangeKey = "1h" | "24h" | "7d" | "30d";
-  const RANGE_MINUTES: Record<RangeKey, number> = { "1h": 60, "24h": 1440, "7d": 7 * 1440, "30d": 30 * 1440 };
-  const RANGE_OPTIONS: { key: RangeKey; label: string }[] = [
-    { key: "1h", label: "Last hour" },
-    { key: "24h", label: "Last 24 hours" },
-    { key: "7d", label: "Last 7 days" },
-    { key: "30d", label: "Last 30 days" },
-  ];
-  let analyticsRange = $state<RangeKey>("24h");
+  // Client analytics: every client seen in the last 24h, used both for
+  // the Managed Clients table's own "Recent queries"/"Last seen" columns
+  // (best-effort join against a client's own identifier values -- there
+  // is no direct managed-client-id -> raw-client foreign key, so a
+  // client with no matching raw identifier honestly shows "--", not a
+  // guess) and available as its own reference list.
   let analyticsRows = $state<ClientAnalyticsRow[]>([]);
   let analyticsDegraded = $state(false);
   let analyticsDegradedReason = $state("");
-  let analyticsError = $state("");
-  let analyticsLoading = $state(false);
-  const analyticsGuard = new StaleGuard();
 
   async function loadAnalytics() {
-    const token = analyticsGuard.start();
-    analyticsLoading = true;
     try {
-      const resp = await api.topClients(RANGE_MINUTES[analyticsRange], router.signal());
-      if (!analyticsGuard.isCurrent(token)) return;
+      const resp = await api.topClients(1440, router.signal());
       analyticsRows = resp.clients;
       analyticsDegraded = resp.degraded;
       analyticsDegradedReason = resp.degraded_reason ?? "";
-      analyticsError = "";
     } catch (err) {
-      if (!analyticsGuard.isCurrent(token)) return;
       if (err instanceof DOMException && err.name === "AbortError") return;
-      analyticsError = err instanceof ApiError ? err.message : String(err);
-    } finally {
-      if (analyticsGuard.isCurrent(token)) analyticsLoading = false;
     }
   }
 
-  function setAnalyticsRange(r: RangeKey) {
-    analyticsRange = r;
-    loadAnalytics();
+  function analyticsFor(c: ManagedClient): ClientAnalyticsRow | undefined {
+    const values = new Set(c.identifiers.filter((i) => i.kind !== "clientid").map((i) => i.value));
+    return analyticsRows.find((r) => values.has(r.raw_client) || r.raw_client === c.name);
   }
 
   function goToQueryLog(rawClient: string) {
@@ -99,19 +86,10 @@
     router.navigate("analytics");
   }
 
-  function formatLastSeen(unixSeconds: number): string {
-    if (!unixSeconds) return "never";
+  function formatLastSeen(unixSeconds: number | undefined): string {
+    if (!unixSeconds) return "—";
     return new Date(unixSeconds * 1000).toLocaleString();
   }
-
-  const analyticsColumns: Column<ClientAnalyticsRow>[] = [
-    { key: "label", label: "Client", sortValue: (r) => r.label.toLowerCase(), minWidth: 16 },
-    { key: "value", label: "Queries", sortValue: (r) => r.value, minWidth: 10 },
-    { key: "share", label: "Share", sortValue: (r) => r.share, minWidth: 8 },
-    { key: "blocked", label: "Blocked", sortValue: (r) => r.blocked, minWidth: 10 },
-    { key: "last_seen", label: "Last Seen", sortValue: (r) => r.last_seen, minWidth: 14 },
-    { key: "query_log", label: "", minWidth: 10 },
-  ];
 
   // Managed-client directory search/filter.
   let clientSearch = $state("");
@@ -131,22 +109,23 @@
     }),
   );
 
-  let addClientModalOpen = $state(false);
   let addGroupModalOpen = $state(false);
 
   let observed = $state<ObservedClient[]>([]);
   let observedDegraded = $state(false);
   let observedDegradedReason = $state("");
   let observedLoadError = $state("");
+  let observedSearch = $state("");
   const observedGuard = new StaleGuard();
+  const filteredObserved = $derived(
+    observed.filter((o) => {
+      if (!observedSearch.trim()) return true;
+      const q = observedSearch.trim().toLowerCase();
+      return o.address.toLowerCase().includes(q) || (o.alias_label ?? "").toLowerCase().includes(q);
+    }),
+  );
 
-  // Observed Clients retention: previously the only way to forget a
-  // stale observed client was the appliance-wide "Clear statistics"
-  // button on the Statistics page, which deletes ALL query history, not
-  // just old clients. This is a targeted per-client prune instead --
-  // see internal/observedretention's own doc comment for the exact
-  // "only a client whose OWN most recent query is older than
-  // retention_days" safety property.
+  // Observed Clients retention.
   let retentionSettings = $state<ObservedRetentionSettings | null>(null);
   let retentionLoadError = $state("");
   let retentionSaving = $state(false);
@@ -157,9 +136,7 @@
   let retentionCleaning = $state(false);
   let retentionCleanError = $state("");
   let retentionCleanResult = $state("");
-  // Editable draft, separate from the persisted settings, so typing in
-  // the retention-days field doesn't change behavior until Save is
-  // pressed -- only the live preview count reacts immediately.
+  let retentionDialogOpen = $state(false);
   let retentionDaysDraft = $state(90);
   let retentionScheduleDraft = $state<ObservedRetentionSchedule>("manual");
 
@@ -186,6 +163,16 @@
       retentionPreviewError = err instanceof ApiError ? err.message : String(err);
     }
   }
+
+  /** Best-effort estimate only -- the backend records the last run, not a
+   * computed next-run time. Disclosed as an estimate, never presented as
+   * a scheduled fact the server itself will honor to the minute. */
+  const nextCleanupEstimate = $derived.by(() => {
+    if (!retentionSettings || retentionScheduleDraft === "manual") return null;
+    const days = retentionScheduleDraft === "daily" ? 1 : retentionScheduleDraft === "weekly" ? 7 : 30;
+    const base = retentionSettings.last_run_at ? new Date(retentionSettings.last_run_at).getTime() : Date.now();
+    return new Date(base + days * 86_400_000);
+  });
 
   async function saveRetentionSettings(e: Event) {
     e.preventDefault();
@@ -232,17 +219,11 @@
     }
   }
 
-  // Shared destructive-action confirm dialog (design-system unification):
-  // replaces every native window.confirm() on this page (delete client,
-  // delete/revoke/regenerate an identifier) with the one real,
-  // app-styled ConfirmDialog every future destructive action should use
-  // instead of inventing its own native-dialog or inline-banner pattern.
+  // Shared destructive-action confirm dialog.
   let pendingConfirm = $state<{ title: string; message: string; confirmLabel: string; run: () => Promise<void> } | null>(null);
-
   function askConfirm(title: string, message: string, confirmLabel: string, run: () => Promise<void>) {
     pendingConfirm = { title, message, confirmLabel, run };
   }
-
   async function runPendingConfirm() {
     if (!pendingConfirm) return;
     const { run } = pendingConfirm;
@@ -254,6 +235,8 @@
     }
   }
 
+  // --- "Save as Managed Client" (an observed address -> a real managed
+  // client), a compact modal distinct from the full editor below. ---
   let manageAddress = $state<string | null>(null);
   let manageMode = $state<"new" | "existing">("new");
   let manageNewName = $state("");
@@ -261,65 +244,275 @@
   let manageError = $state("");
   let manageBusy = $state(false);
 
-  let editClientId = $state<number | null>(null);
-  let editName = $state("");
-  let editDescription = $state("");
-  let editError = $state("");
-  let editBusy = $state(false);
+  function startManage(address: string) {
+    manageAddress = address;
+    manageMode = "new";
+    manageNewName = address;
+    manageExistingClientId = managedClients[0]?.id ?? null;
+    manageError = "";
+  }
+
+  async function submitManage(e: Event) {
+    e.preventDefault();
+    if (manageAddress === null) return;
+    manageError = "";
+    manageBusy = true;
+    const kind = manageAddress.includes(":") ? "ipv6" : "ipv4";
+    try {
+      let clientId: number;
+      if (manageMode === "new") {
+        const created = await api.createClient(manageNewName || manageAddress, "");
+        clientId = created.client_id;
+      } else {
+        if (manageExistingClientId === null) throw new Error("choose a client");
+        clientId = manageExistingClientId;
+      }
+      await api.addClientIdentifier(clientId, kind, manageAddress);
+      manageAddress = null;
+      await Promise.all([refresh(), refreshObserved()]);
+    } catch (err) {
+      manageError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      manageBusy = false;
+    }
+  }
+
+  // --- Add/Edit Managed Client: one dedicated modal, grouped sections
+  // (Identity / Addresses & identifiers / Group assignment / Filtering,
+  // security & policy / Domain overrides / Effective-policy preview).
+  // `clientModal` holds the id of the client being edited, or the
+  // sentinel "new" while the compact create step is showing (which,
+  // on success, becomes the same editor for the freshly created client
+  // -- Add flows straight into Edit rather than being a separate form). ---
+  let clientModal = $state<number | "new" | null>(null);
+  const editingClient = $derived(typeof clientModal === "number" ? managedClients.find((c) => c.id === clientModal) ?? null : null);
 
   let newClientName = $state("");
   let newClientDescription = $state("");
   let addClientBusy = $state(false);
   let addClientError = $state("");
 
-  let newGroupName = $state("");
-  let newGroupPriority = $state(0);
-  let addGroupBusy = $state(false);
-  let addGroupError = $state("");
+  function openAddClient() {
+    newClientName = "";
+    newClientDescription = "";
+    addClientError = "";
+    clientModal = "new";
+  }
 
-  let identifierClientId = $state<number | null>(null);
+  async function submitAddClient(e: Event) {
+    e.preventDefault();
+    addClientError = "";
+    addClientBusy = true;
+    try {
+      const created = await api.createClient(newClientName, newClientDescription);
+      await refresh();
+      clientModal = created.client_id;
+      toast.success(`Created client "${newClientName}". Continue configuring it below.`);
+    } catch (err) {
+      addClientError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      addClientBusy = false;
+    }
+  }
+
+  let editName = $state("");
+  let editDescription = $state("");
+  let editIdentityError = $state("");
+  let editIdentityBusy = $state(false);
+
+  $effect(() => {
+    if (editingClient) {
+      editName = editingClient.name;
+      editDescription = editingClient.description;
+    }
+  });
+
+  async function saveIdentity(e: Event) {
+    e.preventDefault();
+    if (!editingClient) return;
+    editIdentityError = "";
+    editIdentityBusy = true;
+    try {
+      await api.updateClient(editingClient.id, editName, editDescription);
+      await refresh();
+      toast.success("Saved.");
+    } catch (err) {
+      editIdentityError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      editIdentityBusy = false;
+    }
+  }
+
+  async function toggleEnabled(c: ManagedClient) {
+    await api.setClientEnabled(c.id, !c.enabled);
+    await refresh();
+  }
+
+  function deleteClient(c: ManagedClient) {
+    askConfirm(
+      "Delete client",
+      `Permanently delete client "${c.name}"? This removes all its identifiers, group memberships, and domain overrides. This cannot be undone.`,
+      "Delete",
+      async () => {
+        await api.deleteClient(c.id);
+        clientModal = null;
+        await Promise.all([refresh(), refreshObserved()]);
+        toast.success(`Deleted client "${c.name}".`);
+      },
+    );
+  }
+
+  function deleteIpIdentifier(c: ManagedClient, id: ClientIdentifier) {
+    askConfirm("Remove identifier", `Remove identifier ${id.value} from "${c.name}"?`, "Remove", async () => {
+      await api.deleteClientIdentifier(c.id, id.id);
+      await Promise.all([refresh(), refreshObserved()]);
+      toast.success(`Removed identifier ${id.value}.`);
+    });
+  }
+
   let identifierKind = $state<"ipv4" | "ipv4_cidr" | "ipv6" | "ipv6_cidr">("ipv4");
   let identifierValue = $state("");
   let identifierError = $state("");
 
-  let groupAssignClientId = $state<number | null>(null);
+  async function submitIdentifier(e: Event) {
+    e.preventDefault();
+    if (!editingClient) return;
+    identifierError = "";
+    try {
+      await api.addClientIdentifier(editingClient.id, identifierKind, identifierValue);
+      identifierValue = "";
+      await refresh();
+    } catch (err) {
+      identifierError = err instanceof ApiError ? err.message : String(err);
+    }
+  }
+
   let groupAssignGroupId = $state("");
+  async function submitAssignGroup(e: Event) {
+    e.preventDefault();
+    if (!editingClient || !groupAssignGroupId) return;
+    await api.addClientToGroup(editingClient.id, groupAssignGroupId);
+    await refresh();
+  }
+  async function removeFromGroup(c: ManagedClient, groupId: string) {
+    await api.removeClientFromGroup(c.id, groupId);
+    await refresh();
+  }
 
-  let policyEditorClientId = $state<number | null>(null);
-  let policyEditorGroupId = $state<string | null>(null);
-
-  let explainClientId = $state<number | null>(null);
-  let explainResult = $state<PolicyExplainResult | null>(null);
-  let explainError = $state("");
-
-  // Strong ClientID: generate form.
-  let generateClientId = $state<number | null>(null);
   let generateBits = $state<192 | 256>(256);
   let generateLabel = $state("");
   let generateBusy = $state(false);
   let generateError = $state("");
   let lastGenerated = $state<{ clientId: number; identifier: ClientIdentifier } | null>(null);
 
-  // Strong ClientID: per-client domain override form.
-  let overrideClientId = $state<number | null>(null);
+  async function submitGenerateClientID(e: Event) {
+    e.preventDefault();
+    if (!editingClient) return;
+    generateError = "";
+    generateBusy = true;
+    try {
+      const result = await api.generateClientID(editingClient.id, generateBits, generateLabel);
+      lastGenerated = { clientId: editingClient.id, identifier: result.identifier };
+      generateLabel = "";
+      await refresh();
+    } catch (err) {
+      generateError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      generateBusy = false;
+    }
+  }
+
+  function revokeIdentifier(c: ManagedClient, id: ClientIdentifier) {
+    const label = id.label || id.value.slice(0, 12) + "…";
+    askConfirm("Revoke Strong ClientID", `Revoke this Strong ClientID (${label})? DoH/DoT/DoQ traffic using it will stop being recognized once applied.`, "Revoke", async () => {
+      await api.revokeClientIdentifier(c.id, id.id);
+      await refresh();
+      toast.success(`Revoked identifier ${label}.`);
+    });
+  }
+  function regenerateIdentifier(c: ManagedClient, id: ClientIdentifier) {
+    const label = id.label || id.value.slice(0, 12) + "…";
+    askConfirm("Regenerate Strong ClientID", `Regenerate this Strong ClientID (${label})? The old value stops working immediately once applied; a new one replaces it.`, "Regenerate", async () => {
+      const result = await api.regenerateClientIdentifier(c.id, id.id);
+      lastGenerated = { clientId: c.id, identifier: result.identifier };
+      await refresh();
+      toast.success(`Regenerated identifier ${label}.`);
+    });
+  }
+  function deleteIdentifier(c: ManagedClient, id: ClientIdentifier) {
+    const label = id.label || id.value.slice(0, 12) + "…";
+    askConfirm("Delete identifier", `Permanently delete this identifier (${label})? This cannot be undone.`, "Delete", async () => {
+      await api.deleteClientIdentifier(c.id, id.id);
+      if (lastGenerated?.identifier.id === id.id) lastGenerated = null;
+      await refresh();
+      toast.success(`Deleted identifier ${label}.`);
+    });
+  }
+
   let overrideType = $state<"block" | "allow">("block");
   let overridePattern = $state("");
   let overrideError = $state("");
-
-  async function toggleExplain(c: ManagedClient) {
-    if (explainClientId === c.id) {
-      explainClientId = null;
-      return;
+  async function submitAddOverride(e: Event) {
+    e.preventDefault();
+    if (!editingClient) return;
+    overrideError = "";
+    try {
+      await api.addClientDomainOverride(editingClient.id, overrideType, overridePattern);
+      overridePattern = "";
+      await refresh();
+    } catch (err) {
+      overrideError = err instanceof ApiError ? err.message : String(err);
     }
-    explainClientId = c.id;
+  }
+  async function deleteOverride(c: ManagedClient, overrideId: number) {
+    await api.deleteClientDomainOverride(c.id, overrideId);
+    await refresh();
+  }
+
+  let explainResult = $state<PolicyExplainResult | null>(null);
+  let explainError = $state("");
+  let explainLoading = $state(false);
+  async function loadExplain(c: ManagedClient) {
+    explainLoading = true;
     explainResult = null;
     explainError = "";
     try {
       explainResult = await api.explainPolicy(c.id);
     } catch (err) {
       explainError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      explainLoading = false;
     }
   }
+  $effect(() => {
+    if (editingClient) loadExplain(editingClient);
+  });
+
+  function copyToClipboard(text: string) {
+    navigator.clipboard?.writeText(text).catch(() => {});
+  }
+
+  // --- Groups (kept as its own small modal, reachable from the header). ---
+  let newGroupName = $state("");
+  let newGroupPriority = $state(0);
+  let addGroupBusy = $state(false);
+  let addGroupError = $state("");
+  async function addGroup(e: Event) {
+    e.preventDefault();
+    addGroupError = "";
+    addGroupBusy = true;
+    try {
+      await api.createGroup(newGroupName, newGroupPriority);
+      newGroupName = "";
+      addGroupModalOpen = false;
+      await refresh();
+    } catch (err) {
+      addGroupError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      addGroupBusy = false;
+    }
+  }
+  let policyEditorGroupId = $state<string | null>(null);
 
   async function refresh() {
     const token = guard.start();
@@ -359,335 +552,260 @@
     loadRetentionSettings();
   });
 
-  function startEditClient(c: ManagedClient) {
-    editClientId = c.id;
-    editName = c.name;
-    editDescription = c.description;
-    editError = "";
+  function policySummary(p: ManagedClient["policy"]): string {
+    const set = [
+      p.filtering_profile_id && "filtering", p.parental_policy_id && "parental", p.security_policy_id && "security",
+      p.service_blocking_ruleset_id && "blocked services", p.upstream_profile_id && "upstream",
+      p.domain_routing_ruleset_id && "routing",
+    ].filter(Boolean);
+    return set.length ? `Custom (${set.join(", ")})` : "Inherited";
   }
 
-  async function submitEditClient(e: Event) {
-    e.preventDefault();
-    if (editClientId === null) return;
-    editError = "";
-    editBusy = true;
-    try {
-      await api.updateClient(editClientId, editName, editDescription);
-      editClientId = null;
-      await refresh();
-    } catch (err) {
-      editError = err instanceof ApiError ? err.message : String(err);
-    } finally {
-      editBusy = false;
-    }
-  }
-
-  async function toggleEnabled(c: ManagedClient) {
-    await api.setClientEnabled(c.id, !c.enabled);
-    await refresh();
-  }
-
-  function deleteClient(c: ManagedClient) {
-    askConfirm(
-      "Delete client",
-      `Permanently delete client "${c.name}"? This removes all its identifiers, group memberships, and domain overrides. This cannot be undone.`,
-      "Delete",
-      async () => {
-        await api.deleteClient(c.id);
-        await Promise.all([refresh(), refreshObserved()]);
-        toast.success(`Deleted client "${c.name}".`);
-      },
-    );
-  }
-
-  async function removeFromGroup(c: ManagedClient, groupId: string) {
-    await api.removeClientFromGroup(c.id, groupId);
-    await refresh();
-  }
-
-  function deleteIpIdentifier(c: ManagedClient, id: ClientIdentifier) {
-    askConfirm("Remove identifier", `Remove identifier ${id.value} from "${c.name}"?`, "Remove", async () => {
-      await api.deleteClientIdentifier(c.id, id.id);
-      await Promise.all([refresh(), refreshObserved()]);
-      toast.success(`Removed identifier ${id.value}.`);
-    });
-  }
-
-  function startManage(address: string) {
-    manageAddress = address;
-    manageMode = "new";
-    manageNewName = address;
-    manageExistingClientId = managedClients[0]?.id ?? null;
-    manageError = "";
-  }
-
-  async function submitManage(e: Event) {
-    e.preventDefault();
-    if (manageAddress === null) return;
-    manageError = "";
-    manageBusy = true;
-    const kind = manageAddress.includes(":") ? "ipv6" : "ipv4";
-    try {
-      let clientId: number;
-      if (manageMode === "new") {
-        const created = await api.createClient(manageNewName || manageAddress, "");
-        clientId = created.client_id;
-      } else {
-        if (manageExistingClientId === null) throw new Error("choose a client");
-        clientId = manageExistingClientId;
-      }
-      await api.addClientIdentifier(clientId, kind, manageAddress);
-      manageAddress = null;
-      await Promise.all([refresh(), refreshObserved()]);
-    } catch (err) {
-      manageError = err instanceof ApiError ? err.message : String(err);
-    } finally {
-      manageBusy = false;
-    }
-  }
-
-  async function addClient(e: Event) {
-    e.preventDefault();
-    addClientError = "";
-    addClientBusy = true;
-    try {
-      await api.createClient(newClientName, newClientDescription);
-      newClientName = "";
-      newClientDescription = "";
-      addClientModalOpen = false;
-      await refresh();
-    } catch (err) {
-      addClientError = err instanceof ApiError ? err.message : String(err);
-    } finally {
-      addClientBusy = false;
-    }
-  }
-
-  async function addGroup(e: Event) {
-    e.preventDefault();
-    addGroupError = "";
-    addGroupBusy = true;
-    try {
-      await api.createGroup(newGroupName, newGroupPriority);
-      newGroupName = "";
-      addGroupModalOpen = false;
-      await refresh();
-    } catch (err) {
-      addGroupError = err instanceof ApiError ? err.message : String(err);
-    } finally {
-      addGroupBusy = false;
-    }
-  }
-
-  function startAddIdentifier(c: ManagedClient) {
-    identifierClientId = c.id;
-    identifierValue = "";
-    identifierError = "";
-  }
-
-  async function submitIdentifier(e: Event) {
-    e.preventDefault();
-    if (identifierClientId === null) return;
-    identifierError = "";
-    try {
-      await api.addClientIdentifier(identifierClientId, identifierKind, identifierValue);
-      identifierClientId = null;
-      await refresh();
-    } catch (err) {
-      identifierError = err instanceof ApiError ? err.message : String(err);
-    }
-  }
-
-  function startAssignGroup(c: ManagedClient) {
-    groupAssignClientId = c.id;
-    groupAssignGroupId = groups[0]?.group_id ?? "";
-  }
-
-  async function submitAssignGroup(e: Event) {
-    e.preventDefault();
-    if (groupAssignClientId === null || !groupAssignGroupId) return;
-    await api.addClientToGroup(groupAssignClientId, groupAssignGroupId);
-    groupAssignClientId = null;
-    await refresh();
-  }
-
-  function startGenerateClientID(c: ManagedClient) {
-    generateClientId = c.id;
-    generateLabel = "";
-    generateError = "";
-    lastGenerated = null;
-  }
-
-  async function submitGenerateClientID(e: Event) {
-    e.preventDefault();
-    if (generateClientId === null) return;
-    generateError = "";
-    generateBusy = true;
-    try {
-      const result = await api.generateClientID(generateClientId, generateBits, generateLabel);
-      lastGenerated = { clientId: generateClientId, identifier: result.identifier };
-      generateClientId = null;
-      await refresh();
-    } catch (err) {
-      generateError = err instanceof ApiError ? err.message : String(err);
-    } finally {
-      generateBusy = false;
-    }
-  }
-
-  function revokeIdentifier(c: ManagedClient, id: ClientIdentifier) {
-    const label = id.label || id.value.slice(0, 12) + "…";
-    askConfirm(
-      "Revoke Strong ClientID",
-      `Revoke this Strong ClientID (${label})? DoH/DoT/DoQ traffic using it will stop being recognized once applied.`,
-      "Revoke",
-      async () => {
-        await api.revokeClientIdentifier(c.id, id.id);
-        await refresh();
-        toast.success(`Revoked identifier ${label}.`);
-      },
-    );
-  }
-
-  function regenerateIdentifier(c: ManagedClient, id: ClientIdentifier) {
-    const label = id.label || id.value.slice(0, 12) + "…";
-    askConfirm(
-      "Regenerate Strong ClientID",
-      `Regenerate this Strong ClientID (${label})? The old value stops working immediately once applied; a new one replaces it.`,
-      "Regenerate",
-      async () => {
-        const result = await api.regenerateClientIdentifier(c.id, id.id);
-        lastGenerated = { clientId: c.id, identifier: result.identifier };
-        await refresh();
-        toast.success(`Regenerated identifier ${label}.`);
-      },
-    );
-  }
-
-  function deleteIdentifier(c: ManagedClient, id: ClientIdentifier) {
-    const label = id.label || id.value.slice(0, 12) + "…";
-    askConfirm("Delete identifier", `Permanently delete this identifier (${label})? This cannot be undone.`, "Delete", async () => {
-      await api.deleteClientIdentifier(c.id, id.id);
-      if (lastGenerated?.identifier.id === id.id) lastGenerated = null;
-      await refresh();
-      toast.success(`Deleted identifier ${label}.`);
-    });
-  }
-
-  function startAddOverride(c: ManagedClient) {
-    overrideClientId = c.id;
-    overridePattern = "";
-    overrideType = "block";
-    overrideError = "";
-  }
-
-  async function submitAddOverride(e: Event) {
-    e.preventDefault();
-    if (overrideClientId === null) return;
-    overrideError = "";
-    try {
-      await api.addClientDomainOverride(overrideClientId, overrideType, overridePattern);
-      overrideClientId = null;
-      await refresh();
-    } catch (err) {
-      overrideError = err instanceof ApiError ? err.message : String(err);
-    }
-  }
-
-  async function deleteOverride(c: ManagedClient, overrideId: number) {
-    await api.deleteClientDomainOverride(c.id, overrideId);
-    await refresh();
-  }
-
-  function copyToClipboard(text: string) {
-    navigator.clipboard?.writeText(text).catch(() => {});
-  }
-
-  const columns: Column<ManagedClient>[] = [
+  const managedColumns: Column<ManagedClient>[] = [
     { key: "name", label: "Name", sortValue: (c) => c.name.toLowerCase(), minWidth: 14 },
-    { key: "identifiers", label: "Identifiers", minWidth: 20 },
-    { key: "overrides", label: "Strong ClientID Overrides", minWidth: 16 },
-    { key: "groups", label: "Groups", minWidth: 12 },
-    { key: "actions", label: "Actions", minWidth: 18 },
+    { key: "identifiers", label: "Identifiers", minWidth: 16 },
+    { key: "group", label: "Group / network", minWidth: 12 },
+    { key: "policy", label: "Effective policy", minWidth: 16 },
+    { key: "blocked_services", label: "Blocked services", minWidth: 12 },
+    { key: "upstream", label: "Upstream / routing", minWidth: 12 },
+    { key: "logging", label: "Logging / stats", minWidth: 10 },
+    { key: "recent", label: "Recent queries", sortValue: (c) => analyticsFor(c)?.value ?? -1, minWidth: 10 },
+    { key: "last_seen", label: "Last seen", sortValue: (c) => analyticsFor(c)?.last_seen ?? 0, minWidth: 14 },
+    { key: "actions", label: "Actions", minWidth: 10 },
+  ];
+
+  const observedColumns: Column<ObservedClient>[] = [
+    { key: "address", label: "Address", sortValue: (o) => o.address, minWidth: 14 },
+    { key: "alias", label: "Resolved name / alias", sortValue: (o) => o.alias_label ?? "", minWidth: 16 },
+    { key: "source", label: "Detection source", minWidth: 12 },
+    { key: "last_seen", label: "Last seen", minWidth: 10 },
+    { key: "count", label: "Query count", sortValue: (o) => o.query_count, minWidth: 10 },
+    { key: "status", label: "Status", minWidth: 10 },
+    { key: "actions", label: "Actions", minWidth: 12 },
   ];
 </script>
 
-<section aria-labelledby="clients-heading" class="clients">
-  <PageHeader
-    title="Clients"
-    headingId="clients-heading"
-    description="Every managed and observed client on this appliance -- query analytics, identity, group/network association, and per-client policy in one place."
-  />
-  <p class="scope-note">
-    Full client lifecycle: create, edit, enable/disable, delete, group and network association,
-    identifier removal. Strong ClientID (DoH path / DoT+DoQ SNI identity) enforces live, with
-    per-client explicit domain overrides (deny beats allow beats default policy). See "Clients
-    &amp; Access" for global and network-level policy.
-  </p>
-  {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
-
-  <Panel heading="Client analytics">
-    {#snippet actions()}
-      <SegmentedControl label="Client analytics time range" options={RANGE_OPTIONS} value={analyticsRange} onChange={setAnalyticsRange} />
-    {/snippet}
-    {#if analyticsError}
-      <p class="error" role="alert">{analyticsError}</p>
-    {:else if analyticsDegraded}
-      <p class="hint">Client analytics degraded{analyticsDegradedReason ? `: ${analyticsDegradedReason}` : ""}.</p>
+<PageHeader
+  title="Clients"
+  headingId="clients-heading"
+  description="Managed clients (with real identity, policy, and Strong ClientID enforcement) and observed clients (real recent traffic, no history)."
+>
+  {#snippet actions()}
+    {#if activeTab === "managed"}
+      <button type="button" onclick={openAddClient}>Add Managed Client</button>
+      <button type="button" class="secondary" onclick={() => { addGroupError = ""; addGroupModalOpen = true; }}>Manage Groups</button>
     {/if}
-    {#if !analyticsLoading && !analyticsError && analyticsRows.length === 0}
-      <p class="hint">No client activity yet. Detailed rows will appear here once telemetry is collected for this range.</p>
-    {:else}
-      <DataGrid gridId="client-analytics" columns={analyticsColumns} rows={analyticsRows} rowKey={(r) => r.raw_client} emptyMessage="No client activity yet.">
-        {#snippet cell(r, colKey)}
-          {#if colKey === "label"}
-            <span class="mono" title={r.raw_client}>{r.label}</span>
-          {:else if colKey === "value"}
-            {r.value}
-          {:else if colKey === "share"}
-            {r.share.toFixed(1)}%
-          {:else if colKey === "blocked"}
-            {r.blocked} ({r.blocked_percent.toFixed(1)}%)
-          {:else if colKey === "last_seen"}
-            <span class="mono">{formatLastSeen(r.last_seen)}</span>
-          {:else if colKey === "query_log"}
-            <button type="button" class="secondary small" onclick={() => goToQueryLog(r.raw_client)}>Query Log</button>
-          {/if}
-        {/snippet}
-      </DataGrid>
-    {/if}
-  </Panel>
+  {/snippet}
+</PageHeader>
+{#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
 
-  <Panel heading="Managed clients">
-    {#snippet actions()}
-      <input class="search-input" placeholder="Search name, description, address, group…" bind:value={clientSearch} aria-label="Search managed clients" />
-      <select bind:value={statusFilter} aria-label="Filter by status">
-        <option value="all">All statuses</option>
-        <option value="enabled">Enabled</option>
-        <option value="disabled">Disabled</option>
-      </select>
-      <button type="button" onclick={() => { addClientError = ""; addClientModalOpen = true; }}>Add client</button>
-      <button type="button" class="secondary" onclick={() => { addGroupError = ""; addGroupModalOpen = true; }} disabled={managedClients.length === 0 && groups.length === 0}>Add group</button>
-    {/snippet}
-  <DataGrid gridId="managed-clients" {columns} rows={filteredManagedClients} rowKey={(c) => c.id} emptyMessage={managedClients.length === 0 ? "No managed clients yet." : "No clients match this search/filter."}>
+<div class="tabs" role="tablist" aria-label="Client views">
+  <button type="button" role="tab" aria-selected={activeTab === "managed"} class:active={activeTab === "managed"} onclick={() => (activeTab = "managed")}>
+    Managed Clients <span class="tab-count">{managedClients.length}</span>
+  </button>
+  <button type="button" role="tab" aria-selected={activeTab === "observed"} class:active={activeTab === "observed"} onclick={() => (activeTab = "observed")}>
+    Observed Clients <span class="tab-count">{observed.length}</span>
+  </button>
+</div>
+
+{#if activeTab === "managed"}
+  <div class="toolbar">
+    <input class="search-input" placeholder="Search name, description, address, group…" bind:value={clientSearch} aria-label="Search managed clients" />
+    <select bind:value={statusFilter} aria-label="Filter by status">
+      <option value="all">All statuses</option>
+      <option value="enabled">Enabled</option>
+      <option value="disabled">Disabled</option>
+    </select>
+  </div>
+  {#if analyticsDegraded}<p class="hint">Recent-queries/Last-seen data degraded{analyticsDegradedReason ? `: ${analyticsDegradedReason}` : ""} -- other columns are still real.</p>{/if}
+
+  <DataGrid gridId="managed-clients" columns={managedColumns} rows={filteredManagedClients} rowKey={(c) => c.id} emptyMessage={managedClients.length === 0 ? "No managed clients yet." : "No clients match this search/filter."}>
     {#snippet cell(c, colKey)}
+      {@const a = analyticsFor(c)}
       {#if colKey === "name"}
-        {#if editClientId === c.id}
-          <form onsubmit={submitEditClient} class="inline-form edit-name-form">
-            <input required bind:value={editName} aria-label="Client name" />
-            <input bind:value={editDescription} placeholder="Description" aria-label="Client description" />
-            <button type="submit" disabled={editBusy}>{editBusy ? "Saving…" : "Save"}</button>
-            <button type="button" onclick={() => (editClientId = null)}>Cancel</button>
-            {#if editError}<p class="error" role="alert">{editError}</p>{/if}
-          </form>
-        {:else}
-          <div class="name-cell">
-            <span class:disabled-name={!c.enabled}>{c.name}</span>
-            {#if !c.enabled}<span class="badge disabled-badge">disabled</span>{/if}
-          </div>
-          {#if c.description}<p class="hint client-desc">{c.description}</p>{/if}
-        {/if}
+        <button type="button" class="row-link" onclick={() => (clientModal = c.id)}>{c.name}</button>
+        {#if !c.enabled}<span class="badge disabled-badge">disabled</span>{/if}
       {:else if colKey === "identifiers"}
+        <span class="chips">
+          {#each c.identifiers as id (id.id)}
+            <span class="chip">{id.kind === "clientid" ? `Strong ClientID${id.revoked_at ? " (revoked)" : ""}` : id.value}</span>
+          {/each}
+          {#if c.identifiers.length === 0}<span class="hint">none</span>{/if}
+        </span>
+      {:else if colKey === "group"}
+        {c.groups.map((g) => g.name).join(", ") || "—"}
+      {:else if colKey === "policy"}
+        {policySummary(c.policy)}
+      {:else if colKey === "blocked_services"}
+        {c.policy.service_blocking_ruleset_id ?? "Inherited"}
+      {:else if colKey === "upstream"}
+        {c.policy.upstream_profile_id ?? "Inherited"}
+      {:else if colKey === "logging"}
+        {c.policy.query_log_enabled === null ? "Inherit" : c.policy.query_log_enabled ? "On" : "Off"}
+      {:else if colKey === "recent"}
+        {#if a}
+          {a.value.toLocaleString()}
+          {#if a.blocked > 0}<span class="hint"> ({a.blocked} blocked, {a.blocked_percent.toFixed(1)}%)</span>{/if}
+        {:else}
+          —
+        {/if}
+      {:else if colKey === "last_seen"}
+        {formatLastSeen(a?.last_seen)}
+      {:else if colKey === "actions"}
+        <div class="actions">
+          <button type="button" class="secondary small" onclick={() => (clientModal = c.id)}>Edit</button>
+          {#if a}<button type="button" class="secondary small" onclick={() => goToQueryLog(a.raw_client)}>Query Log</button>{/if}
+          <button type="button" class="secondary small" onclick={() => toggleEnabled(c)}>{c.enabled ? "Disable" : "Enable"}</button>
+          <button type="button" class="secondary small danger" onclick={() => deleteClient(c)}>Delete</button>
+        </div>
+      {/if}
+    {/snippet}
+  </DataGrid>
+{:else}
+  <div class="toolbar">
+    <input class="search-input" placeholder="Search address or alias…" bind:value={observedSearch} aria-label="Search observed clients" />
+    <button type="button" class="secondary" onclick={() => (retentionDialogOpen = true)}>Retention…</button>
+  </div>
+  <p class="hint retention-summary">
+    {#if retentionSettings}
+      Retention: remove after {retentionSettings.retention_days} days unseen, schedule {retentionScheduleDraft}.
+      {#if retentionSettings.last_run_at}Last cleanup {new Date(retentionSettings.last_run_at).toLocaleString()}.{:else}Never run yet.{/if}
+      {#if nextCleanupEstimate}Next estimated {nextCleanupEstimate.toLocaleString()}.{/if}
+    {/if}
+  </p>
+
+  {#if observedLoadError}<p class="error" role="alert">{observedLoadError}</p>{/if}
+  {#if observedDegraded}<p class="hint">Observed traffic data degraded{observedDegradedReason ? `: ${observedDegradedReason}` : ""}.</p>{/if}
+
+  <DataGrid gridId="observed-clients" columns={observedColumns} rows={filteredObserved} rowKey={(o) => o.address} emptyMessage="No recent traffic observed.">
+    {#snippet cell(o, colKey)}
+      {#if colKey === "address"}
+        <code>{o.address}</code>
+      {:else if colKey === "alias"}
+        {o.alias_label ?? "—"}
+      {:else if colKey === "source"}
+        Real DNS traffic (last 24h)
+      {:else if colKey === "last_seen"}
+        Within window
+      {:else if colKey === "count"}
+        {o.query_count}
+      {:else if colKey === "status"}
+        {#if o.managed}<StatusBadge label="Managed" tone="healthy" />{:else}<StatusBadge label="Unmanaged" tone="neutral" />{/if}
+      {:else if colKey === "actions"}
+        {#if !o.managed}
+          <button type="button" class="secondary small" onclick={() => startManage(o.address)}>Save as Managed Client</button>
+        {/if}
+      {/if}
+    {/snippet}
+  </DataGrid>
+{/if}
+
+{#if manageAddress !== null}
+  <Modal title="Save as Managed Client" onClose={() => (manageAddress = null)}>
+    <form onsubmit={submitManage} class="modal-form">
+      <label class="radio-label"><input type="radio" bind:group={manageMode} value="new" /> New client named <input bind:value={manageNewName} aria-label="New client name" /></label>
+      <label class="radio-label">
+        <input type="radio" bind:group={manageMode} value="existing" disabled={managedClients.length === 0} />
+        Attach to existing
+        <select bind:value={manageExistingClientId} disabled={managedClients.length === 0}>
+          {#each managedClients as mc}<option value={mc.id}>{mc.name}</option>{/each}
+        </select>
+      </label>
+      <div class="form-actions">
+        <button type="submit" disabled={manageBusy}>{manageBusy ? "Saving…" : "Save"}</button>
+        <button type="button" class="secondary" onclick={() => (manageAddress = null)}>Cancel</button>
+      </div>
+      {#if manageError}<p class="error" role="alert">{manageError}</p>{/if}
+    </form>
+  </Modal>
+{/if}
+
+{#if retentionDialogOpen && retentionSettings}
+  <Modal title="Observed Clients retention" onClose={() => (retentionDialogOpen = false)}>
+    <p class="hint">
+      Observed Clients otherwise accumulates forever. An address that has queried at all within the
+      window below is never touched, no matter how old its earliest activity is.
+    </p>
+    <form onsubmit={saveRetentionSettings} class="retention-form">
+      <label>
+        Remove clients not seen in
+        <input type="number" min="1" max="3650" bind:value={retentionDaysDraft} oninput={refreshRetentionPreview} aria-label="Retention days" /> days
+      </label>
+      <label>
+        Automatic schedule
+        <select bind:value={retentionScheduleDraft} aria-label="Auto-clean schedule">
+          <option value="manual">Manual only (never auto-runs)</option>
+          <option value="daily">Daily</option>
+          <option value="weekly">Weekly</option>
+          <option value="monthly">Monthly</option>
+        </select>
+      </label>
+      <button type="submit" disabled={retentionSaving}>{retentionSaving ? "Saving…" : "Save settings"}</button>
+      {#if retentionSaveResult}<span class="success" role="status">{retentionSaveResult}</span>{/if}
+      {#if retentionSaveError}<p class="error" role="alert">{retentionSaveError}</p>{/if}
+    </form>
+
+    <p class="hint preview-line">
+      {#if retentionPreviewError}
+        Preview unavailable: {retentionPreviewError}
+      {:else if retentionPreviewCount === null}
+        Calculating how many clients this would remove…
+      {:else if retentionPreviewCount === 0}
+        No observed clients currently qualify for removal at {retentionDaysDraft} days.
+      {:else}
+        This would currently remove <strong>{retentionPreviewCount}</strong> observed client{retentionPreviewCount === 1 ? "" : "s"} not seen in {retentionDaysDraft} days.
+      {/if}
+    </p>
+    {#if nextCleanupEstimate}<p class="hint">Next estimated automatic cleanup: {nextCleanupEstimate.toLocaleString()} (estimated from schedule -- not a server-tracked exact time).</p>{/if}
+
+    <div class="form-actions">
+      <button type="button" class="danger-btn" onclick={confirmCleanNow} disabled={retentionCleaning || retentionPreviewCount === 0}>
+        {retentionCleaning ? "Cleaning…" : "Run Cleanup Now"}
+      </button>
+    </div>
+    {#if retentionCleanResult}<p class="success" role="status">{retentionCleanResult}</p>{/if}
+    {#if retentionCleanError}<p class="error" role="alert">{retentionCleanError}</p>{/if}
+    {#if retentionSettings.last_run_at}
+      <p class="hint">
+        Last cleanup: {new Date(retentionSettings.last_run_at).toLocaleString()} --
+        {retentionSettings.last_status === "succeeded"
+          ? `removed ${retentionSettings.last_removed_clients} client${retentionSettings.last_removed_clients === 1 ? "" : "s"}.`
+          : `failed${retentionSettings.last_error ? `: ${retentionSettings.last_error}` : ""}.`}
+      </p>
+    {/if}
+  </Modal>
+{/if}
+
+{#if clientModal === "new"}
+  <Modal title="Add Managed Client" onClose={() => (clientModal = null)}>
+    <form onsubmit={submitAddClient} class="modal-form">
+      <label>Name <input required bind:value={newClientName} /></label>
+      <label>Description <input bind:value={newClientDescription} /></label>
+      <p class="hint">Identifiers, group assignment, policy, and domain overrides can be added on the next screen once the client exists.</p>
+      <div class="form-actions">
+        <button type="submit" disabled={addClientBusy}>{addClientBusy ? "Creating…" : "Create and continue"}</button>
+        <button type="button" class="secondary" onclick={() => (clientModal = null)}>Cancel</button>
+      </div>
+      {#if addClientError}<p class="error" role="alert">{addClientError}</p>{/if}
+    </form>
+  </Modal>
+{:else if editingClient}
+  {@const c = editingClient}
+  <Modal title={`Edit ${c.name}`} onClose={() => (clientModal = null)}>
+    <div class="editor-sections">
+      <section class="editor-section">
+        <h3>Identity</h3>
+        <form onsubmit={saveIdentity} class="inline-form">
+          <input required bind:value={editName} aria-label="Client name" placeholder="Name" />
+          <input bind:value={editDescription} placeholder="Description" aria-label="Client description" />
+          <button type="submit" disabled={editIdentityBusy}>{editIdentityBusy ? "Saving…" : "Save"}</button>
+          <button type="button" class="secondary small" onclick={() => toggleEnabled(c)}>{c.enabled ? "Disable" : "Enable"}</button>
+        </form>
+        {#if editIdentityError}<p class="error" role="alert">{editIdentityError}</p>{/if}
+      </section>
+
+      <section class="editor-section">
+        <h3>Addresses &amp; identifiers</h3>
         <div class="id-list">
           {#each c.identifiers as id (id.id)}
             {#if id.kind === "clientid"}
@@ -704,145 +822,110 @@
                     <div><span class="path-label">DoT/DoQ SNI:</span> <code>{id.sni_hostname}</code> <button type="button" class="mini" onclick={() => copyToClipboard(id.sni_hostname ?? "")}>Copy</button></div>
                   </div>
                   <div class="clientid-actions">
-                    <button type="button" onclick={() => regenerateIdentifier(c, id)}>Regenerate</button>
-                    <button type="button" onclick={() => revokeIdentifier(c, id)}>Revoke</button>
-                    <button type="button" onclick={() => deleteIdentifier(c, id)}>Delete</button>
+                    <button type="button" class="mini" onclick={() => regenerateIdentifier(c, id)}>Regenerate</button>
+                    <button type="button" class="mini" onclick={() => revokeIdentifier(c, id)}>Revoke</button>
+                    <button type="button" class="mini" onclick={() => deleteIdentifier(c, id)}>Delete</button>
                   </div>
                 {:else}
-                  <div class="clientid-actions">
-                    <button type="button" onclick={() => deleteIdentifier(c, id)}>Delete</button>
-                  </div>
+                  <div class="clientid-actions"><button type="button" class="mini" onclick={() => deleteIdentifier(c, id)}>Delete</button></div>
                 {/if}
               </div>
             {:else}
-              <span class="chip">
-                {id.kind}: {id.value}
-                <button type="button" class="chip-x" onclick={() => deleteIpIdentifier(c, id)} aria-label="Remove identifier">×</button>
-              </span>
+              <span class="chip">{id.kind}: {id.value}<button type="button" class="chip-x" onclick={() => deleteIpIdentifier(c, id)} aria-label="Remove identifier">×</button></span>
             {/if}
           {/each}
           {#if lastGenerated && lastGenerated.clientId === c.id}
-            <p class="hint reveal-once">
-              New Strong ClientID generated -- shown once above; the full hex value is always retrievable via
-              "Copy hex" on its own row afterward.
-            </p>
+            <p class="hint reveal-once">New Strong ClientID generated -- shown once above; the full hex value is always retrievable via "Copy hex" afterward.</p>
           {/if}
         </div>
-      {:else if colKey === "overrides"}
+        <form onsubmit={submitIdentifier} class="inline-form">
+          <select bind:value={identifierKind} aria-label="Identifier kind">
+            <option value="ipv4">IPv4</option><option value="ipv4_cidr">IPv4 CIDR</option>
+            <option value="ipv6">IPv6</option><option value="ipv6_cidr">IPv6 CIDR</option>
+          </select>
+          <input required bind:value={identifierValue} placeholder="Address" aria-label="Identifier value" />
+          <button type="submit">Add address</button>
+        </form>
+        {#if identifierError}<p class="error" role="alert">{identifierError}</p>{/if}
+        <form onsubmit={submitGenerateClientID} class="inline-form">
+          <select bind:value={generateBits} aria-label="Strong ClientID bits">
+            <option value={256}>256-bit Strong ClientID</option>
+            <option value={192}>192-bit Strong ClientID</option>
+          </select>
+          <input bind:value={generateLabel} placeholder="Label (optional)" aria-label="ClientID label" />
+          <button type="submit" disabled={generateBusy}>{generateBusy ? "Generating…" : "Generate"}</button>
+        </form>
+        {#if generateError}<p class="error" role="alert">{generateError}</p>{/if}
+      </section>
+
+      <section class="editor-section">
+        <h3>Group / network assignment</h3>
+        <span class="chips">
+          {#each c.groups as g}<span class="chip">{g.name}<button type="button" class="chip-x" onclick={() => removeFromGroup(c, g.group_id)} aria-label="Remove from group">×</button></span>{/each}
+          {#if c.groups.length === 0}<span class="hint">No groups assigned.</span>{/if}
+        </span>
+        <form onsubmit={submitAssignGroup} class="inline-form">
+          <select bind:value={groupAssignGroupId} aria-label="Assign to group">
+            <option value="">Choose a group…</option>
+            {#each groups as g}<option value={g.group_id}>{g.name}</option>{/each}
+          </select>
+          <button type="submit" disabled={!groupAssignGroupId}>Assign</button>
+        </form>
+      </section>
+
+      <section class="editor-section">
+        <h3>Filtering, security &amp; policy</h3>
+        <p class="hint">Covers filtering profile, parental/SafeSearch policy, security policy, blocked services, upstream and domain-routing policy, ECS, and query-log/statistics controls. Anything left "(Inherit)" falls back to this client's group, then network, then the global default.</p>
+        <PolicyEditor layer={c.policy} onSave={(l) => api.putClientPolicy(c.id, l).then((res) => { refresh(); loadExplain(c); return res; })} />
+      </section>
+
+      <section class="editor-section">
+        <h3>Domain overrides</h3>
+        <p class="hint">Explicit per-client block/allow, enforced only when this client is identified via a Strong ClientID (DoH path or DoT/DoQ SNI) -- a real override beats any policy above.</p>
         <span class="chips">
           {#each c.domain_overrides as o (o.id)}
             <span class="chip" class:override-block={o.override_type === "block"} class:override-allow={o.override_type === "allow"}>
-              {o.override_type}: {o.pattern}
-              <button type="button" class="chip-x" onclick={() => deleteOverride(c, o.id)} aria-label="Remove override">×</button>
+              {o.override_type}: {o.pattern}<button type="button" class="chip-x" onclick={() => deleteOverride(c, o.id)} aria-label="Remove override">×</button>
             </span>
           {/each}
         </span>
-      {:else if colKey === "groups"}
-        <span class="chips">
-          {#each c.groups as g}
-            <span class="chip">
-              {g.name}
-              <button type="button" class="chip-x" onclick={() => removeFromGroup(c, g.group_id)} aria-label="Remove from group">×</button>
-            </span>
-          {/each}
-        </span>
-      {:else if colKey === "actions"}
-        <div class="actions">
-          <button onclick={() => startGenerateClientID(c)}>Generate Strong ClientID</button>
-          <button onclick={() => startAddOverride(c)}>Add domain override</button>
-          <button onclick={() => startAddIdentifier(c)}>Add IP identifier</button>
-          <button onclick={() => startAssignGroup(c)} disabled={groups.length === 0}>Assign group</button>
-          <button onclick={() => (policyEditorClientId = policyEditorClientId === c.id ? null : c.id)}>Policy</button>
-          <button onclick={() => toggleExplain(c)}>Explain</button>
-          <button onclick={() => startEditClient(c)}>Edit</button>
-          <button onclick={() => toggleEnabled(c)}>{c.enabled ? "Disable" : "Enable"}</button>
-          <button class="danger" onclick={() => deleteClient(c)}>Delete</button>
-        </div>
-        {#if generateClientId === c.id}
-          <form onsubmit={submitGenerateClientID} class="inline-form">
-            <select bind:value={generateBits}>
-              <option value={256}>256-bit (64 hex)</option>
-              <option value={192}>192-bit (48 hex)</option>
-            </select>
-            <input bind:value={generateLabel} placeholder="Label (optional)" aria-label="ClientID label" />
-            <button type="submit" disabled={generateBusy}>{generateBusy ? "Generating…" : "Generate"}</button>
-            <button type="button" onclick={() => (generateClientId = null)}>Cancel</button>
-            {#if generateError}<p class="error" role="alert">{generateError}</p>{/if}
-          </form>
-        {/if}
-        {#if overrideClientId === c.id}
-          <form onsubmit={submitAddOverride} class="inline-form">
-            <select bind:value={overrideType}>
-              <option value="block">Block</option>
-              <option value="allow">Allow</option>
-            </select>
-            <input required bind:value={overridePattern} placeholder="Domain (e.g. ads.example.com)" aria-label="Override domain" />
-            <button type="submit">Save</button>
-            <button type="button" onclick={() => (overrideClientId = null)}>Cancel</button>
-            {#if overrideError}<p class="error" role="alert">{overrideError}</p>{/if}
-          </form>
-        {/if}
-        {#if identifierClientId === c.id}
-          <form onsubmit={submitIdentifier} class="inline-form">
-            <select bind:value={identifierKind}>
-              <option value="ipv4">IPv4</option>
-              <option value="ipv4_cidr">IPv4 CIDR</option>
-              <option value="ipv6">IPv6</option>
-              <option value="ipv6_cidr">IPv6 CIDR</option>
-            </select>
-            <input required bind:value={identifierValue} placeholder="Value" aria-label="Identifier value" />
-            <button type="submit">Save</button>
-            <button type="button" onclick={() => (identifierClientId = null)}>Cancel</button>
-            {#if identifierError}<p class="error" role="alert">{identifierError}</p>{/if}
-          </form>
-        {/if}
-        {#if groupAssignClientId === c.id}
-          <form onsubmit={submitAssignGroup} class="inline-form">
-            <select bind:value={groupAssignGroupId}>
-              {#each groups as g}
-                <option value={g.group_id}>{g.name}</option>
-              {/each}
-            </select>
-            <button type="submit">Save</button>
-            <button type="button" onclick={() => (groupAssignClientId = null)}>Cancel</button>
-          </form>
-        {/if}
-        {#if policyEditorClientId === c.id}
-          <div class="inline-policy">
-            <PolicyEditor layer={c.policy} onSave={(l) => api.putClientPolicy(c.id, l).then((res) => { refresh(); return res; })} />
-          </div>
-        {/if}
-        {#if explainClientId === c.id}
-          <div class="inline-policy explain-panel">
-            {#if explainError}<p class="error" role="alert">{explainError}</p>{/if}
-            {#if explainResult}
-              <p class="explain-summary">
-                Network match: <strong>{explainResult.network_match ?? "none"}</strong>
-                {#if explainResult.group_contributions.length}
-                  &middot; Groups: <strong>{explainResult.group_contributions.join(", ")}</strong>
-                {/if}
-              </p>
-              <table class="explain-table">
-                <thead><tr><th>Field</th><th>Value</th><th>Source</th></tr></thead>
-                <tbody>
-                  {#each Object.entries(explainResult.fields) as [field, entry] (field)}
-                    <tr>
-                      <td>{field}</td>
-                      <td>{String(entry.value)}</td>
-                      <td>{entry.source}</td>
-                    </tr>
-                  {/each}
-                </tbody>
-              </table>
-            {/if}
-          </div>
-        {/if}
-      {/if}
-    {/snippet}
-  </DataGrid>
-  </Panel>
+        <form onsubmit={submitAddOverride} class="inline-form">
+          <select bind:value={overrideType} aria-label="Override type"><option value="block">Block</option><option value="allow">Allow</option></select>
+          <input required bind:value={overridePattern} placeholder="Domain (e.g. ads.example.com)" aria-label="Override domain" />
+          <button type="submit">Add override</button>
+        </form>
+        {#if overrideError}<p class="error" role="alert">{overrideError}</p>{/if}
+      </section>
 
-  <Panel heading="Groups">
+      <section class="editor-section">
+        <h3>Effective-policy preview</h3>
+        {#if explainLoading}<p class="hint">Loading…</p>{/if}
+        {#if explainError}<p class="error" role="alert">{explainError}</p>{/if}
+        {#if explainResult}
+          <p class="explain-summary">
+            Network match: <strong>{explainResult.network_match ?? "none"}</strong>
+            {#if explainResult.group_contributions.length}&middot; Groups: <strong>{explainResult.group_contributions.join(", ")}</strong>{/if}
+          </p>
+          <table class="explain-table">
+            <thead><tr><th>Field</th><th>Value</th><th>Source</th></tr></thead>
+            <tbody>
+              {#each Object.entries(explainResult.fields) as [field, entry] (field)}
+                <tr><td>{field}</td><td>{String(entry.value)}</td><td>{entry.source}</td></tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+      </section>
+
+      <div class="editor-danger">
+        <button type="button" class="danger-btn" onclick={() => deleteClient(c)}>Delete this client</button>
+      </div>
+    </div>
+  </Modal>
+{/if}
+
+{#if addGroupModalOpen}
+  <Modal title="Manage Groups" onClose={() => (addGroupModalOpen = false)}>
     {#if groups.length === 0}
       <p class="hint">No groups yet.</p>
     {:else}
@@ -851,7 +934,7 @@
           <li>
             <div class="group-row">
               <span><strong>{g.name}</strong> (priority {g.priority}) -- {g.members.length} member{g.members.length === 1 ? "" : "s"}</span>
-              <button onclick={() => (policyEditorGroupId = policyEditorGroupId === g.group_id ? null : g.group_id)}>Policy</button>
+              <button type="button" class="secondary small" onclick={() => (policyEditorGroupId = policyEditorGroupId === g.group_id ? null : g.group_id)}>Policy</button>
             </div>
             {#if policyEditorGroupId === g.group_id}
               <div class="inline-policy">
@@ -862,151 +945,12 @@
         {/each}
       </ul>
     {/if}
-  </Panel>
-
-  <Panel heading="Observed Clients">
-    <p class="scope-note">
-      Addresses that have actually sent DNS queries recently (from real traffic data, not a discovery
-      worker -- no history, no hostname/vendor detection). Loopback and unspecified addresses are never
-      shown as a host. Use "Manage Client" to turn an observed address into a managed client.
-    </p>
-    {#if observedLoadError}<p class="error" role="alert">{observedLoadError}</p>{/if}
-    {#if observedDegraded}<p class="hint">Observed traffic data degraded{observedDegradedReason ? `: ${observedDegradedReason}` : ""}.</p>{/if}
-    {#if observed.length === 0 && !observedLoadError}
-      <p class="hint">No recent traffic observed.</p>
-    {:else}
-      <ul class="observed-list">
-        {#each observed as o (o.address)}
-          <li class="observed-row">
-            {#if o.alias_label}
-              <strong>{o.alias_label}</strong>
-              <code class="hint">{o.address}</code>
-            {:else}
-              <code>{o.address}</code>
-            {/if}
-            <span class="hint">{o.query_count} quer{o.query_count === 1 ? "y" : "ies"}</span>
-            {#if o.managed}
-              <StatusBadge label="Managed" tone="healthy" />
-            {:else}
-              <StatusBadge label="Unmanaged" tone="neutral" />
-              <button type="button" onclick={() => startManage(o.address)}>Manage Client</button>
-            {/if}
-          </li>
-          {#if manageAddress === o.address}
-            <li>
-              <form onsubmit={submitManage} class="inline-form">
-                <label><input type="radio" bind:group={manageMode} value="new" /> New client named <input bind:value={manageNewName} aria-label="New client name" /></label>
-                <label>
-                  <input type="radio" bind:group={manageMode} value="existing" disabled={managedClients.length === 0} />
-                  Attach to existing
-                  <select bind:value={manageExistingClientId} disabled={managedClients.length === 0}>
-                    {#each managedClients as mc}
-                      <option value={mc.id}>{mc.name}</option>
-                    {/each}
-                  </select>
-                </label>
-                <button type="submit" disabled={manageBusy}>{manageBusy ? "Saving…" : "Save"}</button>
-                <button type="button" onclick={() => (manageAddress = null)}>Cancel</button>
-                {#if manageError}<p class="error" role="alert">{manageError}</p>{/if}
-              </form>
-            </li>
-          {/if}
-        {/each}
-      </ul>
-    {/if}
-
-    <div class="retention-block">
-      <h4>Retention &amp; cleanup</h4>
-      <p class="scope-note">
-        Observed Clients otherwise accumulates forever. Configure how long an address can go
-        unseen before it's removed (and its query history with it) -- an address that has queried
-        at all within that window is never touched, no matter how old its earliest activity is.
-      </p>
-      {#if retentionLoadError}
-        <p class="error" role="alert">{retentionLoadError}</p>
-      {:else if !retentionSettings}
-        <p class="hint">Loading…</p>
-      {:else}
-        <form onsubmit={saveRetentionSettings} class="retention-form">
-          <label>
-            Remove clients not seen in
-            <input
-              type="number"
-              min="1"
-              max="3650"
-              bind:value={retentionDaysDraft}
-              oninput={refreshRetentionPreview}
-              aria-label="Retention days"
-            /> days
-          </label>
-          <label>
-            Auto-clean schedule
-            <select bind:value={retentionScheduleDraft} aria-label="Auto-clean schedule">
-              <option value="manual">Manual only (never auto-runs)</option>
-              <option value="daily">Daily</option>
-              <option value="weekly">Weekly</option>
-              <option value="monthly">Monthly</option>
-            </select>
-          </label>
-          <button type="submit" disabled={retentionSaving}>{retentionSaving ? "Saving…" : "Save settings"}</button>
-          {#if retentionSaveResult}<span class="success" role="status">{retentionSaveResult}</span>{/if}
-          {#if retentionSaveError}<p class="error" role="alert">{retentionSaveError}</p>{/if}
-        </form>
-
-        <p class="hint preview-line">
-          {#if retentionPreviewError}
-            Preview unavailable: {retentionPreviewError}
-          {:else if retentionPreviewCount === null}
-            Calculating how many clients this would remove…
-          {:else if retentionPreviewCount === 0}
-            No observed clients currently qualify for removal at {retentionDaysDraft} days.
-          {:else}
-            This would currently remove <strong>{retentionPreviewCount}</strong> observed client{retentionPreviewCount === 1 ? "" : "s"} not seen in {retentionDaysDraft} days.
-          {/if}
-        </p>
-
-        <div class="actions">
-          <button type="button" class="danger-btn" onclick={confirmCleanNow} disabled={retentionCleaning || retentionPreviewCount === 0}>
-            {retentionCleaning ? "Cleaning…" : "Clean old observed clients now"}
-          </button>
-        </div>
-        {#if retentionCleanResult}<p class="success" role="status">{retentionCleanResult}</p>{/if}
-        {#if retentionCleanError}<p class="error" role="alert">{retentionCleanError}</p>{/if}
-        {#if retentionSettings.last_run_at}
-          <p class="hint">
-            Last cleanup: {new Date(retentionSettings.last_run_at).toLocaleString()} --
-            {retentionSettings.last_status === "succeeded"
-              ? `removed ${retentionSettings.last_removed_clients} client${retentionSettings.last_removed_clients === 1 ? "" : "s"}.`
-              : `failed${retentionSettings.last_error ? `: ${retentionSettings.last_error}` : ""}.`}
-          </p>
-        {/if}
-      {/if}
-    </div>
-  </Panel>
-</section>
-
-{#if addClientModalOpen}
-  <Modal title="Add managed client" onClose={() => (addClientModalOpen = false)}>
-    <form onsubmit={addClient} class="modal-form">
-      <label>Name <input required bind:value={newClientName} /></label>
-      <label>Description <input bind:value={newClientDescription} /></label>
-      <div class="form-actions">
-        <button type="submit" disabled={addClientBusy}>{addClientBusy ? "Adding…" : "Add client"}</button>
-        <button type="button" class="secondary" onclick={() => (addClientModalOpen = false)}>Cancel</button>
-      </div>
-      {#if addClientError}<p class="error" role="alert">{addClientError}</p>{/if}
-    </form>
-  </Modal>
-{/if}
-
-{#if addGroupModalOpen}
-  <Modal title="Add group" onClose={() => (addGroupModalOpen = false)}>
-    <form onsubmit={addGroup} class="modal-form">
+    <form onsubmit={addGroup} class="modal-form add-group-form">
+      <h3>Add group</h3>
       <label>Name <input required bind:value={newGroupName} /></label>
       <label>Priority <input type="number" bind:value={newGroupPriority} /></label>
       <div class="form-actions">
         <button type="submit" disabled={addGroupBusy}>{addGroupBusy ? "Adding…" : "Add group"}</button>
-        <button type="button" class="secondary" onclick={() => (addGroupModalOpen = false)}>Cancel</button>
       </div>
       {#if addGroupError}<p class="error" role="alert">{addGroupError}</p>{/if}
     </form>
@@ -1024,59 +968,66 @@
 {/if}
 
 <style>
-  .clients { display: flex; flex-direction: column; gap: 1rem; }
-  .scope-note { font-size: 0.85rem; opacity: 0.75; max-width: 44rem; }
   .hint { font-size: 0.85rem; opacity: 0.75; }
+  .error { color: var(--danger); }
+  .success { color: var(--success); }
+
+  .tabs { display: flex; gap: 0.3rem; border-bottom: 1px solid var(--border); margin-bottom: 1rem; }
+  .tabs button { background: transparent; color: var(--muted); border: none; border-bottom: 2px solid transparent; border-radius: 0; padding: 0.6rem 0.2rem; margin-right: 1.25rem; font-weight: 600; min-height: auto; }
+  .tabs button.active { color: var(--fg); border-bottom-color: var(--accent); }
+  .tab-count { font-weight: 400; opacity: 0.6; font-size: 0.85rem; }
+
+  .toolbar { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-bottom: 0.75rem; align-items: center; }
+  .search-input { min-width: 16rem; flex: 1 1 16rem; }
+  .retention-summary { margin: -0.25rem 0 0.75rem; }
+
+  .row-link { background: transparent; color: var(--accent); border: none; padding: 0; font: inherit; font-weight: 600; cursor: pointer; text-decoration: underline; }
   .chips { display: flex; flex-wrap: wrap; gap: 0.3rem; }
   .chip { background: var(--nav-hover-bg); padding: 0.1rem 0.5rem; border-radius: 999px; font-size: 0.78rem; display: inline-flex; align-items: center; gap: 0.3rem; }
   .chip-x { background: none; border: none; cursor: pointer; padding: 0; font-size: 0.9rem; line-height: 1; opacity: 0.7; }
   .chip-x:hover { opacity: 1; }
-  .override-block { background: color-mix(in srgb, red 12%, var(--nav-hover-bg)); }
-  .override-allow { background: color-mix(in srgb, green 12%, var(--nav-hover-bg)); }
-  .actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
-  .inline-form { display: flex; gap: 0.4rem; margin-top: 0.4rem; flex-wrap: wrap; align-items: center; }
-  .group-list { margin: 0; padding-left: 1.2rem; font-size: 0.9rem; display: flex; flex-direction: column; gap: 0.5rem; }
-  .group-row { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
-  .inline-policy { margin: 0.5rem 0 0.5rem -1.2rem; padding: 0.75rem; border: 1px solid var(--border); border-radius: 6px; background: var(--card-bg); }
-  .explain-summary { font-size: 0.85rem; margin: 0 0 0.5rem; }
-  .explain-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
-  .explain-table th, .explain-table td { text-align: left; padding: 0.25rem 0.5rem; border-bottom: 1px solid var(--border); }
+  .override-block { background: var(--badge-danger-bg); color: var(--badge-danger-fg); }
+  .override-allow { background: var(--badge-ok-bg); color: var(--badge-ok-fg); }
+  .actions { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+  .badge.disabled-badge, .badge.revoked-badge { background: var(--badge-warn-bg); color: var(--badge-warn-fg); padding: 0.05rem 0.4rem; border-radius: 999px; font-size: 0.7rem; margin-left: 0.4rem; }
 
+  button.secondary.small, button.small, .mini { min-height: auto; padding: 0.3rem 0.6rem; font-size: 0.78rem; }
+  .danger { color: var(--danger); }
+  .danger-btn { background: var(--badge-danger-bg); color: var(--badge-danger-fg); border-color: transparent; }
+
+  .modal-form { display: flex; flex-direction: column; gap: 0.75rem; }
+  .modal-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; }
+  .radio-label { flex-direction: row !important; align-items: center; gap: 0.5rem !important; flex-wrap: wrap; }
+  .form-actions { display: flex; gap: 0.5rem; }
+
+  .editor-sections { display: flex; flex-direction: column; gap: 1.25rem; }
+  .editor-section h3 { margin: 0 0 0.5rem; font-size: 0.9rem; }
+  .editor-section > .hint { margin-bottom: 0.5rem; }
+  .inline-form { display: flex; gap: 0.4rem; margin-top: 0.5rem; flex-wrap: wrap; align-items: center; }
   .id-list { display: flex; flex-direction: column; gap: 0.5rem; }
-  .clientid-row { border: 1px solid var(--border); border-radius: 6px; padding: 0.4rem 0.6rem; display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.78rem; background: var(--card-bg); }
+  .clientid-row { border: 1px solid var(--border); border-radius: 6px; padding: 0.4rem 0.6rem; display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.78rem; background: var(--panel-elevated); }
   .clientid-row.revoked { opacity: 0.6; }
   .clientid-main { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
-  .clientid-chip { background: var(--accent, #4a7); color: var(--accent-fg, #fff); }
-  .badge.revoked-badge { background: #a33; color: #fff; padding: 0.05rem 0.4rem; border-radius: 999px; font-size: 0.7rem; }
+  .clientid-chip { background: var(--accent); color: var(--accent-fg); }
   .hexval { font-family: monospace; }
   .clientid-paths { display: flex; flex-direction: column; gap: 0.15rem; }
   .path-label { opacity: 0.7; margin-right: 0.3rem; }
   .clientid-paths code { font-family: monospace; word-break: break-all; }
   .clientid-actions { display: flex; gap: 0.3rem; flex-wrap: wrap; }
-  .mini { font-size: 0.72rem; padding: 0.05rem 0.4rem; }
   .reveal-once { font-style: italic; }
-  .danger { color: #c33; }
-  .name-cell { display: flex; align-items: center; gap: 0.4rem; }
-  .disabled-name { opacity: 0.55; text-decoration: line-through; }
-  .badge.disabled-badge { background: #888; color: #fff; padding: 0.05rem 0.4rem; border-radius: 999px; font-size: 0.7rem; }
-  .client-desc { margin: 0.15rem 0 0; }
-  .edit-name-form { flex-direction: column; align-items: stretch; }
-  .observed-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
-  .observed-row { display: flex; align-items: center; gap: 0.6rem; }
+  .explain-summary { font-size: 0.85rem; margin: 0 0 0.5rem; }
+  .explain-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+  .explain-table th, .explain-table td { text-align: left; padding: 0.25rem 0.5rem; border-bottom: 1px solid var(--border); }
+  .editor-danger { border-top: 1px solid var(--border); padding-top: 1rem; }
 
-  .search-input { min-width: 16rem; flex: 1 1 16rem; }
-  button.secondary.small,
-  button.small { min-height: auto; padding: 0.3rem 0.6rem; font-size: 0.8rem; }
-  .modal-form { display: flex; flex-direction: column; gap: 0.75rem; }
-  .modal-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; }
-  .form-actions { display: flex; gap: 0.5rem; }
+  .group-list { margin: 0 0 1rem; padding-left: 1.2rem; font-size: 0.9rem; display: flex; flex-direction: column; gap: 0.5rem; }
+  .group-row { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
+  .inline-policy { margin: 0.5rem 0 0.5rem -1.2rem; padding: 0.75rem; border: 1px solid var(--border); border-radius: 6px; background: var(--card-bg); }
+  .add-group-form { border-top: 1px solid var(--border); padding-top: 1rem; }
+  .add-group-form h3 { margin: 0 0 0.5rem; font-size: 0.9rem; }
 
-  .retention-block { border-top: 1px solid var(--border); margin-top: 1rem; padding-top: 1rem; display: flex; flex-direction: column; gap: 0.6rem; }
-  .retention-block h4 { margin: 0; }
   .retention-form { display: flex; flex-wrap: wrap; align-items: end; gap: 1rem; }
   .retention-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; }
   .retention-form input[type="number"] { width: 6rem; }
-  .preview-line { margin: 0; }
-  .success { color: var(--success); }
-  .danger-btn { background: var(--badge-danger-bg); color: var(--badge-danger-fg); border-color: transparent; }
+  .preview-line { margin: 0.5rem 0; }
 </style>

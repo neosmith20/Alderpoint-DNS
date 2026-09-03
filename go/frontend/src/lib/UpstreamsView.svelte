@@ -331,10 +331,17 @@
     { key: "status", label: "Status", sortValue: (p) => (p.enabled ? 1 : 0), minWidth: 8 },
     { key: "actions", label: "Actions", minWidth: 24 },
   ];
+
+  // This one page is reachable from two nav entries -- Standard > Settings
+  // > DNS and Advanced > Advanced DNS > Upstreams & Routing (see nav.ts's
+  // own doc comment: splitting it into a simplified/full pair is real,
+  // disclosed remaining work) -- so the heading matches whichever route
+  // the operator actually arrived on rather than always saying one name.
+  const pageTitle = $derived(router.current === "upstreams-routing" ? "Upstreams & Routing" : "DNS Settings");
 </script>
 
 <section aria-labelledby="upstreams-heading" class="upstreams">
-  <h2 id="upstreams-heading">DNS Settings</h2>
+  <h2 id="upstreams-heading">{pageTitle}</h2>
 
   {#if nativeRecursionActive}
     <p class="info-banner" role="status">

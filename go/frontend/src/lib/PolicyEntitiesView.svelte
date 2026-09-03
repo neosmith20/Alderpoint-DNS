@@ -1,26 +1,36 @@
 <script lang="ts">
-  // Owner-facing CRUD for the four real entities blocker-1 policy
-  // scopes (Clients & Access / DNS Settings) reference: Filtering
-  // Profiles, Parental Policies (own SafeSearch mode), Security
-  // Policies, and Service Blocking Rulesets -- see
-  // internal/policyentities' own doc comment. Every one of these,
-  // once assigned to a network/group/client's policy, is a real
-  // compiled DNS-runtime effect (internal/dnsruntime's
-  // computeScopeOverrides), not a stored-only label.
+  // Owner-facing CRUD for the four real entities policy scopes (Scope
+  // Policies / DNS Settings) reference: Filtering Profiles, Parental
+  // Policies (own SafeSearch mode), Security Policies, and Service
+  // Blocking Rulesets -- see internal/policyentities' own doc comment.
+  // Every one of these, once assigned to a network/group/client's
+  // policy, is a real compiled DNS-runtime effect
+  // (internal/dnsruntime's computeScopeOverrides), not a stored-only
+  // label.
+  //
+  // 2026-09 redesign: tabs (one entity type at a time, full-width table,
+  // Add opens a dedicated modal) replace the previous four side-by-side
+  // cards each with its own tiny inline Add form -- exactly the pattern
+  // the redesign spec calls out to avoid.
   import { onMount } from "svelte";
   import { api, ApiError, type CategoryEntity, type ParentalPolicy, type ServiceBlockingRuleset, type DNSRuntimeApplyResult } from "../api";
   import { router } from "../router.svelte";
+  import { timestampPref } from "../timestamp.svelte";
   import PageHeader from "./ui/PageHeader.svelte";
-  import Panel from "./ui/Panel.svelte";
   import DnsRuntimeBadge from "./DnsRuntimeBadge.svelte";
   import ConfirmDialog from "./ui/ConfirmDialog.svelte";
+  import Modal from "./ui/Modal.svelte";
+  import DataGrid from "./DataGrid.svelte";
+  import type { Column } from "./datagrid";
 
-  let confirmDelete = $state<{ kind: string; name: string; run: () => Promise<void> } | null>(null);
-  async function runConfirmDelete() {
-    const pending = confirmDelete;
-    confirmDelete = null;
-    if (pending) await pending.run();
-  }
+  type EntityKind = "filtering" | "parental" | "security" | "service";
+  const TABS: { key: EntityKind; label: string; description: string }[] = [
+    { key: "filtering", label: "Filtering Profiles", description: "A named set of blocklist categories to enforce for whichever scope selects it." },
+    { key: "parental", label: "Parental Policies", description: "A named SafeSearch mode + category set (e.g. adult content) for a network, group, or client." },
+    { key: "security", label: "Security Policies", description: "A named security-oriented category set (malware, telemetry, etc.)." },
+    { key: "service", label: "Service Blocking Rulesets", description: "A named list of specific domains (e.g. one app/service) to block -- independent of the blocklist-category system above." },
+  ];
+  let activeTab = $state<EntityKind>("filtering");
 
   let filteringProfiles = $state<CategoryEntity[]>([]);
   let securityPolicies = $state<CategoryEntity[]>([]);
@@ -28,6 +38,7 @@
   let serviceRulesets = $state<ServiceBlockingRuleset[]>([]);
   let loadError = $state("");
   let lastRuntime = $state<DNSRuntimeApplyResult | null>(null);
+  let search = $state("");
 
   async function refresh() {
     try {
@@ -50,201 +61,162 @@
   onMount(refresh);
 
   function parseList(raw: string): string[] {
-    return raw
-      .split(",")
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
+    return raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
   }
 
-  // --- Filtering Profiles ---
-  let fpId = $state(""), fpName = $state(""), fpCategories = $state(""), fpBusy = $state(false), fpError = $state("");
-  async function createFilteringProfile(e: Event) {
-    e.preventDefault();
-    fpBusy = true;
-    fpError = "";
-    try {
-      const res = await api.createFilteringProfile({ id: fpId, name: fpName, categories: parseList(fpCategories) });
-      lastRuntime = res.dns_runtime ?? null;
-      fpId = fpName = fpCategories = "";
-      await refresh();
-    } catch (err) {
-      fpError = err instanceof ApiError ? err.message : String(err);
-    } finally {
-      fpBusy = false;
-    }
-  }
-  function deleteFilteringProfile(id: string, name: string) {
-    confirmDelete = { kind: "Filtering profile", name, run: async () => {
-      const res = await api.deleteFilteringProfile(id);
-      lastRuntime = res.dns_runtime ?? null;
-      await refresh();
-    } };
+  function rowsFor(kind: EntityKind): (CategoryEntity | ParentalPolicy | ServiceBlockingRuleset)[] {
+    const all = kind === "filtering" ? filteringProfiles : kind === "security" ? securityPolicies : kind === "parental" ? parentalPolicies : serviceRulesets;
+    if (!search.trim()) return all;
+    const q = search.trim().toLowerCase();
+    return all.filter((e) => e.name.toLowerCase().includes(q) || e.id.toLowerCase().includes(q));
   }
 
-  // --- Security Policies ---
-  let spId = $state(""), spName = $state(""), spCategories = $state(""), spBusy = $state(false), spError = $state("");
-  async function createSecurityPolicy(e: Event) {
-    e.preventDefault();
-    spBusy = true;
-    spError = "";
-    try {
-      const res = await api.createSecurityPolicy({ id: spId, name: spName, categories: parseList(spCategories) });
-      lastRuntime = res.dns_runtime ?? null;
-      spId = spName = spCategories = "";
-      await refresh();
-    } catch (err) {
-      spError = err instanceof ApiError ? err.message : String(err);
-    } finally {
-      spBusy = false;
-    }
-  }
-  function deleteSecurityPolicy(id: string, name: string) {
-    confirmDelete = { kind: "Security policy", name, run: async () => {
-      const res = await api.deleteSecurityPolicy(id);
-      lastRuntime = res.dns_runtime ?? null;
-      await refresh();
-    } };
+  function summaryFor(kind: EntityKind, e: CategoryEntity | ParentalPolicy | ServiceBlockingRuleset): string {
+    if (kind === "service") return (e as ServiceBlockingRuleset).domains.join(", ") || "no domains";
+    const cats = (e as CategoryEntity).categories.join(", ") || "no categories";
+    if (kind === "parental") return `SafeSearch: ${(e as ParentalPolicy).safesearch_mode}, ${cats}`;
+    return cats;
   }
 
-  // --- Parental Policies ---
-  let ppId = $state(""), ppName = $state(""), ppCategories = $state(""), ppSafesearch = $state("off"), ppBusy = $state(false), ppError = $state("");
-  async function createParentalPolicy(e: Event) {
-    e.preventDefault();
-    ppBusy = true;
-    ppError = "";
-    try {
-      const res = await api.createParentalPolicy({ id: ppId, name: ppName, safesearch_mode: ppSafesearch, categories: parseList(ppCategories) });
-      lastRuntime = res.dns_runtime ?? null;
-      ppId = ppName = ppCategories = "";
-      ppSafesearch = "off";
-      await refresh();
-    } catch (err) {
-      ppError = err instanceof ApiError ? err.message : String(err);
-    } finally {
-      ppBusy = false;
-    }
-  }
-  function deleteParentalPolicy(id: string, name: string) {
-    confirmDelete = { kind: "Parental policy", name, run: async () => {
-      const res = await api.deleteParentalPolicy(id);
-      lastRuntime = res.dns_runtime ?? null;
-      await refresh();
-    } };
+  let confirmDelete = $state<{ kind: string; name: string; run: () => Promise<void> } | null>(null);
+  async function runConfirmDelete() {
+    const pending = confirmDelete;
+    confirmDelete = null;
+    if (pending) await pending.run();
   }
 
-  // --- Service Blocking Rulesets ---
-  let srId = $state(""), srName = $state(""), srDomains = $state(""), srBusy = $state(false), srError = $state("");
-  async function createServiceRuleset(e: Event) {
+  function deleteEntity(kind: EntityKind, id: string, name: string) {
+    const label = TABS.find((t) => t.key === kind)!.label.replace(/s$/, "");
+    confirmDelete = {
+      kind: label,
+      name,
+      run: async () => {
+        const res =
+          kind === "filtering" ? await api.deleteFilteringProfile(id) :
+          kind === "security" ? await api.deleteSecurityPolicy(id) :
+          kind === "parental" ? await api.deleteParentalPolicy(id) :
+          await api.deleteServiceBlockingRuleset(id);
+        lastRuntime = res.dns_runtime ?? null;
+        await refresh();
+      },
+    };
+  }
+
+  // --- Add modal: one shared form, fields shown per active tab. ---
+  let addModalOpen = $state(false);
+  let draftId = $state("");
+  let draftName = $state("");
+  let draftDescription = $state("");
+  let draftCategories = $state("");
+  let draftDomains = $state("");
+  let draftSafesearch = $state<"off" | "moderate" | "strict">("off");
+  let addBusy = $state(false);
+  let addError = $state("");
+
+  function openAdd() {
+    draftId = draftName = draftDescription = draftCategories = draftDomains = "";
+    draftSafesearch = "off";
+    addError = "";
+    addModalOpen = true;
+  }
+
+  async function submitAdd(e: Event) {
     e.preventDefault();
-    srBusy = true;
-    srError = "";
+    addError = "";
+    addBusy = true;
     try {
-      const res = await api.createServiceBlockingRuleset({ id: srId, name: srName, domains: parseList(srDomains) });
+      const res =
+        activeTab === "filtering" ? await api.createFilteringProfile({ id: draftId, name: draftName, description: draftDescription, categories: parseList(draftCategories) }) :
+        activeTab === "security" ? await api.createSecurityPolicy({ id: draftId, name: draftName, description: draftDescription, categories: parseList(draftCategories) }) :
+        activeTab === "parental" ? await api.createParentalPolicy({ id: draftId, name: draftName, description: draftDescription, safesearch_mode: draftSafesearch, categories: parseList(draftCategories) }) :
+        await api.createServiceBlockingRuleset({ id: draftId, name: draftName, description: draftDescription, domains: parseList(draftDomains) });
       lastRuntime = res.dns_runtime ?? null;
-      srId = srName = srDomains = "";
+      addModalOpen = false;
       await refresh();
     } catch (err) {
-      srError = err instanceof ApiError ? err.message : String(err);
+      addError = err instanceof ApiError ? err.message : String(err);
     } finally {
-      srBusy = false;
+      addBusy = false;
     }
   }
-  function deleteServiceRuleset(id: string, name: string) {
-    confirmDelete = { kind: "Service blocking ruleset", name, run: async () => {
-      const res = await api.deleteServiceBlockingRuleset(id);
-      lastRuntime = res.dns_runtime ?? null;
-      await refresh();
-    } };
-  }
+
+  const columns: Column<CategoryEntity | ParentalPolicy | ServiceBlockingRuleset>[] = [
+    { key: "name", label: "Name", sortValue: (e) => e.name.toLowerCase(), minWidth: 14 },
+    { key: "summary", label: "Main settings", minWidth: 22 },
+    { key: "updated_at", label: "Last modified", sortValue: (e) => (e.updated_at ? new Date(e.updated_at).getTime() : 0), minWidth: 14 },
+    { key: "actions", label: "Actions", minWidth: 8 },
+  ];
 </script>
 
 <PageHeader
   title="Policy Profiles"
   headingId="policy-entities-heading"
-  description="Named, reusable sets a network, group, or client's own policy can select -- each is a real, compiled DNS-runtime effect once assigned (see Clients & Access)."
-/>
+  description="Named, reusable sets a network, group, or client's own policy can select -- each is a real, compiled DNS-runtime effect once assigned (see Scope Policies)."
+>
+  {#snippet actions()}
+    <button type="button" onclick={openAdd}>Add {TABS.find((t) => t.key === activeTab)?.label.replace(/s$/, "")}</button>
+  {/snippet}
+</PageHeader>
 
 {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
 <DnsRuntimeBadge result={lastRuntime} />
 
-<div class="grid">
-  <Panel heading="Filtering Profiles">
-    <p class="hint">A named set of blocklist categories to enforce for whichever scope selects it.</p>
-    <ul class="entity-list">
-      {#each filteringProfiles as p (p.id)}
-        <li><strong>{p.name}</strong> <span class="mono">({p.id})</span> — {p.categories.join(", ") || "no categories"} <button onclick={() => deleteFilteringProfile(p.id, p.name)}>Delete</button></li>
-      {:else}
-        <li class="hint">None yet.</li>
-      {/each}
-    </ul>
-    <form onsubmit={createFilteringProfile} class="add-form">
-      <input placeholder="id (e.g. kids-standard)" value={fpId} oninput={(e) => (fpId = (e.target as HTMLInputElement).value)} required />
-      <input placeholder="Display name" value={fpName} oninput={(e) => (fpName = (e.target as HTMLInputElement).value)} required />
-      <input placeholder="categories, comma-separated" value={fpCategories} oninput={(e) => (fpCategories = (e.target as HTMLInputElement).value)} />
-      <button type="submit" disabled={fpBusy}>{fpBusy ? "Adding…" : "Add"}</button>
-    </form>
-    {#if fpError}<p class="error" role="alert">{fpError}</p>{/if}
-  </Panel>
-
-  <Panel heading="Parental Policies">
-    <p class="hint">A named SafeSearch mode + category set (e.g. adult content) for a network, group, or client.</p>
-    <ul class="entity-list">
-      {#each parentalPolicies as p (p.id)}
-        <li><strong>{p.name}</strong> <span class="mono">({p.id})</span> — SafeSearch: {p.safesearch_mode}, {p.categories.join(", ") || "no categories"} <button onclick={() => deleteParentalPolicy(p.id, p.name)}>Delete</button></li>
-      {:else}
-        <li class="hint">None yet.</li>
-      {/each}
-    </ul>
-    <form onsubmit={createParentalPolicy} class="add-form">
-      <input placeholder="id" value={ppId} oninput={(e) => (ppId = (e.target as HTMLInputElement).value)} required />
-      <input placeholder="Display name" value={ppName} oninput={(e) => (ppName = (e.target as HTMLInputElement).value)} required />
-      <select value={ppSafesearch} onchange={(e) => (ppSafesearch = (e.target as HTMLSelectElement).value)}>
-        <option value="off">SafeSearch: off</option>
-        <option value="moderate">SafeSearch: moderate</option>
-        <option value="strict">SafeSearch: strict</option>
-      </select>
-      <input placeholder="categories, comma-separated" value={ppCategories} oninput={(e) => (ppCategories = (e.target as HTMLInputElement).value)} />
-      <button type="submit" disabled={ppBusy}>{ppBusy ? "Adding…" : "Add"}</button>
-    </form>
-    {#if ppError}<p class="error" role="alert">{ppError}</p>{/if}
-  </Panel>
-
-  <Panel heading="Security Policies">
-    <p class="hint">A named security-oriented category set (malware, telemetry, etc.).</p>
-    <ul class="entity-list">
-      {#each securityPolicies as p (p.id)}
-        <li><strong>{p.name}</strong> <span class="mono">({p.id})</span> — {p.categories.join(", ") || "no categories"} <button onclick={() => deleteSecurityPolicy(p.id, p.name)}>Delete</button></li>
-      {:else}
-        <li class="hint">None yet.</li>
-      {/each}
-    </ul>
-    <form onsubmit={createSecurityPolicy} class="add-form">
-      <input placeholder="id" value={spId} oninput={(e) => (spId = (e.target as HTMLInputElement).value)} required />
-      <input placeholder="Display name" value={spName} oninput={(e) => (spName = (e.target as HTMLInputElement).value)} required />
-      <input placeholder="categories, comma-separated" value={spCategories} oninput={(e) => (spCategories = (e.target as HTMLInputElement).value)} />
-      <button type="submit" disabled={spBusy}>{spBusy ? "Adding…" : "Add"}</button>
-    </form>
-    {#if spError}<p class="error" role="alert">{spError}</p>{/if}
-  </Panel>
-
-  <Panel heading="Service Blocking Rulesets">
-    <p class="hint">A named list of specific domains (e.g. one app/service) to block -- independent of the blocklist-category system above.</p>
-    <ul class="entity-list">
-      {#each serviceRulesets as r (r.id)}
-        <li><strong>{r.name}</strong> <span class="mono">({r.id})</span> — {r.domains.join(", ") || "no domains"} <button onclick={() => deleteServiceRuleset(r.id, r.name)}>Delete</button></li>
-      {:else}
-        <li class="hint">None yet.</li>
-      {/each}
-    </ul>
-    <form onsubmit={createServiceRuleset} class="add-form">
-      <input placeholder="id" value={srId} oninput={(e) => (srId = (e.target as HTMLInputElement).value)} required />
-      <input placeholder="Display name" value={srName} oninput={(e) => (srName = (e.target as HTMLInputElement).value)} required />
-      <input placeholder="domains, comma-separated" value={srDomains} oninput={(e) => (srDomains = (e.target as HTMLInputElement).value)} />
-      <button type="submit" disabled={srBusy}>{srBusy ? "Adding…" : "Add"}</button>
-    </form>
-    {#if srError}<p class="error" role="alert">{srError}</p>{/if}
-  </Panel>
+<div class="tabs" role="tablist" aria-label="Policy entity type">
+  {#each TABS as t (t.key)}
+    <button type="button" role="tab" aria-selected={activeTab === t.key} class:active={activeTab === t.key} onclick={() => (activeTab = t.key)}>{t.label}</button>
+  {/each}
 </div>
+
+<p class="hint tab-description">{TABS.find((t) => t.key === activeTab)?.description}</p>
+
+<div class="toolbar">
+  <input class="search-input" placeholder="Search name or id…" bind:value={search} aria-label="Search" />
+</div>
+
+<DataGrid gridId={`policy-entities-${activeTab}`} {columns} rows={rowsFor(activeTab)} rowKey={(e) => e.id} emptyMessage="None yet.">
+  {#snippet cell(e, colKey)}
+    {#if colKey === "name"}
+      {e.name} <span class="mono">({e.id})</span>
+      {#if e.description}<p class="hint desc-line">{e.description}</p>{/if}
+    {:else if colKey === "summary"}
+      {summaryFor(activeTab, e)}
+    {:else if colKey === "updated_at"}
+      {e.updated_at ? timestampPref.format(e.updated_at) : "—"}
+    {:else if colKey === "actions"}
+      <button type="button" class="secondary small danger" onclick={() => deleteEntity(activeTab, e.id, e.name)}>Delete</button>
+    {/if}
+  {/snippet}
+</DataGrid>
+
+{#if addModalOpen}
+  <Modal title={`Add ${TABS.find((t) => t.key === activeTab)?.label.replace(/s$/, "")}`} onClose={() => (addModalOpen = false)}>
+    <form onsubmit={submitAdd} class="modal-form">
+      <label>ID <input required bind:value={draftId} placeholder="e.g. kids-standard" /></label>
+      <label>Display name <input required bind:value={draftName} /></label>
+      <label>Description <input bind:value={draftDescription} placeholder="optional" /></label>
+      {#if activeTab === "parental"}
+        <label>
+          SafeSearch
+          <select bind:value={draftSafesearch}>
+            <option value="off">Off</option>
+            <option value="moderate">Moderate</option>
+            <option value="strict">Strict</option>
+          </select>
+        </label>
+      {/if}
+      {#if activeTab === "service"}
+        <label>Domains (comma-separated) <input bind:value={draftDomains} placeholder="app1.example.com, app2.example.com" /></label>
+      {:else}
+        <label>Categories (comma-separated) <input bind:value={draftCategories} placeholder="ads, malware" /></label>
+      {/if}
+      <div class="form-actions">
+        <button type="submit" disabled={addBusy}>{addBusy ? "Adding…" : "Add"}</button>
+        <button type="button" class="secondary" onclick={() => (addModalOpen = false)}>Cancel</button>
+      </div>
+      {#if addError}<p class="error" role="alert">{addError}</p>{/if}
+    </form>
+  </Modal>
+{/if}
 
 {#if confirmDelete}
   <ConfirmDialog
@@ -257,11 +229,23 @@
 {/if}
 
 <style>
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); gap: 1rem; }
-  .entity-list { list-style: none; margin: 0 0 0.75rem; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
-  .entity-list li { font-size: 0.85rem; display: flex; align-items: baseline; gap: 0.4rem; flex-wrap: wrap; }
-  .mono { font-family: monospace; opacity: 0.7; font-size: 0.75rem; }
-  .add-form { display: flex; flex-direction: column; gap: 0.4rem; }
-  .hint { font-size: 0.8rem; opacity: 0.7; margin: 0 0 0.5rem; }
-  .error { color: var(--danger); font-size: 0.85rem; }
+  .hint { font-size: 0.85rem; opacity: 0.75; }
+  .desc-line { margin: 0.1rem 0 0; }
+  .mono { font-family: monospace; opacity: 0.7; font-size: 0.78rem; }
+  .error { color: var(--danger); }
+
+  .tabs { display: flex; gap: 0.3rem; border-bottom: 1px solid var(--border); margin: 0.75rem 0 0; flex-wrap: wrap; }
+  .tabs button { background: transparent; color: var(--muted); border: none; border-bottom: 2px solid transparent; border-radius: 0; padding: 0.55rem 0.2rem; margin-right: 1.25rem; font-weight: 600; min-height: auto; }
+  .tabs button.active { color: var(--fg); border-bottom-color: var(--accent); }
+  .tab-description { margin: 0.5rem 0 0.75rem; }
+
+  .toolbar { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-bottom: 0.75rem; }
+  .search-input { min-width: 16rem; flex: 1 1 16rem; }
+
+  button.secondary.small { min-height: auto; padding: 0.3rem 0.6rem; font-size: 0.8rem; }
+  .danger { color: var(--danger); }
+
+  .modal-form { display: flex; flex-direction: column; gap: 0.75rem; }
+  .modal-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; }
+  .form-actions { display: flex; gap: 0.5rem; }
 </style>

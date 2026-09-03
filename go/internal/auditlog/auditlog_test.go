@@ -73,6 +73,34 @@ func TestListIsScopedToTheGivenAdmin(t *testing.T) {
 	}
 }
 
+func TestListAllReturnsEveryAdministratorsEntries(t *testing.T) {
+	svc, adminID := newTestService(t)
+	ctx := context.Background()
+	res, err := svc.DB.Exec(`INSERT INTO admins (username, password_hash, created_at) VALUES ('other', 'x', datetime('now'))`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherID, _ := res.LastInsertId()
+
+	svc.Record(ctx, adminID, "admin", "password_change", true, "203.0.113.9", "")
+	svc.Record(ctx, otherID, "other", "login", true, "198.51.100.4", "")
+
+	entries, err := svc.ListAll(ctx, 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected both administrators' entries, got %d: %+v", len(entries), entries)
+	}
+	// Most recent first.
+	if entries[0].Username != "other" || entries[0].Action != "login" {
+		t.Fatalf("expected the most recent entry (other's login) first, got %+v", entries[0])
+	}
+	if entries[1].Username != "admin" {
+		t.Fatalf("expected admin's entry second, got %+v", entries[1])
+	}
+}
+
 func TestRecordIsNoOpWithZeroAdminID(t *testing.T) {
 	svc, _ := newTestService(t)
 	svc.Record(context.Background(), 0, "nobody", "login_attempt", false, "", "")

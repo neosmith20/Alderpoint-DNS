@@ -56,29 +56,31 @@ async function main() {
     const text = await page.evaluate(() => document.querySelector(".admin").textContent);
     check("Sessions table renders", /Sessions/.test(text));
     check("This session's own row is labeled", /This session/.test(text));
-    check("Recent Administrative Activity section renders", /Recent Administrative Activity/.test(text));
+    check("Administration links out to the full Audit Log page (2026-09 redesign moved it there)", /Open Audit Log/.test(text));
 
-    // Trigger a real audit-log-producing action (Protection Control's
-    // toggle, on the Dashboard) then come back and confirm it appears.
+    // Trigger a real audit-log-producing action (the global protection
+    // on/off control, now in the Dashboard's own page header) then check
+    // it on the dedicated Audit Log page (Advanced > Operations), which
+    // replaced Administration's embedded "Recent Administrative Activity"
+    // table in the 2026-09 redesign.
     await clickNavItem(page, (t) => t === "Dashboard");
     await page.waitForSelector("#dashboard-heading", { timeout: 3000 });
     await new Promise((r) => setTimeout(r, 500));
     const toggled = await page.evaluate(() => {
-      const h3 = [...document.querySelectorAll("h3")].find((e) => e.textContent.trim() === "Protection Control");
-      const card = h3?.closest(".card");
-      const btn = [...(card?.querySelectorAll("button") ?? [])].find((b) => /Disable protection|Enable protection/.test(b.textContent));
+      const btn = [...document.querySelectorAll("button")].find((b) => /Disable protection|Enable protection/.test(b.textContent));
       if (btn) { btn.click(); return true; }
       return false;
     });
-    check("Protection Control toggle is clickable from Dashboard", toggled);
+    check("Protection on/off control is clickable from the Dashboard header", toggled);
     await new Promise((r) => setTimeout(r, 600));
 
-    await clickNavItem(page, (t) => t === "Administration");
-    await page.waitForSelector("#admin-heading", { timeout: 3000 });
+    check("Audit Log nav item exists and is clickable", await clickNavItem(page, (t) => t === "Audit Log"));
+    await page.waitForSelector("#audit-log-heading", { timeout: 3000 });
+    await page.waitForSelector('[data-grid-id="audit-log"]', { timeout: 3000 });
     await new Promise((r) => setTimeout(r, 500));
-    const afterText = await page.evaluate(() => document.querySelector(".admin").textContent);
-    check("Real Protection Control toggle appears in Recent Administrative Activity", /protection_(enabled|disabled)/.test(afterText), afterText.slice(0, 500));
-    check("Recent activity row shows Success badge", /Success/.test(afterText));
+    const afterText = await page.evaluate(() => document.querySelector('[data-grid-id="audit-log"]').textContent);
+    check("Real protection toggle appears in the Audit Log", /protection_(enabled|disabled)/.test(afterText), afterText.slice(0, 500));
+    check("Audit Log row shows Success badge", /Success/.test(afterText));
 
     // Blocker 4 (Full Admin Audit Log): appliance-wide coverage via
     // internal/httpapi's audited() route wrapper -- not just the
@@ -100,11 +102,12 @@ async function main() {
     });
     check("a real mutation on an unrelated feature (Filtering Profiles) succeeds", created === 201, String(created));
     await page.reload({ waitUntil: "networkidle0" });
-    await page.waitForSelector("#admin-heading", { timeout: 3000 });
+    await page.waitForSelector("#audit-log-heading", { timeout: 3000 });
+    await page.waitForSelector('[data-grid-id="audit-log"]', { timeout: 3000 });
     await new Promise((r) => setTimeout(r, 500));
-    const afterUnrelatedText = await page.evaluate(() => document.querySelector(".admin").textContent);
+    const afterUnrelatedText = await page.evaluate(() => document.querySelector('[data-grid-id="audit-log"]').textContent);
     check(
-      "the unrelated mutation appears in Recent Administrative Activity too -- proves appliance-wide audited() coverage, not just hand-picked actions",
+      "the unrelated mutation appears in the Audit Log too -- proves appliance-wide audited() coverage, not just hand-picked actions",
       /policy_entities_filtering_profiles_create/.test(afterUnrelatedText),
       afterUnrelatedText.slice(0, 600),
     );

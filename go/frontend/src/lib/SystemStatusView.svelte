@@ -3,6 +3,8 @@
   import { api, ApiError } from "../api";
   import { perfLog } from "../perfLog.svelte";
   import { timestampPref } from "../timestamp.svelte";
+  import PageHeader from "./ui/PageHeader.svelte";
+  import StatusBadge from "./ui/StatusBadge.svelte";
 
   // System Status. Metric strip + Components are real (existing
   // GET /api/health + /api/system/status, both native Go). UI
@@ -161,17 +163,33 @@
   let copyStatus = $state("");
 </script>
 
-<section aria-labelledby="health-heading" class="system-status">
-  <h2 id="health-heading">System Status</h2>
-  <p class="scope-note">
-    Metric strip, Components, UI Performance, Node Identity, BIND Cache Counters, and the DNS
-    Performance benchmark are all live. Network Discovery (device fingerprinting, vendor/OS
-    detection, first/last-seen history) is not built -- the Clients page's Observed Clients list is
-    a narrower, real substitute drawn from actual DNS traffic.
-  </p>
+<PageHeader
+  headingId="health-heading"
+  title="System Status"
+  description="Metric strip, Components, UI Performance, Node Identity, BIND Cache Counters, and the DNS Performance benchmark are all live."
+/>
 
-  {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
+<div class="health-summary">
+  <StatusBadge label={`Overall: ${health?.status ?? "…"}`} tone={health?.status === "ok" ? "healthy" : health?.status ? "danger" : "neutral"} />
+  {#if health?.components.control_db}
+    <StatusBadge label={`Web / DB: ${health.components.control_db.status}`} tone={health.components.control_db.status === "ok" ? "healthy" : "danger"} />
+  {/if}
+  <StatusBadge
+    label={`Hostagent: ${cacheError ? "unreachable" : cache ? "reachable" : "…"}`}
+    tone={cacheError ? "danger" : cache ? "healthy" : "neutral"}
+  />
+  {#if health?.components.analytics}
+    <StatusBadge label={`Analytics: ${health.components.analytics.status}`} tone={health.components.analytics.status === "ok" ? "healthy" : health.components.analytics.status === "unconfigured" ? "neutral" : "warning"} />
+  {/if}
+  {#if replication && replication.settings.role !== "standalone"}
+    <StatusBadge label={`Replication: ${replication.settings.role}`} tone="accent" />
+  {/if}
+  <span class="hint">Filtering has no dedicated health component yet -- see Blocklists/Custom Rules for real per-list status instead.</span>
+</div>
 
+{#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
+
+<div class="system-status">
   <div class="metric-strip">
     <div class="metric"><span class="label">Appliance</span><span class="value">{sysStatus?.appliance_name ?? "…"}</span></div>
     <div class="metric"><span class="label">Version</span><span class="value">{health?.version ?? "…"}</span></div>
@@ -197,7 +215,7 @@
                        cell an undefined c.status would otherwise leave here. -->
                   <td class="status-info">info</td>
                   <td>
-                    {c.rss_bytes ? `RSS ${(c.rss_bytes / 1048576).toFixed(1)} MB · ` : ""}{c.goroutine_count} goroutines · heap {(c.heap_alloc_bytes / 1048576).toFixed(1)} MB · {c.num_gc} GCs
+                    {c.rss_bytes ? `RSS ${(c.rss_bytes / 1048576).toFixed(1)} MB · ` : ""}{c.goroutine_count} goroutines · heap {c.heap_alloc_bytes !== undefined ? (c.heap_alloc_bytes / 1048576).toFixed(1) : "?"} MB · {c.num_gc} GCs
                   </td>
                 {:else}
                   <td class="status-{c.status}">{c.status}</td>
@@ -404,11 +422,12 @@
       </div>
     {/if}
   </div>
-</section>
+</div>
 
 <style>
   .system-status { display: flex; flex-direction: column; gap: 1rem; }
   .scope-note { font-size: 0.85rem; opacity: 0.75; max-width: 50rem; }
+  .health-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; margin-bottom: 1rem; }
   .grid-2col { display: grid; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); gap: 1rem; align-items: start; }
   .metric-strip { display: flex; flex-wrap: wrap; gap: 1rem; }
   .metric { border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem 1rem; background: var(--card-bg); min-width: 8rem; }

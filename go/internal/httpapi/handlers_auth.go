@@ -305,6 +305,30 @@ func (s *Server) handleListAuditLog(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, map[string]any{"entries": entries})
 }
 
+// handleListAuditLogAll backs the Advanced > Operations > Audit Log page --
+// every administrator's activity (unlike handleListAuditLog above, which
+// stays scoped to the calling admin for Administration's own smaller
+// summary card). See internal/auditlog.Service.ListAll's doc comment for
+// the real, disclosed shape/scope ceiling.
+func (s *Server) handleListAuditLogAll(w http.ResponseWriter, r *http.Request) {
+	if s.AuditLog == nil {
+		WriteJSON(w, http.StatusOK, map[string]any{"entries": []any{}})
+		return
+	}
+	limit := 500
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	entries, err := s.AuditLog.ListAll(r.Context(), limit)
+	if err != nil {
+		Err(http.StatusInternalServerError, "internal_error", "failed to load audit log").WriteJSON(w)
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"entries": entries})
+}
+
 type changePasswordRequest struct {
 	CurrentPassword string `json:"current_password"`
 	NewPassword     string `json:"new_password"`

@@ -185,7 +185,7 @@
 
 <section aria-labelledby="clients-access-heading" class="clients-access">
   <PageHeader
-    title="Clients & Access"
+    title="Scope Policies"
     headingId="clients-access-heading"
     description="Global default policy, network-scoped policy, group-scoped policy, and the explicit-deny > explicit-allow > default precedence that governs every client."
   />
