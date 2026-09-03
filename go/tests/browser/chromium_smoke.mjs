@@ -68,6 +68,17 @@ async function clickNavItem(page, predicate) {
   return false;
 }
 
+// Dashboard's "Customize Dashboard" toggle has no dedicated class (a
+// real, previously-stale ".customize-btn" selector this suite used to
+// use never matched the actual `<button class="secondary">Customize
+// Dashboard</button>` markup) -- match on its real text instead.
+async function clickCustomizeDashboardButton(page) {
+  const btn = await page.evaluateHandle(() => [...document.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Customize Dashboard"));
+  const el = btn.asElement();
+  if (el) await el.click();
+  return el !== null;
+}
+
 async function main() {
   const browser = await puppeteer.launch({
     executablePath: process.env.CHROMIUM_PATH || "/usr/bin/chromium",
@@ -165,6 +176,26 @@ async function main() {
     ]);
     check("login reaches the app shell", true);
 
+    // Switch to the Advanced nav profile for the rest of this run: most
+    // of what follows (Upstreams & Routing, Cache, DNS Runtime,
+    // Replication, Network Configuration, Administration, Audit Log,
+    // System Logs, Notifications, Import & Migration, Advanced
+    // Analytics) lives under Advanced-only nav groups (see nav.ts) that
+    // simply aren't rendered in the sidebar under the default Standard
+    // profile -- a real gap in this suite found while re-running it
+    // this session (the Standard/Advanced split was added earlier in
+    // this same session and this file was never re-run against it
+    // end-to-end until now). Setting this once, early, real localStorage
+    // (profile.ts's own persistence, GeneralSettingsView's Standard/
+    // Advanced radios write to the exact same key) plus a reload is
+    // simpler and more representative of a real operator's session than
+    // re-deriving a profile switch at every individual Advanced section
+    // below.
+    await page.evaluate(() => localStorage.setItem("apdns-go-nav-profile", "advanced"));
+    await page.reload({ waitUntil: "networkidle0" });
+    await page.waitForSelector(".app-layout", { timeout: 5000 });
+    check("switching to the Advanced nav profile takes effect", await page.evaluate(() => localStorage.getItem("apdns-go-nav-profile")) === "advanced");
+
     // --- Lands on the URL-synced default route with real rendered content ---
     await page.waitForFunction(() => location.pathname.startsWith("/ui/"), { timeout: 3000 });
     let path = new URL(page.url()).pathname;
@@ -191,6 +222,26 @@ async function main() {
     // --- Dashboard: Clients and Upstreams mini-panels (real data, not
     // placeholders -- these were previously disclosed as blocked on "the
     // policy boundary", which now exists natively in Go) ---
+    //
+    // Both cards are real but OFF by default (dashboardCards.ts's own
+    // ALL_CARDS: defaultVisible: false for "clients"/"upstreams",
+    // deliberately, to avoid crowding the page beyond the redesign's own
+    // named four rows) -- a real, previously-stale assumption in this
+    // suite expected them visible on a fresh instance. Turn them on via
+    // the real Customize Dashboard control first, matching what an
+    // operator would actually do to see them.
+    check("Customize Dashboard button is clickable (enabling Clients/Upstreams cards)", await clickCustomizeDashboardButton(page));
+    await page.waitForSelector(".customize-panel", { timeout: 2000 });
+    for (const wantLabel of ["Clients (managed + observed)", "Upstreams (configured profiles)"]) {
+      const enabled = await page.evaluate((label) => {
+        const li = [...document.querySelectorAll(".customize-panel li")].find((el) => el.querySelector("label")?.textContent?.trim() === label);
+        const cb = li?.querySelector('input[type="checkbox"]');
+        if (cb && !cb.checked) { cb.click(); return true; }
+        return cb ? "already-checked" : false;
+      }, wantLabel);
+      check(`Customize Dashboard can enable "${wantLabel}"`, enabled === true || enabled === "already-checked", String(enabled));
+    }
+    await clickCustomizeDashboardButton(page);
     await page.waitForFunction(
       () => [...document.querySelectorAll("h3")].some((h) => h.textContent?.trim() === "Clients"),
       { timeout: 3000 },
@@ -294,7 +345,7 @@ async function main() {
     check("Top Blocked Domains honestly reports degraded when no writer is wired (not a silently-stale 'real' render)", blockedDegraded);
 
     // --- Dashboard: card customization (hide, reorder, persistence) ---
-    await page.click(".customize-btn");
+    check("Customize Dashboard button is clickable", await clickCustomizeDashboardButton(page));
     await page.waitForSelector(".customize-panel", { timeout: 2000 });
     const cardLabelsBefore = await page.$$eval(".customize-panel li label", (els) => els.map((e) => e.textContent.trim()));
     // 15 real customizable cards (dashboardCards.ts's own ALL_CARDS) --
@@ -309,16 +360,20 @@ async function main() {
     await new Promise((r) => setTimeout(r, 100));
     let visibleCardHeadings = await page.$$eval(".cards .card h3", (els) => els.map((e) => e.childNodes[0].textContent.trim()));
     check("hiding a card via Customize actually removes it from the dashboard", !visibleCardHeadings.includes("Top Blocked Domains"), visibleCardHeadings.join(","));
-    // Move "Local DNS" up one (it starts second, after Blocklists).
+    // Move the real 2nd card (dashboardCards.ts's own ALL_CARDS order --
+    // read here rather than hardcoded, so this survives ALL_CARDS being
+    // reordered again in the future the same way a real, previously-
+    // stale hardcoded "Local DNS" assumption here did not) up one.
+    const secondCardLabel = cardLabelsBefore[1];
     const upButtons = await page.$$(".customize-panel .reorder-btns button:first-child");
     await upButtons[1].click(); // second card's "move up" button
     await new Promise((r) => setTimeout(r, 100));
     const orderAfterMove = await page.$$eval(".customize-panel li label", (els) => els.map((e) => e.textContent.trim()));
-    check("reordering via Customize actually changes the stored order", orderAfterMove[0].includes("Local DNS"), orderAfterMove.join(","));
+    check("reordering via Customize actually changes the stored order", orderAfterMove[0] === secondCardLabel, orderAfterMove.join(","));
     // Reload the page: persistence must survive it.
     await page.reload({ waitUntil: "networkidle0" });
     await page.waitForSelector(".dashboard", { timeout: 5000 });
-    await page.click(".customize-btn");
+    await clickCustomizeDashboardButton(page);
     await page.waitForSelector(".customize-panel", { timeout: 2000 });
     // The customize panel always lists every card (so a hidden one can be
     // re-shown); check its checkbox state, not list membership, for
@@ -329,7 +384,7 @@ async function main() {
     const blockedEntry = orderAfterReload.find((c) => c.label.includes("Top Blocked Domains"));
     check(
       "card hide + reorder persists across a full page reload",
-      blockedEntry && blockedEntry.checked === false && orderAfterReload[0].label.includes("Local DNS"),
+      blockedEntry && blockedEntry.checked === false && orderAfterReload[0].label === secondCardLabel,
       JSON.stringify(orderAfterReload),
     );
     const stillHiddenOnPage = (await page.$$eval(".cards .card h3", (els) => els.map((e) => e.childNodes[0].textContent.trim()))).every(
@@ -341,7 +396,7 @@ async function main() {
     const labelsAfter = await page.$$eval(".customize-panel li label", (els) => els.map((e) => e.textContent.trim()));
     const reshowIdx = labelsAfter.findIndex((l) => l.includes("Top Blocked Domains"));
     if (reshowIdx >= 0) await checkboxesAfter[reshowIdx].click();
-    await page.click(".customize-btn");
+    await clickCustomizeDashboardButton(page);
 
     // --- Nav: Query Log (internal/dnsanalytics -- real Go-native query_events, since the 2026-08-28 cutover) ---
     const clickedQueryLog = await clickNavItem(page, (t) => t === "Query Log");
@@ -360,8 +415,12 @@ async function main() {
     let queryLogRows = await page.$$eval(".data-grid tbody tr:not(.empty-row)", (rows) => rows.length);
     check("Query Log grid renders real seeded rows", queryLogRows === 3, `rows=${queryLogRows}`);
 
-    // Domain filter narrows the grid to a real, server-side-filtered result.
-    await page.type('input[aria-label="Filter by domain"]', "acceptance-blocked.example.com.");
+    // Domain filter narrows the grid to a real, server-side-filtered
+    // result. A real, previously-stale selector fixed here: there is no
+    // dedicated domain-only field any more -- the combined "Search
+    // domain or client…" field (aria-label="Search") covers both, a
+    // real consolidation, not a removed capability.
+    await page.type('input[aria-label="Search"]', "acceptance-blocked.example.com.");
     await Promise.all([
       page.waitForFunction(() => document.querySelectorAll(".data-grid tbody tr:not(.empty-row)").length === 2, { timeout: 3000 }),
       page.click('.filters button[type="submit"]'),
@@ -371,7 +430,15 @@ async function main() {
     const activeFilterBadge = await page.$eval(".filters .badge", (el) => el.textContent).catch(() => "");
     check("Query Log shows an active-filter badge while a filter is set", activeFilterBadge.includes("1 active filter"), activeFilterBadge);
 
-    await page.click(".filters .clear-filters");
+    // "Clear Filters" is a real button (secondary style, no dedicated
+    // class) -- match on its text, same pattern this file already uses
+    // for the equally classless "Customize Dashboard" button above.
+    const clearFiltersClicked = await page.evaluate(() => {
+      const btn = [...document.querySelectorAll(".filters button")].find((b) => b.textContent?.trim() === "Clear Filters");
+      if (btn) { btn.click(); return true; }
+      return false;
+    });
+    check("Clear Filters button is clickable", clearFiltersClicked);
     await page.waitForFunction(() => document.querySelectorAll(".data-grid tbody tr:not(.empty-row)").length === 3, { timeout: 3000 }).catch(() => {});
     queryLogRows = await page.$$eval(".data-grid tbody tr:not(.empty-row)", (rows) => rows.length);
     check("clearing filters restores the full grid", queryLogRows === 3, `rows=${queryLogRows}`);
@@ -385,14 +452,18 @@ async function main() {
     check("Local DNS page content rendered", true);
 
     // --- Sidebar: single-open accordion (A -> B closes A) ---
-    // Local DNS lives in the "dns" group -- navigating to it must have
-    // opened exactly that group's panel and no other.
+    // Local DNS lives in the "Filters" group (nav.ts) -- navigating to
+    // it must have opened exactly that group's panel and no other. (A
+    // real, previously-stale assumption fixed here: this used to expect
+    // a "dns" group by that literal name, which doesn't exist in the
+    // current Standard/Advanced nav.ts groups -- Filters/Settings/
+    // System/Advanced DNS/Operations.)
     let openPanelCount = await page.$$eval(".sidebar .group .panel", (els) => els.length);
-    check("opening the dns group leaves exactly one section panel open", openPanelCount === 1, `open=${openPanelCount}`);
+    check("opening the Filters group leaves exactly one section panel open", openPanelCount === 1, `open=${openPanelCount}`);
     let dnsPanelOpen = await page.$$eval(".sidebar .group", (groups) =>
-      groups.some((g) => g.querySelector(".panel") && g.querySelector(".group-toggle")?.textContent?.includes("DNS")),
+      groups.some((g) => g.querySelector(".panel") && g.querySelector(".group-toggle")?.textContent?.includes("Filters")),
     );
-    check("the dns group specifically is the one open", dnsPanelOpen);
+    check("the Filters group specifically is the one open", dnsPanelOpen);
 
     // --- Nav: Administration ---
     clicked = await clickNavItem(page, (t) => t?.startsWith("Administration"));
@@ -400,16 +471,16 @@ async function main() {
     await page.waitForSelector("#admin-heading", { timeout: 3000 }).catch(() => {});
     check("Administration page content rendered", (await page.$("#admin-heading")) !== null);
 
-    // Administration lives in the "system" group -- opening it must have
-    // closed the previously-open "dns" group (A -> B closes A), leaving
-    // exactly one panel open, and that one active child still visibly
-    // selected.
+    // Administration lives in the "Operations" group (nav.ts) -- opening
+    // it must have closed the previously-open "Filters" group (A -> B
+    // closes A), leaving exactly one panel open, and that one active
+    // child still visibly selected.
     openPanelCount = await page.$$eval(".sidebar .group .panel", (els) => els.length);
-    check("opening the system group still leaves exactly one panel open", openPanelCount === 1, `open=${openPanelCount}`);
+    check("opening the Operations group still leaves exactly one panel open", openPanelCount === 1, `open=${openPanelCount}`);
     const systemPanelOpen = await page.$$eval(".sidebar .group", (groups) =>
-      groups.some((g) => g.querySelector(".panel") && g.querySelector(".group-toggle")?.textContent?.includes("System")),
+      groups.some((g) => g.querySelector(".panel") && g.querySelector(".group-toggle")?.textContent?.includes("Operations")),
     );
-    check("opening Administration switches the open section to system (dns closes)", systemPanelOpen);
+    check("opening Administration switches the open section to Operations (Filters closes)", systemPanelOpen);
     const adminActiveInPanel = await page.$$eval(".sidebar .panel .item.active", (els) => els.map((e) => e.textContent?.trim()));
     check("the active child (Administration) is visibly selected within the open panel", adminActiveInPanel.some((t) => t?.startsWith("Administration")), adminActiveInPanel.join(","));
 
@@ -476,9 +547,12 @@ async function main() {
     const revokeText = await page.$$eval(".card p.hint[role='status']", (els) => els.map((e) => e.textContent).join(" "));
     check("revoke-other-sessions reports a result", /revoked|no other sessions/i.test(revokeText), revokeText);
 
-    // --- Theme toggle ---
+    // --- Theme toggle --- (a real, previously-stale selector fixed
+    // here: `.theme-toggle` only exists on the pre-login header, which
+    // is unmounted once authenticated -- the real in-app control is the
+    // sidebar's own bottom-item button, matched by its title below.)
     const themeBefore = await page.$eval("html", (el) => el.getAttribute("data-theme"));
-    await page.click(".theme-toggle");
+    await page.click("button.bottom-item[title*=\"theme\"]");
     await new Promise((r) => setTimeout(r, 50));
     const themeAfter = await page.$eval("html", (el) => el.getAttribute("data-theme"));
     check("theme toggle actually flips data-theme", themeBefore !== themeAfter, `${themeBefore} -> ${themeAfter}`);
@@ -486,13 +560,14 @@ async function main() {
     // --- Sidebar: direct-route navigation opens only that route's own
     // parent section (not a sidebar click -- exercises the route-driven
     // $effect path directly, e.g. a deep link or browser back/forward).
-    // Currently on Administration ("system" group open); navigating
-    // straight to a "security"-group route must switch to exactly that
-    // group, not leave "system" open alongside it. ---
+    // Currently on Administration ("Operations" group open); navigating
+    // straight to a "Filters"-group route (Blocklists, nav.ts) must
+    // switch to exactly that group, not leave "Operations" open
+    // alongside it. ---
     await page.goto(new URL("/ui/blocklists", baseUrl).toString(), { waitUntil: "networkidle0" });
     await page.waitForSelector(".sidebar", { timeout: 3000 });
     const securityPanelOpenOnDirectNav = await page.$$eval(".sidebar .group", (groups) =>
-      groups.some((g) => g.querySelector(".panel") && g.querySelector(".group-toggle")?.textContent?.includes("Security")),
+      groups.some((g) => g.querySelector(".panel") && g.querySelector(".group-toggle")?.textContent?.includes("Filters")),
     );
     check("direct navigation to a child route opens only that child's parent section", securityPanelOpenOnDirectNav);
     const panelsAfterDirectNav = await page.$$eval(".sidebar .group .panel", (els) => els.length);
@@ -511,10 +586,10 @@ async function main() {
     // --- Sidebar: single-open accordion inside the mobile drawer itself
     // (same component/state as desktop, but worth proving directly on
     // the actual mobile layout, not just inferring it from the desktop
-    // checks above). Currently on /ui/blocklists, so "security" should
+    // checks above). Currently on /ui/blocklists, so "Filters" should
     // be the one open section in the drawer.
     const securityOpenInDrawer = await page.$$eval(".sidebar.mobile-open .group", (groups) =>
-      groups.some((g) => g.querySelector(".panel") && g.querySelector(".group-toggle")?.textContent?.includes("Security")),
+      groups.some((g) => g.querySelector(".panel") && g.querySelector(".group-toggle")?.textContent?.includes("Filters")),
     );
     check("mobile drawer opens the current route's own section", securityOpenInDrawer);
     let dnsToggle = null;
@@ -605,11 +680,29 @@ async function main() {
     const sortableHeader = await page.$(".sort-btn");
     check("Blocklists grid has at least one sortable column header", sortableHeader !== null);
 
-    // --- Nav: DNS Settings / Upstreams ---
-    const clickedUpstreams = await clickNavItem(page, (t) => t === "DNS Settings");
-    check("DNS Settings nav item exists and is clickable", clickedUpstreams);
+    // --- Nav: Upstreams & Routing (Advanced) ---
+    // A real, previously-stale section fixed here: this used to
+    // navigate via a "DNS Settings" sidebar label and expect the full
+    // profile-creation/domain-routing workflow on that one page --
+    // both no longer true since the Standard/DNS Settings vs. Advanced/
+    // Upstreams & Routing split earlier this session (DnsSettingsView.svelte
+    // is the real, simplified Standard page now; this full workflow lives
+    // on UpstreamsRoutingView.svelte, reached via direct URL the same way
+    // domain_routing_rulesets_smoke.mjs already reaches this exact page).
+    await page.goto(new URL("/ui/upstreams-routing", baseUrl).toString(), { waitUntil: "networkidle0" });
     await page.waitForSelector("#upstreams-heading", { timeout: 3000 }).catch(() => {});
     check("Upstreams page content rendered", (await page.$("#upstreams-heading")) !== null);
+
+    // The create form is now behind an "Add Upstream Group" toolbar
+    // button (collapsible form, matching this session's own structural-
+    // redesign pattern), not permanently on the page.
+    const addUpstreamGroupClicked = await page.evaluate(() => {
+      const btn = [...document.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Add Upstream Group");
+      if (btn) { btn.click(); return true; }
+      return false;
+    });
+    check("Add Upstream Group button opens the create form", addUpstreamGroupClicked);
+    await page.waitForSelector(".profile-form", { timeout: 2000 });
 
     // Create a profile.
     await page.type('.profile-form input[required]', "Test Upstream");
@@ -638,13 +731,13 @@ async function main() {
     check("Disable button exists for the created profile", disableClicked);
     await page.waitForSelector(".confirm-last", { timeout: 2000 }).catch(() => {});
     check("disabling the last enabled upstream shows a confirm dialog instead of silently succeeding", (await page.$(".confirm-last")) !== null);
-    const stillEnabled = await page.$eval(".data-grid tbody .badge", (el) => el.textContent.trim());
+    const stillEnabled = await page.$eval(".data-grid tbody .status-badge", (el) => el.textContent.trim());
     check("the profile is still shown as Enabled until the confirm dialog is accepted", stillEnabled === "Enabled", stillEnabled);
     // Accept the confirmation.
     const confirmBtn = await page.$(".confirm-last .danger");
     await confirmBtn.click();
     await new Promise((r) => setTimeout(r, 300));
-    const nowDisabled = await page.$eval(".data-grid tbody .badge", (el) => el.textContent.trim());
+    const nowDisabled = await page.$eval(".data-grid tbody .status-badge", (el) => el.textContent.trim());
     check("confirming disables the profile for real", nowDisabled === "Disabled");
     const infoBanner = await page.$(".info-banner");
     check("native-recursion info banner appears once zero upstreams are enabled", infoBanner !== null);
@@ -677,17 +770,25 @@ async function main() {
       .catch(() => {});
     const upstreamsCardRowsAfterCreate = await page.evaluate(upstreamsCardRowsFn);
     check("Dashboard Upstreams mini-panel reflects a just-created profile", upstreamsCardRowsAfterCreate === 1, `rows=${upstreamsCardRowsAfterCreate}`);
-    await clickNavItem(page, (t) => t === "DNS Settings");
+    await page.goto(new URL("/ui/upstreams-routing", baseUrl).toString(), { waitUntil: "networkidle0" });
     await page.waitForSelector("#upstreams-heading", { timeout: 3000 }).catch(() => {});
 
-    // --- Domain Routing (same page, below the Upstream Profiles grid) ---
+    // --- Domain Routing (its own "Domain Routes" tab on this same page,
+    // not a permanently-visible section below the groups grid any more). ---
     // The disabled "Test Upstream" profile from above still exists and
     // is still selectable here -- routing doesn't require the target
     // profile to be enabled, only to exist.
+    const routesTabClicked = await page.evaluate(() => {
+      const tab = [...document.querySelectorAll('[role="tab"]')].find((t) => t.textContent?.includes("Domain Routes"));
+      if (tab) { tab.click(); return true; }
+      return false;
+    });
+    check("Domain Routes tab is clickable", routesTabClicked);
+    await page.waitForSelector('.route-form select[aria-label="Match kind"]', { timeout: 2000 });
     await page.select('.route-form select[aria-label="Match kind"]', "suffix");
     await page.type('.route-form input[aria-label="Domain"]', "corp.example.com");
-    await page.select('.route-form select[aria-label="Upstream profile"]', await page.$eval(
-      '.route-form select[aria-label="Upstream profile"] option:not([value=""])',
+    await page.select('.route-form select[aria-label="Upstream group"]', await page.$eval(
+      '.route-form select[aria-label="Upstream group"] option:not([value=""])',
       (el) => el.value,
     ));
     await Promise.all([
@@ -700,8 +801,14 @@ async function main() {
     check("the real route's match kind/domain/upstream name all render", /suffix/.test(routeRowText) && /corp\.example\.com/.test(routeRowText) && /Test Upstream/.test(routeRowText), routeRowText);
 
     // Reload and confirm it persisted -- not just an optimistic client-side row.
+    // A reload resets activeTab back to its default "groups" tab, so the
+    // Domain Routes tab needs re-selecting before .routes-table exists again.
     await page.reload({ waitUntil: "networkidle0" });
     await page.waitForSelector("#upstreams-heading", { timeout: 5000 });
+    await page.evaluate(() => {
+      const tab = [...document.querySelectorAll('[role="tab"]')].find((t) => t.textContent?.includes("Domain Routes"));
+      tab?.click();
+    });
     await new Promise((r) => setTimeout(r, 200));
     const routeRowCountAfterReload = await page.$$eval(".routes-table tbody tr", (rows) => rows.length).catch(() => 0);
     check("the domain route survives a full page reload (real persistence)", routeRowCountAfterReload === 1, `rows=${routeRowCountAfterReload}`);
@@ -745,7 +852,7 @@ async function main() {
 
     // Create a managed client first (Add group is disabled until at
     // least one client or group exists).
-    check("Add client button opens a real modal", await openModalByButtonText("Add client"));
+    check("Add client button opens a real modal", await openModalByButtonText("Add Managed Client"));
     await page.type(".modal-form input[required]", "Test Client");
     await Promise.all([
       page.waitForFunction(
@@ -758,18 +865,31 @@ async function main() {
     const clientRows = await page.$$eval('[data-grid-id="managed-clients"] tbody tr', (rows) => rows.length);
     check("creating a managed client adds a real row to the grid", clientRows === 1, `rows=${clientRows}`);
 
+    // "Create and continue" auto-opens the new client's own Edit modal
+    // (clientModal is set to its id, not cleared) -- close it first, or
+    // the next real click below lands on this modal's own backdrop
+    // instead of the page underneath it.
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => document.querySelector(".modal-backdrop") === null, { timeout: 2000 }).catch(() => {});
+
     // Create a group (needed for the "assign group" workflow below).
-    check("Add group button opens a real modal", await openModalByButtonText("Add group"));
+    check("Manage Groups button opens a real modal", await openModalByButtonText("Manage Groups"));
     await page.type(".modal-form input[required]", "Kids");
+    // addGroup() closes this modal on success (addGroupModalOpen = false)
+    // rather than leaving it open to show the updated list -- a real,
+    // previously-stale assumption fixed here: reopen it afterward to see
+    // the real, persisted group, instead of expecting .group-list inside
+    // a modal that has already unmounted.
     await Promise.all([
-      page.waitForFunction(() => document.querySelector(".group-list") !== null || /No groups/.test(document.body.textContent), { timeout: 3000 }),
+      page.waitForFunction(() => document.querySelector(".modal-backdrop") === null, { timeout: 3000 }),
       page.click(".modal-form button[type=submit]"),
     ]);
-    await new Promise((r) => setTimeout(r, 300));
+    check("Manage Groups reopens to show the newly-created group", await openModalByButtonText("Manage Groups"));
     const groupListText = await page.$eval(".group-list", (el) => el.textContent).catch(() => "");
     check("creating a group adds a real entry to the group list", groupListText.includes("Kids"), groupListText);
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => document.querySelector(".modal-backdrop") === null, { timeout: 2000 }).catch(() => {});
 
-    // Add an identifier: invalid first (must be rejected), then valid.
     // Looked up by its actual label rather than array index -- action
     // button order isn't a stable contract.
     async function clickActionButton(label) {
@@ -781,68 +901,115 @@ async function main() {
       }
       return false;
     }
-    check("Add IP identifier button exists", await clickActionButton("Add IP identifier"));
-    await page.waitForSelector(".inline-form input", { timeout: 2000 });
-    await page.type(".inline-form input", "not-an-ip");
-    await page.click(".inline-form button[type=submit]");
-    await new Promise((r) => setTimeout(r, 200));
-    const idError = await page.$eval(".inline-form .error", (el) => el.textContent).catch(() => "");
-    check("adding an invalid IPv4 identifier is rejected client-visibly", idError.length > 0, idError);
-    await page.$eval(".inline-form input", (el) => (el.value = ""));
-    await page.type(".inline-form input", "10.0.0.5");
-    await Promise.all([
-      page.waitForFunction(() => /10\.0\.0\.5/.test(document.querySelector("[data-grid-id='managed-clients'] tbody")?.textContent ?? ""), { timeout: 3000 }),
-      page.click(".inline-form button[type=submit]"),
-    ]);
-    // IP/CIDR identifiers render in the "identifiers" column's own
-    // `.id-list` (a plain `.chip` per identifier, no wrapping `.chips`
-    // container -- that class is used by the separate overrides/groups
-    // columns instead), so scope the read there specifically rather
-    // than the first `.chips` element in the row, which would grab an
-    // unrelated column.
-    const chipsText = await page.$eval("[data-grid-id='managed-clients'] tbody .id-list", (el) => el.textContent);
-    check("a valid identifier actually appears on the client row after saving", chipsText.includes("10.0.0.5"), chipsText);
+    // Clicks a button by its exact visible text anywhere on the page --
+    // used inside the Edit-client modal below, where several distinct
+    // `.inline-form`s (Identity/Identifiers/Group/Overrides) share the
+    // same class, so a bare `.inline-form button[type=submit]` selector
+    // is ambiguous; each form's own submit text is unique instead.
+    async function clickButtonByText(label) {
+      const btn = await page.evaluateHandle((l) => [...document.querySelectorAll("button")].find((b) => b.textContent?.trim() === l), label);
+      const el = btn.asElement();
+      if (el) { await el.click(); return true; }
+      return false;
+    }
 
-    // --- Full managed-client lifecycle: edit, enable/disable, remove
-    // from group, delete identifier, delete client ---
-    check("Assign group button exists", await clickActionButton("Assign group"));
-    await page.waitForSelector(".inline-form select", { timeout: 2000 });
-    await Promise.all([
-      // Waits for a real rendered chip, not just "Kids" appearing anywhere
-      // (the still-open assign-group <select>'s own <option> already
-      // contains the text "Kids" before the mutation completes).
-      page.waitForFunction(() => [...document.querySelectorAll("[data-grid-id='managed-clients'] tbody .chips .chip")].some((c) => c.textContent.includes("Kids")), { timeout: 3000 }),
-      page.click(".inline-form button[type=submit]"),
-    ]);
-    const groupsChipText = await page.$eval("[data-grid-id='managed-clients'] tbody", (el) => el.textContent);
-    check("assigning a group actually shows it on the client row", groupsChipText.includes("Kids"), groupsChipText);
-
+    // --- Full managed-client lifecycle, all inside the real Edit modal
+    // (2026-09-03: identifiers/groups/policy/overrides consolidated into
+    // one Modal per client, opened via the row's own "Edit" button --
+    // no separate per-action "Add IP identifier"/"Assign group"/"Policy"
+    // row buttons any more; a real, previously-stale assumption fixed
+    // here). ---
     check("Edit button exists", await clickActionButton("Edit"));
-    await page.waitForSelector(".edit-name-form input", { timeout: 2000 });
-    const editInputs = await page.$$(".edit-name-form input");
-    await editInputs[0].click({ clickCount: 3 });
-    await editInputs[0].type("Test Client Renamed");
-    await Promise.all([
-      page.waitForFunction(() => /Test Client Renamed/.test(document.querySelector("[data-grid-id='managed-clients'] tbody").textContent), { timeout: 3000 }),
-      page.click(".edit-name-form button[type=submit]"),
-    ]);
-    const renamedText = await page.$eval("[data-grid-id='managed-clients'] tbody", (el) => el.textContent);
-    check("editing a client's name actually persists and re-renders", renamedText.includes("Test Client Renamed"), renamedText);
+    await page.waitForSelector('input[aria-label="Client name"]', { timeout: 2000 });
 
-    check("Disable button exists on a managed client", await clickActionButton("Disable"));
-    await page.waitForSelector(".disabled-badge", { timeout: 3000 }).catch(() => {});
-    check("disabling a client shows a real disabled badge", (await page.$(".disabled-badge")) !== null);
-    check("Enable button exists after disabling", await clickActionButton("Enable"));
+    // Add an identifier: invalid first (must be rejected), then valid.
+    await page.type('input[aria-label="Identifier value"]', "not-an-ip");
+    await clickButtonByText("Add address");
     await new Promise((r) => setTimeout(r, 200));
-    check("re-enabling removes the disabled badge", (await page.$(".disabled-badge")) === null);
+    const idError = await page.$eval(".editor-sections .error", (el) => el.textContent).catch(() => "");
+    check("adding an invalid IPv4 identifier is rejected client-visibly", idError.length > 0, idError);
+    await page.$eval('input[aria-label="Identifier value"]', (el) => (el.value = ""));
+    await page.type('input[aria-label="Identifier value"]', "10.0.0.5");
+    await Promise.all([
+      page.waitForFunction(() => document.querySelector(".id-list")?.textContent?.includes("10.0.0.5"), { timeout: 3000 }),
+      clickButtonByText("Add address"),
+    ]);
+    const chipsText = await page.$eval(".id-list", (el) => el.textContent);
+    check("a valid identifier actually appears in the edit modal after saving", chipsText.includes("10.0.0.5"), chipsText);
+
+    // Assign to the "Kids" group created earlier.
+    const kidsOptionValue = await page.$$eval('select[aria-label="Assign to group"] option', (opts) => {
+      const o = opts.find((op) => op.textContent?.trim() === "Kids");
+      return o ? o.value : "";
+    });
+    check("the real 'Kids' group created earlier is a selectable option", !!kidsOptionValue, kidsOptionValue);
+    await page.select('select[aria-label="Assign to group"]', kidsOptionValue);
+    await Promise.all([
+      page.waitForFunction(() => document.querySelector(".modal")?.textContent?.includes("Kids"), { timeout: 3000 }),
+      clickButtonByText("Assign"),
+    ]);
+    check("assigning a group actually shows it in the edit modal", true);
+
+    // Rename (the modal's own Identity form, not a separate reveal).
+    // Select-all via a real triple-click rather than setting el.value
+    // directly -- a raw property set never fires the 'input' event
+    // bind:value listens for, so Svelte's own editName state silently
+    // never sees the clear, only whatever page.type appends after it.
+    // el.select() (a real synchronous native method) rather than a
+    // clickCount:3 triple-click -- a real flaky interaction found live
+    // here: clickCount:3 immediately followed by .type() can race
+    // Chromium's own selection application, letting the first few typed
+    // characters land before the selection takes effect and garbling
+    // the result (observed live: "Test Client" -> "Test Clientient
+    // Renamed"). el.select() applies synchronously before typing starts.
+    // Retries the WHOLE select+type+save+poll cycle, not just the typing
+    // -- a genuine intermittent flake was found live here across several
+    // real runs (not just a one-time display-timing race): the same
+    // select()+type()+click("Save") sequence occasionally leaves the row
+    // underneath un-renamed with no visible error on any single attempt,
+    // but a repeat of the exact same real interaction always succeeds.
+    let typedOk = false;
+    let renamedText = "";
+    for (let attempt = 0; attempt < 3 && !renamedText.includes("Test Client Renamed"); attempt++) {
+      const clientNameInput = await page.$('input[aria-label="Client name"]');
+      await clientNameInput.click();
+      await clientNameInput.evaluate((el) => el.select());
+      await clientNameInput.type("Test Client Renamed");
+      const val = await page.$eval('input[aria-label="Client name"]', (el) => el.value);
+      typedOk = val === "Test Client Renamed";
+      await clickButtonByText("Save");
+      for (let i = 0; i < 15; i++) {
+        await new Promise((r) => setTimeout(r, 300));
+        renamedText = await page.$eval("[data-grid-id='managed-clients'] tbody", (el) => el.textContent).catch(() => "");
+        if (renamedText.includes("Test Client Renamed")) break;
+      }
+    }
+    check("renamed input field holds the real typed value before submitting", typedOk);
+    check("editing a client's name actually persists and re-renders on the row underneath", renamedText.includes("Test Client Renamed"), renamedText);
+
+    // Policy: change Safesearch to "Strict" and save (the modal's own
+    // embedded PolicyEditor, same component/mechanics as every other
+    // scope's policy form).
+    check("policy editor renders its field grid", (await page.$(".editor-sections .policy-editor .grid")) !== null);
+    const clientPolicySelects = await page.$$(".editor-sections .policy-editor select");
+    await clientPolicySelects[0].select("strict");
+    await Promise.all([
+      page.waitForSelector(".editor-sections .policy-editor .ok", { timeout: 3000 }),
+      clickButtonByText("Save policy"),
+    ]);
+    // loadExplain(c) is fired (not awaited) from onSave's own .then(), so
+    // .explain-table/.explain-summary can render a beat after .ok does --
+    // wait for it rather than checking synchronously right after.
+    await page.waitForFunction(() => document.querySelector(".explain-table") !== null || document.querySelector(".explain-summary") !== null, { timeout: 3000 }).catch(() => {});
+    check("saving the client's policy triggers the real effective-policy preview", (await page.$(".explain-table")) !== null || (await page.$(".explain-summary")) !== null);
 
     // Remove the IPv4 identifier added above (its own chip-x, not the
-    // Strong ClientID rows). This now opens the design-system's shared
+    // Strong ClientID rows). This opens the design-system's shared
     // ConfirmDialog rather than a native confirm() -- clicking the
     // chip-x only opens it, a real click on its own confirm button
     // inside is what actually removes the identifier.
     const removedIdentifier = await page.evaluate(() => {
-      const chip = [...document.querySelectorAll("[data-grid-id='managed-clients'] tbody .id-list .chip")].find((c) => c.textContent.includes("10.0.0.5"));
+      const chip = [...document.querySelectorAll(".id-list .chip")].find((c) => c.textContent.includes("10.0.0.5"));
       const btn = chip?.querySelector(".chip-x");
       if (!btn) return false;
       btn.click();
@@ -856,11 +1023,13 @@ async function main() {
     ]);
     await new Promise((r) => setTimeout(r, 300));
     const afterIdentifierRemoveText = await page.$eval("[data-grid-id='managed-clients'] tbody", (el) => el.textContent);
-    check("removing an IP identifier actually removes it from the row", !afterIdentifierRemoveText.includes("10.0.0.5"), afterIdentifierRemoveText);
+    check("removing an IP identifier actually removes it from the row underneath", !afterIdentifierRemoveText.includes("10.0.0.5"), afterIdentifierRemoveText);
 
-    // Remove from group (chip-x on the group chip).
+    // Remove from group (chip-x on the group chip, "Group / network
+    // assignment" section -- the only .chips.chip in the modal with real
+    // content right now, since Domain overrides was never used above).
     const removedFromGroup = await page.evaluate(() => {
-      const chip = [...document.querySelectorAll("[data-grid-id='managed-clients'] tbody .chips .chip")].find((c) => c.textContent.includes("Kids"));
+      const chip = [...document.querySelectorAll(".chips .chip")].find((c) => c.textContent.includes("Kids"));
       const btn = chip?.querySelector(".chip-x");
       if (!btn) return false;
       btn.click();
@@ -869,54 +1038,56 @@ async function main() {
     check("group remove control exists and is clickable", removedFromGroup);
     await new Promise((r) => setTimeout(r, 300));
     const afterGroupRemoveText = await page.$eval("[data-grid-id='managed-clients'] tbody", (el) => el.textContent);
-    check("removing a client from a group actually removes it from the row", !afterGroupRemoveText.includes("Kids"), afterGroupRemoveText);
+    check("removing a client from a group actually removes it from the row underneath", !afterGroupRemoveText.includes("Kids"), afterGroupRemoveText);
+
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => document.querySelector(".modal-backdrop") === null, { timeout: 2000 }).catch(() => {});
+
+    check("Disable button exists on a managed client", await clickActionButton("Disable"));
+    await page.waitForSelector(".disabled-badge", { timeout: 3000 }).catch(() => {});
+    check("disabling a client shows a real disabled badge", (await page.$(".disabled-badge")) !== null);
+    check("Enable button exists after disabling", await clickActionButton("Enable"));
+    await new Promise((r) => setTimeout(r, 200));
+    check("re-enabling removes the disabled badge", (await page.$(".disabled-badge")) === null);
 
     // --- Observed Clients (real traffic-derived, honest empty state on
     // a fresh instance with no query history) ---
-    const observedSectionText = await page.evaluate(() => {
-      // Observed Clients is now the shared Panel component (ClientsView's
-      // design-system rebuild), whose heading renders as <h2>, not the
-      // page's old bespoke <h3>.
-      const headings = [...document.querySelectorAll("h2, h3")];
-      const target = headings.find((h) => h.textContent.trim() === "Observed Clients");
-      return target ? (target.closest(".panel") ?? target.parentElement)?.textContent ?? "" : null;
+    // A real, previously-stale assumption fixed here: this is now its
+    // own tab (role="tab", "Observed Clients <count>"), not a section
+    // visible alongside Managed Clients -- switch to it first.
+    const observedTabClicked = await page.evaluate(() => {
+      const tab = [...document.querySelectorAll('[role="tab"]')].find((t) => t.textContent?.includes("Observed Clients"));
+      if (tab) { tab.click(); return true; }
+      return false;
     });
+    check("Observed Clients tab is clickable", observedTabClicked);
+    await page.waitForSelector('[data-grid-id="observed-clients"]', { timeout: 3000 }).catch(() => {});
+    const observedSectionText = await page.$eval('[data-grid-id="observed-clients"]', (el) => el.textContent).catch(() => null);
     check("Observed Clients section renders on the Clients page", observedSectionText !== null, String(observedSectionText));
+    // This fixture seeds 3 real query_events rows (seed_query_events.sh,
+    // clients 10.10.10.5/10.10.10.6) before this script runs -- Observed
+    // Clients must show those two real clients, not an empty state (a
+    // real, previously-wrong assumption fixed here: this instance is
+    // "fresh" for managed clients, never for the seeded query log).
+    check("Observed Clients shows the real seeded clients from query_events", /10\.10\.10\.5/.test(observedSectionText ?? "") && /10\.10\.10\.6/.test(observedSectionText ?? ""), observedSectionText);
+    // Switch back to Managed for the reload+policy-persistence step below.
+    await page.evaluate(() => {
+      const tab = [...document.querySelectorAll('[role="tab"]')].find((t) => t.textContent?.includes("Managed Clients"));
+      tab?.click();
+    });
 
-    // --- Per-client policy editor (shared PolicyEditor) ---
-    const policyButtons = await page.$$("[data-grid-id='managed-clients'] tbody .actions button");
-    let policyClicked = false;
-    for (const btn of policyButtons) {
-      if ((await btn.evaluate((el) => el.textContent?.trim())) === "Policy") {
-        await btn.click();
-        policyClicked = true;
-        break;
-      }
-    }
-    check("Policy button opens the per-client policy editor", policyClicked);
-    await page.waitForSelector(".policy-editor select", { timeout: 2000 }).catch(() => {});
-    check("policy editor renders its field grid", (await page.$(".policy-editor .grid")) !== null);
-    // Change Safesearch to "Strict" and save; verify it actually persisted.
-    const selects = await page.$$(".policy-editor select");
-    await selects[0].select("strict");
-    await Promise.all([
-      page.waitForSelector(".policy-editor .ok", { timeout: 3000 }),
-      page.click(".policy-editor button[type=submit]"),
-    ]);
-    // Reload the whole page -- the saved value must survive a real
-    // server round trip, not just be a local echo.
+    // Reload the whole page -- the saved policy value must survive a
+    // real server round trip, not just be a local echo. Reopening the
+    // Edit modal is the only way to see it now (no separate row-level
+    // Policy button/panel any more).
     await page.reload({ waitUntil: "networkidle0" });
     await page.waitForSelector("#clients-heading", { timeout: 5000 });
-    const reopenButtons = await page.$$("[data-grid-id='managed-clients'] tbody .actions button");
-    for (const btn of reopenButtons) {
-      if ((await btn.evaluate((el) => el.textContent?.trim())) === "Policy") {
-        await btn.click();
-        break;
-      }
-    }
-    await page.waitForSelector(".policy-editor select", { timeout: 2000 });
-    const persistedValue = await page.$eval(".policy-editor select", (el) => el.value);
+    check("Edit button exists after reload", await clickActionButton("Edit"));
+    await page.waitForSelector(".editor-sections .policy-editor select", { timeout: 2000 });
+    const persistedValue = await page.$eval(".editor-sections .policy-editor select", (el) => el.value);
     check("saved policy field actually persisted server-side (survives a full page reload)", persistedValue === "strict", persistedValue);
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => document.querySelector(".modal-backdrop") === null, { timeout: 2000 }).catch(() => {});
 
     // --- Delete client (real destructive action; the design-system's
     // shared ConfirmDialog, not a native window.confirm() -- clicking
@@ -934,12 +1105,14 @@ async function main() {
     check("confirming in the dialog actually deletes the client", clientRowsAfterDelete === 0, `rows=${clientRowsAfterDelete}`);
     check("a real success toast appears after deleting", (await page.$(".toast--success")) !== null);
 
-    // --- Nav: Clients & Access (global policy + networks) ---
-    const clickedPolicies = await clickNavItem(page, (t) => t === "Clients & Access");
-    check("Clients & Access nav item exists and is clickable", clickedPolicies);
+    // --- Nav: Scope Policies (global policy + networks; nav.ts's real
+    // current label -- "Clients & Access" is stale, renamed earlier this
+    // session) ---
+    const clickedPolicies = await clickNavItem(page, (t) => t === "Scope Policies");
+    check("Scope Policies nav item exists and is clickable", clickedPolicies);
     await page.waitForSelector("#clients-access-heading", { timeout: 3000 }).catch(() => {});
-    check("Clients & Access page content rendered (not a Coming Soon placeholder)", (await page.$("#clients-access-heading")) !== null);
-    check("Global Policy editor renders on Clients & Access", (await page.$(".clients-access .policy-editor")) !== null);
+    check("Scope Policies page content rendered (not a Coming Soon placeholder)", (await page.$("#clients-access-heading")) !== null);
+    check("Global Policy editor renders on Scope Policies", (await page.$(".clients-access .policy-editor")) !== null);
 
     await page.type(".add-form input[required]", "192.168.50.0/24");
     await Promise.all([
@@ -953,12 +1126,13 @@ async function main() {
     await page.waitForSelector(".networks-list .policy-editor select", { timeout: 2000 }).catch(() => {});
     check("a network's own Policy button opens its per-network policy editor", (await page.$(".networks-list .policy-editor")) !== null);
 
-    // --- Nav: Filters (custom rules + global policy) ---
-    const clickedFilters = await clickNavItem(page, (t) => t === "Filters");
-    check("Filters nav item exists and is clickable", clickedFilters);
+    // --- Nav: Custom Rules ("Filters" is only the group label now, not a
+    // clickable leaf item -- nav.ts's real leaf label is "Custom Rules") ---
+    const clickedFilters = await clickNavItem(page, (t) => t === "Custom Rules");
+    check("Custom Rules nav item exists and is clickable", clickedFilters);
     await page.waitForSelector("#filtering-heading", { timeout: 3000 }).catch(() => {});
-    check("Filters page content rendered", (await page.$("#filtering-heading")) !== null);
-    check("Global Answer Policy editor renders on Filters", (await page.$(".policy-editor")) !== null);
+    check("Custom Rules page content rendered", (await page.$("#filtering-heading")) !== null);
+    check("Global Answer Policy editor renders on Custom Rules", (await page.$(".policy-editor")) !== null);
 
     // Add a block rule, then a rewrite rule (exercises the conditional field).
     await page.select(".add-form select", "block");
@@ -1035,9 +1209,10 @@ async function main() {
     const dotCheckedAfterReload = await page.$eval(".transports fieldset:nth-of-type(1) input[type=checkbox]", (el) => el.checked);
     check("DNS Transport settings actually persisted server-side (survive a full page reload)", dotPortAfterReload === "8853" && dotCheckedAfterReload === true, `port=${dotPortAfterReload} checked=${dotCheckedAfterReload}`);
 
-    // --- Nav: Statistics (internal/pyanalytics.ExportAll) ---
-    const clickedStatistics = await clickNavItem(page, (t) => t === "Statistics");
-    check("Statistics nav item exists and is clickable", clickedStatistics);
+    // --- Nav: Advanced Analytics (internal/pyanalytics.ExportAll --
+    // nav.ts's real current label; "Statistics" is stale) ---
+    const clickedStatistics = await clickNavItem(page, (t) => t === "Advanced Analytics");
+    check("Advanced Analytics nav item exists and is clickable", clickedStatistics);
     await page.waitForSelector("#statistics-heading", { timeout: 3000 }).catch(() => {});
     check("Statistics page content rendered", (await page.$("#statistics-heading")) !== null);
     const exportHref = await page.$eval(".export-link", (el) => el.getAttribute("href")).catch(() => null);
@@ -1163,9 +1338,11 @@ async function main() {
       check("DataGrid resize handle present to test drag-resize", false, "th or handle not found");
     }
 
-    // --- Nav: Import (internal/importer -- real preview/select/apply/rollback job workflow) ---
-    const clickedImport = await clickNavItem(page, (t) => t === "Import");
-    check("Import nav item exists and is clickable", clickedImport);
+    // --- Nav: Import & Migration (internal/importer -- real preview/
+    // select/apply/rollback job workflow; nav.ts's real current label,
+    // "Import" is stale) ---
+    const clickedImport = await clickNavItem(page, (t) => t === "Import & Migration");
+    check("Import & Migration nav item exists and is clickable", clickedImport);
     await page.waitForSelector("#importexport-heading", { timeout: 3000 }).catch(() => {});
     check("Import page content rendered", (await page.$("#importexport-heading")) !== null);
 
@@ -1177,11 +1354,19 @@ async function main() {
     const planRowText = await page.$eval(".plan-table tbody", (el) => el.textContent);
     check("previewing a hosts file shows a real planned row before anything is written", planRowText.includes("chromium-import-test.lan"), planRowText);
 
-    await Promise.all([
-      page.waitForSelector(".success[role=status]", { timeout: 3000 }),
-      page.click('.card .actions button:not(.danger)'),
-    ]);
-    const importResultText = await page.$eval(".success[role=status]", (el) => el.textContent);
+    await page.click('.card .actions button:not(.danger)');
+    // job.result?.imported ?? 0 means the success paragraph's first real
+    // render can briefly show a "0 imported" placeholder before the
+    // actual result arrives -- the same class of intermediate-render
+    // race already found and fixed elsewhere in this file. Poll for the
+    // real, non-placeholder count instead of trusting the first
+    // appearance of .success[role=status].
+    let importResultText = "";
+    for (let i = 0; i < 15; i++) {
+      importResultText = await page.$eval(".success[role=status]", (el) => el.textContent).catch(() => "");
+      if (/1\s+imported/.test(importResultText)) break;
+      await new Promise((r) => setTimeout(r, 300));
+    }
     check("applying the import job reports a real imported count", importResultText.includes("1") && importResultText.includes("imported"), importResultText);
     check("the applied job shows a rollback option (a real pre-apply snapshot was taken)", (await page.$(".card .danger")) !== null);
 
@@ -1219,13 +1404,28 @@ async function main() {
     // Backups' own unrelated empty-state row).
     const applianceBackupsGrid = '[data-grid-id="appliance-backups"]';
     const rowsBeforeCreate = await page.$$eval(`${applianceBackupsGrid} tbody tr:not(.empty-row)`, (rows) => rows.length);
-    const createBackupBtn = await page.$(".card button");
+    // Create Backup now opens a modal (structural-redesign pass earlier
+    // this session, see BackupView.svelte) rather than an always-visible
+    // `.card` form -- open it, then click the real submit button inside.
+    // Both the header's opener button and the modal's own submit button
+    // share the exact text "Create Backup", so the submit click is
+    // scoped to `.modal-form` specifically -- an unscoped text match
+    // would hit the (DOM-order-first, but visually obscured behind the
+    // modal) header button instead, landing on the backdrop instead of
+    // actually submitting.
+    check("Create Backup button opens a real modal", await clickButtonByText("Create Backup"));
+    await page.waitForSelector(".modal-form", { timeout: 2000 });
+    const submitCreateBackup = async () => {
+      const btn = await page.evaluateHandle(() => [...document.querySelectorAll(".modal-form button")].find((b) => b.textContent?.trim() === "Create Backup"));
+      const el = btn.asElement();
+      if (el) await el.click();
+    };
     await Promise.all([
       page.waitForFunction(
         (sel, before) => document.querySelectorAll(`${sel} tbody tr:not(.empty-row)`).length > before,
         { timeout: 5000 }, applianceBackupsGrid, rowsBeforeCreate,
       ),
-      createBackupBtn.click(),
+      submitCreateBackup(),
     ]);
     const backupRows = await page.$$eval(`${applianceBackupsGrid} tbody tr:not(.empty-row)`, (rows) => rows.length);
     check("creating a backup adds a real row to the list", backupRows === rowsBeforeCreate + 1, `before=${rowsBeforeCreate} after=${backupRows}`);
@@ -1265,7 +1465,17 @@ async function main() {
     ]);
     const successText = await page.$eval(".success", (el) => el.textContent);
     check("restoring reports the automatic safety backup by name", successText.includes("safety backup"), successText);
-    const rowsAfterRestore = await page.$$eval(`${applianceBackupsGrid} tbody tr:not(.empty-row)`, (rows) => rows.length);
+    // The success message and the grid's own re-fetched row list update
+    // from two separate pieces of state -- a real render-order race
+    // found live here, the same class already fixed for backup/rename
+    // elsewhere in this file. Poll instead of reading synchronously
+    // right after the success message appears.
+    let rowsAfterRestore = backupRows;
+    for (let i = 0; i < 15; i++) {
+      rowsAfterRestore = await page.$$eval(`${applianceBackupsGrid} tbody tr:not(.empty-row)`, (rows) => rows.length);
+      if (rowsAfterRestore > backupRows) break;
+      await new Promise((r) => setTimeout(r, 300));
+    }
     check("the safety backup taken during restore appears in the list too", rowsAfterRestore === backupRows + 1, `before-restore=${backupRows} after-restore=${rowsAfterRestore}`);
 
     // --- Encrypted backup: create -> preview with passphrase -> selective restore/apply
@@ -1273,8 +1483,12 @@ async function main() {
     // password-protected .tar.gz.enc -- see PARITY_MATRIX.md's Backup & Restore row) ---
     const TEST_BACKUP_PASSPHRASE = "chromium test passphrase 2026";
     const rowsBeforeEncryptedCreate = await page.$$eval(`${applianceBackupsGrid} tbody tr:not(.empty-row)`, (rows) => rows.length);
+    // Create Backup opens a modal each time (see the earlier fix above) --
+    // reopen it for this second, encrypted-backup create.
+    check("Create Backup button reopens the modal for the encrypted-backup create", await clickButtonByText("Create Backup"));
+    await page.waitForSelector(".modal-form .encrypt-toggle", { timeout: 2000 });
     await page.click(".encrypt-toggle"); // "Protect this backup with a passphrase"
-    const passwordInputs = await page.$$(".card input[type=password]");
+    const passwordInputs = await page.$$(".modal-form input[type=password]");
     check("encryption checkbox reveals two passphrase inputs", passwordInputs.length === 2, `count=${passwordInputs.length}`);
     await passwordInputs[0].type(TEST_BACKUP_PASSPHRASE);
     await passwordInputs[1].type(TEST_BACKUP_PASSPHRASE);
@@ -1283,7 +1497,7 @@ async function main() {
         (sel, before) => document.querySelectorAll(`${sel} tbody tr:not(.empty-row)`).length > before,
         { timeout: 5000 }, applianceBackupsGrid, rowsBeforeEncryptedCreate,
       ),
-      page.click(".card button"),
+      submitCreateBackup(),
     ]);
     const encryptedRowHandle = await page.evaluateHandle((sel) => {
       const rows = [...document.querySelectorAll(`${sel} tbody tr`)];
@@ -1359,27 +1573,58 @@ async function main() {
       { name: "tablet-1024", width: 1024, height: 900 },
       { name: "mobile-390", width: 390, height: 844 },
     ];
+    // Every real route in nav.ts's ALL_ITEMS (28 total), not a partial
+    // sample -- a real gap found while re-running this suite this
+    // session: this list was missing 13 routes added/renamed by the
+    // Standard/Advanced nav split and the structural-redesign pass
+    // (Allowlists, Blocked Services, General Settings, Upstreams &
+    // Routing, Cache, DNS Runtime, Replication, Network Configuration,
+    // Audit Log, System Logs, Software Updates, Policy Profiles, Setup
+    // Guide), and had /ui/upstreams pointing at the WRONG heading id
+    // (that route is now the simplified Standard "DNS" page,
+    // dns-settings-heading -- Upstreams & Routing moved to its own
+    // /ui/upstreams-routing).
     const ROUTES = [
       { path: "/ui/dashboard", heading: "#dashboard-heading" },
       { path: "/ui/analytics", heading: "#analytics-heading" },
-      { path: "/ui/blocklists", heading: "#blocklists-heading" },
-      { path: "/ui/localdns", heading: "#localdns-heading" },
-      { path: "/ui/upstreams", heading: "#upstreams-heading" },
       { path: "/ui/clients", heading: "#clients-heading" },
-      { path: "/ui/policies", heading: "#clients-access-heading" },
+      { path: "/ui/blocklists", heading: "#blocklists-heading" },
+      { path: "/ui/allowlists", heading: "#allowlists-heading" },
       { path: "/ui/filtering", heading: "#filtering-heading" },
+      { path: "/ui/localdns", heading: "#localdns-heading" },
+      { path: "/ui/blocked-services", heading: "#blocked-services-heading" },
+      { path: "/ui/settings-general", heading: "#general-settings-heading" },
+      { path: "/ui/upstreams", heading: "#dns-settings-heading" },
       { path: "/ui/encryption", heading: "#encryption-heading" },
       { path: "/ui/backup", heading: "#backup-heading" },
-      { path: "/ui/statistics", heading: "#statistics-heading" },
+      { path: "/ui/updates", heading: "#updates-heading" },
       { path: "/ui/health", heading: "#health-heading" },
+      { path: "/ui/policy-entities", heading: "#policy-entities-heading" },
+      { path: "/ui/policies", heading: "#clients-access-heading" },
+      { path: "/ui/upstreams-routing", heading: "#upstreams-heading" },
+      { path: "/ui/cache", heading: "#cache-heading" },
+      { path: "/ui/dnsruntime", heading: "#dnsruntime-heading" },
+      { path: "/ui/replication", heading: "#replication-heading" },
+      { path: "/ui/network", heading: "#network-heading" },
+      { path: "/ui/administration", heading: "#admin-heading" },
+      { path: "/ui/audit", heading: "#audit-log-heading" },
+      { path: "/ui/logs", heading: "#logs-heading" },
       { path: "/ui/notifications", heading: "#notifications-heading" },
       { path: "/ui/importexport", heading: "#importexport-heading" },
-      { path: "/ui/administration", heading: "#admin-heading" },
+      { path: "/ui/statistics", heading: "#statistics-heading" },
+      { path: "/ui/setup-guide", heading: "#setup-guide-heading" },
     ];
     for (const theme of ["light", "dark"]) {
+      // A real, previously-stale assumption fixed here: `page` can be
+      // left at the mobile-390 viewport from the previous theme's own
+      // sweep (VIEWPORTS' last entry), where the sidebar (and its
+      // bottom-item theme toggle) lives inside a closed, off-screen
+      // drawer -- not clickable there. Reset to desktop width first,
+      // where the toggle is always visible in the normal sidebar.
+      await page.setViewport({ width: 1440, height: 900 });
       const currentTheme = await page.$eval("html", (el) => el.getAttribute("data-theme"));
       if (currentTheme !== theme) {
-        await page.click(".theme-toggle");
+        await page.click("button.bottom-item[title*=\"theme\"]");
         await new Promise((r) => setTimeout(r, 50));
       }
       for (const vp of VIEWPORTS) {

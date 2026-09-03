@@ -143,7 +143,14 @@
   <p class="hint">Loading…</p>
 {:else}
   <p class="hint count-line">{filtered.length} of {entries.length} recorded entries.</p>
-  <DataGrid gridId="audit-log" {columns} rows={filtered} rowKey={(r) => r.at + r.action + r.ip} emptyMessage="No audit entries match these filters.">
+  <!-- rowKey uses the real admin_audit_log.id (2026-09-03) -- a real
+       live defect this closed: the previous synthetic at+action+ip key
+       genuinely collided (Svelte's own "each_key_duplicate" runtime
+       error, caught live) whenever two entries shared a timestamp,
+       action, and source IP -- an ordinary occurrence for any session
+       performing the same audited action more than once in one second,
+       not a rare edge case. -->
+  <DataGrid gridId="audit-log" {columns} rows={filtered} rowKey={(r) => r.id} emptyMessage="No audit entries match these filters.">
     {#snippet cell(row, colKey)}
       {#if colKey === "at"}
         <span class="mono">{timestampPref.format(row.at)}</span>

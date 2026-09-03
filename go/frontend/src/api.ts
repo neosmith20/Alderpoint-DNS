@@ -422,6 +422,10 @@ export interface AdminSessionRow {
 }
 
 export interface AuditLogEntry {
+  /** Real admin_audit_log.id -- the real DataGrid row key (see
+   * AuditLogView.svelte's own doc comment for the live defect this
+   * closed: a synthetic at+action+ip key genuinely collided). */
+  id: number;
   at: string;
   /** Only populated by listAuditLogAll (the Audit Log page) -- the
    * admin-scoped listAuditLog already implies whose entries they are. */

@@ -36,6 +36,17 @@ type Service struct {
 // written on every Record() call since the table was created), so
 // there's no backfill gap.
 type Entry struct {
+	// ID is the real admin_audit_log.id primary key -- 2026-09-03: added
+	// after a real live defect this ID closes: the Audit Log page used
+	// to key its DataGrid rows with a synthetic `at+action+ip` string,
+	// which genuinely collided (a Svelte "each_key_duplicate" runtime
+	// error, not just a theoretical risk) whenever two entries shared a
+	// timestamp, action, and source IP -- an ordinary occurrence for any
+	// admin session that performs several of the same audited action in
+	// the same second, which every automated Chromium suite run against
+	// this page does. The real primary key was always available in the
+	// table; it just was never selected.
+	ID       int64  `json:"id"`
 	At       string `json:"at"`
 	Username string `json:"username,omitempty"`
 	Action   string `json:"action"`
@@ -61,13 +72,15 @@ func (s *Service) Record(ctx context.Context, adminID int64, username, action st
 
 // List mirrors V1.1.1's own real query:
 // `SELECT at, action, success, ip, detail FROM admin_audit_log WHERE
-// admin_id=? ORDER BY id DESC LIMIT 25`.
+// admin_id=? ORDER BY id DESC LIMIT 25` (id is also selected now, purely
+// for the frontend's own real DataGrid row key -- see Entry.ID's doc
+// comment).
 func (s *Service) List(ctx context.Context, adminID int64, limit int) ([]Entry, error) {
 	if limit <= 0 {
 		limit = 25
 	}
 	rows, err := s.DB.QueryContext(ctx,
-		`SELECT at, action, success, ip, detail FROM admin_audit_log WHERE admin_id=? ORDER BY id DESC LIMIT ?`,
+		`SELECT id, at, action, success, ip, detail FROM admin_audit_log WHERE admin_id=? ORDER BY id DESC LIMIT ?`,
 		adminID, limit)
 	if err != nil {
 		return nil, err
@@ -77,7 +90,7 @@ func (s *Service) List(ctx context.Context, adminID int64, limit int) ([]Entry, 
 	for rows.Next() {
 		var e Entry
 		var success int
-		if err := rows.Scan(&e.At, &e.Action, &success, &e.IP, &e.Detail); err != nil {
+		if err := rows.Scan(&e.ID, &e.At, &e.Action, &success, &e.IP, &e.Detail); err != nil {
 			return nil, err
 		}
 		e.Success = success != 0
@@ -103,7 +116,7 @@ func (s *Service) ListAll(ctx context.Context, limit int) ([]Entry, error) {
 		limit = 500
 	}
 	rows, err := s.DB.QueryContext(ctx,
-		`SELECT at, username, action, success, ip, detail FROM admin_audit_log ORDER BY id DESC LIMIT ?`,
+		`SELECT id, at, username, action, success, ip, detail FROM admin_audit_log ORDER BY id DESC LIMIT ?`,
 		limit)
 	if err != nil {
 		return nil, err
@@ -113,7 +126,7 @@ func (s *Service) ListAll(ctx context.Context, limit int) ([]Entry, error) {
 	for rows.Next() {
 		var e Entry
 		var success int
-		if err := rows.Scan(&e.At, &e.Username, &e.Action, &success, &e.IP, &e.Detail); err != nil {
+		if err := rows.Scan(&e.ID, &e.At, &e.Username, &e.Action, &success, &e.IP, &e.Detail); err != nil {
 			return nil, err
 		}
 		e.Success = success != 0
