@@ -294,6 +294,23 @@ async function main() {
     check("page body does not literally say 'Coming Soon'", !/Coming Soon/i.test(bodyText));
     check("Global Policy editor renders", (await page.$(".clients-access .policy-card .policy-editor")) !== null);
 
+    // 2026-09-03: Scope Policies now clearly shows the selected scope,
+    // inherited settings, overrides, and effective DNS behavior in a
+    // real per-scope summary table (see ClientsAccessView's scopeTable
+    // snippet) -- proven here for Global (root scope: no Inherited
+    // column) and, further below, for a Network (has one).
+    const globalEffectiveHeaders = await page.$$eval(".clients-access .policy-card .effective-table th", (ths) => ths.map((t) => t.textContent?.trim()));
+    check(
+      "Global scope's effective-DNS-behavior table renders with no Inherited column (it's the root scope)",
+      globalEffectiveHeaders.includes("Effective DNS behavior") && !globalEffectiveHeaders.includes("Inherited (Global)"),
+      globalEffectiveHeaders.join(", "),
+    );
+    check("Client Scope panel clearly explains and links to the Clients page", await page.evaluate(() => {
+      const h2 = [...document.querySelectorAll(".clients-access h2, .clients-access h3")].find((e) => e.textContent?.trim() === "Client Scope");
+      const text = h2?.closest(".panel")?.textContent ?? "";
+      return /most specific/i.test(text) && /Clients/.test(text);
+    }));
+
     // Edit + save global policy, verify persistence across reload.
     const globalSelects = await page.$$(".clients-access .policy-card .policy-editor select");
     await globalSelects[0].select("strict");
@@ -317,6 +334,12 @@ async function main() {
     await page.click(".networks-list .scope-row button");
     await page.waitForSelector(".networks-list .policy-editor select", { timeout: 2000 }).catch(() => {});
     check("per-network policy editor opens", (await page.$(".networks-list .policy-editor")) !== null);
+    const networkEffectiveHeaders = await page.$$eval(".networks-list .effective-table th", (ths) => ths.map((t) => t.textContent?.trim())).catch(() => []);
+    check(
+      "Network scope's summary table shows Inherited, Override, and Effective columns",
+      networkEffectiveHeaders.includes("Inherited (Global)") && networkEffectiveHeaders.includes("Override (this scope)") && networkEffectiveHeaders.includes("Effective DNS behavior"),
+      networkEffectiveHeaders.join(", "),
+    );
 
     // Groups: a real, non-sparse section (name/priority/member-count/
     // policy summary), not a placeholder -- see this page's own doc

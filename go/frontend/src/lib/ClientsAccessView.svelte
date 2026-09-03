@@ -181,7 +181,102 @@
     if (active.length === 0) return "inherit";
     return active.slice(0, 3).map(([k, v]) => `${k}=${v}`).join(", ");
   }
+
+  // Inherited / Overrides / Effective (2026-09-03): every field a scope
+  // can set, in the same order PolicyEditor presents them, so the
+  // read-only summary table below lines up with the edit form under it.
+  // Computed entirely client-side from data this page already loaded --
+  // no new endpoint. This mirrors internal/policy/effective.go's own
+  // "unset means inherit" rule for exactly two layers (a scope and
+  // Global) -- Group vs. Network's real relative precedence, and
+  // multi-group priority, is a per-CLIENT question that genuinely needs
+  // a real client to resolve (which network it's in, which groups it
+  // belongs to) -- that's exactly what Explain (right) answers for one
+  // real client. This table intentionally does NOT pretend to guess
+  // that without a client; it shows what THIS scope alone contributes
+  // on top of Global, which is the honest, well-defined half of the
+  // question.
+  type PolicyFieldKey = keyof PolicyLayer;
+  const FIELD_LABELS: [PolicyFieldKey, string][] = [
+    ["filtering_profile_id", "Filtering profile"],
+    ["parental_policy_id", "Parental policy"],
+    ["security_policy_id", "Security policy"],
+    ["service_blocking_ruleset_id", "Service blocking"],
+    ["safesearch_mode", "Safesearch"],
+    ["blocking_response_mode", "Blocking response"],
+    ["custom_ipv4", "Custom IPv4"],
+    ["custom_ipv6", "Custom IPv6"],
+    ["ecs_mode", "ECS mode"],
+    ["upstream_profile_id", "Upstream profile"],
+    ["fallback_strategy", "Fallback strategy"],
+    ["fallback_upstream_profile_id", "Fallback upstream profile"],
+    ["domain_routing_ruleset_id", "Domain routing ruleset"],
+    ["query_log_enabled", "Query log"],
+    ["statistics_enabled", "Statistics"],
+  ];
+
+  function formatFieldValue(v: string | boolean | null | undefined): string {
+    if (v === null || v === undefined || v === "") return "—";
+    if (typeof v === "boolean") return v ? "Enabled" : "Disabled";
+    return String(v);
+  }
+
+  function isSet(v: string | boolean | null | undefined): boolean {
+    return v !== null && v !== undefined && v !== "";
+  }
+
+  interface EffectiveRow {
+    key: PolicyFieldKey;
+    label: string;
+    inherited: string;
+    override: string;
+    effective: string;
+    source: "this scope" | "inherited" | "built-in default";
+  }
+
+  function effectiveRows(base: PolicyLayer | null, override: PolicyLayer | null): EffectiveRow[] {
+    return FIELD_LABELS.map(([key, label]) => {
+      const overrideVal = override ? override[key] : null;
+      const baseVal = base ? base[key] : null;
+      const overridden = isSet(overrideVal);
+      const effectiveVal = overridden ? overrideVal : baseVal;
+      const source: EffectiveRow["source"] = overridden ? "this scope" : isSet(baseVal) ? "inherited" : "built-in default";
+      return {
+        key,
+        label,
+        inherited: formatFieldValue(baseVal),
+        override: overridden ? formatFieldValue(overrideVal) : "(inherit)",
+        effective: formatFieldValue(effectiveVal),
+        source,
+      };
+    });
+  }
 </script>
+
+{#snippet scopeTable(base: PolicyLayer | null, override: PolicyLayer | null, showInherited: boolean)}
+  <div class="table-wrap">
+    <table class="effective-table">
+      <thead>
+        <tr>
+          <th>Field</th>
+          {#if showInherited}<th>Inherited (Global)</th>{/if}
+          <th>Override (this scope)</th>
+          <th>Effective DNS behavior</th>
+        </tr>
+      </thead>
+      <tbody>
+        {#each effectiveRows(base, override) as row (row.key)}
+          <tr class={row.source === "this scope" ? "row-overridden" : ""}>
+            <td>{row.label}</td>
+            {#if showInherited}<td>{row.inherited}</td>{/if}
+            <td>{row.override}</td>
+            <td><strong>{row.effective}</strong> <span class="badge {row.source === 'this scope' ? 'source-group' : row.source === 'inherited' ? 'source-global' : 'source-default'}">{row.source}</span></td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
+  </div>
+{/snippet}
 
 <section aria-labelledby="clients-access-heading" class="clients-access">
   <PageHeader
@@ -189,12 +284,21 @@
     headingId="clients-access-heading"
     description="Global default policy, network-scoped policy, group-scoped policy, and the explicit-deny > explicit-allow > default precedence that governs every client."
   />
-  <p class="scope-note">
-    Strong ClientID lifecycle (generate, add, display, copy, regenerate, revoke, DoH path, DoT/DoQ
-    SNI), group membership, and per-client domain overrides live on the
-    <button type="button" class="link-btn" onclick={() => router.navigate("clients")}>Clients</button> page,
-    next to each identity they apply to.
-  </p>
+  <Panel heading="Client Scope">
+    {#snippet actions()}
+      <StatusBadge label="Most specific -- above Group, Network, and Global" tone="accent" />
+    {/snippet}
+    <p class="hint">
+      The most specific scope in the precedence chain (Client &gt; Group &gt; Network &gt; Global): a
+      field set on a client's own identity wins over every scope shown below. Strong ClientID
+      lifecycle (generate, add, display, copy, regenerate, revoke, DoH path, DoT/DoQ SNI), group
+      membership, per-client policy fields, and per-domain overrides are all managed on the
+      <button type="button" class="link-btn" onclick={() => router.navigate("clients")}>Clients</button> page,
+      next to each identity they apply to -- not duplicated here. Use <strong>Explain Effective
+      Policy</strong> (right) to see one real client's fully resolved, field-by-field effective DNS
+      behavior across every scope, including its own client-level overrides.
+    </p>
+  </Panel>
 
   <div class="layout">
     <div class="scopes">
@@ -204,11 +308,16 @@
         {/snippet}
         <p class="hint">
           The default policy every client falls back to unless a network, group, or client layer
-          overrides a field. Enforced live by this appliance's own DNS runtime.
+          overrides a field. Enforced live by this appliance's own DNS runtime. This is the root
+          scope -- it has nothing to inherit from; an unset field here falls back to this
+          appliance's built-in default behavior.
         </p>
         {#if globalLoadError}<p class="error" role="alert">{globalLoadError}</p>{/if}
         {#if globalPolicy}
           <div class="policy-card">
+            <h4>Selected scope: Global -- effective DNS behavior</h4>
+            {@render scopeTable(null, globalPolicy, false)}
+            <h4>Overrides at this scope</h4>
             <PolicyEditor layer={globalPolicy} onSave={(l) => api.putGlobalPolicy(l).then((res) => { refreshGlobal(); return res; })} />
           </div>
         {:else if !globalLoadError}
@@ -255,6 +364,16 @@
                 </div>
                 {#if expandedNetworkId === n.network_id}
                   <div class="policy-card">
+                    <h4>Selected scope: Network {n.cidr}</h4>
+                    <p class="hint">
+                      Inherited from Global unless overridden here. Effective DNS behavior below
+                      assumes no Group layer also applies to a given client -- Group outranks
+                      Network, so a client belonging to a group with its own value for a field
+                      gets the group's value instead; see Explain (right) for one real client's
+                      true fully-resolved result.
+                    </p>
+                    {@render scopeTable(globalPolicy, n.policy, true)}
+                    <h4>Overrides at this scope</h4>
                     <PolicyEditor
                       layer={n.policy}
                       onSave={(l) => api.putNetworkPolicy(n.network_id, l).then((res) => { refreshNetworks(); return res; })}
@@ -298,6 +417,16 @@
                 </div>
                 {#if expandedGroupId === g.group_id}
                   <div class="policy-card">
+                    <h4>Selected scope: Group {g.name}</h4>
+                    <p class="hint">
+                      Inherited from Global unless overridden here. Effective DNS behavior below
+                      is what a member client gets for a field this group sets -- if that client
+                      belongs to more than one group, the highest-priority group's value for that
+                      field wins instead; see Explain (right) for one real client's true
+                      fully-resolved result.
+                    </p>
+                    {@render scopeTable(globalPolicy, g.policy, true)}
+                    <h4>Overrides at this scope</h4>
                     <PolicyEditor layer={g.policy} onSave={(l) => api.putGroupPolicy(g.group_id, l).then((res) => { refreshGroups(); return res; })} />
                   </div>
                 {/if}
@@ -364,7 +493,6 @@
 
 <style>
   .clients-access { display: flex; flex-direction: column; gap: 1rem; }
-  .scope-note { font-size: 0.85rem; opacity: 0.75; max-width: 52rem; }
   .hint { font-size: 0.85rem; opacity: 0.75; max-width: 44rem; }
   .empty { font-size: 0.85rem; opacity: 0.6; font-style: italic; }
 
@@ -373,7 +501,15 @@
 
   .badge { background: var(--nav-hover-bg); padding: 0.1rem 0.55rem; border-radius: 999px; font-size: 0.72rem; opacity: 0.85; white-space: nowrap; }
 
-  .policy-card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--bg, transparent); }
+  .policy-card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--bg, transparent); display: flex; flex-direction: column; gap: 0.6rem; }
+  .policy-card h4 { margin: 0.4rem 0 0; font-size: 0.85rem; }
+  .policy-card h4:first-child { margin-top: 0; }
+  .table-wrap { overflow-x: auto; }
+  .effective-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+  .effective-table th, .effective-table td { text-align: left; padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .effective-table td:last-child { white-space: normal; }
+  .effective-table tr.row-overridden { background: var(--attention-bg, transparent); }
+  .badge.source-default { opacity: 0.6; }
   .add-form { border: 1px dashed var(--border); border-radius: 8px; padding: 0.75rem 1rem; display: flex; flex-direction: column; gap: 0.5rem; max-width: 22rem; }
   .add-form label { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.85rem; }
 
