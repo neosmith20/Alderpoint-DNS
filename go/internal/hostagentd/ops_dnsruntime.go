@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -222,6 +223,53 @@ func adoptFromPIDFile(path string) *trackedProcess {
 	return &trackedProcess{pid: pid}
 }
 
+// dnsdistAPIKeyPattern extracts the apiKey="..." value dnscompile's own
+// webserver() block writes into the compiled dnsdist config (see
+// dnscompile.go's `w("  apiKey=%s", luaString(in.DnsdistAPIKey))`).
+var dnsdistAPIKeyPattern = regexp.MustCompile(`(?m)^\s*apiKey\s*=\s*"((?:[^"\\]|\\.)*)"\s*$`)
+
+// dnsdistWebserverPortPattern extracts the port from dnscompile's own
+// `webserver("127.0.0.1:<port>")` line, compiled right before apiKey=.
+var dnsdistWebserverPortPattern = regexp.MustCompile(`(?m)^\s*webserver\("[^:]+:(\d+)"\)`)
+
+// adoptDnsdistAPIKeyFromLiveConfig recovers the webserver API key from
+// whatever dnsdist config is CURRENTLY on disk at cfg.DnsdistLivePath --
+// the same real, evidence-based recovery adoptFromPIDFile already does
+// for the running process itself. Real gap this closes: dnsdistAPIKey
+// is deliberately in-memory-only on this side (see dnsRuntimeState's
+// own doc comment) -- correct for what it was designed to solve (never
+// re-deriving a secret the web side is the source of truth for), but
+// a real, previously-undiscovered consequence is that EVERY hostagent
+// restart (which happens on every routine redeploy, not just a rare
+// event) wipes this side's own knowledge back to empty, even though
+// dnsdist itself is still running fine with the same key it always
+// had and the web side's own persisted key (see
+// dnsruntime.LoadOrCreateDnsdistAPIKey) hasn't changed either -- Top
+// Upstream Resolvers telemetry silently went unavailable after every
+// such restart until some unrelated real promote happened to
+// re-establish it. An empty/unreadable/keyless config file yields ""
+// (adopted honestly as "not known yet", the existing safe default),
+// never an error -- this is a best-effort recovery, not a required
+// one.
+func adoptDnsdistAPIKeyFromLiveConfig(path string) (key string, port int) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", 0
+	}
+	m := dnsdistAPIKeyPattern.FindSubmatch(data)
+	if m == nil {
+		return "", 0
+	}
+	key = strings.ReplaceAll(string(m[1]), `\"`, `"`)
+	port = 8083 // dnscompile's own real, only-ever-used dnsdist API port (see fetchUpstreamStats's own same fallback)
+	if wm := dnsdistWebserverPortPattern.FindSubmatch(data); wm != nil {
+		if p, err := strconv.Atoi(string(wm[1])); err == nil {
+			port = p
+		}
+	}
+	return key, port
+}
+
 // loadOrGenerateRNDCKey returns the same rndc HMAC key across hostagent
 // restarts -- see RegisterDNSRuntimeOps's own doc comment for why a
 // fresh random key on every restart breaks rndc reconfig against an
@@ -375,6 +423,15 @@ func RegisterDNSRuntimeOps(s *Server, cfg DNSRuntimeConfig) (func(), error) {
 	// duplicate-process incident this prevents.
 	st.bind = adoptFromPIDFile(bindPIDFile(cfg))
 	st.dnsdist = adoptFromPIDFile(dnsdistPIDFile(cfg))
+	// Recover the webserver API key from whatever config the adopted
+	// dnsdist process is actually running with -- see
+	// adoptDnsdistAPIKeyFromLiveConfig's own doc comment. Only
+	// meaningful when a process was actually adopted above; an empty
+	// key on a genuine cold start is the existing, already-safe
+	// default (st is zero-valued).
+	if st.dnsdist.alive() {
+		st.dnsdistAPIKey, st.dnsdistAPIPort = adoptDnsdistAPIKeyFromLiveConfig(cfg.DnsdistLivePath)
+	}
 
 	s.Register(hostagent.OpDNSRuntimeStatus, func(ctx context.Context, params json.RawMessage) (any, error) {
 		st.mu.Lock()
