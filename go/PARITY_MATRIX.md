@@ -15,6 +15,22 @@ by Alex's own hands-on acceptance, never by an agent. No agent may ever write a 
 accepted column other than what an agent already correctly wrote there before this note existed
 (`not started`) -- this pass changed none of them.
 
+**2026-09-03: independent visual/functional QA pass -- 9 unconfirmed-delete gaps closed, a
+broken theme-toggle icon fixed (and a regression it introduced caught and fixed the same
+session), two pages' stuck-forever "Loading…" states fixed, deployed live (commits
+`d39f78c`/`989e0fa`).** Full account in `AGENT_PROGRESS.md`'s own 2026-09-03 entry. Not a
+per-row content refresh -- the real, actionable finding was that Local DNS record deletion
+(the real 48-record hand-curated production list), Blocklist category/subscription
+deletion, Custom Rules deletion, Upstream/domain-routing deletion, Notification
+provider/subscription deletion, all four Policy Profile kinds' deletion, Backup/Secret-
+Backup deletion, and "Revoke all other sessions" had **zero confirmation of any kind**
+before this pass, on pages spanning Local DNS, Blocklists, Filters, DNS Settings,
+Notifications, Policy Profiles, Backup & Restore, and Administration -- all now gated by
+the shared `ConfirmDialog` already used elsewhere. Also disclosed: `AGENT_PROGRESS.md`
+itself had gone undocumented for the 12 commits this file's own last full refresh
+(`f5cb6d2`) already covered (`06ade22`..`cd1c797`) -- a real documentation gap, not
+backfilled with invented detail since this session didn't do that work.
+
 **2026-09-02: independent product-audit verification pass (agent-verified evidence added; no Owner
 accepted values touched).** Run against a source-of-truth stack of: (1) the real V1.1.1 package
 already installed as reference, (2) the actual live V2 appliance (`:8443`, SHA `83fbbb4`), (3) the
