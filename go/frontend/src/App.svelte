@@ -306,7 +306,14 @@
   .shell.app-shell { height: 100vh; overflow: hidden; }
   header { display: flex; justify-content: space-between; align-items: center; padding: 1rem 0; }
   h1 { font-size: 1.2rem; display: flex; align-items: center; gap: 0.6rem; }
-  .theme-toggle { background: transparent; display: inline-flex; align-items: center; justify-content: center; }
+  /* color: var(--fg) overrides the global button rule's accent-fg default
+     (meant for text on a filled accent-colored button) -- this button is
+     transparent, and accent-fg is near-black in dark mode, rendering the
+     sun/moon icon all but invisible against the dark navy page background
+     (a real, screenshot-caught regression from swapping emoji for the SVG
+     icon: emoji carried their own color, this button's default text color
+     never did). */
+  .theme-toggle { background: transparent; color: var(--fg); display: inline-flex; align-items: center; justify-content: center; }
   .centered { display: flex; justify-content: center; padding-top: 3rem; }
   .auth-form { display: flex; flex-direction: column; gap: 0.75rem; width: 22rem; max-width: 90vw; background: var(--card-bg); padding: 1.5rem; border-radius: 8px; border: 1px solid var(--border); }
   .auth-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; }
