@@ -71,6 +71,11 @@
   function dohUri(): string {
     return `https://${clientAddress}:${settings?.doh_port ?? 443}${settings?.doh_path ?? "/dns-query"}`;
   }
+  function doh3Uri(): string {
+    const port = settings?.doh3_port ?? 443;
+    const portSuffix = port === 443 ? "" : `:${port}`;
+    return `https://${clientAddress}${portSuffix}${settings?.doh_path ?? "/dns-query"}`;
+  }
 
   const enabledProtocols = $derived((["plain", "dot", "doh", "doq", "doh3", "dnscrypt"] as ProtocolKey[]).filter(protocolEnabled));
 
@@ -95,6 +100,21 @@
     android: ["plain", "dot"],
     ios: ["plain", "dot", "doh"],
   };
+
+  // No mainstream OS has native/profile-based DoQ, DoH3, or DNSCrypt
+  // support, so none of them appear in DEVICE_PROTOCOLS above for any
+  // device (a real, deliberate limit, not an oversight -- see that
+  // const's own doc comment). The real gap that closed here: a
+  // protocol enabled in Encryption but absent from every device tab
+  // used to be genuinely invisible on this page -- the status summary
+  // at top would list it as "enabled", but clicking through every
+  // device tab never showed how to actually use it. This surfaces any
+  // such protocol explicitly, with the same real connection details
+  // Encryption's own manual-setup section already computes, plus a
+  // link back there for the complete instructions (a client capable of
+  // DoQ/DoH3/DNSCrypt is, by definition, not using a device-native
+  // setting this page's own device tabs cover).
+  const uncoveredEnabledProtocols = $derived(enabledProtocols.filter((p) => !DEVICE_PROTOCOLS[activeDevice].includes(p)));
 </script>
 
 <PageHeader
@@ -195,6 +215,47 @@
       </div>
     {/each}
   </div>
+
+  {#if uncoveredEnabledProtocols.length > 0}
+    <div class="protocol-list other-protocols">
+      <p class="hint section-note">
+        Also enabled on this appliance, but with no {DEVICES.find((d) => d.key === activeDevice)?.label}-native or
+        profile-based setting to walk through -- use a client application that specifically
+        supports the protocol instead:
+      </p>
+      {#each uncoveredEnabledProtocols as p (p)}
+        <div class="card protocol-card">
+          <div class="card-head">
+            <h3>{PROTOCOL_LABEL[p]}</h3>
+            {#if protocolWorks(p)}
+              <StatusBadge label="Works now" tone="healthy" />
+            {:else}
+              <StatusBadge label="Certificate issue" tone="warning" />
+            {/if}
+          </div>
+          {#if p === "doq"}
+            <p class="value-row"><code>{doqUri()}</code> <button type="button" class="mini" onclick={() => copy(doqUri())}>Copy</button></p>
+            <p class="hint">Needs a DoQ-capable client app (e.g. dnscrypt-proxy, AdGuard's own apps) -- no OS has a built-in DoQ setting.</p>
+          {:else if p === "doh3"}
+            <p class="value-row"><code>{doh3Uri()}</code> <button type="button" class="mini" onclick={() => copy(doh3Uri())}>Copy</button></p>
+            <p class="hint">Same URL as DoH -- a client that specifically supports HTTP/3 upgrades automatically; everything else keeps using HTTP/2 against the same address.</p>
+          {:else if p === "dnscrypt"}
+            {#if settings?.dnscrypt_stamp}
+              <p class="value-row"><code>{settings.dnscrypt_stamp}</code> <button type="button" class="mini" onclick={() => copy(settings?.dnscrypt_stamp ?? "")}>Copy</button></p>
+            {/if}
+            <p class="hint">
+              Paste the stamp above into any DNSCrypt client that accepts one, or configure manually:
+              server <code>{clientAddress}:{settings?.dnscrypt_port}</code>, provider name
+              <code>{settings?.dnscrypt_provider_name}</code>. Doesn't use this appliance's TLS
+              certificate at all -- its own provider key is the trust anchor, so the certificate
+              warning above doesn't apply to it.
+            </p>
+          {/if}
+          <button type="button" class="secondary small" onclick={() => router.navigate("encryption")}>Full manual setup on Encryption</button>
+        </div>
+      {/each}
+    </div>
+  {/if}
 {/if}
 
 <style>
@@ -225,4 +286,6 @@
     background: var(--btn-bg); color: var(--accent-fg); font-weight: 650; text-decoration: none; font-size: 0.85rem;
   }
   .mini-btn:hover { background: var(--btn-bg-hover); }
+  .section-note { max-width: 46rem; }
+  .protocol-card button.secondary.small { min-height: auto; padding: 0.35rem 0.7rem; font-size: 0.8rem; margin-top: 0.2rem; }
 </style>
