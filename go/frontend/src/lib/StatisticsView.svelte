@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { api, type AnalyticsSettings } from "../api";
+  import { router } from "../router.svelte";
 
   // Statistics. Export is real: a genuine download of this appliance's
   // own Go-native query_events table, summarized the same way the
@@ -98,6 +99,23 @@
 
   onMount(loadOverview);
 
+  // BIND Cache Effectiveness -- moved here from the Dashboard (2026-09-03,
+  // owner-requested: it's a point-in-time cache health reading, not a
+  // query-history summary, and belongs alongside the appliance's other
+  // real statistics rather than crowding the Dashboard's own activity
+  // cards). Same api.cacheStatus() the Cache page itself uses.
+  let cacheStatus = $state<Awaited<ReturnType<typeof api.cacheStatus>> | null>(null);
+  let cacheError = $state("");
+  async function loadCache() {
+    try {
+      cacheStatus = await api.cacheStatus();
+      cacheError = "";
+    } catch (err) {
+      cacheError = err instanceof Error ? err.message : String(err);
+    }
+  }
+  onMount(loadCache);
+
   let confirmText = $state("");
   let clearing = $state(false);
   let clearError = $state("");
@@ -180,6 +198,42 @@
           </tbody>
         </table>
         {#if topDomains.aggregation_note}<p class="hint">{topDomains.aggregation_note}</p>{/if}
+      {/if}
+    </div>
+  </div>
+
+  <h3 class="section-heading">BIND Cache Effectiveness</h3>
+  <div class="grid-2col">
+    <div class="card wide-card">
+      <div class="card-head">
+        <h3>Real-time cache health</h3>
+        <button class="link" onclick={() => router.navigate("cache")}>Manage</button>
+      </div>
+      {#if cacheError}
+        <p class="degraded-note" role="status">Unable to load cache status: {cacheError}</p>
+      {:else if !cacheStatus}
+        <p class="hint">Loading…</p>
+      {:else if cacheStatus.bind.length === 0}
+        <p class="hint">No BIND contexts configured.</p>
+      {:else}
+        {#each cacheStatus.bind as ctx (ctx.name)}
+          <div class="cache-ctx">
+            <div class="card-head"><strong>{ctx.name}</strong>{#if cacheStatus.bind.length > 1}<span class="hint">{ctx.reachable ? "reachable" : "unreachable"}</span>{/if}</div>
+            {#if !ctx.cache_stats || !ctx.cache_stats.available}
+              <p class="hint">Unavailable: {ctx.cache_stats?.error || "BIND's statistics channel did not respond."}</p>
+            {:else}
+              {@const hr = ctx.cache_stats.hit_ratio ?? 0}
+              <div class="outcome-row">
+                <div class="outcome-head"><span>Hit rate</span><span>{(hr * 100).toFixed(1)}%</span></div>
+                <span class="meter"><span style="width: {Math.min(hr * 100, 100).toFixed(1)}%"></span></span>
+              </div>
+              <p class="hint">Hits / misses: {ctx.cache_stats.hits.toLocaleString()} / {ctx.cache_stats.misses.toLocaleString()}</p>
+              {#if ctx.cache_stats.cache_size_bytes !== null}
+                <p class="hint">Cache memory: {(ctx.cache_stats.cache_size_bytes / 1048576).toFixed(1)} MB</p>
+              {/if}
+            {/if}
+          </div>
+        {/each}
       {/if}
     </div>
   </div>
@@ -283,6 +337,10 @@
   .settings-form label.row { flex-direction: row; align-items: center; gap: 0.5rem; }
   .settings-form input[type="number"] { width: 10rem; }
   .card h3 { margin: 0; }
+  .card-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.4rem; }
+  .link { background: transparent; color: var(--accent); border: none; padding: 0; font-size: 0.85rem; cursor: pointer; text-decoration: underline; }
+  .cache-ctx { margin-bottom: 0.75rem; }
+  .cache-ctx:last-child { margin-bottom: 0; }
   .hint { font-size: 0.85rem; opacity: 0.75; margin: 0; }
   .big { margin: 0; font-size: 1.9rem; font-weight: 700; }
   .of { font-size: 1rem; font-weight: 400; opacity: 0.7; }

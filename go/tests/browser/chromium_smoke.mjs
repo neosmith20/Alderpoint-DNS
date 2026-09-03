@@ -297,11 +297,10 @@ async function main() {
     await page.click(".customize-btn");
     await page.waitForSelector(".customize-panel", { timeout: 2000 });
     const cardLabelsBefore = await page.$$eval(".customize-panel li label", (els) => els.map((e) => e.textContent.trim()));
-    // 16 real customizable cards as of the 2026-09-02/03 dashboard grid-density
-    // pass (dashboardCards.ts's own ALL_CARDS) -- this assertion still hardcoded
-    // the pre-pass count of 7. The panel itself was never broken; only this
-    // stale expectation was wrong.
-    check("customize panel lists all 16 cards", cardLabelsBefore.length === 16, cardLabelsBefore.join(","));
+    // 15 real customizable cards (dashboardCards.ts's own ALL_CARDS) --
+    // BIND Cache Effectiveness moved to the Statistics page (2026-09-03,
+    // owner-requested) and no longer has a Dashboard card of its own.
+    check("customize panel lists all 15 cards", cardLabelsBefore.length === 15, cardLabelsBefore.join(","));
     // Hide "Top Blocked Domains".
     const checkboxes = await page.$$(".customize-panel input[type=checkbox]");
     const labels = await page.$$eval(".customize-panel li label", (els) => els.map((e) => e.textContent.trim()));

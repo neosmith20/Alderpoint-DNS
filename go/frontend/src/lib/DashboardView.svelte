@@ -70,18 +70,6 @@
     }
   }
 
-  let cacheStatus = $state<Awaited<ReturnType<typeof api.cacheStatus>> | null>(null);
-  let cacheError = $state("");
-  async function loadCache() {
-    try {
-      cacheStatus = await api.cacheStatus(router.signal());
-      cacheError = "";
-    } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") return;
-      cacheError = err instanceof Error ? err.message : String(err);
-    }
-  }
-
   let topClients = $state<Awaited<ReturnType<typeof api.topClients>> | null>(null);
   async function loadTopClients() {
     try {
@@ -322,7 +310,6 @@
     loadUpstreamsMini();
     loadTopUpstreams();
     loadProtection();
-    loadCache();
     loadTopClients();
     loadBreakdowns();
     loadRecentActivity();
@@ -518,41 +505,8 @@
             {/each}
           {/if}
         </div>
-      {:else if card.id === "cache"}
-        <div class="card grid-card">
-          <div class="card-head">
-            <h3>BIND Cache Effectiveness</h3>
-            <button class="link" onclick={() => router.navigate("cache")}>Manage</button>
-          </div>
-          {#if cacheError}
-            <p class="degraded-note" role="status">Unable to load cache status: {cacheError}</p>
-          {:else if !cacheStatus}
-            <p class="hint">Loading…</p>
-          {:else if cacheStatus.bind.length === 0}
-            <p class="hint">No BIND contexts configured.</p>
-          {:else}
-            {#each cacheStatus.bind as ctx (ctx.name)}
-              <div class="cache-ctx">
-                <div class="card-head"><strong>{ctx.name}</strong>{#if cacheStatus.bind.length > 1}<span class="hint">{ctx.reachable ? "reachable" : "unreachable"}</span>{/if}</div>
-                {#if !ctx.cache_stats || !ctx.cache_stats.available}
-                  <p class="hint">Unavailable: {ctx.cache_stats?.error || "BIND's statistics channel did not respond."}</p>
-                {:else}
-                  {@const hr = ctx.cache_stats.hit_ratio ?? 0}
-                  <div class="outcome-row">
-                    <div class="outcome-head"><span>Hit rate</span><span>{(hr * 100).toFixed(1)}%</span></div>
-                    <span class="meter"><span style="width: {Math.min(hr * 100, 100).toFixed(1)}%"></span></span>
-                  </div>
-                  <p class="hint">Hits / misses: {ctx.cache_stats.hits.toLocaleString()} / {ctx.cache_stats.misses.toLocaleString()}</p>
-                  {#if ctx.cache_stats.cache_size_bytes !== null}
-                    <p class="hint">Cache memory: {(ctx.cache_stats.cache_size_bytes / 1048576).toFixed(1)} MB</p>
-                  {/if}
-                {/if}
-              </div>
-            {/each}
-          {/if}
-        </div>
       {:else if card.id === "recent-activity"}
-        <div class="card grid-card">
+        <div class="card grid-card grid-card-2x">
           <div class="card-head">
             <h3>Recent Activity</h3>
             <button class="link" onclick={() => router.navigate("analytics")}>View all</button>
@@ -807,6 +761,13 @@
      width row with most of that width empty). */
   .wide-card { flex: 1 1 100%; min-width: 20rem; }
   .grid-card { flex: 1 1 24rem; min-width: 20rem; }
+  /* Recent Activity's own 5-column table (Time/Client/Domain/Type/Status)
+     needs real room to be legible rather than lean on truncation alone --
+     owner-reported ("cut off, can't see what is going on"). Roughly two
+     grid-card widths plus the gap between them, so it claims two slots in
+     the flex-wrap layout instead of one; still wraps to full-width alone
+     on narrow viewports like every other grid-card. */
+  .grid-card-2x { flex-basis: 49rem; min-width: 41rem; }
   .card h3 { margin: 0 0 0.4rem; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.03em; opacity: 0.75; }
   .card-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem; }
   .scope { text-transform: none; font-weight: 400; opacity: 0.7; }
