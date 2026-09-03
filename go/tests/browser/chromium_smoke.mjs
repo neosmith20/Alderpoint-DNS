@@ -1047,14 +1047,27 @@ async function main() {
     // silently -- a real trap this test used to walk straight into,
     // not a product bug: a provider legitimately can, and here should,
     // exist with no credential set yet.
-    await page.select(".add-form select", "slack");
-    await page.type('.add-form input[aria-label="Display name"]', "Ops Slack");
+    //
+    // Add Destination now opens a modal (2026-09-03: the always-embedded
+    // inline form was moved into a Modal per the structural-redesign
+    // pass) rather than exposing the create form permanently on the page.
+    async function openAddDestinationModal() {
+      const btn = await page.evaluateHandle(() => [...document.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Add Destination"));
+      const el = btn.asElement();
+      if (el) await el.click();
+      return el !== null;
+    }
+    check("Add Destination button opens the create-provider modal", await openAddDestinationModal());
+    await page.waitForSelector('input[aria-label="Display name"]', { timeout: 3000 });
+    await page.select(".modal-form select", "slack");
+    await page.type('input[aria-label="Display name"]', "Ops Slack");
     await Promise.all([
       page.waitForFunction(() => document.querySelectorAll(".data-grid tbody .actions").length > 0, { timeout: 3000 }),
-      page.click(".add-form button[type=submit]"),
+      page.click(".modal-form button[type=submit]"),
     ]);
     let notificationRows = await page.$$eval(".data-grid tbody tr", (rows) => rows.length);
     check("adding a notification provider adds a real row", notificationRows === 1, `rows=${notificationRows}`);
+    check("the modal closes itself after a fully-successful create", (await page.$(".modal-form")) === null);
     const providerRowText = await page.$eval(".data-grid tbody", (el) => el.textContent);
     check("notification provider row shows the real display name and an honest 'Not set' credential state (no hostagent in this fixture)", providerRowText.includes("Ops Slack") && providerRowText.includes("Not set"), providerRowText);
 
@@ -1067,17 +1080,24 @@ async function main() {
     // this hostagent-less fixture makes the secret-seal call genuinely
     // fail, but the provider row itself was still really created --
     // the grid must still show it (not silently keep the pre-creation
-    // list) alongside a clear error explaining exactly what failed.
-    await page.type('.add-form input[aria-label="Display name"]', "No Hostagent Here");
-    await page.type(".add-form [data-secret-input]", "https://hooks.slack.example/will-fail");
+    // list) alongside a clear error explaining exactly what failed. The
+    // modal must also stay open on this partial failure (there is
+    // nothing to reopen it with once the error is dismissed off-screen).
+    check("Add Destination button reopens the modal for a second provider", await openAddDestinationModal());
+    await page.waitForSelector('input[aria-label="Display name"]', { timeout: 3000 });
+    await page.type('input[aria-label="Display name"]', "No Hostagent Here");
+    await page.type("[data-secret-input]", "https://hooks.slack.example/will-fail");
     await Promise.all([
       page.waitForFunction(() => document.querySelectorAll(".data-grid tbody tr").length === 2, { timeout: 3000 }),
-      page.click(".add-form button[type=submit]"),
+      page.click(".modal-form button[type=submit]"),
     ]);
     const rowsAfterFailedSecret = await page.$$eval(".data-grid tbody tr", (rows) => rows.length);
     check("a provider whose credential-seal call fails still shows its real, already-created row (not silently dropped)", rowsAfterFailedSecret === 2, `rows=${rowsAfterFailedSecret}`);
-    const createErrorText = await page.$eval(".notifications .error", (el) => el.textContent).catch(() => "");
+    const createErrorText = await page.$eval(".modal .error", (el) => el.textContent).catch(() => "");
     check("the real partial-failure is explained, not hidden behind a generic error", createErrorText.includes("No Hostagent Here") && createErrorText.includes("credential"), createErrorText);
+    check("the modal stays open on a partial (credential-seal) failure so the error is visible", (await page.$(".modal-form")) !== null);
+    await page.click(".modal__close");
+    await new Promise((r) => setTimeout(r, 150));
 
     // --- DataGrid mechanics (sort/resize/persist), proven here against
     // this page's real "notification-providers" grid -- moved off

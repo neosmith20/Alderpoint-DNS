@@ -13,6 +13,7 @@
   import DataGrid from "./DataGrid.svelte";
   import type { Column } from "./datagrid";
   import ConfirmDialog from "./ui/ConfirmDialog.svelte";
+  import Modal from "./ui/Modal.svelte";
 
   // Notifications. Real native-Go storage for provider metadata
   // (internal/notifications). Credentials are real too (2026-08-28):
@@ -45,6 +46,7 @@
   let smtpUsername = $state("");
   let createError = $state("");
   let createBusy = $state(false);
+  let addProviderOpen = $state(false);
 
   let rowBusy = $state<Record<string, boolean>>({});
   let rowStatus = $state<Record<string, string>>({});
@@ -198,6 +200,8 @@
       await refresh();
       if (secretErr) {
         createError = `Provider "${p.display_name}" was created, but setting its credential failed: ${secretErr instanceof ApiError ? secretErr.message : String(secretErr)}`;
+      } else {
+        addProviderOpen = false;
       }
     } catch (err) {
       createError = err instanceof ApiError ? err.message : String(err);
@@ -292,32 +296,10 @@
 
   {#if loadError}<p class="error" role="alert">{loadError}</p>{/if}
 
-  <h3>Destinations</h3>
-  <form class="add-form" onsubmit={createProvider}>
-    <div class="add-form-row">
-      <select bind:value={kind}>
-        <option value="webhook">Webhook</option>
-        <option value="email_smtp">Email (SMTP)</option>
-        <option value="pushover">Pushover</option>
-        <option value="slack">Slack</option>
-      </select>
-      <input placeholder="Display name" bind:value={displayName} aria-label="Display name" required />
-    </div>
-    {#if kind === "email_smtp"}
-      <div class="add-form-row">
-        <input placeholder="SMTP host" bind:value={smtpHost} aria-label="SMTP host" required />
-        <input type="number" placeholder="Port" bind:value={smtpPort} aria-label="SMTP port" min="1" max="65535" required />
-        <input placeholder="From address" bind:value={smtpFrom} aria-label="From address" required />
-        <input placeholder="To address" bind:value={smtpTo} aria-label="To address" required />
-        <input placeholder="Username (optional)" bind:value={smtpUsername} aria-label="SMTP username" />
-      </div>
-    {/if}
-    <div class="add-form-row">
-      <input placeholder={secretLabel[kind]} bind:value={secretValue} aria-label={secretLabel[kind]} data-secret-input />
-      <button type="submit" disabled={createBusy}>{createBusy ? "Adding…" : "Add provider"}</button>
-    </div>
-  </form>
-  {#if createError}<p class="error" role="alert">{createError}</p>{/if}
+  <div class="section-head">
+    <h3>Destinations</h3>
+    <button type="button" onclick={() => (addProviderOpen = true)}>Add Destination</button>
+  </div>
 
   <DataGrid gridId="notification-providers" {columns} rows={providers} rowKey={(p) => p.provider_id} emptyMessage="No notification providers yet.">
     {#snippet cell(p, colKey)}
@@ -442,6 +424,36 @@
   />
 {/if}
 
+{#if addProviderOpen}
+  <Modal title="Add Destination" onClose={() => (addProviderOpen = false)}>
+    <form class="modal-form" onsubmit={createProvider}>
+      <label>
+        Kind
+        <select bind:value={kind}>
+          <option value="webhook">Webhook</option>
+          <option value="email_smtp">Email (SMTP)</option>
+          <option value="pushover">Pushover</option>
+          <option value="slack">Slack</option>
+        </select>
+      </label>
+      <label>Display name <input required aria-label="Display name" bind:value={displayName} placeholder="e.g. Ops Slack channel" /></label>
+      {#if kind === "email_smtp"}
+        <label>SMTP host <input required bind:value={smtpHost} placeholder="smtp.example.com" /></label>
+        <label>SMTP port <input required type="number" bind:value={smtpPort} /></label>
+        <label>From address <input required bind:value={smtpFrom} placeholder="alerts@example.com" /></label>
+        <label>To address <input required bind:value={smtpTo} placeholder="oncall@example.com" /></label>
+        <label>Username <input bind:value={smtpUsername} placeholder="optional" /></label>
+      {/if}
+      <label>{secretLabel[kind]} <input data-secret-input bind:value={secretValue} placeholder={secretLabel[kind]} /></label>
+      <div class="form-actions">
+        <button type="submit" disabled={createBusy}>{createBusy ? "Adding…" : "Add Destination"}</button>
+        <button type="button" class="secondary" onclick={() => (addProviderOpen = false)}>Cancel</button>
+      </div>
+      {#if createError}<p class="error" role="alert">{createError}</p>{/if}
+    </form>
+  </Modal>
+{/if}
+
 <style>
   .notifications { display: flex; flex-direction: column; gap: 1rem; }
   .scope-note { font-size: 0.85rem; opacity: 0.75; max-width: 50rem; }
@@ -450,9 +462,13 @@
     padding: 0.75rem 1rem; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-elevated);
   }
   .status-summary .attention { color: var(--warning); }
-  .add-form { display: flex; flex-direction: column; gap: 0.5rem; }
+  .section-head { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-top: 0.5rem; }
+  .section-head h3 { margin: 0; }
   .add-form-row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
-  .add-form input { flex: 1; min-width: 10rem; }
+  .add-form-row input { flex: 1; min-width: 10rem; }
+  .modal-form { display: flex; flex-direction: column; gap: 0.75rem; }
+  .modal-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; }
+  .form-actions { display: flex; gap: 0.5rem; }
   .actions { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
   .row-status { font-size: 0.8rem; opacity: 0.8; margin: 0.25rem 0 0; }
   .error { color: var(--badge-danger-fg); }

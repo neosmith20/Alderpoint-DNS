@@ -65,12 +65,21 @@ async function main() {
     check("Notifications page renders real content", (await page.$("#notifications-heading")) !== null);
 
     // Create a real webhook provider pointed at our disposable receiver
-    // (kind defaults to "webhook").
-    await page.type('.add-form input[aria-label="Display name"]', "QA Webhook");
-    await page.type(".add-form input[data-secret-input]", webhookUrl);
+    // (kind defaults to "webhook"). Add Destination now opens a modal
+    // (2026-09-03: the always-embedded inline form was moved into a
+    // Modal per the structural-redesign pass) rather than exposing the
+    // create form inline on the page.
+    const addDestinationBtn = await page.evaluateHandle(() =>
+      [...document.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Add Destination"),
+    );
+    check("Add Destination button exists", addDestinationBtn.asElement() !== null);
+    await addDestinationBtn.asElement()?.click();
+    await page.waitForSelector('input[aria-label="Display name"]', { timeout: 3000 });
+    await page.type('input[aria-label="Display name"]', "QA Webhook");
+    await page.type("input[data-secret-input]", webhookUrl);
     await Promise.all([
       page.waitForFunction(() => document.querySelectorAll(".data-grid tbody tr").length > 0, { timeout: 3000 }),
-      page.click(".add-form button[type=submit]"),
+      page.click('.modal-form button[type=submit]'),
     ]);
     const rows = await page.$$eval(".data-grid tbody tr", (rows) => rows.length);
     check("creating a webhook provider adds a real row", rows === 1, `rows=${rows}`);
