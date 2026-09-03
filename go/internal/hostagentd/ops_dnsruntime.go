@@ -101,7 +101,12 @@ func (c *DNSRuntimeConfig) applyDefaults() {
 		c.HealthCheckRetryDelay = 200 * time.Millisecond
 	}
 	if c.DnsdistAPITimeout <= 0 {
-		c.DnsdistAPITimeout = 3 * time.Second
+		// 3s measured too tight for comfort once the real response size
+		// was found to scale with the compiled ruleset (see
+		// fetchUpstreamStats's own doc comment -- 26+ MB on the real
+		// live appliance's real blocklist count, ~0.3s to fetch+parse
+		// today but with real headroom needed as that count grows).
+		c.DnsdistAPITimeout = 10 * time.Second
 	}
 }
 

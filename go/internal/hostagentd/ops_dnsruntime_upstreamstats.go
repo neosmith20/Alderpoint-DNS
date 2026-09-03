@@ -119,21 +119,35 @@ func fetchUpstreamStats(ctx context.Context, apiKey string, apiPort int, timeout
 		return &UpstreamStatsResult{Available: false, Reason: fmt.Sprintf("dnsdist webserver API unreachable: %v", err)}, nil
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if err != nil {
-		return nil, fmt.Errorf("reading dnsdist API response: %w", err)
-	}
 	if resp.StatusCode != http.StatusOK {
-		return &UpstreamStatsResult{Available: false, Reason: fmt.Sprintf("dnsdist webserver API returned HTTP %d", resp.StatusCode)}, nil
+		// Non-OK bodies are small (an error page/message), never the huge
+		// real payload below -- fine to buffer in full, bounded small.
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return &UpstreamStatsResult{Available: false, Reason: fmt.Sprintf("dnsdist webserver API returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(errBody)))}, nil
 	}
 
 	// Real shape confirmed live against the actual installed dnsdist
-	// 2.1.1 binary (a disposable throwaway instance, webserver enabled,
-	// queried with a real curl -- not guessed from documentation): a
-	// single JSON object whose own "servers" key holds the per-backend
-	// array, matching dnsdistAPIServersResponse exactly.
+	// 2.1.1 binary: a single JSON object whose own "servers" key holds
+	// the per-backend array, matching dnsdistAPIServersResponse exactly
+	// -- but NOT small. A real, previously-undiscovered defect this
+	// fixes: this endpoint's real response also inline-dumps dnsdist's
+	// entire compiled ruleset (acl/rules/response-rules/etc, alongside
+	// the "servers" key this package actually wants) -- on the real
+	// live appliance, with 854k+ real blocklist rules compiled in, that
+	// is a genuine 26+ MB document, not the few KB a "per-server stats"
+	// endpoint name suggests. The previous 4 MiB io.ReadAll(io.LimitReader(...))
+	// silently truncated the raw bytes mid-document on every real poll
+	// against this scale of ruleset, which json.Unmarshal then failed
+	// to parse as "unexpected end of JSON input" -- the exact live
+	// symptom that kept Top Upstream Resolvers empty even after the
+	// separate API-key-persistence fix landed. Decoding straight from
+	// the response stream (json.Decoder, not a ReadAll'd byte slice)
+	// avoids ever holding a second full copy of the body in memory;
+	// LimitReader here is a defensive cap only (256 MiB -- ~10x today's
+	// real size, real headroom against blocklist growth), not the
+	// primary parsing boundary the old code mistakenly made it.
 	var wrapped dnsdistAPIServersResponse
-	if err := json.Unmarshal(body, &wrapped); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 256<<20)).Decode(&wrapped); err != nil {
 		return nil, fmt.Errorf("parsing dnsdist API response: %w", err)
 	}
 
