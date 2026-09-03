@@ -565,13 +565,16 @@
             <p class="hint">No recent activity.</p>
           {:else}
             <table class="mini-table">
+              <colgroup>
+                <col style="width: 16%" /><col style="width: 16%" /><col style="width: 32%" /><col style="width: 12%" /><col style="width: 24%" />
+              </colgroup>
               <thead><tr><th>Time</th><th>Client</th><th>Domain</th><th>Type</th><th>Status</th></tr></thead>
               <tbody>
                 {#each recentActivity.rows as row (row.id)}
                   <tr>
-                    <td class="mono hint">{new Date(row.ts * 1000).toLocaleTimeString()}</td>
-                    <td class="mono">{row.client_name || row.client}</td>
-                    <td class="mono">{row.domain}</td>
+                    <td class="mono hint" title={new Date(row.ts * 1000).toLocaleTimeString()}>{new Date(row.ts * 1000).toLocaleTimeString()}</td>
+                    <td class="mono" title={row.client_name || row.client}>{row.client_name || row.client}</td>
+                    <td class="mono" title={row.domain}>{row.domain}</td>
                     <td>{row.qtype}</td>
                     <td><span class="mini-badge {row.blocked ? 'mini-badge-blocked' : 'mini-badge-ok'}">{row.blocked ? "Blocked" : row.rcode}</span></td>
                   </tr>
@@ -723,7 +726,7 @@
         <div class="card grid-card">
           <div class="card-head">
             <h3>Top Upstream Resolvers</h3>
-            <button class="link" onclick={() => router.navigate("dns-settings")}>Manage</button>
+            <button class="link" onclick={() => router.navigate("upstreams")}>Manage</button>
           </div>
           {#if topUpstreamsDegraded}
             <p class="degraded-note" role="status">Resolver telemetry unavailable: {topUpstreamsDegradedReason || "unavailable"}</p>
@@ -740,7 +743,7 @@
               <tbody>
                 {#each topUpstreams as u (u.resolver_key)}
                   <tr>
-                    <td class="mono">{u.address || u.resolver_key}</td>
+                    <td class="mono" title={u.address || u.resolver_key}>{u.address || u.resolver_key}</td>
                     <td class="mono">{u.protocol || "--"}</td>
                     <td class="mono">{u.queries_attempted}</td>
                     <td class="mono">{u.queries_attempted > 0 ? Math.round((u.successful_responses / u.queries_attempted) * 100) + "%" : "--"}</td>
@@ -818,9 +821,17 @@
 
   .link { background: transparent; color: var(--accent); border: none; padding: 0; font-size: 0.85rem; cursor: pointer; text-decoration: underline; }
   .mono { font-family: monospace; font-size: 0.85rem; }
-  .mini-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin-top: 0.5rem; }
-  .mini-table th { text-align: left; font-weight: 600; opacity: 0.7; padding: 0.25rem 0.5rem 0.25rem 0; border-bottom: 1px solid var(--border); }
-  .mini-table td { padding: 0.3rem 0.5rem 0.3rem 0; border-bottom: 1px solid var(--border); }
+  /* table-layout: fixed + td's own max-width: 0/overflow:hidden is what
+     actually keeps a long real value (a domain name, a client identifier)
+     from forcing the table -- and with it the whole card -- wider than a
+     grid-card's own column (a real, reported "Recent Activity spills out
+     of its card" defect: 5 columns including a real unbounded-length
+     domain, with no truncation or scroll boundary of any kind). Each td
+     still gets a real `title` attribute (see the markup) so the full
+     value is always available on hover, not just silently cut off. */
+  .mini-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 0.88rem; margin-top: 0.5rem; }
+  .mini-table th { text-align: left; font-weight: 600; opacity: 0.7; padding: 0.25rem 0.5rem 0.25rem 0; border-bottom: 1px solid var(--border); overflow: hidden; white-space: nowrap; }
+  .mini-table td { max-width: 0; padding: 0.3rem 0.5rem 0.3rem 0; border-bottom: 1px solid var(--border); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mini-table tr:last-child td { border-bottom: none; }
   .mini-badge { display: inline-block; padding: 0.1rem 0.45rem; border-radius: 999px; font-size: 0.72rem; }
   .mini-badge-ok { background: var(--badge-ok-bg); color: var(--badge-ok-fg); }
