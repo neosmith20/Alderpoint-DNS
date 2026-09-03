@@ -189,7 +189,11 @@
   <section class="status-grid">
     <div class="card">
       <h3>Current Version</h3>
-      <p class="mono">{status?.current_version ?? "…"}</p>
+      {#if loadError}
+        <p class="hint error">Unavailable</p>
+      {:else}
+        <p class="mono">{status?.current_version ?? "…"}</p>
+      {/if}
     </div>
     <div class="card">
       <h3>Update Status</h3>
@@ -224,7 +228,7 @@
       {#if channelSaveResult}<span class="success" role="status">{channelSaveResult}</span>{/if}
     </form>
     <div class="row">
-      <button onclick={checkNow} disabled={checkBusy}>{checkBusy ? "Checking…" : "Check for Updates"}</button>
+      <button onclick={checkNow} disabled={checkBusy || !!loadError}>{checkBusy ? "Checking…" : "Check for Updates"}</button>
       {#if channel?.last_checked_at}
         <span class="hint">
           Last checked {new Date(channel.last_checked_at).toLocaleString()} --
@@ -239,7 +243,7 @@
     {#if checkError}<p class="error" role="alert">{checkError}</p>{/if}
     {#if updateAvailable}
       <div class="row">
-        <button onclick={downloadAndStage} disabled={downloadBusy}>{downloadBusy ? "Downloading…" : `Download & Stage v${channel?.latest_version}`}</button>
+        <button onclick={downloadAndStage} disabled={downloadBusy || !!loadError}>{downloadBusy ? "Downloading…" : `Download & Stage v${channel?.latest_version}`}</button>
       </div>
       {#if downloadError}<p class="error" role="alert">{downloadError}</p>{/if}
       {#if downloadResult}<p class="success" role="status">{downloadResult}</p>{/if}
@@ -251,7 +255,7 @@
     <p class="hint">Upload a new Alderpoint DNS build directly -- fed into the same checksum/version-verification and mandatory-backup pipeline as any other update.</p>
     <input type="file" bind:files={file} aria-label="Candidate binary file" />
     <input placeholder="Claimed version (must match the binary's own report)" bind:value={claimedVersion} aria-label="Claimed version" />
-    <button type="submit" disabled={stageBusy || !file?.[0] || !claimedVersion.trim()}>{stageBusy ? "Staging…" : "Validate & Stage"}</button>
+    <button type="submit" disabled={stageBusy || !file?.[0] || !claimedVersion.trim() || !!loadError}>{stageBusy ? "Staging…" : "Validate & Stage"}</button>
     {#if stageError}<p class="error" role="alert">{stageError}</p>{/if}
     {#if stageResult}<p class="success" role="status">{stageResult}</p>{/if}
   </form>
