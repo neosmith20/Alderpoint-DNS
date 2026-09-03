@@ -24,26 +24,6 @@ function check(name, cond, detail) {
   console.log(`[${cond ? "PASS" : "FAIL"}] ${name}${!cond && detail ? " -- " + detail : ""}`);
 }
 
-async function clickNavItem(page, predicate) {
-  const tryFind = async () => {
-    for (const btn of await page.$$(".sidebar .item")) {
-      const text = await btn.evaluate((el) => el.textContent?.trim());
-      if (predicate(text)) {
-        await btn.click();
-        return true;
-      }
-    }
-    return false;
-  };
-  if (await tryFind()) return true;
-  for (const toggle of await page.$$(".sidebar .group-toggle")) {
-    await toggle.click();
-    await new Promise((r) => setTimeout(r, 40));
-    if (await tryFind()) return true;
-  }
-  return false;
-}
-
 async function main() {
   const browser = await puppeteer.launch({
     executablePath: process.env.CHROMIUM_PATH || "/usr/bin/chromium",
@@ -60,7 +40,17 @@ async function main() {
     await Promise.all([page.waitForSelector(".app-layout", { timeout: 5000 }), page.click('button[type="submit"]')]);
     check("login reaches the app shell", true);
 
-    check("Notifications nav item exists and is clickable", await clickNavItem(page, (t) => t === "Notifications"));
+    // Notifications is Advanced-only nav (see nav.ts's "operations" group)
+    // -- direct URL navigation works regardless of the selected profile,
+    // same pattern network_config_smoke.mjs/domain_routing_rulesets_smoke.mjs
+    // already use for their own Advanced-only pages. A real, previously-
+    // stale defect in this test found while re-running it this session:
+    // it used to click the sidebar item directly, which silently failed
+    // once Notifications moved under an Advanced-only group (that group
+    // isn't rendered in the sidebar at all under the default Standard
+    // profile), always failing this check and every one of the (unaware)
+    // real assertions after it.
+    await page.goto(new URL("/ui/notifications", baseUrl).toString(), { waitUntil: "networkidle0" });
     await page.waitForSelector("#notifications-heading", { timeout: 3000 }).catch(() => {});
     check("Notifications page renders real content", (await page.$("#notifications-heading")) !== null);
 
@@ -77,13 +67,27 @@ async function main() {
     await page.waitForSelector('input[aria-label="Display name"]', { timeout: 3000 });
     await page.type('input[aria-label="Display name"]', "QA Webhook");
     await page.type("input[data-secret-input]", webhookUrl);
+    // A real test bug found while re-running this suite this session
+    // (not a product bug): DataGrid's own empty state is a real `<tr
+    // class="empty-row">`, always present before any provider exists --
+    // ".data-grid tbody tr" alone is satisfied by THAT row and resolves
+    // instantly, before the real create+refresh round trip ever
+    // finishes. Every other DataGrid-count check in this suite already
+    // excludes `.empty-row`; this one didn't.
     await Promise.all([
-      page.waitForFunction(() => document.querySelectorAll(".data-grid tbody tr").length > 0, { timeout: 3000 }),
+      page.waitForFunction(() => document.querySelectorAll(".data-grid tbody tr:not(.empty-row)").length > 0, { timeout: 3000 }),
       page.click('.modal-form button[type=submit]'),
     ]);
-    const rows = await page.$$eval(".data-grid tbody tr", (rows) => rows.length);
+    const rows = await page.$$eval(".data-grid tbody tr:not(.empty-row)", (rows) => rows.length);
     check("creating a webhook provider adds a real row", rows === 1, `rows=${rows}`);
 
+    // createProvider() awaits create -> set-secret -> ONE refresh() before
+    // ever closing the modal, so the row's has_secret is already final by
+    // the time it first appears -- but give one more render tick margin
+    // here anyway (same pattern this file already uses after Send Test
+    // below), matching how this suite treats every other just-rendered
+    // async state elsewhere.
+    await new Promise((r) => setTimeout(r, 300));
     const rowText = await page.$eval(".data-grid tbody", (el) => el.textContent);
     check("provider row shows a real 'Configured' credential status", /Configured/.test(rowText), rowText);
 
