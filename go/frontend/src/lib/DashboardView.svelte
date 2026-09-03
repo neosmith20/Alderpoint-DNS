@@ -452,7 +452,7 @@
           {/if}
         </div>
       {:else if card.id === "outcomes"}
-        <div class="card wide-card">
+        <div class="card grid-card">
           <h3>Query Outcomes</h3>
           {#if chartDegraded}
             <p class="degraded-note" role="status">Analytics degraded: {chartDegradedReason || "unavailable"}</p>
@@ -474,7 +474,7 @@
           {/if}
         </div>
       {:else if card.id === "top-clients"}
-        <div class="card wide-card">
+        <div class="card grid-card">
           <h3>Top Clients <span class="scope">(last 24h)</span></h3>
           {#if !topClients}
             <p class="hint">Loading…</p>
@@ -500,7 +500,7 @@
       {:else if card.id === "qtypes" || card.id === "rcodes" || card.id === "protocols"}
         {@const data = card.id === "qtypes" ? qtypeBreakdown : card.id === "rcodes" ? rcodeBreakdown : protocolBreakdown}
         {@const label = card.id === "qtypes" ? "Query Types" : card.id === "rcodes" ? "Response Codes" : "Protocol Usage"}
-        <div class="card wide-card">
+        <div class="card grid-card">
           <h3>{label} <span class="scope">(last 24h)</span></h3>
           {#if !data}
             <p class="hint">Loading…</p>
@@ -519,7 +519,7 @@
           {/if}
         </div>
       {:else if card.id === "cache"}
-        <div class="card wide-card">
+        <div class="card grid-card">
           <div class="card-head">
             <h3>BIND Cache Effectiveness</h3>
             <button class="link" onclick={() => router.navigate("cache")}>Manage</button>
@@ -552,7 +552,7 @@
           {/if}
         </div>
       {:else if card.id === "recent-activity"}
-        <div class="card wide-card">
+        <div class="card grid-card">
           <div class="card-head">
             <h3>Recent Activity</h3>
             <button class="link" onclick={() => router.navigate("analytics")}>View all</button>
@@ -581,7 +581,7 @@
           {/if}
         </div>
       {:else if card.id === "system-health"}
-        <div class="card wide-card">
+        <div class="card grid-card">
           <div class="card-head">
             <h3>System Health</h3>
             <button class="link" onclick={() => router.navigate("health")}>Details</button>
@@ -600,7 +600,7 @@
           {/if}
         </div>
       {:else if card.id === "top-domains"}
-        <div class="card wide-card">
+        <div class="card grid-card">
           <h3>Top Domains <span class="scope">(last 24h)</span></h3>
           {#if !topDomains}
             <p class="hint">Loading…</p>
@@ -622,7 +622,7 @@
           {/if}
         </div>
       {:else if card.id === "top-blocked-domains"}
-        <div class="card wide-card">
+        <div class="card grid-card">
           <h3>Top Blocked Domains <span class="scope">(last 24h)</span></h3>
           {#if !topBlockedDomains}
             <p class="hint">Loading…</p>
@@ -643,7 +643,7 @@
           {/if}
         </div>
       {:else if card.id === "clients"}
-        <div class="card wide-card">
+        <div class="card grid-card">
           <div class="card-head">
             <h3>Clients</h3>
             <button class="link" onclick={() => router.navigate("clients")}>Manage</button>
@@ -692,7 +692,7 @@
           {/if}
         </div>
       {:else if card.id === "upstreams"}
-        <div class="card wide-card">
+        <div class="card grid-card">
           <div class="card-head">
             <h3>Upstreams</h3>
             <button class="link" onclick={() => router.navigate("upstreams")}>Manage</button>
@@ -720,7 +720,7 @@
           {/if}
         </div>
       {:else if card.id === "top-upstreams"}
-        <div class="card wide-card">
+        <div class="card grid-card">
           <div class="card-head">
             <h3>Top Upstream Resolvers</h3>
             <button class="link" onclick={() => router.navigate("dns-settings")}>Manage</button>
@@ -794,7 +794,16 @@
   .cards { display: flex; flex-wrap: wrap; gap: 1rem; margin-top: 0.75rem; align-items: stretch; }
   .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); box-shadow: var(--shadow); }
   .stat-card { flex: 1 1 14rem; min-width: 12rem; }
+  /* wide-card: reserved for the one card that genuinely needs full row
+     width -- DNS Activity's own timeseries chart. Every other
+     stat/list-shaped card below uses grid-card instead, which packs
+     2-3 per row on a wide screen instead of always claiming a whole
+     row each (a real, previously-reported "dashboard leaves an empty
+     row/wasted space" defect: on a 1440px desktop, Query Outcomes, Top
+     Domains, Top Blocked Domains, etc. each sat alone on their own full-
+     width row with most of that width empty). */
   .wide-card { flex: 1 1 100%; min-width: 20rem; }
+  .grid-card { flex: 1 1 24rem; min-width: 20rem; }
   .card h3 { margin: 0 0 0.4rem; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.03em; opacity: 0.75; }
   .card-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem; }
   .scope { text-transform: none; font-weight: 400; opacity: 0.7; }

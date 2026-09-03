@@ -153,7 +153,7 @@
     stroke: var(--accent);
   }
   .line-blocked {
-    stroke: #dc2626;
+    stroke: var(--danger);
   }
   .hover-line {
     stroke: var(--border);
@@ -163,7 +163,7 @@
     fill: var(--accent);
   }
   .hover-dot.blocked {
-    fill: #dc2626;
+    fill: var(--danger);
   }
   .legend {
     display: flex;
@@ -188,7 +188,7 @@
     background: var(--accent);
   }
   .swatch.blocked {
-    background: #dc2626;
+    background: var(--danger);
   }
   .tooltip {
     opacity: 0.8;

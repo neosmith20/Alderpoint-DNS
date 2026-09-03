@@ -237,5 +237,5 @@
   .mono { font-family: monospace; opacity: 0.7; font-size: 0.75rem; }
   .add-form { display: flex; flex-direction: column; gap: 0.4rem; }
   .hint { font-size: 0.8rem; opacity: 0.7; margin: 0 0 0.5rem; }
-  .error { color: #dc2626; font-size: 0.85rem; }
+  .error { color: var(--danger); font-size: 0.85rem; }
 </style>

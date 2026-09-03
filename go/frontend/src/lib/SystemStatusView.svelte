@@ -180,70 +180,118 @@
     <div class="metric"><span class="label">Timezone</span><span class="value">{sysStatus?.appliance_timezone ?? "…"}</span></div>
   </div>
 
-  <div class="card">
-    <h3>Components</h3>
-    {#if health}
-      <table class="components">
-        <thead><tr><th>Component</th><th>Status</th><th>Detail</th></tr></thead>
-        <tbody>
-          {#each Object.entries(health.components) as [name, c] (name)}
-            <tr>
-              <td>{name}</td>
-              <td class="status-{c.status}">{c.status}</td>
-              <td>{c.schema_version !== undefined ? `schema_version=${c.schema_version}` : (c.detail ?? c.reason ?? "")}</td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-    {/if}
-  </div>
+  <div class="grid-2col">
+    <div class="card">
+      <h3>Components</h3>
+      {#if health}
+        <table class="components">
+          <thead><tr><th>Component</th><th>Status</th><th>Detail</th></tr></thead>
+          <tbody>
+            {#each Object.entries(health.components) as [name, c] (name)}
+              <tr>
+                <td>{name}</td>
+                <td class="status-{c.status}">{c.status}</td>
+                <td>{c.schema_version !== undefined ? `schema_version=${c.schema_version}` : (c.detail ?? c.reason ?? "")}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+    </div>
 
-  <div class="card">
-    <h3>Node Identity</h3>
-    {#if replicationError}
-      <p class="status-unavailable">Unavailable: {replicationError}</p>
-    {:else if !replication}
-      <p class="hint">…</p>
-    {:else}
-      {@const s = replication.settings}
-      <div class="metric-strip">
-        <div class="metric"><span class="label">Node ID</span><span class="value mono">{s.node_id}</span></div>
-        <div class="metric"><span class="label">Replication role</span><span class="value">{s.role}</span></div>
-        {#if s.role === "replica"}
-          <div class="metric"><span class="label">Last sync</span><span class="value">{s.last_sync_status || "never"}</span></div>
-          <div class="metric"><span class="label">Drift</span><span class="value">{s.drift_detected ? "detected" : "in sync"}</span></div>
+    <div class="card">
+      <h3>Node Identity</h3>
+      {#if replicationError}
+        <p class="status-unavailable">Unavailable: {replicationError}</p>
+      {:else if !replication}
+        <p class="hint">…</p>
+      {:else}
+        {@const s = replication.settings}
+        <div class="metric-strip">
+          <div class="metric"><span class="label">Node ID</span><span class="value mono">{s.node_id}</span></div>
+          <div class="metric"><span class="label">Replication role</span><span class="value">{s.role}</span></div>
+          {#if s.role === "replica"}
+            <div class="metric"><span class="label">Last sync</span><span class="value">{s.last_sync_status || "never"}</span></div>
+            <div class="metric"><span class="label">Drift</span><span class="value">{s.drift_detected ? "detected" : "in sync"}</span></div>
+          {/if}
+        </div>
+      {/if}
+    </div>
+
+    <div class="card">
+      <h3>BIND Cache Counters</h3>
+      {#if cacheError}
+        <p class="status-unavailable">Unavailable: {cacheError}</p>
+      {:else if !cache}
+        <p class="hint">…</p>
+      {:else if cache.bind.length === 0}
+        <p class="hint">No BIND contexts reported (host-control agent not configured for this deployment, or none compiled yet).</p>
+      {:else}
+        <table class="components">
+          <thead><tr><th>Context</th><th>Hits</th><th>Misses</th><th>Hit rate</th></tr></thead>
+          <tbody>
+            {#each cache.bind as ctx (ctx.name)}
+              <tr>
+                <td>{ctx.name}</td>
+                {#if !ctx.cache_stats || !ctx.cache_stats.available}
+                  <td colspan="3" class="status-unavailable">unavailable{ctx.cache_stats?.error ? `: ${ctx.cache_stats.error}` : ""}</td>
+                {:else}
+                  <td>{ctx.cache_stats.hits.toLocaleString()}</td>
+                  <td>{ctx.cache_stats.misses.toLocaleString()}</td>
+                  <td>{ctx.cache_stats.hit_ratio !== null ? `${(ctx.cache_stats.hit_ratio * 100).toFixed(1)}%` : "—"}</td>
+                {/if}
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+    </div>
+
+    <div class="card">
+      <h3>Analytics Health</h3>
+      <p class="scope-note">
+        Proves the analytics writer/receiver are actually alive, not just that the aggregates file
+        still opens -- a stale or failed writer here must never read as zero traffic.
+      </p>
+      {#if health}
+        {@const a = health.components.analytics}
+        {#if !a}
+          <p>…</p>
+        {:else if a.status === "unconfigured"}
+          <p class="status-unavailable">Not configured on this deployment.</p>
+        {:else}
+          <div class="metric-strip">
+            <div class="metric"><span class="label">Overall</span><span class="value status-{a.status}">{a.status}</span></div>
+            <div class="metric"><span class="label">DB reachable</span><span class="value">{a.db_reachable ? "yes" : "no"}</span></div>
+            <div class="metric"><span class="label">Consecutive read failures</span><span class="value">{a.consecutive_read_failures ?? 0}</span></div>
+            <div class="metric">
+              <span class="label">Writer</span>
+              <span class="value">
+                {a.writer_heartbeat_configured ? (a.writer_status ?? "unknown") : "not configured"}
+                {#if a.writer_heartbeat_configured}({a.writer_stale ? "stale" : "fresh"}){/if}
+              </span>
+            </div>
+            {#if a.writer_heartbeat_configured}
+              <div class="metric"><span class="label">Writer tick count</span><span class="value">{a.writer_tick_count ?? 0}</span></div>
+              <div class="metric">
+                <span class="label">Last successful write</span>
+                <span class="value">{a.writer_last_success_at ? new Date(a.writer_last_success_at * 1000).toLocaleString() : "never"}</span>
+              </div>
+            {/if}
+            <div class="metric">
+              <span class="label">Queue depth</span>
+              <span class="value">{a.queue_depth_available ? a.queue_depth : "unavailable"}</span>
+            </div>
+            <div class="metric">
+              <span class="label">Last committed bucket</span>
+              <span class="value">{a.last_committed_bucket ? new Date(a.last_committed_bucket * 1000).toLocaleString() : "none"}</span>
+            </div>
+          </div>
+          {#if a.writer_last_error}<p class="degraded-note" role="status">Last writer error: {a.writer_last_error}</p>{/if}
+          {#if a.reason}<p class="degraded-note" role="status">{a.reason}</p>{/if}
         {/if}
-      </div>
-    {/if}
-  </div>
-
-  <div class="card">
-    <h3>BIND Cache Counters</h3>
-    {#if cacheError}
-      <p class="status-unavailable">Unavailable: {cacheError}</p>
-    {:else if !cache}
-      <p class="hint">…</p>
-    {:else if cache.bind.length === 0}
-      <p class="hint">No BIND contexts reported (host-control agent not configured for this deployment, or none compiled yet).</p>
-    {:else}
-      <table class="components">
-        <thead><tr><th>Context</th><th>Hits</th><th>Misses</th><th>Hit rate</th></tr></thead>
-        <tbody>
-          {#each cache.bind as ctx (ctx.name)}
-            <tr>
-              <td>{ctx.name}</td>
-              {#if !ctx.cache_stats || !ctx.cache_stats.available}
-                <td colspan="3" class="status-unavailable">unavailable{ctx.cache_stats?.error ? `: ${ctx.cache_stats.error}` : ""}</td>
-              {:else}
-                <td>{ctx.cache_stats.hits.toLocaleString()}</td>
-                <td>{ctx.cache_stats.misses.toLocaleString()}</td>
-                <td>{ctx.cache_stats.hit_ratio !== null ? `${(ctx.cache_stats.hit_ratio * 100).toFixed(1)}%` : "—"}</td>
-              {/if}
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-    {/if}
+      {/if}
+    </div>
   </div>
 
   <div class="card">
@@ -319,52 +367,6 @@
   </div>
 
   <div class="card">
-    <h3>Analytics Health</h3>
-    <p class="scope-note">
-      Proves the analytics writer/receiver are actually alive, not just that the aggregates file
-      still opens -- a stale or failed writer here must never read as zero traffic.
-    </p>
-    {#if health}
-      {@const a = health.components.analytics}
-      {#if !a}
-        <p>…</p>
-      {:else if a.status === "unconfigured"}
-        <p class="status-unavailable">Not configured on this deployment.</p>
-      {:else}
-        <div class="metric-strip">
-          <div class="metric"><span class="label">Overall</span><span class="value status-{a.status}">{a.status}</span></div>
-          <div class="metric"><span class="label">DB reachable</span><span class="value">{a.db_reachable ? "yes" : "no"}</span></div>
-          <div class="metric"><span class="label">Consecutive read failures</span><span class="value">{a.consecutive_read_failures ?? 0}</span></div>
-          <div class="metric">
-            <span class="label">Writer</span>
-            <span class="value">
-              {a.writer_heartbeat_configured ? (a.writer_status ?? "unknown") : "not configured"}
-              {#if a.writer_heartbeat_configured}({a.writer_stale ? "stale" : "fresh"}){/if}
-            </span>
-          </div>
-          {#if a.writer_heartbeat_configured}
-            <div class="metric"><span class="label">Writer tick count</span><span class="value">{a.writer_tick_count ?? 0}</span></div>
-            <div class="metric">
-              <span class="label">Last successful write</span>
-              <span class="value">{a.writer_last_success_at ? new Date(a.writer_last_success_at * 1000).toLocaleString() : "never"}</span>
-            </div>
-          {/if}
-          <div class="metric">
-            <span class="label">Queue depth</span>
-            <span class="value">{a.queue_depth_available ? a.queue_depth : "unavailable"}</span>
-          </div>
-          <div class="metric">
-            <span class="label">Last committed bucket</span>
-            <span class="value">{a.last_committed_bucket ? new Date(a.last_committed_bucket * 1000).toLocaleString() : "none"}</span>
-          </div>
-        </div>
-        {#if a.writer_last_error}<p class="degraded-note" role="status">Last writer error: {a.writer_last_error}</p>{/if}
-        {#if a.reason}<p class="degraded-note" role="status">{a.reason}</p>{/if}
-      {/if}
-    {/if}
-  </div>
-
-  <div class="card">
     <h3>UI Performance <span class="scope">(session-only, cleared on reload)</span></h3>
     <div class="actions">
       <button class="refresh-perf" onclick={refresh}>Refresh</button>
@@ -396,6 +398,7 @@
 <style>
   .system-status { display: flex; flex-direction: column; gap: 1rem; }
   .scope-note { font-size: 0.85rem; opacity: 0.75; max-width: 50rem; }
+  .grid-2col { display: grid; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); gap: 1rem; align-items: start; }
   .metric-strip { display: flex; flex-wrap: wrap; gap: 1rem; }
   .metric { border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem 1rem; background: var(--card-bg); min-width: 8rem; }
   .metric .label { display: block; font-size: 0.75rem; opacity: 0.65; }
@@ -406,7 +409,7 @@
   .scope { font-size: 0.75rem; font-weight: 400; opacity: 0.6; }
   table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
   th, td { text-align: left; padding: 0.3rem 0.6rem; border-bottom: 1px solid var(--border); }
-  .status-ok { color: #16a34a; }
+  .status-ok { color: var(--success); }
   .status-degraded, .status-unavailable, .status-failed { color: var(--badge-danger-fg); }
   .degraded-note { background: var(--badge-warn-bg); color: var(--badge-warn-fg); padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.85rem; }
   .actions { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }

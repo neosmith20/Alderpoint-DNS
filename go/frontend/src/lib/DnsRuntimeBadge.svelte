@@ -49,7 +49,7 @@
 
 <style>
   .dns-runtime-badge { font-size: 0.8rem; margin: 0.3rem 0 0; }
-  .dns-runtime-badge.ok { color: var(--success, #16a34a); }
+  .dns-runtime-badge.ok { color: var(--success); }
   .dns-runtime-badge.warn { color: var(--badge-danger-fg); }
   .dns-runtime-timings { font-size: 0.78rem; opacity: 0.8; margin-top: 0.2rem; }
   .dns-runtime-timings summary { cursor: pointer; }

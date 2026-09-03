@@ -426,7 +426,7 @@
   .mono { font-family: monospace; }
   .wrap-anywhere { overflow-wrap: anywhere; }
   .hint { font-size: 0.85rem; opacity: 0.75; margin: 0; }
-  .success { color: #16a34a; }
+  .success { color: var(--success); }
   .error { color: var(--badge-danger-fg); }
   .actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
   .badge { padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 0.78rem; }

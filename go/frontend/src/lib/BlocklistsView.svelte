@@ -326,7 +326,7 @@
   .badge-ok { background: var(--badge-ok-bg); color: var(--badge-ok-fg); }
   .badge-warn { background: var(--badge-warn-bg); color: var(--badge-warn-fg); }
   .badge-attention { background: var(--badge-danger-bg); color: var(--badge-danger-fg); font-weight: 600; }
-  .link-button { background: none; border: none; color: var(--link, #2563eb); cursor: pointer; padding: 0; text-decoration: underline; align-self: flex-end; }
+  .link-button { background: none; border: none; color: var(--accent); cursor: pointer; padding: 0; text-decoration: underline; align-self: flex-end; }
   .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); display: flex; flex-direction: column; gap: 0.6rem; }
   .categories-card h3 { margin: 0; }
   .category-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }

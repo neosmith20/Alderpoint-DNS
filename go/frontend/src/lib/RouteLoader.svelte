@@ -93,7 +93,7 @@
     opacity: 0.75;
   }
   .panel.error p {
-    color: #dc2626;
+    color: var(--danger);
   }
   .skeleton {
     display: flex;

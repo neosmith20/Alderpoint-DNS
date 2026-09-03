@@ -413,7 +413,7 @@
   .history-table th, .history-table td { text-align: left; padding: 0.35rem 0.6rem; border-bottom: 1px solid var(--border); white-space: nowrap; }
   .history-table td:last-child { white-space: normal; }
   .mono { font-family: monospace; font-size: 0.8rem; }
-  .status-sent { color: var(--success, #16a34a); }
+  .status-sent { color: var(--success); }
   .status-failed { color: var(--badge-danger-fg); }
   .status-suppressed { opacity: 0.7; }
 </style>

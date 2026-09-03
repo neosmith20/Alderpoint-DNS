@@ -611,7 +611,7 @@
   .card h3 { margin: 0; }
   .actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
   .error { color: var(--badge-danger-fg); }
-  .success { color: #16a34a; }
+  .success { color: var(--success); }
   .warning { color: var(--badge-danger-fg); font-size: 0.85rem; margin: 0; }
   .hint { font-size: 0.8rem; opacity: 0.75; margin: 0; }
   .lock-badge { margin-left: 0.5rem; font-size: 0.78rem; opacity: 0.8; }

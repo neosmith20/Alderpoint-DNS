@@ -186,40 +186,42 @@
 <section aria-labelledby="filtering-heading" class="filtering">
   <h2 id="filtering-heading">Filters</h2>
 
-  <div class="card">
-    <h3>Global Answer Policy</h3>
-    <PolicyEditor
-      layer={globalPolicy}
-      onSave={(l) =>
-        api.putGlobalPolicy(l).then((resp) => {
-          dnsRuntimeResult = resp.dns_runtime ?? null;
-          return refresh();
-        })}
-    />
-  </div>
+  <div class="grid-2col">
+    <div class="card">
+      <h3>Global Answer Policy</h3>
+      <PolicyEditor
+        layer={globalPolicy}
+        onSave={(l) =>
+          api.putGlobalPolicy(l).then((resp) => {
+            dnsRuntimeResult = resp.dns_runtime ?? null;
+            return refresh();
+          })}
+      />
+    </div>
 
-  <div class="card">
-    <h3>Test a Domain</h3>
-    <p class="hint">
-      Checks whether a query for this domain would be blocked, against the real compiled global
-      custom-rules and blocklist state (not per-network/per-client overrides yet).
-    </p>
-    <form onsubmit={runTestDomain} class="test-domain-form">
-      <input required bind:value={testDomainInput} placeholder="ads.example.com" aria-label="Domain to test" />
-      <button type="submit" disabled={testDomainBusy}>{testDomainBusy ? "Testing…" : "Test"}</button>
-    </form>
-    {#if testDomainError}<p class="error" role="alert">{testDomainError}</p>{/if}
-    {#if testDomainResult}
-      <p class="test-domain-result" class:blocked={testDomainResult.blocked} class:allowed={!testDomainResult.blocked} role="status">
-        <strong>{testDomainResult.domain}</strong> would be
-        <strong>{testDomainResult.blocked ? "BLOCKED" : "ALLOWED"}</strong>
-        {#if testDomainResult.reason === "no_match"}
-          (no rule matches -- default allow)
-        {:else if testDomainResult.matched}
-          by {testDomainResult.reason.replace("_", " ")}: <code>{testDomainResult.matched}</code>
-        {/if}
+    <div class="card">
+      <h3>Test a Domain</h3>
+      <p class="hint">
+        Checks whether a query for this domain would be blocked, against the real compiled global
+        custom-rules and blocklist state (not per-network/per-client overrides yet).
       </p>
-    {/if}
+      <form onsubmit={runTestDomain} class="test-domain-form">
+        <input required bind:value={testDomainInput} placeholder="ads.example.com" aria-label="Domain to test" />
+        <button type="submit" disabled={testDomainBusy}>{testDomainBusy ? "Testing…" : "Test"}</button>
+      </form>
+      {#if testDomainError}<p class="error" role="alert">{testDomainError}</p>{/if}
+      {#if testDomainResult}
+        <p class="test-domain-result" class:blocked={testDomainResult.blocked} class:allowed={!testDomainResult.blocked} role="status">
+          <strong>{testDomainResult.domain}</strong> would be
+          <strong>{testDomainResult.blocked ? "BLOCKED" : "ALLOWED"}</strong>
+          {#if testDomainResult.reason === "no_match"}
+            (no rule matches -- default allow)
+          {:else if testDomainResult.matched}
+            by {testDomainResult.reason.replace("_", " ")}: <code>{testDomainResult.matched}</code>
+          {/if}
+        </p>
+      {/if}
+    </div>
   </div>
 
   <div class="card">
@@ -303,6 +305,7 @@
 
 <style>
   .filtering { display: flex; flex-direction: column; gap: 1rem; }
+  .grid-2col { display: grid; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); gap: 1rem; align-items: start; }
   .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; background: var(--card-bg); }
   .card h3 { margin-top: 0; }
   .test-domain-form { display: flex; gap: 0.5rem; align-items: center; max-width: 28rem; }

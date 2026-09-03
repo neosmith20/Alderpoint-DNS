@@ -173,10 +173,10 @@
   .card h3 { margin: 0; }
   table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
   th, td { text-align: left; padding: 0.3rem 0.6rem; border-bottom: 1px solid var(--border); }
-  .status-ok { color: #16a34a; }
+  .status-ok { color: var(--success); }
   .status-unavailable { color: var(--badge-danger-fg); }
   .hint { font-size: 0.85rem; opacity: 0.75; margin: 0; }
-  .success { color: #16a34a; }
+  .success { color: var(--success); }
   .error { color: var(--badge-danger-fg); }
   .flush-cell { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
   .flush-cell input { width: 10rem; }

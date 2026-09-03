@@ -236,7 +236,7 @@
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 0.6rem; }
   .grid label { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.8rem; }
   .editor-actions { display: flex; align-items: center; gap: 0.6rem; }
-  .ok { color: #16a34a; font-size: 0.85rem; }
+  .ok { color: var(--success); font-size: 0.85rem; }
   .hint { font-size: 0.8rem; opacity: 0.75; margin: 0; }
   .hint-inline { font-weight: normal; opacity: 0.65; font-size: 0.75rem; }
 </style>
