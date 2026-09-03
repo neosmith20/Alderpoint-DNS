@@ -453,3 +453,67 @@ func restorePersisted(ctx context.Context, snap *persistSnapshot, iface string) 
 	}
 	return nil
 }
+
+// PersistPreview is the real, generated persistent-config text (or
+// command list) that OpNetworkApply's persistent half WOULD write/run
+// for the detected backend, given the exact same proposed ipv4/ipv6
+// config -- rendered by the identical render*/command-building logic
+// persistChange itself uses below, so this can never drift out of sync
+// with what an actual Apply produces. Building this never touches the
+// live interface or writes any file.
+type PersistPreview struct {
+	Backend      string   `json:"backend"`
+	WouldPersist bool     `json:"would_persist"`
+	Reason       string   `json:"reason,omitempty"`
+	FilePath     string   `json:"file_path,omitempty"`
+	FileContent  string   `json:"file_content,omitempty"`
+	Commands     []string `json:"commands,omitempty"`
+}
+
+// renderNetworkManagerCommands mirrors stageNetworkManager's real nmcli
+// argv, formatted as the shell-equivalent command line it runs -- a
+// dry-run rendering, never executed here.
+func renderNetworkManagerCommands(conn string, ipv4, ipv6 AddrConfig) []string {
+	var cmds []string
+	switch ipv4.Mode {
+	case "dhcp":
+		cmds = append(cmds, fmt.Sprintf("nmcli con mod %s ipv4.method auto ipv4.addresses '' ipv4.gateway ''", conn))
+	case "static":
+		cmds = append(cmds, fmt.Sprintf("nmcli con mod %s ipv4.method manual ipv4.addresses %s/%d ipv4.gateway %s", conn, ipv4.Address, ipv4.Prefix, ipv4.Gateway))
+	}
+	switch ipv6.Mode {
+	case "static":
+		cmds = append(cmds, fmt.Sprintf("nmcli con mod %s ipv6.method manual ipv6.addresses %s/%d ipv6.gateway %s", conn, ipv6.Address, ipv6.Prefix, ipv6.Gateway))
+	case "slaac":
+		cmds = append(cmds, fmt.Sprintf("nmcli con mod %s ipv6.method auto", conn))
+	}
+	if len(cmds) > 0 {
+		cmds = append(cmds, fmt.Sprintf("nmcli con up %s", conn))
+	}
+	return cmds
+}
+
+// previewPersist is OpNetworkPreview's implementation -- the read-only
+// twin of persistChange above. Every branch mirrors persistChange's own
+// switch exactly (same backends, same render calls) but never calls
+// os.WriteFile/os.MkdirAll or execs netplan/networkctl/nmcli.
+func previewPersist(ctx context.Context, backend, iface string, ipv4, ipv6 AddrConfig) PersistPreview {
+	switch backend {
+	case BackendUnsupported:
+		return PersistPreview{Backend: backend, WouldPersist: false, Reason: "no single supported networking backend was detected -- this change would apply to the running system only and would not survive a reboot"}
+	case BackendNetworkd:
+		return PersistPreview{Backend: backend, WouldPersist: true, FilePath: networkdUnitPath(iface), FileContent: renderNetworkdUnit(iface, ipv4, ipv6)}
+	case BackendNetplan:
+		return PersistPreview{Backend: backend, WouldPersist: true, FilePath: filepath.Join(netplanDir, "90-alderpointdns.yaml"), FileContent: renderNetplanYAML(iface, ipv4, ipv6)}
+	case BackendIfupdown:
+		return PersistPreview{Backend: backend, WouldPersist: true, FilePath: ifupdownDropinPath(iface), FileContent: renderIfupdownStanza(iface, ipv4, ipv6)}
+	case BackendNetworkManager:
+		conn, err := nmConnectionForInterface(ctx, iface)
+		if err != nil {
+			return PersistPreview{Backend: backend, WouldPersist: false, Reason: "no active NetworkManager connection found for interface " + iface + ": " + err.Error()}
+		}
+		return PersistPreview{Backend: backend, WouldPersist: true, Commands: renderNetworkManagerCommands(conn, ipv4, ipv6)}
+	default:
+		return PersistPreview{Backend: backend, WouldPersist: false, Reason: "unrecognized backend"}
+	}
+}

@@ -736,6 +736,25 @@ export interface NetworkAddrConfigInput {
   gateway?: string;
 }
 
+// NetworkPreviewResult: the real, generated persistent-config text (or
+// nmcli command list) a matching networkApply() call would actually
+// write/run -- rendered read-only, no file touched, no live change made.
+// See Advanced > Operations > Network Configuration's "Preview" panel.
+export interface NetworkPreviewResult {
+  interface: string;
+  live_addresses: string[];
+  live_gateway: string;
+  backend: { backend: string; ambiguous: boolean; detail: string };
+  persist: {
+    backend: string;
+    would_persist: boolean;
+    reason?: string;
+    file_path?: string;
+    file_content?: string;
+    commands?: string[];
+  };
+}
+
 export interface FamilyConfig {
   address?: string;
   prefixlen?: number;
@@ -1245,6 +1264,12 @@ export const api = {
   // rollback safety window covers both.
   networkStatus: (iface: string, signal?: AbortSignal) =>
     req<{ raw_addr_json: string; current: CurrentNetworkConfig }>(`/api/network/status?interface=${encodeURIComponent(iface)}`, undefined, signal),
+  networkPreview: (iface: string, addresses: string[], gateway: string | undefined, ipv4: NetworkAddrConfigInput, signal?: AbortSignal) =>
+    req<NetworkPreviewResult>(
+      "/api/network/preview",
+      { method: "POST", body: JSON.stringify({ interface: iface, addresses, gateway, ipv4 }) },
+      signal,
+    ),
   networkApply: (iface: string, addresses: string[], gateway?: string, ipv4?: NetworkAddrConfigInput, persist?: boolean) =>
     req<NetworkApplyResult>("/api/network/apply", { method: "POST", body: JSON.stringify({ interface: iface, addresses, gateway, ipv4, persist }) }),
   networkConfirm: (iface: string) => req<{ status: string }>("/api/network/confirm", { method: "POST", body: JSON.stringify({ interface: iface }) }),

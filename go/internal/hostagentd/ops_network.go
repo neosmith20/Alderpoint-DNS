@@ -75,6 +75,31 @@ func RegisterNetworkOps(s *Server, cfg NetworkConfig) {
 		return networkStatus(ctx, in.Interface)
 	})
 
+	s.Register(hostagent.OpNetworkPreview, func(ctx context.Context, params json.RawMessage) (any, error) {
+		var in struct {
+			Interface string     `json:"interface"`
+			Addresses []string   `json:"addresses"`
+			Gateway   string     `json:"gateway"`
+			Ipv4      AddrConfig `json:"ipv4"`
+			Ipv6      AddrConfig `json:"ipv6"`
+		}
+		if err := json.Unmarshal(params, &in); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		if in.Interface == "" {
+			return nil, fmt.Errorf("interface is required")
+		}
+		backend := DetectBackend(ctx)
+		persist := previewPersist(ctx, backend.Backend, in.Interface, in.Ipv4, in.Ipv6)
+		return map[string]any{
+			"interface":      in.Interface,
+			"live_addresses": in.Addresses,
+			"live_gateway":   in.Gateway,
+			"backend":        backend,
+			"persist":        persist,
+		}, nil
+	})
+
 	s.Register(hostagent.OpNetworkApply, func(ctx context.Context, params json.RawMessage) (any, error) {
 		var in struct {
 			Interface string   `json:"interface"`

@@ -99,6 +99,24 @@ func (s *Server) handleNetworkStatus(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, result)
 }
 
+// handleNetworkPreview: real, generated-config-before-applying preview
+// (see hostagentd's OpNetworkPreview/previewPersist -- exactly the
+// same render logic OpNetworkApply's persistent half uses, called
+// read-only). Deliberately not wrapped in s.audited: it never changes
+// anything, matching handleNetworkStatus's own unaudited GET.
+func (s *Server) handleNetworkPreview(w http.ResponseWriter, r *http.Request) {
+	var body json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		Err(http.StatusBadRequest, "validation_error", "invalid JSON body").WriteJSON(w)
+		return
+	}
+	result, ok := callAgent[json.RawMessage](s, w, r, hostagent.OpNetworkPreview, body)
+	if !ok {
+		return
+	}
+	WriteJSON(w, http.StatusOK, result)
+}
+
 func (s *Server) handleNetworkApply(w http.ResponseWriter, r *http.Request) {
 	var body json.RawMessage
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {

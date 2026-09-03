@@ -343,11 +343,11 @@ type DNSPromoteParams struct {
 
 	// Cache tuning -- see dnscompile.NamedConfInput's own doc comment for
 	// what each field does and its real BIND default when zero/false.
-	CacheMaxTTLSeconds    int  `json:"cache_max_ttl_seconds,omitempty"`
-	CacheMaxNegativeTTL   int  `json:"cache_max_negative_ttl_seconds,omitempty"`
-	CachePrefetchEnabled  bool `json:"cache_prefetch_enabled,omitempty"`
-	CacheServeStale       bool `json:"cache_serve_stale_enabled,omitempty"`
-	CacheMaxStaleTTL      int  `json:"cache_max_stale_ttl_seconds,omitempty"`
+	CacheMaxTTLSeconds   int  `json:"cache_max_ttl_seconds,omitempty"`
+	CacheMaxNegativeTTL  int  `json:"cache_max_negative_ttl_seconds,omitempty"`
+	CachePrefetchEnabled bool `json:"cache_prefetch_enabled,omitempty"`
+	CacheServeStale      bool `json:"cache_serve_stale_enabled,omitempty"`
+	CacheMaxStaleTTL     int  `json:"cache_max_stale_ttl_seconds,omitempty"`
 }
 
 type DNSPromoteResult struct {

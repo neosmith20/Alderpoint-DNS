@@ -404,6 +404,7 @@ func (s *Server) Routes() http.Handler {
 	s.registerReplicationRoutes(mux)
 
 	mux.HandleFunc("GET /api/network/status", requireAuth(s.handleNetworkStatus))
+	mux.HandleFunc("POST /api/network/preview", requireAuth(s.handleNetworkPreview))
 	mux.HandleFunc("POST /api/network/apply", requireAuth(s.audited("network_apply", s.handleNetworkApply)))
 	mux.HandleFunc("POST /api/network/confirm", requireAuth(s.audited("network_confirm", s.handleNetworkConfirm)))
 	mux.HandleFunc("POST /api/network/rollback", requireAuth(s.audited("network_rollback", s.handleNetworkRollback)))

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, ApiError, type CurrentNetworkConfig, type NetworkApplyResult } from "../api";
+  import { api, ApiError, type CurrentNetworkConfig, type NetworkApplyResult, type NetworkPreviewResult, type NetworkAddrConfigInput } from "../api";
   import StatusBadge from "./ui/StatusBadge.svelte";
   import PageHeader from "./ui/PageHeader.svelte";
 
@@ -24,6 +24,15 @@
   // (useful for an immediate fix) but is honestly reported as
   // not-persisted -- never silently claimed as durable. DHCP mode is
   // now a real, selectable, persisted mode too (previously static-only).
+  //
+  // Generated configuration preview (2026-09-03): a real, read-only
+  // render of exactly what Apply's persistent half would write --
+  // GET-safe /api/network/preview, backed by hostagentd's own
+  // previewPersist(), which calls the IDENTICAL render*() functions
+  // persistChange() uses, so the preview can never drift from what an
+  // actual Apply produces. Shown automatically (debounced on every
+  // form edit) above the Apply button, never something the owner has
+  // to separately ask for before committing to a live network change.
 
   let current = $state<CurrentNetworkConfig | null>(null);
   let statusError = $state("");
@@ -44,6 +53,84 @@
   let confirmBusy = $state(false);
   let rollbackBusy = $state(false);
   let actionResult = $state("");
+
+  // Generated network-configuration preview (2026-09-03): the real
+  // persistent-config text (or nmcli commands) OpNetworkApply's
+  // persistent half would actually write/run for the detected backend,
+  // fetched read-only and re-rendered on every relevant form edit
+  // (debounced) so it is always visible ABOVE the Apply button --
+  // never something the owner has to separately request before
+  // committing to a live network change.
+  let preview = $state<NetworkPreviewResult | null>(null);
+  let previewError = $state("");
+  let previewLoading = $state(false);
+  let previewAbort: AbortController | null = null;
+  let previewDebounce: ReturnType<typeof setTimeout> | null = null;
+
+  function currentIpv4Input(): NetworkAddrConfigInput | null {
+    if (ipv4Mode === "static") {
+      if (!ipv4Address.trim()) return null;
+      return { mode: "static", address: ipv4Address.trim(), prefix: Number(ipv4Prefix) || 24, gateway: ipv4Gateway.trim() };
+    }
+    return { mode: "dhcp" };
+  }
+
+  function liveCidrForPreview(): string | null {
+    if (ipv4Mode === "static") {
+      return ipv4Address.trim() ? `${ipv4Address.trim()}/${ipv4Prefix || 24}` : null;
+    }
+    return current?.ipv4?.address && current?.ipv4?.prefixlen ? `${current.ipv4.address}/${current.ipv4.prefixlen}` : null;
+  }
+
+  async function runPreview() {
+    const iface = selectedIface.trim();
+    const ipv4Input = currentIpv4Input();
+    const liveCidr = liveCidrForPreview();
+    if (!iface || !ipv4Input || !liveCidr) {
+      preview = null;
+      previewError = "";
+      previewLoading = false;
+      return;
+    }
+    previewAbort?.abort();
+    const ac = new AbortController();
+    previewAbort = ac;
+    previewLoading = true;
+    previewError = "";
+    try {
+      const result = await api.networkPreview(
+        iface,
+        [liveCidr],
+        ipv4Mode === "static" ? ipv4Gateway.trim() || undefined : current?.ipv4?.gateway || undefined,
+        ipv4Input,
+        ac.signal,
+      );
+      if (ac.signal.aborted) return;
+      preview = result;
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      preview = null;
+      previewError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      if (!ac.signal.aborted) previewLoading = false;
+    }
+  }
+
+  function schedulePreview() {
+    if (previewDebounce) clearTimeout(previewDebounce);
+    previewDebounce = setTimeout(runPreview, 450);
+  }
+
+  $effect(() => {
+    // Reactive dependencies: re-run whenever any field the preview is
+    // rendered from changes.
+    void selectedIface;
+    void ipv4Mode;
+    void ipv4Address;
+    void ipv4Prefix;
+    void ipv4Gateway;
+    schedulePreview();
+  });
 
   async function refresh() {
     statusError = "";
@@ -91,6 +178,7 @@
         ipv4Mode === "static" ? { mode: "static", address: ipv4Address.trim(), prefix: Number(ipv4Prefix) || 24, gateway: ipv4Gateway.trim() } : { mode: "dhcp" },
         persistChange,
       );
+      preview = null;
     } catch (err) {
       applyError = err instanceof ApiError ? err.message : String(err);
     } finally {
@@ -223,6 +311,34 @@
           <input type="checkbox" bind:checked={persistChange} />
           Persist this change so it survives a reboot (writes the detected backend's own config)
         </label>
+
+        <div class="preview-panel" aria-live="polite">
+          <h4>Generated configuration preview</h4>
+          {#if previewLoading && !preview}
+            <p class="hint">Generating preview…</p>
+          {:else if previewError}
+            <p class="error" role="alert">Preview unavailable: {previewError}</p>
+          {:else if !preview}
+            <p class="hint">Fill in the fields above to see exactly what will be written.</p>
+          {:else}
+            <p class="hint">
+              Live change: <strong>{selectedIface}</strong> &rarr; <span class="mono">{preview.live_addresses.join(", ")}</span>{#if preview.live_gateway} via <span class="mono">{preview.live_gateway}</span>{/if}
+              {#if previewLoading}<span class="hint"> (refreshing…)</span>{/if}
+            </p>
+            {#if !persistChange}
+              <p class="hint">"Persist" is unchecked -- the config below would NOT be written; only the live change above would apply.</p>
+            {:else if !preview.persist.would_persist}
+              <p class="error" role="alert">Not persisted: {preview.persist.reason}</p>
+            {:else if preview.persist.file_content}
+              <p class="hint">Backend: <strong>{preview.persist.backend}</strong> -- would write <span class="mono">{preview.persist.file_path}</span>:</p>
+              <pre class="config-preview" data-network-preview-content>{preview.persist.file_content}</pre>
+            {:else if preview.persist.commands && preview.persist.commands.length > 0}
+              <p class="hint">Backend: <strong>{preview.persist.backend}</strong> -- would run:</p>
+              <pre class="config-preview" data-network-preview-content>{preview.persist.commands.join("\n")}</pre>
+            {/if}
+          {/if}
+        </div>
+
         <button type="submit" disabled={busy || !selectedIface.trim() || (ipv4Mode === "static" && !ipv4Address.trim())}>{busy ? "Applying…" : "Apply"}</button>
         {#if applyError}<p class="error" role="alert">{applyError}</p>{/if}
       </form>
@@ -280,4 +396,14 @@
   .hint { font-size: 0.85rem; opacity: 0.8; margin: 0; }
   .checkbox-row { flex-direction: row; align-items: center; gap: 0.5rem; }
   .error { color: var(--badge-danger-fg); font-size: 0.85rem; margin: 0; }
+  .preview-panel {
+    border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem 0.9rem;
+    background: var(--panel-elevated); display: flex; flex-direction: column; gap: 0.4rem;
+  }
+  .preview-panel h4 { margin: 0; font-size: 0.85rem; }
+  .config-preview {
+    margin: 0; padding: 0.6rem 0.75rem; border-radius: 6px; background: var(--code-bg, var(--card-bg));
+    border: 1px solid var(--border); font-family: monospace; font-size: 0.8rem; white-space: pre-wrap;
+    word-break: break-word; max-height: 16rem; overflow-y: auto;
+  }
 </style>

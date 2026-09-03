@@ -222,3 +222,48 @@ func TestNetworkStatusReportsRealInterfaces(t *testing.T) {
 		t.Fatalf("expected the real interface's real address in the status output, got %s", encoded)
 	}
 }
+
+// TestNetworkPreviewNeverMutatesTheRealInterface proves OpNetworkPreview
+// (added 2026-09-03 for Network Configuration's "preview before
+// applying" requirement) is genuinely read-only against a real
+// interface: the exact same params that TestNetworkApplyChangesThe...
+// above proves DOES change a real interface must, through preview,
+// leave it completely untouched.
+func TestNetworkPreviewNeverMutatesTheRealInterface(t *testing.T) {
+	iface := newTestVeth(t)
+	if err := exec.Command("ip", "addr", "add", "10.250.99.30/24", "dev", iface).Run(); err != nil {
+		t.Fatal(err)
+	}
+	before := currentAddrs(t, iface)
+
+	s := &Server{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	RegisterNetworkOps(s, NetworkConfig{})
+	result, err := s.handlers["network.preview"](context.Background(), json.RawMessage(fmt.Sprintf(
+		`{"interface":%q,"addresses":["10.250.99.99/24"],"ipv4":{"mode":"static","address":"10.250.99.99","prefix":24,"gateway":"10.250.99.1"}}`, iface)))
+	if err != nil {
+		t.Fatalf("expected preview to succeed, got: %v", err)
+	}
+	encoded, _ := json.Marshal(result)
+	if !strings.Contains(string(encoded), `"backend"`) || !strings.Contains(string(encoded), `"persist"`) {
+		t.Fatalf("expected backend and persist fields in the preview response, got %s", encoded)
+	}
+
+	after := currentAddrs(t, iface)
+	if strings.Join(before, ",") != strings.Join(after, ",") {
+		t.Fatalf("preview must never change the real interface address: before=%v after=%v", before, after)
+	}
+	for _, a := range after {
+		if a == "10.250.99.99/24" {
+			t.Fatal("preview must never apply the proposed address to the real interface")
+		}
+	}
+}
+
+func TestNetworkPreviewRequiresInterface(t *testing.T) {
+	s := &Server{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	RegisterNetworkOps(s, NetworkConfig{})
+	_, err := s.handlers["network.preview"](context.Background(), json.RawMessage(`{}`))
+	if err == nil {
+		t.Fatal("expected an error when interface is missing")
+	}
+}

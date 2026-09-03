@@ -67,6 +67,13 @@ const (
 	OpNetworkApply    = "network.apply"
 	OpNetworkConfirm  = "network.confirm"
 	OpNetworkRollback = "network.rollback"
+	// OpNetworkPreview renders exactly what OpNetworkApply's persistent
+	// half would write/run for the detected backend -- the real
+	// netplan YAML / systemd-networkd unit / ifupdown stanza text, or
+	// the real nmcli commands for NetworkManager -- WITHOUT touching
+	// the live interface or any file on disk. Read-only, side-effect
+	// free, safe to call on every form edit.
+	OpNetworkPreview = "network.preview"
 
 	OpUpdateCheck = "update.check"
 	OpUpdateStage = "update.stage"

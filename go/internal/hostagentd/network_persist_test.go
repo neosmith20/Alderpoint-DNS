@@ -158,3 +158,81 @@ func TestPersistChangeReportsUnsupportedBackendHonestly(t *testing.T) {
 		t.Fatal("expected a real, non-empty reason explaining why persistence was skipped")
 	}
 }
+
+// --- OpNetworkPreview / previewPersist: real generated-config preview,
+// added 2026-09-03 so Network Configuration can show exactly what
+// Apply's persistent half would write BEFORE the owner commits to it.
+// Every case below asserts the preview's content is IDENTICAL to what
+// persistChange would actually write -- proving the preview can never
+// drift from reality -- and that previewing never touches disk.
+
+func TestPreviewPersistNetplanMatchesWhatApplyWouldWriteAndTouchesNoFile(t *testing.T) {
+	dir := withOverriddenPaths(t)
+	ipv4 := AddrConfig{Mode: "static", Address: "10.0.0.5", Prefix: 24, Gateway: "10.0.0.1"}
+	preview := previewPersist(context.Background(), BackendNetplan, "eth0", ipv4, AddrConfig{})
+	if !preview.WouldPersist {
+		t.Fatalf("expected would_persist=true for netplan, got %+v", preview)
+	}
+	wantPath := filepath.Join(dir, "netplan", "90-alderpointdns.yaml")
+	if preview.FilePath != wantPath {
+		t.Fatalf("expected file_path %q, got %q", wantPath, preview.FilePath)
+	}
+	if preview.FileContent != renderNetplanYAML("eth0", ipv4, AddrConfig{}) {
+		t.Fatalf("preview content must exactly match what stageNetplan would write, got:\n%s", preview.FileContent)
+	}
+	if _, err := os.Stat(wantPath); !os.IsNotExist(err) {
+		t.Fatalf("previewing must never actually write the file, but it exists: err=%v", err)
+	}
+}
+
+func TestPreviewPersistNetworkdMatchesWhatApplyWouldWriteAndTouchesNoFile(t *testing.T) {
+	dir := withOverriddenPaths(t)
+	ipv4 := AddrConfig{Mode: "dhcp"}
+	preview := previewPersist(context.Background(), BackendNetworkd, "eth1", ipv4, AddrConfig{Mode: "slaac"})
+	if !preview.WouldPersist {
+		t.Fatalf("expected would_persist=true for networkd, got %+v", preview)
+	}
+	wantPath := filepath.Join(dir, "systemd-network", "90-alderpointdns-eth1.network")
+	if preview.FilePath != wantPath {
+		t.Fatalf("expected file_path %q, got %q", wantPath, preview.FilePath)
+	}
+	if preview.FileContent != renderNetworkdUnit("eth1", ipv4, AddrConfig{Mode: "slaac"}) {
+		t.Fatalf("preview content must exactly match what stageNetworkd would write, got:\n%s", preview.FileContent)
+	}
+	if _, err := os.Stat(wantPath); !os.IsNotExist(err) {
+		t.Fatalf("previewing must never actually write the file, but it exists: err=%v", err)
+	}
+}
+
+func TestPreviewPersistIfupdownMatchesWhatApplyWouldWriteAndTouchesNoFile(t *testing.T) {
+	dir := withOverriddenPaths(t)
+	ipv4 := AddrConfig{Mode: "static", Address: "10.0.0.9", Prefix: 24, Gateway: "10.0.0.1"}
+	preview := previewPersist(context.Background(), BackendIfupdown, "eth2", ipv4, AddrConfig{})
+	if !preview.WouldPersist {
+		t.Fatalf("expected would_persist=true for ifupdown, got %+v", preview)
+	}
+	wantPath := filepath.Join(dir, "interfaces.d", "90-alderpointdns-eth2.cfg")
+	if preview.FilePath != wantPath {
+		t.Fatalf("expected file_path %q, got %q", wantPath, preview.FilePath)
+	}
+	if preview.FileContent != renderIfupdownStanza("eth2", ipv4, AddrConfig{}) {
+		t.Fatalf("preview content must exactly match what stageIfupdown would write, got:\n%s", preview.FileContent)
+	}
+	if _, err := os.Stat(wantPath); !os.IsNotExist(err) {
+		t.Fatalf("previewing must never actually write the file, but it exists: err=%v", err)
+	}
+}
+
+func TestPreviewPersistUnsupportedBackendReportsWouldNotPersistHonestly(t *testing.T) {
+	withOverriddenPaths(t)
+	preview := previewPersist(context.Background(), BackendUnsupported, "eth0", AddrConfig{Mode: "dhcp"}, AddrConfig{})
+	if preview.WouldPersist {
+		t.Fatalf("expected would_persist=false for an unsupported backend, got %+v", preview)
+	}
+	if preview.Reason == "" {
+		t.Fatal("expected a real, non-empty reason explaining why persistence would be skipped")
+	}
+	if preview.FileContent != "" || preview.FilePath != "" {
+		t.Fatalf("expected no file content/path for an unsupported backend, got %+v", preview)
+	}
+}

@@ -77,6 +77,25 @@ async function main() {
     const prefixInput = await page.$('.network input[placeholder="24"]');
     await prefixInput.evaluate((el) => { el.value = ""; el.dispatchEvent(new Event("input", { bubbles: true })); });
     await prefixInput.type("24");
+
+    // 2026-09-03: generated network-configuration preview -- real,
+    // read-only /api/network/preview content must render automatically
+    // (debounced on form edit) BEFORE Apply is ever clicked, not
+    // something the owner has to separately request.
+    await page.waitForFunction(
+      () => {
+        const el = document.querySelector(".preview-panel");
+        return el && !el.textContent.includes("Fill in the fields above") && !el.textContent.includes("Generating preview");
+      },
+      { timeout: 4000 },
+    ).catch(() => {});
+    const previewTextBeforeApply = await page.$eval(".preview-panel", (el) => el.textContent).catch(() => "");
+    check(
+      "Generated configuration preview renders real content before Apply is clicked",
+      /Live change:/.test(previewTextBeforeApply) && /10\.99\.0\.9/.test(previewTextBeforeApply),
+      previewTextBeforeApply.slice(0, 300),
+    );
+
     // This suite proves the live apply/confirm/rollback UI round trip
     // only -- it deliberately unchecks "Persist" so it never writes
     // into this fixture host's own REAL backend config (netplan/
@@ -88,6 +107,12 @@ async function main() {
     if (persistCheckbox && (await persistCheckbox.evaluate((el) => el.checked))) {
       await persistCheckbox.click();
     }
+    const previewTextAfterUncheckingPersist = await page.$eval(".preview-panel", (el) => el.textContent).catch(() => "");
+    check(
+      "Preview reflects 'Persist' unchecked -- honestly states the generated config would not be written",
+      /would NOT be written/.test(previewTextAfterUncheckingPersist),
+      previewTextAfterUncheckingPersist.slice(0, 300),
+    );
     await page.click('.network button[type="submit"]');
 
     await page.waitForFunction(() => document.body.textContent.includes("Awaiting confirmation"), { timeout: 4000 }).catch(() => {});
