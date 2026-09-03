@@ -153,7 +153,7 @@
     <header>
       <h1>Alderpoint DNS</h1>
       <button class="theme-toggle" onclick={toggleTheme} aria-label="Toggle color theme">
-        {theme === "light" ? "🌙" : "☀️"}
+        <Icon name={theme === "light" ? "moon" : "sun"} size={17} />
       </button>
     </header>
   {/if}
@@ -219,7 +219,7 @@
           </div>
           <span class="spacer"></span>
           <button class="theme-toggle" onclick={toggleTheme} aria-label="Toggle color theme">
-            {theme === "light" ? "🌙" : "☀️"}
+            <Icon name={theme === "light" ? "moon" : "sun"} size={17} />
           </button>
           <span class="whoami">{authedUsername}</span>
           <button class="logout-btn" onclick={doLogout} aria-label="Log out">
@@ -306,7 +306,7 @@
   .shell.app-shell { height: 100vh; overflow: hidden; }
   header { display: flex; justify-content: space-between; align-items: center; padding: 1rem 0; }
   h1 { font-size: 1.2rem; display: flex; align-items: center; gap: 0.6rem; }
-  .theme-toggle { background: transparent; font-size: 1.1rem; }
+  .theme-toggle { background: transparent; display: inline-flex; align-items: center; justify-content: center; }
   .centered { display: flex; justify-content: center; padding-top: 3rem; }
   .auth-form { display: flex; flex-direction: column; gap: 0.75rem; width: 22rem; max-width: 90vw; background: var(--card-bg); padding: 1.5rem; border-radius: 8px; border: 1px solid var(--border); }
   .auth-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; }

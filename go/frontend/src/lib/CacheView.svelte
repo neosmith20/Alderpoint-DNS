@@ -102,7 +102,9 @@
 
   <div class="card">
     <h3>BIND contexts</h3>
-    {#if !status}
+    {#if loadError}
+      <p class="hint status-unavailable">Unavailable: {loadError}</p>
+    {:else if !status}
       <p class="hint">Loading…</p>
     {:else if status.bind.length === 0}
       <p class="hint">No BIND contexts reported (hostagent not configured for this deployment, or none compiled yet).</p>
@@ -159,7 +161,7 @@
       restarts dnsdist and clears its cache as a result. A failed health check rolls back
       automatically; real DNS answering is never left down.
     </p>
-    <button onclick={restartDnsdist} disabled={flushBusy === "dnsdist"}>
+    <button onclick={restartDnsdist} disabled={flushBusy === "dnsdist" || !!loadError}>
       {flushBusy === "dnsdist" ? "Restarting…" : "Restart dnsdist (clears cache)"}
     </button>
     <DnsRuntimeBadge result={dnsdistRuntimeResult} />

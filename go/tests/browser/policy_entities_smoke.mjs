@@ -97,7 +97,7 @@ async function main() {
     // --- Delete cleanup, prove real deletion round-trips too ---
     await page.goto(baseUrl + "/ui/policy-entities", { waitUntil: "networkidle0" });
     await page.waitForSelector("#policy-entities-heading", { timeout: 5000 });
-    const deleted = await page.evaluate(() => {
+    const deleteClicked = await page.evaluate(() => {
       const panels = [...document.querySelectorAll(".panel")];
       const fpPanel = panels.find((p) => p.querySelector("h2")?.textContent.trim() === "Filtering Profiles");
       const btn = [...fpPanel.querySelectorAll(".entity-list button")].find((b) => b.closest("li")?.textContent.includes("Smoke Profile"));
@@ -105,7 +105,22 @@ async function main() {
       btn.click();
       return true;
     });
-    check("Delete button is clickable", deleted === true);
+    check("Delete button is clickable", deleteClicked === true);
+    // Deletion is gated by the shared ConfirmDialog (see PolicyEntitiesView.svelte's
+    // confirmDelete) -- confirm it and prove the row is actually gone, not just that
+    // the click didn't throw.
+    await page.waitForSelector(".modal .danger", { timeout: 2000 });
+    await Promise.all([
+      page.waitForFunction(() => document.querySelector(".modal .danger") === null, { timeout: 3000 }),
+      page.click(".modal .danger"),
+    ]);
+    await new Promise((r) => setTimeout(r, 300));
+    const stillListed = await page.evaluate(() => {
+      const panels = [...document.querySelectorAll(".panel")];
+      const fpPanel = panels.find((p) => p.querySelector("h2")?.textContent.trim() === "Filtering Profiles");
+      return [...fpPanel.querySelectorAll(".entity-list li")].some((li) => li.textContent.includes("Smoke Profile"));
+    });
+    check("Confirming delete actually removes the profile from the list", stillListed === false);
 
     await page.close();
   } finally {

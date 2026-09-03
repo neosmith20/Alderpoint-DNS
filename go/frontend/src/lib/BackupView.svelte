@@ -7,6 +7,7 @@
   import { toast } from "../toast.svelte";
   import DataGrid from "./DataGrid.svelte";
   import type { Column } from "./datagrid";
+  import ConfirmDialog from "./ui/ConfirmDialog.svelte";
 
   // Backup & Restore, native Go (own format -- see internal/backup's doc
   // comment for exactly why this isn't byte-compatible with Python's
@@ -134,9 +135,19 @@
     }
   }
 
-  async function deleteSecretBackup(b: SecretBackupInfo) {
+  let confirmDeleteSecretBackup = $state<SecretBackupInfo | null>(null);
+
+  function deleteSecretBackup(b: SecretBackupInfo) {
+    confirmDeleteSecretBackup = b;
+  }
+
+  async function runDeleteSecretBackup() {
+    const b = confirmDeleteSecretBackup;
+    confirmDeleteSecretBackup = null;
+    if (!b) return;
     await api.deleteSecretBackup(b.name);
     await refreshSecretBackups();
+    toast.success(`Deleted secret backup "${b.name}".`);
   }
 
   // Scheduled Backups -- owner-configurable periodic backups, field-matched
@@ -331,9 +342,19 @@
     }
   }
 
-  async function deleteBackup(b: BackupInfo) {
+  let confirmDeleteBackup = $state<BackupInfo | null>(null);
+
+  function deleteBackup(b: BackupInfo) {
+    confirmDeleteBackup = b;
+  }
+
+  async function runDeleteBackup() {
+    const b = confirmDeleteBackup;
+    confirmDeleteBackup = null;
+    if (!b) return;
     await api.deleteBackup(b.filename);
     await refresh();
+    toast.success(`Deleted "${b.filename}".`);
   }
 
   function formatSize(bytes: number): string {
@@ -602,6 +623,26 @@
     </DataGrid>
   {/if}
 </section>
+
+{#if confirmDeleteBackup}
+  <ConfirmDialog
+    title="Delete backup"
+    message={`Delete "${confirmDeleteBackup.filename}"? This cannot be undone.`}
+    confirmLabel="Delete"
+    onConfirm={runDeleteBackup}
+    onCancel={() => (confirmDeleteBackup = null)}
+  />
+{/if}
+
+{#if confirmDeleteSecretBackup}
+  <ConfirmDialog
+    title="Delete secret backup"
+    message={`Delete "${confirmDeleteSecretBackup.name}"? This cannot be undone.`}
+    confirmLabel="Delete"
+    onConfirm={runDeleteSecretBackup}
+    onCancel={() => (confirmDeleteSecretBackup = null)}
+  />
+{/if}
 
 <style>
   .backup { display: flex; flex-direction: column; gap: 1rem; }

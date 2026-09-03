@@ -8,6 +8,7 @@
   import DnsRuntimeBadge from "./DnsRuntimeBadge.svelte";
   import type { Column } from "./datagrid";
   import PolicyEditor from "./PolicyEditor.svelte";
+  import ConfirmDialog from "./ui/ConfirmDialog.svelte";
 
   // Filters page: Custom Filtering Rules (native Go, new functionality --
   // see internal/customrules's doc comment for why: Python V2 has no
@@ -127,7 +128,16 @@
     await refresh();
   }
 
-  async function deleteRule(r: CustomRule) {
+  let confirmDeleteRule = $state<CustomRule | null>(null);
+
+  function deleteRule(r: CustomRule) {
+    confirmDeleteRule = r;
+  }
+
+  async function runDeleteRule() {
+    const r = confirmDeleteRule;
+    confirmDeleteRule = null;
+    if (!r) return;
     const resp = await api.deleteCustomRule(r.id);
     dnsRuntimeResult = resp.dns_runtime ?? null;
     await refresh();
@@ -152,7 +162,14 @@
     selected = new Set();
     await refresh();
   }
-  async function bulkDelete() {
+  let confirmBulkDelete = $state(false);
+
+  function bulkDelete() {
+    confirmBulkDelete = true;
+  }
+
+  async function runBulkDelete() {
+    confirmBulkDelete = false;
     const resp = await api.bulkDeleteCustomRules([...selected]);
     dnsRuntimeResult = resp.dns_runtime ?? null;
     selected = new Set();
@@ -302,6 +319,26 @@
     </DataGrid>
   </div>
 </section>
+
+{#if confirmDeleteRule}
+  <ConfirmDialog
+    title="Delete rule"
+    message={`Delete the ${confirmDeleteRule.rule_type} rule "${confirmDeleteRule.pattern}"? This takes effect on the live DNS runtime immediately.`}
+    confirmLabel="Delete"
+    onConfirm={runDeleteRule}
+    onCancel={() => (confirmDeleteRule = null)}
+  />
+{/if}
+
+{#if confirmBulkDelete}
+  <ConfirmDialog
+    title="Delete rules"
+    message={`Delete ${selected.size} selected rule${selected.size === 1 ? "" : "s"}? This takes effect on the live DNS runtime immediately.`}
+    confirmLabel="Delete"
+    onConfirm={runBulkDelete}
+    onCancel={() => (confirmBulkDelete = false)}
+  />
+{/if}
 
 <style>
   .filtering { display: flex; flex-direction: column; gap: 1rem; }

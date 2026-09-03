@@ -167,12 +167,22 @@
     await refresh();
   }
 
-  async function deleteRecord(r: LocalDnsRecord) {
+  let confirmDeleteRecord = $state<LocalDnsRecord | null>(null);
+
+  function deleteRecord(r: LocalDnsRecord) {
+    confirmDeleteRecord = r;
+  }
+
+  async function runDeleteRecord() {
+    const r = confirmDeleteRecord;
+    confirmDeleteRecord = null;
+    if (!r) return;
     pendingDelete = new Set(pendingDelete).add(r.id);
     try {
       const resp = await api.deleteLocalDNS(r.id);
       dnsRuntimeResult = resp.dns_runtime ?? null;
       await refresh();
+      toast.success(`Deleted "${r.name}".`);
     } catch (err) {
       loadError = err instanceof Error ? err.message : String(err);
     } finally {
@@ -312,6 +322,16 @@
     confirmLabel="Remove"
     onConfirm={runDeleteAlias}
     onCancel={() => (confirmDeleteAlias = null)}
+  />
+{/if}
+
+{#if confirmDeleteRecord}
+  <ConfirmDialog
+    title="Delete record"
+    message={`Delete the ${confirmDeleteRecord.record_type} record "${confirmDeleteRecord.name}" (${confirmDeleteRecord.value})? This takes effect on the live DNS runtime immediately.`}
+    confirmLabel="Delete"
+    onConfirm={runDeleteRecord}
+    onCancel={() => (confirmDeleteRecord = null)}
   />
 {/if}
 

@@ -6,6 +6,7 @@
   import DataGrid from "./DataGrid.svelte";
   import DnsRuntimeBadge from "./DnsRuntimeBadge.svelte";
   import type { Column } from "./datagrid";
+  import ConfirmDialog from "./ui/ConfirmDialog.svelte";
 
   let subs = $state<Subscription[]>([]);
   let presets = $state<IntervalPreset[]>([]);
@@ -80,7 +81,16 @@
     }
   }
 
-  async function deleteCategory(cat: BlocklistCategory) {
+  let confirmDeleteCategory = $state<BlocklistCategory | null>(null);
+
+  function deleteCategory(cat: BlocklistCategory) {
+    confirmDeleteCategory = cat;
+  }
+
+  async function runDeleteCategory() {
+    const cat = confirmDeleteCategory;
+    confirmDeleteCategory = null;
+    if (!cat) return;
     categoryError = "";
     categoryBusy = true;
     try {
@@ -189,7 +199,16 @@
     if (job_id) await refresh();
   }
 
-  async function onDelete(sub: Subscription) {
+  let confirmDeleteSub = $state<Subscription | null>(null);
+
+  function onDelete(sub: Subscription) {
+    confirmDeleteSub = sub;
+  }
+
+  async function runDeleteSub() {
+    const sub = confirmDeleteSub;
+    confirmDeleteSub = null;
+    if (!sub) return;
     pendingDelete = new Set(pendingDelete).add(sub.subscription_id);
     try {
       const resp = await api.deleteBlocklist(sub.subscription_id);
@@ -318,6 +337,26 @@
     {/snippet}
   </DataGrid>
 </section>
+
+{#if confirmDeleteCategory}
+  <ConfirmDialog
+    title="Delete category"
+    message={`Delete the category "${confirmDeleteCategory.name}"? Subscriptions in it are not deleted, but lose this grouping.`}
+    confirmLabel="Delete"
+    onConfirm={runDeleteCategory}
+    onCancel={() => (confirmDeleteCategory = null)}
+  />
+{/if}
+
+{#if confirmDeleteSub}
+  <ConfirmDialog
+    title="Delete blocklist"
+    message={`Delete the blocklist subscription "${confirmDeleteSub.name}"? Its rules stop being enforced as soon as this takes effect on the live DNS runtime.`}
+    confirmLabel="Delete"
+    onConfirm={runDeleteSub}
+    onCancel={() => (confirmDeleteSub = null)}
+  />
+{/if}
 
 <style>
   .section-header { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }

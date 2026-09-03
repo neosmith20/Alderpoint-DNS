@@ -297,7 +297,11 @@ async function main() {
     await page.click(".customize-btn");
     await page.waitForSelector(".customize-panel", { timeout: 2000 });
     const cardLabelsBefore = await page.$$eval(".customize-panel li label", (els) => els.map((e) => e.textContent.trim()));
-    check("customize panel lists all 7 cards", cardLabelsBefore.length === 7, cardLabelsBefore.join(","));
+    // 16 real customizable cards as of the 2026-09-02/03 dashboard grid-density
+    // pass (dashboardCards.ts's own ALL_CARDS) -- this assertion still hardcoded
+    // the pre-pass count of 7. The panel itself was never broken; only this
+    // stale expectation was wrong.
+    check("customize panel lists all 16 cards", cardLabelsBefore.length === 16, cardLabelsBefore.join(","));
     // Hide "Top Blocked Domains".
     const checkboxes = await page.$$(".customize-panel input[type=checkbox]");
     const labels = await page.$$eval(".customize-panel li label", (els) => els.map((e) => e.textContent.trim()));
@@ -458,9 +462,17 @@ async function main() {
     await clickNavItem(page, (t) => t?.startsWith("Administration"));
     await page.waitForSelector("#admin-heading", { timeout: 3000 }).catch(() => {});
 
-    // --- Revoke other sessions ---
+    // --- Revoke other sessions --- (now gated by the shared ConfirmDialog,
+    // same pattern as every other destructive action -- see
+    // AdministrationView.svelte's confirmRevokeSessions)
     const revokeBtn = await page.$(".danger");
     await revokeBtn.click();
+    await page.waitForSelector(".modal .danger", { timeout: 2000 });
+    check("revoke-other-sessions opens the shared ConfirmDialog rather than acting immediately", (await page.$(".modal .danger")) !== null);
+    await Promise.all([
+      page.waitForFunction(() => document.querySelector(".modal .danger") === null, { timeout: 3000 }),
+      page.click(".modal .danger"),
+    ]);
     await new Promise((r) => setTimeout(r, 300));
     const revokeText = await page.$$eval(".card p.hint[role='status']", (els) => els.map((e) => e.textContent).join(" "));
     check("revoke-other-sessions reports a result", /revoked|no other sessions/i.test(revokeText), revokeText);
@@ -676,8 +688,14 @@ async function main() {
     const routeRowCountAfterReload = await page.$$eval(".routes-table tbody tr", (rows) => rows.length).catch(() => 0);
     check("the domain route survives a full page reload (real persistence)", routeRowCountAfterReload === 1, `rows=${routeRowCountAfterReload}`);
 
-    // Delete it.
+    // Delete it -- now gated by the shared ConfirmDialog rather than deleting
+    // on the first click (see UpstreamsView.svelte's confirmDeleteRoute).
     await page.click(".routes-table tbody tr td button");
+    await page.waitForSelector(".modal .danger", { timeout: 2000 });
+    await Promise.all([
+      page.waitForFunction(() => document.querySelector(".modal .danger") === null, { timeout: 3000 }),
+      page.click(".modal .danger"),
+    ]);
     await page.waitForFunction(() => document.querySelector(".routes-table tbody .empty-row") !== null, { timeout: 3000 }).catch(() => {});
     const routeEmptyAfterDelete = (await page.$(".routes-table tbody .empty-row")) !== null;
     check("deleting the domain route removes it for real (honest empty state, not a leftover row)", routeEmptyAfterDelete);

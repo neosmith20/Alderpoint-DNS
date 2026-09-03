@@ -12,6 +12,7 @@
   import { router } from "../router.svelte";
   import DataGrid from "./DataGrid.svelte";
   import type { Column } from "./datagrid";
+  import ConfirmDialog from "./ui/ConfirmDialog.svelte";
 
   // Notifications. Real native-Go storage for provider metadata
   // (internal/notifications). Credentials are real too (2026-08-28):
@@ -107,7 +108,16 @@
     }
   }
 
-  async function removeSubscription(sub: NotificationSubscription) {
+  let confirmRemoveSubscription = $state<NotificationSubscription | null>(null);
+
+  function removeSubscription(sub: NotificationSubscription) {
+    confirmRemoveSubscription = sub;
+  }
+
+  async function runRemoveSubscription() {
+    const sub = confirmRemoveSubscription;
+    confirmRemoveSubscription = null;
+    if (!sub) return;
     await api.deleteNotificationSubscription(sub.id);
     await refreshSubscriptions();
   }
@@ -199,7 +209,16 @@
     await refresh();
   }
 
-  async function remove(p: NotificationProvider) {
+  let confirmRemoveProvider = $state<NotificationProvider | null>(null);
+
+  function remove(p: NotificationProvider) {
+    confirmRemoveProvider = p;
+  }
+
+  async function runRemoveProvider() {
+    const p = confirmRemoveProvider;
+    confirmRemoveProvider = null;
+    if (!p) return;
     await api.deleteNotificationProvider(p.provider_id);
     await refresh();
   }
@@ -393,6 +412,26 @@
     </div>
   {/if}
 </section>
+
+{#if confirmRemoveProvider}
+  <ConfirmDialog
+    title="Delete provider"
+    message={`Delete the "${confirmRemoveProvider.display_name}" provider? Any saved secret is discarded and subscriptions using it stop delivering.`}
+    confirmLabel="Delete"
+    onConfirm={runRemoveProvider}
+    onCancel={() => (confirmRemoveProvider = null)}
+  />
+{/if}
+
+{#if confirmRemoveSubscription}
+  <ConfirmDialog
+    title="Remove subscription"
+    message={`Remove the "${categoryLabel(confirmRemoveSubscription.event_category)}" notification via ${confirmRemoveSubscription.provider_name}?`}
+    confirmLabel="Remove"
+    onConfirm={runRemoveSubscription}
+    onCancel={() => (confirmRemoveSubscription = null)}
+  />
+{/if}
 
 <style>
   .notifications { display: flex; flex-direction: column; gap: 1rem; }

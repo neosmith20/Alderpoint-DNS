@@ -72,7 +72,9 @@
   <div class="grid-2col">
     <div class="card">
       <h3>Runtime status</h3>
-      {#if status}
+      {#if statusError}
+        <p class="hint status-unavailable">Unavailable: {statusError}</p>
+      {:else if status}
         <div class="row">
           <span class={status.bind_running ? "status-ok" : "status-unavailable"}>BIND {status.bind_running ? "running" : "not running"}</span>
           <span class={status.dnsdist_running ? "status-ok" : "status-unavailable"}>dnsdist {status.dnsdist_running ? "running" : "not running"}</span>
@@ -89,7 +91,7 @@
     <div class="card">
       <h3>Apply Runtime Changes</h3>
       <p class="hint">Recompiles current Local DNS / Custom Rules / Blocklists / DNS Settings / DNS Transport state and promotes it through the host-control agent.</p>
-      <button onclick={apply} disabled={applyBusy}>{applyBusy ? "Applying…" : "Apply Runtime Changes"}</button>
+      <button onclick={apply} disabled={applyBusy || !!statusError}>{applyBusy ? "Applying…" : "Apply Runtime Changes"}</button>
       {#if applyError}<p class="error" role="alert">{applyError}</p>{/if}
       {#if applyResult}
         {#if applyResult.promoted}

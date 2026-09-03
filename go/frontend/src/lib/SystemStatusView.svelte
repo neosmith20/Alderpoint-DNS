@@ -190,8 +190,19 @@
             {#each Object.entries(health.components) as [name, c] (name)}
               <tr>
                 <td>{name}</td>
-                <td class="status-{c.status}">{c.status}</td>
-                <td>{c.schema_version !== undefined ? `schema_version=${c.schema_version}` : (c.detail ?? c.reason ?? "")}</td>
+                {#if name === "process"}
+                  <!-- process carries no status of its own (informational only, see
+                       handlers_health_process.go's own doc comment: it never demotes
+                       overall health) -- render a neutral label instead of the blank
+                       cell an undefined c.status would otherwise leave here. -->
+                  <td class="status-info">info</td>
+                  <td>
+                    {c.rss_bytes ? `RSS ${(c.rss_bytes / 1048576).toFixed(1)} MB · ` : ""}{c.goroutine_count} goroutines · heap {(c.heap_alloc_bytes / 1048576).toFixed(1)} MB · {c.num_gc} GCs
+                  </td>
+                {:else}
+                  <td class="status-{c.status}">{c.status}</td>
+                  <td>{c.schema_version !== undefined ? `schema_version=${c.schema_version}` : (c.detail ?? c.reason ?? "")}</td>
+                {/if}
               </tr>
             {/each}
           </tbody>
@@ -410,6 +421,7 @@
   table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
   th, td { text-align: left; padding: 0.3rem 0.6rem; border-bottom: 1px solid var(--border); }
   .status-ok { color: var(--success); }
+  .status-info { color: var(--muted); }
   .status-degraded, .status-unavailable, .status-failed { color: var(--badge-danger-fg); }
   .degraded-note { background: var(--badge-warn-bg); color: var(--badge-warn-fg); padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.85rem; }
   .actions { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }

@@ -6,6 +6,7 @@
   import DataGrid from "./DataGrid.svelte";
   import DnsRuntimeBadge from "./DnsRuntimeBadge.svelte";
   import type { Column } from "./datagrid";
+  import ConfirmDialog from "./ui/ConfirmDialog.svelte";
 
   // Native Go implementation (own schema/CRUD, not a Python proxy) --
   // see internal/upstreams's doc comment for what's preserved
@@ -148,17 +149,35 @@
     }
   }
 
-  async function deleteRuleset(id: string) {
+  let confirmDeleteRuleset = $state<DomainRoutingRuleset | null>(null);
+
+  function deleteRuleset(rs: DomainRoutingRuleset) {
+    confirmDeleteRuleset = rs;
+  }
+
+  async function runDeleteRuleset() {
+    const rs = confirmDeleteRuleset;
+    confirmDeleteRuleset = null;
+    if (!rs) return;
     rulesetError = "";
     try {
-      await api.deleteDomainRoutingRuleset(id);
+      await api.deleteDomainRoutingRuleset(rs.id);
       await refreshRoutes();
     } catch (err) {
       rulesetError = err instanceof ApiError ? err.message : String(err);
     }
   }
 
-  async function deleteRoute(r: DomainRoute) {
+  let confirmDeleteRoute = $state<DomainRoute | null>(null);
+
+  function deleteRoute(r: DomainRoute) {
+    confirmDeleteRoute = r;
+  }
+
+  async function runDeleteRoute() {
+    const r = confirmDeleteRoute;
+    confirmDeleteRoute = null;
+    if (!r) return;
     routeBusy = true;
     try {
       const resp = await api.deleteDomainRoute(r.id);
@@ -169,6 +188,18 @@
     } finally {
       routeBusy = false;
     }
+  }
+
+  let confirmDeleteProfile = $state<UpstreamProfile | null>(null);
+
+  function requestDeleteProfile(p: UpstreamProfile) {
+    confirmDeleteProfile = p;
+  }
+
+  async function runDeleteProfile() {
+    const p = confirmDeleteProfile;
+    confirmDeleteProfile = null;
+    if (p) await onDelete(p);
   }
 
   onMount(() => {
@@ -397,7 +428,7 @@
           {:else}
             <button onclick={() => onEnable(p)} disabled={pendingAction.has(p.upstream_profile_id)}>Enable</button>
           {/if}
-          <button onclick={() => onDelete(p)} disabled={pendingAction.has(p.upstream_profile_id)}>Delete</button>
+          <button onclick={() => requestDeleteProfile(p)} disabled={pendingAction.has(p.upstream_profile_id)}>Delete</button>
           <button onclick={() => move(p, -1)} aria-label={`Move ${p.name} up`}>&uarr;</button>
           <button onclick={() => move(p, 1)} aria-label={`Move ${p.name} down`}>&darr;</button>
         </div>
@@ -434,7 +465,7 @@
       <h4>Rulesets</h4>
       <div class="ruleset-list">
         {#each rulesets as rs (rs.id)}
-          <span class="ruleset-chip">{rs.name} <button onclick={() => deleteRuleset(rs.id)} title="Delete">×</button></span>
+          <span class="ruleset-chip">{rs.name} <button onclick={() => deleteRuleset(rs)} title="Delete">×</button></span>
         {:else}
           <span class="hint">No named rulesets yet -- every route below applies globally.</span>
         {/each}
@@ -487,6 +518,36 @@
     </table>
   </div>
 </section>
+
+{#if confirmDeleteProfile}
+  <ConfirmDialog
+    title="Delete upstream profile"
+    message={`Delete "${confirmDeleteProfile.name}"? This takes effect on the live DNS runtime immediately.`}
+    confirmLabel="Delete"
+    onConfirm={runDeleteProfile}
+    onCancel={() => (confirmDeleteProfile = null)}
+  />
+{/if}
+
+{#if confirmDeleteRuleset}
+  <ConfirmDialog
+    title="Delete ruleset"
+    message={`Delete the domain routing ruleset "${confirmDeleteRuleset.name}"? Any domain route assigned to it stops being scoped to it.`}
+    confirmLabel="Delete"
+    onConfirm={runDeleteRuleset}
+    onCancel={() => (confirmDeleteRuleset = null)}
+  />
+{/if}
+
+{#if confirmDeleteRoute}
+  <ConfirmDialog
+    title="Delete domain route"
+    message={`Delete the route for "${confirmDeleteRoute.domain}"? This takes effect on the live DNS runtime immediately.`}
+    confirmLabel="Delete"
+    onConfirm={runDeleteRoute}
+    onCancel={() => (confirmDeleteRoute = null)}
+  />
+{/if}
 
 <style>
   .upstreams { display: flex; flex-direction: column; gap: 1rem; }

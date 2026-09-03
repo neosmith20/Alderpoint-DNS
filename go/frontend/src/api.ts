@@ -947,7 +947,10 @@ export const api = {
       components: Record<
         string,
         {
-          status: string;
+          // Every component has one except "process" (informational only,
+          // see handlers_health_process.go's own doc comment -- it never
+          // demotes overall health, so it carries no status of its own).
+          status?: string;
           schema_version?: number;
           detail?: string;
           reason?: string;
@@ -964,6 +967,14 @@ export const api = {
           queue_depth?: number;
           queue_depth_available?: boolean;
           last_committed_bucket?: number;
+          // "process" component fields (handlers_health_process.go's
+          // processStats) -- present only on the "process" component.
+          goroutine_count?: number;
+          heap_alloc_bytes?: number;
+          heap_sys_bytes?: number;
+          heap_objects?: number;
+          num_gc?: number;
+          rss_bytes?: number;
         }
       >;
     }>("/api/health"),

@@ -13,6 +13,14 @@
   import PageHeader from "./ui/PageHeader.svelte";
   import Panel from "./ui/Panel.svelte";
   import DnsRuntimeBadge from "./DnsRuntimeBadge.svelte";
+  import ConfirmDialog from "./ui/ConfirmDialog.svelte";
+
+  let confirmDelete = $state<{ kind: string; name: string; run: () => Promise<void> } | null>(null);
+  async function runConfirmDelete() {
+    const pending = confirmDelete;
+    confirmDelete = null;
+    if (pending) await pending.run();
+  }
 
   let filteringProfiles = $state<CategoryEntity[]>([]);
   let securityPolicies = $state<CategoryEntity[]>([]);
@@ -65,10 +73,12 @@
       fpBusy = false;
     }
   }
-  async function deleteFilteringProfile(id: string) {
-    const res = await api.deleteFilteringProfile(id);
-    lastRuntime = res.dns_runtime ?? null;
-    await refresh();
+  function deleteFilteringProfile(id: string, name: string) {
+    confirmDelete = { kind: "Filtering profile", name, run: async () => {
+      const res = await api.deleteFilteringProfile(id);
+      lastRuntime = res.dns_runtime ?? null;
+      await refresh();
+    } };
   }
 
   // --- Security Policies ---
@@ -88,10 +98,12 @@
       spBusy = false;
     }
   }
-  async function deleteSecurityPolicy(id: string) {
-    const res = await api.deleteSecurityPolicy(id);
-    lastRuntime = res.dns_runtime ?? null;
-    await refresh();
+  function deleteSecurityPolicy(id: string, name: string) {
+    confirmDelete = { kind: "Security policy", name, run: async () => {
+      const res = await api.deleteSecurityPolicy(id);
+      lastRuntime = res.dns_runtime ?? null;
+      await refresh();
+    } };
   }
 
   // --- Parental Policies ---
@@ -112,10 +124,12 @@
       ppBusy = false;
     }
   }
-  async function deleteParentalPolicy(id: string) {
-    const res = await api.deleteParentalPolicy(id);
-    lastRuntime = res.dns_runtime ?? null;
-    await refresh();
+  function deleteParentalPolicy(id: string, name: string) {
+    confirmDelete = { kind: "Parental policy", name, run: async () => {
+      const res = await api.deleteParentalPolicy(id);
+      lastRuntime = res.dns_runtime ?? null;
+      await refresh();
+    } };
   }
 
   // --- Service Blocking Rulesets ---
@@ -135,10 +149,12 @@
       srBusy = false;
     }
   }
-  async function deleteServiceRuleset(id: string) {
-    const res = await api.deleteServiceBlockingRuleset(id);
-    lastRuntime = res.dns_runtime ?? null;
-    await refresh();
+  function deleteServiceRuleset(id: string, name: string) {
+    confirmDelete = { kind: "Service blocking ruleset", name, run: async () => {
+      const res = await api.deleteServiceBlockingRuleset(id);
+      lastRuntime = res.dns_runtime ?? null;
+      await refresh();
+    } };
   }
 </script>
 
@@ -156,7 +172,7 @@
     <p class="hint">A named set of blocklist categories to enforce for whichever scope selects it.</p>
     <ul class="entity-list">
       {#each filteringProfiles as p (p.id)}
-        <li><strong>{p.name}</strong> <span class="mono">({p.id})</span> — {p.categories.join(", ") || "no categories"} <button onclick={() => deleteFilteringProfile(p.id)}>Delete</button></li>
+        <li><strong>{p.name}</strong> <span class="mono">({p.id})</span> — {p.categories.join(", ") || "no categories"} <button onclick={() => deleteFilteringProfile(p.id, p.name)}>Delete</button></li>
       {:else}
         <li class="hint">None yet.</li>
       {/each}
@@ -174,7 +190,7 @@
     <p class="hint">A named SafeSearch mode + category set (e.g. adult content) for a network, group, or client.</p>
     <ul class="entity-list">
       {#each parentalPolicies as p (p.id)}
-        <li><strong>{p.name}</strong> <span class="mono">({p.id})</span> — SafeSearch: {p.safesearch_mode}, {p.categories.join(", ") || "no categories"} <button onclick={() => deleteParentalPolicy(p.id)}>Delete</button></li>
+        <li><strong>{p.name}</strong> <span class="mono">({p.id})</span> — SafeSearch: {p.safesearch_mode}, {p.categories.join(", ") || "no categories"} <button onclick={() => deleteParentalPolicy(p.id, p.name)}>Delete</button></li>
       {:else}
         <li class="hint">None yet.</li>
       {/each}
@@ -197,7 +213,7 @@
     <p class="hint">A named security-oriented category set (malware, telemetry, etc.).</p>
     <ul class="entity-list">
       {#each securityPolicies as p (p.id)}
-        <li><strong>{p.name}</strong> <span class="mono">({p.id})</span> — {p.categories.join(", ") || "no categories"} <button onclick={() => deleteSecurityPolicy(p.id)}>Delete</button></li>
+        <li><strong>{p.name}</strong> <span class="mono">({p.id})</span> — {p.categories.join(", ") || "no categories"} <button onclick={() => deleteSecurityPolicy(p.id, p.name)}>Delete</button></li>
       {:else}
         <li class="hint">None yet.</li>
       {/each}
@@ -215,7 +231,7 @@
     <p class="hint">A named list of specific domains (e.g. one app/service) to block -- independent of the blocklist-category system above.</p>
     <ul class="entity-list">
       {#each serviceRulesets as r (r.id)}
-        <li><strong>{r.name}</strong> <span class="mono">({r.id})</span> — {r.domains.join(", ") || "no domains"} <button onclick={() => deleteServiceRuleset(r.id)}>Delete</button></li>
+        <li><strong>{r.name}</strong> <span class="mono">({r.id})</span> — {r.domains.join(", ") || "no domains"} <button onclick={() => deleteServiceRuleset(r.id, r.name)}>Delete</button></li>
       {:else}
         <li class="hint">None yet.</li>
       {/each}
@@ -229,6 +245,16 @@
     {#if srError}<p class="error" role="alert">{srError}</p>{/if}
   </Panel>
 </div>
+
+{#if confirmDelete}
+  <ConfirmDialog
+    title={`Delete ${confirmDelete.kind.toLowerCase()}`}
+    message={`Delete the ${confirmDelete.kind.toLowerCase()} "${confirmDelete.name}"? Any network, group, or client policy still selecting it keeps that selection but stops getting its effect -- update those policies afterward.`}
+    confirmLabel="Delete"
+    onConfirm={runConfirmDelete}
+    onCancel={() => (confirmDelete = null)}
+  />
+{/if}
 
 <style>
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); gap: 1rem; }

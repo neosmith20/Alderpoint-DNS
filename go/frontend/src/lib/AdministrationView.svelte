@@ -3,6 +3,7 @@
   import { api, ApiError, type AdminSessionRow, type AuditLogEntry } from "../api";
   import { timestampPref, type TimestampMode } from "../timestamp.svelte";
   import StatusBadge from "./ui/StatusBadge.svelte";
+  import ConfirmDialog from "./ui/ConfirmDialog.svelte";
 
   let applianceName = $state("");
   let statusError = $state("");
@@ -82,7 +83,14 @@
     }
   }
 
-  async function revokeOtherSessions() {
+  let confirmRevokeSessions = $state(false);
+
+  function revokeOtherSessions() {
+    confirmRevokeSessions = true;
+  }
+
+  async function runRevokeOtherSessions() {
+    confirmRevokeSessions = false;
     revokeBusy = true;
     revokeResult = "";
     try {
@@ -195,6 +203,16 @@
     {/if}
   </div>
 </section>
+
+{#if confirmRevokeSessions}
+  <ConfirmDialog
+    title="Revoke other sessions"
+    message="Sign out every other active session for this account? This device's own session is not affected."
+    confirmLabel="Revoke"
+    onConfirm={runRevokeOtherSessions}
+    onCancel={() => (confirmRevokeSessions = false)}
+  />
+{/if}
 
 <style>
   .admin { display: flex; flex-direction: column; gap: 1rem; }
