@@ -27,6 +27,9 @@ import (
 	"alderpointdns/go-controlplane/internal/appliancesettings"
 	"alderpointdns/go-controlplane/internal/backup"
 	"alderpointdns/go-controlplane/internal/blockedservices"
+	"alderpointdns/go-controlplane/internal/cachesettings"
+	"alderpointdns/go-controlplane/internal/dnsgenerations"
+	"alderpointdns/go-controlplane/internal/updatehistory"
 	"alderpointdns/go-controlplane/internal/blocklists"
 	"alderpointdns/go-controlplane/internal/bootstrap"
 	"alderpointdns/go-controlplane/internal/clientalias"
@@ -633,6 +636,9 @@ func runWeb(args []string) {
 	policyEntitiesSvc := &policyentities.Service{DB: db}
 	blockedServicesSvc := &blockedservices.Service{DB: db, Policy: policySvc, PolicyEntities: policyEntitiesSvc}
 	applianceSettingsSvc := &appliancesettings.Service{DB: db}
+	cacheSettingsSvc := &cachesettings.Service{DB: db}
+	dnsGenerationsStore := &dnsgenerations.Store{DB: db}
+	updateHistorySvc := &updatehistory.Service{DB: db}
 	customRulesSvc := &customrules.Service{DB: db}
 	dnsTransportsSvc := &dnstransports.Service{DB: db}
 	notificationsSvc := &notifications.Service{DB: db}
@@ -813,6 +819,7 @@ func runWeb(args []string) {
 		dnsRuntimeOrch = &dnsruntime.Orchestrator{
 			LocalDNS: ldSvc, CustomRules: customRulesSvc, Blocklists: blSvc, Upstreams: upSvc, DNSTransports: dnsTransportsSvc, Policy: policySvc,
 			DomainRouting: domainRoutingSvc, Clients: clientsSvc, PolicyEntities: policyEntitiesSvc,
+			CacheSettings: cacheSettingsSvc, Generations: dnsGenerationsStore,
 			HostAgent: hostAgentClient, DnsdistListenAddress: *dnsRuntimeDnsdistAddr, BindBackendAddress: *dnsRuntimeBindProxyAddr,
 			TLSCertPath: dnsRuntimeTLSCert, TLSKeyPath: dnsRuntimeTLSKey,
 			DnstapSocketPath: *dnstapDialPath,
@@ -853,7 +860,7 @@ func runWeb(args []string) {
 	}
 
 	srv := &httpapi.Server{
-		DB: db, Auth: authStore, Bootstrap: bootstrapMgr, Blocklists: blSvc, LocalDNS: ldSvc, ClientAliases: clientAliasSvc, Upstreams: upSvc, DomainRouting: domainRoutingSvc, Clients: clientsSvc, Policy: policySvc, PolicyEntities: policyEntitiesSvc, BlockedServices: blockedServicesSvc, ApplianceSettings: applianceSettingsSvc, CustomRules: customRulesSvc, Backup: backupSvc,
+		DB: db, Auth: authStore, Bootstrap: bootstrapMgr, Blocklists: blSvc, LocalDNS: ldSvc, ClientAliases: clientAliasSvc, Upstreams: upSvc, DomainRouting: domainRoutingSvc, Clients: clientsSvc, Policy: policySvc, PolicyEntities: policyEntitiesSvc, BlockedServices: blockedServicesSvc, ApplianceSettings: applianceSettingsSvc, CacheSettings: cacheSettingsSvc, Generations: dnsGenerationsStore, UpdateHistory: updateHistorySvc, CustomRules: customRulesSvc, Backup: backupSvc,
 		DNSTransports: dnsTransportsSvc, Notifications: notificationsSvc, Importer: importerSvc,
 		StaticDir: *staticDir, Log: logger, Version: Version, StartedAt: startedAt,
 		SessionTTL: cfg.SessionTTL(), LastSeen: cfg.LastSeenUpdateInterval(),

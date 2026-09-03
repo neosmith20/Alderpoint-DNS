@@ -1597,12 +1597,66 @@ export const api = {
 
   dnsRuntimeStatus: (signal?: AbortSignal) => req<DNSRuntimeStatus>("/api/dns-runtime/status", undefined, signal),
   applyDNSRuntime: () => req<DNSRuntimeApplyResult>("/api/dns-runtime/apply", { method: "POST" }),
+  dnsRuntimeGenerations: (signal?: AbortSignal) => req<{ generations: DNSRuntimeGeneration[]; available: boolean }>("/api/dns-runtime/generations", undefined, signal),
+  dnsRuntimeInventory: (signal?: AbortSignal) => req<{ files: DNSRuntimeInventoryFile[]; available: boolean }>("/api/dns-runtime/inventory", undefined, signal),
+  dnsRuntimePendingChanges: (signal?: AbortSignal) => req<{ known: boolean; pending: boolean }>("/api/dns-runtime/pending-changes", undefined, signal),
+  dnsRuntimeRollback: () => req<DNSRuntimeApplyResult>("/api/dns-runtime/rollback", { method: "POST" }),
+
+  getCacheSettings: (signal?: AbortSignal) => req<CacheSettings>("/api/cache/settings", undefined, signal),
+  updateCacheSettings: (settings: CacheSettings) =>
+    req<{ status: string; settings: CacheSettings; dns_runtime?: DNSRuntimeApplyResult }>("/api/cache/settings", { method: "PUT", body: JSON.stringify(settings) }),
+
+  updateHistory: (signal?: AbortSignal) => req<{ entries: UpdateHistoryEntry[] }>("/api/updates/history", undefined, signal),
 };
 
 export interface DNSRuntimeStatus {
   bind_running: boolean;
   dnsdist_running: boolean;
   last_promoted_at?: string;
+}
+
+export interface DNSRuntimeGeneration {
+  id: number;
+  generation_number: number;
+  created_at: string;
+  trigger: "apply" | "rollback";
+  promoted: boolean;
+  rolled_back: boolean;
+  stage?: string;
+  detail?: string;
+  error?: string;
+  content_hash?: string;
+  has_snapshot: boolean;
+  build_ms: number;
+  compile_ms: number;
+  rpc_ms: number;
+  total_ms: number;
+}
+
+export interface DNSRuntimeInventoryFile {
+  path: string;
+  size_bytes: number;
+  mod_time: string;
+}
+
+export interface CacheSettings {
+  max_cache_ttl_seconds: number;
+  max_negative_ttl_seconds: number;
+  prefetch_enabled: boolean;
+  serve_stale_enabled: boolean;
+  max_stale_ttl_seconds: number;
+  updated_at: string;
+}
+
+export interface UpdateHistoryEntry {
+  id: number;
+  at: string;
+  from_version: string;
+  to_version: string;
+  source: "manual" | "channel";
+  result: "success" | "failed";
+  backup_ref: string;
+  error: string;
 }
 
 export interface DNSRuntimeApplyResult {

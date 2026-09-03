@@ -1240,6 +1240,16 @@ type NamedConfInput struct {
 	RNDCKey     string // base64 HMAC secret, required if RNDCPort != 0
 	Directory   string
 	LogPath     string
+
+	// Cache tuning (Advanced > Cache's real Configuration section, see
+	// internal/cachesettings): 0/zero-value fields fall back to BIND's
+	// own real defaults below, matching "not configured yet" honestly
+	// rather than emitting a directive with a fabricated value.
+	MaxCacheTTLSeconds    int  // 0 = BIND default (1 week)
+	MaxNegativeTTLSeconds int  // 0 = BIND default (3 hours)
+	PrefetchEnabled       bool
+	ServeStaleEnabled     bool
+	MaxStaleTTLSeconds    int // only emitted when ServeStaleEnabled
 }
 
 // CompileNamedConf renders one self-contained BIND named.conf -- a pure
@@ -1327,6 +1337,29 @@ func CompileNamedConf(in NamedConfInput) (string, error) {
 	w("\tminimal-responses yes;")
 	w("\tempty-zones-enable yes;")
 	w("\tversion \"not disclosed\";")
+	if in.MaxCacheTTLSeconds > 0 {
+		w("\tmax-cache-ttl %d;", in.MaxCacheTTLSeconds)
+	}
+	if in.MaxNegativeTTLSeconds > 0 {
+		w("\tmax-ncache-ttl %d;", in.MaxNegativeTTLSeconds)
+	}
+	if in.PrefetchEnabled {
+		// BIND's own documented default trigger/eligible pair -- prefetch
+		// a record once its remaining TTL drops to 2s, for anything whose
+		// original TTL was at least 9s.
+		w("\tprefetch 2 9;")
+	} else {
+		w("\tprefetch 0 0;") // BIND's own real "disabled" spelling -- there is no separate on/off directive
+	}
+	if in.ServeStaleEnabled {
+		w("\tstale-answer-enable yes;")
+		w("\tstale-cache-enable yes;")
+		if in.MaxStaleTTLSeconds > 0 {
+			w("\tmax-stale-ttl %d;", in.MaxStaleTTLSeconds)
+		}
+	} else {
+		w("\tstale-answer-enable no;")
+	}
 	w("\tquerylog no;")
 	w("\tstatistics-file %q;", in.Directory+"/named.stats")
 	w("\tmemstatistics-file %q;", in.Directory+"/named.memstats")

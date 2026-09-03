@@ -11,6 +11,9 @@ import (
 	"alderpointdns/go-controlplane/internal/appliancesettings"
 	"alderpointdns/go-controlplane/internal/backup"
 	"alderpointdns/go-controlplane/internal/blockedservices"
+	"alderpointdns/go-controlplane/internal/cachesettings"
+	"alderpointdns/go-controlplane/internal/dnsgenerations"
+	"alderpointdns/go-controlplane/internal/updatehistory"
 	"alderpointdns/go-controlplane/internal/blocklists"
 	"alderpointdns/go-controlplane/internal/bootstrap"
 	"alderpointdns/go-controlplane/internal/clientalias"
@@ -79,6 +82,9 @@ type Server struct {
 	Replication   *replication.Service
 	BlockedServices *blockedservices.Service
 	ApplianceSettings *appliancesettings.Service
+	CacheSettings   *cachesettings.Service
+	Generations     *dnsgenerations.Store
+	UpdateHistory   *updatehistory.Service
 	StaticDir     string
 	Log           *slog.Logger
 
@@ -379,6 +385,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/cache/status", requireAuth(s.handleCacheStatus))
 	mux.HandleFunc("POST /api/cache/flush", requireAuth(s.handleCacheFlush))
 	mux.HandleFunc("POST /api/cache/dnsdist-restart", requireAuth(s.handleCacheDnsdistRestart))
+	mux.HandleFunc("GET /api/cache/settings", requireAuth(s.handleGetCacheSettings))
+	mux.HandleFunc("PUT /api/cache/settings", requireAuth(s.audited("cache_settings_update", s.handleUpdateCacheSettings)))
 
 	mux.HandleFunc("GET /api/dns/performance", requireAuth(s.handleDNSPerfStatus))
 	mux.HandleFunc("POST /api/dns/performance/benchmark", requireAuth(s.handleDNSPerfBenchmark))
@@ -401,9 +409,14 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PUT /api/updates/channel", requireAuth(s.handleSetUpdateChannel))
 	mux.HandleFunc("POST /api/updates/check", requireAuth(s.handleCheckForUpdate))
 	mux.HandleFunc("POST /api/updates/download-and-stage", requireAuth(s.handleUpdateDownloadAndStage))
+	mux.HandleFunc("GET /api/updates/history", requireAuth(s.handleUpdateHistory))
 
 	mux.HandleFunc("GET /api/dns-runtime/status", requireAuth(s.handleDNSRuntimeStatus))
 	mux.HandleFunc("POST /api/dns-runtime/apply", requireAuth(s.handleDNSRuntimeApply))
+	mux.HandleFunc("GET /api/dns-runtime/generations", requireAuth(s.handleDNSRuntimeGenerations))
+	mux.HandleFunc("GET /api/dns-runtime/inventory", requireAuth(s.handleDNSRuntimeInventory))
+	mux.HandleFunc("GET /api/dns-runtime/pending-changes", requireAuth(s.handleDNSRuntimePendingChanges))
+	mux.HandleFunc("POST /api/dns-runtime/rollback", requireAuth(s.audited("dns_runtime_rollback", s.handleDNSRuntimeRollback)))
 
 	mux.HandleFunc("/", s.handleStatic)
 

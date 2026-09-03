@@ -32,6 +32,8 @@ import (
 	"time"
 
 	"alderpointdns/go-controlplane/internal/blocklists"
+	"alderpointdns/go-controlplane/internal/cachesettings"
+	"alderpointdns/go-controlplane/internal/dnsgenerations"
 	"alderpointdns/go-controlplane/internal/clients"
 	"alderpointdns/go-controlplane/internal/customrules"
 	"alderpointdns/go-controlplane/internal/dnscompile"
@@ -55,6 +57,14 @@ type Orchestrator struct {
 	Clients        *clients.Service
 	PolicyEntities *policyentities.Service
 	HostAgent      *hostagent.Client
+	// CacheSettings: nil-safe (BIND's own real defaults apply when nil,
+	// same as every unset NamedConfInput cache field) -- see
+	// internal/cachesettings' own doc comment.
+	CacheSettings *cachesettings.Service
+	// Generations: nil-safe (deployment history/rollback/pending-changes
+	// all honestly report unavailable when nil) -- see
+	// internal/dnsgenerations' own doc comment.
+	Generations *dnsgenerations.Store
 
 	// DnsdistListenAddress, BindBackendAddress, and TLSCertPath/
 	// TLSKeyPath are fixed deployment configuration (not stored in any
@@ -246,6 +256,15 @@ func (o *Orchestrator) run(ctx context.Context, dryRun bool) Result {
 		"dnsdist_api_key":   o.DnsdistAPIKey,
 		"dnsdist_api_port":  o.DnsdistAPIPort,
 	}
+	if o.CacheSettings != nil {
+		if cs, err := o.CacheSettings.Get(ctx); err == nil {
+			params["cache_max_ttl_seconds"] = cs.MaxCacheTTLSeconds
+			params["cache_max_negative_ttl_seconds"] = cs.MaxNegativeTTLSeconds
+			params["cache_prefetch_enabled"] = cs.PrefetchEnabled
+			params["cache_serve_stale_enabled"] = cs.ServeStaleEnabled
+			params["cache_max_stale_ttl_seconds"] = cs.MaxStaleTTLSeconds
+		}
+	}
 	var promResult struct {
 		Promoted   bool          `json:"promoted"`
 		RolledBack bool          `json:"rolled_back"`
@@ -267,10 +286,181 @@ func (o *Orchestrator) run(ctx context.Context, dryRun bool) Result {
 		timings.ReloadMS = promResult.Timings.ReloadMS
 		timings.HealthMS = promResult.Timings.HealthMS
 	}
+	// Deployment history: every real (non-dry-run) attempt, success or
+	// failure -- best-effort, never fails the real apply it's describing
+	// (matching internal/auditlog.Record's own "logging must never break
+	// the real action" contract).
+	if !dryRun && o.Generations != nil {
+		o.Generations.Record(ctx, dnsgenerations.RecordInput{
+			Trigger: "apply", Promoted: promResult.Promoted, RolledBack: promResult.RolledBack,
+			Stage: promResult.Stage, Detail: promResult.Detail, DnsdistConf: dnsdistConf,
+			BuildMS: timings.BuildMS, CompileMS: timings.CompileMS, RPCMS: timings.RPCMS, TotalMS: timings.TotalMS,
+		})
+	}
 	return Result{
 		Attempted: true, Promoted: promResult.Promoted, RolledBack: promResult.RolledBack,
 		Stage: promResult.Stage, Detail: promResult.Detail, Timings: timings,
 	}
+}
+
+// PendingChanges reports whether the config Apply would promote right
+// now differs from what's actually live -- a real dry-compile-and-hash
+// comparison against the last promoted generation's own saved content,
+// never a guess. No promoted generation on record yet (a fresh
+// deployment, or one from before this feature existed) honestly reports
+// "unknown" rather than false.
+type PendingChangesResult struct {
+	Known   bool `json:"known"`
+	Pending bool `json:"pending"`
+}
+
+func (o *Orchestrator) PendingChanges(ctx context.Context) (PendingChangesResult, error) {
+	if o.Generations == nil {
+		return PendingChangesResult{}, nil
+	}
+	latest, err := o.Generations.LatestPromoted(ctx)
+	if err != nil {
+		return PendingChangesResult{}, err
+	}
+	if latest == nil || latest.ContentHash == "" {
+		return PendingChangesResult{Known: false}, nil
+	}
+	in, _, _, err := o.build(ctx)
+	if err != nil {
+		return PendingChangesResult{}, err
+	}
+	dnsdistConf, err := dnscompile.CompileDnsdist(in)
+	if err != nil {
+		return PendingChangesResult{}, err
+	}
+	return PendingChangesResult{Known: true, Pending: dnsgenerations.ContentHash(dnsdistConf) != latest.ContentHash}, nil
+}
+
+// Rollback re-promotes the previous PROMOTED generation's own real,
+// saved dnsdist config -- through the exact same validate/promote/
+// health-check/auto-revert pipeline Apply uses, not a separate/less-
+// tested path. bind_forwarders/bind_tls_hostname/cache settings are
+// recomputed fresh (they're simple current-state params, not versioned
+// content -- see dnsgenerations' own doc comment on what IS and is not
+// snapshotted). Honestly refuses when there is no earlier promoted
+// generation to roll back to, rather than silently no-op'ing.
+func (o *Orchestrator) Rollback(ctx context.Context) Result {
+	if o.HostAgent == nil {
+		return Result{Attempted: false, Error: "no host-agent configured for this deployment -- DNS runtime compilation is unavailable"}
+	}
+	if o.Generations == nil {
+		return Result{Attempted: false, Error: "deployment history is not available on this deployment"}
+	}
+	target, err := o.Generations.PreviousPromoted(ctx)
+	if err != nil {
+		return Result{Attempted: true, Error: fmt.Sprintf("loading rollback target: %v", err)}
+	}
+	if target == nil {
+		return Result{Attempted: false, Error: "no earlier promoted generation to roll back to"}
+	}
+
+	runStarted := time.Now()
+	_, bindForwarders, bindTLSHostname, err := o.build(ctx)
+	if err != nil {
+		return Result{Attempted: true, Error: fmt.Sprintf("gathering runtime state: %v", err)}
+	}
+	dnsdistConf, err := o.Generations.SnapshotConf(ctx, target.GenerationNumber)
+	if err != nil || dnsdistConf == "" {
+		return Result{Attempted: true, Error: "the target generation's own saved configuration is no longer available"}
+	}
+	params := map[string]any{
+		"dnsdist_conf":      dnsdistConf,
+		"bind_forwarders":   bindForwarders,
+		"bind_tls_hostname": bindTLSHostname,
+		"dry_run":           false,
+		"dnsdist_api_key":   o.DnsdistAPIKey,
+		"dnsdist_api_port":  o.DnsdistAPIPort,
+	}
+	if o.CacheSettings != nil {
+		if cs, err := o.CacheSettings.Get(ctx); err == nil {
+			params["cache_max_ttl_seconds"] = cs.MaxCacheTTLSeconds
+			params["cache_max_negative_ttl_seconds"] = cs.MaxNegativeTTLSeconds
+			params["cache_prefetch_enabled"] = cs.PrefetchEnabled
+			params["cache_serve_stale_enabled"] = cs.ServeStaleEnabled
+			params["cache_max_stale_ttl_seconds"] = cs.MaxStaleTTLSeconds
+		}
+	}
+
+	var promResult struct {
+		Promoted   bool          `json:"promoted"`
+		RolledBack bool          `json:"rolled_back"`
+		Stage      string        `json:"stage"`
+		Detail     string        `json:"detail"`
+		Timings    *ApplyTimings `json:"timings"`
+	}
+	rpcStarted := time.Now()
+	if err := o.HostAgent.Call(ctx, hostagent.OpDNSRuntimePromote, params, &promResult); err != nil {
+		return Result{Attempted: true, Error: err.Error()}
+	}
+	rpcMS := time.Since(rpcStarted).Milliseconds()
+	totalMS := time.Since(runStarted).Milliseconds()
+
+	o.Generations.Record(ctx, dnsgenerations.RecordInput{
+		Trigger: "rollback", Promoted: promResult.Promoted, RolledBack: promResult.RolledBack,
+		Stage: promResult.Stage, Detail: fmt.Sprintf("rolled back to generation #%d -- %s", target.GenerationNumber, promResult.Detail),
+		DnsdistConf: dnsdistConf, RPCMS: rpcMS, TotalMS: totalMS,
+	})
+	return Result{
+		Attempted: true, Promoted: promResult.Promoted, RolledBack: promResult.RolledBack,
+		Stage: promResult.Stage, Detail: promResult.Detail,
+		Timings: &ApplyTimings{RPCMS: rpcMS, TotalMS: totalMS},
+	}
+}
+
+// InventoryFile is one real generated file this DNS runtime actually
+// reads from -- not a guess at what dnscompile "might" produce.
+type InventoryFile struct {
+	Path      string `json:"path"`
+	SizeBytes int64  `json:"size_bytes"`
+	ModTime   string `json:"mod_time"`
+}
+
+// ConfigInventory lists the real files backing the currently-compiled
+// state: every blocklist/allowlist subscription's own pulled RPZ file
+// and the Local DNS runtime hosts file. It does NOT include the live
+// named.conf/dnsdist.conf themselves -- those live on the host-agent
+// side (a different process/filesystem namespace this web process
+// cannot stat directly); the last promoted generation's own dnsdist
+// config size (from its saved snapshot) stands in for that one.
+func (o *Orchestrator) ConfigInventory(ctx context.Context) ([]InventoryFile, error) {
+	var out []InventoryFile
+	statAdd := func(dir, name string) {
+		if dir == "" {
+			return
+		}
+		fi, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			return
+		}
+		out = append(out, InventoryFile{Path: filepath.Join(dir, name), SizeBytes: fi.Size(), ModTime: fi.ModTime().UTC().Format(time.RFC3339)})
+	}
+	if o.Blocklists != nil {
+		subs, err := o.Blocklists.List(ctx)
+		if err == nil {
+			for _, sub := range subs {
+				statAdd(o.Blocklists.RuntimeDir, sub.SubscriptionID+".rpz")
+			}
+		}
+	}
+	if o.LocalDNS != nil {
+		statAdd(o.LocalDNS.RuntimeDir, "local-dns.hosts")
+	}
+	if o.Generations != nil {
+		if latest, err := o.Generations.LatestPromoted(ctx); err == nil && latest != nil {
+			if conf, err := o.Generations.SnapshotConf(ctx, latest.GenerationNumber); err == nil && conf != "" {
+				out = append(out, InventoryFile{
+					Path: fmt.Sprintf("dnsdist.conf (generation #%d, host-agent side)", latest.GenerationNumber),
+					SizeBytes: int64(len(conf)), ModTime: latest.CreatedAt,
+				})
+			}
+		}
+	}
+	return out, nil
 }
 
 func (o *Orchestrator) build(ctx context.Context) (dnscompile.Input, []string, string, error) {

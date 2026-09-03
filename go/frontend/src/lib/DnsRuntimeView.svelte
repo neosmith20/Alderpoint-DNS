@@ -1,9 +1,11 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, ApiError, type DNSRuntimeStatus, type DNSRuntimeApplyResult } from "../api";
+  import { api, ApiError, type DNSRuntimeStatus, type DNSRuntimeApplyResult, type DNSRuntimeGeneration, type DNSRuntimeInventoryFile } from "../api";
   import { router } from "../router.svelte";
+  import { timestampPref } from "../timestamp.svelte";
   import PageHeader from "./ui/PageHeader.svelte";
   import StatusBadge from "./ui/StatusBadge.svelte";
+  import ConfirmDialog from "./ui/ConfirmDialog.svelte";
 
   // DNS Runtime: the real Go-native BIND + dnsdist compiler/promotion
   // pipeline (internal/dnscompile, internal/dnsruntime,
@@ -12,27 +14,32 @@
   // DNS, Upstreams/Domain Routing, Custom Rules, Blocklists, DNS
   // Transports, Scope Policies global/network policy, Strong
   // ClientID -- see every applyDNSRuntimeBestEffort call site). "Apply
-  // Runtime Changes" below is a manual re-compile-and-promote-now
-  // action (useful after fixing an underlying config issue, or to
-  // force a fresh promotion), not the only way a change takes effect.
-  // Scope: one default upstream profile, a flat global domain-routing
-  // list, global + per-network response-mode policy -- no per-group/
-  // per-client general-policy compilation yet -- see
-  // internal/dnscompile's own doc comment for the complete list.
+  // Pending Changes" below is a manual re-compile-and-promote-now
+  // action, not the only way a change takes effect.
   //
-  // Disclosed ceiling of DNSRuntimeStatus itself: bind_running /
-  // dnsdist_running / last_promoted_at is the complete real status this
-  // appliance tracks today. There is no generation id, no pending-
-  // changes count, no persisted deployment history, no rollback-state
-  // record, and no generated-configuration inventory anywhere in the Go
-  // backend yet -- every one of those spec sections below says so
-  // explicitly rather than being silently dropped or faked.
+  // Generation tracking (internal/dnsgenerations): a real, replayable
+  // snapshot of the dnsdist config is saved on every successful
+  // promotion; deployment history and Roll Back to Previous Generation
+  // are both real. Disclosed, not faked: there is no BIND-side file
+  // snapshot per generation (that state is continuously derived from
+  // the live DB -- blocklists/local DNS/policy -- governed by Backup &
+  // Restore instead), so rollback restores dnsdist's own compiled
+  // config, not BIND zone/RPZ file history.
 
   let status = $state<DNSRuntimeStatus | null>(null);
   let statusError = $state("");
   let applyBusy = $state(false);
   let applyResult = $state<DNSRuntimeApplyResult | null>(null);
   let applyError = $state("");
+
+  let generations = $state<DNSRuntimeGeneration[]>([]);
+  let generationsAvailable = $state(false);
+  let inventory = $state<DNSRuntimeInventoryFile[]>([]);
+  let pending = $state<{ known: boolean; pending: boolean } | null>(null);
+
+  let rollbackBusy = $state(false);
+  let rollbackResult = $state<DNSRuntimeApplyResult | null>(null);
+  let confirmRollbackOpen = $state(false);
 
   async function refresh() {
     statusError = "";
@@ -41,6 +48,24 @@
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
       statusError = err instanceof ApiError ? err.message : String(err);
+    }
+    try {
+      const g = await api.dnsRuntimeGenerations(router.signal());
+      generations = g.generations;
+      generationsAvailable = g.available;
+    } catch {
+      /* the history card's own "unavailable" state covers a failed fetch */
+    }
+    try {
+      const inv = await api.dnsRuntimeInventory(router.signal());
+      inventory = inv.files;
+    } catch {
+      /* the inventory card's own empty state covers a failed fetch */
+    }
+    try {
+      pending = await api.dnsRuntimePendingChanges(router.signal());
+    } catch {
+      pending = null;
     }
   }
 
@@ -62,11 +87,25 @@
     }
   }
 
-  const overallHealthy = $derived(!!status && status.bind_running && status.dnsdist_running);
+  async function runRollback() {
+    confirmRollbackOpen = false;
+    rollbackBusy = true;
+    rollbackResult = null;
+    try {
+      rollbackResult = await api.dnsRuntimeRollback();
+      await refresh();
+    } catch (err) {
+      rollbackResult = { attempted: true, promoted: false, rolled_back: false, error: err instanceof ApiError ? err.message : String(err) };
+    } finally {
+      rollbackBusy = false;
+    }
+  }
 
-  // Apply-stage timeline: real, measured per-stage timings from the most
-  // recent apply (see DNSRuntimeApplyResult.timings' own doc comment) --
-  // not synthesized. Absent on a response where attempted was false.
+  const overallHealthy = $derived(!!status && status.bind_running && status.dnsdist_running);
+  const activeGeneration = $derived(generations.find((g) => g.promoted && !g.rolled_back) ?? null);
+  const promotedGenerations = $derived(generations.filter((g) => g.promoted));
+  const canRollback = $derived(promotedGenerations.length >= 2);
+
   const timelineStages = $derived.by(() => {
     const t = applyResult?.timings;
     if (!t) return [];
@@ -81,6 +120,11 @@
     ];
   });
   const timelineTotal = $derived(applyResult?.timings?.total_ms ?? 0);
+
+  function formatBytes(n: number): string {
+    if (n < 1024) return `${n} B`;
+    return `${(n / 1024).toFixed(1)} KB`;
+  }
 </script>
 
 <PageHeader
@@ -89,6 +133,9 @@
   description="Real BIND + dnsdist compilation, validation against the actual installed binaries, atomic promotion, and automatic rollback on any failure."
 >
   {#snippet actions()}
+    <button type="button" class="secondary" onclick={() => (confirmRollbackOpen = true)} disabled={!canRollback || rollbackBusy}>
+      {rollbackBusy ? "Rolling back…" : "Roll Back to Previous Generation"}
+    </button>
     <button type="button" onclick={apply} disabled={applyBusy || !!statusError}>{applyBusy ? "Applying…" : "Apply Pending Changes"}</button>
   {/snippet}
 </PageHeader>
@@ -97,9 +144,20 @@
 
 <div class="status-summary">
   <StatusBadge label={statusError ? "Unavailable" : overallHealthy ? "Healthy" : "Degraded"} tone={statusError ? "danger" : overallHealthy ? "healthy" : "danger"} />
-  <span>Last successful deployment: <strong>{status?.last_promoted_at ? new Date(status.last_promoted_at).toLocaleString() : "none yet this hostagent generation"}</strong></span>
-  <span class="hint">Active generation / pending-changes count are not tracked by this appliance yet.</span>
+  <span>Active generation: <strong>{activeGeneration ? `#${activeGeneration.generation_number}` : "none yet"}</strong></span>
+  <span>Last successful deployment: <strong>{status?.last_promoted_at ? new Date(status.last_promoted_at).toLocaleString() : "none yet"}</strong></span>
+  {#if pending?.known}
+    <StatusBadge label={pending.pending ? "Pending changes" : "Up to date"} tone={pending.pending ? "warning" : "healthy"} />
+  {/if}
 </div>
+
+{#if rollbackResult}
+  {#if rollbackResult.promoted}
+    <p class="success" role="status">Rolled back successfully.</p>
+  {:else}
+    <p class="error" role="alert">Rollback failed: {rollbackResult.error || rollbackResult.detail}</p>
+  {/if}
+{/if}
 
 <div class="grid-2col">
   <div class="card">
@@ -145,20 +203,57 @@
 <div class="grid-2col">
   <div class="card">
     <h3>Generated configuration inventory</h3>
-    <p class="hint">
-      Not exposed by this appliance's DNS runtime yet -- there is no owner-facing listing of the
-      generated BIND/dnsdist configuration files themselves. This is a disclosed gap.
-    </p>
+    {#if inventory.length === 0}
+      <p class="hint">No generated files found yet.</p>
+    {:else}
+      <table class="inv-table">
+        <thead><tr><th>File</th><th>Size</th><th>Modified</th></tr></thead>
+        <tbody>
+          {#each inventory as f (f.path)}
+            <tr><td class="mono" title={f.path}>{f.path}</td><td>{formatBytes(f.size_bytes)}</td><td>{timestampPref.format(f.mod_time)}</td></tr>
+          {/each}
+        </tbody>
+      </table>
+    {/if}
   </div>
   <div class="card">
-    <h3>Recent deployment history &amp; rollback state</h3>
+    <h3>Validation &amp; rollback state</h3>
     <p class="hint">
-      Not persisted anywhere yet -- only the most recent apply's own result (above) and the
-      last-successful-promotion timestamp are tracked. A failed apply already rolls back
-      automatically in real time; there is no separate manual "Roll Back to Previous Generation"
-      action because no prior generations are retained to roll back to.
+      {#if !generationsAvailable}
+        Deployment history is not available on this deployment.
+      {:else if canRollback}
+        {promotedGenerations.length} promoted generations on record. Rolling back restores dnsdist's own compiled configuration to the previous one -- through the same validate/promote/health-check pipeline every apply uses.
+      {:else}
+        Only one promoted generation exists so far -- nothing to roll back to yet.
+      {/if}
     </p>
   </div>
+</div>
+
+<div class="card wide">
+  <h3>Recent deployment history</h3>
+  {#if generations.length === 0}
+    <p class="hint">No deployment attempts recorded yet.</p>
+  {:else}
+    <table class="history-table">
+      <thead><tr><th>Gen</th><th>When</th><th>Trigger</th><th>Result</th><th>Detail</th></tr></thead>
+      <tbody>
+        {#each generations as g (g.id)}
+          <tr>
+            <td>#{g.generation_number}</td>
+            <td class="mono">{timestampPref.format(g.created_at)}</td>
+            <td>{g.trigger}</td>
+            <td>
+              {#if g.promoted}<StatusBadge label="Promoted" tone="healthy" />
+              {:else if g.rolled_back}<StatusBadge label="Rejected, rolled back" tone="warning" />
+              {:else}<StatusBadge label="Failed" tone="danger" />{/if}
+            </td>
+            <td>{g.error || g.detail || "—"}</td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
+  {/if}
 </div>
 
 <div class="card wide">
@@ -174,6 +269,16 @@
   </p>
 </div>
 
+{#if confirmRollbackOpen}
+  <ConfirmDialog
+    title="Roll Back to Previous Generation"
+    message="Re-promote the previous generation's own saved dnsdist configuration? This goes through the same validate/promote/health-check pipeline as a normal apply, with automatic rollback if it fails health checks."
+    confirmLabel="Roll Back"
+    onConfirm={runRollback}
+    onCancel={() => (confirmRollbackOpen = false)}
+  />
+{/if}
+
 <style>
   .status-summary {
     display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; font-size: 0.85rem; margin-bottom: 1rem;
@@ -186,10 +291,16 @@
   .success { color: var(--success); }
   .error { color: var(--danger); }
   .hint { font-size: 0.85rem; opacity: 0.7; }
+  .mono { font-family: monospace; font-size: 0.8rem; }
 
   .timeline { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.5rem; }
   .timeline-row { display: grid; grid-template-columns: 9rem 1fr 4.5rem; align-items: center; gap: 0.6rem; font-size: 0.82rem; }
   .timeline-bar { display: block; height: 0.5rem; border-radius: 999px; background: var(--border); overflow: hidden; }
   .timeline-bar span { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
   .timeline-ms { text-align: right; font-family: monospace; opacity: 0.8; }
+
+  .inv-table, .history-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+  .inv-table th, .history-table th { text-align: left; font-weight: 600; opacity: 0.7; padding: 0.3rem 0.5rem 0.3rem 0; border-bottom: 1px solid var(--border); }
+  .inv-table td, .history-table td { padding: 0.3rem 0.5rem 0.3rem 0; border-bottom: 1px solid var(--border); max-width: 20rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .inv-table tr:last-child td, .history-table tr:last-child td { border-bottom: none; }
 </style>

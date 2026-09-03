@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, ApiError, type UpdateCheckResponse, type UpdateChannel } from "../api";
+  import { api, ApiError, type UpdateCheckResponse, type UpdateChannel, type UpdateHistoryEntry } from "../api";
   import { router } from "../router.svelte";
+  import { timestampPref } from "../timestamp.svelte";
   import StatusBadge from "./ui/StatusBadge.svelte";
   import PageHeader from "./ui/PageHeader.svelte";
 
@@ -24,6 +25,18 @@
   let loadError = $state("");
   let channel = $state<UpdateChannel | null>(null);
   let channelError = $state("");
+  let history = $state<UpdateHistoryEntry[] | null>(null);
+  let historyError = $state("");
+
+  async function loadHistory() {
+    try {
+      const resp = await api.updateHistory(router.signal());
+      history = resp.entries;
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      historyError = err instanceof ApiError ? err.message : String(err);
+    }
+  }
 
   let channelOwner = $state("");
   let channelRepo = $state("");
@@ -75,6 +88,7 @@
   onMount(() => {
     refresh();
     refreshChannel();
+    loadHistory();
   });
 
   async function saveChannel(e: Event) {
@@ -172,6 +186,7 @@
       applyError = err instanceof ApiError ? err.message : String(err);
     } finally {
       applyBusy = false;
+      loadHistory();
     }
   }
 </script>
@@ -283,11 +298,30 @@
 
   <div class="card">
     <h3>Update History</h3>
-    <p class="hint">
-      Not persisted anywhere yet -- there is no owner-facing log of past update attempts (time,
-      from/to version, result, backup used). Only the current version and the most recent staged
-      candidate (above) are tracked. This is a disclosed gap, not a hidden feature.
-    </p>
+    {#if historyError}
+      <p class="error" role="alert">{historyError}</p>
+    {:else if !history}
+      <p class="hint">Loading…</p>
+    {:else if history.length === 0}
+      <p class="hint">No update attempts recorded yet.</p>
+    {:else}
+      <table class="history-table">
+        <thead><tr><th>When</th><th>From</th><th>To</th><th>Source</th><th>Result</th><th>Backup</th><th>Error</th></tr></thead>
+        <tbody>
+          {#each history as h (h.id)}
+            <tr>
+              <td class="mono">{timestampPref.format(h.at)}</td>
+              <td class="mono">{h.from_version}</td>
+              <td class="mono">{h.to_version || "—"}</td>
+              <td>{h.source}</td>
+              <td><StatusBadge label={h.result} tone={h.result === "success" ? "healthy" : "danger"} /></td>
+              <td class="mono">{h.backup_ref || "—"}</td>
+              <td>{h.error || "—"}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    {/if}
   </div>
 </div>
 
@@ -309,4 +343,8 @@
   .channel-form input { flex: 1 1 10rem; }
   .row { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; }
   .mono { font-family: monospace; }
+  .history-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+  .history-table th { text-align: left; font-weight: 600; opacity: 0.7; padding: 0.3rem 0.5rem 0.3rem 0; border-bottom: 1px solid var(--border); }
+  .history-table td { padding: 0.3rem 0.5rem 0.3rem 0; border-bottom: 1px solid var(--border); }
+  .history-table tr:last-child td { border-bottom: none; }
 </style>

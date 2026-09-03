@@ -340,6 +340,14 @@ type DNSPromoteParams struct {
 	// touches what's actually live).
 	DnsdistAPIKey  string `json:"dnsdist_api_key,omitempty"`
 	DnsdistAPIPort int    `json:"dnsdist_api_port,omitempty"`
+
+	// Cache tuning -- see dnscompile.NamedConfInput's own doc comment for
+	// what each field does and its real BIND default when zero/false.
+	CacheMaxTTLSeconds    int  `json:"cache_max_ttl_seconds,omitempty"`
+	CacheMaxNegativeTTL   int  `json:"cache_max_negative_ttl_seconds,omitempty"`
+	CachePrefetchEnabled  bool `json:"cache_prefetch_enabled,omitempty"`
+	CacheServeStale       bool `json:"cache_serve_stale_enabled,omitempty"`
+	CacheMaxStaleTTL      int  `json:"cache_max_stale_ttl_seconds,omitempty"`
 }
 
 type DNSPromoteResult struct {
@@ -480,6 +488,8 @@ func (st *dnsRuntimeState) promote(ctx context.Context, p DNSPromoteParams) (*DN
 		PlainPort: st.cfg.BindPlainPort, ProxyPort: st.cfg.BindProxyPort, StatsPort: st.cfg.BindStatsPort,
 		RNDCPort: st.cfg.BindRNDCPort, RNDCKey: st.rndcKeySecret,
 		Directory: st.cfg.BindDirectory, LogPath: st.cfg.BindLogPath,
+		MaxCacheTTLSeconds: p.CacheMaxTTLSeconds, MaxNegativeTTLSeconds: p.CacheMaxNegativeTTL,
+		PrefetchEnabled: p.CachePrefetchEnabled, ServeStaleEnabled: p.CacheServeStale, MaxStaleTTLSeconds: p.CacheMaxStaleTTL,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("compiling named.conf: %w", err)

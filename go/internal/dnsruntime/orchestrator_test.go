@@ -26,6 +26,7 @@ import (
 	"alderpointdns/go-controlplane/internal/hostagent"
 	"alderpointdns/go-controlplane/internal/hostagentd"
 	"alderpointdns/go-controlplane/internal/localdns"
+	"alderpointdns/go-controlplane/internal/dnsgenerations"
 	"alderpointdns/go-controlplane/internal/policy"
 	"alderpointdns/go-controlplane/internal/policyentities"
 	"alderpointdns/go-controlplane/internal/upstreams"
@@ -377,6 +378,130 @@ func TestApplyEndToEndAgainstARealHostAgent(t *testing.T) {
 	got := strings.TrimSpace(string(out))
 	if got != "10.5.5.5" {
 		t.Fatalf("expected the real end-to-end answer 10.5.5.5 for a record created only in this test's SQLite DB, got %q", got)
+	}
+}
+
+// TestGenerationTrackingPendingChangesAndRollbackEndToEnd proves the
+// whole real chain: each real Apply records a real, replayable
+// generation; PendingChanges honestly reflects whether the live config
+// actually differs from what's compiled right now; and Rollback
+// genuinely re-promotes the PREVIOUS generation's own saved dnsdist
+// config through the real host-agent -- verified by a real dig query
+// against the live dnsdist instance, not just an in-memory assertion.
+func TestGenerationTrackingPendingChangesAndRollbackEndToEnd(t *testing.T) {
+	for _, bin := range []string{"named", "rndc", "dnsdist", "dig"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			t.Skipf("%s not available in this environment", bin)
+		}
+	}
+	db := newTestDB(t)
+	ctx := context.Background()
+	localDNS := &localdns.Service{DB: db, StagingDir: t.TempDir(), RuntimeDir: t.TempDir()}
+	customRules := &customrules.Service{DB: db}
+
+	bindDir := filepath.Join("/var/lib/bind", fmt.Sprintf("dnsruntime-gen-e2e-%d", os.Getpid()), t.Name())
+	if err := os.MkdirAll(bindDir, 0o755); err != nil {
+		t.Skipf("cannot create test dir under /var/lib/bind: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(bindDir) })
+
+	cfg := hostagentd.DNSRuntimeConfig{
+		StagingDir: t.TempDir(), BindLivePath: filepath.Join(bindDir, "named.conf"), BindDirectory: bindDir, BindLogPath: filepath.Join(bindDir, "named.log"),
+		DnsdistLivePath: filepath.Join(t.TempDir(), "dnsdist.conf"),
+		BindPlainPort:   freePort(t), BindProxyPort: freePort(t), BindStatsPort: freePort(t), BindRNDCPort: freePort(t),
+		DnsdistListenAddress:  fmt.Sprintf("127.0.0.1:%d", freePort(t)),
+		HealthCheckTimeout:    8 * time.Second,
+		HealthCheckRetryDelay: 100 * time.Millisecond,
+	}
+	sockPath := filepath.Join(t.TempDir(), "agent.sock")
+	agent := &hostagentd.Server{SocketPath: sockPath, AllowedUID: uint32(os.Getuid()), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	stop, err := hostagentd.RegisterDNSRuntimeOps(agent, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(stop)
+	agentCtx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go agent.Serve(agentCtx)
+	waitForSocket(t, sockPath)
+
+	generations := &dnsgenerations.Store{DB: db}
+	o := &Orchestrator{
+		LocalDNS: localDNS, CustomRules: customRules, Generations: generations,
+		HostAgent: hostagent.NewClient(sockPath),
+		DnsdistListenAddress: cfg.DnsdistListenAddress, BindBackendAddress: fmt.Sprintf("127.0.0.1:%d", cfg.BindProxyPort),
+	}
+
+	// --- Generation 1: nothing blocked. ---
+	res := o.Apply(ctx)
+	if !res.Attempted || !res.Promoted {
+		t.Fatalf("expected generation 1 to promote cleanly, got %+v", res)
+	}
+	gen1, err := generations.LatestPromoted(ctx)
+	if err != nil || gen1 == nil || gen1.GenerationNumber != 1 {
+		t.Fatalf("expected a real recorded generation #1, got %+v (err=%v)", gen1, err)
+	}
+
+	pending, err := o.PendingChanges(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pending.Known || pending.Pending {
+		t.Fatalf("expected no pending changes immediately after a clean apply, got %+v", pending)
+	}
+
+	// --- Add a real block rule -> pending changes must now be true. ---
+	if _, err := customRules.Create(ctx, "block", "blocked.example.com", nil); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = o.PendingChanges(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pending.Known || !pending.Pending {
+		t.Fatalf("expected pending changes to be true after adding an unApplied block rule, got %+v", pending)
+	}
+
+	// --- Generation 2: the block rule is now live. ---
+	res = o.Apply(ctx)
+	if !res.Attempted || !res.Promoted {
+		t.Fatalf("expected generation 2 to promote cleanly, got %+v", res)
+	}
+	gen2, err := generations.LatestPromoted(ctx)
+	if err != nil || gen2 == nil || gen2.GenerationNumber != 2 {
+		t.Fatalf("expected a real recorded generation #2, got %+v (err=%v)", gen2, err)
+	}
+	if gen2.ContentHash == gen1.ContentHash {
+		t.Fatal("expected generation 2's content hash to differ from generation 1's (a real block rule was added)")
+	}
+
+	host, port := cfg.DnsdistListenAddress[:strings.LastIndex(cfg.DnsdistListenAddress, ":")], cfg.DnsdistListenAddress[strings.LastIndex(cfg.DnsdistListenAddress, ":")+1:]
+	dig := func() string {
+		out, err := exec.Command("dig", "+time=2", "+tries=2", "@"+host, "-p", port, "blocked.example.com", "A").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(out)
+	}
+	if !strings.Contains(dig(), "status: NXDOMAIN") {
+		t.Fatalf("expected blocked.example.com to be genuinely blocked (NXDOMAIN) after generation 2, got:\n%s", dig())
+	}
+
+	// --- Rollback: generation 1's real saved config comes back live. ---
+	rbRes := o.Rollback(ctx)
+	if !rbRes.Attempted || !rbRes.Promoted {
+		t.Fatalf("expected rollback to promote cleanly, got %+v", rbRes)
+	}
+	if strings.Contains(dig(), "status: NXDOMAIN") {
+		t.Fatalf("expected blocked.example.com to be UNBLOCKED again after rolling back to generation 1, got:\n%s", dig())
+	}
+
+	history, err := generations.History(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 3 || history[0].Trigger != "rollback" || history[0].GenerationNumber != 3 {
+		t.Fatalf("expected 3 real history rows with the rollback recorded as its own new generation #3, got %+v", history)
 	}
 }
 

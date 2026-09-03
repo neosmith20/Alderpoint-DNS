@@ -434,6 +434,48 @@ func TestCompileNamedConfDeterministic(t *testing.T) {
 	checkNamedConf(t, out1)
 }
 
+func TestCompileNamedConfCacheTuningDirectives(t *testing.T) {
+	dir := testBindDir(t)
+	in := NamedConfInput{
+		Forwarders: []string{"9.9.9.9:53"},
+		PlainPort:  15453, ProxyPort: 15553, StatsPort: 18153,
+		Directory: dir, LogPath: dir + "/named.log",
+		MaxCacheTTLSeconds: 3600, MaxNegativeTTLSeconds: 300,
+		PrefetchEnabled: true, ServeStaleEnabled: true, MaxStaleTTLSeconds: 7200,
+	}
+	out, err := CompileNamedConf(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"max-cache-ttl 3600;", "max-ncache-ttl 300;", "prefetch 2 9;", "stale-answer-enable yes;", "stale-cache-enable yes;", "max-stale-ttl 7200;"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected generated named.conf to contain %q, got:\n%s", want, out)
+		}
+	}
+	checkNamedConf(t, out) // real named-checkconf syntax validation, not just a substring match
+}
+
+func TestCompileNamedConfCacheTuningDefaultsWhenUnset(t *testing.T) {
+	dir := testBindDir(t)
+	in := NamedConfInput{
+		PlainPort: 15453, ProxyPort: 15553, StatsPort: 18153,
+		Directory: dir, LogPath: dir + "/named.log",
+	}
+	out, err := CompileNamedConf(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, unwanted := range []string{"max-cache-ttl", "max-ncache-ttl", "stale-answer-enable yes", "max-stale-ttl"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("expected no %q directive when cache tuning is unconfigured (BIND's own real default should apply), got:\n%s", unwanted, out)
+		}
+	}
+	if !strings.Contains(out, "prefetch 0 0;") {
+		t.Errorf("expected prefetch to be explicitly disabled by default (PrefetchEnabled defaults false), got:\n%s", out)
+	}
+	checkNamedConf(t, out)
+}
+
 func TestCompileNamedConfEmptyForwardersMeansNativeRecursion(t *testing.T) {
 	dir := testBindDir(t)
 	in := NamedConfInput{PlainPort: 15453, ProxyPort: 15553, StatsPort: 18153, Directory: dir, LogPath: dir + "/named.log"}

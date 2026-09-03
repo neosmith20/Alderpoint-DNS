@@ -7,6 +7,7 @@ import (
 
 	"alderpointdns/go-controlplane/internal/auth"
 	"alderpointdns/go-controlplane/internal/hostagent"
+	"alderpointdns/go-controlplane/internal/updatehistory"
 )
 
 // hostagentUnavailable is the shared "no client configured / agent not
@@ -162,6 +163,19 @@ func (s *Server) handleLogsRead(w http.ResponseWriter, r *http.Request) {
 
 // --- Software Updates ------------------------------------------------------
 
+func (s *Server) handleUpdateHistory(w http.ResponseWriter, r *http.Request) {
+	if s.UpdateHistory == nil {
+		WriteJSON(w, http.StatusOK, map[string]any{"entries": []any{}})
+		return
+	}
+	entries, err := s.UpdateHistory.List(r.Context(), 50)
+	if err != nil {
+		Err(http.StatusInternalServerError, "internal_error", "failed to load update history").WriteJSON(w)
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"entries": entries})
+}
+
 func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	result, ok := callAgent[json.RawMessage](s, w, r, hostagent.OpUpdateCheck, nil)
 	if !ok {
@@ -198,18 +212,52 @@ func (s *Server) handleUpdateStage(w http.ResponseWriter, r *http.Request) {
 // schema rollback or otherwise corrupts state in a way a binary revert
 // alone can't undo).
 func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
+	// Capture from/to versions before anything else changes state -- see
+	// internal/updatehistory's own doc comment for why this real record
+	// exists at all (previously nothing about a past attempt was kept).
+	var checkResult struct {
+		CurrentVersion string `json:"current_version"`
+		Staged         *struct {
+			Version string `json:"version"`
+		} `json:"staged"`
+	}
+	fromVersion, toVersion := s.Version, ""
+	if s.HostAgent != nil {
+		if err := s.HostAgent.Call(r.Context(), hostagent.OpUpdateCheck, nil, &checkResult); err == nil {
+			if checkResult.CurrentVersion != "" {
+				fromVersion = checkResult.CurrentVersion
+			}
+			if checkResult.Staged != nil {
+				toVersion = checkResult.Staged.Version
+			}
+		}
+	}
+
+	backupRef := ""
 	if s.Backup != nil {
-		if _, err := s.Backup.Create(r.Context(), "pre-update-safety", ""); err != nil {
+		info, err := s.Backup.Create(r.Context(), "pre-update-safety", "")
+		if err != nil {
+			s.UpdateHistory.Record(r.Context(), updatehistory.RecordInput{
+				FromVersion: fromVersion, ToVersion: toVersion, Source: "manual", Result: "failed",
+				Error: "mandatory pre-upgrade backup failed: " + err.Error(),
+			})
 			Err(http.StatusInternalServerError, "backup_failed", "mandatory pre-upgrade backup failed -- update aborted, no changes were made: "+err.Error()).WriteJSON(w)
 			return
 		}
+		backupRef = info.Filename
 	}
 	sess, _ := auth.FromContext(r.Context())
 	result, ok := callAgent[json.RawMessage](s, w, r, hostagent.OpUpdateApply, nil)
 	if !ok {
 		s.AuditLog.Record(r.Context(), sess.AdminID, sess.Username, "software_update_install", false, clientIP(r), "")
+		s.UpdateHistory.Record(r.Context(), updatehistory.RecordInput{
+			FromVersion: fromVersion, ToVersion: toVersion, Source: "manual", Result: "failed", BackupRef: backupRef,
+		})
 		return
 	}
 	s.AuditLog.Record(r.Context(), sess.AdminID, sess.Username, "software_update_install", true, clientIP(r), "")
+	s.UpdateHistory.Record(r.Context(), updatehistory.RecordInput{
+		FromVersion: fromVersion, ToVersion: toVersion, Source: "manual", Result: "success", BackupRef: backupRef,
+	})
 	WriteJSON(w, http.StatusOK, result)
 }

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, ApiError, type CacheStatusResponse, type DNSRuntimeApplyResult } from "../api";
+  import { api, ApiError, type CacheStatusResponse, type DNSRuntimeApplyResult, type CacheSettings } from "../api";
   import { router } from "../router.svelte";
   import DnsRuntimeBadge from "./DnsRuntimeBadge.svelte";
   import PageHeader from "./ui/PageHeader.svelte";
@@ -35,8 +35,42 @@
     }
   }
 
+  let cacheSettings = $state<CacheSettings | null>(null);
+  let cacheSettingsError = $state("");
+  let cacheSettingsBusy = $state(false);
+  let cacheSettingsSaved = $state(false);
+  let cacheDnsRuntimeResult = $state<DNSRuntimeApplyResult | null>(null);
+
+  async function loadCacheSettings() {
+    try {
+      cacheSettings = await api.getCacheSettings(router.signal());
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      cacheSettingsError = err instanceof ApiError ? err.message : String(err);
+    }
+  }
+
+  async function saveCacheSettings(e: Event) {
+    e.preventDefault();
+    if (!cacheSettings) return;
+    cacheSettingsBusy = true;
+    cacheSettingsError = "";
+    cacheSettingsSaved = false;
+    try {
+      const resp = await api.updateCacheSettings(cacheSettings);
+      cacheSettings = resp.settings;
+      cacheDnsRuntimeResult = resp.dns_runtime ?? null;
+      cacheSettingsSaved = true;
+    } catch (err) {
+      cacheSettingsError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      cacheSettingsBusy = false;
+    }
+  }
+
   onMount(() => {
     refresh();
+    loadCacheSettings();
   });
 
   // Per-context flush target/scope (name/tree need a real domain name to
@@ -201,10 +235,29 @@
   <div class="card">
     <h3>Cache configuration</h3>
     <p class="hint">
-      Size, minimum/maximum TTL, negative TTL, prefetch, and serve-stale behavior are not yet
-      exposed as owner-configurable settings anywhere in this appliance's DNS runtime -- this section
-      is a disclosed gap, not a hidden control.
+      Real BIND options -- applies to the resolver cache above (dnsdist's own packet-cache size is a
+      separate, fixed internal setting). Saving recompiles and applies through the same real
+      validate/promote/health-check pipeline every other DNS Runtime change uses.
     </p>
+    {#if cacheSettingsError}<p class="error" role="alert">{cacheSettingsError}</p>{/if}
+    {#if !cacheSettings}
+      <p class="hint">Loading…</p>
+    {:else}
+      <form onsubmit={saveCacheSettings} class="cache-config-form">
+        <label>Max cache TTL (seconds) <input type="number" min="1" max="2592000" bind:value={cacheSettings.max_cache_ttl_seconds} /></label>
+        <label>Max negative TTL (seconds) <input type="number" min="1" max="604800" bind:value={cacheSettings.max_negative_ttl_seconds} /></label>
+        <label class="checkbox-label"><input type="checkbox" bind:checked={cacheSettings.prefetch_enabled} /> Prefetch popular records before they expire</label>
+        <label class="checkbox-label"><input type="checkbox" bind:checked={cacheSettings.serve_stale_enabled} /> Serve stale answers when upstream is unreachable</label>
+        {#if cacheSettings.serve_stale_enabled}
+          <label>Max stale TTL (seconds) <input type="number" min="1" max="604800" bind:value={cacheSettings.max_stale_ttl_seconds} /></label>
+        {/if}
+        <div class="form-actions">
+          <button type="submit" disabled={cacheSettingsBusy}>{cacheSettingsBusy ? "Applying…" : "Save &amp; Apply"}</button>
+          {#if cacheSettingsSaved}<span class="success">Saved.</span>{/if}
+        </div>
+      </form>
+      <DnsRuntimeBadge result={cacheDnsRuntimeResult} />
+    {/if}
   </div>
 </div>
 
@@ -227,4 +280,8 @@
   .error { color: var(--badge-danger-fg); }
   .flush-cell { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
   .flush-cell input { width: 10rem; }
+  .cache-config-form { display: flex; flex-direction: column; gap: 0.65rem; max-width: 28rem; }
+  .cache-config-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; }
+  .checkbox-label { flex-direction: row !important; align-items: center; gap: 0.5rem !important; }
+  .form-actions { display: flex; align-items: center; gap: 0.6rem; }
 </style>
