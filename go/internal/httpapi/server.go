@@ -6,20 +6,19 @@ import (
 	"net/http"
 	"time"
 
+	"alderpointdns/go-controlplane/internal/appliancesettings"
 	"alderpointdns/go-controlplane/internal/auditlog"
 	"alderpointdns/go-controlplane/internal/auth"
-	"alderpointdns/go-controlplane/internal/appliancesettings"
 	"alderpointdns/go-controlplane/internal/backup"
 	"alderpointdns/go-controlplane/internal/blockedservices"
-	"alderpointdns/go-controlplane/internal/cachesettings"
-	"alderpointdns/go-controlplane/internal/dnsgenerations"
-	"alderpointdns/go-controlplane/internal/updatehistory"
 	"alderpointdns/go-controlplane/internal/blocklists"
 	"alderpointdns/go-controlplane/internal/bootstrap"
+	"alderpointdns/go-controlplane/internal/cachesettings"
 	"alderpointdns/go-controlplane/internal/clientalias"
 	"alderpointdns/go-controlplane/internal/clients"
 	"alderpointdns/go-controlplane/internal/customrules"
 	"alderpointdns/go-controlplane/internal/dnsanalytics"
+	"alderpointdns/go-controlplane/internal/dnsgenerations"
 	"alderpointdns/go-controlplane/internal/dnsperf"
 	"alderpointdns/go-controlplane/internal/dnsruntime"
 	"alderpointdns/go-controlplane/internal/dnstransports"
@@ -33,9 +32,10 @@ import (
 	"alderpointdns/go-controlplane/internal/policy"
 	"alderpointdns/go-controlplane/internal/policyentities"
 	"alderpointdns/go-controlplane/internal/replication"
-	"alderpointdns/go-controlplane/internal/softwareupdates"
 	"alderpointdns/go-controlplane/internal/secretbackup"
 	"alderpointdns/go-controlplane/internal/secretstore"
+	"alderpointdns/go-controlplane/internal/softwareupdates"
+	"alderpointdns/go-controlplane/internal/updatehistory"
 	"alderpointdns/go-controlplane/internal/upstreams"
 )
 
@@ -66,27 +66,27 @@ type Server struct {
 	// preview/apply/rollback job workflow (POST /api/import/jobs etc.)
 	// reports unavailable; the older one-shot POST /api/import/hosts
 	// endpoint (s.LocalDNS-backed directly) is unaffected either way.
-	Importer      *importer.Service
-	Upstreams     *upstreams.Service
-	Clients       *clients.Service
-	Policy         *policy.Service
-	PolicyEntities *policyentities.Service
-	DomainRouting  *domainrouting.Service
-	CustomRules   *customrules.Service
-	Backup          *backup.Service
-	SoftwareUpdates *softwareupdates.Service
-	SecretBackup  *secretbackup.Service
-	FilterImport  *filterimport.Service
-	DNSTransports *dnstransports.Service
-	Notifications *notifications.Service
-	Replication   *replication.Service
-	BlockedServices *blockedservices.Service
+	Importer          *importer.Service
+	Upstreams         *upstreams.Service
+	Clients           *clients.Service
+	Policy            *policy.Service
+	PolicyEntities    *policyentities.Service
+	DomainRouting     *domainrouting.Service
+	CustomRules       *customrules.Service
+	Backup            *backup.Service
+	SoftwareUpdates   *softwareupdates.Service
+	SecretBackup      *secretbackup.Service
+	FilterImport      *filterimport.Service
+	DNSTransports     *dnstransports.Service
+	Notifications     *notifications.Service
+	Replication       *replication.Service
+	BlockedServices   *blockedservices.Service
 	ApplianceSettings *appliancesettings.Service
-	CacheSettings   *cachesettings.Service
-	Generations     *dnsgenerations.Store
-	UpdateHistory   *updatehistory.Service
-	StaticDir     string
-	Log           *slog.Logger
+	CacheSettings     *cachesettings.Service
+	Generations       *dnsgenerations.Store
+	UpdateHistory     *updatehistory.Service
+	StaticDir         string
+	Log               *slog.Logger
 
 	// TLSCertPath/TLSKeyPath are this control plane's OWN real,
 	// currently-served management TLS certificate/key -- the same
@@ -186,6 +186,15 @@ type Server struct {
 
 	ApplianceName     string
 	ApplianceTimezone string
+
+	// ControlDBPath/AnalyticsDBPath: real on-disk sqlite file paths for
+	// System Status' "Database sizes" card (os.Stat'd on demand, not
+	// cached -- these files are small and this is a low-traffic page).
+	// Empty is a valid, honestly-reported "unknown" state rather than a
+	// startup requirement, matching every other optional System Status
+	// signal on this page.
+	ControlDBPath   string
+	AnalyticsDBPath string
 }
 
 func (s *Server) Uptime() time.Duration { return time.Since(s.StartedAt) }

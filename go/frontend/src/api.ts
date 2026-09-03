@@ -1060,6 +1060,9 @@ export const api = {
     req<{
       version: string; uptime_seconds: number; appliance_name: string; appliance_timezone: string;
       session_timeout_seconds: number; login_rate_limit_max_attempts: number; login_rate_limit_window_seconds: number;
+      database_sizes: { name: string; path: string; bytes?: number; unavailable?: boolean }[];
+      last_dns_deployment: { generation_number: number; at: string; trigger: string; total_ms: number } | null;
+      recent_warnings: { at: string; source: string; severity: string; message: string }[];
     }>("/api/system/status"),
   dashboardSummary: (signal?: AbortSignal) =>
     req<{

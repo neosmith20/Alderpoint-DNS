@@ -22,22 +22,21 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"alderpointdns/go-controlplane/internal/appliancesettings"
 	"alderpointdns/go-controlplane/internal/auditlog"
 	"alderpointdns/go-controlplane/internal/auth"
-	"alderpointdns/go-controlplane/internal/appliancesettings"
 	"alderpointdns/go-controlplane/internal/backup"
 	"alderpointdns/go-controlplane/internal/blockedservices"
-	"alderpointdns/go-controlplane/internal/cachesettings"
-	"alderpointdns/go-controlplane/internal/dnsgenerations"
-	"alderpointdns/go-controlplane/internal/updatehistory"
 	"alderpointdns/go-controlplane/internal/blocklists"
 	"alderpointdns/go-controlplane/internal/bootstrap"
+	"alderpointdns/go-controlplane/internal/cachesettings"
 	"alderpointdns/go-controlplane/internal/clientalias"
 	"alderpointdns/go-controlplane/internal/clients"
 	"alderpointdns/go-controlplane/internal/config"
 	"alderpointdns/go-controlplane/internal/customrules"
 	"alderpointdns/go-controlplane/internal/dbmigrate"
 	"alderpointdns/go-controlplane/internal/dnsanalytics"
+	"alderpointdns/go-controlplane/internal/dnsgenerations"
 	"alderpointdns/go-controlplane/internal/dnsperf"
 	"alderpointdns/go-controlplane/internal/dnsruntime"
 	"alderpointdns/go-controlplane/internal/dnstransports"
@@ -51,11 +50,12 @@ import (
 	"alderpointdns/go-controlplane/internal/observedretention"
 	"alderpointdns/go-controlplane/internal/policy"
 	"alderpointdns/go-controlplane/internal/policyentities"
-	"alderpointdns/go-controlplane/internal/softwareupdates"
 	"alderpointdns/go-controlplane/internal/pymigrate"
 	"alderpointdns/go-controlplane/internal/replication"
 	"alderpointdns/go-controlplane/internal/secretbackup"
 	"alderpointdns/go-controlplane/internal/secretstore"
+	"alderpointdns/go-controlplane/internal/softwareupdates"
+	"alderpointdns/go-controlplane/internal/updatehistory"
 	"alderpointdns/go-controlplane/internal/upstreams"
 )
 
@@ -866,7 +866,7 @@ func runWeb(args []string) {
 		SessionTTL: cfg.SessionTTL(), LastSeen: cfg.LastSeenUpdateInterval(),
 		ApplianceName: cfg.Appliance.Name, ApplianceTimezone: cfg.Appliance.Timezone,
 		Analytics: analyticsReader, RawQueryLog: analyticsReader, AnalyticsSettings: analyticsSettingsHolder, ObservedRetention: observedRetentionSvc, HostAgent: hostAgentClient,
-		AuditLog: &auditlog.Service{DB: db},
+		AuditLog:   &auditlog.Service{DB: db},
 		DNSRuntime: dnsRuntimeOrch, TLSCertPath: cfg.Web.TLSCertPath, TLSKeyPath: cfg.Web.TLSKeyPath,
 		DNSPerfBindPlainAddr: *dnsPerfBindPlainAddr,
 		Secrets:              secretsSvc,
@@ -874,6 +874,8 @@ func runWeb(args []string) {
 		SecretBackup:         secretBackupSvc,
 		FilterImport:         filterImportSvc,
 		SoftwareUpdates:      softwareUpdatesSvc,
+		ControlDBPath:        *dbPath,
+		AnalyticsDBPath:      *analyticsDBPath,
 	}
 
 	// DNS Performance benchmark: same "optional, never fatal" contract

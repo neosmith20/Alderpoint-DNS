@@ -562,6 +562,25 @@ async function main() {
     // status instead of assuming which one.
     const statusValue = await page.$eval(".metric .value[class*='status-']", (el) => el.textContent.trim()).catch(() => null);
     check("System Status metric strip renders a real component status (honestly 'degraded' in this no-writer fixture)", statusValue === "ok" || statusValue === "degraded", statusValue);
+
+    // 2026-09-03 System Status expansion: Database Sizes, Last DNS
+    // Deployment, Recent Warnings -- all served from the real, already
+    // GET /api/system/status response (no new endpoint), see
+    // handlers_auth.go's databaseSizes/lastDNSDeployment/recentWarnings.
+    const statusCardHeadings = await page.$$eval(".card h3", (els) => els.map((e) => e.textContent?.trim()));
+    check("Database Sizes card renders", statusCardHeadings.includes("Database Sizes"), statusCardHeadings.join(", "));
+    check("Last DNS Deployment card renders", statusCardHeadings.includes("Last DNS Deployment"), statusCardHeadings.join(", "));
+    check("Recent Warnings card renders", statusCardHeadings.includes("Recent Warnings"), statusCardHeadings.join(", "));
+    const dbSizeText = await page.evaluate(() => {
+      const h3 = [...document.querySelectorAll(".card h3")].find((e) => e.textContent?.trim() === "Database Sizes");
+      return h3?.closest(".card")?.textContent ?? "";
+    });
+    // Both -db and -analytics-db are always real, non-empty paths for
+    // any working fixture (the latter is a hard startup requirement,
+    // see runWeb's own -analytics-db check) -- both rows, each with a
+    // real KB/MB size, not "unavailable".
+    check("Database Sizes card shows both real databases with real sizes", /Control database/.test(dbSizeText) && /Analytics database/.test(dbSizeText) && !/unavailable/.test(dbSizeText), dbSizeText.slice(0, 300));
+
     // A second real test bug found alongside the first: perfLog is a
     // plain in-memory, session-only log (deliberately -- matches
     // Python's own semantics, see PARITY_MATRIX), so a real

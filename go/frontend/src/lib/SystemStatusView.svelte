@@ -36,6 +36,14 @@
   // Discovery status is still not built, disclosed rather than hidden:
   // a Python-side pipeline this migration hasn't built a compatibility
   // boundary for.
+  //
+  // Database Sizes, Last DNS Deployment, and Recent Warnings
+  // (2026-09-03) are real too: real on-disk sqlite file sizes (control
+  // + analytics dbs, summed with their -wal/-shm sidecars), the real
+  // currently-live dns_runtime_generations row, and a real merged feed
+  // of failed DNS deployments / failed notification deliveries / failed
+  // update attempts -- all served from the existing GET
+  // /api/system/status response, no new endpoint.
 
   let health = $state<Awaited<ReturnType<typeof api.health>> | null>(null);
   let sysStatus = $state<Awaited<ReturnType<typeof api.systemStatus>> | null>(null);
@@ -138,6 +146,18 @@
     refresh();
   });
 
+  function formatBytes(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    const units = ["KB", "MB", "GB", "TB"];
+    let v = bytes;
+    let u = -1;
+    do {
+      v /= 1024;
+      u++;
+    } while (v >= 1024 && u < units.length - 1);
+    return `${v.toFixed(1)} ${units[u]}`;
+  }
+
   function formatUptime(seconds: number): string {
     const d = Math.floor(seconds / 86400);
     const h = Math.floor((seconds % 86400) / 3600);
@@ -166,7 +186,7 @@
 <PageHeader
   headingId="health-heading"
   title="System Status"
-  description="Metric strip, Components, UI Performance, Node Identity, BIND Cache Counters, and the DNS Performance benchmark are all live."
+  description="Metric strip, Components, Database Sizes, Last DNS Deployment, Recent Warnings, Node Identity, BIND Cache Counters, UI Performance, and the DNS Performance benchmark are all live."
 />
 
 <div class="health-summary">
@@ -225,6 +245,50 @@
             {/each}
           </tbody>
         </table>
+      {/if}
+    </div>
+
+    <div class="card">
+      <h3>Database Sizes</h3>
+      {#if !sysStatus}
+        <p class="hint">…</p>
+      {:else if sysStatus.database_sizes.length === 0}
+        <p class="hint">No database paths reported for this deployment.</p>
+      {:else}
+        <table class="components">
+          <thead><tr><th>Database</th><th>Size</th><th>Path</th></tr></thead>
+          <tbody>
+            {#each sysStatus.database_sizes as d (d.path)}
+              <tr>
+                <td>{d.name}</td>
+                {#if d.unavailable}
+                  <td class="status-unavailable" colspan="2">unavailable</td>
+                {:else}
+                  <td>{formatBytes(d.bytes ?? 0)}</td>
+                  <td class="mono scope">{d.path}</td>
+                {/if}
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+    </div>
+
+    <div class="card">
+      <h3>Last DNS Deployment</h3>
+      {#if !sysStatus}
+        <p class="hint">…</p>
+      {:else if !sysStatus.last_dns_deployment}
+        <p class="hint">No DNS generation has ever been promoted on this deployment yet.</p>
+      {:else}
+        {@const d = sysStatus.last_dns_deployment}
+        <div class="metric-strip">
+          <div class="metric"><span class="label">Generation</span><span class="value">#{d.generation_number}</span></div>
+          <div class="metric"><span class="label">When</span><span class="value">{timestampPref.format(d.at)}</span></div>
+          <div class="metric"><span class="label">Trigger</span><span class="value">{d.trigger}</span></div>
+          <div class="metric"><span class="label">Total time</span><span class="value">{d.total_ms} ms</span></div>
+        </div>
+        <p class="hint">See Advanced DNS &gt; DNS Runtime for full deployment history and rollback.</p>
       {/if}
     </div>
 
@@ -321,6 +385,34 @@
         {/if}
       {/if}
     </div>
+  </div>
+
+  <div class="card">
+    <h3>Recent Warnings</h3>
+    <p class="scope-note">
+      A real, merged feed of failed DNS deployments, failed notification deliveries, and failed
+      software update attempts -- nothing synthesized. Empty means none of those three sources
+      have anything to report.
+    </p>
+    {#if !sysStatus}
+      <p class="hint">…</p>
+    {:else if sysStatus.recent_warnings.length === 0}
+      <p class="hint">No recent warnings.</p>
+    {:else}
+      <table class="components">
+        <thead><tr><th>When</th><th>Source</th><th>Severity</th><th>Message</th></tr></thead>
+        <tbody>
+          {#each sysStatus.recent_warnings as w, i (w.at + "-" + i)}
+            <tr>
+              <td class="mono">{timestampPref.format(w.at)}</td>
+              <td>{w.source}</td>
+              <td class="status-{w.severity === "critical" ? "failed" : "warning"}">{w.severity}</td>
+              <td>{w.message}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    {/if}
   </div>
 
   <div class="card">
@@ -442,6 +534,7 @@
   .status-ok { color: var(--success); }
   .status-info { color: var(--muted); }
   .status-degraded, .status-unavailable, .status-failed { color: var(--badge-danger-fg); }
+  .status-warning { color: var(--warning); }
   .degraded-note { background: var(--badge-warn-bg); color: var(--badge-warn-fg); padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.85rem; }
   .actions { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
   .hint { font-size: 0.8rem; opacity: 0.7; }

@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"sort"
 	"strconv"
 
 	"alderpointdns/go-controlplane/internal/auth"
@@ -373,10 +376,11 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 // discovery, bind contexts, replication) -- see PARITY_MATRIX.md's
 // System Status row for that real remaining scope.
 func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	WriteJSON(w, http.StatusOK, map[string]any{
 		"version":            s.Version,
 		"uptime_seconds":     int(s.Uptime().Seconds()),
-		"appliance_name":     s.applianceDisplayName(r.Context()),
+		"appliance_name":     s.applianceDisplayName(ctx),
 		"appliance_timezone": s.ApplianceTimezone,
 		// Real, already-enforced authentication security state
 		// (Administration > Authentication Security) -- s.SessionTTL is
@@ -387,7 +391,146 @@ func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
 		"session_timeout_seconds":         int(s.SessionTTL.Seconds()),
 		"login_rate_limit_max_attempts":   auth.LoginFailureMax,
 		"login_rate_limit_window_seconds": int(auth.LoginFailureWindow.Seconds()),
+		// 2026-09-03 System Status expansion: real on-disk database
+		// sizes, the real last-promoted DNS generation, and a real
+		// merged feed of recent warning-worthy events -- see each
+		// helper's own doc comment for exactly what backs it.
+		"database_sizes":      s.databaseSizes(),
+		"last_dns_deployment": s.lastDNSDeployment(ctx),
+		"recent_warnings":     s.recentWarnings(ctx),
 	})
+}
+
+// databaseSizes reports the real on-disk size of this appliance's own
+// sqlite databases -- the control-plane db and, when configured, the
+// Go-native analytics db (internal/dnsanalytics). Each is summed with
+// its own -wal/-shm sidecar files: under WAL mode (both are opened
+// that way) recently-written data can sit in those files rather than
+// the main one, so the main file's size alone routinely undercounts
+// real disk usage. A path that can't be stat'd (not configured, or a
+// real read error) is reported honestly as unavailable rather than
+// omitted or shown as zero.
+func (s *Server) databaseSizes() []map[string]any {
+	out := []map[string]any{}
+	add := func(name, path string) {
+		if path == "" {
+			return
+		}
+		entry := map[string]any{"name": name, "path": path}
+		if total, ok := sumSQLiteFiles(path); ok {
+			entry["bytes"] = total
+		} else {
+			entry["unavailable"] = true
+		}
+		out = append(out, entry)
+	}
+	add("Control database", s.ControlDBPath)
+	add("Analytics database", s.AnalyticsDBPath)
+	return out
+}
+
+func sumSQLiteFiles(path string) (int64, bool) {
+	var total int64
+	found := false
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if fi, err := os.Stat(path + suffix); err == nil {
+			total += fi.Size()
+			found = true
+		}
+	}
+	return total, found
+}
+
+// lastDNSDeployment is the real, currently-live DNS Runtime generation
+// (internal/dnsgenerations) -- the same row DNS Runtime's own "Active
+// generation" reads, surfaced here too so an operator doesn't have to
+// leave System Status to see when DNS last actually changed. nil when
+// DNS Runtime isn't configured on this deployment, or nothing has ever
+// been promoted yet.
+func (s *Server) lastDNSDeployment(ctx context.Context) map[string]any {
+	if s.Generations == nil {
+		return nil
+	}
+	g, err := s.Generations.LatestPromoted(ctx)
+	if err != nil || g == nil {
+		return nil
+	}
+	return map[string]any{
+		"generation_number": g.GenerationNumber,
+		"at":                g.CreatedAt,
+		"trigger":           g.Trigger,
+		"total_ms":          g.TotalMS,
+	}
+}
+
+type systemWarning struct {
+	At       string `json:"at"`
+	Source   string `json:"source"`
+	Severity string `json:"severity"`
+	Message  string `json:"message"`
+}
+
+// recentWarnings merges real warning-worthy rows from three already
+// real, already-persisted sources this System Status page has no
+// other single view over: failed/rolled-back DNS Runtime generations,
+// warning/critical/failed notification deliveries, and failed/errored
+// software update attempts. Nothing here is synthesized -- an empty
+// result honestly means none of those three sources have anything to
+// report, not that warnings aren't being watched for.
+func (s *Server) recentWarnings(ctx context.Context) []systemWarning {
+	out := []systemWarning{}
+	if s.Generations != nil {
+		if gens, err := s.Generations.History(ctx, 20); err == nil {
+			for _, g := range gens {
+				switch {
+				case g.Error != "":
+					out = append(out, systemWarning{At: g.CreatedAt, Source: "DNS Runtime", Severity: "critical",
+						Message: fmt.Sprintf("Generation #%d (%s) failed: %s", g.GenerationNumber, g.Trigger, g.Error)})
+				case g.RolledBack:
+					out = append(out, systemWarning{At: g.CreatedAt, Source: "DNS Runtime", Severity: "warning",
+						Message: fmt.Sprintf("Generation #%d was rolled back", g.GenerationNumber)})
+				}
+			}
+		}
+	}
+	if s.Notifications != nil {
+		if hist, err := s.Notifications.ListHistory(ctx, 30); err == nil {
+			for _, h := range hist {
+				if h.Status != "failed" && h.Severity != "warning" && h.Severity != "critical" {
+					continue
+				}
+				msg := h.Message
+				if h.Status == "failed" && h.Error != "" {
+					msg = fmt.Sprintf("%s (delivery to %s failed: %s)", h.Message, h.ProviderName, h.Error)
+				}
+				severity := h.Severity
+				if severity == "" {
+					severity = "warning"
+				}
+				out = append(out, systemWarning{At: h.At, Source: "Notifications", Severity: severity, Message: msg})
+			}
+		}
+	}
+	if s.UpdateHistory != nil {
+		if entries, err := s.UpdateHistory.List(ctx, 20); err == nil {
+			for _, e := range entries {
+				if e.Error == "" && (e.Result == "" || e.Result == "success" || e.Result == "ok") {
+					continue
+				}
+				detail := e.Error
+				if detail == "" {
+					detail = e.Result
+				}
+				out = append(out, systemWarning{At: e.At, Source: "Software Updates", Severity: "warning",
+					Message: fmt.Sprintf("Update %s -> %s: %s", e.FromVersion, e.ToVersion, detail)})
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].At > out[j].At })
+	if len(out) > 15 {
+		out = out[:15]
+	}
+	return out
 }
 
 // applianceDisplayName: the DB-stored override (General Settings >
