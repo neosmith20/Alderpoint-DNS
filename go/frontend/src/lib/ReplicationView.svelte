@@ -287,20 +287,28 @@
       </div>
 
       <div class="card">
-        <div class="section-header"><h3>Pending Enrollments</h3></div>
+        <div class="section-header">
+          <h3>Pending Enrollments</h3>
+          <StatusBadge label="{(status.enrollments ?? []).filter((e) => e.status === 'pending').length} awaiting use" tone="neutral" />
+        </div>
+        <p class="hint">
+          A one-time token issued above, not yet a replica. Once the replica connects and consumes
+          it, that row moves to <strong>Replica Health</strong> below as a new enrolled replica --
+          the two tables show consecutive stages of the same enrollment workflow, not unrelated data.
+        </p>
         {#if status.enrollments && status.enrollments.length > 0}
           <table>
-            <thead><tr><th>Name</th><th>Created</th><th>Expires</th><th>Status</th><th></th></tr></thead>
+            <thead><tr><th>Name</th><th>Status</th><th>Created</th><th>Expires</th><th></th></tr></thead>
             <tbody>
               {#each status.enrollments as e (e.id)}
                 <tr>
                   <td>{e.node_name}</td>
+                  <td><span class="badge {e.status === 'consumed' ? 'badge-ok' : e.status === 'pending' ? 'badge-neutral' : 'badge-danger'}">{e.status}</span></td>
                   <td class="mono">{timestampPref.format(e.created_at)}</td>
                   <td class="mono">{timestampPref.format(e.expires_at)}</td>
-                  <td><span class="badge {e.status === 'consumed' ? 'badge-ok' : e.status === 'pending' ? 'badge-neutral' : 'badge-danger'}">{e.status}</span></td>
-                  <td>
+                  <td class="actions">
                     {#if e.status === "pending"}
-                      <button onclick={() => revokeEnrollment(e.id)} disabled={busy}>Revoke</button>
+                      <button class="danger" onclick={() => revokeEnrollment(e.id)} disabled={busy}>Revoke</button>
                     {/if}
                   </td>
                 </tr>
@@ -308,12 +316,16 @@
             </tbody>
           </table>
         {:else}
-          <p class="hint">No enrollments yet.</p>
+          <p class="hint">No enrollment tokens issued yet -- generate one above to clone this primary to a new replica.</p>
         {/if}
       </div>
 
       <div class="card">
-        <div class="section-header"><h3>Replica Health</h3></div>
+        <div class="section-header">
+          <h3>Replica Health</h3>
+          <StatusBadge label="{(status.replicas ?? []).filter((r) => r.status === 'active').length} active of {status.replicas?.length ?? 0}" tone="neutral" />
+        </div>
+        <p class="hint">Each row is a replica that has already consumed its enrollment token above and is syncing generations from this primary.</p>
         {#if status.replicas && status.replicas.length > 0}
           <table>
             <thead><tr><th>Name</th><th>Status</th><th>Last seen</th><th>Last generation acked</th><th>Last result</th><th>Actions</th></tr></thead>
@@ -324,7 +336,7 @@
                   <td><span class="badge {r.status === 'active' ? 'badge-ok' : r.status === 'revoked' ? 'badge-danger' : 'badge-neutral'}">{r.status}</span></td>
                   <td class="mono">{r.last_seen_at ? timestampPref.format(r.last_seen_at) : "never"}</td>
                   <td class="mono">{r.last_generation_acked}</td>
-                  <td>{r.last_result || "—"}</td>
+                  <td>{#if r.last_result}<span class="badge {resultBadgeClass(r.last_result)}">{r.last_result}</span>{:else}<span class="hint">—</span>{/if}</td>
                   <td class="actions">
                     {#if r.status !== "paused"}
                       <button onclick={() => setReplicaStatus(r.id, "paused")} disabled={busy}>Pause</button>
@@ -340,7 +352,7 @@
             </tbody>
           </table>
         {:else}
-          <p class="hint">No replicas enrolled yet.</p>
+          <p class="hint">No replicas enrolled yet -- once a pending enrollment above is consumed, it appears here.</p>
         {/if}
       </div>
 
