@@ -73,14 +73,17 @@ type Orchestrator struct {
 
 	// DnsdistAPIKey: forwarded into dnscompile.Input's own field of the
 	// same name -- see that field's doc comment for what it compiles.
-	// Generated once per process lifetime by this deployment's own
-	// cmd/alderpointdns-go startup (crypto/rand, never persisted --
-	// see that call site's own comment for why no cross-restart
-	// persistence is needed) rather than by this package, matching
-	// TLSCertPath/TLSKeyPath's own "fixed deployment configuration,
-	// not stored in any table" posture above. Empty means no webserver
-	// API is compiled at all, same honest zero-value contract as
-	// DnstapSocketPath.
+	// Loaded (or generated once, ever) by LoadOrCreateDnsdistAPIKey at
+	// cmd/alderpointdns-go startup and persisted in the control-plane
+	// database (dnsdist_api_key) -- deliberately NOT regenerated per
+	// process lifetime any more: a fresh-every-restart key caused a
+	// real, previously-reported defect (Top Upstream Resolvers staying
+	// empty indefinitely after any web-process restart, since dnsdist
+	// itself keeps running with whatever OLDER key was compiled into
+	// its last promote until some unrelated config change happens to
+	// trigger a new one). See that migration's own doc comment for the
+	// full account. Empty means no webserver API is compiled at all,
+	// same honest zero-value contract as DnstapSocketPath.
 	DnsdistAPIKey  string
 	DnsdistAPIPort int
 }

@@ -8,9 +8,7 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -781,22 +779,16 @@ func runWeb(args []string) {
 	dnsRuntimeTLSKey := resolveDNSRuntimeTLSPath(*dnsRuntimeTLSKeyPath, cfg.Web.TLSKeyPath)
 	var dnsRuntimeOrch *dnsruntime.Orchestrator
 	if hostAgentClient != nil && *dnsRuntimeDnsdistAddr != "" && *dnsRuntimeBindProxyAddr != "" {
-		// Generated fresh once per process lifetime, never persisted --
-		// see internal/dnsruntime.Orchestrator's own DnsdistAPIKey doc
-		// comment for why this is safe: every promote() call (Apply/
-		// Validate) sends the current key to the host-agent as an
-		// explicit param alongside the compiled config it's part of, so
-		// there is never a "the agent remembers a stale key" problem
-		// across a restart of THIS process, only a brief window right
-		// after a fresh start (before the first promote) where the
-		// upstream-stats poller sees "not available yet" -- honest, not
-		// a silent failure (see UpstreamStatsResult.Reason).
-		dnsdistAPIKeyBytes := make([]byte, 24)
-		dnsdistAPIKey := ""
-		if _, err := rand.Read(dnsdistAPIKeyBytes); err == nil {
-			dnsdistAPIKey = base64.RawURLEncoding.EncodeToString(dnsdistAPIKeyBytes)
-		} else {
-			logger.Warn("could not generate a dnsdist webserver API key -- Top Upstream Resolvers telemetry will be unavailable", "err", err)
+		// Persisted (dnsdist_api_key), not regenerated per process
+		// lifetime -- see LoadOrCreateDnsdistAPIKey's own doc comment
+		// for the real cross-restart authentication gap a fresh-every-
+		// restart key caused (Top Upstream Resolvers staying empty
+		// indefinitely after any web-process restart until an
+		// unrelated config change happened to trigger a fresh
+		// promote).
+		dnsdistAPIKey, err := dnsruntime.LoadOrCreateDnsdistAPIKey(ctx, db)
+		if err != nil {
+			logger.Warn("could not load/create the persisted dnsdist webserver API key -- Top Upstream Resolvers telemetry will be unavailable", "err", err)
 		}
 		dnsRuntimeOrch = &dnsruntime.Orchestrator{
 			LocalDNS: ldSvc, CustomRules: customRulesSvc, Blocklists: blSvc, Upstreams: upSvc, DNSTransports: dnsTransportsSvc, Policy: policySvc,
