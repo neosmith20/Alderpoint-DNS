@@ -1,5 +1,19 @@
 # Alderpoint DNS V2 — Go/Svelte Route-by-Route Parity Matrix
 
+**2026-09-03 (later): four owner-requested dashboard changes + a four-layer live
+investigation that finally made Top Upstream Resolvers show real data.** Full account
+in `AGENT_PROGRESS.md`. BIND Cache Effectiveness moved to Statistics; Recent Activity
+widened; Top Upstream Resolvers redesigned as a name+bar list (checked against AdGuard
+Home's own real dashboard source as a reference) instead of a cramped 6-column table,
+after root-causing why it had NEVER shown data through four separate real bugs (an
+API key regenerated fresh on every web-process restart, the same gap in the boot-time
+`dns-promote` CLI, a 26+ MB real dnsdist API response silently truncated at a 4 MiB
+cap, and apdns-hostagent's own in-memory key getting wiped on every one of its own
+restarts) -- all four fixed, verified live with a real forced promote (owner-approved,
+DNS-continuity monitored), and holding across several subsequent ordinary redeploys.
+New owner-customizable Appearance colors (18 modern options, 3 roles) on
+Administration.
+
 **Governance note (2026-09-02, per explicit owner instruction): this file is a tracking artifact,
 not the source of truth.** The source of truth for any parity/release decision is, in order: the
 actual V1.1.1 package/UI/backend; the current V2 live appliance; the current V2 source/package; and
