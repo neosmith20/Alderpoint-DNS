@@ -40,16 +40,29 @@ case "$1" in
       /var/lib/apdns-hostagent/dns-staging \
       /var/lib/apdns-hostagent/update-staging
     install -d -o root -g root -m 0700 /var/log/apdns-hostagent
-    # named (a separate system account, unrelated to this package) must be
-    # able to traverse into its own working directory once the owner
-    # configures DNS Runtime through the setup UI -- created here so the
-    # directory has the right ownership from the very first promote, not
-    # created implicitly by root the first time with the wrong owner.
-    if getent passwd bind >/dev/null; then
-      install -d -o bind -g bind -m 0755 /var/lib/bind/alderpointdns-go
-    else
-      install -d -o root -g root -m 0755 /var/lib/bind/alderpointdns-go
-    fi
+    # 2026-09-04: a real, confirmed-live packaging defect, found by the
+    # first genuine native-systemd install/start/configure test this
+    # package ever had -- named (see cmd/apdns-hostagent's ops_dnsruntime.go,
+    # a plain exec.CommandContext with no Credential/-u drop) always
+    # actually runs as root, the same UID as apdns-hostagent itself, never
+    # as the separate "bind" system account. BIND9 on Linux drops
+    # CAP_DAC_OVERRIDE as part of its own internal privilege hardening
+    # even while remaining UID 0, so its startup directory-writability
+    # self-check then falls back to plain DAC: owning UID must match
+    # exactly, or the write is refused -- confirmed by direct reproduction
+    # (a bind:bind 0755 directory makes named exit immediately with
+    # "directory ... is not writable" / "permission denied" on every
+    # single promote attempt; the identical directory as root:root works).
+    # The previous conditional here assumed the OPPOSITE (that named runs
+    # as "bind"), and since bind9 is a real package dependency, `getent
+    # passwd bind` always succeeds by the time this postinst runs -- so
+    # the one branch that was ever actually taken in practice was the
+    # broken one; the working root:root branch was unreachable dead code.
+    # Always root:root now, matching the real live deployment's own
+    # directory (confirmed directly: /var/lib/bind/apdns-go-live is
+    # root:root on the live appliance, which is why live was never
+    # affected by this).
+    install -d -o root -g root -m 0755 /var/lib/bind/alderpointdns-go
 
     # A real self-signed cert so the management UI serves HTTPS from the
     # very first boot, before the owner has configured anything through
@@ -120,6 +133,21 @@ EOF
     chmod 0644 /etc/alderpointdns-go/hostagent.env
 
     systemctl daemon-reload >/dev/null 2>&1 || true
+    # 2026-09-04: a second real finding from the same native-install test
+    # that found the directory-ownership bug above. bind9 and dnsdist are
+    # real apt Depends (this appliance drives them itself, as
+    # apdns-hostagent-spawned CHILD PROCESSES, never via systemd -- see
+    # apdns-hostagent.service's own doc comment), but installing those
+    # packages also enables THEIR OWN generic named.service/dnsdist.service
+    # units by normal Debian postinst convention. Confirmed directly: a
+    # fresh install leaves both `enabled` (only a build sandbox's
+    # policy-rc.d, not a real machine, stopped them from actually starting
+    # during this install). Left alone, a real reboot would start a second,
+    # unconfigured named/dnsdist competing for the exact same real :53 this
+    # appliance's own DNS-runtime-managed instances need -- disabled here
+    # so only the hostagent-managed instances this appliance actually
+    # configures ever run.
+    systemctl disable --now named.service bind9.service dnsdist.service >/dev/null 2>&1 || true
     # Units are installed and enabled, but deliberately NOT started here:
     # a real DNS Runtime promote (BIND/dnsdist) needs bind9/dnsdist
     # actually configured, which only happens through this control
