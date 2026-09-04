@@ -11,6 +11,19 @@ Type=simple
 User=apdns-go-web
 Group=apdns-go-web
 WorkingDirectory=/var/lib/alderpointdns-go
+# -dns-runtime-bind-proxy-addr's port MUST match apdns-hostagent.service's
+# own real BIND PROXYv2 listener port -- that companion unit does not
+# override -dns-runtime-bind-proxy-port, so it uses apdns-hostagent's own
+# compiled-in default (15553; see cmd/apdns-hostagent/main.go). 2026-09-04:
+# a real, confirmed-live defect found by the first genuine native-install
+# test this package ever had -- this line previously hardcoded 26553 (a
+# value that only ever matched one specific, separately hand-configured
+# host, not this package's own real default), so every compiled dnsdist
+# config pointed its BIND backend `newServer` at a port nothing was
+# listening on. Local DNS records and blocklist/custom-rule enforcement
+# (both answered directly by dnsdist) kept working and masked this
+# entirely; only queries actually needing forwarding through BIND (any
+# real upstream/native-recursion resolution) timed out.
 ExecStart=/opt/alderpointdns-go/alderpointdns-go web \
   -addr 0.0.0.0:8443 \
   -db /var/lib/alderpointdns-go/data/app.db \
@@ -24,7 +37,7 @@ ExecStart=/opt/alderpointdns-go/alderpointdns-go web \
   -replication-cert-dir /var/lib/alderpointdns-go/replication-certs \
   -hostagent-socket /run/apdns-hostagent/agent.sock \
   -dns-runtime-dnsdist-addr 0.0.0.0:53 \
-  -dns-runtime-bind-proxy-addr 127.0.0.1:26553
+  -dns-runtime-bind-proxy-addr 127.0.0.1:15553
 Restart=on-failure
 RestartSec=3
 # Memory-limit/restart parity with the live container deployment's own
