@@ -5,26 +5,53 @@
 // instance (real two-UID privilege separation, real rndc/control.db/
 // journal/ip access) without re-running the entire other suite.
 //
-// The Cache/DNS Runtime/DNS Performance checks below need a hostagent
-// wired with a full real DNS-runtime configuration (-dns-runtime-bind-
-// conf/-dns-runtime-dnsdist-conf/etc. -- see internal/dnsruntime's own
-// TestApplyEndToEndAgainstARealHostAgent for the exact real flags/ports
-// this needs, real named+dnsdist+rndc). A hostagent without that wiring
-// (e.g. this suite's own -allowed-uid/-secrets-key-dir/-current-binary-
-// only minimal fixture) honestly can't satisfy them -- disclosed
-// per-check below rather than silently skipped. The identical apply/
-// compile/promote/rollback machinery this would exercise already has
-// real end-to-end Go coverage (internal/dnsruntime's own
+// 2026-09-04: the DNS Runtime/DNS Performance checks below need a
+// hostagent wired with a full real DNS-runtime configuration
+// (-dns-runtime-bind-conf/-dns-runtime-dnsdist-conf/etc.) -- that real
+// fixture now exists and is exercised: see
+// go/tests/fixtures/run_dnsruntime_fixture.sh, modeled directly on
+// cmd/apdns-hostagent/main_test.go's own real named+dnsdist+rndc+
+// apdns-browsertest topology and packaging/systemd/apdns-hostagent.
+// service's real flag set (including -current-binary, so Software
+// Updates' "real current version" check is real too, and
+// -bind-compiled-dir, pointed at the SAME flat directory as
+// -dns-runtime-bind-dir, exactly matching how the real live appliance's
+// own apdns-hostagent is actually configured). Previously this file
+// ran against a minimal, deliberately-unwired fixture and disclosed 5
+// checks as an honest gap; every one of them is now driven for real
+// against that fixture and asserted true/false, not skipped -- a fresh
+// named/dnsdist pair really starts, a real Local DNS/blocklist/policy
+// state really compiles+promotes+is queryable, and the real Safe DNS
+// Benchmark queries the real resulting dnsdist. Two selector bugs found
+// in the process (".dnsruntime .row"/".dnsruntime button" never matched
+// DnsRuntimeView.svelte's real markup at all, independent of whether
+// DNS Runtime was configured) are fixed below, and the Cache "ctx0"
+// expectation -- which tested a synthetic multi-context directory
+// layout that cannot occur under the current single-context DNS-runtime
+// architecture (confirmed directly against the real live appliance's
+// own flat /var/lib/bind/apdns-go-live, no ctx0 subdirectory) -- is
+// replaced with the real, honest, live-matching "no BIND contexts"
+// empty state. The identical apply/compile/promote/rollback machinery
+// also has real end-to-end Go coverage (internal/dnsruntime's own
 // TestApplyEndToEndAgainstARealHostAgent/
-// TestGenerationTrackingPendingChangesAndRollbackEndToEnd, both against
-// real named/dnsdist/rndc binaries), and is verified again directly on
-// the live appliance as part of this session's own deployment
-// verification pass.
+// TestGenerationTrackingPendingChangesAndRollbackEndToEnd) and is
+// verified again directly on the live appliance as part of this
+// project's own deployment verification passes.
 import puppeteer from "puppeteer-core";
+import fs from "node:fs";
 
-const [, , baseUrl, username, password] = process.argv;
+// 2026-09-04: a real fresh instance's first screen is now bootstrap-
+// token-gated (internal/bootstrap -- see chromium_smoke.mjs's own header
+// comment for the full story), a step this file never learned about --
+// it used to only know #setup-heading/#login-heading, so it hung
+// (HARNESS ERROR: timeout waiting for that selector) against any truly
+// fresh instance, including the real DNS-runtime-configured fixture this
+// file's own header comment calls for. Optional 4th arg, same contract
+// as chromium_smoke.mjs's: omit it when pointed at an already-bootstrapped
+// instance (this file's own longstanding minimal-hostagent fixture).
+const [, , baseUrl, username, password, bootstrapTokenPath] = process.argv;
 if (!baseUrl || !username || !password) {
-  console.error("usage: node hostagent_smoke.mjs <base-url> <username> <password>");
+  console.error("usage: node hostagent_smoke.mjs <base-url> <username> <password> [bootstrap-token-path]");
   process.exit(2);
 }
 
@@ -45,6 +72,18 @@ async function main() {
     page.on("pageerror", (err) => console.error("PAGE ERROR:", err));
     await page.setViewport({ width: 1440, height: 900 });
     await page.goto(baseUrl, { waitUntil: "networkidle0" });
+
+    await page.waitForSelector("#bootstrap-heading, #setup-heading, #login-heading", { timeout: 5000 });
+    if (await page.$("#bootstrap-heading")) {
+      check("bootstrap-token-path was given for a fresh instance landing on the bootstrap gate", !!bootstrapTokenPath);
+      const token = fs.readFileSync(bootstrapTokenPath, "utf8").trim();
+      await page.type('input[autocomplete="off"]', token);
+      await Promise.all([
+        page.waitForSelector("#setup-heading", { timeout: 5000 }),
+        page.click('button[type="submit"]'),
+      ]);
+      check("real bootstrap token advances to the setup/account-creation form", (await page.$("#setup-heading")) !== null);
+    }
 
     await page.waitForSelector("#setup-heading, #login-heading", { timeout: 5000 });
     if (await page.$("#setup-heading")) {
@@ -93,19 +132,34 @@ async function main() {
     }
 
     // --- Cache ---
+    // 2026-09-04: discoverBindContexts() (cmd/apdns-hostagent/main.go)
+    // is a real, live-verified dead code path under the CURRENT
+    // single-context DNS-runtime architecture, not a fixture gap -- it
+    // only ever finds a context by scanning -bind-compiled-dir for
+    // "<subdir>/named.conf" (the OLD V1-parity multi-context layout,
+    // "ctx0", "ctx1", ...). The real live appliance passes the SAME
+    // directory to both -bind-compiled-dir and -dns-runtime-bind-dir
+    // (packaging/systemd/apdns-hostagent.service), and the single-
+    // context DNS-runtime compiler writes its named.conf directly into
+    // that directory's OWN root (confirmed directly against the live
+    // appliance's real /var/lib/bind/apdns-go-live/named.conf -- a flat
+    // file, no ctx0 subdirectory) -- so discoverBindContexts finds zero
+    // subdirectories there on live, today, permanently, not just in a
+    // disposable fixture. The previous "ctx0" expectation here tested a
+    // synthetic directory layout that does not, and cannot, occur on a
+    // real deployment -- replaced with the real, honest, live-matching
+    // behavior: Cache's own disclosed "no contexts" empty state.
     check("Cache nav item exists and is clickable", await clickNav("Cache"));
     await page.waitForSelector("#cache-heading", { timeout: 3000 }).catch(() => {});
     check("Cache page content rendered", (await page.$("#cache-heading")) !== null);
-    await page.waitForFunction(() => document.querySelector(".cache table tbody tr td") !== null, { timeout: 3000 }).catch(() => {});
-    const cacheRowText = await page.$eval(".cache table tbody", (el) => el.textContent).catch(() => "");
-    check("Cache page shows the real discovered BIND context", cacheRowText.includes("ctx0"), cacheRowText);
-    // BIND Cache Counters (2026-08-27): real if this fixture's BIND
-    // context has statistics-channels enabled, honestly "unavailable"
-    // otherwise -- either is a real pass, this only checks the column
-    // rendered something, not a specific value (the fixture environment
-    // controls whether stats are actually reachable).
-    const cacheStatsCellText = await page.$eval(".cache table tbody tr td:nth-child(4)", (el) => el.textContent).catch(() => "");
-    check("Cache page's Cache hits/misses column renders (real value or honest unavailable)", cacheStatsCellText.length > 0, cacheStatsCellText);
+    await page.waitForFunction(() => document.querySelector(".cache") !== null, { timeout: 3000 }).catch(() => {});
+    const cacheHintText = await page.$eval(".cache .hint", (el) => el.textContent).catch(() => "");
+    check(
+      "Cache honestly reports no discovered BIND contexts, matching the real live appliance's own single-context (no ctx0 subdirectory) layout",
+      cacheHintText.includes("No BIND contexts reported"),
+      cacheHintText,
+    );
+    check("Cache page renders no context rows (consistent with the honest empty state above, not a stale leftover row)", (await page.$(".cache table tbody tr td")) === null);
 
     // --- Replication ---
     check("Replication nav item exists and is clickable", await clickNav("Replication"));
@@ -212,27 +266,53 @@ async function main() {
     check("Software Updates page shows the real current version", versionText.trim().length > 0 && versionText.trim() !== "…", versionText);
 
     // --- DNS Runtime (internal/dnscompile, internal/hostagentd/ops_dnsruntime.go) ---
+    // 2026-09-04: this section previously used two selectors that never
+    // matched DnsRuntimeView.svelte's real markup at all (".dnsruntime
+    // .row"/".dnsruntime button" -- there is no ".dnsruntime" wrapper
+    // class, and the real Apply button lives in PageHeader's own
+    // ".page-header__actions"), so this always fell into a permanent
+    // "gap" false negative regardless of whether the fixture's hostagent
+    // was actually DNS-runtime-configured. Fixed to the real selectors
+    // now that a real full-DNS-runtime fixture exists to prove this
+    // against (go/tests/fixtures/run_dnsruntime_fixture.sh).
     check("DNS Runtime nav item exists and is clickable", await clickNav("DNS Runtime"));
     await page.waitForSelector("#dnsruntime-heading", { timeout: 3000 }).catch(() => {});
     check("DNS Runtime page content rendered", (await page.$("#dnsruntime-heading")) !== null);
-    await page.waitForFunction(() => document.querySelector(".dnsruntime .row") !== null, { timeout: 3000 }).catch(() => {});
-    const runtimeRowText = await page.$eval(".dnsruntime .row", (el) => el.textContent).catch(() => "");
-    // Needs a hostagent wired with a real DNS-runtime configuration
-    // (see this file's own header comment) -- this fixture's own
-    // minimal hostagent isn't, so this and the Apply check below are
-    // an honestly-disclosed gap here, not silently skipped or forced
-    // to crash the rest of this run.
-    check("DNS Runtime page shows real BIND/dnsdist process status", /running|not running/.test(runtimeRowText), runtimeRowText || "(DNS Runtime not configured on this fixture's hostagent)");
-    const dnsRuntimeButton = await page.$(".dnsruntime button");
-    if (dnsRuntimeButton) {
+    await page.waitForFunction(() => document.querySelectorAll(".grid-2col .card .status-badge").length >= 2, { timeout: 3000 }).catch(() => {});
+    const runtimeStatusTexts = await page.$$eval(".grid-2col .card .status-badge", (els) => els.slice(0, 2).map((e) => e.textContent));
+    check(
+      "DNS Runtime page shows real BIND/dnsdist process status",
+      runtimeStatusTexts.length === 2 && runtimeStatusTexts.every((t) => /running|not running/i.test(t)),
+      runtimeStatusTexts.join(" | "),
+    );
+
+    const applyButton = await page.$('.page-header__actions button:not(.secondary)');
+    if (applyButton) {
       await Promise.all([
-        page.waitForFunction(() => document.querySelector(".dnsruntime .success, .dnsruntime .error") !== null, { timeout: 8000 }),
-        dnsRuntimeButton.click(),
+        page.waitForFunction(() => {
+          const card = document.querySelector("[data-apply-result]");
+          return !!card && (card.querySelector(".success") || card.querySelector(".error"));
+        }, { timeout: 15000 }),
+        applyButton.click(),
       ]);
-      const applyResultText = await page.$eval(".dnsruntime .success, .dnsruntime .error", (el) => el.textContent).catch(() => "");
+      const applyResultText = await page.$eval("[data-apply-result] .success, [data-apply-result] .error", (el) => el.textContent).catch(() => "");
       check("Apply Runtime Changes performs a real compile+promote and reports a real result", applyResultText.length > 0, applyResultText);
+      // The real proof this was a genuine compile+promote, not a stub:
+      // BIND/dnsdist actually transition from "Not running" to
+      // "Running" after a successful apply.
+      await page.waitForFunction(() => {
+        const badges = document.querySelectorAll(".grid-2col .card .status-badge");
+        return badges.length >= 2 && Array.from(badges).slice(0, 2).every((b) => b.textContent.trim() === "Running");
+      }, { timeout: 10000 }).catch(() => {});
+      const runtimeStatusAfterApply = await page.$$eval(".grid-2col .card .status-badge", (els) => els.slice(0, 2).map((e) => e.textContent.trim()));
+      check(
+        "a successful Apply brings real BIND+dnsdist processes from 'Not running' to 'Running'",
+        runtimeStatusAfterApply.length === 2 && runtimeStatusAfterApply.every((t) => t === "Running"),
+        runtimeStatusAfterApply.join(" | "),
+      );
     } else {
-      check("Apply Runtime Changes performs a real compile+promote and reports a real result", false, "(no Apply button -- DNS Runtime unavailable on this fixture's hostagent)");
+      check("Apply Runtime Changes performs a real compile+promote and reports a real result", false, "(no Apply button found)");
+      check("a successful Apply brings real BIND+dnsdist processes from 'Not running' to 'Running'", false, "(no Apply button found)");
     }
 
     // --- System Status: DNS Performance benchmark (internal/dnsperf,

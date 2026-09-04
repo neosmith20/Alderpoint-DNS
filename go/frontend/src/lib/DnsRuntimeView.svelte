@@ -172,7 +172,7 @@
   </div>
 </div>
 
-<div class="card wide">
+<div class="card wide" data-apply-result>
   <h3>Apply-stage timeline</h3>
   {#if applyError}
     <p class="error" role="alert">{applyError}</p>
