@@ -37,6 +37,29 @@ ExecStart=/opt/alderpointdns-go/apdns-hostagent \
   -log-file-units named,dnsdist \
   -log-unit-map named=/var/lib/bind/alderpointdns-go/named.log,dnsdist=/var/lib/apdns-hostagent/dns-staging/dnsdist.startup.log
 EnvironmentFile=-/etc/alderpointdns-go/hostagent.env
+# 2026-09-04: a real, confirmed-live packaging defect found by the first
+# genuine native-systemd install/start test this package ever got (prior
+# verification passes hand-ran the web binary directly, sidestepping
+# real socket permissions entirely) -- Group= is deliberately unset
+# below this comment's fix, so RuntimeDirectory=apdns-hostagent was
+# created root:root, and RuntimeDirectoryMode=0750 leaves "other" with
+# no access at all. apdns-go-web (postinst's own dedicated, non-root
+# service account -- see alderpointdns-go.service's User=/Group=) is
+# in neither root nor a group with any path to this directory, so
+# EVERY real request through internal/hostagent.Client failed outright
+# at the unix socket connect() with EACCES ("permission denied"),
+# before SO_PEERCRED -- the real intended authorization boundary (see
+# this unit's own top comment) -- ever even ran. DNS Runtime, Cache,
+# Replication, Network Configuration, Logs, and Software Updates were
+# ALL unreachable on any fresh native install as a result. Group=
+# below makes RuntimeDirectory=apdns-hostagent group-owned by that same
+# account instead, restoring exactly the narrow access 0750 already
+# intended (root + apdns-go-web only, no wider "other" grant) --
+# StateDirectory/LogsDirectory below stay root-only regardless (mode
+# 0700 excludes group access entirely), so this changes nothing about
+# this process's own already-root file access, only which group new
+# files under RuntimeDirectory are created with.
+Group=apdns-go-web
 RuntimeDirectory=apdns-hostagent
 RuntimeDirectoryMode=0750
 StateDirectory=apdns-hostagent
