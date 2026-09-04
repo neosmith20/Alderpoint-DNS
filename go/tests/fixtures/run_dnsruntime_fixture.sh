@@ -102,6 +102,27 @@ case "$cmd" in
     [ -S "$SOCK" ] || { echo "hostagent socket never appeared; log:" >&2; cat "$WORK/hostagent.log" >&2; exit 1; }
     chmod 0666 "$SOCK"
 
+    # A real self-signed management TLS cert -- same directory convention
+    # as a real deployment (packaging/go-deb's postinst generates one at
+    # first boot), and REQUIRED for a real end-to-end DNSCrypt proof:
+    # handleDNSCryptRotate (internal/httpapi/handlers_encryption.go)
+    # gates entirely on -config's web.tls_cert_path being set (DNSCrypt
+    # key material reuses that same directory), so a plain-HTTP fixture
+    # genuinely cannot provision DNSCrypt at all, not just "won't serve
+    # HTTPS".
+    CERT_DIR="$WORK/certs"
+    mkdir -p "$CERT_DIR"
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+      -keyout "$CERT_DIR/web.key" -out "$CERT_DIR/web.crt" -days 3 \
+      -subj "/CN=apdns-dnsruntime-fixture" -addext "subjectAltName=IP:127.0.0.1" \
+      >/dev/null 2>&1
+    chmod 0644 "$CERT_DIR/web.key" "$CERT_DIR/web.crt"
+    # RotateDNSCrypt (internal/dnstransports) writes DNSCrypt provider/
+    # cert key material into this SAME directory directly from the web
+    # process itself (unprivileged apdns-browsertest, not through the
+    # hostagent) -- needs real write access, not just read+traverse.
+    chmod 0777 "$CERT_DIR"
+
     # Fixture config + DB + migrations, all under the world-writable work
     # dir so the unprivileged web process (below) can use them.
     CFG="$WORK/appliance.yaml"
@@ -110,6 +131,8 @@ case "$cmd" in
       -e "s#/var/lib/alderpointdns-go/blocklists/runtime#$WORK/blocklists/runtime#" \
       -e "s#/var/lib/alderpointdns-go/local-dns/staging#$WORK/local-dns/staging#" \
       -e "s#/var/lib/alderpointdns-go/local-dns/runtime#$WORK/local-dns/runtime#" \
+      -e "s#tls_cert_path: \"\"#tls_cert_path: \"$CERT_DIR/web.crt\"#" \
+      -e "s#tls_key_path: \"\"#tls_key_path: \"$CERT_DIR/web.key\"#" \
       "$REPO_GO_ROOT/config/appliance.yaml" > "$CFG"
     MIGRATIONS_DIR="$WORK/migrations"
     cp -r "$REPO_GO_ROOT/schema/migrations" "$MIGRATIONS_DIR"
@@ -151,10 +174,10 @@ case "$cmd" in
     WEB_PID=$!
     disown "$WEB_PID" 2>/dev/null || true
 
-    BASE_URL="http://$WEB_ADDR"
+    BASE_URL="https://$WEB_ADDR"
     ok=""
     for i in $(seq 1 100); do
-      if curl -fsS "$BASE_URL/api/health" >/dev/null 2>&1; then ok=1; break; fi
+      if curl -fskS "$BASE_URL/api/health" >/dev/null 2>&1; then ok=1; break; fi
       sleep 0.1
     done
     if [ -z "$ok" ]; then
@@ -180,6 +203,19 @@ EOF
     if [ -f "$STATE_FILE" ]; then
       # shellcheck disable=SC1090
       . "$STATE_FILE"
+      # $WEB_PID is the `runuser` wrapper's own PID, not the actual
+      # `alderpointdns-go web` process it execs -- a real leak this
+      # closes: `kill -9` on runuser does NOT kill its child, so every
+      # prior version of this script left the real web process (and its
+      # own real dnsdist/named children, since it's the one that drives
+      # DNS Runtime Apply) running forever, one more orphaned generation
+      # per "up" -- confirmed directly (nine leaked `alderpointdns-go
+      # web` processes found accumulated on this host during the
+      # 2026-09-04 session that added the DNSCrypt verification pass).
+      # Pattern-match on this fixture's own unique -db path instead of
+      # trusting a stored PID, matching the same discipline already used
+      # for named/dnsdist below.
+      pkill -9 -f "alderpointdns-go web -db $WORK/app.db" 2>/dev/null || true
       kill -9 "$WEB_PID" 2>/dev/null || true
       kill -9 "$HOSTAGENT_PID" 2>/dev/null || true
       pkill -9 -f "named -g -c $BIND_DIR/named.conf" 2>/dev/null || true
