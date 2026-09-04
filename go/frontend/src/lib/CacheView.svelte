@@ -252,7 +252,12 @@
           <label>Max stale TTL (seconds) <input type="number" min="1" max="604800" bind:value={cacheSettings.max_stale_ttl_seconds} /></label>
         {/if}
         <div class="form-actions">
-          <button type="submit" disabled={cacheSettingsBusy}>{cacheSettingsBusy ? "Applying…" : "Save &amp; Apply"}</button>
+          <!-- Plain JS string, not markup -- Svelte does NOT HTML-decode a
+               `{}` expression the way it decodes static template text, so
+               "&amp;" here was a real, screenshot-caught bug: the button
+               literally read "Save &amp; Apply" on screen, not "Save &
+               Apply". A bare "&" is exactly what a JS string needs. -->
+          <button type="submit" disabled={cacheSettingsBusy}>{cacheSettingsBusy ? "Applying…" : "Save & Apply"}</button>
           {#if cacheSettingsSaved}<span class="success">Saved.</span>{/if}
         </div>
       </form>

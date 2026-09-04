@@ -157,7 +157,19 @@
     </thead>
     <tbody>
       {#if visibleRows.length === 0}
-        <tr class="empty-row"><td colspan={columns.length}>{emptyMessage}</td></tr>
+        <!-- 2026-09-04: a real, screenshot-caught defect this `.empty-msg`
+             wrapper closes -- the message used to render `text-align:
+             center` directly in the colspan'd <td>, which spans the SUM of
+             every column's width. On any page whose columns' min-widths add
+             up past the viewport (nearly all of them, at mobile/tablet
+             widths), that centers the message somewhere out past the right
+             edge of `.grid-scroll`'s visible area -- readable only by
+             scrolling the (otherwise-empty-looking) table sideways first,
+             with no visual hint that there's anything to scroll to. Sticky-
+             positioning an inline-block wrapper to the scroll container's
+             own left edge keeps it inside the visible area at any scroll
+             position, any viewport. -->
+        <tr class="empty-row"><td colspan={columns.length}><span class="empty-msg">{emptyMessage}</span></td></tr>
       {:else}
         {#each visibleRows as row (rowKey(row))}
           <tr class={rowClass?.(row)}>
@@ -237,9 +249,14 @@
     background: var(--attention-bg);
   }
   .empty-row td {
+    padding: 0;
+  }
+  .empty-msg {
+    display: inline-block;
     opacity: 0.65;
-    text-align: center;
     padding: 1.25rem;
+    position: sticky;
+    left: 0;
   }
   .resize-handle {
     position: absolute;

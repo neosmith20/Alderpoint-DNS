@@ -303,9 +303,21 @@
   .audit-link-card h3 { margin: 0 0 0.35rem; }
   .audit-link-card p { margin: 0; }
   .table-scroll { overflow-x: auto; margin-top: 0.75rem; }
-  .admin-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-  .admin-table th { text-align: left; font-weight: 600; opacity: 0.7; padding: 0.3rem 0.5rem 0.3rem 0; border-bottom: 1px solid var(--border); }
-  .admin-table td { padding: 0.35rem 0.5rem 0.35rem 0; border-bottom: 1px solid var(--border); word-break: break-word; }
+  /* 2026-09-04: a real, screenshot-caught defect -- `width: 100%` plus
+     `word-break: break-word` forced this table to actually shrink to fit
+     any viewport, wrapping the Client column's full user-agent string
+     (e.g. "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML,
+     like Gecko) HeadlessChrome/150.0.0.0 Safari/537.36") across a dozen
+     lines per row at mobile widths -- one real appliance with more than a
+     couple of active sessions made this page thousands of pixels tall and
+     nearly unreadable. Every other wide table in this app (DataGrid.svelte,
+     LogsView, UpstreamsRoutingView) instead keeps a natural, un-wrapped
+     width and relies on `.table-scroll`'s own `overflow-x: auto` for
+     narrow viewports -- this table just wasn't following that same
+     pattern. */
+  .admin-table { min-width: 44rem; border-collapse: collapse; font-size: 0.85rem; }
+  .admin-table th { text-align: left; font-weight: 600; opacity: 0.7; padding: 0.3rem 0.5rem 0.3rem 0; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .admin-table td { padding: 0.35rem 0.5rem 0.35rem 0; border-bottom: 1px solid var(--border); white-space: nowrap; }
   .admin-table tr:last-child td { border-bottom: none; }
   .mono { font-family: monospace; }
 </style>
