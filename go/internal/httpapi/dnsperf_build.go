@@ -117,7 +117,7 @@ func (s *Server) BuildDNSPerfCases(ctx context.Context) ([]dnsperf.BenchmarkCase
 		"Cold external totals include upstream/authoritative network waiting outside Alderpoint control.",
 		"Alderpoint-controlled hot/local/block targets are measured separately from cold external targets.",
 		"DoT/DoH initial TLS handshake and established-connection query latency are reported as separate cases.",
-		"Every case targets this deployment's own Go-managed dnsdist/BIND runtime, never Python's separate :8443 runtime.",
+		"Every case targets this deployment's own Go-managed dnsdist/BIND runtime.",
 	}
 	if !s.dnsPerfHasBlockedDomain(ctx) {
 		notes = append(notes, "No blocklist domain was available at benchmark time; the Filtering/block case used a placeholder domain that is not expected to be blocked.")

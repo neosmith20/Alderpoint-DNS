@@ -216,7 +216,7 @@ func (s *Server) handleAnalyticsTopDomains(w http.ResponseWriter, r *http.Reques
 		"window": map[string]any{"start": start, "end": now, "minutes": minutes},
 	}
 	if granularity == "hour" {
-		resp["aggregation_note"] = "windows over 120 minutes are summed from hour buckets (coarser than Python's raw-Parquet path for the same window)"
+		resp["aggregation_note"] = "windows over 120 minutes are summed from hour buckets, not per-query detail"
 	}
 	WriteJSON(w, http.StatusOK, resp)
 }

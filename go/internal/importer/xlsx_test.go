@@ -2,42 +2,35 @@ package importer
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"testing"
 )
 
-// buildRealXLSXFixture generates a real .xlsx file using the actual
-// `openpyxl` library (the same library V1.1.1's own parse_xlsx_bytes()
-// reads with) via a small Python one-liner -- proving this Go reader
-// against real Excel-compatible output, not a hand-built zip.
-func buildRealXLSXFixture(t *testing.T, rows [][]string) []byte {
+// singleRowXLSXFixture is the same kind of checked-in real-openpyxl
+// fixture as realXLSXFixture above, one data row only (see
+// testdata/single_row_fixture.xlsx's own generation).
+func singleRowXLSXFixture(t *testing.T) []byte {
 	t.Helper()
-	if _, err := exec.LookPath("python3"); err != nil {
-		t.Skip("python3 not available for building a real .xlsx fixture")
-	}
-	path := filepath.Join(t.TempDir(), "fixture.xlsx")
-	script := `
-import sys, openpyxl
-wb = openpyxl.Workbook()
-ws = wb.active
-import json
-rows = json.loads(sys.argv[2])
-for row in rows:
-    ws.append(row)
-wb.save(sys.argv[1])
-`
-	rowsJSON, err := json.Marshal(rows)
+	data, err := os.ReadFile("testdata/single_row_fixture.xlsx")
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("python3", "-c", script, path, string(rowsJSON))
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("building real xlsx fixture: %v: %s", err, out)
-	}
-	data, err := os.ReadFile(path)
+	return data
+}
+
+// realXLSXFixture returns a real .xlsx file's bytes -- generated once
+// with the actual `openpyxl` library (the same library V1.1.1's own
+// parse_xlsx_bytes() reads with; see testdata/fixture.xlsx's own
+// generation, recorded in this repo's history) and checked in as a
+// static fixture, proving this Go reader against real Excel-compatible
+// output, not a hand-built zip -- without requiring python3/openpyxl to
+// actually be installed to run `go test` (see the 2026-09-04 zero-Python
+// audit: V2 must have no Python-based test requirements; a one-time,
+// checked-in fixture keeps the real-openpyxl proof without a runtime
+// Python dependency).
+func realXLSXFixture(t *testing.T) []byte {
+	t.Helper()
+	data, err := os.ReadFile("testdata/fixture.xlsx")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,11 +38,7 @@ wb.save(sys.argv[1])
 }
 
 func TestParseXLSXRowsReadsARealOpenpyxlWorkbook(t *testing.T) {
-	data := buildRealXLSXFixture(t, [][]string{
-		{"name", "record_type", "value", "ttl"},
-		{"printer.lan", "A", "10.0.0.50", "300"},
-		{"nas.lan", "A", "10.0.0.60", "600"},
-	})
+	data := realXLSXFixture(t)
 	rows, err := ParseXLSXRows(data)
 	if err != nil {
 		t.Fatal(err)
@@ -69,10 +58,7 @@ func TestParseXLSXRowsReadsARealOpenpyxlWorkbook(t *testing.T) {
 }
 
 func TestParseXLSXPlanEndToEndFromARealWorkbook(t *testing.T) {
-	data := buildRealXLSXFixture(t, [][]string{
-		{"name", "record_type", "value", "ttl"},
-		{"printer.lan", "A", "10.0.0.50", "300"},
-	})
+	data := singleRowXLSXFixture(t)
 	plan := parseXLSXPlan(data)
 	if plan.SourceType != "xlsx" {
 		t.Fatalf("expected source_type=xlsx, got %q", plan.SourceType)
@@ -92,10 +78,7 @@ func TestParseXLSXRowsOfInvalidFileFails(t *testing.T) {
 }
 
 func TestParseToPlanXLSXDecodesBase64(t *testing.T) {
-	data := buildRealXLSXFixture(t, [][]string{
-		{"name", "record_type", "value", "ttl"},
-		{"printer.lan", "A", "10.0.0.50", "300"},
-	})
+	data := singleRowXLSXFixture(t)
 	plan, err := ParseToPlan("xlsx", base64.StdEncoding.EncodeToString(data), "")
 	if err != nil {
 		t.Fatal(err)

@@ -8,11 +8,12 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http/httptest"
-	"os/exec"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -74,23 +75,16 @@ func TestCreateImportJobZoneWithDefaultDomainSucceeds(t *testing.T) {
 
 func TestCreateImportJobXLSXDecodesBase64AndImportsReal(t *testing.T) {
 	s := newImportTestServer(t)
-	// A real .xlsx built with the real openpyxl library.
-	pyScript := `
-import sys, openpyxl, base64
-wb = openpyxl.Workbook()
-ws = wb.active
-ws.append(["name", "record_type", "value", "ttl"])
-ws.append(["printer.lan", "A", "10.0.0.50", "300"])
-import io
-buf = io.BytesIO()
-wb.save(buf)
-sys.stdout.write(base64.b64encode(buf.getvalue()).decode())
-`
-	out, err := exec.Command("python3", "-c", pyScript).Output()
+	// A real .xlsx, once built with the real openpyxl library and
+	// checked in as a static fixture -- see
+	// internal/apdnsbak/apdnsbak_test.go's own comment for the full
+	// zero-Python-test-requirement rationale (2026-09-04 audit).
+	xlsxBytes, err := os.ReadFile("testdata/import_fixture.xlsx")
 	if err != nil {
-		t.Skipf("python3/openpyxl not available: %v", err)
+		t.Fatal(err)
 	}
-	body, _ := json.Marshal(map[string]string{"source_type": "xlsx", "text": string(out)})
+	encoded := base64.StdEncoding.EncodeToString(xlsxBytes)
+	body, _ := json.Marshal(map[string]string{"source_type": "xlsx", "text": encoded})
 	rec := httptest.NewRecorder()
 	s.handleCreateImportJob(rec, httptest.NewRequest("POST", "/api/import/jobs", bytes.NewReader(body)))
 	if rec.Code != 201 {

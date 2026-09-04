@@ -66,7 +66,7 @@ curl -s -X POST http://127.0.0.1:8451/api/setup -H 'Content-Type: application/js
 CJ="$WORK/cj.txt"
 LOGIN=$(curl -s -c "$CJ" -X POST http://127.0.0.1:8451/api/login -H 'Content-Type: application/json' \
   -d '{"username":"restart","password":"correct-horse-battery-staple"}')
-CSRF=$(echo "$LOGIN" | python3 -c "import json,sys;print(json.load(sys.stdin)['csrf'])")
+CSRF=$(echo "$LOGIN" | jq -r '.csrf')
 
 curl -s -X POST http://127.0.0.1:8451/api/local-dns -b "$CJ" -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' \
   -d '{"name":"restart.lan","record_type":"A","value":"10.0.0.7","ttl":300,"enabled":true}' >/dev/null

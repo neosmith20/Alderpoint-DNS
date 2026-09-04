@@ -3,84 +3,34 @@ package apdnsbak
 import (
 	"database/sql"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"testing"
 
 	_ "modernc.org/sqlite"
 )
 
-// buildRealApdnsbakFixture generates a real .apdnsbak archive using the
-// actual Python app/v2/backup_restore.py + app/v2/secret_store.py
-// modules from this repo -- proving this Go reader against real output
-// from the real tool that produces these archives, not a hand-built
-// byte string.
-func buildRealApdnsbakFixture(t *testing.T, passphrase string) []byte {
+// realApdnsbakFixture returns a real .apdnsbak archive's bytes --
+// generated once against the actual (now-decommissioned) Python
+// app/v2/backup_restore.py + app/v2/secret_store.py modules and checked
+// in as a static fixture (see testdata/fixture.apdnsbak's own
+// generation, recorded in this repo's history), proving this Go reader
+// against real output from the real tool that produced these archives,
+// without this test SUITE ever executing that Python code itself (see
+// the 2026-09-04 zero-Python audit: V2 must not execute old Python code,
+// even in tests -- reading a real fixture it once produced is fine,
+// re-running it on every `go test` is not). The fixture's own DB seeded
+// exactly one row, `local_dns_records` name='apdnsbak-printer.lan', under
+// passphrase "test-restore-passphrase" -- see the assertions below.
+func realApdnsbakFixture(t *testing.T) []byte {
 	t.Helper()
-	if _, err := exec.LookPath("python3"); err != nil {
-		t.Skip("python3 not available for building a real .apdnsbak fixture")
-	}
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "control.db")
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`CREATE TABLE local_dns_records (
-		id INTEGER PRIMARY KEY, name TEXT NOT NULL, record_type TEXT NOT NULL,
-		value TEXT NOT NULL, ttl INTEGER NOT NULL DEFAULT 300, enabled INTEGER NOT NULL DEFAULT 1,
-		created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(name, record_type, value)
-	)`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`INSERT INTO local_dns_records(name, record_type, value, ttl, enabled, created_at, updated_at)
-		VALUES('apdnsbak-printer.lan','A','10.0.0.88',300,1,datetime('now'),datetime('now'))`); err != nil {
-		t.Fatal(err)
-	}
-	db.Close()
-
-	backupPath := filepath.Join(dir, "fixture.apdnsbak")
-	script := `
-import sys
-sys.path.insert(0, "` + repoRoot(t) + `")
-from pathlib import Path
-from app.v2.backup_restore import create_appliance_backup
-from app.v2.secret_store import SecretStore
-
-store = SecretStore(Path(sys.argv[3]))
-create_appliance_backup(
-    control_db_path=Path(sys.argv[1]),
-    secret_store=store,
-    key=b"unused-in-passphrase-mode-000000",
-    backup_path=Path(sys.argv[2]),
-    source_version="v2-test",
-    passphrase=sys.argv[4],
-    source_node_id="fixture-node",
-)
-`
-	secretDir := filepath.Join(dir, "secretstore")
-	cmd := exec.Command("python3", "-c", script, dbPath, backupPath, secretDir, passphrase)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Skipf("building real .apdnsbak fixture (python deps missing?): %v: %s", err, out)
-	}
-	data, err := os.ReadFile(backupPath)
+	data, err := os.ReadFile("testdata/fixture.apdnsbak")
 	if err != nil {
 		t.Fatal(err)
 	}
 	return data
 }
 
-func repoRoot(t *testing.T) string {
-	t.Helper()
-	abs, err := filepath.Abs("../../../")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return abs
-}
-
 func TestExtractRealApdnsbakArchive(t *testing.T) {
-	data := buildRealApdnsbakFixture(t, "test-restore-passphrase")
+	data := realApdnsbakFixture(t)
 
 	dbPath, manifest, cleanup, err := Extract(data, "test-restore-passphrase")
 	defer cleanup()
@@ -109,7 +59,7 @@ func TestExtractRealApdnsbakArchive(t *testing.T) {
 }
 
 func TestExtractWithWrongPassphraseFails(t *testing.T) {
-	data := buildRealApdnsbakFixture(t, "test-restore-passphrase")
+	data := realApdnsbakFixture(t)
 	_, _, cleanup, err := Extract(data, "wrong-passphrase")
 	defer cleanup()
 	if err != ErrWrongPassphrase {
@@ -118,7 +68,7 @@ func TestExtractWithWrongPassphraseFails(t *testing.T) {
 }
 
 func TestExtractWithNoPassphraseFails(t *testing.T) {
-	data := buildRealApdnsbakFixture(t, "test-restore-passphrase")
+	data := realApdnsbakFixture(t)
 	_, _, cleanup, err := Extract(data, "")
 	defer cleanup()
 	if err != ErrPassphraseRequired {

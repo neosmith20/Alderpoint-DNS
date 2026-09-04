@@ -1,9 +1,14 @@
 package httpapi
 
-// HTTP-layer proof for the real .apdnsbak import route -- builds a real
-// archive with the actual Python app/v2/backup_restore.py module (same
-// approach as internal/apdnsbak's own tests) and drives it through the
-// real handler end to end.
+// HTTP-layer proof for the real .apdnsbak import route -- reads a real
+// archive that was once built with the actual (now-decommissioned)
+// Python app/v2/backup_restore.py module (same approach as
+// internal/apdnsbak's own tests -- see testdata/apdnsbak_fixture.apdnsbak's
+// own generation, recorded in this repo's history) and drives it through
+// the real handler end to end. Checked in as a static fixture rather
+// than generated per-run: see the 2026-09-04 zero-Python audit
+// (internal/apdnsbak/apdnsbak_test.go's own comment has the full
+// rationale).
 
 import (
 	"bytes"
@@ -14,7 +19,6 @@ import (
 	"log/slog"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -49,88 +53,18 @@ func newApdnsbakTestServer(t *testing.T) *Server {
 	}
 }
 
+// buildApdnsbakHTTPFixture returns the checked-in static fixture's bytes
+// (testdata/apdnsbak_fixture.apdnsbak -- its own DB seeded exactly one
+// row, local_dns_records name='apdnsbak-http-printer.lan', under
+// passphrase "test-passphrase", matching every call site below). The
+// passphrase parameter is kept only so call sites read the same as
+// before; the fixture itself is fixed, not regenerated per-passphrase.
 func buildApdnsbakHTTPFixture(t *testing.T, passphrase string) []byte {
 	t.Helper()
-	if _, err := exec.LookPath("python3"); err != nil {
-		t.Skip("python3 not available")
+	if passphrase != "test-passphrase" {
+		t.Fatalf("testdata/apdnsbak_fixture.apdnsbak was sealed under \"test-passphrase\" -- got %q", passphrase)
 	}
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "control.db")
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	schema := `
-CREATE TABLE local_dns_records (
-    id INTEGER PRIMARY KEY, name TEXT NOT NULL, record_type TEXT NOT NULL,
-    value TEXT NOT NULL, ttl INTEGER NOT NULL DEFAULT 300, enabled INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(name, record_type, value)
-);
-CREATE TABLE upstream_profiles (
-    id INTEGER PRIMARY KEY, upstream_profile_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
-    transport TEXT NOT NULL, strategy TEXT NOT NULL DEFAULT 'ordered', created_at TEXT NOT NULL,
-    enabled INTEGER NOT NULL DEFAULT 1, sort_order INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE upstream_endpoints (
-    id INTEGER PRIMARY KEY, upstream_profile_row_id INTEGER NOT NULL, address TEXT NOT NULL,
-    tls_hostname TEXT, priority INTEGER NOT NULL DEFAULT 0, weight INTEGER NOT NULL DEFAULT 1,
-    secret_ref TEXT, doh_path TEXT
-);
-CREATE TABLE dns_transport_settings (
-    id INTEGER PRIMARY KEY CHECK (id = 1), dot_enabled INTEGER NOT NULL DEFAULT 0,
-    dot_port INTEGER NOT NULL DEFAULT 853, updated_at TEXT NOT NULL,
-    doh_enabled INTEGER NOT NULL DEFAULT 0, doh_port INTEGER NOT NULL DEFAULT 443,
-    doh_path TEXT NOT NULL DEFAULT '/dns-query', doq_enabled INTEGER NOT NULL DEFAULT 0,
-    doq_port INTEGER NOT NULL DEFAULT 853, doh3_enabled INTEGER NOT NULL DEFAULT 0, doh3_port INTEGER NOT NULL DEFAULT 443
-);
-CREATE TABLE policy_layers (
-    id INTEGER PRIMARY KEY, scope TEXT NOT NULL, scope_ref TEXT NOT NULL,
-    filtering_profile_id TEXT, safesearch_mode TEXT, parental_policy_id TEXT, security_policy_id TEXT,
-    service_blocking_ruleset_id TEXT, blocking_response_mode TEXT, custom_ipv4 TEXT, custom_ipv6 TEXT,
-    upstream_profile_id TEXT, fallback_strategy TEXT, fallback_upstream_profile_id TEXT, ecs_mode TEXT,
-    domain_routing_ruleset_id TEXT, query_log_enabled INTEGER, statistics_enabled INTEGER,
-    created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(scope, scope_ref)
-);
-CREATE TABLE blocklist_subscriptions (
-    id INTEGER PRIMARY KEY, subscription_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, url TEXT NOT NULL,
-    category TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL,
-    last_refresh_at TEXT, last_status TEXT NOT NULL DEFAULT 'never_refreshed', last_error TEXT NOT NULL DEFAULT '',
-    rule_count INTEGER NOT NULL DEFAULT 0, update_interval_seconds INTEGER
-);
-`
-	if _, err := db.Exec(schema); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`INSERT INTO local_dns_records(name, record_type, value, ttl, enabled, created_at, updated_at)
-		VALUES('apdnsbak-http-printer.lan','A','10.0.0.89',300,1,datetime('now'),datetime('now'))`); err != nil {
-		t.Fatal(err)
-	}
-	db.Close()
-
-	backupPath := filepath.Join(dir, "fixture.apdnsbak")
-	repoRoot, err := filepath.Abs("../../../")
-	if err != nil {
-		t.Fatal(err)
-	}
-	script := `
-import sys
-sys.path.insert(0, sys.argv[5])
-from pathlib import Path
-from app.v2.backup_restore import create_appliance_backup
-from app.v2.secret_store import SecretStore
-
-store = SecretStore(Path(sys.argv[3]))
-create_appliance_backup(
-    control_db_path=Path(sys.argv[1]), secret_store=store,
-    key=b"unused-in-passphrase-mode-000000", backup_path=Path(sys.argv[2]),
-    source_version="v2-test", passphrase=sys.argv[4], source_node_id="fixture-node",
-)
-`
-	cmd := exec.Command("python3", "-c", script, dbPath, backupPath, filepath.Join(dir, "secretstore"), passphrase, repoRoot)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Skipf("building real .apdnsbak fixture (python deps missing?): %v: %s", err, out)
-	}
-	data, err := os.ReadFile(backupPath)
+	data, err := os.ReadFile("testdata/apdnsbak_fixture.apdnsbak")
 	if err != nil {
 		t.Fatal(err)
 	}
