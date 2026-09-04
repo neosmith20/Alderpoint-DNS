@@ -231,6 +231,54 @@ func TestBuildExplicitAllowOverridesBlock(t *testing.T) {
 	}
 }
 
+// TestBuildAllowRuleForSubdomainOfABlockedParentDomain is the direct
+// build()-level regression proof for the real 2026-09-04 live defect:
+// an "allow" custom rule for a SUBdomain of an entirely different
+// (broader) blocked domain string is a real, common shape -- most
+// blocklist entries and many owner "block" rules target a bare parent
+// domain, matched at the real dnsdist runtime via suffix, not an exact
+// string. The old exact-match-only exclusion (proven by the test just
+// above) left such an allow rule with zero effect: it never appeared
+// anywhere in the compiled output at all. AllowedDomains must be
+// populated regardless of whether its entries share an exact string
+// with anything in BlockedDomains -- dnscompile itself is responsible
+// for making the suffix-level precedence hold (see
+// TestCompileDnsdistAllowedDomainWinsOverParentBlockedDomain).
+func TestBuildAllowRuleForSubdomainOfABlockedParentDomain(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	customRules := &customrules.Service{DB: db}
+	if _, err := customRules.Create(ctx, "block", "amazonaws.com", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := customRules.Create(ctx, "allow", "trans-qrcode-images-na.s3.amazonaws.com", nil); err != nil {
+		t.Fatal(err)
+	}
+	o := &Orchestrator{CustomRules: customRules}
+	in, _, _, err := o.build(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundAllow := false
+	for _, d := range in.AllowedDomains {
+		if d == "trans-qrcode-images-na.s3.amazonaws.com" {
+			foundAllow = true
+		}
+	}
+	if !foundAllow {
+		t.Fatalf("expected the subdomain allow rule in AllowedDomains regardless of the differently-named parent block, got %v", in.AllowedDomains)
+	}
+	foundBlock := false
+	for _, d := range in.BlockedDomains {
+		if d == "amazonaws.com" {
+			foundBlock = true
+		}
+	}
+	if !foundBlock {
+		t.Fatalf("expected the parent domain to still compile as blocked (other subdomains must stay blocked), got %v", in.BlockedDomains)
+	}
+}
+
 // TestBuildAllowlistSubscriptionOverridesBlocklistSubscription proves
 // list_type=="allow" on a blocklist_subscriptions row (an Allowlist,
 // same table/pipeline as Blocklists -- see migration 0029) feeds
@@ -378,6 +426,98 @@ func TestApplyEndToEndAgainstARealHostAgent(t *testing.T) {
 	got := strings.TrimSpace(string(out))
 	if got != "10.5.5.5" {
 		t.Fatalf("expected the real end-to-end answer 10.5.5.5 for a record created only in this test's SQLite DB, got %q", got)
+	}
+}
+
+// TestApplyAllowRuleOverridesParentBlockEndToEnd is the full real-chain
+// regression proof for the 2026-09-04 live defect report: an owner's
+// "allow" custom rule for one specific subdomain did nothing against a
+// blocklist/custom-rule block of its broader parent domain -- a real
+// query for the allowed subdomain still came back NXDOMAIN from
+// dnsdist itself, even though BIND (queried directly) resolved it
+// fine. Reproduces the exact real shape (a Local DNS record standing
+// in for what would otherwise be a real public answer, so this test
+// needs no internet access) against a real hostagentd instance, real
+// named, real dnsdist, real dig -- not just compiled Lua text.
+func TestApplyAllowRuleOverridesParentBlockEndToEnd(t *testing.T) {
+	for _, bin := range []string{"named", "rndc", "dnsdist", "dig"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			t.Skipf("%s not available in this environment", bin)
+		}
+	}
+	db := newTestDB(t)
+	ctx := context.Background()
+	localDNS := &localdns.Service{DB: db, StagingDir: t.TempDir(), RuntimeDir: t.TempDir()}
+	if _, err := localDNS.Create(ctx, localdns.CreateInput{
+		Name: "trans-qrcode-images-na.s3.example-e2e.test", RecordType: "A", Value: "10.6.6.6", TTL: 300, Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	customRules := &customrules.Service{DB: db}
+	if _, err := customRules.Create(ctx, "block", "s3.example-e2e.test", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := customRules.Create(ctx, "allow", "trans-qrcode-images-na.s3.example-e2e.test", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	bindDir := filepath.Join("/var/lib/bind", fmt.Sprintf("dnsruntime-e2e-allow-%d", os.Getpid()), t.Name())
+	if err := os.MkdirAll(bindDir, 0o755); err != nil {
+		t.Skipf("cannot create test dir under /var/lib/bind: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(bindDir) })
+
+	dnsdistPort := freePort(t)
+	cfg := hostagentd.DNSRuntimeConfig{
+		StagingDir: t.TempDir(), BindLivePath: filepath.Join(bindDir, "named.conf"), BindDirectory: bindDir, BindLogPath: filepath.Join(bindDir, "named.log"),
+		DnsdistLivePath: filepath.Join(t.TempDir(), "dnsdist.conf"),
+		BindPlainPort:   freePort(t), BindProxyPort: freePort(t), BindStatsPort: freePort(t), BindRNDCPort: freePort(t),
+		DnsdistListenAddress:  fmt.Sprintf("127.0.0.1:%d", dnsdistPort),
+		HealthCheckTimeout:    8 * time.Second,
+		HealthCheckRetryDelay: 100 * time.Millisecond,
+	}
+	sockPath := filepath.Join(t.TempDir(), "agent.sock")
+	agent := &hostagentd.Server{SocketPath: sockPath, AllowedUID: uint32(os.Getuid()), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	stop, err := hostagentd.RegisterDNSRuntimeOps(agent, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(stop)
+	agentCtx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go agent.Serve(agentCtx)
+	waitForSocket(t, sockPath)
+
+	o := &Orchestrator{
+		LocalDNS: localDNS, CustomRules: customRules, HostAgent: hostagent.NewClient(sockPath),
+		DnsdistListenAddress: cfg.DnsdistListenAddress, BindBackendAddress: fmt.Sprintf("127.0.0.1:%d", cfg.BindProxyPort),
+	}
+	res := o.Apply(context.Background())
+	if !res.Attempted || !res.Promoted || res.RolledBack {
+		t.Fatalf("expected a real, clean end-to-end promotion, got %+v", res)
+	}
+
+	host, port := cfg.DnsdistListenAddress[:strings.LastIndex(cfg.DnsdistListenAddress, ":")], cfg.DnsdistListenAddress[strings.LastIndex(cfg.DnsdistListenAddress, ":")+1:]
+	dig := func(name string) string {
+		out, err := exec.Command("dig", "+time=2", "+tries=2", "+short", "@"+host, "-p", port, name, "A").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+
+	if got := dig("trans-qrcode-images-na.s3.example-e2e.test"); got != "10.6.6.6" {
+		t.Fatalf("expected the allowed subdomain to resolve to its real Local DNS answer despite the parent block, got %q", got)
+	}
+	// A real, direct regression guard against the fix being too broad:
+	// an unrelated sibling under the same blocked parent, never
+	// allowed, must still come back blocked (NXDOMAIN).
+	blockedOut, err := exec.Command("dig", "+time=2", "+tries=2", "@"+host, "-p", port, "other-bucket.s3.example-e2e.test", "A").CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(blockedOut), "status: NXDOMAIN") {
+		t.Fatalf("expected the unrelated sibling subdomain to still be blocked (NXDOMAIN), got:\n%s", blockedOut)
 	}
 }
 

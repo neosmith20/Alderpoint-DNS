@@ -254,9 +254,11 @@ func TestCompileDnsdistCustomIpModeRequiresAnAddress(t *testing.T) {
 }
 
 func TestCompileDnsdistExplicitAllowDomainOverridesBlock(t *testing.T) {
-	// Precedence is applied by the caller before Input is built (set
-	// difference) -- proven here by simply never including the allowed
-	// domain in BlockedDomains at all.
+	// The caller (internal/dnsruntime's orchestrator) already excludes
+	// an exact-string match from BlockedDomains before Input is built
+	// (a dedup optimization, not the real precedence mechanism -- see
+	// AllowedDomains' own doc comment) -- proven here by simply never
+	// including the allowed domain in BlockedDomains at all.
 	in := minimalInput()
 	in.BlockedDomains = []string{"safe.example.com"}
 	out, err := CompileDnsdist(in)
@@ -265,6 +267,37 @@ func TestCompileDnsdistExplicitAllowDomainOverridesBlock(t *testing.T) {
 	}
 	if strings.Contains(out, "notblocked.example.com") {
 		t.Fatalf("domain never in BlockedDomains must never appear as a block rule, got:\n%s", out)
+	}
+	checkDnsdist(t, out)
+}
+
+// TestCompileDnsdistAllowedDomainWinsOverParentBlockedDomain is the
+// direct compiled-output regression proof for the real 2026-09-04 live
+// defect (see AllowedDomains' own doc comment and
+// TestEvaluateDomainAllowedDomainWinsOverParentBlocklistEntry): an
+// allowed SUBdomain and a blocked PARENT domain are different strings,
+// so the caller's own exact-match exclusion (proven above) can never
+// cancel this -- AllowedDomains must compile to a real terminal
+// AllowAction, emitted before the block rule, for the fix to actually
+// hold at the real dnsdist runtime.
+func TestCompileDnsdistAllowedDomainWinsOverParentBlockedDomain(t *testing.T) {
+	in := minimalInput()
+	in.BlockedDomains = []string{"amazonaws.com"}
+	in.AllowedDomains = []string{"trans-qrcode-images-na.s3.amazonaws.com"}
+	out, err := CompileDnsdist(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowIdx := strings.Index(out, `SuffixMatchNodeRule({"trans-qrcode-images-na.s3.amazonaws.com."}), AllowAction()`)
+	blockIdx := strings.Index(out, `SuffixMatchNodeRule({"amazonaws.com."})`)
+	if allowIdx < 0 {
+		t.Fatalf("expected a real terminal AllowAction for the allowed subdomain, got:\n%s", out)
+	}
+	if blockIdx < 0 {
+		t.Fatalf("expected the parent domain's own block rule to still compile (other subdomains stay blocked), got:\n%s", out)
+	}
+	if allowIdx > blockIdx {
+		t.Fatalf("allowed-domain rule must be emitted before the block rule (allow always wins), got:\n%s", out)
 	}
 	checkDnsdist(t, out)
 }
@@ -1040,14 +1073,14 @@ func TestCompileDnsdistDefaultPoolServerNamedForTelemetry(t *testing.T) {
 }
 
 func TestEvaluateDomainNoMatch(t *testing.T) {
-	res := EvaluateDomain("safe.example.com", nil, nil, nil)
+	res := EvaluateDomain("safe.example.com", nil, nil, nil, nil)
 	if res.Blocked || res.Reason != "no_match" {
 		t.Fatalf("got %+v, want an unblocked no_match result", res)
 	}
 }
 
 func TestEvaluateDomainBlocklistSuffixMatch(t *testing.T) {
-	res := EvaluateDomain("ads.example.com", []string{"example.com"}, nil, nil)
+	res := EvaluateDomain("ads.example.com", nil, []string{"example.com"}, nil, nil)
 	if !res.Blocked || res.Reason != "blocklist" || res.Matched != "example.com" {
 		t.Fatalf("got %+v, want blocked by the real suffix entry", res)
 	}
@@ -1057,29 +1090,59 @@ func TestEvaluateDomainSuffixDoesNotFalsePositiveOnSimilarString(t *testing.T) {
 	// "evilexample.com" ends with "example.com" as a raw string but is
 	// NOT a subdomain of it -- must not match, same as dnsdist's real
 	// SuffixMatchNodeRule.
-	res := EvaluateDomain("evilexample.com", []string{"example.com"}, nil, nil)
+	res := EvaluateDomain("evilexample.com", nil, []string{"example.com"}, nil, nil)
 	if res.Blocked {
 		t.Fatalf("got %+v, want unblocked (not a real subdomain)", res)
 	}
 }
 
 func TestEvaluateDomainRegexBlock(t *testing.T) {
-	res := EvaluateDomain("ad1.example.com", nil, nil, []string{"^ad[0-9]+\\.example\\.com$"})
+	res := EvaluateDomain("ad1.example.com", nil, nil, nil, []string{"^ad[0-9]+\\.example\\.com$"})
 	if !res.Blocked || res.Reason != "regex_block" {
 		t.Fatalf("got %+v, want blocked by the regex", res)
 	}
 }
 
 func TestEvaluateDomainRegexAllowWinsOverBlocklist(t *testing.T) {
-	res := EvaluateDomain("safe.example.com", []string{"example.com"}, []string{"^safe\\."}, nil)
+	res := EvaluateDomain("safe.example.com", nil, []string{"example.com"}, []string{"^safe\\."}, nil)
 	if res.Blocked || res.Reason != "regex_allow" {
 		t.Fatalf("got %+v, want the regex-allow to win over the blocklist suffix match", res)
 	}
 }
 
 func TestEvaluateDomainMostSpecificBlocklistEntryReported(t *testing.T) {
-	res := EvaluateDomain("deep.corp.example.com", []string{"example.com", "corp.example.com"}, nil, nil)
+	res := EvaluateDomain("deep.corp.example.com", nil, []string{"example.com", "corp.example.com"}, nil, nil)
 	if !res.Blocked || res.Matched != "corp.example.com" {
 		t.Fatalf("got %+v, want the more specific entry reported as the match", res)
+	}
+}
+
+// TestEvaluateDomainAllowedDomainWinsOverParentBlocklistEntry is the
+// direct regression proof for the real 2026-09-04 live defect: an
+// owner's "allow" custom rule for one specific subdomain
+// (trans-qrcode-images-na.s3.amazonaws.com) did nothing at all against
+// a blocklist's own bare parent-domain entry (amazonaws.com, matched
+// via suffix against every subdomain underneath it) -- the only
+// existing allow/block interaction was BlockedDomains' own exact-
+// string set-difference, which can never cancel a block of a
+// DIFFERENT (broader) domain string. AllowedDomains must win
+// regardless of how much more specific it is than the block entry.
+func TestEvaluateDomainAllowedDomainWinsOverParentBlocklistEntry(t *testing.T) {
+	res := EvaluateDomain("trans-qrcode-images-na.s3.amazonaws.com",
+		[]string{"trans-qrcode-images-na.s3.amazonaws.com"}, []string{"amazonaws.com"}, nil, nil)
+	if res.Blocked || res.Reason != "allowlist" || res.Matched != "trans-qrcode-images-na.s3.amazonaws.com" {
+		t.Fatalf("got %+v, want the specific allow entry to win over the broader blocklist suffix match", res)
+	}
+}
+
+// TestEvaluateDomainAllowedDomainDoesNotAllowUnrelatedSiblings proves
+// the fix is real suffix matching, not an accidental "any allow
+// disables all blocking" bug: a SIBLING subdomain under the same
+// blocked parent, not itself allowed, must still be blocked.
+func TestEvaluateDomainAllowedDomainDoesNotAllowUnrelatedSiblings(t *testing.T) {
+	res := EvaluateDomain("some-other-bucket.s3.amazonaws.com",
+		[]string{"trans-qrcode-images-na.s3.amazonaws.com"}, []string{"amazonaws.com"}, nil, nil)
+	if !res.Blocked || res.Reason != "blocklist" {
+		t.Fatalf("got %+v, want the unrelated sibling to still be blocked", res)
 	}
 }

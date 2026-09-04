@@ -200,7 +200,7 @@ func (o *Orchestrator) EvaluateDomain(ctx context.Context, domain string) (dnsco
 	if err != nil {
 		return dnscompile.EvaluationResult{}, err
 	}
-	return dnscompile.EvaluateDomain(domain, in.BlockedDomains, in.RegexAllow, in.RegexBlock), nil
+	return dnscompile.EvaluateDomain(domain, in.AllowedDomains, in.BlockedDomains, in.RegexAllow, in.RegexBlock), nil
 }
 
 // Apply gathers current state, compiles it, and promotes it through
@@ -572,6 +572,24 @@ func (o *Orchestrator) build(ctx context.Context) (dnscompile.Input, []string, s
 		if !allowedSet[d] {
 			in.BlockedDomains = append(in.BlockedDomains, d)
 		}
+	}
+	// 2026-09-04 real fix for a real live defect: previously allowedSet
+	// was used ONLY for the exact-string exclusion just above, which
+	// left an "allow" rule powerless against a block entry for a
+	// PARENT domain (the common case -- blocklists routinely list a
+	// bare apex domain, matched via dnscompile's own SuffixMatchNodeRule
+	// against every subdomain). Confirmed live: an owner's real "allow"
+	// custom rule for trans-qrcode-images-na.s3.amazonaws.com compiled
+	// and promoted successfully, dnsdist still returned NXDOMAIN,
+	// because dandelion-sprout-s-anti-malware-list's own blocklist
+	// entry is the bare parent "amazonaws.com" -- an exact-string
+	// exclusion can never cancel that. Passing the real allow set
+	// through to dnscompile.Input.AllowedDomains (compiled as a real
+	// terminal, suffix-matched AllowAction -- see its own doc comment)
+	// makes an owner's allow rule actually win, the same way it already
+	// does for regex-allow.
+	for d := range allowedSet {
+		in.AllowedDomains = append(in.AllowedDomains, d)
 	}
 
 	if o.Policy != nil {

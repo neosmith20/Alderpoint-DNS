@@ -235,12 +235,39 @@ type Input struct {
 
 	// BlockedDomains: literal domains to block (from enabled blocklist
 	// subscriptions' compiled domain lists plus rule_type=="block"
-	// custom rules). AllowedDomains always wins over a same-named entry
-	// here, applied by the caller before this struct is built (set
-	// difference, matching Python's own "explicit allow always
-	// overrides a block" precedence) -- this package does not
-	// re-derive that itself.
+	// custom rules). The caller (internal/dnsruntime's orchestrator)
+	// already excludes any domain with an exact-string match in
+	// AllowedDomains before this struct is built -- a small dedup
+	// optimization that keeps this (often huge, hundreds of thousands
+	// of entries) list from carrying redundant entries, NOT the actual
+	// allow/block precedence mechanism; see AllowedDomains below for
+	// that.
 	BlockedDomains []string
+
+	// AllowedDomains: literal domains from rule_type=="allow" custom
+	// rules and list_type=="allow" blocklist subscriptions, compiled as
+	// a real terminal AllowAction -- suffix-matched and evaluated
+	// BEFORE BlockedDomains/RegexBlock below, so it wins regardless of
+	// where the conflicting block entry came from or how specific it
+	// is. 2026-09-04 real fix for a real live defect: this field did
+	// not exist before -- the only allow/block interaction was
+	// BlockedDomains' own exact-string set-difference (see its comment
+	// above), which only ever cancels a block of the EXACT SAME domain
+	// string. A block entry for a broader PARENT domain (e.g. a
+	// blocklist's own "amazonaws.com" entry, matched via
+	// SuffixMatchNodeRule against every subdomain) was never
+	// cancelled by an owner's "allow" rule for one specific subdomain
+	// underneath it (e.g. "trans-qrcode-images-na.s3.amazonaws.com")
+	// -- confirmed live: the owner's allow rule compiled and promoted
+	// successfully, dnsdist still returned NXDOMAIN, and BIND itself
+	// (queried directly, bypassing dnsdist) resolved the domain fine,
+	// proving dnsdist's own blocklist suffix match was the real actor.
+	// A real, compiled, terminal AllowAction rule -- the same
+	// mechanism RegexAllow already correctly uses -- makes the intent
+	// of an owner-facing "allow" action (override a false-positive
+	// block, whatever produced it) actually hold, not just cancel an
+	// identically-named entry.
+	AllowedDomains []string
 	RegexBlock     []string // rule_type=="regex_block" patterns (dnsdist RegexRule syntax)
 	RegexAllow     []string // rule_type=="regex_allow" -- always wins, evaluated first
 	RewriteRules   []CustomRule
@@ -363,25 +390,26 @@ func matchesSuffix(query, suffix string) bool {
 // EvaluationResult is Test a Domain's answer: whether a hypothetical
 // query for Domain would be blocked by the given real compiled state,
 // and which real rule/source decided it -- the exact same precedence
-// CompileDnsdist itself uses (RegexAllow > RegexBlock > BlockedDomains
-// suffix match > default allow), so this can never report an outcome
-// the real compiled runtime wouldn't actually produce. Deliberately
-// global-only, matching this evaluator's callers (no per-network/
-// per-client override is evaluated here -- see NetworkOverride's own
-// doc comment for that disclosed scope).
+// CompileDnsdist itself uses (RegexAllow > AllowedDomains suffix match
+// > RegexBlock > BlockedDomains suffix match > default allow), so this
+// can never report an outcome the real compiled runtime wouldn't
+// actually produce. Deliberately global-only, matching this
+// evaluator's callers (no per-network/per-client override is
+// evaluated here -- see NetworkOverride's own doc comment for that
+// disclosed scope).
 type EvaluationResult struct {
 	Domain  string `json:"domain"`
 	Blocked bool   `json:"blocked"`
-	Reason  string `json:"reason"`            // "regex_allow" | "regex_block" | "blocklist" | "no_match"
+	Reason  string `json:"reason"`            // "regex_allow" | "allowlist" | "regex_block" | "blocklist" | "no_match"
 	Matched string `json:"matched,omitempty"` // the exact pattern/domain entry that decided it
 }
 
 // EvaluateDomain answers "would a real query for this domain be
-// blocked?" against the same three real input sets CompileDnsdist
-// itself compiles from (BlockedDomains, RegexAllow, RegexBlock) --
-// a pure function, no dnsdist process involved, safe to call on every
-// keystroke of a "Test a Domain" UI.
-func EvaluateDomain(domain string, blockedDomains, regexAllow, regexBlock []string) EvaluationResult {
+// blocked?" against the same real input sets CompileDnsdist itself
+// compiles from (AllowedDomains, BlockedDomains, RegexAllow,
+// RegexBlock) -- a pure function, no dnsdist process involved, safe to
+// call on every keystroke of a "Test a Domain" UI.
+func EvaluateDomain(domain string, allowedDomains, blockedDomains, regexAllow, regexBlock []string) EvaluationResult {
 	q := normalizeDomain(domain)
 	res := EvaluationResult{Domain: q}
 	for _, p := range regexAllow {
@@ -394,6 +422,22 @@ func EvaluateDomain(domain string, blockedDomains, regexAllow, regexBlock []stri
 			res.Matched = p
 			return res
 		}
+	}
+	// Most-specific (longest) suffix match wins, same tie-break used
+	// for blockedDomains below -- irrelevant to the boolean outcome
+	// (any match allows), but Matched should report the most specific
+	// real entry.
+	bestAllow := ""
+	for _, d := range allowedDomains {
+		n := normalizeDomain(d)
+		if n != "" && matchesSuffix(q, n) && len(n) > len(bestAllow) {
+			bestAllow = n
+		}
+	}
+	if bestAllow != "" {
+		res.Reason = "allowlist"
+		res.Matched = bestAllow
+		return res
 	}
 	for _, p := range regexBlock {
 		re, err := regexp.Compile(p)
@@ -636,9 +680,7 @@ func CompileDnsdist(in Input) (string, error) {
 
 	// Regex-allow: terminal AllowAction, evaluated before every block
 	// rule below so it always wins, real dnsdist behavior (AllowAction
-	// stops further rule processing and lets the query through) rather
-	// than something this package has to reimplement by set-difference
-	// the way literal-domain allow/block already is.
+	// stops further rule processing and lets the query through).
 	if len(in.RegexAllow) > 0 {
 		w("-- regex allow rules (always win over a block rule below)")
 		patterns := append([]string(nil), in.RegexAllow...)
@@ -647,6 +689,35 @@ func CompileDnsdist(in Input) (string, error) {
 			w("addAction(RegexRule(%s), AllowAction())", luaString(p))
 		}
 		w("")
+	}
+
+	// Literal-domain allow: same real terminal-AllowAction treatment as
+	// regex-allow just above, suffix-matched so it wins over a block
+	// entry at any level of the domain hierarchy, not just an
+	// identically-named one -- see AllowedDomains' own doc comment for
+	// the real live defect this fixes.
+	if len(in.AllowedDomains) > 0 {
+		normalized := map[string]bool{}
+		for _, d := range in.AllowedDomains {
+			n := normalizeDomain(d)
+			if n != "" {
+				normalized[n] = true
+			}
+		}
+		domains := make([]string, 0, len(normalized))
+		for d := range normalized {
+			domains = append(domains, d+".")
+		}
+		sort.Strings(domains)
+		if len(domains) > 0 {
+			w("-- allowed domains (always win over a block rule below, whatever produced it)")
+			quoted := make([]string, len(domains))
+			for i, d := range domains {
+				quoted[i] = luaString(d)
+			}
+			w(`addAction(SuffixMatchNodeRule({%s}), AllowAction())`, strings.Join(quoted, ", "))
+			w("")
+		}
 	}
 
 	// Per-scope (network/group/client) policy enforcement: query-log/
